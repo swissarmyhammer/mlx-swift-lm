@@ -3,6 +3,7 @@
 #if FoundationModelsIntegration
 #if canImport(FoundationModels, _version: 2)
 
+import Foundation
 import FoundationModels
 import MLXLMCommon
 import os.log
@@ -16,12 +17,16 @@ struct TranscriptConverter {
 
     /// The MLX `Chat.Message` array for a collection of transcript entries.
     ///
+    /// A single transcript entry can expand to more than one chat message
+    /// (a `.toolCalls` entry carries one call per tool the model invoked in
+    /// that round), so entries are flat-mapped rather than compact-mapped.
+    ///
     /// - Parameter entries: Transcript entries from FoundationModels
     /// - Returns: Array of MLX Chat.Message objects
     static func mlxMessages(for entries: some Collection<Transcript.Entry>) -> [Chat
         .Message]
     {
-        entries.compactMap { entry -> Chat.Message? in
+        entries.flatMap { entry -> [Chat.Message] in
             switch entry {
             case .instructions(let instructions):
                 // System message for model instructions. Labeled image
@@ -33,9 +38,9 @@ struct TranscriptConverter {
                 guard text != nil || !images.isEmpty else {
                     logger.warning(
                         "Skipping instructions entry with no text or image content")
-                    return nil
+                    return []
                 }
-                return Chat.Message.system(text ?? "", images: images)
+                return [Chat.Message.system(text ?? "", images: images)]
 
             case .prompt(let prompt):
                 // User message for prompts. Labeled image attachments
@@ -45,17 +50,44 @@ struct TranscriptConverter {
                 let images = extractImages(from: prompt.segments)
                 guard text != nil || !images.isEmpty else {
                     logger.warning("Skipping prompt entry with no text or image content")
-                    return nil
+                    return []
                 }
-                return Chat.Message.user(text ?? "", images: images)
+                return [Chat.Message.user(text ?? "", images: images)]
 
             case .response(let response):
                 // Assistant message for previous responses
                 guard let text = extractText(from: response.segments) else {
                     logger.warning("Skipping response entry with no text content")
-                    return nil
+                    return []
                 }
-                return Chat.Message.assistant(text)
+                return [Chat.Message.assistant(text)]
+
+            case .toolCalls(let toolCalls):
+                // One assistant message per tool call, each carrying the
+                // exact `{"name": ..., "arguments": ...}` envelope text the
+                // Executor's own tool-calling grammar generates (see
+                // `unwrapToolCallMarkers` in MLXLanguageModel.swift) --
+                // replayed verbatim rather than through Chat.Message's
+                // structured `toolCalls:` parameter, so a continuation round
+                // sees byte-identical history to what it actually produced,
+                // not a template's own `tool_calls` re-rendering of it.
+                return toolCalls.map { call in
+                    Chat.Message.assistant(
+                        toolCallEnvelopeJSON(name: call.toolName, arguments: call.arguments))
+                }
+
+            case .toolOutput(let toolOutput):
+                // Tool-role message carrying the executed tool's result,
+                // correlated to its call via `id`. Always emitted (even when
+                // the tool produced no text) so a continuation round's prompt
+                // always differs from the round that made the call --
+                // dropping empty outputs would make the two rounds' rendered
+                // prompts identical and risk the model repeating the same
+                // call forever.
+                return [
+                    Chat.Message.tool(
+                        extractToolOutputText(from: toolOutput.segments), id: toolOutput.id)
+                ]
 
             case .reasoning:
                 // Prior-turn reasoning is intentionally NOT replayed into the
@@ -64,14 +96,31 @@ struct TranscriptConverter {
                 // a future SDK change is reviewed here rather than silently
                 // absorbed by the catch-all below.
                 logger.debug("Skipping reasoning entry (not replayed into chat history)")
-                return nil
+                return []
 
-            default:
-                // Skip unsupported entry types (toolCalls, toolOutput, etc.)
+            @unknown default:
+                // Skip unrecognized future entry types.
                 logger.debug("Skipping unsupported entry type")
-                return nil
+                return []
             }
         }
+    }
+
+    /// Builds the `{"name": <name>, "arguments": <arguments>}` envelope text
+    /// for a replayed tool call, matching the shape the Executor's
+    /// tool-calling grammar generates as its constrained output.
+    ///
+    /// - Parameters:
+    ///   - name: The called tool's name.
+    ///   - arguments: The call's arguments, spliced into the envelope
+    ///     verbatim via `GeneratedContent.jsonString` rather than
+    ///     re-serialized, so nested structure/formatting matches exactly.
+    /// - Returns: The envelope JSON text.
+    private static func toolCallEnvelopeJSON(name: String, arguments: GeneratedContent) -> String {
+        let nameJSON =
+            (try? JSONSerialization.data(withJSONObject: name, options: .fragmentsAllowed))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "\"\(name)\""
+        return "{\"name\": \(nameJSON), \"arguments\": \(arguments.jsonString)}"
     }
 
     /// Extracts text content from transcript segments.
@@ -96,6 +145,33 @@ struct TranscriptConverter {
 
         let combined = texts.joined(separator: "\n")
         return combined.isEmpty ? nil : combined
+    }
+
+    /// Extracts a tool output's text content, unlike `extractText`:
+    /// - Includes `.structure` segments (a tool's structured result, rendered
+    ///   as its JSON), not just `.text`, since tool outputs commonly return
+    ///   structured data rather than prose.
+    /// - Always returns a `String` (never `nil`), including empty, so a
+    ///   tool-output entry always produces a `Chat.Message.tool(...)` even
+    ///   when the tool returned no content -- omitting the message entirely
+    ///   would make a continuation round's rendered prompt identical to the
+    ///   round that made the call.
+    ///
+    /// - Parameter segments: A tool output's transcript segments.
+    /// - Returns: Concatenated text (and structured-content JSON), or "".
+    private static func extractToolOutputText(from segments: [Transcript.Segment]) -> String {
+        let texts = segments.compactMap { segment -> String? in
+            switch segment {
+            case .text(let textSegment):
+                return textSegment.content
+            case .structure(let structuredSegment):
+                return structuredSegment.content.jsonString
+            default:
+                logger.debug("Skipping non-text/structure segment in extractToolOutputText")
+                return nil
+            }
+        }
+        return texts.joined(separator: "\n")
     }
 
     /// Extracts image inputs from image attachment segments.

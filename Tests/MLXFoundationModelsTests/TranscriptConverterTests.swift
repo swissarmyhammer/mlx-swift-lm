@@ -144,8 +144,9 @@ struct TranscriptConverterTests {
     func testUnsupportedEntryTypesAreSkipped() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
-        // Create a transcript with only supported types
-        // (toolCalls and toolOutput would be skipped, but we can't easily create them in tests)
+        // Reasoning is the only entry type still dropped by design (see
+        // testReasoningEntryIsDropped); toolCalls/toolOutput are now
+        // rendered (see the tool-call/tool-output tests below).
         let entries: [Transcript.Entry] = [
             .prompt(
                 Transcript.Prompt(
@@ -347,6 +348,127 @@ struct TranscriptConverterTests {
             return ciImage.extent.width
         }
         #expect(widths == [2, 4])
+    }
+
+    @Test
+    func testToolCallsEntryBecomesAssistantEnvelopeMessage() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let call = Transcript.ToolCall(
+            id: "call-1", toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location": "Tokyo"}"#))
+        let entries: [Transcript.Entry] = [.toolCalls(Transcript.ToolCalls(id: "tc-1", [call]))]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        #expect(messages.count == 1)
+        #expect(messages[0].role == .assistant)
+        // Assert on parsed structure rather than exact formatting/whitespace,
+        // since `GeneratedContent.jsonString`'s serialization isn't a
+        // contract this test should pin down.
+        let envelope = try #require(
+            try JSONSerialization.jsonObject(with: Data(messages[0].content.utf8))
+                as? [String: Any])
+        #expect(envelope["name"] as? String == "get_weather")
+        let arguments = try #require(envelope["arguments"] as? [String: Any])
+        #expect(arguments["location"] as? String == "Tokyo")
+    }
+
+    @Test
+    func testMultipleToolCallsInOneEntryAllCarried() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let first = Transcript.ToolCall(
+            id: "call-1", toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location": "Tokyo"}"#))
+        let second = Transcript.ToolCall(
+            id: "call-2", toolName: "get_time",
+            arguments: try GeneratedContent(json: #"{"timezone": "JST"}"#))
+        let entries: [Transcript.Entry] = [
+            .toolCalls(Transcript.ToolCalls(id: "tc-1", [first, second]))
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        #expect(messages.count == 2)
+        #expect(messages[0].role == .assistant)
+        #expect(messages[0].content.contains("get_weather"))
+        #expect(messages[1].role == .assistant)
+        #expect(messages[1].content.contains("get_time"))
+    }
+
+    @Test
+    func testToolOutputEntryBecomesToolRoleMessage() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let entries: [Transcript.Entry] = [
+            .toolOutput(
+                Transcript.ToolOutput(
+                    id: "call-1", toolName: "get_weather",
+                    segments: [.text(Transcript.TextSegment(content: "72F and sunny"))]))
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        #expect(messages.count == 1)
+        #expect(messages[0].role == .tool)
+        #expect(messages[0].content == "72F and sunny")
+    }
+
+    @Test
+    func testStructuredToolOutputCarriesJSONContent() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let structured = Transcript.StructuredSegment(
+            source: "get_weather",
+            content: try GeneratedContent(json: #"{"tempF": 72, "condition": "sunny"}"#))
+        let entries: [Transcript.Entry] = [
+            .toolOutput(
+                Transcript.ToolOutput(
+                    id: "call-1", toolName: "get_weather", segments: [.structure(structured)]))
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        #expect(messages.count == 1)
+        #expect(messages[0].role == .tool)
+        #expect(messages[0].content.contains("72"))
+        #expect(messages[0].content.contains("sunny"))
+    }
+
+    @Test
+    func testToolCallAndOutputOrderingPreserved() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let call = Transcript.ToolCall(
+            id: "call-1", toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location": "Tokyo"}"#))
+        let entries: [Transcript.Entry] = [
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "Weather in Tokyo?"))],
+                    responseFormat: nil)),
+            .toolCalls(Transcript.ToolCalls(id: "tc-1", [call])),
+            .toolOutput(
+                Transcript.ToolOutput(
+                    id: "call-1", toolName: "get_weather",
+                    segments: [.text(Transcript.TextSegment(content: "72F and sunny"))])),
+            .response(
+                Transcript.Response(
+                    assetIDs: [],
+                    segments: [.text(Transcript.TextSegment(content: "It's 72F and sunny."))])),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        #expect(messages.count == 4)
+        #expect(messages[0].role == .user)
+        #expect(messages[1].role == .assistant)
+        #expect(messages[1].content.contains("get_weather"))
+        #expect(messages[2].role == .tool)
+        #expect(messages[2].content == "72F and sunny")
+        #expect(messages[3].role == .assistant)
+        #expect(messages[3].content == "It's 72F and sunny.")
     }
 
     @Test

@@ -892,29 +892,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     let userInput = UserInput(chat: messages)
                     let input = try await context.processor.prepare(input: userInput)
 
-                    // Single-turn tool-calling cap: if the transcript already
-                    // contains prior tool-call or tool-output entries, this
-                    // is a continuation round from `LanguageModelSession`'s
-                    // auto-loop (it executed the tool and re-invoked us with
-                    // the result appended). Our `TranscriptConverter` drops
-                    // those entries, so re-entering the tool-calling branch
-                    // would just make the model emit the same tool call
-                    // again -- an infinite loop. Fall through to text
-                    // generation so the session terminates cleanly after
-                    // one round.
-                    //
-                    // Multi-turn tool calling -- where the model sees tool
-                    // outputs in the transcript and continues with a
-                    // data-aware response -- is not supported.
-                    let isContinuationAfterToolCall = request.transcript.contains { entry in
-                        switch entry {
-                        case .instructions, .prompt, .response: return false
-                        case .reasoning: return false
-                        case .toolCalls, .toolOutput: return true
-                        @unknown default: return true
-                        }
-                    }
-
                     // Resolve the per-instance configuration. Held strictly as
                     // a local; it never lands in context.configuration or
                     // Executor.Configuration, so two instances with the same id
@@ -974,9 +951,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // grammar already constrains output, so suppression-prep
                     // would be wasted work.
                     let mayRunReasoningPath =
-                        (request.enabledToolDefinitions.isEmpty
-                            || isContinuationAfterToolCall)
-                        && request.schema == nil
+                        request.enabledToolDefinitions.isEmpty && request.schema == nil
 
                     // When .reasoning is OMITTED on the unconstrained path,
                     // re-render the prompt with thinking off so the model
@@ -1024,10 +999,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // baseline `input` rendered above.
                     let effectiveInput = suppressedInput ?? input
 
-                    if !request.enabledToolDefinitions.isEmpty
-                        && !isContinuationAfterToolCall
-                    {
-                        // Tool-calling path. Force the model to emit a JSON
+                    if !request.enabledToolDefinitions.isEmpty {
+                        // Tool-calling path. Continuation rounds from
+                        // `LanguageModelSession`'s auto-loop re-enter this
+                        // branch too: the transcript's prior tool-call and
+                        // tool-output entries are replayed into the prompt by
+                        // `TranscriptConverter`, so the model sees the
+                        // results and chooses another tool call or the final
+                        // answer (multi-turn tool calling).
+                        //
+                        // Force the model to emit a JSON
                         // object matching one of the declared tools --
                         // including a synthetic "final answer" tool whose
                         // arguments carry the free-text response. After
