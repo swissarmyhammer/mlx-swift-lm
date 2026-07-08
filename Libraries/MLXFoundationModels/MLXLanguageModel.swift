@@ -18,6 +18,9 @@ import MLX
 import os.log
 import MLXGuidedGeneration
 
+/// Shared `os.log` subsystem for every logger in this adapter.
+let mlxFoundationModelsLoggingSubsystem = "com.apple.FoundationModels-MLX"
+
 // MARK: - Constraint Cache Kind
 
 /// Selects which xgrammar constructor a cached template was compiled
@@ -674,16 +677,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// to MLXLMCommon's `Float` `GenerateParameters.temperature`, clamping
         /// negatives to 0.
         ///
-        /// - Returns: `nil` when the caller did not request a specific
-        ///   temperature, leaving `GenerateParameters`' built-in default in
-        ///   place. Otherwise the clamped `Float`.
-        ///
         /// Negative sampling temperatures land in `CategoricalSampler` and
         /// produce inverted distributions; we clamp at 0 so the worst the
         /// caller can get is greedy. `0` itself is honored unchanged because
         /// MLXLMCommon's `GenerateParameters.sampler()` routes
         /// `temperature == 0` to `ArgMaxSampler` (greedy) -- no division-by-
         /// zero hazard.
+        ///
+        /// Kept as a standalone function (not inlined at its call site)
+        /// since it's unit-tested directly in `MLXLanguageModelTests.swift`.
+        ///
+        /// - Returns: `nil` when the caller did not request a specific
+        ///   temperature, leaving `GenerateParameters`' built-in default in
+        ///   place. Otherwise the clamped `Float`.
         static func clampedTemperature(_ value: Double?) -> Float? {
             guard let value else { return nil }
             return Float(max(0, value))
@@ -696,6 +702,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// default" -- so an unrecognized case never traps and never reaches the
         /// resolver. All value policy lives in `resolveSamplingParameters`; this
         /// shim is a pure 1:1 case translation.
+        ///
+        /// Kept as a standalone function (not inlined at its call site)
+        /// since it's unit-tested directly in `SamplingModeShimTests.swift`.
         static func samplingMode(
             from samplingMode: GenerationOptions.SamplingMode?
         ) -> MLXSamplingMode? {
@@ -783,7 +792,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Metal command-buffer assertion abort — that is a process crash, not
         /// a catchable Swift error.
         private static let logger = Logger(
-            subsystem: "com.apple.FoundationModels-MLX", category: "Prewarm")
+            subsystem: mlxFoundationModelsLoggingSubsystem, category: "Prewarm")
 
         /// Prewarms the model: loads weights and pre-compiles Metal shaders so
         /// the first `respond()` pays no cold-start shader-JIT cost.
@@ -1779,27 +1788,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
         }
 
-        /// Routes one scanned segment to the appropriate channel entry.
-        private static func send(
-            _ segment: ReasoningEventEmitter.Segment,
-            responseEntryID: String,
-            reasoningEntryID: String,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async {
-            switch segment {
-            case .reasoning(let text):
-                await channel.send(
-                    .reasoning(
-                        entryID: reasoningEntryID,
-                        action: .appendText(text, tokenCount: 1)))
-            case .response(let text):
-                await channel.send(
-                    .response(
-                        entryID: responseEntryID,
-                        action: .appendText(text, tokenCount: 1)))
-            }
-        }
-
         /// Routes each of `segments` to the appropriate channel entry, in order.
         ///
         /// - Parameters:
@@ -1814,9 +1802,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             channel: LanguageModelExecutorGenerationChannel
         ) async {
             for segment in segments {
-                await Self.send(
-                    segment, responseEntryID: responseEntryID,
-                    reasoningEntryID: reasoningEntryID, channel: channel)
+                switch segment {
+                case .reasoning(let text):
+                    await channel.send(
+                        .reasoning(
+                            entryID: reasoningEntryID,
+                            action: .appendText(text, tokenCount: 1)))
+                case .response(let text):
+                    await channel.send(
+                        .response(
+                            entryID: responseEntryID,
+                            action: .appendText(text, tokenCount: 1)))
+                }
             }
         }
 
@@ -1987,11 +1984,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             else {
                 // Malformed output. The grammar should have prevented this;
                 // emit the raw buffer as text so failures surface loudly.
-                await channel.send(
-                    .response(
-                        entryID: entryID,
-                        action: .appendText(outputBuffer, tokenCount: 1)
-                    ))
+                await Self.sendTextDelta(outputBuffer, entryID: entryID, channel: channel)
                 return
             }
 
@@ -2008,11 +2001,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 } else {
                     text = ""
                 }
-                await channel.send(
-                    .response(
-                        entryID: entryID,
-                        action: .appendText(text, tokenCount: 1)
-                    ))
+                await Self.sendTextDelta(text, entryID: entryID, channel: channel)
             } else {
                 guard
                     let args = obj[ToolCallEnvelopeKey.arguments],

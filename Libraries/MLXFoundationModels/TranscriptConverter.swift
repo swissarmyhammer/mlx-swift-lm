@@ -13,7 +13,7 @@ import os.log
 struct TranscriptConverter {
 
     private static let logger = Logger(
-        subsystem: "com.apple.FoundationModels-MLX", category: "TranscriptConverter")
+        subsystem: mlxFoundationModelsLoggingSubsystem, category: "TranscriptConverter")
 
     /// The MLX `Chat.Message` array for a collection of transcript entries.
     ///
@@ -66,7 +66,8 @@ struct TranscriptConverter {
                 // not a template's own `tool_calls` re-rendering of it.
                 return toolCalls.map { call in
                     Chat.Message.assistant(
-                        toolCallEnvelopeJSON(name: call.toolName, arguments: call.arguments))
+                        "{\"\(ToolCallEnvelopeKey.name)\": \(jsonStringLiteral(call.toolName)), "
+                            + "\"\(ToolCallEnvelopeKey.arguments)\": \(call.arguments.jsonString)}")
                 }
 
             case .toolOutput(let toolOutput):
@@ -122,21 +123,6 @@ struct TranscriptConverter {
             return []
         }
         return [make(text ?? "", images)]
-    }
-
-    /// Builds the `{"name": <name>, "arguments": <arguments>}` envelope text
-    /// for a replayed tool call, matching the shape the Executor's
-    /// tool-calling grammar generates as its constrained output.
-    ///
-    /// - Parameters:
-    ///   - name: The called tool's name.
-    ///   - arguments: The call's arguments, spliced into the envelope
-    ///     verbatim via `GeneratedContent.jsonString` rather than
-    ///     re-serialized, so nested structure/formatting matches exactly.
-    /// - Returns: The envelope JSON text.
-    private static func toolCallEnvelopeJSON(name: String, arguments: GeneratedContent) -> String {
-        "{\"\(ToolCallEnvelopeKey.name)\": \(jsonStringLiteral(name)), "
-            + "\"\(ToolCallEnvelopeKey.arguments)\": \(arguments.jsonString)}"
     }
 
     /// Encodes `value` as a JSON string literal (quotes included), escaping

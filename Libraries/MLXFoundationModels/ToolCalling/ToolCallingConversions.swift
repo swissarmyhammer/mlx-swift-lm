@@ -19,7 +19,7 @@ import FoundationModels
 /// JSON keys for the `{"name": ..., "arguments": ...}` envelope the
 /// tool-calling grammar generates as its constrained output --
 /// `MLXLanguageModel.Executor.emitToolCallingEvent` parses it with these
-/// keys, and `TranscriptConverter.toolCallEnvelopeJSON` builds it with the
+/// keys, and `TranscriptConverter.mlxMessages(for:)` builds it with the
 /// same keys when replaying a prior call into a continuation round's prompt.
 enum ToolCallEnvelopeKey {
     static let name = "name"
@@ -73,7 +73,13 @@ enum ToolCallingConversions {
         try tools.map(makeToolSpec(from:))
     }
 
+    /// Errors converting a `Transcript.ToolDefinition` to its OpenAI-style
+    /// function-envelope dict shape.
     enum ToolCallingConversionError: Error {
+        /// Thrown when a tool's `GenerationSchema` (its parameters) cannot
+        /// be encoded to JSON -- unexpected in practice, since
+        /// `GenerationSchema` is `Codable` and tool parameter schemas
+        /// should always encode cleanly.
         case invalidParameterSchema
     }
 }
