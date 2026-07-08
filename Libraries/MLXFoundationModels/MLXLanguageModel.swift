@@ -614,6 +614,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///
     /// Safe to call multiple times; once the model is loaded, subsequent calls
     /// return immediately from cache.
+    ///
+    /// - Throws: Whatever the underlying model loader throws while
+    ///   downloading or initializing the container.
     public func preload() async throws {
         _ = try await loadContainer()
     }
