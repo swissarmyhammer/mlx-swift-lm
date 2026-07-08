@@ -74,6 +74,12 @@ public enum GuidedGenerationLoop {
     ///     Used by the run tracker to detect consecutive whitespace runs.
     ///   - diagnosticLog: When true, flush the grammar constraint's diagnostic
     ///     logs after the run completes. Defaults to false.
+    ///   - cache: An existing `[KVCache]` to continue generating from
+    ///     (e.g. one holding a prior round's prefilled prompt), or `nil`
+    ///     to build a fresh cache internally. When the caller supplies a
+    ///     cache, its `KVCache` instances (reference types) are mutated
+    ///     in place by this call, so the caller's array reflects the new
+    ///     state afterward without `run` needing to return it.
     ///   - emit: Callback for each text delta. Return `false` to stop.
     /// - Returns: Total number of tokens generated (including FF tokens).
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
@@ -96,10 +102,11 @@ public enum GuidedGenerationLoop {
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
+        cache: [KVCache]? = nil,
         emit: (String) -> Bool
     ) throws -> Int {
         let model = context.model
-        var cache = model.newCache(parameters: nil)
+        var cache = cache ?? model.newCache(parameters: nil)
         var modelState: LMOutput.State?
 
         // Build EOS token set

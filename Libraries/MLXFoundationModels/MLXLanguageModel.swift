@@ -386,6 +386,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Without caching, model loading takes 2-30 seconds per request.
     private static let cache = ModelCache()
 
+    /// Shared token-prefix KV-cache -- thread-safe via actor isolation.
+    /// Lets `Executor.respond` reuse a prior round's KV state instead of
+    /// re-prefilling the whole transcript every turn. See `PromptCache`.
+    private static let promptCache = PromptCache()
+
     /// The configuration identifying and parameterizing the model to load.
     public let configuration: ModelConfiguration
 
@@ -501,6 +506,33 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         await cache.hasCachedXgTokenizer(modelID: modelID)
     }
 
+    /// Resolves this round's prompt-cache participation: see
+    /// `PromptCache.resolve`.
+    static func resolvePromptCache(
+        modelID: String, newTokens: [Int], model: any MLXLMCommon.LanguageModel,
+        parameters: GenerateParameters?
+    ) async -> (cache: [KVCache], tokensToFeed: [Int]) {
+        await promptCache.resolve(
+            modelID: modelID, newTokens: newTokens, model: SendableBox(model),
+            parameters: parameters
+        ).consume()
+    }
+
+    /// Persists this round's `(tokens, cache)` for the next round's
+    /// `resolvePromptCache` call: see `PromptCache.store`.
+    static func storePromptCache(modelID: String, tokens: [Int], cache: [KVCache]) async {
+        await promptCache.store(modelID: modelID, tokens: tokens, cache: SendableBox(cache))
+    }
+
+    /// Drops one model's remembered prompt cache without touching the
+    /// container/tokenizer/constraint caches. Used when a round's actual
+    /// generated content can't be reconciled with `cache`'s own `offset`
+    /// (see `Executor.commitPromptCache`) -- the entry is untrustworthy,
+    /// so the next round rebuilds instead of risking a stale reuse.
+    static func removePromptCache(modelID: String) async {
+        await promptCache.remove(modelID: modelID)
+    }
+
     /// Evicts every cached model, tokenizer, constraint template, and per-model
     /// tokenizer bias, freeing the GPU memory held by model weights. Subsequent
     /// requests reload from the on-disk cache.
@@ -511,6 +543,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// a live kernel — the weights free via ARC once that work returns.
     public static func evictAll() async {
         await cache.evictAll()
+        await promptCache.evictAll()
     }
 
     /// Drops this model from the shared cache, freeing the GPU memory held by its
@@ -523,6 +556,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// — the in-flight load completes but does not re-populate the cache.
     public func evict() async {
         await Self.cache.remove(modelID: modelID)
+        await Self.promptCache.remove(modelID: modelID)
     }
 
     /// Whether the shared cache has a *genuine download* in flight for the
@@ -1410,8 +1444,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         }
 
         /// Sends the authoritative `.updateUsage` event for `entryID`.
-        /// `cachedTokenCount` is always 0 -- prompt-cache reuse isn't
-        /// implemented, so every request prefills its full prompt.
+        /// `cachedTokenCount` is always 0: `PromptCache` reuse (see
+        /// `Executor.makePromptCacheSlot`) already shrinks `promptTokenCount`
+        /// itself down to whatever suffix was actually prefilled -- there is
+        /// no separate "reused" figure to report alongside it here, this
+        /// field would need to distinguish "tokens re-sent to the model" from
+        /// "tokens reused from a prior round's cache," which is not
+        /// threaded through to this layer.
         ///
         /// - Parameters:
         ///   - entryID: The response entry the usage applies to.
@@ -1437,6 +1476,137 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             totalTokenCount: outputTokenCount,
                             reasoningTokenCount: Swift.min(reasoningTokenCount, outputTokenCount))
                     )))
+        }
+
+        // MARK: - Prompt Cache
+
+        /// Whether `input` carries only text -- no image/video/audio
+        /// payload. The prompt-cache optimization reduces `input` to a raw
+        /// token suffix, which would silently drop any attached media
+        /// (there is nowhere for it to travel to on a cache-reuse round),
+        /// so multimodal rounds are kept off the cache path entirely and
+        /// always get the original, unreduced `input` with `cache: nil` --
+        /// identical to pre-cache behavior.
+        private static func isTextOnly(_ input: LMInput) -> Bool {
+            input.image == nil && input.video == nil && input.audio == nil
+        }
+
+        /// What a generation call needs to participate in prompt-cache
+        /// reuse: the `[KVCache]` to generate with (`nil` when this round
+        /// doesn't qualify -- see `isTextOnly`), the `LMInput` to actually
+        /// feed (the original input, unless a stored prefix let it shrink
+        /// to a token suffix), and the full prompt token sequence (for
+        /// `commitPromptCache` to key the next round's entry on).
+        private struct PromptCacheSlot {
+            let cache: [KVCache]?
+            let feedInput: LMInput
+            let promptTokens: [Int]
+        }
+
+        /// Resolves a generation call's prompt-cache participation against
+        /// `input`. See `PromptCacheSlot`.
+        ///
+        /// - Parameters:
+        ///   - input: The full, unreduced prompt for this round.
+        ///   - context: The loaded model context.
+        ///   - parameters: Generation parameters, threaded through to a
+        ///     rebuilt cache (see `PromptCache.resolve`); `nil` for the
+        ///     grammar-constrained paths, matching
+        ///     `GuidedGenerationLoop.run`'s own `model.newCache(parameters:
+        ///     nil)`.
+        private func makePromptCacheSlot(
+            input: LMInput, context: ModelContext, parameters: GenerateParameters?
+        ) async -> PromptCacheSlot {
+            let promptTokens = input.text.tokens.asArray(Int.self)
+            guard Self.isTextOnly(input) else {
+                return PromptCacheSlot(cache: nil, feedInput: input, promptTokens: promptTokens)
+            }
+            let resolved = await MLXLanguageModel.resolvePromptCache(
+                modelID: modelID, newTokens: promptTokens, model: context.model,
+                parameters: parameters)
+            return PromptCacheSlot(
+                cache: resolved.cache,
+                feedInput: LMInput(tokens: MLXArray(resolved.tokensToFeed)),
+                promptTokens: promptTokens)
+        }
+
+        /// Reconciles this round's actual generated token IDs against
+        /// `cache`'s own authoritative `offset` advance beyond
+        /// `slot.promptTokens`, then persists (or invalidates)
+        /// `PromptCache`'s entry for this model.
+        ///
+        /// `cache.offset` is the only ground truth for how many tokens the
+        /// cache actually holds -- trusting a caller-supplied token count
+        /// that doesn't match it risks seeding a future round with token
+        /// values that don't correspond to real cache state (wrong
+        /// positions, wrong attention). A mismatch here means
+        /// `generatedTokenIDs` can't be trusted to reflect `cache`
+        /// exactly, so the entry is dropped rather than stored.
+        ///
+        /// - Parameters:
+        ///   - slot: The slot this round generated with. A no-op when
+        ///     `slot.cache` is `nil` (this round didn't participate in
+        ///     prompt-cache reuse -- see `isTextOnly`).
+        ///   - generatedTokenIDs: This round's generated token IDs, in order.
+        private static func commitPromptCache(
+            modelID: String, slot: PromptCacheSlot, generatedTokenIDs: [Int]
+        ) async {
+            guard let cache = slot.cache else { return }
+            guard !generatedTokenIDs.isEmpty else { return }
+            let finalOffset = cache.first?.offset ?? slot.promptTokens.count
+            guard finalOffset - slot.promptTokens.count == generatedTokenIDs.count else {
+                await MLXLanguageModel.removePromptCache(modelID: modelID)
+                return
+            }
+            await MLXLanguageModel.storePromptCache(
+                modelID: modelID, tokens: slot.promptTokens + generatedTokenIDs, cache: cache)
+        }
+
+        /// Variant of `commitPromptCache` for generation paths that only
+        /// yield decoded text (`generate(input:cache:parameters:context:...)`,
+        /// `GuidedGenerationLoop.run`), not raw token IDs. Reconstructs the
+        /// generated token IDs by re-encoding `emittedText`, and trusts the
+        /// reconstruction only when its count matches `cache`'s real
+        /// `offset` advance -- the same ground-truth check as the
+        /// exact-IDs overload, applied to a best-effort reconstruction
+        /// instead of a directly-observed token stream.
+        ///
+        /// Also accepts a count exactly one *more* than the cache's offset
+        /// advance, dropping the reconstruction's trailing token before
+        /// storing: `GuidedGenerationLoop.run`'s natural (grammar-accepted)
+        /// termination commits, detokenizes, and counts its terminal token
+        /// *before* checking `commitResult.isTerminated` and breaking --
+        /// that last token is therefore never fed back through the model,
+        /// so `cache`'s real offset legitimately lands one token short of
+        /// `emittedText`'s full re-encoding on that (common, successful)
+        /// exit path. Dropping the trailing token doesn't weaken the
+        /// fidelity check for the other paths sharing this helper
+        /// (`runUnconstrained`'s `generate()`, which does not have this
+        /// off-by-one): a wrong trailing token value, from either path,
+        /// still gets caught by the next round's real re-tokenization
+        /// comparison in `PromptCache.decide` and safely falls back to
+        /// trim/rebuild rather than reusing it.
+        ///
+        /// - Parameters:
+        ///   - slot: The slot this round generated with.
+        ///   - emittedText: The full decoded text this round generated.
+        ///   - tokenizer: Used to re-encode `emittedText` for the fidelity check.
+        private static func commitPromptCache(
+            modelID: String, slot: PromptCacheSlot, emittedText: String, tokenizer: any Tokenizer
+        ) async {
+            guard let cache = slot.cache else { return }
+            let finalOffset = cache.first?.offset ?? slot.promptTokens.count
+            let actualGeneratedCount = finalOffset - slot.promptTokens.count
+            guard actualGeneratedCount > 0 else { return }
+            let reencoded = tokenizer.encode(text: emittedText, addSpecialTokens: false)
+            guard
+                let trustedTokens = PromptCache.reconcileGeneratedTokens(
+                    reencoded: reencoded, actualGeneratedCount: actualGeneratedCount)
+            else {
+                await MLXLanguageModel.removePromptCache(modelID: modelID)
+                return
+            }
+            await commitPromptCache(modelID: modelID, slot: slot, generatedTokenIDs: trustedTokens)
         }
 
         /// Runs think-then-call Phase 1: unconstrained reasoning until
@@ -1508,9 +1678,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             phase2MaxTokens: Int,
             context: ModelContext,
             setup: ConstraintSetup
-        ) throws -> (outputBuffer: String, generatedTokenCount: Int?, incomplete: Bool) {
+        ) async throws -> (outputBuffer: String, generatedTokenCount: Int?, incomplete: Bool) {
             var outputBuffer = ""
-            let result = try runGuidedGenerationLoop(
+            let result = try await runGuidedGenerationLoop(
                 input: phase2Input, context: context, setup: setup, maxTokens: phase2MaxTokens
             ) { text in
                 outputBuffer += text
@@ -1544,7 +1714,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             setup: ConstraintSetup,
             maxTokens: Int,
             onText: @escaping (String) -> Bool
-        ) throws -> (generatedTokenCount: Int?, incomplete: Bool) {
+        ) async throws -> (generatedTokenCount: Int?, incomplete: Bool) {
             var incomplete = false
             var generatedTokenCount: Int?
             // Derive reserves from this call's own `maxTokens`, not
@@ -1553,9 +1723,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // pre-Phase-1 budget could consume the entire (or more than
             // the entire) remaining budget.
             let (completionReserve, hardReserve) = setup.reserves(forMaxTokens: maxTokens)
+
+            // `parameters: nil` matches GuidedGenerationLoop.run's own
+            // `model.newCache(parameters: nil)` -- a rebuilt cache here has
+            // the same "flavor" it would have gotten unassisted.
+            let slot = await makePromptCacheSlot(input: input, context: context, parameters: nil)
+            var emittedText = ""
             do {
                 generatedTokenCount = try GuidedGenerationLoop.run(
-                    input: input,
+                    input: slot.feedInput,
                     context: context,
                     constraint: setup.constraint,
                     maxTokens: maxTokens,
@@ -1565,13 +1741,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     closingBias: setup.closingBias,
                     whitespaceBias: setup.whitespaceBias,
                     whitespaceTokenIDs: setup.whitespaceTokenIDs,
-                    emit: onText
-                )
+                    cache: slot.cache
+                ) { text in
+                    emittedText += text
+                    return onText(text)
+                }
             } catch GuidedGenerationError.incompleteOutput {
                 // Grammar exhausted maxTokens before reaching a stop state.
                 // Deltas already emitted (or buffered) are best-effort output.
                 incomplete = true
             }
+            await Self.commitPromptCache(
+                modelID: modelID, slot: slot, emittedText: emittedText, tokenizer: context.tokenizer)
             return (generatedTokenCount, incomplete)
         }
 
@@ -1766,7 +1947,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let phase2MaxTokens = Self.resolvePhase2MaxTokens(
                 reasoningTokenIDs: reasoningTokenIDs, setup: setup)
 
-            let phase2 = try executeToolCallingPhase2(
+            let phase2 = try await executeToolCallingPhase2(
                 phase2Input: phase2Input, phase2MaxTokens: phase2MaxTokens,
                 context: context, setup: setup)
             let outputBuffer = phase2.outputBuffer
@@ -1842,7 +2023,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 }
             }()
 
-            let result = try runGuidedGenerationLoop(
+            let result = try await runGuidedGenerationLoop(
                 input: input, context: context, setup: setup, maxTokens: setup.maxTokens
             ) { text in
                 textContinuation.yield(text)
@@ -1886,21 +2067,30 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 samplingMode: samplingMode
             )
 
+            let slot = await makePromptCacheSlot(input: input, context: context, parameters: params)
+            var emittedText = ""
+
             for await generation in try generate(
-                input: input,
+                input: slot.feedInput,
+                cache: slot.cache,
                 parameters: params,
                 context: context
             ) {
                 try Task.checkCancellation()
                 switch generation {
                 case .chunk(let text):
+                    emittedText += text
                     await Self.sendTextDelta(text, entryID: entryID, channel: channel)
                 case .info(let info):
                     // MLX-LM emits one .info event at end-of-generation with
                     // authoritative scalar token counts (`promptTokenCount`
                     // is the prompt; `generationTokenCount` is the
                     // model-generated completion -- see Evaluate.swift's
-                    // `GenerateCompletionInfo` definition).
+                    // `GenerateCompletionInfo` definition). When this round
+                    // reused a cached prefix, `promptTokenCount` reflects
+                    // only the suffix actually fed (`slot.feedInput`), not
+                    // the full transcript -- this is what makes the cache's
+                    // effect observable end-to-end.
                     await Self.sendUsageUpdate(
                         entryID: entryID,
                         promptTokenCount: info.promptTokenCount,
@@ -1911,6 +2101,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     break
                 }
             }
+
+            await Self.commitPromptCache(
+                modelID: modelID, slot: slot, emittedText: emittedText, tokenizer: context.tokenizer)
         }
 
         /// Dispatches the no-tools/no-schema path: reasoning routing when a
@@ -2016,13 +2209,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
             var reasoningTokenCount = 0
             var completionInfo: GenerateCompletionInfo?
+            var generatedTokenIDs: [Int] = []
+
+            let slot = await makePromptCacheSlot(input: input, context: context, parameters: params)
 
             for await generation in try generateTokens(
-                input: input, parameters: params, context: context
+                input: slot.feedInput, cache: slot.cache, parameters: params, context: context
             ) {
                 try Task.checkCancellation()
                 switch generation {
                 case .token(let token):
+                    generatedTokenIDs.append(token)
                     if let segments = Self.processReasoningToken(
                         token, emitter: &emitter, detokenizer: &detokenizer,
                         reasoningTokenCount: &reasoningTokenCount)
@@ -2062,6 +2259,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     reasoningTokenCount: reasoningTokenCount,
                     channel: channel)
             }
+
+            await Self.commitPromptCache(
+                modelID: modelID, slot: slot, generatedTokenIDs: generatedTokenIDs)
         }
 
         /// Routes each of `segments` to the appropriate channel entry, in order.
@@ -2184,8 +2384,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 config: reasoningConfig, primedInside: primedInside, tokenizer: context.tokenizer
             )
 
+            let slot = await makePromptCacheSlot(input: input, context: context, parameters: params)
+
             let (stream, task) = try generateTokensTask(
-                input: input, parameters: params, context: context)
+                input: slot.feedInput, cache: slot.cache, parameters: params, context: context)
             let closed: Bool
             do {
                 closed = try await collectReasoningTokens(
@@ -2208,6 +2410,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             await Self.sendSegments(
                 collector.finalize(), responseEntryID: responseEntryID,
                 reasoningEntryID: reasoningEntryID, channel: channel)
+
+            await Self.commitPromptCache(
+                modelID: modelID, slot: slot, generatedTokenIDs: collector.reasoningTokenIDs)
+
             return (collector.reasoningTokenIDs, closed)
         }
 
