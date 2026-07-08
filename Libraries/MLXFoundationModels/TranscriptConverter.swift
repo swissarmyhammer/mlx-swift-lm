@@ -135,10 +135,41 @@ struct TranscriptConverter {
     ///     re-serialized, so nested structure/formatting matches exactly.
     /// - Returns: The envelope JSON text.
     private static func toolCallEnvelopeJSON(name: String, arguments: GeneratedContent) -> String {
-        let nameJSON =
-            (try? JSONSerialization.data(withJSONObject: name, options: .fragmentsAllowed))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? "\"\(name)\""
-        return "{\"name\": \(nameJSON), \"arguments\": \(arguments.jsonString)}"
+        "{\"name\": \(jsonStringLiteral(name)), \"arguments\": \(arguments.jsonString)}"
+    }
+
+    /// Encodes `value` as a JSON string literal (quotes included), escaping
+    /// quotes, backslashes, and control characters per RFC 8259.
+    ///
+    /// - Parameter value: The string to encode.
+    /// - Returns: The quoted, escaped JSON string literal.
+    private static func jsonStringLiteral(_ value: String) -> String {
+        if let data = try? JSONSerialization.data(withJSONObject: value, options: .fragmentsAllowed),
+            let json = String(data: data, encoding: .utf8)
+        {
+            return json
+        }
+        // JSONSerialization cannot fail for a plain String in practice, but
+        // escape manually rather than risk an unescaped quote or control
+        // character reaching the constrained grammar's parser.
+        var escaped = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\"": escaped += "\\\""
+            case "\\": escaped += "\\\\"
+            case "\n": escaped += "\\n"
+            case "\r": escaped += "\\r"
+            case "\t": escaped += "\\t"
+            default:
+                if scalar.value < 0x20 {
+                    escaped += String(format: "\\u%04x", scalar.value)
+                } else {
+                    escaped.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        escaped += "\""
+        return escaped
     }
 
     /// Extracts and concatenates transcript segment text, with newlines

@@ -48,6 +48,24 @@ struct TokenizerBias: @unchecked Sendable {
     }
 }
 
+// MARK: - Constraint Setup
+
+/// The grammar-constraint machinery `prepareConstraintSetup` prepares for the
+/// tool-calling and guided-generation paths: a model-keyed xgrammar
+/// tokenizer, a compiled constraint, and the token-budget/logit-bias values
+/// `GuidedGenerationLoop.run` needs to steer generation toward a structural
+/// close.
+struct ConstraintSetup {
+    let xgTokenizer: GrammarTokenizer
+    let constraint: GrammarConstraint
+    let maxTokens: Int
+    let closingBias: MLXArray
+    let completionReserve: Int
+    let hardReserve: Int
+    let whitespaceBias: MLXArray
+    let whitespaceTokenIDs: Set<Int>
+}
+
 // MARK: - Model Cache Actor
 
 /// Thread-safe model cache using Swift actor isolation.
@@ -1081,16 +1099,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             constraintSource: String,
             reserveEstimateSource: String,
             requestedMaxTokens: Int?
-        ) async throws -> (
-            xgTokenizer: GrammarTokenizer,
-            constraint: GrammarConstraint,
-            maxTokens: Int,
-            closingBias: MLXArray,
-            completionReserve: Int,
-            hardReserve: Int,
-            whitespaceBias: MLXArray,
-            whitespaceTokenIDs: Set<Int>
-        ) {
+        ) async throws -> ConstraintSetup {
             let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer
@@ -1133,10 +1142,140 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // the compact minimal JSON string.
             let hardReserve = structuralReserve * 8
 
-            return (
-                xgTokenizer, constraint, maxTokens, bias.closing, completionReserve,
-                hardReserve, bias.whitespace, bias.whitespaceTokenIDs
+            return ConstraintSetup(
+                xgTokenizer: xgTokenizer, constraint: constraint, maxTokens: maxTokens,
+                closingBias: bias.closing, completionReserve: completionReserve,
+                hardReserve: hardReserve, whitespaceBias: bias.whitespace,
+                whitespaceTokenIDs: bias.whitespaceTokenIDs
             )
+        }
+
+        /// Metadata key signaling the model's output was cut off before
+        /// completing naturally (budget exhausted mid-thought or
+        /// mid-structure), so a consumer doesn't mistake a partial answer
+        /// for the model's chosen response.
+        private static let incompleteOutputMetadataKey = "incompleteOutput"
+
+        /// Sends the incomplete-output metadata signal for `entryID`.
+        ///
+        /// - Parameters:
+        ///   - entryID: The response entry the signal applies to.
+        ///   - channel: The generation channel to send the signal on.
+        private static func sendIncompleteOutputMetadata(
+            entryID: String, channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            await channel.send(
+                .response(
+                    entryID: entryID,
+                    action: .updateMetadata([Self.incompleteOutputMetadataKey: true])))
+        }
+
+        /// Sends a single text delta for `entryID`.
+        ///
+        /// - Parameters:
+        ///   - text: The delta text to append.
+        ///   - entryID: The response entry to stream into.
+        ///   - channel: The generation channel to send the delta on.
+        private static func sendTextDelta(
+            _ text: String, entryID: String, channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            await channel.send(
+                .response(entryID: entryID, action: .appendText(text, tokenCount: 1)))
+        }
+
+        /// Runs think-then-call Phase 1: unconstrained reasoning until
+        /// `</think>`, whose token IDs prefill the constrained Phase 2.
+        /// Sends the incomplete-output signal itself when cut off, since
+        /// that path also needs its caller to skip its own tail GPU sync
+        /// and return immediately (Phase 1 already synchronized on its way
+        /// out).
+        ///
+        /// - Parameters:
+        ///   - cfg: The think-then-call reasoning config (already gated by the caller).
+        ///   - toolAwareInput: The tool-aware-template-rendered prompt.
+        ///   - maxTokens: The resolved token budget for this request.
+        ///   - request: The generation request (temperature/reasoning options).
+        ///   - requestedSamplingMode: The caller's sampling mode override, if any.
+        ///   - reasoningEntryID: The entry to stream reasoning segments into.
+        ///   - entryID: The response entry (for the incomplete-output signal).
+        ///   - context: The loaded model context.
+        ///   - channel: The generation channel to send events on.
+        /// - Throws: Whatever `runToolCallReasoningPhase` throws.
+        /// - Returns: The reasoning token IDs (empty if Phase 1 wasn't
+        ///   entered) and whether Phase 1 was cut off before closing.
+        private func executeThinkThenCallPhase1(
+            cfg: ReasoningConfig,
+            toolAwareInput: LMInput,
+            maxTokens: Int,
+            request: LanguageModelExecutorGenerationRequest,
+            requestedSamplingMode: MLXSamplingMode?,
+            reasoningEntryID: String,
+            entryID: String,
+            context: ModelContext,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws -> (tokenIDs: [Int], cutOff: Bool) {
+            let primedInside = Self.reasoningPrimedInside(
+                input: toolAwareInput, config: cfg, tokenizer: context.tokenizer)
+            let phase1 = try await runToolCallReasoningPhase(
+                input: toolAwareInput, config: cfg,
+                primedInside: primedInside, maxTokens: maxTokens,
+                requestedTemperature: request.generationOptions.temperature,
+                samplingMode: requestedSamplingMode,
+                reasoningEntryID: reasoningEntryID,
+                responseEntryID: entryID,
+                context: context, channel: channel)
+            guard phase1.closed else {
+                // Cut off mid-thought (budget exhausted before `</think>`).
+                // Don't prefill a truncated thought into the grammar —
+                // signal and finish. Phase 1 already synchronized the GPU
+                // on its way out.
+                await Self.sendIncompleteOutputMetadata(entryID: entryID, channel: channel)
+                return (phase1.tokenIDs, true)
+            }
+            return (phase1.tokenIDs, false)
+        }
+
+        /// Runs think-then-call Phase 2: constrained tool-grammar generation
+        /// continuing from Phase 1's (possibly empty) reasoning tokens.
+        ///
+        /// - Parameters:
+        ///   - phase2Input: The prompt to generate from (tool-aware input,
+        ///     plus any Phase 1 reasoning tokens prefilled).
+        ///   - phase2MaxTokens: The remaining token budget for this phase.
+        ///   - context: The loaded model context.
+        ///   - setup: The constraint/bias/reserve setup from `prepareConstraintSetup`.
+        /// - Returns: The buffered output text, the generated token count
+        ///   (nil if generation threw before completing), and whether
+        ///   output was incomplete.
+        private func executeToolCallingPhase2(
+            phase2Input: LMInput,
+            phase2MaxTokens: Int,
+            context: ModelContext,
+            setup: ConstraintSetup
+        ) throws -> (outputBuffer: String, generatedTokenCount: Int?, incomplete: Bool) {
+            var outputBuffer = ""
+            var incomplete = false
+            var generatedTokenCount: Int?
+            do {
+                generatedTokenCount = try GuidedGenerationLoop.run(
+                    input: phase2Input,
+                    context: context,
+                    constraint: setup.constraint,
+                    maxTokens: phase2MaxTokens,
+                    vocabSize: Int(setup.xgTokenizer.vocabSize),
+                    completionReserve: setup.completionReserve,
+                    hardReserve: setup.hardReserve,
+                    closingBias: setup.closingBias,
+                    whitespaceBias: setup.whitespaceBias,
+                    whitespaceTokenIDs: setup.whitespaceTokenIDs
+                ) { text in
+                    outputBuffer += text
+                    return !Task.isCancelled
+                }
+            } catch GuidedGenerationError.incompleteOutput {
+                incomplete = true
+            }
+            return (outputBuffer, generatedTokenCount, incomplete)
         }
 
         /// Tool-calling generation path. Continuation rounds from
@@ -1263,32 +1402,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // constrained phase below. Empty on the single-phase path.
             var reasoningTokenIDs: [Int] = []
             if let cfg = thinkThenCallConfig {
-                let primedInside = Self.reasoningPrimedInside(
-                    input: toolAwareInput, config: cfg,
-                    tokenizer: context.tokenizer)
-                let phase1 = try await runToolCallReasoningPhase(
-                    input: toolAwareInput, config: cfg,
-                    primedInside: primedInside, maxTokens: setup.maxTokens,
-                    requestedTemperature: request.generationOptions
-                        .temperature,
-                    samplingMode: requestedSamplingMode,
-                    reasoningEntryID: reasoningEntryID,
-                    responseEntryID: entryID,
+                let phase1 = try await executeThinkThenCallPhase1(
+                    cfg: cfg, toolAwareInput: toolAwareInput, maxTokens: setup.maxTokens,
+                    request: request, requestedSamplingMode: requestedSamplingMode,
+                    reasoningEntryID: reasoningEntryID, entryID: entryID,
                     context: context, channel: channel)
                 reasoningTokenIDs = phase1.tokenIDs
-                if !phase1.closed {
-                    // Cut off mid-thought (budget exhausted before
-                    // `</think>`). Don't prefill a truncated thought
-                    // into the grammar — signal and finish. Phase 1
-                    // already synchronized the GPU on its way out.
-                    await channel.send(
-                        .response(
-                            entryID: entryID,
-                            action: .updateMetadata([
-                                "incompleteOutput": true
-                            ])))
-                    return false
-                }
+                guard !phase1.cutOff else { return false }
             }
 
             // Phase 2 continues from the model's completed reasoning;
@@ -1309,28 +1429,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 : Swift.max(
                     setup.maxTokens - reasoningTokenIDs.count, setup.completionReserve)
 
-            var outputBuffer = ""
-            var incomplete = false
-            var generatedTokenCount: Int?
-            do {
-                generatedTokenCount = try GuidedGenerationLoop.run(
-                    input: phase2Input,
-                    context: context,
-                    constraint: setup.constraint,
-                    maxTokens: phase2MaxTokens,
-                    vocabSize: Int(setup.xgTokenizer.vocabSize),
-                    completionReserve: setup.completionReserve,
-                    hardReserve: setup.hardReserve,
-                    closingBias: setup.closingBias,
-                    whitespaceBias: setup.whitespaceBias,
-                    whitespaceTokenIDs: setup.whitespaceTokenIDs
-                ) { text in
-                    outputBuffer += text
-                    return !Task.isCancelled
-                }
-            } catch GuidedGenerationError.incompleteOutput {
-                incomplete = true
-            }
+            let phase2 = try executeToolCallingPhase2(
+                phase2Input: phase2Input, phase2MaxTokens: phase2MaxTokens,
+                context: context, setup: setup)
+            let outputBuffer = phase2.outputBuffer
+            let incomplete = phase2.incomplete
+            let generatedTokenCount = phase2.generatedTokenCount
 
             try await emitToolCallingEvent(
                 outputBuffer: outputBuffer,
@@ -1365,11 +1469,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
 
             if incomplete {
-                await channel.send(
-                    .response(
-                        entryID: entryID,
-                        action: .updateMetadata(["incompleteOutput": true]))
-                )
+                await Self.sendIncompleteOutputMetadata(entryID: entryID, channel: channel)
             }
 
             return true
@@ -1413,11 +1513,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 .makeStream()
             async let forwarder: Void = {
                 for await text in textStream {
-                    await channel.send(
-                        .response(
-                            entryID: entryID,
-                            action: .appendText(text, tokenCount: 1)
-                        ))
+                    await Self.sendTextDelta(text, entryID: entryID, channel: channel)
                 }
             }()
 
@@ -1465,11 +1561,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
 
             if incomplete {
-                await channel.send(
-                    .response(
-                        entryID: entryID,
-                        action: .updateMetadata(["incompleteOutput": true]))
-                )
+                await Self.sendIncompleteOutputMetadata(entryID: entryID, channel: channel)
             }
         }
 
@@ -1500,11 +1592,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 try Task.checkCancellation()
                 switch generation {
                 case .chunk(let text):
-                    await channel.send(
-                        .response(
-                            entryID: entryID,
-                            action: .appendText(text, tokenCount: 1)
-                        ))
+                    await Self.sendTextDelta(text, entryID: entryID, channel: channel)
                 case .info(let info):
                     // MLX-LM emits one .info event at end-of-generation with
                     // authoritative scalar token counts (`promptTokenCount`
@@ -1641,10 +1729,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // empty or partial answer for the model's chosen response — mirrors
             // the guided path's `incompleteOutput` convention.
             if emitter.isInsideReasoning {
-                await channel.send(
-                    .response(
-                        entryID: responseEntryID,
-                        action: .updateMetadata(["incompleteOutput": true])))
+                await Self.sendIncompleteOutputMetadata(
+                    entryID: responseEntryID, channel: channel)
             }
 
             if let info = completionInfo {
