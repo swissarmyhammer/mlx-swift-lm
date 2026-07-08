@@ -67,7 +67,7 @@ struct ConstraintSetup {
     /// cached against a stale (e.g. pre-Phase-1) `maxTokens` -- or the
     /// reserve can consume the entire (or more than the entire) remaining
     /// budget.
-    func reserves(forMaxTokens maxTokens: Int) -> (completion: Int, hard: Int) {
+        func reserves(forMaxTokens maxTokens: Int) -> (completionReserve: Int, hardReserve: Int) {
         (Swift.max(structuralReserve * 3, maxTokens / 4), structuralReserve * 8)
     }
 }
@@ -866,6 +866,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - request: The generation request containing transcript, tools, and options
         ///   - model: The model instance for this request
         ///   - channel: The channel to send response events into
+        /// - Throws: Whatever the underlying container load, grammar/tokenizer
+        ///   setup, or generation path throws.
         public func respond(
             to request: LanguageModelExecutorGenerationRequest,
             model: MLXLanguageModel,
@@ -993,7 +995,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             /// Reasoning-path setup, present only when `.reasoning` was
             /// declared, a reasoning config resolved, and no tools/schema
             /// are in play.
-            let reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
+            let reasoningSetup: (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?
         }
 
         /// Renders the prompt, resolves the per-instance configuration, and
@@ -1092,7 +1094,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
 
             let reasoningSetup:
-                (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
+                (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?
             if mayRunReasoningPath, declaresReasoning,
                 let reasoningConfig = resolved.reasoningConfig
             {
@@ -1389,7 +1391,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Returns: The reasoning token IDs (empty if Phase 1 wasn't
         ///   entered) and whether Phase 1 was cut off before closing.
         private func executeThinkThenCallPhase1(
-            cfg: ReasoningConfig,
+            reasoningConfig: ReasoningConfig,
             toolAwareInput: LMInput,
             maxTokens: Int,
             request: LanguageModelExecutorGenerationRequest,
@@ -1400,9 +1402,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> (tokenIDs: [Int], cutOff: Bool) {
             let primedInside = Self.reasoningPrimedInside(
-                input: toolAwareInput, config: cfg, tokenizer: context.tokenizer)
+                input: toolAwareInput, config: reasoningConfig, tokenizer: context.tokenizer)
             let phase1 = try await runToolCallReasoningPhase(
-                input: toolAwareInput, config: cfg,
+                input: toolAwareInput, config: reasoningConfig,
                 primedInside: primedInside, maxTokens: maxTokens,
                 requestedTemperature: request.generationOptions.temperature,
                 samplingMode: requestedSamplingMode,
@@ -1548,7 +1550,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             guard !reasoningTokenIDs.isEmpty else { return setup.maxTokens }
             return Swift.max(
                 setup.maxTokens - reasoningTokenIDs.count,
-                setup.reserves(forMaxTokens: setup.maxTokens).completion)
+                setup.reserves(forMaxTokens: setup.maxTokens).completionReserve)
         }
 
         /// Tool-calling generation path. Continuation rounds from
@@ -1671,7 +1673,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var reasoningTokenIDs: [Int] = []
             if let cfg = thinkThenCallConfig {
                 let phase1 = try await executeThinkThenCallPhase1(
-                    cfg: cfg, toolAwareInput: toolAwareInput, maxTokens: setup.maxTokens,
+                    reasoningConfig: cfg, toolAwareInput: toolAwareInput, maxTokens: setup.maxTokens,
                     request: request, requestedSamplingMode: requestedSamplingMode,
                     reasoningEntryID: reasoningEntryID, entryID: entryID,
                     context: context, channel: channel)
@@ -1844,7 +1846,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Dispatches the no-tools/no-schema path: reasoning routing when a
         /// config resolved, otherwise plain unconstrained text.
         private func runTextGeneration(
-            reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?,
+            reasoningSetup: (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?,
             fallbackInput: LMInput,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
@@ -1857,7 +1859,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if let reasoning = reasoningSetup {
                 try await runReasoning(
                     input: reasoning.input,
-                    reasoningConfig: reasoning.config,
+                    reasoningConfig: reasoning.reasoningConfig,
                     primedInside: reasoning.primedInside,
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: requestedTemperature,
