@@ -415,6 +415,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// when one exists. Shares the process-global cache that `respond()`,
     /// `preload()`, and `session.prewarm()` use, so a caller working directly
     /// with the lower-level `ModelContainer` reuses the adapter's cache.
+    ///
+    /// - Returns: The cached model container, loading it first if necessary.
+    /// - Throws: Whatever the underlying model loader throws while
+    ///   downloading or initializing the container.
     public func loadContainer() async throws -> ModelContainer {
         try await loadContainer(suppressDownloadingState: false)
     }
@@ -814,6 +818,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         let modelID: String
 
         /// Creates an executor from a configuration.
+        ///
+        /// - Parameter configuration: The executor configuration.
+        /// - Throws: Never currently -- `throws` is reserved for future
+        ///   configuration validation and to match the initializer shape
+        ///   `LanguageModelExecutor` conformance expects.
         public init(configuration: Configuration) throws {
             self.modelID = configuration.modelID
         }
