@@ -145,27 +145,51 @@ private actor ModelCache {
 
         do {
             let loaded = try await loadTask.task.value
-            // Supersession guard: `evict()`/`evictAll()` may have removed this
-            // load while it was suspended (actor reentrancy). If we are no longer
-            // the registered task, hand the awaiter its container but do NOT
-            // re-populate the cache — ARC frees the weights when the awaiter
-            // releases it.
-            guard loadingTasks[modelID] === loadTask else { return loaded }
-            containers[modelID] = loaded
-            loadingTasks[modelID] = nil
-            suppressedLoadIDs.remove(modelID)
-            lastErrors[modelID] = nil
-            return loaded
+            return recordLoadSuccess(modelID: modelID, loadTask: loadTask, loaded: loaded)
         } catch {
-            // Same guard on the failure path: a superseded load must not re-add a
-            // stale lastErrors entry for a model nobody holds.
-            if loadingTasks[modelID] === loadTask {
-                loadingTasks[modelID] = nil
-                suppressedLoadIDs.remove(modelID)
-                lastErrors[modelID] = error
-            }
+            recordLoadFailure(modelID: modelID, loadTask: loadTask, error: error)
             throw error
         }
+    }
+
+    /// Finalizes a successful load: populates the container cache and clears
+    /// the per-model in-flight/error bookkeeping. Guarded against
+    /// supersession: `evict()`/`evictAll()` may have removed this load while
+    /// it was suspended (actor reentrancy), in which case we hand the
+    /// awaiter its container but do NOT re-populate the cache — ARC frees
+    /// the weights when the awaiter releases it.
+    ///
+    /// - Parameters:
+    ///   - modelID: The model identifier the load was registered under.
+    ///   - loadTask: The `LoadTask` this load was registered as, for the
+    ///     supersession identity check.
+    ///   - loaded: The container the load produced.
+    /// - Returns: `loaded`, unconditionally.
+    private func recordLoadSuccess(
+        modelID: String, loadTask: LoadTask, loaded: ModelContainer
+    ) -> ModelContainer {
+        guard loadingTasks[modelID] === loadTask else { return loaded }
+        containers[modelID] = loaded
+        loadingTasks[modelID] = nil
+        suppressedLoadIDs.remove(modelID)
+        lastErrors[modelID] = nil
+        return loaded
+    }
+
+    /// Records a failed load's error, unless a concurrent `evict()`/`evictAll()`
+    /// superseded this load while it was suspended — a superseded load must
+    /// not re-add a stale `lastErrors` entry for a model nobody holds.
+    ///
+    /// - Parameters:
+    ///   - modelID: The model identifier the load was registered under.
+    ///   - loadTask: The `LoadTask` this load was registered as, for the
+    ///     supersession identity check.
+    ///   - error: The error the load threw.
+    private func recordLoadFailure(modelID: String, loadTask: LoadTask, error: Error) {
+        guard loadingTasks[modelID] === loadTask else { return }
+        loadingTasks[modelID] = nil
+        suppressedLoadIDs.remove(modelID)
+        lastErrors[modelID] = error
     }
 
     /// Whether a *genuine download* is in flight for the given model: a load
@@ -1378,6 +1402,53 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             return (generatedTokenCount, incomplete)
         }
 
+        /// Derives the think-then-call reasoning config for the tool-calling
+        /// path. Think-then-call is gated to the `enable_thinking` family
+        /// (Qwen3/QwQ): their template both renders the tool block AND
+        /// honors `enable_thinking`. R1-style `.alwaysOn` models are
+        /// tool-blind (template ignores `tools:`), so they fall through to
+        /// the single-phase path unchanged; thinking-disabled requests stay
+        /// single-phase too.
+        ///
+        /// - Parameters:
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - resolved: The resolved model configuration.
+        ///   - reasoningLevel: The caller's requested reasoning level, if any.
+        /// - Returns: The reasoning config to run think-then-call with, or
+        ///   `nil` when the model/request doesn't qualify.
+        private static func makeThinkThenCallConfig(
+            declaresReasoning: Bool,
+            resolved: ModelConfiguration,
+            reasoningLevel: ContextOptions.ReasoningLevel?
+        ) -> ReasoningConfig? {
+            guard declaresReasoning,
+                let cfg = resolved.reasoningConfig,
+                case .templateFlag = cfg.promptStrategy,
+                thinkingEnabled(for: reasoningLevel) != false
+            else { return nil }
+            return cfg
+        }
+
+        /// Resolves Phase 2's token budget for think-then-call tool-calling.
+        ///
+        /// - Parameters:
+        ///   - reasoningTokenIDs: Phase 1's accumulated reasoning token IDs
+        ///     (empty on the single-phase path).
+        ///   - setup: The constraint/bias/reserve setup from `prepareConstraintSetup`.
+        /// - Returns: `setup.maxTokens` unchanged when Phase 1 contributed no
+        ///   reasoning tokens; otherwise the remaining budget after Phase 1,
+        ///   floored at the completion reserve so the envelope always has
+        ///   room to close the tool call (matches the unconstrained path's
+        ///   shared-budget behavior).
+        private static func resolvePhase2MaxTokens(
+            reasoningTokenIDs: [Int], setup: ConstraintSetup
+        ) -> Int {
+            guard !reasoningTokenIDs.isEmpty else { return setup.maxTokens }
+            return Swift.max(
+                setup.maxTokens - reasoningTokenIDs.count,
+                setup.reserves(forMaxTokens: setup.maxTokens).completion)
+        }
+
         /// Tool-calling generation path. Continuation rounds from
         /// `LanguageModelSession`'s auto-loop re-enter this path too: the
         /// transcript's prior tool-call and tool-output entries are replayed
@@ -1450,15 +1521,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // models are tool-blind (template ignores `tools:`), so
             // they fall through to the single-phase path unchanged;
             // thinking-disabled requests stay single-phase too.
-            let thinkThenCallConfig: ReasoningConfig? = {
-                guard declaresReasoning,
-                    let cfg = resolved.reasoningConfig,
-                    case .templateFlag = cfg.promptStrategy,
-                    Self.thinkingEnabled(
-                        for: request.contextOptions.reasoningLevel) != false
-                else { return nil }
-                return cfg
-            }()
+            let thinkThenCallConfig = Self.makeThinkThenCallConfig(
+                declaresReasoning: declaresReasoning,
+                resolved: resolved,
+                reasoningLevel: request.contextOptions.reasoningLevel)
             // Thread `enable_thinking` through the tool-aware template
             // (3-arg form) so the prompt is both tool-aware and
             // thinking-primed; nil on the single-phase path.
@@ -1523,12 +1589,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // envelope continues under the remaining budget, floored
             // at the completion reserve so it always has room to close
             // the tool call.
-            let phase2MaxTokens =
-                reasoningTokenIDs.isEmpty
-                ? setup.maxTokens
-                : Swift.max(
-                    setup.maxTokens - reasoningTokenIDs.count,
-                    setup.reserves(forMaxTokens: setup.maxTokens).completion)
+            let phase2MaxTokens = Self.resolvePhase2MaxTokens(
+                reasoningTokenIDs: reasoningTokenIDs, setup: setup)
 
             let phase2 = try executeToolCallingPhase2(
                 phase2Input: phase2Input, phase2MaxTokens: phase2MaxTokens,
@@ -1923,38 +1985,74 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             let (stream, task) = try generateTokensTask(
                 input: input, parameters: params, context: context)
-            var closed = false
+            let closed: Bool
             do {
-                for await generation in stream {
-                    try Task.checkCancellation()
-                    guard case .token(let token) = generation else { continue }
-                    await Self.sendSegments(
-                        collector.ingest(token), responseEntryID: responseEntryID,
-                        reasoningEntryID: reasoningEntryID, channel: channel)
-                    if collector.shouldStopAfterReasoning {
-                        closed = true
-                        break
-                    }
-                }
+                closed = try await collectReasoningTokens(
+                    stream: stream, collector: &collector,
+                    responseEntryID: responseEntryID, reasoningEntryID: reasoningEntryID,
+                    channel: channel)
             } catch {
                 // Drain the generation task before propagating, but do NOT sync
                 // here: respond's outer `catch` is the single GPU-sync point for
                 // this exit path. Keep one clean GPU sync per exit path —
                 // cascading syncs across nested catches can race the Metal
                 // command-buffer state during teardown.
-                task.cancel()
-                _ = await task.value
+                await Self.drainReasoningTask(task)
                 throw error
             }
             // Drain the generation task before Phase 2 reuses the Stream.
-            task.cancel()
-            _ = await task.value
+            await Self.drainReasoningTask(task)
             Stream.gpu.synchronize()
 
             await Self.sendSegments(
                 collector.finalize(), responseEntryID: responseEntryID,
                 reasoningEntryID: reasoningEntryID, channel: channel)
             return (collector.reasoningTokenIDs, closed)
+        }
+
+        /// Consumes `stream`, feeding each generated token into `collector`
+        /// and routing its emitted segments to the appropriate channel
+        /// entry, until the stream ends or the collector's reasoning span
+        /// closes.
+        ///
+        /// - Parameters:
+        ///   - stream: The raw token stream from `generateTokensTask`.
+        ///   - collector: The reasoning-token collector to feed tokens into.
+        ///   - responseEntryID: The entry `.response` segments stream into.
+        ///   - reasoningEntryID: The entry `.reasoning` segments stream into.
+        ///   - channel: The generation channel to send events on.
+        /// - Throws: `CancellationError` if the task is cancelled mid-loop.
+        /// - Returns: Whether the collector's reasoning span closed
+        ///   (`</think>` reached) before the stream ended.
+        private func collectReasoningTokens(
+            stream: AsyncStream<TokenGeneration>,
+            collector: inout ReasoningTokenCollector,
+            responseEntryID: String,
+            reasoningEntryID: String,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws -> Bool {
+            for await generation in stream {
+                try Task.checkCancellation()
+                guard case .token(let token) = generation else { continue }
+                await Self.sendSegments(
+                    collector.ingest(token), responseEntryID: responseEntryID,
+                    reasoningEntryID: reasoningEntryID, channel: channel)
+                if collector.shouldStopAfterReasoning {
+                    return true
+                }
+            }
+            return false
+        }
+
+        /// Cancels and drains `task` before its `Stream` is reused by Phase 2
+        /// or before an error propagates -- without this, Phase 2's prefill
+        /// could overlap Phase 1's in-flight forward pass on the shared
+        /// `Stream` and trip a Metal command-buffer assertion.
+        ///
+        /// - Parameter task: The generation task returned by `generateTokensTask`.
+        private static func drainReasoningTask(_ task: Task<Void, Never>) async {
+            task.cancel()
+            _ = await task.value
         }
 
         /// Parses a tool-calling envelope JSON object and emits the
@@ -2002,37 +2100,81 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
 
             if name == FinalAnswerTool.toolName {
-                let text: String
-                if userResponseSchema == nil {
-                    let args = obj[ToolCallEnvelopeKey.arguments] as? [String: Any]
-                    text = (args?["response"] as? String) ?? ""
-                } else if let args = obj[ToolCallEnvelopeKey.arguments],
-                    let argsData = try? JSONSerialization.data(withJSONObject: args),
-                    let argsStr = String(data: argsData, encoding: .utf8)
-                {
-                    text = argsStr
-                } else {
-                    text = ""
-                }
-                await Self.sendTextDelta(text, entryID: entryID, channel: channel)
+                await Self.handleFinalAnswerTool(
+                    obj: obj, userResponseSchema: userResponseSchema,
+                    entryID: entryID, channel: channel)
             } else {
-                guard
-                    let args = obj[ToolCallEnvelopeKey.arguments],
-                    let argsData = try? JSONSerialization.data(withJSONObject: args),
-                    let argsStr = String(data: argsData, encoding: .utf8)
-                else {
-                    return
-                }
-                await channel.send(
-                    .toolCalls(
-                        entryID: toolCallsEntryID,
-                        action: .toolCall(
-                            id: UUID().uuidString,
-                            name: name,
-                            action: .appendArguments(argsStr, tokenCount: 1)
-                        )
-                    ))
+                await Self.handleRealTool(
+                    obj: obj, name: name, toolCallsEntryID: toolCallsEntryID, channel: channel)
             }
+        }
+
+        /// Handles the synthetic final-answer tool: unwraps its arguments
+        /// into a single `.textDelta` event.
+        ///
+        /// - With no developer response schema: unwraps `arguments.response`
+        ///   directly.
+        /// - With a developer response schema: re-serializes `arguments`
+        ///   back to JSON text; the session's normal response-parsing path
+        ///   decodes it through the developer's `GenerationSchema`.
+        ///
+        /// - Parameters:
+        ///   - obj: The parsed tool-call envelope (`{"name":..., "arguments":...}`).
+        ///   - userResponseSchema: The developer's response schema, if any.
+        ///   - entryID: The response entry to stream the final answer into.
+        ///   - channel: The generation channel to send the event on.
+        private static func handleFinalAnswerTool(
+            obj: [String: Any],
+            userResponseSchema: GenerationSchema?,
+            entryID: String,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            let text: String
+            if userResponseSchema == nil {
+                let args = obj[ToolCallEnvelopeKey.arguments] as? [String: Any]
+                text = (args?["response"] as? String) ?? ""
+            } else if let args = obj[ToolCallEnvelopeKey.arguments],
+                let argsData = try? JSONSerialization.data(withJSONObject: args),
+                let argsStr = String(data: argsData, encoding: .utf8)
+            {
+                text = argsStr
+            } else {
+                text = ""
+            }
+            await sendTextDelta(text, entryID: entryID, channel: channel)
+        }
+
+        /// Handles a real (developer-declared) tool call: re-serializes its
+        /// arguments to JSON and emits a single `.toolCallDelta` with a
+        /// freshly minted tool-call id.
+        ///
+        /// - Parameters:
+        ///   - obj: The parsed tool-call envelope (`{"name":..., "arguments":...}`).
+        ///   - name: The tool's name.
+        ///   - toolCallsEntryID: The entry to stream the tool-call event into.
+        ///   - channel: The generation channel to send the event on.
+        private static func handleRealTool(
+            obj: [String: Any],
+            name: String,
+            toolCallsEntryID: String,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            guard
+                let args = obj[ToolCallEnvelopeKey.arguments],
+                let argsData = try? JSONSerialization.data(withJSONObject: args),
+                let argsStr = String(data: argsData, encoding: .utf8)
+            else {
+                return
+            }
+            await channel.send(
+                .toolCalls(
+                    entryID: toolCallsEntryID,
+                    action: .toolCall(
+                        id: UUID().uuidString,
+                        name: name,
+                        action: .appendArguments(argsStr, tokenCount: 1)
+                    )
+                ))
         }
 
         /// Strips Qwen-style `<tool_call>\n...\n</tool_call>` wrapper markers
