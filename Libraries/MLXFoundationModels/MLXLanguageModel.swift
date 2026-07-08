@@ -217,13 +217,13 @@ private actor ModelCache {
             return cached
         }
         let vocab = TokenizerVocabExtractor.extractForGrammar(from: tokenizer)
-        let xgTok = try GrammarTokenizer(
+        let xgTokenizer = try GrammarTokenizer(
             vocab: vocab.vocab,
             vocabType: vocab.vocabType,
             eosTokenId: Int32(tokenizer.eosTokenId ?? 0)
         )
-        xgTokenizers[modelID] = xgTok
-        return xgTok
+        xgTokenizers[modelID] = xgTokenizer
+        return xgTokenizer
     }
 
     /// Whether an `GrammarTokenizer` is already cached for the given model.
@@ -942,134 +942,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // .Video are not Sendable), so route the array through
                 // perform(nonSendable:_:) which boxes it across the actor hop.
                 try await container.perform(nonSendable: messages) { context, messages in
-                    // Render the prompt through the model's UserInputProcessor.
-                    let userInput = UserInput(chat: messages)
-                    let input = try await context.processor.prepare(input: userInput)
+                    let setup = try await prepareRespondSetup(
+                        request: request, messages: messages, modelID: modelID,
+                        context: context, declaresReasoning: declaresReasoning,
+                        configurationResolver: configurationResolver)
 
-                    // Resolve the per-instance configuration. Held strictly as
-                    // a local; it never lands in context.configuration or
-                    // Executor.Configuration, so two instances with the same id
-                    // but different resolvers don't cross-contaminate through
-                    // the shared caches. Identity is read from
-                    // context.configuration (above, at load time) and never
-                    // from `resolved`.
-                    let configData = try? Data(
-                        contentsOf:
-                            context.configuration.modelDirectory
-                            .appendingPathComponent("config.json"))
-                    let modelType =
-                        configData.flatMap {
-                            try? JSONDecoder.json5().decode(
-                                BaseConfiguration.self, from: $0
-                            ).modelType
-                        } ?? ""
-                    let descriptor = ModelDescriptor(
-                        modelType: modelType,
-                        modelId: modelID,
-                        configData: configData,
-                        tokenizer: context.tokenizer)
-                    let resolved = configurationResolver.resolve(
-                        context.configuration, for: descriptor)
-
-                    // Capability gate. When the caller omits `.reasoning`
-                    // but the resolved configuration carries a reasoning
-                    // config, the model must not be allowed to think:
-                    //
-                    // - Toggleable strategies (`.templateFlag`) re-render the
-                    //   prompt with thinking off (handled below per path).
-                    // - Non-suppressible strategies (`.alwaysOn`) raise
-                    //   `unsupportedCapability` BEFORE generation, regardless
-                    //   of which path (tools / schema / unconstrained) the
-                    //   request would otherwise take. The throw is
-                    //   path-independent so a tool-calling or schema-guided
-                    //   request on a model that always reasons surfaces the
-                    //   same typed error the unconstrained path does, never a
-                    //   silent leak through the grammar's malformed-output
-                    //   fallback.
-                    try validateReasoningCapability(
-                        declaresReasoning: declaresReasoning, resolved: resolved)
-
-                    // Reasoning is only consumed by the unconstrained path
-                    // (no tools, no schema). On the guided/tool paths the
-                    // grammar already constrains output, so suppression-prep
-                    // would be wasted work.
-                    let mayRunReasoningPath =
-                        request.enabledToolDefinitions.isEmpty && request.schema == nil
-
-                    // When .reasoning is OMITTED on the unconstrained path,
-                    // re-render the prompt with thinking off so the model
-                    // doesn't emit `<think>`. Toggleable-only;
-                    // .alwaysOn was already rejected above.
-                    let suppressedInput: LMInput?
-                    if mayRunReasoningPath, !declaresReasoning,
-                        let suppressionConfig = resolved.reasoningConfig
-                    {
-                        suppressedInput = try await Self.preparedInput(
-                            messages: messages, config: suppressionConfig,
-                            thinkingEnabled: false, processor: context.processor,
-                            cannotDisableMessage:
-                                "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
-                        )
-                    } else {
-                        suppressedInput = nil
-                    }
-
-                    let reasoningSetup:
-                        (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
-                    if mayRunReasoningPath, declaresReasoning,
-                        let reasoningConfig = resolved.reasoningConfig
-                    {
-                        let thinkingEnabled = Self.thinkingEnabled(
-                            for: request.contextOptions.reasoningLevel)
-                        let reasoningInput = try await Self.preparedInput(
-                            messages: messages, config: reasoningConfig,
-                            thinkingEnabled: thinkingEnabled, processor: context.processor,
-                            cannotDisableMessage:
-                                "This model always reasons; reasoning cannot be disabled via reasoningLevel."
-                        )
-                        reasoningSetup = (
-                            reasoningInput, reasoningConfig,
-                            Self.reasoningPrimedInside(
-                                input: reasoningInput, config: reasoningConfig,
-                                tokenizer: context.tokenizer)
-                        )
-                    } else {
-                        reasoningSetup = nil
-                    }
-
-                    // The prompt actually fed into generation: the suppressed
-                    // prompt when we're forcing thinking off, otherwise the
-                    // baseline `input` rendered above.
-                    let effectiveInput = suppressedInput ?? input
-
-                    if !request.enabledToolDefinitions.isEmpty {
-                        let completedNormally = try await runToolCalling(
-                            request: request, messages: messages, modelID: modelID,
-                            requestedMaxTokens: requestedMaxTokens,
-                            requestedSamplingMode: requestedSamplingMode,
-                            declaresReasoning: declaresReasoning, resolved: resolved,
-                            entryID: entryID, toolCallsEntryID: toolCallsEntryID,
-                            reasoningEntryID: reasoningEntryID, context: context,
-                            channel: channel)
-                        guard completedNormally else { return }
-                    } else if let schemaJSON {
-                        try await runGuidedGeneration(
-                            schemaJSON: schemaJSON, input: input, modelID: modelID,
-                            requestedMaxTokens: requestedMaxTokens, entryID: entryID,
-                            context: context, channel: channel)
-                    } else {
-                        try await runTextGeneration(
-                            reasoningSetup: reasoningSetup,
-                            fallbackInput: effectiveInput,
-                            requestedMaxTokens: requestedMaxTokens,
-                            requestedTemperature: request.generationOptions.temperature,
-                            samplingMode: requestedSamplingMode,
-                            responseEntryID: entryID,
-                            reasoningEntryID: reasoningEntryID,
-                            context: context,
-                            channel: channel
-                        )
-                    }
+                    let completedNormally = try await dispatchGeneration(
+                        setup: setup, request: request, messages: messages,
+                        modelID: modelID, schemaJSON: schemaJSON,
+                        requestedMaxTokens: requestedMaxTokens,
+                        requestedSamplingMode: requestedSamplingMode,
+                        declaresReasoning: declaresReasoning, entryID: entryID,
+                        toolCallsEntryID: toolCallsEntryID,
+                        reasoningEntryID: reasoningEntryID, context: context,
+                        channel: channel)
+                    guard completedNormally else { return }
 
                     Stream.gpu.synchronize()
                 }
@@ -1088,6 +975,221 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     throw Self.mapGrammarError(grammarError)
                 }
                 throw error
+            }
+        }
+
+        /// Bundles what `respond()`'s dispatch step needs, once the prompt
+        /// has been rendered and the per-instance configuration resolved.
+        private struct RespondSetup {
+            /// The prompt rendered by `UserInputProcessor.prepare`, before
+            /// any reasoning-suppression rewrite.
+            let input: LMInput
+            /// The per-instance configuration resolved from `config.json`.
+            let resolved: ModelConfiguration
+            /// The prompt actually fed into generation: the suppressed
+            /// prompt when forcing thinking off, otherwise the baseline
+            /// `input`.
+            let effectiveInput: LMInput
+            /// Reasoning-path setup, present only when `.reasoning` was
+            /// declared, a reasoning config resolved, and no tools/schema
+            /// are in play.
+            let reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
+        }
+
+        /// Renders the prompt, resolves the per-instance configuration, and
+        /// prepares whatever the reasoning path needs -- everything
+        /// `respond()`'s `container.perform` closure must do before it can
+        /// dispatch to one of the three generation paths.
+        ///
+        /// - Parameters:
+        ///   - request: The generation request; supplies tool/schema gating and reasoning level.
+        ///   - messages: The rendered chat messages for this round.
+        ///   - modelID: The model identifier used to build the `ModelDescriptor`.
+        ///   - context: The loaded model context (tokenizer, configuration, processor).
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - configurationResolver: Patches the per-call `ModelConfiguration` read from `config.json`.
+        /// - Returns: A `RespondSetup` bundling the resolved configuration and effective input.
+        /// - Throws: Whatever `UserInputProcessor.prepare`, capability validation, or
+        ///   reasoning-prompt preparation throw.
+        private func prepareRespondSetup(
+            request: LanguageModelExecutorGenerationRequest,
+            messages: [Chat.Message],
+            modelID: String,
+            context: ModelContext,
+            declaresReasoning: Bool,
+            configurationResolver: any ModelConfigurationResolver
+        ) async throws -> RespondSetup {
+            // Render the prompt through the model's UserInputProcessor.
+            let userInput = UserInput(chat: messages)
+            let input = try await context.processor.prepare(input: userInput)
+
+            // Resolve the per-instance configuration. Held strictly as
+            // a local; it never lands in context.configuration or
+            // Executor.Configuration, so two instances with the same id
+            // but different resolvers don't cross-contaminate through
+            // the shared caches. Identity is read from
+            // context.configuration (above, at load time) and never
+            // from `resolved`.
+            let configData = try? Data(
+                contentsOf:
+                    context.configuration.modelDirectory
+                    .appendingPathComponent("config.json"))
+            let modelType =
+                configData.flatMap {
+                    try? JSONDecoder.json5().decode(
+                        BaseConfiguration.self, from: $0
+                    ).modelType
+                } ?? ""
+            let descriptor = ModelDescriptor(
+                modelType: modelType,
+                modelId: modelID,
+                configData: configData,
+                tokenizer: context.tokenizer)
+            let resolved = configurationResolver.resolve(
+                context.configuration, for: descriptor)
+
+            // Capability gate. When the caller omits `.reasoning`
+            // but the resolved configuration carries a reasoning
+            // config, the model must not be allowed to think:
+            //
+            // - Toggleable strategies (`.templateFlag`) re-render the
+            //   prompt with thinking off (handled below per path).
+            // - Non-suppressible strategies (`.alwaysOn`) raise
+            //   `unsupportedCapability` BEFORE generation, regardless
+            //   of which path (tools / schema / unconstrained) the
+            //   request would otherwise take. The throw is
+            //   path-independent so a tool-calling or schema-guided
+            //   request on a model that always reasons surfaces the
+            //   same typed error the unconstrained path does, never a
+            //   silent leak through the grammar's malformed-output
+            //   fallback.
+            try validateReasoningCapability(
+                declaresReasoning: declaresReasoning, resolved: resolved)
+
+            // Reasoning is only consumed by the unconstrained path
+            // (no tools, no schema). On the guided/tool paths the
+            // grammar already constrains output, so suppression-prep
+            // would be wasted work.
+            let mayRunReasoningPath =
+                request.enabledToolDefinitions.isEmpty && request.schema == nil
+
+            // When .reasoning is OMITTED on the unconstrained path,
+            // re-render the prompt with thinking off so the model
+            // doesn't emit `<think>`. Toggleable-only;
+            // .alwaysOn was already rejected above.
+            let suppressedInput: LMInput?
+            if mayRunReasoningPath, !declaresReasoning,
+                let suppressionConfig = resolved.reasoningConfig
+            {
+                suppressedInput = try await Self.preparedInput(
+                    messages: messages, config: suppressionConfig,
+                    thinkingEnabled: false, processor: context.processor,
+                    cannotDisableMessage:
+                        "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
+                )
+            } else {
+                suppressedInput = nil
+            }
+
+            let reasoningSetup:
+                (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
+            if mayRunReasoningPath, declaresReasoning,
+                let reasoningConfig = resolved.reasoningConfig
+            {
+                let thinkingEnabled = Self.thinkingEnabled(
+                    for: request.contextOptions.reasoningLevel)
+                let reasoningInput = try await Self.preparedInput(
+                    messages: messages, config: reasoningConfig,
+                    thinkingEnabled: thinkingEnabled, processor: context.processor,
+                    cannotDisableMessage:
+                        "This model always reasons; reasoning cannot be disabled via reasoningLevel."
+                )
+                reasoningSetup = (
+                    reasoningInput, reasoningConfig,
+                    Self.reasoningPrimedInside(
+                        input: reasoningInput, config: reasoningConfig,
+                        tokenizer: context.tokenizer)
+                )
+            } else {
+                reasoningSetup = nil
+            }
+
+            // The prompt actually fed into generation: the suppressed
+            // prompt when we're forcing thinking off, otherwise the
+            // baseline `input` rendered above.
+            let effectiveInput = suppressedInput ?? input
+
+            return RespondSetup(
+                input: input, resolved: resolved, effectiveInput: effectiveInput,
+                reasoningSetup: reasoningSetup)
+        }
+
+        /// Dispatches to the tool-calling, guided-generation, or plain-text
+        /// path based on the request's tools/schema -- the three-way branch
+        /// `respond()`'s `container.perform` closure previously ran inline.
+        ///
+        /// - Parameters:
+        ///   - setup: The prepared prompt/configuration bundle from `prepareRespondSetup`.
+        ///   - request: The generation request; supplies the enabled tools and schema.
+        ///   - messages: The rendered chat messages for this round.
+        ///   - modelID: The model identifier for constraint/tokenizer caches.
+        ///   - schemaJSON: The developer-supplied JSON schema, if any, already encoded.
+        ///   - requestedMaxTokens: The caller's token budget override, if any.
+        ///   - requestedSamplingMode: The caller's sampling mode override, if any.
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - entryID: The response entry to stream output into.
+        ///   - toolCallsEntryID: The entry to stream tool-call events into.
+        ///   - reasoningEntryID: The entry to stream think-then-call/reasoning output into.
+        ///   - context: The loaded model context.
+        ///   - channel: The generation channel to send events on.
+        /// - Returns: `false` only when `runToolCalling`'s think-then-call Phase 1
+        ///   was cut off before `</think>` closed -- the caller must skip its own
+        ///   tail `Stream.gpu.synchronize()` and return immediately. `true` on
+        ///   every other exit.
+        /// - Throws: Whatever the underlying generation path throws.
+        private func dispatchGeneration(
+            setup: RespondSetup,
+            request: LanguageModelExecutorGenerationRequest,
+            messages: [Chat.Message],
+            modelID: String,
+            schemaJSON: String?,
+            requestedMaxTokens: Int?,
+            requestedSamplingMode: MLXSamplingMode?,
+            declaresReasoning: Bool,
+            entryID: String,
+            toolCallsEntryID: String,
+            reasoningEntryID: String,
+            context: ModelContext,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws -> Bool {
+            if !request.enabledToolDefinitions.isEmpty {
+                return try await runToolCalling(
+                    request: request, messages: messages, modelID: modelID,
+                    requestedMaxTokens: requestedMaxTokens,
+                    requestedSamplingMode: requestedSamplingMode,
+                    declaresReasoning: declaresReasoning, resolved: setup.resolved,
+                    entryID: entryID, toolCallsEntryID: toolCallsEntryID,
+                    reasoningEntryID: reasoningEntryID, context: context,
+                    channel: channel)
+            } else if let schemaJSON {
+                try await runGuidedGeneration(
+                    schemaJSON: schemaJSON, input: setup.input, modelID: modelID,
+                    requestedMaxTokens: requestedMaxTokens, entryID: entryID,
+                    context: context, channel: channel)
+                return true
+            } else {
+                try await runTextGeneration(
+                    reasoningSetup: setup.reasoningSetup,
+                    fallbackInput: setup.effectiveInput,
+                    requestedMaxTokens: requestedMaxTokens,
+                    requestedTemperature: request.generationOptions.temperature,
+                    samplingMode: requestedSamplingMode,
+                    responseEntryID: entryID,
+                    reasoningEntryID: reasoningEntryID,
+                    context: context,
+                    channel: channel
+                )
+                return true
             }
         }
 
@@ -1422,11 +1524,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             reasoningLevel: ContextOptions.ReasoningLevel?
         ) -> ReasoningConfig? {
             guard declaresReasoning,
-                let cfg = resolved.reasoningConfig,
-                case .templateFlag = cfg.promptStrategy,
+                let reasoningConfig = resolved.reasoningConfig,
+                case .templateFlag = reasoningConfig.promptStrategy,
                 thinkingEnabled(for: reasoningLevel) != false
             else { return nil }
-            return cfg
+            return reasoningConfig
         }
 
         /// Resolves Phase 2's token budget for think-then-call tool-calling.
@@ -2134,8 +2236,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 let args = obj[ToolCallEnvelopeKey.arguments] as? [String: Any]
                 text = (args?["response"] as? String) ?? ""
             } else if let args = obj[ToolCallEnvelopeKey.arguments],
-                let argsData = try? JSONSerialization.data(withJSONObject: args),
-                let argsStr = String(data: argsData, encoding: .utf8)
+                let argsStr = extractToolArgumentsAsJSON(args)
             {
                 text = argsStr
             } else {
@@ -2161,8 +2262,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) async {
             guard
                 let args = obj[ToolCallEnvelopeKey.arguments],
-                let argsData = try? JSONSerialization.data(withJSONObject: args),
-                let argsStr = String(data: argsData, encoding: .utf8)
+                let argsStr = extractToolArgumentsAsJSON(args)
             else {
                 return
             }
@@ -2175,6 +2275,24 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         action: .appendArguments(argsStr, tokenCount: 1)
                     )
                 ))
+        }
+
+        /// Serializes a tool call's `arguments` value back to JSON text.
+        ///
+        /// Shared by `handleFinalAnswerTool` (developer-schema branch) and
+        /// `handleRealTool`, which both re-serialize the parsed envelope's
+        /// `arguments` value for their respective events.
+        ///
+        /// - Parameter arguments: The `arguments` value from a parsed
+        ///   tool-call envelope (`obj[ToolCallEnvelopeKey.arguments]`); any
+        ///   JSON-serializable value.
+        /// - Returns: The JSON-encoded string, or `nil` if serialization or
+        ///   UTF-8 decoding fails.
+        private static func extractToolArgumentsAsJSON(_ arguments: Any) -> String? {
+            guard let data = try? JSONSerialization.data(withJSONObject: arguments),
+                let json = String(data: data, encoding: .utf8)
+            else { return nil }
+            return json
         }
 
         /// Strips Qwen-style `<tool_call>\n...\n</tool_call>` wrapper markers
