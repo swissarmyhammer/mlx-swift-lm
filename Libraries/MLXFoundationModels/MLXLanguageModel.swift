@@ -1881,6 +1881,41 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
         }
 
+        /// Processes one generated token during unconstrained reasoning:
+        /// attributes it to the reasoning count while inside a thinking span,
+        /// feeds it through the detokenizer, and runs any resulting text
+        /// chunk through the reasoning-segment scanner.
+        ///
+        /// - Parameters:
+        ///   - token: The freshly generated token ID.
+        ///   - emitter: The reasoning-segment scanner (mutated: state advances
+        ///     as `</think>` is detected).
+        ///   - detokenizer: The streaming detokenizer (mutated: accumulates
+        ///     the token, possibly yielding a decoded chunk).
+        ///   - reasoningTokenCount: Running count of tokens attributed to
+        ///     reasoning (mutated).
+        /// - Returns: The segments produced by this token, or `nil` if the
+        ///   detokenizer didn't yield a chunk yet (nothing to send this call).
+        private static func processReasoningToken(
+            _ token: Int,
+            emitter: inout ReasoningEventEmitter,
+            detokenizer: inout NaiveStreamingDetokenizer,
+            reasoningTokenCount: inout Int
+        ) -> [ReasoningEventEmitter.Segment]? {
+            // One `.token` == one real token, so this is a true token count
+            // (not a chunk count). Attribute it to reasoning while the
+            // scanner is inside a thinking span. This generously counts the
+            // closing-delimiter tokens as reasoning (the emitter only flips
+            // state once `process` consumes the full `</think>`); it remains
+            // a true token count and the clamp downstream keeps it ≤ total.
+            if emitter.isInsideReasoning {
+                reasoningTokenCount += 1
+            }
+            detokenizer.append(token: token)
+            guard let chunk = detokenizer.next() else { return nil }
+            return emitter.process(chunk)
+        }
+
         /// Reasoning-aware unconstrained generation.
         ///
         /// Routes thinking delimited by the model's reasoning markers to
@@ -1919,20 +1954,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 try Task.checkCancellation()
                 switch generation {
                 case .token(let token):
-                    // One `.token` == one real token, so this is a true token
-                    // count (not a chunk count). Attribute it to reasoning while
-                    // the scanner is inside a thinking span. This generously
-                    // counts the closing-delimiter tokens as reasoning (the
-                    // emitter only flips state once `process` consumes the full
-                    // `</think>`); it remains a true token count and the clamp
-                    // below keeps it ≤ total.
-                    if emitter.isInsideReasoning {
-                        reasoningTokenCount += 1
-                    }
-                    detokenizer.append(token: token)
-                    if let chunk = detokenizer.next() {
+                    if let segments = Self.processReasoningToken(
+                        token, emitter: &emitter, detokenizer: &detokenizer,
+                        reasoningTokenCount: &reasoningTokenCount)
+                    {
                         await Self.sendSegments(
-                            emitter.process(chunk), responseEntryID: responseEntryID,
+                            segments, responseEntryID: responseEntryID,
                             reasoningEntryID: reasoningEntryID, channel: channel)
                     }
                 case .info(let info):
