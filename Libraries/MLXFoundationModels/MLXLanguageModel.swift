@@ -1084,7 +1084,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 let suppressionConfig = resolved.reasoningConfig
             {
                 suppressedInput = try await Self.preparedInput(
-                    messages: messages, config: suppressionConfig,
+                    messages: messages, reasoningConfig: suppressionConfig,
                     thinkingEnabled: false, processor: context.processor,
                     cannotDisableMessage:
                         "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
@@ -1101,7 +1101,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 let thinkingEnabled = Self.thinkingEnabled(
                     for: request.contextOptions.reasoningLevel)
                 let reasoningInput = try await Self.preparedInput(
-                    messages: messages, config: reasoningConfig,
+                    messages: messages, reasoningConfig: reasoningConfig,
                     thinkingEnabled: thinkingEnabled, processor: context.processor,
                     cannotDisableMessage:
                         "This model always reasons; reasoning cannot be disabled via reasoningLevel."
@@ -1109,7 +1109,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 reasoningSetup = (
                     reasoningInput, reasoningConfig,
                     Self.reasoningPrimedInside(
-                        input: reasoningInput, config: reasoningConfig,
+                        input: reasoningInput, reasoningConfig: reasoningConfig,
                         tokenizer: context.tokenizer)
                 )
             } else {
@@ -1402,9 +1402,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> (tokenIDs: [Int], cutOff: Bool) {
             let primedInside = Self.reasoningPrimedInside(
-                input: toolAwareInput, config: reasoningConfig, tokenizer: context.tokenizer)
+                input: toolAwareInput, reasoningConfig: reasoningConfig, tokenizer: context.tokenizer)
             let phase1 = try await runToolCallReasoningPhase(
-                input: toolAwareInput, config: reasoningConfig,
+                input: toolAwareInput, reasoningConfig: reasoningConfig,
                 primedInside: primedInside, maxTokens: maxTokens,
                 requestedTemperature: request.generationOptions.temperature,
                 samplingMode: requestedSamplingMode,
@@ -2003,14 +2003,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// before generation rather than leaking `<think>` into `.response`.
         private static func preparedInput(
             messages: [Chat.Message],
-            config: ReasoningConfig,
+            reasoningConfig: ReasoningConfig,
             thinkingEnabled: Bool?,
             processor: any UserInputProcessor,
             cannotDisableMessage: String
         ) async throws -> LMInput {
             let additionalContext: [String: any Sendable]?
             do {
-                additionalContext = try config.promptStrategy
+                additionalContext = try reasoningConfig.promptStrategy
                     .additionalContext(forThinkingEnabled: thinkingEnabled)
             } catch ReasoningError.cannotDisableReasoning {
                 throw LanguageModelError.unsupportedCapability(
@@ -2045,12 +2045,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// open reasoning block (some model families prefill the opening
         /// delimiter).
         private static func reasoningPrimedInside(
-            input: LMInput, config: ReasoningConfig, tokenizer: any Tokenizer
+            input: LMInput, reasoningConfig: ReasoningConfig, tokenizer: any Tokenizer
         ) -> Bool {
             let tokens = input.text.tokens.asArray(Int.self)
             let renderedTail = tokenizer.decode(tokenIds: Array(tokens.suffix(64)))
             return ReasoningEventEmitter.promptEndsInsideReasoning(
-                renderedPromptTail: renderedTail, config: config)
+                renderedPromptTail: renderedTail, config: reasoningConfig)
         }
 
         /// Think-then-call Phase 1: generate reasoning unconstrained until
@@ -2068,7 +2068,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// skip Phase 2 rather than prefill a truncated thought into the grammar.
         private func runToolCallReasoningPhase(
             input: LMInput,
-            config: ReasoningConfig,
+            reasoningConfig: ReasoningConfig,
             primedInside: Bool,
             maxTokens: Int,
             requestedTemperature: Double?,
@@ -2084,7 +2084,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 samplingMode: samplingMode
             )
             var collector = ReasoningTokenCollector(
-                config: config, primedInside: primedInside, tokenizer: context.tokenizer
+                config: reasoningConfig, primedInside: primedInside, tokenizer: context.tokenizer
             )
 
             let (stream, task) = try generateTokensTask(
