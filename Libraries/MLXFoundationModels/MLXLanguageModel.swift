@@ -1671,9 +1671,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // `</think>`, retaining the token IDs to prefill into the
             // constrained phase below. Empty on the single-phase path.
             var reasoningTokenIDs: [Int] = []
-            if let cfg = thinkThenCallConfig {
+            if let reasoningConfig = thinkThenCallConfig {
                 let phase1 = try await executeThinkThenCallPhase1(
-                    reasoningConfig: cfg, toolAwareInput: toolAwareInput, maxTokens: setup.maxTokens,
+                    reasoningConfig: reasoningConfig, toolAwareInput: toolAwareInput,
+                    maxTokens: setup.maxTokens,
                     request: request, requestedSamplingMode: requestedSamplingMode,
                     reasoningEntryID: reasoningEntryID, entryID: entryID,
                     context: context, channel: channel)
