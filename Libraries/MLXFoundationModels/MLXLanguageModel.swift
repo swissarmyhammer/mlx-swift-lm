@@ -57,10 +57,19 @@ struct ConstraintSetup {
     let constraint: GrammarConstraint
     let maxTokens: Int
     let closingBias: MLXArray
-    let completionReserve: Int
-    let hardReserve: Int
+    let structuralReserve: Int
     let whitespaceBias: MLXArray
     let whitespaceTokenIDs: Set<Int>
+
+    /// Derives completion/hard reserves for whatever `maxTokens` budget is
+    /// actually in play for a given generation call. Reserves must always
+    /// be computed against the budget they'll be applied to -- never
+    /// cached against a stale (e.g. pre-Phase-1) `maxTokens` -- or the
+    /// reserve can consume the entire (or more than the entire) remaining
+    /// budget.
+    func reserves(forMaxTokens maxTokens: Int) -> (completion: Int, hard: Int) {
+        (Swift.max(structuralReserve * 3, maxTokens / 4), structuralReserve * 8)
+    }
 }
 
 // MARK: - Model Cache Actor
@@ -1147,28 +1156,25 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 modelID: modelID,
                 tokenizer: context.tokenizer
             )
+            // The structural reserve is the bare minimum tokens for the
+            // JSON skeleton (empty strings). `ConstraintSetup.reserves`
+            // derives the completion reserve (3x structural minimum, or
+            // 25% of whatever maxTokens is in play) and the hard reserve
+            // (8x structural minimum -- larger than the raw estimate
+            // because grammar-forced key names (FF tokens) and
+            // model-inserted whitespace cost more tokens than the compact
+            // minimal JSON string) from this on demand, so they always
+            // stay in sync with the budget of the specific generation call
+            // they're applied to.
             let structuralReserve = CompletionReserve.estimate(
                 schemaJSON: reserveEstimateSource,
                 tokenizer: context.tokenizer
             )
-            // The structural reserve is the bare minimum tokens for the
-            // JSON skeleton (empty strings). Use the larger of 3x structural
-            // minimum or 25% of maxTokens, so closing bias activates early
-            // enough for the model to generate actual content in closing
-            // fields.
-            let completionReserve = Swift.max(
-                structuralReserve * 3, maxTokens / 4)
-            // Hard reserve: the point at which we force structural
-            // completion by penalizing non-closing tokens. Must be larger
-            // than the raw estimate because grammar-forced key names (FF
-            // tokens) and model-inserted whitespace cost more tokens than
-            // the compact minimal JSON string.
-            let hardReserve = structuralReserve * 8
 
             return ConstraintSetup(
                 xgTokenizer: xgTokenizer, constraint: constraint, maxTokens: maxTokens,
-                closingBias: bias.closing, completionReserve: completionReserve,
-                hardReserve: hardReserve, whitespaceBias: bias.whitespace,
+                closingBias: bias.closing, structuralReserve: structuralReserve,
+                whitespaceBias: bias.whitespace,
                 whitespaceTokenIDs: bias.whitespaceTokenIDs
             )
         }
@@ -1344,6 +1350,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) throws -> (generatedTokenCount: Int?, incomplete: Bool) {
             var incomplete = false
             var generatedTokenCount: Int?
+            // Derive reserves from this call's own `maxTokens`, not
+            // `setup.maxTokens` -- Phase 2 of think-then-call runs under a
+            // reduced budget, and a reserve sized to the original,
+            // pre-Phase-1 budget could consume the entire (or more than
+            // the entire) remaining budget.
+            let (completionReserve, hardReserve) = setup.reserves(forMaxTokens: maxTokens)
             do {
                 generatedTokenCount = try GuidedGenerationLoop.run(
                     input: input,
@@ -1351,8 +1363,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     constraint: setup.constraint,
                     maxTokens: maxTokens,
                     vocabSize: Int(setup.xgTokenizer.vocabSize),
-                    completionReserve: setup.completionReserve,
-                    hardReserve: setup.hardReserve,
+                    completionReserve: completionReserve,
+                    hardReserve: hardReserve,
                     closingBias: setup.closingBias,
                     whitespaceBias: setup.whitespaceBias,
                     whitespaceTokenIDs: setup.whitespaceTokenIDs,
@@ -1515,7 +1527,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 reasoningTokenIDs.isEmpty
                 ? setup.maxTokens
                 : Swift.max(
-                    setup.maxTokens - reasoningTokenIDs.count, setup.completionReserve)
+                    setup.maxTokens - reasoningTokenIDs.count,
+                    setup.reserves(forMaxTokens: setup.maxTokens).completion)
 
             let phase2 = try executeToolCallingPhase2(
                 phase2Input: phase2Input, phase2MaxTokens: phase2MaxTokens,
