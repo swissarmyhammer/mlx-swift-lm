@@ -76,16 +76,42 @@ public enum GuidedGenerationLoop {
     ///     logs after the run completes. Defaults to false.
     ///   - cache: An existing `[KVCache]` to continue generating from
     ///     (e.g. one holding a prior round's prefilled prompt), or `nil`
-    ///     to build a fresh cache internally. When the caller supplies a
-    ///     cache, its `KVCache` instances (reference types) are mutated
-    ///     in place by this call, so the caller's array reflects the new
-    ///     state afterward without `run` needing to return it.
+    ///     to build a fresh cache internally. `KVCache` instances (reference
+    ///     types) are mutated in place by this call, so the caller's own
+    ///     array reference stays valid for in-place state changes -- BUT
+    ///     `maybeQuantizeKVCache` (active when `kvBits` is set) replaces
+    ///     array *elements* with new `QuantizedKVCache` instances inside
+    ///     this call's local `[KVCache]` copy, and array value semantics
+    ///     mean that replacement never reaches back into the caller's own
+    ///     array variable. Use `RunResult.cache` from this call's return
+    ///     value as the authoritative post-call array -- never assume the
+    ///     `cache:` argument the caller passed in still reflects it,
+    ///     particularly once `kvBits` triggers a mid-run replacement.
+    ///   - onTokenCommitted: Called, in order, with the ID of every token
+    ///     actually fed through the model this call (sampled tokens and
+    ///     fast-forward tokens alike) -- i.e. exactly the tokens
+    ///     `cache`'s `offset` advances over. Never called for a token that
+    ///     is sampled/detokenized/emitted but never fed back (the terminal
+    ///     token on a `commitResult.isTerminated` stop, or any
+    ///     fast-forward token abandoned by a mid-batch stop), so a caller
+    ///     accumulating these IDs for `PromptCache` storage never needs to
+    ///     reconcile them against `cache.offset` by re-encoding emitted
+    ///     text -- the count always matches by construction. `nil` is a
+    ///     no-op, so existing callers are unaffected.
     ///   - emit: Callback for each text delta. Return `false` to stop.
-    /// - Returns: Total number of tokens generated (including FF tokens).
+    /// - Returns: A `RunResult` bundling the total token count (including
+    ///   FF tokens, matching the previous bare `Int` return) and the final
+    ///   `[KVCache]` array (see the `cache:` parameter doc above).
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
     ///   exhausted before the grammar reaches a stop state.
     ///   `GuidedGenerationError.prematureEOS` if the model emits EOS
-    ///   before the grammar accepts.
+    ///   before the grammar accepts. On either throw, `onTokenCommitted`
+    ///   has already reported every token fed so far -- a caller that
+    ///   accumulated those IDs still has a trustworthy partial sequence --
+    ///   but the possibly-quantization-updated `[KVCache]` array itself is
+    ///   not returned on a throwing exit (no `RunResult` is produced);
+    ///   `kvBits` is not set by any caller in this codebase today; wiring
+    ///   quantized KV caches through a throwing exit is not yet supported.
     @discardableResult
     public static func run(
         input: LMInput,
@@ -103,8 +129,9 @@ public enum GuidedGenerationLoop {
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
         cache: [KVCache]? = nil,
+        onTokenCommitted: ((Int) -> Void)? = nil,
         emit: (String) -> Bool
-    ) throws -> Int {
+    ) throws -> RunResult {
         let model = context.model
         var cache = cache ?? model.newCache(parameters: nil)
         var modelState: LMOutput.State?
@@ -372,6 +399,7 @@ public enum GuidedGenerationLoop {
                         state: modelState
                     )
                     modelState = result.state
+                    onTokenCommitted?(Int(ffToken))
                     // Only need logits from the last FF token
                     if i == ffTokens.count - 1 {
                         logits = result.logits
@@ -404,6 +432,7 @@ public enum GuidedGenerationLoop {
                 )
                 modelState = result.state
                 logits = result.logits
+                onTokenCommitted?(tokenId)
 
                 // Quantize the KV cache after the forward pass, matching the
                 // unconstrained TokenIterator. No-op unless `kvBits` is set.
@@ -442,7 +471,26 @@ public enum GuidedGenerationLoop {
             throw GuidedGenerationError.incompleteOutput
         }
 
-        return tokenCount
+        return RunResult(tokenCount: tokenCount, cache: cache)
+    }
+
+    /// The outcome of a `run` call that reached a stop state: everything a
+    /// caller needs to report usage and participate in KV-cache reuse
+    /// (e.g. `PromptCache`) on a subsequent call.
+    ///
+    /// Not `Sendable`: `KVCache` (a plain class hierarchy) isn't
+    /// `Sendable`, matching `run`'s own `cache:` parameter. Callers that
+    /// need to carry this across an actor boundary should box it the same
+    /// way `PromptCache` boxes `[KVCache]` elsewhere (see `SendableBox`).
+    public struct RunResult {
+        /// Total tokens generated (including FF tokens) -- the same
+        /// quantity `run` used to return bare.
+        public let tokenCount: Int
+        /// The cache array as it stands after this call. Always use this,
+        /// never the caller's own pre-call `cache:` argument, as the
+        /// authoritative post-call state -- see `run`'s `cache:` parameter
+        /// doc for why the two can diverge once `kvBits` is set.
+        public let cache: [KVCache]
     }
 
     // MARK: - Internal (visible for testing)

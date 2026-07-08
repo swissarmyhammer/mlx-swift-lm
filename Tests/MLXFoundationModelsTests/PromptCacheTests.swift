@@ -1,6 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import MLXLMCommon
 import Testing
 
 @testable import MLXFoundationModels
@@ -105,6 +106,121 @@ struct PromptCacheReconciliationTests {
         let trusted = PromptCache.reconcileGeneratedTokens(
             reencoded: [10, 11], actualGeneratedCount: 3)
         #expect(trusted == nil)
+    }
+}
+
+@Suite("PromptCache real-token-ID cache-advance reconciliation")
+struct PromptCacheAdvanceReconciliationTests {
+
+    @Test("exact match")
+    func exactMatch() {
+        let outcome = PromptCache.reconcileCacheAdvance(observedTokenCount: 5, cacheAdvance: 5)
+        #expect(outcome == .matches)
+    }
+
+    @Test("cache one token ahead of observed IDs asks to trim the cache back by one")
+    func oneAheadTrimsCacheByOne() {
+        let outcome = PromptCache.reconcileCacheAdvance(observedTokenCount: 5, cacheAdvance: 6)
+        #expect(outcome == .trimCacheByOne)
+    }
+
+    @Test("any larger gap is untrustworthy")
+    func largerGapIsUntrustworthy() {
+        #expect(
+            PromptCache.reconcileCacheAdvance(observedTokenCount: 5, cacheAdvance: 7)
+                == .untrustworthy)
+    }
+
+    @Test("cache behind the observed IDs is untrustworthy")
+    func cacheBehindObservedIsUntrustworthy() {
+        #expect(
+            PromptCache.reconcileCacheAdvance(observedTokenCount: 5, cacheAdvance: 4)
+                == .untrustworthy)
+    }
+}
+
+@Suite("PromptCache multi-slot longest-common-prefix selection")
+struct PromptCacheSlotSelectionTests {
+
+    @Test("no candidates selects nothing")
+    func noCandidatesSelectsNothing() {
+        let index = PromptCache.selectSlot(candidates: [], newTokens: [1, 2, 3])
+        #expect(index == nil)
+    }
+
+    @Test("single candidate with zero overlap selects nothing")
+    func zeroOverlapSelectsNothing() {
+        let index = PromptCache.selectSlot(
+            candidates: [(tokens: [9, 9, 9], lastUsed: 1)], newTokens: [1, 2, 3])
+        #expect(index == nil)
+    }
+
+    @Test("picks the candidate with the longest common prefix")
+    func picksLongestCommonPrefix() {
+        let index = PromptCache.selectSlot(
+            candidates: [
+                (tokens: [1, 2, 9, 9], lastUsed: 1),
+                (tokens: [1, 2, 3, 9], lastUsed: 2),
+                (tokens: [1, 9, 9, 9], lastUsed: 3),
+            ],
+            newTokens: [1, 2, 3, 4])
+        #expect(index == 1)
+    }
+
+    @Test("ties in LCP length go to the most recently used candidate")
+    func tiesGoToMostRecentlyUsed() {
+        let index = PromptCache.selectSlot(
+            candidates: [
+                (tokens: [1, 2, 3], lastUsed: 5),
+                (tokens: [1, 2, 9], lastUsed: 10),
+                (tokens: [1, 2, 3], lastUsed: 1),
+            ],
+            newTokens: [1, 2, 3, 4])
+        #expect(index == 0)
+    }
+
+    @Test("a full-length match still wins over a longer but partial candidate")
+    func fullLengthMatchIsEligible() {
+        let index = PromptCache.selectSlot(
+            candidates: [
+                (tokens: [1, 2, 3], lastUsed: 1),
+                (tokens: [1, 2, 3, 4, 5, 6, 7, 9], lastUsed: 2),
+            ],
+            newTokens: [1, 2, 3])
+        // Both share an LCP of 3; the more recently used wins the tie.
+        #expect(index == 1)
+    }
+}
+
+@Suite("PromptCache trim-and-verify")
+struct PromptCacheTrimAndVerifyTests {
+
+    @Test("empty cache array is never trusted")
+    func emptyCacheIsUntrusted() {
+        #expect(PromptCache.trimAndVerify([], from: 10, to: 5) == false)
+    }
+
+    @Test("trimming an unbounded cache to the requested offset verifies true")
+    func unboundedCacheTrimVerifies() {
+        let cache = KVCacheSimple()
+        cache.offset = 10
+        let verified = PromptCache.trimAndVerify([cache], from: 10, to: 6)
+        #expect(verified == true)
+        #expect(cache.offset == 6)
+    }
+
+    @Test("a trim request inconsistent with the cache's real offset fails verification")
+    func mismatchedAssumedOffsetFailsVerification() {
+        // The cache is really only at offset 5, but the caller (incorrectly)
+        // believes it is at 10 and asks to trim down to 3 -- trimPromptCache
+        // computes numTokens = 10 - 3 = 7, but KVCacheSimple.trim can only
+        // trim min(5, 7) = 5, landing the real offset at 0, not the
+        // requested 3. Verification must catch this rather than trusting
+        // the request.
+        let cache = KVCacheSimple()
+        cache.offset = 5
+        let verified = PromptCache.trimAndVerify([cache], from: 10, to: 3)
+        #expect(verified == false)
     }
 }
 

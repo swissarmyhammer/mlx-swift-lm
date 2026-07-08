@@ -1444,17 +1444,22 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         }
 
         /// Sends the authoritative `.updateUsage` event for `entryID`.
-        /// `cachedTokenCount` is always 0: `PromptCache` reuse (see
-        /// `Executor.makePromptCacheSlot`) already shrinks `promptTokenCount`
-        /// itself down to whatever suffix was actually prefilled -- there is
-        /// no separate "reused" figure to report alongside it here, this
-        /// field would need to distinguish "tokens re-sent to the model" from
-        /// "tokens reused from a prior round's cache," which is not
-        /// threaded through to this layer.
         ///
         /// - Parameters:
         ///   - entryID: The response entry the usage applies to.
-        ///   - promptTokenCount: The prompt's total token count.
+        ///   - promptTokenCount: The prompt's total token count (the full
+        ///     transcript, not shrunk by any `PromptCache` reuse -- see
+        ///     `PromptCacheSlot.cachedTokenCount`).
+        ///   - cachedTokenCount: How many of `promptTokenCount` were served
+        ///     from a prior round's `PromptCache` slot rather than re-fed
+        ///     this round; 0 when this round didn't reuse a cache. Clamped
+        ///     to `promptTokenCount`: the tool-calling think-then-call path
+        ///     computes this against Phase 2's prompt (the base tool-aware
+        ///     input plus Phase 1's reasoning tokens), which can be longer
+        ///     than `promptTokenCount` itself (the base input alone, to
+        ///     avoid double-counting reasoning tokens as both prompt and
+        ///     output) -- without the clamp that mismatch could report more
+        ///     cached tokens than the prompt is claimed to contain.
         ///   - outputTokenCount: The generated output's total token count.
         ///   - reasoningTokenCount: The subset of the output spent on
         ///     reasoning (0 on paths that don't reason); clamped to
@@ -1463,6 +1468,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private static func sendUsageUpdate(
             entryID: String,
             promptTokenCount: Int,
+            cachedTokenCount: Int,
             outputTokenCount: Int,
             reasoningTokenCount: Int,
             channel: LanguageModelExecutorGenerationChannel
@@ -1471,7 +1477,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 .response(
                     entryID: entryID,
                     action: .updateUsage(
-                        input: .init(totalTokenCount: promptTokenCount, cachedTokenCount: 0),
+                        input: .init(
+                            totalTokenCount: promptTokenCount,
+                            cachedTokenCount: Swift.min(cachedTokenCount, promptTokenCount)),
                         output: .init(
                             totalTokenCount: outputTokenCount,
                             reasoningTokenCount: Swift.min(reasoningTokenCount, outputTokenCount))
@@ -1501,6 +1509,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let cache: [KVCache]?
             let feedInput: LMInput
             let promptTokens: [Int]
+
+            /// How many of `promptTokens` were served from a prior
+            /// round's `PromptCache` slot rather than re-fed this round --
+            /// `promptTokens.count` minus the suffix actually fed via
+            /// `feedInput`. Zero when this round didn't participate in
+            /// prompt-cache reuse (multimodal input, first turn, or a
+            /// full rebuild, all of which feed the entire prompt).
+            var cachedTokenCount: Int {
+                promptTokens.count - feedInput.text.tokens.size
+            }
         }
 
         /// Resolves a generation call's prompt-cache participation against
@@ -1547,45 +1565,74 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - slot: The slot this round generated with. A no-op when
         ///     `slot.cache` is `nil` (this round didn't participate in
         ///     prompt-cache reuse -- see `isTextOnly`).
-        ///   - generatedTokenIDs: This round's generated token IDs, in order.
+        ///   - generatedTokenIDs: This round's generated token IDs, in
+        ///     order -- the REAL IDs the model produced (from a raw
+        ///     `.token(Int)`/`onTokenCommitted` stream), never a
+        ///     re-encoding of decoded text.
         private static func commitPromptCache(
             modelID: String, slot: PromptCacheSlot, generatedTokenIDs: [Int]
         ) async {
             guard let cache = slot.cache else { return }
             guard !generatedTokenIDs.isEmpty else { return }
-            let finalOffset = cache.first?.offset ?? slot.promptTokens.count
-            guard finalOffset - slot.promptTokens.count == generatedTokenIDs.count else {
+            let cacheAdvance = (cache.first?.offset ?? slot.promptTokens.count)
+                - slot.promptTokens.count
+            switch PromptCache.reconcileCacheAdvance(
+                observedTokenCount: generatedTokenIDs.count, cacheAdvance: cacheAdvance)
+            {
+            case .matches:
+                await MLXLanguageModel.storePromptCache(
+                    modelID: modelID, tokens: slot.promptTokens + generatedTokenIDs, cache: cache)
+            case .trimCacheByOne:
+                // The cache's real offset is one token ahead of what we
+                // observed (see `PromptCache.reconcileCacheAdvance`'s doc);
+                // trim it back to match rather than storing a token count
+                // that doesn't correspond to the cache's actual state.
+                guard
+                    canTrimPromptCache(cache),
+                    PromptCache.trimAndVerify(
+                        cache, from: slot.promptTokens.count + cacheAdvance,
+                        to: slot.promptTokens.count + generatedTokenIDs.count)
+                else {
+                    await MLXLanguageModel.removePromptCache(modelID: modelID)
+                    return
+                }
+                await MLXLanguageModel.storePromptCache(
+                    modelID: modelID, tokens: slot.promptTokens + generatedTokenIDs, cache: cache)
+            case .untrustworthy:
                 await MLXLanguageModel.removePromptCache(modelID: modelID)
-                return
             }
-            await MLXLanguageModel.storePromptCache(
-                modelID: modelID, tokens: slot.promptTokens + generatedTokenIDs, cache: cache)
         }
 
-        /// Variant of `commitPromptCache` for generation paths that only
-        /// yield decoded text (`generate(input:cache:parameters:context:...)`,
-        /// `GuidedGenerationLoop.run`), not raw token IDs. Reconstructs the
-        /// generated token IDs by re-encoding `emittedText`, and trusts the
-        /// reconstruction only when its count matches `cache`'s real
-        /// `offset` advance -- the same ground-truth check as the
-        /// exact-IDs overload, applied to a best-effort reconstruction
-        /// instead of a directly-observed token stream.
+        /// Variant of `commitPromptCache` for `runUnconstrained`'s
+        /// `generate(input:cache:parameters:context:...)`, the one
+        /// remaining generation path that only yields decoded text, not
+        /// raw token IDs -- `generate()`'s `Generation` stream
+        /// (`.chunk`/`.info`/`.toolCall`) never exposes the token IDs
+        /// `TextToolTokenLoopHandler` observes internally, and switching
+        /// to a raw-token stream there would drop `effectiveStopStrings`
+        /// support (a real behavior regression), so this path reconstructs
+        /// the generated token IDs by re-encoding `emittedText` instead.
+        /// Every other generation path (`runReasoning`,
+        /// `runToolCallReasoningPhase`, `runGuidedGenerationLoop`) threads
+        /// real token IDs through directly and never reaches this overload.
         ///
-        /// Also accepts a count exactly one *more* than the cache's offset
-        /// advance, dropping the reconstruction's trailing token before
-        /// storing: `GuidedGenerationLoop.run`'s natural (grammar-accepted)
-        /// termination commits, detokenizes, and counts its terminal token
-        /// *before* checking `commitResult.isTerminated` and breaking --
-        /// that last token is therefore never fed back through the model,
-        /// so `cache`'s real offset legitimately lands one token short of
+        /// Trusts the reconstruction only when its count matches `cache`'s
+        /// real `offset` advance -- the same ground-truth check as the
+        /// exact-IDs overload, applied to a best-effort reconstruction
+        /// instead of a directly-observed token stream. Also accepts a
+        /// count exactly one *more* than the cache's offset advance,
+        /// dropping the reconstruction's trailing token before storing:
+        /// `TokenIterator`'s next()-ahead prefetch design discards the
+        /// terminal EOS/stop token that ends a round without ever handing
+        /// it to `generate()`'s stream, even though that token's forward
+        /// pass already advanced the cache (see
+        /// `PromptCache.reconcileGeneratedTokens`'s doc) -- so `cache`'s
+        /// real offset legitimately lands one token short of
         /// `emittedText`'s full re-encoding on that (common, successful)
-        /// exit path. Dropping the trailing token doesn't weaken the
-        /// fidelity check for the other paths sharing this helper
-        /// (`runUnconstrained`'s `generate()`, which does not have this
-        /// off-by-one): a wrong trailing token value, from either path,
-        /// still gets caught by the next round's real re-tokenization
-        /// comparison in `PromptCache.decide` and safely falls back to
-        /// trim/rebuild rather than reusing it.
+        /// natural-stop exit path. A wrong trailing token value still
+        /// gets caught by the next round's real re-tokenization comparison
+        /// in `PromptCache.decide` and safely falls back to trim/rebuild
+        /// rather than reusing it.
         ///
         /// - Parameters:
         ///   - slot: The slot this round generated with.
@@ -1671,14 +1718,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - context: The loaded model context.
         ///   - setup: The constraint/bias/reserve setup from `prepareConstraintSetup`.
         /// - Returns: The buffered output text, the generated token count
-        ///   (nil if generation threw before completing), and whether
-        ///   output was incomplete.
+        ///   (nil if generation threw before completing), how many prompt
+        ///   tokens were served from a `PromptCache` slot this round, and
+        ///   whether output was incomplete.
         private func executeToolCallingPhase2(
             phase2Input: LMInput,
             phase2MaxTokens: Int,
             context: ModelContext,
             setup: ConstraintSetup
-        ) async throws -> (outputBuffer: String, generatedTokenCount: Int?, incomplete: Bool) {
+        ) async throws -> (
+            outputBuffer: String, generatedTokenCount: Int?, cachedTokenCount: Int,
+            incomplete: Bool
+        ) {
             var outputBuffer = ""
             let result = try await runGuidedGenerationLoop(
                 input: phase2Input, context: context, setup: setup, maxTokens: phase2MaxTokens
@@ -1686,7 +1737,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 outputBuffer += text
                 return !Task.isCancelled
             }
-            return (outputBuffer, result.generatedTokenCount, result.incomplete)
+            return (outputBuffer, result.generatedTokenCount, result.cachedTokenCount, result.incomplete)
         }
 
         /// Runs `GuidedGenerationLoop.run` with the shared error handling
@@ -1707,14 +1758,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - onText: Called with each generated text delta; return `false`
         ///     to stop generation early.
         /// - Returns: The generated token count (nil if generation threw
-        ///   before completing) and whether output was incomplete.
+        ///   before completing), how many prompt tokens were served from a
+        ///   `PromptCache` slot this round, and whether output was
+        ///   incomplete.
         private func runGuidedGenerationLoop(
             input: LMInput,
             context: ModelContext,
             setup: ConstraintSetup,
             maxTokens: Int,
             onText: @escaping (String) -> Bool
-        ) async throws -> (generatedTokenCount: Int?, incomplete: Bool) {
+        ) async throws -> (generatedTokenCount: Int?, cachedTokenCount: Int, incomplete: Bool) {
             var incomplete = false
             var generatedTokenCount: Int?
             // Derive reserves from this call's own `maxTokens`, not
@@ -1728,9 +1781,32 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // `model.newCache(parameters: nil)` -- a rebuilt cache here has
             // the same "flavor" it would have gotten unassisted.
             let slot = await makePromptCacheSlot(input: input, context: context, parameters: nil)
-            var emittedText = ""
+            // The cache to commit: the slot's own cache unless `run`
+            // returns a (possibly quantization-updated) replacement -- see
+            // `GuidedGenerationLoop.RunResult.cache`'s doc. Stays at
+            // `slot.cache` if `run` throws before returning a result;
+            // `kvBits` is never set on this path today so that's a no-op
+            // in practice (see `RunResult`'s throwing-exit doc).
+            //
+            // Deliberately only overwritten below when `slot.cache` was
+            // non-nil to begin with: `run` ALWAYS returns a concrete,
+            // non-nil `[KVCache]` (building one internally via
+            // `model.newCache` when passed `nil`), so unconditionally
+            // adopting `result.cache` would turn a multimodal round's
+            // intentional `nil` (see `isTextOnly`/`makePromptCacheSlot`)
+            // into a real cache below -- silently defeating the guard
+            // that keeps image/video/audio-conditioned KV state out of
+            // `PromptCache` (it would get stored keyed only by
+            // `slot.promptTokens`, i.e. the TEXT tokens, with no record
+            // that the underlying KV state was also conditioned on
+            // non-text input a later text-only round can't reproduce).
+            var finalCache = slot.cache
+            // Real committed token IDs, reported as `run` feeds them
+            // through the model -- never a re-encoding of `onText`'s
+            // decoded text (see `PromptCache.reconcileCacheAdvance`).
+            var generatedTokenIDs: [Int] = []
             do {
-                generatedTokenCount = try GuidedGenerationLoop.run(
+                let result = try GuidedGenerationLoop.run(
                     input: slot.feedInput,
                     context: context,
                     constraint: setup.constraint,
@@ -1741,19 +1817,29 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     closingBias: setup.closingBias,
                     whitespaceBias: setup.whitespaceBias,
                     whitespaceTokenIDs: setup.whitespaceTokenIDs,
-                    cache: slot.cache
+                    cache: slot.cache,
+                    onTokenCommitted: { generatedTokenIDs.append($0) }
                 ) { text in
-                    emittedText += text
-                    return onText(text)
+                    onText(text)
+                }
+                generatedTokenCount = result.tokenCount
+                if slot.cache != nil {
+                    finalCache = result.cache
                 }
             } catch GuidedGenerationError.incompleteOutput {
                 // Grammar exhausted maxTokens before reaching a stop state.
-                // Deltas already emitted (or buffered) are best-effort output.
+                // Deltas already emitted (or buffered) are best-effort
+                // output; `generatedTokenIDs` still holds every token
+                // `onTokenCommitted` reported before the throw, so a
+                // partial cache commit below is still trustworthy.
                 incomplete = true
             }
             await Self.commitPromptCache(
-                modelID: modelID, slot: slot, emittedText: emittedText, tokenizer: context.tokenizer)
-            return (generatedTokenCount, incomplete)
+                modelID: modelID,
+                slot: PromptCacheSlot(
+                    cache: finalCache, feedInput: slot.feedInput, promptTokens: slot.promptTokens),
+                generatedTokenIDs: generatedTokenIDs)
+            return (generatedTokenCount, slot.cachedTokenCount, incomplete)
         }
 
         /// Derives the think-then-call reasoning config for the tool-calling
@@ -1969,6 +2055,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 await Self.sendUsageUpdate(
                     entryID: entryID,
                     promptTokenCount: toolAwareInput.text.tokens.size,
+                    cachedTokenCount: phase2.cachedTokenCount,
                     outputTokenCount: totalOutput,
                     reasoningTokenCount: reasoningCount,
                     channel: channel)
@@ -2038,6 +2125,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 await Self.sendUsageUpdate(
                     entryID: entryID,
                     promptTokenCount: input.text.tokens.size,
+                    cachedTokenCount: result.cachedTokenCount,
                     outputTokenCount: generatedTokenCount,
                     reasoningTokenCount: 0,
                     channel: channel)
@@ -2083,17 +2171,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     await Self.sendTextDelta(text, entryID: entryID, channel: channel)
                 case .info(let info):
                     // MLX-LM emits one .info event at end-of-generation with
-                    // authoritative scalar token counts (`promptTokenCount`
-                    // is the prompt; `generationTokenCount` is the
-                    // model-generated completion -- see Evaluate.swift's
-                    // `GenerateCompletionInfo` definition). When this round
-                    // reused a cached prefix, `promptTokenCount` reflects
-                    // only the suffix actually fed (`slot.feedInput`), not
-                    // the full transcript -- this is what makes the cache's
-                    // effect observable end-to-end.
+                    // an authoritative scalar output count
+                    // (`generationTokenCount` -- see Evaluate.swift's
+                    // `GenerateCompletionInfo` definition). `info.promptTokenCount`
+                    // itself only reflects the suffix actually fed
+                    // (`slot.feedInput`) when this round reused a cached
+                    // prefix, so report the FULL transcript length from
+                    // `slot.promptTokens` instead, alongside how much of it
+                    // was served from cache -- this is what makes the
+                    // cache's effect observable end-to-end without
+                    // shrinking the reported prompt size.
                     await Self.sendUsageUpdate(
                         entryID: entryID,
-                        promptTokenCount: info.promptTokenCount,
+                        promptTokenCount: slot.promptTokens.count,
+                        cachedTokenCount: slot.cachedTokenCount,
                         outputTokenCount: info.generationTokenCount,
                         reasoningTokenCount: 0,
                         channel: channel)
@@ -2251,10 +2342,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // Single source of truth for usage: one authoritative
                 // `.updateUsage` (the framework's aggregator replaces
                 // wholesale, so we must not also rely on per-delta
-                // auto-summing).
+                // auto-summing). `info.promptTokenCount` only reflects the
+                // suffix actually fed when this round reused a cached
+                // prefix; report the full transcript length from
+                // `slot.promptTokens` plus how much was served from cache.
                 await Self.sendUsageUpdate(
                     entryID: responseEntryID,
-                    promptTokenCount: info.promptTokenCount,
+                    promptTokenCount: slot.promptTokens.count,
+                    cachedTokenCount: slot.cachedTokenCount,
                     outputTokenCount: info.generationTokenCount,
                     reasoningTokenCount: reasoningTokenCount,
                     channel: channel)
