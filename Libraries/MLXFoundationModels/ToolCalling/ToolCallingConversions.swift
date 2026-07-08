@@ -26,6 +26,8 @@ enum ToolCallEnvelopeKey {
     static let arguments = "arguments"
 }
 
+/// Converts FoundationModels tool definitions to the OpenAI-style
+/// function-envelope dicts MLX chat templates (`tools:` parameter) expect.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 enum ToolCallingConversions {
 
