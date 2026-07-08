@@ -995,15 +995,23 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Bundles what `respond()`'s dispatch step needs, once the prompt
         /// has been rendered and the per-instance configuration resolved.
         private struct RespondSetup {
-            /// The prompt rendered by `UserInputProcessor.prepare`, before
-            /// any reasoning-suppression rewrite.
-            let input: LMInput
+            /// The prompt rendered by `UserInputProcessor.prepare` through
+            /// the model's *default* (non-tool-aware) chat template, before
+            /// any reasoning-suppression rewrite. `nil` when tools are
+            /// enabled: the tool-calling branch re-tokenizes independently
+            /// via a tool-aware `applyChatTemplate(tools:)` call and never
+            /// reads this field, so rendering it eagerly is both wasted
+            /// work and unsafe -- a continuation round's `messages` can
+            /// contain a replayed `.tool`-role message, and the default
+            /// template of a toolCalling-capable model isn't guaranteed to
+            /// handle `role == "tool"`.
+            let input: LMInput?
             /// The per-instance configuration resolved from `config.json`.
             let resolved: ModelConfiguration
             /// The prompt actually fed into generation: the suppressed
             /// prompt when forcing thinking off, otherwise the baseline
-            /// `input`.
-            let effectiveInput: LMInput
+            /// `input`. `nil` under the same condition as `input`.
+            let effectiveInput: LMInput?
             /// Reasoning-path setup, present only when `.reasoning` was
             /// declared, a reasoning config resolved, and no tools/schema
             /// are in play.
@@ -1033,9 +1041,24 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             declaresReasoning: Bool,
             configurationResolver: any ModelConfigurationResolver
         ) async throws -> RespondSetup {
-            // Render the prompt through the model's UserInputProcessor.
+            // Only render the prompt through the model's *default*
+            // (non-tool-aware) UserInputProcessor when the tool-calling
+            // branch won't run: `runToolCalling` re-tokenizes independently
+            // via a tool-aware `applyChatTemplate(tools:)` call and never
+            // reads `input`/`effectiveInput`/`reasoningSetup`, so this
+            // render would be both wasted work and unsafe on that branch --
+            // a continuation round's `messages` can carry a replayed
+            // `.tool`-role message (see `TranscriptConverter.mlxMessages`),
+            // and nothing guarantees a toolCalling-capable model's default
+            // template handles `role == "tool"`.
+            let needsEagerInput = request.enabledToolDefinitions.isEmpty
             let userInput = UserInput(chat: messages)
-            let input = try await context.processor.prepare(input: userInput)
+            let input: LMInput? =
+                if needsEagerInput {
+                    try await context.processor.prepare(input: userInput)
+                } else {
+                    nil
+                }
 
             // Resolve the per-instance configuration. Held strictly as
             // a local; it never lands in context.configuration or
@@ -1130,7 +1153,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             // The prompt actually fed into generation: the suppressed
             // prompt when we're forcing thinking off, otherwise the
-            // baseline `input` rendered above.
+            // baseline `input` rendered above. Both operands are `nil`
+            // together when tools are enabled, so this stays `nil` in
+            // that case too -- exactly the branch that never reads it.
             let effectiveInput = suppressedInput ?? input
 
             return RespondSetup(
@@ -1186,15 +1211,32 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     reasoningEntryID: reasoningEntryID, context: context,
                     channel: channel)
             } else if let schemaJSON {
+                // `prepareRespondSetup` only omits `input` when tools are
+                // enabled, which this `else if` already excludes (the
+                // tool-calling branch above returns first) -- `input` is
+                // guaranteed present here.
+                guard let input = setup.input else {
+                    preconditionFailure(
+                        "RespondSetup.input must be present on the guided-generation path; prepareRespondSetup only skips rendering it when tools are enabled, and that branch already returned above."
+                    )
+                }
                 try await runGuidedGeneration(
-                    schemaJSON: schemaJSON, input: setup.input, modelID: modelID,
+                    schemaJSON: schemaJSON, input: input, modelID: modelID,
                     requestedMaxTokens: requestedMaxTokens, entryID: entryID,
                     context: context, channel: channel)
                 return true
             } else {
+                // Same guarantee as above: `effectiveInput` is only `nil`
+                // when tools are enabled, and this is the no-tools/no-schema
+                // path.
+                guard let fallbackInput = setup.effectiveInput else {
+                    preconditionFailure(
+                        "RespondSetup.effectiveInput must be present on the text-generation path; prepareRespondSetup only skips rendering it when tools are enabled, and that branch already returned above."
+                    )
+                }
                 try await runTextGeneration(
                     reasoningSetup: setup.reasoningSetup,
-                    fallbackInput: setup.effectiveInput,
+                    fallbackInput: fallbackInput,
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: request.generationOptions.temperature,
                     samplingMode: requestedSamplingMode,
