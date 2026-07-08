@@ -16,6 +16,16 @@ import FoundationModels
 /// dictionaries can cross actor boundaries. These factories bridge our
 /// strongly-typed Swift representations into that form without leaking `Any`
 /// into the rest of the codebase.
+/// JSON keys for the `{"name": ..., "arguments": ...}` envelope the
+/// tool-calling grammar generates as its constrained output --
+/// `MLXLanguageModel.Executor.emitToolCallingEvent` parses it with these
+/// keys, and `TranscriptConverter.toolCallEnvelopeJSON` builds it with the
+/// same keys when replaying a prior call into a continuation round's prompt.
+enum ToolCallEnvelopeKey {
+    static let name = "name"
+    static let arguments = "arguments"
+}
+
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 enum ToolCallingConversions {
 

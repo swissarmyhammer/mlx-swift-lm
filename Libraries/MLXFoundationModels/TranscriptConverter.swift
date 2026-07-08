@@ -135,7 +135,8 @@ struct TranscriptConverter {
     ///     re-serialized, so nested structure/formatting matches exactly.
     /// - Returns: The envelope JSON text.
     private static func toolCallEnvelopeJSON(name: String, arguments: GeneratedContent) -> String {
-        "{\"name\": \(jsonStringLiteral(name)), \"arguments\": \(arguments.jsonString)}"
+        "{\"\(ToolCallEnvelopeKey.name)\": \(jsonStringLiteral(name)), "
+            + "\"\(ToolCallEnvelopeKey.arguments)\": \(arguments.jsonString)}"
     }
 
     /// Encodes `value` as a JSON string literal (quotes included), escaping

@@ -40,12 +40,6 @@ struct TokenizerBias: @unchecked Sendable {
     let closing: MLXArray
     let whitespace: MLXArray
     let whitespaceTokenIDs: Set<Int>
-
-    init(closing: MLXArray, whitespace: MLXArray, whitespaceTokenIDs: Set<Int>) {
-        self.closing = closing
-        self.whitespace = whitespace
-        self.whitespaceTokenIDs = whitespaceTokenIDs
-    }
 }
 
 // MARK: - Constraint Setup
@@ -950,19 +944,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     //   same typed error the unconstrained path does, never a
                     //   silent leak through the grammar's malformed-output
                     //   fallback.
-                    if !declaresReasoning, let suppressionConfig = resolved.reasoningConfig {
-                        do {
-                            _ = try suppressionConfig.promptStrategy
-                                .additionalContext(forThinkingEnabled: false)
-                        } catch ReasoningError.cannotDisableReasoning {
-                            throw LanguageModelError.unsupportedCapability(
-                                LanguageModelError.UnsupportedCapability(
-                                    capability: .reasoning,
-                                    debugDescription:
-                                        "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
-                                ))
-                        }
-                    }
+                    try validateReasoningCapability(
+                        declaresReasoning: declaresReasoning, resolved: resolved)
 
                     // Reasoning is only consumed by the unconstrained path
                     // (no tools, no schema). On the guided/tool paths the
@@ -1063,6 +1046,37 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     throw Self.mapGrammarError(grammarError)
                 }
                 throw error
+            }
+        }
+
+        /// Enforces the reasoning capability gate before generation: when
+        /// the caller omitted `.reasoning` but the resolved configuration
+        /// carries a non-suppressible (`.alwaysOn`) reasoning config, throws
+        /// `unsupportedCapability` up front -- before any of the three
+        /// generation paths run, so a tool-calling or schema-guided request
+        /// surfaces the same typed error the unconstrained path would.
+        ///
+        /// - Parameters:
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - resolved: The resolved model configuration.
+        /// - Throws: `LanguageModelError.unsupportedCapability(.reasoning)`
+        ///   when the model always reasons and `.reasoning` wasn't declared.
+        private func validateReasoningCapability(
+            declaresReasoning: Bool, resolved: ModelConfiguration
+        ) throws {
+            guard !declaresReasoning, let suppressionConfig = resolved.reasoningConfig else {
+                return
+            }
+            do {
+                _ = try suppressionConfig.promptStrategy
+                    .additionalContext(forThinkingEnabled: false)
+            } catch ReasoningError.cannotDisableReasoning {
+                throw LanguageModelError.unsupportedCapability(
+                    LanguageModelError.UnsupportedCapability(
+                        capability: .reasoning,
+                        debugDescription:
+                            "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
+                    ))
             }
         }
 
@@ -1183,6 +1197,36 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 .response(entryID: entryID, action: .appendText(text, tokenCount: 1)))
         }
 
+        /// Sends the authoritative `.updateUsage` event for `entryID`.
+        /// `cachedTokenCount` is always 0 -- prompt-cache reuse isn't
+        /// implemented, so every request prefills its full prompt.
+        ///
+        /// - Parameters:
+        ///   - entryID: The response entry the usage applies to.
+        ///   - promptTokenCount: The prompt's total token count.
+        ///   - outputTokenCount: The generated output's total token count.
+        ///   - reasoningTokenCount: The subset of the output spent on
+        ///     reasoning (0 on paths that don't reason); clamped to
+        ///     `outputTokenCount`.
+        ///   - channel: The generation channel to send the event on.
+        private static func sendUsageUpdate(
+            entryID: String,
+            promptTokenCount: Int,
+            outputTokenCount: Int,
+            reasoningTokenCount: Int,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            await channel.send(
+                .response(
+                    entryID: entryID,
+                    action: .updateUsage(
+                        input: .init(totalTokenCount: promptTokenCount, cachedTokenCount: 0),
+                        output: .init(
+                            totalTokenCount: outputTokenCount,
+                            reasoningTokenCount: Swift.min(reasoningTokenCount, outputTokenCount))
+                    )))
+        }
+
         /// Runs think-then-call Phase 1: unconstrained reasoning until
         /// `</think>`, whose token IDs prefill the constrained Phase 2.
         /// Sends the incomplete-output signal itself when cut off, since
@@ -1254,28 +1298,63 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             setup: ConstraintSetup
         ) throws -> (outputBuffer: String, generatedTokenCount: Int?, incomplete: Bool) {
             var outputBuffer = ""
+            let result = try runGuidedGenerationLoop(
+                input: phase2Input, context: context, setup: setup, maxTokens: phase2MaxTokens
+            ) { text in
+                outputBuffer += text
+                return !Task.isCancelled
+            }
+            return (outputBuffer, result.generatedTokenCount, result.incomplete)
+        }
+
+        /// Runs `GuidedGenerationLoop.run` with the shared error handling
+        /// both the tool-calling and guided-generation paths need: catches
+        /// `GuidedGenerationError.incompleteOutput` and reports it as a flag
+        /// rather than a thrown error, since best-effort output has
+        /// typically already been emitted by the time the grammar exhausts
+        /// its budget.
+        ///
+        /// - Parameters:
+        ///   - input: The prompt to generate from.
+        ///   - context: The loaded model context.
+        ///   - setup: The constraint/bias/reserve setup from `prepareConstraintSetup`.
+        ///   - maxTokens: The token budget for this call -- not always
+        ///     `setup.maxTokens`, since the tool-calling path's Phase 2 may
+        ///     run under a reduced budget after Phase 1 reasoning consumed
+        ///     part of it.
+        ///   - onText: Called with each generated text delta; return `false`
+        ///     to stop generation early.
+        /// - Returns: The generated token count (nil if generation threw
+        ///   before completing) and whether output was incomplete.
+        private func runGuidedGenerationLoop(
+            input: LMInput,
+            context: ModelContext,
+            setup: ConstraintSetup,
+            maxTokens: Int,
+            onText: @escaping (String) -> Bool
+        ) throws -> (generatedTokenCount: Int?, incomplete: Bool) {
             var incomplete = false
             var generatedTokenCount: Int?
             do {
                 generatedTokenCount = try GuidedGenerationLoop.run(
-                    input: phase2Input,
+                    input: input,
                     context: context,
                     constraint: setup.constraint,
-                    maxTokens: phase2MaxTokens,
+                    maxTokens: maxTokens,
                     vocabSize: Int(setup.xgTokenizer.vocabSize),
                     completionReserve: setup.completionReserve,
                     hardReserve: setup.hardReserve,
                     closingBias: setup.closingBias,
                     whitespaceBias: setup.whitespaceBias,
-                    whitespaceTokenIDs: setup.whitespaceTokenIDs
-                ) { text in
-                    outputBuffer += text
-                    return !Task.isCancelled
-                }
+                    whitespaceTokenIDs: setup.whitespaceTokenIDs,
+                    emit: onText
+                )
             } catch GuidedGenerationError.incompleteOutput {
+                // Grammar exhausted maxTokens before reaching a stop state.
+                // Deltas already emitted (or buffered) are best-effort output.
                 incomplete = true
             }
-            return (outputBuffer, generatedTokenCount, incomplete)
+            return (generatedTokenCount, incomplete)
         }
 
         /// Tool-calling generation path. Continuation rounds from
@@ -1445,27 +1524,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             )
 
             if let generatedTokenCount {
-                // Output total spans both phases (reasoning + envelope);
-                // the reasoning subset is the Phase-1 token count,
-                // clamped ≤ total.
+                // Output total spans both phases (reasoning + envelope).
                 let reasoningCount = reasoningTokenIDs.count
                 let totalOutput = generatedTokenCount + reasoningCount
-                await channel.send(
-                    .response(
-                        entryID: entryID,
-                        action: .updateUsage(
-                            input: .init(
-                                totalTokenCount: toolAwareInput.text.tokens
-                                    .size,
-                                cachedTokenCount: 0
-                            ),
-                            output: .init(
-                                totalTokenCount: totalOutput,
-                                reasoningTokenCount: Swift.min(
-                                    reasoningCount, totalOutput)
-                            )
-                        )
-                    ))
+                await Self.sendUsageUpdate(
+                    entryID: entryID,
+                    promptTokenCount: toolAwareInput.text.tokens.size,
+                    outputTokenCount: totalOutput,
+                    reasoningTokenCount: reasoningCount,
+                    channel: channel)
             }
 
             if incomplete {
@@ -1517,47 +1584,24 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 }
             }()
 
-            var incomplete = false
-            var generatedTokenCount: Int?
-            do {
-                generatedTokenCount = try GuidedGenerationLoop.run(
-                    input: input,
-                    context: context,
-                    constraint: setup.constraint,
-                    maxTokens: setup.maxTokens,
-                    vocabSize: Int(setup.xgTokenizer.vocabSize),
-                    completionReserve: setup.completionReserve,
-                    hardReserve: setup.hardReserve,
-                    closingBias: setup.closingBias,
-                    whitespaceBias: setup.whitespaceBias,
-                    whitespaceTokenIDs: setup.whitespaceTokenIDs
-                ) { text in
-                    textContinuation.yield(text)
-                    return !Task.isCancelled
-                }
-            } catch GuidedGenerationError.incompleteOutput {
-                // Grammar exhausted maxTokens before reaching a stop state.
-                // Text deltas already emitted are best-effort output.
-                incomplete = true
+            let result = try runGuidedGenerationLoop(
+                input: input, context: context, setup: setup, maxTokens: setup.maxTokens
+            ) { text in
+                textContinuation.yield(text)
+                return !Task.isCancelled
             }
+            let generatedTokenCount = result.generatedTokenCount
+            let incomplete = result.incomplete
             textContinuation.finish()
             await forwarder
 
             if let generatedTokenCount {
-                await channel.send(
-                    .response(
-                        entryID: entryID,
-                        action: .updateUsage(
-                            input: .init(
-                                totalTokenCount: input.text.tokens.size,
-                                cachedTokenCount: 0
-                            ),
-                            output: .init(
-                                totalTokenCount: generatedTokenCount,
-                                reasoningTokenCount: 0
-                            )
-                        )
-                    ))
+                await Self.sendUsageUpdate(
+                    entryID: entryID,
+                    promptTokenCount: input.text.tokens.size,
+                    outputTokenCount: generatedTokenCount,
+                    reasoningTokenCount: 0,
+                    channel: channel)
             }
 
             if incomplete {
@@ -1599,20 +1643,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // is the prompt; `generationTokenCount` is the
                     // model-generated completion -- see Evaluate.swift's
                     // `GenerateCompletionInfo` definition).
-                    await channel.send(
-                        .response(
-                            entryID: entryID,
-                            action: .updateUsage(
-                                input: .init(
-                                    totalTokenCount: info.promptTokenCount,
-                                    cachedTokenCount: 0
-                                ),
-                                output: .init(
-                                    totalTokenCount: info.generationTokenCount,
-                                    reasoningTokenCount: 0
-                                )
-                            )
-                        ))
+                    await Self.sendUsageUpdate(
+                        entryID: entryID,
+                        promptTokenCount: info.promptTokenCount,
+                        outputTokenCount: info.generationTokenCount,
+                        reasoningTokenCount: 0,
+                        channel: channel)
                 case .toolCall(_):
                     break
                 }
@@ -1706,22 +1742,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     }
                     detokenizer.append(token: token)
                     if let chunk = detokenizer.next() {
-                        for segment in emitter.process(chunk) {
-                            await Self.send(
-                                segment, responseEntryID: responseEntryID,
-                                reasoningEntryID: reasoningEntryID, channel: channel)
-                        }
+                        await Self.sendSegments(
+                            emitter.process(chunk), responseEntryID: responseEntryID,
+                            reasoningEntryID: reasoningEntryID, channel: channel)
                     }
                 case .info(let info):
                     completionInfo = info
                 }
             }
 
-            for segment in emitter.finalize() {
-                await Self.send(
-                    segment, responseEntryID: responseEntryID,
-                    reasoningEntryID: reasoningEntryID, channel: channel)
-            }
+            await Self.sendSegments(
+                emitter.finalize(), responseEntryID: responseEntryID,
+                reasoningEntryID: reasoningEntryID, channel: channel)
 
             // If generation ended while still inside a thinking block, the model
             // was cut off mid-thought (e.g. it exhausted the token budget before
@@ -1735,24 +1767,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             if let info = completionInfo {
                 // Single source of truth for usage: one authoritative
-                // `.updateUsage` (the framework's aggregator replaces wholesale,
-                // so we must not also rely on per-delta auto-summing). The
-                // reasoning count is clamped to never exceed the total.
-                await channel.send(
-                    .response(
-                        entryID: responseEntryID,
-                        action: .updateUsage(
-                            input: .init(
-                                totalTokenCount: info.promptTokenCount,
-                                cachedTokenCount: 0
-                            ),
-                            output: .init(
-                                totalTokenCount: info.generationTokenCount,
-                                reasoningTokenCount: min(
-                                    reasoningTokenCount, info.generationTokenCount)
-                            )
-                        )
-                    ))
+                // `.updateUsage` (the framework's aggregator replaces
+                // wholesale, so we must not also rely on per-delta
+                // auto-summing).
+                await Self.sendUsageUpdate(
+                    entryID: responseEntryID,
+                    promptTokenCount: info.promptTokenCount,
+                    outputTokenCount: info.generationTokenCount,
+                    reasoningTokenCount: reasoningTokenCount,
+                    channel: channel)
             }
         }
 
@@ -1774,6 +1797,26 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     .response(
                         entryID: responseEntryID,
                         action: .appendText(text, tokenCount: 1)))
+            }
+        }
+
+        /// Routes each of `segments` to the appropriate channel entry, in order.
+        ///
+        /// - Parameters:
+        ///   - segments: The scanned segments to route, in emission order.
+        ///   - responseEntryID: The entry `.response` segments stream into.
+        ///   - reasoningEntryID: The entry `.reasoning` segments stream into.
+        ///   - channel: The generation channel to send events on.
+        private static func sendSegments(
+            _ segments: [ReasoningEventEmitter.Segment],
+            responseEntryID: String,
+            reasoningEntryID: String,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            for segment in segments {
+                await Self.send(
+                    segment, responseEntryID: responseEntryID,
+                    reasoningEntryID: reasoningEntryID, channel: channel)
             }
         }
 
@@ -1875,11 +1918,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 for await generation in stream {
                     try Task.checkCancellation()
                     guard case .token(let token) = generation else { continue }
-                    for segment in collector.ingest(token) {
-                        await Self.send(
-                            segment, responseEntryID: responseEntryID,
-                            reasoningEntryID: reasoningEntryID, channel: channel)
-                    }
+                    await Self.sendSegments(
+                        collector.ingest(token), responseEntryID: responseEntryID,
+                        reasoningEntryID: reasoningEntryID, channel: channel)
                     if collector.shouldStopAfterReasoning {
                         closed = true
                         break
@@ -1900,11 +1941,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             _ = await task.value
             Stream.gpu.synchronize()
 
-            for segment in collector.finalize() {
-                await Self.send(
-                    segment, responseEntryID: responseEntryID,
-                    reasoningEntryID: reasoningEntryID, channel: channel)
-            }
+            await Self.sendSegments(
+                collector.finalize(), responseEntryID: responseEntryID,
+                reasoningEntryID: reasoningEntryID, channel: channel)
             return (collector.reasoningTokenIDs, closed)
         }
 
@@ -1944,7 +1983,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             guard
                 let obj = try? JSONSerialization.jsonObject(with: data)
                     as? [String: Any],
-                let name = obj["name"] as? String
+                let name = obj[ToolCallEnvelopeKey.name] as? String
             else {
                 // Malformed output. The grammar should have prevented this;
                 // emit the raw buffer as text so failures surface loudly.
@@ -1959,9 +1998,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if name == FinalAnswerTool.toolName {
                 let text: String
                 if userResponseSchema == nil {
-                    let args = obj["arguments"] as? [String: Any]
+                    let args = obj[ToolCallEnvelopeKey.arguments] as? [String: Any]
                     text = (args?["response"] as? String) ?? ""
-                } else if let args = obj["arguments"],
+                } else if let args = obj[ToolCallEnvelopeKey.arguments],
                     let argsData = try? JSONSerialization.data(withJSONObject: args),
                     let argsStr = String(data: argsData, encoding: .utf8)
                 {
@@ -1976,7 +2015,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     ))
             } else {
                 guard
-                    let args = obj["arguments"],
+                    let args = obj[ToolCallEnvelopeKey.arguments],
                     let argsData = try? JSONSerialization.data(withJSONObject: args),
                     let argsStr = String(data: argsData, encoding: .utf8)
                 else {
