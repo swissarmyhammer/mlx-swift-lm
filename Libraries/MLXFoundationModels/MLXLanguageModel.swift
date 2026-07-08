@@ -1727,7 +1727,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             context: ModelContext,
             setup: ConstraintSetup
         ) async throws -> (
-            outputBuffer: String, generatedTokenCount: Int?, cachedTokenCount: Int,
+            outputBuffer: String, generatedTokenCount: Int, cachedTokenCount: Int,
             incomplete: Bool
         ) {
             var outputBuffer = ""
@@ -1767,9 +1767,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             setup: ConstraintSetup,
             maxTokens: Int,
             onText: @escaping (String) -> Bool
-        ) async throws -> (generatedTokenCount: Int?, cachedTokenCount: Int, incomplete: Bool) {
+        ) async throws -> (generatedTokenCount: Int, cachedTokenCount: Int, incomplete: Bool) {
             var incomplete = false
-            var generatedTokenCount: Int?
+            let generatedTokenCount: Int
             // Derive reserves from this call's own `maxTokens`, not
             // `setup.maxTokens` -- Phase 2 of think-then-call runs under a
             // reduced budget, and a reserve sized to the original,
@@ -2054,18 +2054,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 channel: channel
             )
 
-            if let generatedTokenCount {
-                // Output total spans both phases (reasoning + envelope).
-                let reasoningCount = reasoningTokenIDs.count
-                let totalOutput = generatedTokenCount + reasoningCount
-                await Self.sendUsageUpdate(
-                    entryID: entryID,
-                    promptTokenCount: toolAwareInput.text.tokens.size,
-                    cachedTokenCount: phase2.cachedTokenCount,
-                    outputTokenCount: totalOutput,
-                    reasoningTokenCount: reasoningCount,
-                    channel: channel)
-            }
+            // Output total spans both phases (reasoning + envelope).
+            let reasoningCount = reasoningTokenIDs.count
+            let totalOutput = generatedTokenCount + reasoningCount
+            await Self.sendUsageUpdate(
+                entryID: entryID,
+                promptTokenCount: toolAwareInput.text.tokens.size,
+                cachedTokenCount: phase2.cachedTokenCount,
+                outputTokenCount: totalOutput,
+                reasoningTokenCount: reasoningCount,
+                channel: channel)
 
             if incomplete {
                 await Self.sendIncompleteOutputMetadata(entryID: entryID, channel: channel)
@@ -2127,15 +2125,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             textContinuation.finish()
             await forwarder
 
-            if let generatedTokenCount {
-                await Self.sendUsageUpdate(
-                    entryID: entryID,
-                    promptTokenCount: input.text.tokens.size,
-                    cachedTokenCount: result.cachedTokenCount,
-                    outputTokenCount: generatedTokenCount,
-                    reasoningTokenCount: 0,
-                    channel: channel)
-            }
+            await Self.sendUsageUpdate(
+                entryID: entryID,
+                promptTokenCount: input.text.tokens.size,
+                cachedTokenCount: result.cachedTokenCount,
+                outputTokenCount: generatedTokenCount,
+                reasoningTokenCount: 0,
+                channel: channel)
 
             if incomplete {
                 await Self.sendIncompleteOutputMetadata(entryID: entryID, channel: channel)
