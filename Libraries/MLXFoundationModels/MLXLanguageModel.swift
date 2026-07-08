@@ -1018,6 +1018,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let reasoningSetup: (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?
         }
 
+        /// Unwraps a `RespondSetup` field that's `nil` only when tools are
+        /// enabled, on a dispatch path reachable only when they are not.
+        /// Shared by every such unwrap in `dispatchGeneration` so the
+        /// "this can't actually be nil here" reasoning is stated once.
+        ///
+        /// - Parameters:
+        ///   - value: The optional field to unwrap.
+        ///   - fieldName: The `RespondSetup` field's name, for the crash message.
+        ///   - contextPath: The dispatch path performing the unwrap, for the crash message.
+        /// - Returns: `value`, unwrapped.
+        private static func unwrapSetupField<T>(
+            _ value: T?, fieldName: String, contextPath: String
+        ) -> T {
+            guard let value else {
+                preconditionFailure(
+                    "RespondSetup.\(fieldName) must be present on the \(contextPath) path; prepareRespondSetup only skips rendering it when tools are enabled, and that branch already returned above."
+                )
+            }
+            return value
+        }
+
         /// Renders the prompt, resolves the per-instance configuration, and
         /// prepares whatever the reasoning path needs -- everything
         /// `respond()`'s `container.perform` closure must do before it can
@@ -1215,11 +1236,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // enabled, which this `else if` already excludes (the
                 // tool-calling branch above returns first) -- `input` is
                 // guaranteed present here.
-                guard let input = setup.input else {
-                    preconditionFailure(
-                        "RespondSetup.input must be present on the guided-generation path; prepareRespondSetup only skips rendering it when tools are enabled, and that branch already returned above."
-                    )
-                }
+                let input = Self.unwrapSetupField(
+                    setup.input, fieldName: "input", contextPath: "guided-generation")
                 try await runGuidedGeneration(
                     schemaJSON: schemaJSON, input: input, modelID: modelID,
                     requestedMaxTokens: requestedMaxTokens, entryID: entryID,
@@ -1229,11 +1247,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // Same guarantee as above: `effectiveInput` is only `nil`
                 // when tools are enabled, and this is the no-tools/no-schema
                 // path.
-                guard let fallbackInput = setup.effectiveInput else {
-                    preconditionFailure(
-                        "RespondSetup.effectiveInput must be present on the text-generation path; prepareRespondSetup only skips rendering it when tools are enabled, and that branch already returned above."
-                    )
-                }
+                let fallbackInput = Self.unwrapSetupField(
+                    setup.effectiveInput, fieldName: "effectiveInput", contextPath: "text-generation")
                 try await runTextGeneration(
                     reasoningSetup: setup.reasoningSetup,
                     fallbackInput: fallbackInput,
