@@ -282,7 +282,7 @@ struct GenerableRoundTripTests {
         kvBits: Int? = nil
     ) async throws -> String {
         try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer
             )

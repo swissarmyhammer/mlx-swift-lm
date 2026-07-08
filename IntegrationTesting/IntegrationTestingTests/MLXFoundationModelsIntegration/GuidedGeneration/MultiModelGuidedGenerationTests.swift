@@ -120,7 +120,7 @@ struct MultiModelGuidedGenerationTests {
             """
 
         let raw: String = try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer
             )
@@ -246,7 +246,7 @@ struct MultiModelGuidedGenerationTests {
             """
 
         let raw: String = try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer
             )
@@ -440,7 +440,7 @@ struct MultiModelGuidedGenerationTests {
         let modelID = Self.gemmaModelID
         let container = try await loadTestModelContainer(id: modelID)
         try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer
             )

@@ -33,26 +33,19 @@ struct TranscriptConverter {
                 // attachments ride along as message images, mirroring the
                 // prompt path, so the `.vision` gate sees them and they are
                 // not silently dropped.
-                let text = extractText(from: instructions.segments)
-                let images = extractImages(from: instructions.segments)
-                guard text != nil || !images.isEmpty else {
-                    logger.warning(
-                        "Skipping instructions entry with no text or image content")
-                    return []
-                }
-                return [Chat.Message.system(text ?? "", images: images)]
+                return makeTextImageMessage(
+                    from: instructions.segments,
+                    make: { Chat.Message.system($0, images: $1) },
+                    emptyWarning: "Skipping instructions entry with no text or image content")
 
             case .prompt(let prompt):
                 // User message for prompts. Labeled image attachments
                 // (public `.attachment` segments) ride along as message
                 // images; text is still concatenated as before.
-                let text = extractText(from: prompt.segments)
-                let images = extractImages(from: prompt.segments)
-                guard text != nil || !images.isEmpty else {
-                    logger.warning("Skipping prompt entry with no text or image content")
-                    return []
-                }
-                return [Chat.Message.user(text ?? "", images: images)]
+                return makeTextImageMessage(
+                    from: prompt.segments,
+                    make: { Chat.Message.user($0, images: $1) },
+                    emptyWarning: "Skipping prompt entry with no text or image content")
 
             case .response(let response):
                 // Assistant message for previous responses
@@ -106,6 +99,31 @@ struct TranscriptConverter {
         }
     }
 
+    /// Builds a system/user chat message from a text- and image-bearing
+    /// entry (instructions or prompt), sharing the extract-guard-construct
+    /// logic the two cases would otherwise duplicate.
+    ///
+    /// - Parameters:
+    ///   - segments: The entry's transcript segments.
+    ///   - make: Constructs the role-specific message from the extracted
+    ///     text (empty string if none) and images.
+    ///   - emptyWarning: Logged when the entry has neither text nor images.
+    /// - Returns: A single-element array with the constructed message, or
+    ///   an empty array when the entry has no content to carry.
+    private static func makeTextImageMessage(
+        from segments: [Transcript.Segment],
+        make: (String, [UserInput.Image]) -> Chat.Message,
+        emptyWarning: String
+    ) -> [Chat.Message] {
+        let text = extractText(from: segments)
+        let images = extractImages(from: segments)
+        guard text != nil || !images.isEmpty else {
+            logger.warning("\(emptyWarning, privacy: .public)")
+            return []
+        }
+        return [make(text ?? "", images)]
+    }
+
     /// Builds the `{"name": <name>, "arguments": <arguments>}` envelope text
     /// for a replayed tool call, matching the shape the Executor's
     /// tool-calling grammar generates as its constrained output.
@@ -123,6 +141,36 @@ struct TranscriptConverter {
         return "{\"name\": \(nameJSON), \"arguments\": \(arguments.jsonString)}"
     }
 
+    /// Extracts and concatenates transcript segment text, with newlines
+    /// between segments. Shared by `extractText` and `extractToolOutputText`,
+    /// which differ only in whether `.structure` segments are included and
+    /// how an empty result should read to their caller.
+    ///
+    /// - Parameters:
+    ///   - segments: Array of transcript segments.
+    ///   - includeStructure: When true, `.structure` segments are included,
+    ///     rendered as their JSON; when false they're skipped like images
+    ///     and other non-text segment types.
+    ///   - logContext: Name of the calling extractor, for the
+    ///     skipped-segment debug log.
+    /// - Returns: The segments' text, joined with newlines ("" if none matched).
+    private static func extractConcatenatedText(
+        from segments: [Transcript.Segment], includeStructure: Bool, logContext: String
+    ) -> String {
+        let texts = segments.compactMap { segment -> String? in
+            switch segment {
+            case .text(let textSegment):
+                return textSegment.content
+            case .structure(let structuredSegment) where includeStructure:
+                return structuredSegment.content.jsonString
+            default:
+                logger.debug("Skipping non-text segment in \(logContext, privacy: .public)")
+                return nil
+            }
+        }
+        return texts.joined(separator: "\n")
+    }
+
     /// Extracts text content from transcript segments.
     ///
     /// Concatenates all text segments with newlines.
@@ -131,19 +179,8 @@ struct TranscriptConverter {
     /// - Parameter segments: Array of transcript segments
     /// - Returns: Concatenated text, or nil if no text content found
     private static func extractText(from segments: [Transcript.Segment]) -> String? {
-        let texts = segments.compactMap { segment -> String? in
-            switch segment {
-            case .text(let textSegment):
-                return textSegment.content
-
-            default:
-                // Skip images, structured content, and local attention segment types
-                logger.debug("Skipping non-text segment in extractText")
-                return nil
-            }
-        }
-
-        let combined = texts.joined(separator: "\n")
+        let combined = extractConcatenatedText(
+            from: segments, includeStructure: false, logContext: "extractText")
         return combined.isEmpty ? nil : combined
     }
 
@@ -160,18 +197,8 @@ struct TranscriptConverter {
     /// - Parameter segments: A tool output's transcript segments.
     /// - Returns: Concatenated text (and structured-content JSON), or "".
     private static func extractToolOutputText(from segments: [Transcript.Segment]) -> String {
-        let texts = segments.compactMap { segment -> String? in
-            switch segment {
-            case .text(let textSegment):
-                return textSegment.content
-            case .structure(let structuredSegment):
-                return structuredSegment.content.jsonString
-            default:
-                logger.debug("Skipping non-text/structure segment in extractToolOutputText")
-                return nil
-            }
-        }
-        return texts.joined(separator: "\n")
+        extractConcatenatedText(
+            from: segments, includeStructure: true, logContext: "extractToolOutputText")
     }
 
     /// Extracts image inputs from image attachment segments.

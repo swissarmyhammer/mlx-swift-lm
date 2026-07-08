@@ -158,7 +158,7 @@ struct HardReserveStressTests {
         let container = try await loadTestModelContainer(id: modelID)
 
         let raw: String = try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer
             )

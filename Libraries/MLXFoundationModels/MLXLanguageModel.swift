@@ -36,7 +36,7 @@ enum ConstraintKind {
 /// (the arrays are only *added* to logits in `GuidedGenerationLoop`, never
 /// mutated), and the entry is shared across actors via `ModelCache` — the same
 /// pattern as `GrammarTokenizer`/`GrammarConstraint` in `XGrammarBridge.swift`.
-final class TokenizerBias: @unchecked Sendable {
+struct TokenizerBias: @unchecked Sendable {
     let closing: MLXArray
     let whitespace: MLXArray
     let whitespaceTokenIDs: Set<Int>
@@ -161,7 +161,7 @@ private actor ModelCache {
     }
 
     /// Gets or creates a cached GrammarTokenizer for the given model.
-    func makeXGTokenizer(
+    func makeXgTokenizer(
         modelID: String,
         tokenizer: any Tokenizer
     ) throws -> GrammarTokenizer {
@@ -179,10 +179,10 @@ private actor ModelCache {
     }
 
     /// Whether an `GrammarTokenizer` is already cached for the given model.
-    /// Used by `MLXLanguageModel.hasCachedXGTokenizer` so tests can assert
+    /// Used by `MLXLanguageModel.hasCachedXgTokenizer` so tests can assert
     /// that `warmUp()` pre-created it (a genuine cache hit) rather than only
     /// that a later guided respond happens to succeed.
-    func hasCachedXGTokenizer(modelID: String) -> Bool {
+    func hasCachedXgTokenizer(modelID: String) -> Bool {
         xgTokenizers[modelID] != nil
     }
 
@@ -407,11 +407,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     }
 
     /// Gets or creates a cached GrammarTokenizer for the given model.
-    static func makeXGTokenizer(
+    static func makeXgTokenizer(
         modelID: String,
         tokenizer: any Tokenizer
     ) async throws -> GrammarTokenizer {
-        try await cache.makeXGTokenizer(modelID: modelID, tokenizer: tokenizer)
+        try await cache.makeXgTokenizer(modelID: modelID, tokenizer: tokenizer)
     }
 
     /// Gets the cached per-model tokenizer-derived logit biases (closing +
@@ -445,8 +445,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Whether the shared cache already holds an `GrammarTokenizer` for the model.
     /// Internal test seam (not public API): lets `PrewarmGrammarTests` confirm
     /// `warmUp()` pre-created the tokenizer.
-    static func hasCachedXGTokenizer(modelID: String) async -> Bool {
-        await cache.hasCachedXGTokenizer(modelID: modelID)
+    static func hasCachedXgTokenizer(modelID: String) async -> Bool {
+        await cache.hasCachedXgTokenizer(modelID: modelID)
     }
 
     /// Evicts every cached model, tokenizer, constraint template, and per-model
@@ -616,7 +616,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         // per-request schema/tool grammar that prewarm doesn't possess — a
         // pre-built constraint would land under a key no real respond() reads.
         let tokenizer = await container.tokenizer
-        _ = try await Self.makeXGTokenizer(
+        _ = try await Self.makeXgTokenizer(
             modelID: modelID, tokenizer: tokenizer)
 
         // Force Metal shader JIT with a minimal 1-token generate, run inside
@@ -1000,347 +1000,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     let effectiveInput = suppressedInput ?? input
 
                     if !request.enabledToolDefinitions.isEmpty {
-                        // Tool-calling path. Continuation rounds from
-                        // `LanguageModelSession`'s auto-loop re-enter this
-                        // branch too: the transcript's prior tool-call and
-                        // tool-output entries are replayed into the prompt by
-                        // `TranscriptConverter`, so the model sees the
-                        // results and chooses another tool call or the final
-                        // answer (multi-turn tool calling).
-                        //
-                        // Force the model to emit a JSON
-                        // object matching one of the declared tools --
-                        // including a synthetic "final answer" tool whose
-                        // arguments carry the free-text response. After
-                        // generation, parse the output to route to either a
-                        // toolCallDelta (real tool) or textDelta (final
-                        // answer) event.
-                        //
-                        // Buffers the full output before emitting; streaming
-                        // within the final-answer path (reparse-each-delta) is
-                        // not yet implemented.
-                        let finalAnswerDef = FinalAnswerTool.makeToolDefinition(
-                            responseSchema: request.schema
-                        )
-                        let allTools =
-                            Array(request.enabledToolDefinitions) + [finalAnswerDef]
-
-                        // Re-tokenize using the model's native tool-aware chat
-                        // template (Qwen/Llama/Phi/Gemma all ship one in their
-                        // tokenizer_config.json). This is what teaches the model
-                        // *what* tools exist and how to decide between them; the
-                        // grammar constraint below only enforces the *shape* of
-                        // whatever tool call it emits.
-                        let toolSpecs = try ToolCallingConversions.makeToolSpecs(
-                            from: allTools)
-                        let tokenizerMessages = DefaultMessageGenerator().generate(
-                            messages: messages)
-
-                        // Think-then-call is gated to the enable_thinking
-                        // family (Qwen3/QwQ): their template both renders the tool
-                        // block AND honors `enable_thinking`. R1-style `.alwaysOn`
-                        // models are tool-blind (template ignores `tools:`), so
-                        // they fall through to the single-phase path unchanged;
-                        // thinking-disabled requests stay single-phase too.
-                        let thinkThenCallConfig: ReasoningConfig? = {
-                            guard declaresReasoning,
-                                let cfg = resolved.reasoningConfig,
-                                case .templateFlag = cfg.promptStrategy,
-                                Self.thinkingEnabled(
-                                    for: request.contextOptions.reasoningLevel) != false
-                            else { return nil }
-                            return cfg
-                        }()
-                        // Thread `enable_thinking` through the tool-aware template
-                        // (3-arg form) so the prompt is both tool-aware and
-                        // thinking-primed; nil on the single-phase path.
-                        let reasoningContext = try thinkThenCallConfig.flatMap {
-                            try $0.promptStrategy.additionalContext(
-                                forThinkingEnabled: Self.thinkingEnabled(
-                                    for: request.contextOptions.reasoningLevel))
-                        }
-                        let toolAwareTokens = try context.tokenizer.applyChatTemplate(
-                            messages: tokenizerMessages,
-                            tools: toolSpecs,
-                            additionalContext: reasoningContext
-                        )
-                        let toolAwareInput = LMInput(tokens: MLXArray(toolAwareTokens))
-
-                        let toolCallingGrammar =
-                            try SchemaConverter.encodeToolCallingGrammar(
-                                tools: allTools
-                            )
-                        // The inner JSON envelope is still needed separately to
-                        // seed `CompletionReserve` -- the wrapper tokens
-                        // (`<tool_call>`, two `\n`s, `</tool_call>`) are small
-                        // and fixed, so padding the reserve with their
-                        // tokenized size adds noise rather than accuracy.
-                        let toolCallingEnvelopeJSON =
-                            try SchemaConverter.encodeToolCallingEnvelopeJSON(
-                                tools: allTools
-                            )
-
-                        let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
-                            modelID: modelID,
-                            tokenizer: context.tokenizer
-                        )
-                        let constraint = try await MLXLanguageModel.makeConstraint(
-                            modelID: modelID,
-                            kind: .structuralTag,
-                            source: toolCallingGrammar,
-                            tokenizer: xgTokenizer,
-                            hostTokenizer: context.tokenizer,
-                            fastForward: true
-                        )
-
-                        // Always partition into zones -- the grammar has
-                        // wiggle room (JSON whitespace before the outer
-                        // `}`, whitespace before `\n</tool_call>`) that
-                        // open-source models tend to exploit into infinite
-                        // loops when not pushed toward structural close.
-                        // Use the caller's budget when set, otherwise the
-                        // Executor's default.
-                        let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
-                        let bias = await MLXLanguageModel.makeTokenizerBias(
-                            modelID: modelID,
-                            tokenizer: context.tokenizer
-                        )
-                        let closingBias = bias.closing
-                        let structuralReserve = CompletionReserve.estimate(
-                            schemaJSON: toolCallingEnvelopeJSON,
-                            tokenizer: context.tokenizer
-                        )
-                        let completionReserve = Swift.max(
-                            structuralReserve * 3, maxTokens / 4)
-                        let hardReserve = structuralReserve * 8
-
-                        let whitespaceBias = bias.whitespace
-                        let whitespaceTokenIDs = bias.whitespaceTokenIDs
-
-                        // PHASE 1 (think-then-call): reason unconstrained until
-                        // `</think>`, retaining the token IDs to prefill into the
-                        // constrained phase below. Empty on the single-phase path.
-                        var reasoningTokenIDs: [Int] = []
-                        if let cfg = thinkThenCallConfig {
-                            let primedInside = Self.reasoningPrimedInside(
-                                input: toolAwareInput, config: cfg,
-                                tokenizer: context.tokenizer)
-                            let phase1 = try await runToolCallReasoningPhase(
-                                input: toolAwareInput, config: cfg,
-                                primedInside: primedInside, maxTokens: maxTokens,
-                                requestedTemperature: request.generationOptions
-                                    .temperature,
-                                samplingMode: requestedSamplingMode,
-                                reasoningEntryID: reasoningEntryID,
-                                responseEntryID: entryID,
-                                context: context, channel: channel)
-                            reasoningTokenIDs = phase1.tokenIDs
-                            if !phase1.closed {
-                                // Cut off mid-thought (budget exhausted before
-                                // `</think>`). Don't prefill a truncated thought
-                                // into the grammar — signal and finish. Phase 1
-                                // already synchronized the GPU on its way out.
-                                await channel.send(
-                                    .response(
-                                        entryID: entryID,
-                                        action: .updateMetadata([
-                                            "incompleteOutput": true
-                                        ])))
-                                return
-                            }
-                        }
-
-                        // Phase 2 continues from the model's completed reasoning;
-                        // carry the raw IDs (no decode/re-encode) so the grammar
-                        // starts from the exact post-`</think>` state.
-                        let phase2Input =
-                            reasoningTokenIDs.isEmpty
-                            ? toolAwareInput
-                            : LMInput(
-                                tokens: MLXArray(toolAwareTokens + reasoningTokenIDs))
-                        // Shared budget (match the unconstrained path): the
-                        // envelope continues under the remaining budget, floored
-                        // at the completion reserve so it always has room to close
-                        // the tool call.
-                        let phase2MaxTokens =
-                            reasoningTokenIDs.isEmpty
-                            ? maxTokens
-                            : Swift.max(
-                                maxTokens - reasoningTokenIDs.count, completionReserve)
-
-                        var outputBuffer = ""
-                        var incomplete = false
-                        var generatedTokenCount: Int?
-                        do {
-                            generatedTokenCount = try GuidedGenerationLoop.run(
-                                input: phase2Input,
-                                context: context,
-                                constraint: constraint,
-                                maxTokens: phase2MaxTokens,
-                                vocabSize: Int(xgTokenizer.vocabSize),
-                                completionReserve: completionReserve,
-                                hardReserve: hardReserve,
-                                closingBias: closingBias,
-                                whitespaceBias: whitespaceBias,
-                                whitespaceTokenIDs: whitespaceTokenIDs
-                            ) { text in
-                                outputBuffer += text
-                                return !Task.isCancelled
-                            }
-                        } catch GuidedGenerationError.incompleteOutput {
-                            incomplete = true
-                        }
-
-                        try await emitToolCallingEvent(
-                            outputBuffer: outputBuffer,
-                            userResponseSchema: request.schema,
-                            entryID: entryID,
-                            toolCallsEntryID: toolCallsEntryID,
-                            channel: channel
-                        )
-
-                        if let generatedTokenCount {
-                            // Output total spans both phases (reasoning + envelope);
-                            // the reasoning subset is the Phase-1 token count,
-                            // clamped ≤ total.
-                            let reasoningCount = reasoningTokenIDs.count
-                            let totalOutput = generatedTokenCount + reasoningCount
-                            await channel.send(
-                                .response(
-                                    entryID: entryID,
-                                    action: .updateUsage(
-                                        input: .init(
-                                            totalTokenCount: toolAwareInput.text.tokens
-                                                .size,
-                                            cachedTokenCount: 0
-                                        ),
-                                        output: .init(
-                                            totalTokenCount: totalOutput,
-                                            reasoningTokenCount: Swift.min(
-                                                reasoningCount, totalOutput)
-                                        )
-                                    )
-                                ))
-                        }
-
-                        if incomplete {
-                            await channel.send(
-                                .response(
-                                    entryID: entryID,
-                                    action: .updateMetadata(["incompleteOutput": true]))
-                            )
-                        }
+                        let completedNormally = try await runToolCalling(
+                            request: request, messages: messages, modelID: modelID,
+                            requestedMaxTokens: requestedMaxTokens,
+                            requestedSamplingMode: requestedSamplingMode,
+                            declaresReasoning: declaresReasoning, resolved: resolved,
+                            entryID: entryID, toolCallsEntryID: toolCallsEntryID,
+                            reasoningEntryID: reasoningEntryID, context: context,
+                            channel: channel)
+                        guard completedNormally else { return }
                     } else if let schemaJSON {
-                        // Guided generation: stream text deltas as they arrive.
-                        let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
-                            modelID: modelID,
-                            tokenizer: context.tokenizer
-                        )
-
-                        let constraint = try await MLXLanguageModel.makeConstraint(
-                            modelID: modelID,
-                            kind: .json,
-                            source: schemaJSON,
-                            tokenizer: xgTokenizer,
-                            hostTokenizer: context.tokenizer,
-                            fastForward: true
-                        )
-                        // Bias and reserve computation: only when a token
-                        // budget is set. Without a budget, the grammar mask
-                        // and model's natural EOS tendency control termination.
-                        let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
-                        let bias = await MLXLanguageModel.makeTokenizerBias(
-                            modelID: modelID,
-                            tokenizer: context.tokenizer
-                        )
-                        let closingBias = bias.closing
-                        let structuralReserve = CompletionReserve.estimate(
-                            schemaJSON: schemaJSON,
-                            tokenizer: context.tokenizer
-                        )
-                        // The structural reserve is the bare minimum tokens for
-                        // JSON skeleton (empty strings). Use the larger of 3x
-                        // structural minimum or 25% of maxTokens, so closing
-                        // bias activates early enough for the model to generate
-                        // actual content in closing fields.
-                        let completionReserve = Swift.max(
-                            structuralReserve * 3, maxTokens / 4)
-                        // Hard reserve: the point at which we force structural
-                        // completion by penalizing non-closing tokens. Must be
-                        // larger than the raw estimate because grammar-forced
-                        // key names (FF tokens) and model-inserted whitespace
-                        // cost more tokens than the compact minimal JSON string.
-                        let hardReserve = structuralReserve * 8
-
-                        let whitespaceBias = bias.whitespace
-                        let whitespaceTokenIDs = bias.whitespaceTokenIDs
-
-                        // GuidedGenerationLoop.run's emit closure is synchronous (for
-                        // performance -- it runs inside the tight MLX generation loop).
-                        // channel.send is async. Bridge via an AsyncStream + concurrent
-                        // forwarder so text deltas stream to the channel in order.
-                        let (textStream, textContinuation) = AsyncStream<String>
-                            .makeStream()
-                        async let forwarder: Void = {
-                            for await text in textStream {
-                                await channel.send(
-                                    .response(
-                                        entryID: entryID,
-                                        action: .appendText(text, tokenCount: 1)
-                                    ))
-                            }
-                        }()
-
-                        var incomplete = false
-                        var generatedTokenCount: Int?
-                        do {
-                            generatedTokenCount = try GuidedGenerationLoop.run(
-                                input: input,
-                                context: context,
-                                constraint: constraint,
-                                maxTokens: maxTokens,
-                                vocabSize: Int(xgTokenizer.vocabSize),
-                                completionReserve: completionReserve,
-                                hardReserve: hardReserve,
-                                closingBias: closingBias,
-                                whitespaceBias: whitespaceBias,
-                                whitespaceTokenIDs: whitespaceTokenIDs
-                            ) { text in
-                                textContinuation.yield(text)
-                                return !Task.isCancelled
-                            }
-                        } catch GuidedGenerationError.incompleteOutput {
-                            // Grammar exhausted maxTokens before reaching a stop state.
-                            // Text deltas already emitted are best-effort output.
-                            incomplete = true
-                        }
-                        textContinuation.finish()
-                        await forwarder
-
-                        if let generatedTokenCount {
-                            await channel.send(
-                                .response(
-                                    entryID: entryID,
-                                    action: .updateUsage(
-                                        input: .init(
-                                            totalTokenCount: input.text.tokens.size,
-                                            cachedTokenCount: 0
-                                        ),
-                                        output: .init(
-                                            totalTokenCount: generatedTokenCount,
-                                            reasoningTokenCount: 0
-                                        )
-                                    )
-                                ))
-                        }
-
-                        if incomplete {
-                            await channel.send(
-                                .response(
-                                    entryID: entryID,
-                                    action: .updateMetadata(["incompleteOutput": true]))
-                            )
-                        }
+                        try await runGuidedGeneration(
+                            schemaJSON: schemaJSON, input: input, modelID: modelID,
+                            requestedMaxTokens: requestedMaxTokens, entryID: entryID,
+                            context: context, channel: channel)
                     } else {
                         try await runTextGeneration(
                             reasoningSetup: reasoningSetup,
@@ -1372,6 +1045,431 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     throw Self.mapGrammarError(grammarError)
                 }
                 throw error
+            }
+        }
+
+        /// Prepares the shared grammar-constraint machinery for the
+        /// tool-calling and guided-generation paths: the model-keyed
+        /// xgrammar tokenizer, a compiled constraint for `constraintSource`,
+        /// and the token-budget/logit-bias values `GuidedGenerationLoop.run`
+        /// needs to steer generation toward a structural close.
+        ///
+        /// - Parameters:
+        ///   - modelID: The model identifier for the tokenizer/constraint/bias caches.
+        ///   - context: The loaded model context (tokenizer, configuration).
+        ///   - kind: Which constructor `constraintSource` compiles under --
+        ///     keeps a JSON-schema source and a structural-tag source from
+        ///     ever aliasing in the constraint cache even if their text collides.
+        ///   - constraintSource: The grammar/schema text the constraint is
+        ///     compiled from (the tool-calling grammar, or the developer's
+        ///     JSON schema).
+        ///   - reserveEstimateSource: The text `CompletionReserve.estimate`
+        ///     sizes the reserve from. Equal to `constraintSource` on the
+        ///     guided-generation path; on the tool-calling path this is the
+        ///     inner JSON envelope alone (the wrapper tokens around it are
+        ///     small and fixed, so estimating from them would add noise
+        ///     rather than accuracy).
+        ///   - requestedMaxTokens: The caller's token budget override, if any.
+        /// - Throws: Whatever `makeXgTokenizer`/`makeConstraint` throw.
+        /// - Returns: The tokenizer, compiled constraint, resolved token
+        ///   budget, and the closing/whitespace biases and reserve sizes for
+        ///   `GuidedGenerationLoop.run`.
+        private func prepareConstraintSetup(
+            modelID: String,
+            context: ModelContext,
+            kind: ConstraintKind,
+            constraintSource: String,
+            reserveEstimateSource: String,
+            requestedMaxTokens: Int?
+        ) async throws -> (
+            xgTokenizer: GrammarTokenizer,
+            constraint: GrammarConstraint,
+            maxTokens: Int,
+            closingBias: MLXArray,
+            completionReserve: Int,
+            hardReserve: Int,
+            whitespaceBias: MLXArray,
+            whitespaceTokenIDs: Set<Int>
+        ) {
+            let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
+                modelID: modelID,
+                tokenizer: context.tokenizer
+            )
+            let constraint = try await MLXLanguageModel.makeConstraint(
+                modelID: modelID,
+                kind: kind,
+                source: constraintSource,
+                tokenizer: xgTokenizer,
+                hostTokenizer: context.tokenizer,
+                fastForward: true
+            )
+
+            // Always partition into zones -- the grammar has wiggle room
+            // (JSON whitespace before the outer `}`, whitespace before
+            // `\n</tool_call>`) that open-source models tend to exploit
+            // into infinite loops when not pushed toward structural close.
+            // Use the caller's budget when set, otherwise the Executor's
+            // default.
+            let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
+            let bias = await MLXLanguageModel.makeTokenizerBias(
+                modelID: modelID,
+                tokenizer: context.tokenizer
+            )
+            let structuralReserve = CompletionReserve.estimate(
+                schemaJSON: reserveEstimateSource,
+                tokenizer: context.tokenizer
+            )
+            // The structural reserve is the bare minimum tokens for the
+            // JSON skeleton (empty strings). Use the larger of 3x structural
+            // minimum or 25% of maxTokens, so closing bias activates early
+            // enough for the model to generate actual content in closing
+            // fields.
+            let completionReserve = Swift.max(
+                structuralReserve * 3, maxTokens / 4)
+            // Hard reserve: the point at which we force structural
+            // completion by penalizing non-closing tokens. Must be larger
+            // than the raw estimate because grammar-forced key names (FF
+            // tokens) and model-inserted whitespace cost more tokens than
+            // the compact minimal JSON string.
+            let hardReserve = structuralReserve * 8
+
+            return (
+                xgTokenizer, constraint, maxTokens, bias.closing, completionReserve,
+                hardReserve, bias.whitespace, bias.whitespaceTokenIDs
+            )
+        }
+
+        /// Tool-calling generation path. Continuation rounds from
+        /// `LanguageModelSession`'s auto-loop re-enter this path too: the
+        /// transcript's prior tool-call and tool-output entries are replayed
+        /// into the prompt by `TranscriptConverter`, so the model sees the
+        /// results and chooses another tool call or the final answer
+        /// (multi-turn tool calling).
+        ///
+        /// Forces the model to emit a JSON object matching one of the
+        /// declared tools -- including a synthetic "final answer" tool whose
+        /// arguments carry the free-text response. After generation, parses
+        /// the output to route to either a toolCallDelta (real tool) or
+        /// textDelta (final answer) event. Buffers the full output before
+        /// emitting; streaming within the final-answer path
+        /// (reparse-each-delta) is not yet implemented.
+        ///
+        /// - Parameters:
+        ///   - request: The generation request; supplies the enabled tools,
+        ///     developer schema, and generation options.
+        ///   - messages: The rendered chat messages for this round.
+        ///   - modelID: The model identifier for constraint/tokenizer caches.
+        ///   - requestedMaxTokens: The caller's token budget override, if any.
+        ///   - requestedSamplingMode: The caller's sampling mode override, if any.
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - resolved: The resolved model configuration.
+        ///   - entryID: The response entry to stream output into.
+        ///   - toolCallsEntryID: The entry to stream tool-call events into.
+        ///   - reasoningEntryID: The entry to stream think-then-call reasoning into.
+        ///   - context: The loaded model context.
+        ///   - channel: The generation channel to send events on.
+        /// - Throws: Whatever the grammar/tokenizer/generation calls throw.
+        /// - Returns: `false` only when think-then-call Phase 1 was cut off
+        ///   before `</think>` closed -- Phase 1 already synchronized the
+        ///   GPU on its way out, so the caller must skip its own tail
+        ///   `Stream.gpu.synchronize()` and return immediately. `true` on
+        ///   every other exit.
+        private func runToolCalling(
+            request: LanguageModelExecutorGenerationRequest,
+            messages: [Chat.Message],
+            modelID: String,
+            requestedMaxTokens: Int?,
+            requestedSamplingMode: MLXSamplingMode?,
+            declaresReasoning: Bool,
+            resolved: ModelConfiguration,
+            entryID: String,
+            toolCallsEntryID: String,
+            reasoningEntryID: String,
+            context: ModelContext,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws -> Bool {
+            let finalAnswerDef = FinalAnswerTool.makeToolDefinition(
+                responseSchema: request.schema
+            )
+            let allTools =
+                Array(request.enabledToolDefinitions) + [finalAnswerDef]
+
+            // Re-tokenize using the model's native tool-aware chat
+            // template (Qwen/Llama/Phi/Gemma all ship one in their
+            // tokenizer_config.json). This is what teaches the model
+            // *what* tools exist and how to decide between them; the
+            // grammar constraint below only enforces the *shape* of
+            // whatever tool call it emits.
+            let toolSpecs = try ToolCallingConversions.makeToolSpecs(
+                from: allTools)
+            let tokenizerMessages = DefaultMessageGenerator().generate(
+                messages: messages)
+
+            // Think-then-call is gated to the enable_thinking
+            // family (Qwen3/QwQ): their template both renders the tool
+            // block AND honors `enable_thinking`. R1-style `.alwaysOn`
+            // models are tool-blind (template ignores `tools:`), so
+            // they fall through to the single-phase path unchanged;
+            // thinking-disabled requests stay single-phase too.
+            let thinkThenCallConfig: ReasoningConfig? = {
+                guard declaresReasoning,
+                    let cfg = resolved.reasoningConfig,
+                    case .templateFlag = cfg.promptStrategy,
+                    Self.thinkingEnabled(
+                        for: request.contextOptions.reasoningLevel) != false
+                else { return nil }
+                return cfg
+            }()
+            // Thread `enable_thinking` through the tool-aware template
+            // (3-arg form) so the prompt is both tool-aware and
+            // thinking-primed; nil on the single-phase path.
+            let reasoningContext = try thinkThenCallConfig.flatMap {
+                try $0.promptStrategy.additionalContext(
+                    forThinkingEnabled: Self.thinkingEnabled(
+                        for: request.contextOptions.reasoningLevel))
+            }
+            let toolAwareTokens = try context.tokenizer.applyChatTemplate(
+                messages: tokenizerMessages,
+                tools: toolSpecs,
+                additionalContext: reasoningContext
+            )
+            let toolAwareInput = LMInput(tokens: MLXArray(toolAwareTokens))
+
+            let toolCallingGrammar =
+                try SchemaConverter.encodeToolCallingGrammar(
+                    tools: allTools
+                )
+            // The inner JSON envelope is still needed separately to
+            // seed `CompletionReserve` -- the wrapper tokens
+            // (`<tool_call>`, two `\n`s, `</tool_call>`) are small
+            // and fixed, so padding the reserve with their
+            // tokenized size adds noise rather than accuracy.
+            let toolCallingEnvelopeJSON =
+                try SchemaConverter.encodeToolCallingEnvelopeJSON(
+                    tools: allTools
+                )
+
+            let setup = try await prepareConstraintSetup(
+                modelID: modelID,
+                context: context,
+                kind: .structuralTag,
+                constraintSource: toolCallingGrammar,
+                reserveEstimateSource: toolCallingEnvelopeJSON,
+                requestedMaxTokens: requestedMaxTokens
+            )
+
+            // PHASE 1 (think-then-call): reason unconstrained until
+            // `</think>`, retaining the token IDs to prefill into the
+            // constrained phase below. Empty on the single-phase path.
+            var reasoningTokenIDs: [Int] = []
+            if let cfg = thinkThenCallConfig {
+                let primedInside = Self.reasoningPrimedInside(
+                    input: toolAwareInput, config: cfg,
+                    tokenizer: context.tokenizer)
+                let phase1 = try await runToolCallReasoningPhase(
+                    input: toolAwareInput, config: cfg,
+                    primedInside: primedInside, maxTokens: setup.maxTokens,
+                    requestedTemperature: request.generationOptions
+                        .temperature,
+                    samplingMode: requestedSamplingMode,
+                    reasoningEntryID: reasoningEntryID,
+                    responseEntryID: entryID,
+                    context: context, channel: channel)
+                reasoningTokenIDs = phase1.tokenIDs
+                if !phase1.closed {
+                    // Cut off mid-thought (budget exhausted before
+                    // `</think>`). Don't prefill a truncated thought
+                    // into the grammar — signal and finish. Phase 1
+                    // already synchronized the GPU on its way out.
+                    await channel.send(
+                        .response(
+                            entryID: entryID,
+                            action: .updateMetadata([
+                                "incompleteOutput": true
+                            ])))
+                    return false
+                }
+            }
+
+            // Phase 2 continues from the model's completed reasoning;
+            // carry the raw IDs (no decode/re-encode) so the grammar
+            // starts from the exact post-`</think>` state.
+            let phase2Input =
+                reasoningTokenIDs.isEmpty
+                ? toolAwareInput
+                : LMInput(
+                    tokens: MLXArray(toolAwareTokens + reasoningTokenIDs))
+            // Shared budget (match the unconstrained path): the
+            // envelope continues under the remaining budget, floored
+            // at the completion reserve so it always has room to close
+            // the tool call.
+            let phase2MaxTokens =
+                reasoningTokenIDs.isEmpty
+                ? setup.maxTokens
+                : Swift.max(
+                    setup.maxTokens - reasoningTokenIDs.count, setup.completionReserve)
+
+            var outputBuffer = ""
+            var incomplete = false
+            var generatedTokenCount: Int?
+            do {
+                generatedTokenCount = try GuidedGenerationLoop.run(
+                    input: phase2Input,
+                    context: context,
+                    constraint: setup.constraint,
+                    maxTokens: phase2MaxTokens,
+                    vocabSize: Int(setup.xgTokenizer.vocabSize),
+                    completionReserve: setup.completionReserve,
+                    hardReserve: setup.hardReserve,
+                    closingBias: setup.closingBias,
+                    whitespaceBias: setup.whitespaceBias,
+                    whitespaceTokenIDs: setup.whitespaceTokenIDs
+                ) { text in
+                    outputBuffer += text
+                    return !Task.isCancelled
+                }
+            } catch GuidedGenerationError.incompleteOutput {
+                incomplete = true
+            }
+
+            try await emitToolCallingEvent(
+                outputBuffer: outputBuffer,
+                userResponseSchema: request.schema,
+                entryID: entryID,
+                toolCallsEntryID: toolCallsEntryID,
+                channel: channel
+            )
+
+            if let generatedTokenCount {
+                // Output total spans both phases (reasoning + envelope);
+                // the reasoning subset is the Phase-1 token count,
+                // clamped ≤ total.
+                let reasoningCount = reasoningTokenIDs.count
+                let totalOutput = generatedTokenCount + reasoningCount
+                await channel.send(
+                    .response(
+                        entryID: entryID,
+                        action: .updateUsage(
+                            input: .init(
+                                totalTokenCount: toolAwareInput.text.tokens
+                                    .size,
+                                cachedTokenCount: 0
+                            ),
+                            output: .init(
+                                totalTokenCount: totalOutput,
+                                reasoningTokenCount: Swift.min(
+                                    reasoningCount, totalOutput)
+                            )
+                        )
+                    ))
+            }
+
+            if incomplete {
+                await channel.send(
+                    .response(
+                        entryID: entryID,
+                        action: .updateMetadata(["incompleteOutput": true]))
+                )
+            }
+
+            return true
+        }
+
+        /// Guided-generation path: streams text deltas constrained to the
+        /// developer's JSON schema as they arrive.
+        ///
+        /// - Parameters:
+        ///   - schemaJSON: The developer-supplied JSON schema.
+        ///   - input: The rendered prompt to generate from.
+        ///   - modelID: The model identifier for constraint/tokenizer caches.
+        ///   - requestedMaxTokens: The caller's token budget override, if any.
+        ///   - entryID: The response entry to stream output into.
+        ///   - context: The loaded model context.
+        ///   - channel: The generation channel to send events on.
+        /// - Throws: Whatever the grammar/generation calls throw.
+        private func runGuidedGeneration(
+            schemaJSON: String,
+            input: LMInput,
+            modelID: String,
+            requestedMaxTokens: Int?,
+            entryID: String,
+            context: ModelContext,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws {
+            let setup = try await prepareConstraintSetup(
+                modelID: modelID,
+                context: context,
+                kind: .json,
+                constraintSource: schemaJSON,
+                reserveEstimateSource: schemaJSON,
+                requestedMaxTokens: requestedMaxTokens
+            )
+
+            // GuidedGenerationLoop.run's emit closure is synchronous (for
+            // performance -- it runs inside the tight MLX generation loop).
+            // channel.send is async. Bridge via an AsyncStream + concurrent
+            // forwarder so text deltas stream to the channel in order.
+            let (textStream, textContinuation) = AsyncStream<String>
+                .makeStream()
+            async let forwarder: Void = {
+                for await text in textStream {
+                    await channel.send(
+                        .response(
+                            entryID: entryID,
+                            action: .appendText(text, tokenCount: 1)
+                        ))
+                }
+            }()
+
+            var incomplete = false
+            var generatedTokenCount: Int?
+            do {
+                generatedTokenCount = try GuidedGenerationLoop.run(
+                    input: input,
+                    context: context,
+                    constraint: setup.constraint,
+                    maxTokens: setup.maxTokens,
+                    vocabSize: Int(setup.xgTokenizer.vocabSize),
+                    completionReserve: setup.completionReserve,
+                    hardReserve: setup.hardReserve,
+                    closingBias: setup.closingBias,
+                    whitespaceBias: setup.whitespaceBias,
+                    whitespaceTokenIDs: setup.whitespaceTokenIDs
+                ) { text in
+                    textContinuation.yield(text)
+                    return !Task.isCancelled
+                }
+            } catch GuidedGenerationError.incompleteOutput {
+                // Grammar exhausted maxTokens before reaching a stop state.
+                // Text deltas already emitted are best-effort output.
+                incomplete = true
+            }
+            textContinuation.finish()
+            await forwarder
+
+            if let generatedTokenCount {
+                await channel.send(
+                    .response(
+                        entryID: entryID,
+                        action: .updateUsage(
+                            input: .init(
+                                totalTokenCount: input.text.tokens.size,
+                                cachedTokenCount: 0
+                            ),
+                            output: .init(
+                                totalTokenCount: generatedTokenCount,
+                                reasoningTokenCount: 0
+                            )
+                        )
+                    ))
+            }
+
+            if incomplete {
+                await channel.send(
+                    .response(
+                        entryID: entryID,
+                        action: .updateMetadata(["incompleteOutput": true]))
+                )
             }
         }
 

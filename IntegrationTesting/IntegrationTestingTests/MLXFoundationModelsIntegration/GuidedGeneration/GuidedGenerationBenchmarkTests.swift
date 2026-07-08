@@ -324,7 +324,7 @@ struct GuidedGenerationBenchmarkTests {
         let modelID = TestFixtures.defaultModelID
         let (xgTokenizer, hostTokenizer): (GrammarTokenizer, any Tokenizer) =
             try await container.perform { context in
-                let xg = try await MLXLanguageModel.makeXGTokenizer(
+                let xg = try await MLXLanguageModel.makeXgTokenizer(
                     modelID: modelID,
                     tokenizer: context.tokenizer
                 )
@@ -447,7 +447,7 @@ struct GuidedGenerationBenchmarkTests {
         modelID: String = TestFixtures.defaultModelID
     ) async throws -> RunResult {
         try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer
             )

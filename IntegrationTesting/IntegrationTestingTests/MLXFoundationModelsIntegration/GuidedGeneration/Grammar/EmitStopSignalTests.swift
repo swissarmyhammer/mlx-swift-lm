@@ -53,7 +53,7 @@ struct EmitStopSignalTests {
         let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
 
         try await container.perform { context in
-            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+            let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: TestFixtures.defaultModelID,
                 tokenizer: context.tokenizer
             )
