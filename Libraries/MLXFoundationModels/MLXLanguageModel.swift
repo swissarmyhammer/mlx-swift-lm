@@ -1831,7 +1831,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // Deltas already emitted (or buffered) are best-effort
                 // output; `generatedTokenIDs` still holds every token
                 // `onTokenCommitted` reported before the throw, so a
-                // partial cache commit below is still trustworthy.
+                // partial cache commit below is still trustworthy. Report
+                // that same count for usage too -- `GuidedGenerationLoop.run`
+                // doesn't return a `RunResult` on this throw path, but the
+                // tally accumulated via `onTokenCommitted` is exactly what
+                // `RunResult.tokenCount` would have been, matching how
+                // `runReasoning` already reports usage on incomplete output.
+                generatedTokenCount = generatedTokenIDs.count
                 incomplete = true
             }
             await Self.commitPromptCache(

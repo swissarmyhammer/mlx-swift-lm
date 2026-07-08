@@ -63,7 +63,7 @@ public enum GuidedGenerationLoop {
     ///     no-op, so models that don't quantize are unaffected.
     ///   - kvGroupSize: Group size for KV-cache quantization (default 64, matching
     ///     `GenerateParameters`). Only used when `kvBits` is non-nil.
-    ///   - quantizedKVStart: Token offset at which quantization begins (default 0).
+    ///   - quantizedKvStart: Token offset at which quantization begins (default 0).
     ///     Only used when `kvBits` is non-nil.
     ///   - closingBias: Pre-computed logit bias array favoring closing tokens
     ///     (from `ClosingTokenBias.compute`). Nil disables forced completion.
@@ -105,13 +105,19 @@ public enum GuidedGenerationLoop {
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
     ///   exhausted before the grammar reaches a stop state.
     ///   `GuidedGenerationError.prematureEOS` if the model emits EOS
-    ///   before the grammar accepts. On either throw, `onTokenCommitted`
-    ///   has already reported every token fed so far -- a caller that
-    ///   accumulated those IDs still has a trustworthy partial sequence --
-    ///   but the possibly-quantization-updated `[KVCache]` array itself is
-    ///   not returned on a throwing exit (no `RunResult` is produced);
-    ///   `kvBits` is not set by any caller in this codebase today; wiring
-    ///   quantized KV caches through a throwing exit is not yet supported.
+    ///   before the grammar accepts. On either throw, no `RunResult` is
+    ///   produced -- NEITHER field, not just `cache`, is available from a
+    ///   throwing exit: there is no authoritative `tokenCount` attached to
+    ///   the thrown error either. `onTokenCommitted` has already reported
+    ///   every token fed so far, though, so a caller that needs the count
+    ///   on this path must tally the callback's calls itself (its running
+    ///   count is exactly `RunResult.tokenCount` would have been) -- the
+    ///   same pattern already used to report usage on an incomplete guided-
+    ///   generation round. The possibly-quantization-updated `[KVCache]`
+    ///   array is likewise only reachable by tallying, or -- since
+    ///   `kvBits` is not set by any caller in this codebase today -- simply
+    ///   unsupported in practice; wiring quantized KV caches through a
+    ///   throwing exit is not yet supported.
     @discardableResult
     public static func run(
         input: LMInput,
@@ -121,7 +127,7 @@ public enum GuidedGenerationLoop {
         vocabSize: Int,
         kvBits: Int? = nil,
         kvGroupSize: Int = 64,
-        quantizedKVStart: Int = 0,
+        quantizedKvStart: Int = 0,
         completionReserve: Int = 64,
         hardReserve: Int = 0,
         closingBias: MLXArray? = nil,
@@ -286,12 +292,12 @@ public enum GuidedGenerationLoop {
                 maskArray: maskArray,
                 closingBias: activeBias
             )
-            let tokenId = Int(token)
+            let tokenID = Int(token)
 
             // Track the sampled token for whitespace run detection.
             // Fast-forward tokens are NOT tracked (they are grammar-forced).
             if whitespaceBias != nil {
-                _ = whitespaceTracker.record(tokenID: tokenId)
+                _ = whitespaceTracker.record(tokenID: tokenID)
             }
 
             // Check EOS only when the grammar exposed a real mask
@@ -308,10 +314,10 @@ public enum GuidedGenerationLoop {
             // `applyMaskAndSample` set it to -inf, so argmax would not
             // have selected it.
             if mask.needsApply {
-                if tokenId == context.tokenizer.unknownTokenId || stopTokenIDs.contains(tokenId) {
+                if tokenID == context.tokenizer.unknownTokenId || stopTokenIDs.contains(tokenID) {
                     if diagnosticLog {
                         logger.info(
-                            "[GuidedGen] Stop reason: EOS/unk tokenId=\(tokenId) at token \(tokenCount)"
+                            "[GuidedGen] Stop reason: EOS/unk tokenID=\(tokenID) at token \(tokenCount)"
                         )
                     }
                     grammarStopped = true
@@ -323,7 +329,7 @@ public enum GuidedGenerationLoop {
             let commitResult = try constraint.commitToken(Int32(token))
 
             // Yield the sampled token
-            detokenizer.append(token: tokenId)
+            detokenizer.append(token: tokenID)
             if let text = detokenizer.next() {
                 accumulatedText += text
                 if !emit(text) { break }
@@ -406,22 +412,13 @@ public enum GuidedGenerationLoop {
                     }
                 }
 
-                // Quantize the KV cache after the forward pass(es), matching the
-                // unconstrained TokenIterator. No-op unless `kvBits` is set.
-                maybeQuantizeKVCache(
-                    cache: &cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
-                    quantizedKVStart: quantizedKVStart)
-
-                // Kick off GPU computation asynchronously
-                asyncEval(logits)
-
-                // Overlap: compute the next mask AND build its sample array on the
-                // CPU while the GPU runs the forward pass.
-                mask = try constraint.computeMask()
-                maskArray = buildMaskArray(for: mask, vocabSize: vocabSize, logitDim: logitDim)
-
-                // Wait for GPU to finish (may already be done)
-                eval(logits)
+                // Quantize the KV cache, compute the next mask, and overlap
+                // that CPU work with the forward pass's GPU work (matching
+                // the unconstrained TokenIterator's quantization behavior).
+                (mask, maskArray) = try Self.advanceMaskOnCPUWhileGPURuns(
+                    logits: logits, cache: &cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
+                    quantizedKvStart: quantizedKvStart, constraint: constraint,
+                    vocabSize: vocabSize, logitDim: logitDim)
             } else {
                 // Normal single-token forward pass (lazy)
                 let nextInput = LMInput.Text(tokens: MLXArray([Int32(token)]))
@@ -432,24 +429,15 @@ public enum GuidedGenerationLoop {
                 )
                 modelState = result.state
                 logits = result.logits
-                onTokenCommitted?(tokenId)
+                onTokenCommitted?(tokenID)
 
-                // Quantize the KV cache after the forward pass, matching the
-                // unconstrained TokenIterator. No-op unless `kvBits` is set.
-                maybeQuantizeKVCache(
-                    cache: &cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
-                    quantizedKVStart: quantizedKVStart)
-
-                // Kick off GPU computation asynchronously
-                asyncEval(logits)
-
-                // Overlap: compute the next mask AND build its sample array on the
-                // CPU while the GPU runs the forward pass.
-                mask = try constraint.computeMask()
-                maskArray = buildMaskArray(for: mask, vocabSize: vocabSize, logitDim: logitDim)
-
-                // Wait for GPU to finish (may already be done)
-                eval(logits)
+                // Quantize the KV cache, compute the next mask, and overlap
+                // that CPU work with the forward pass's GPU work (matching
+                // the unconstrained TokenIterator's quantization behavior).
+                (mask, maskArray) = try Self.advanceMaskOnCPUWhileGPURuns(
+                    logits: logits, cache: &cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
+                    quantizedKvStart: quantizedKvStart, constraint: constraint,
+                    vocabSize: vocabSize, logitDim: logitDim)
             }
         }
 
@@ -472,6 +460,54 @@ public enum GuidedGenerationLoop {
         }
 
         return RunResult(tokenCount: tokenCount, cache: cache)
+    }
+
+    /// Quantizes the KV cache (a no-op unless `kvBits` is set), then computes
+    /// the next grammar mask and its sample array while the GPU finishes the
+    /// forward pass that just ran -- the exact sequence `run`'s main loop
+    /// needs after every per-token model call, whether that call fed a
+    /// single sampled token or the last token of a fast-forward batch.
+    /// Extracted because both branches ran this identical 8-line sequence.
+    ///
+    /// - Parameters:
+    ///   - logits: The forward pass's output logits. Used only to drive the
+    ///     GPU overlap (`asyncEval` kicks it off, `eval` waits for it).
+    ///   - cache: The KV cache to quantize in place, matching `run`'s own
+    ///     `cache:` parameter semantics.
+    ///   - kvBits: Bit width for KV-cache quantization, or nil to disable.
+    ///   - kvGroupSize: Group size for KV-cache quantization.
+    ///   - quantizedKvStart: Token offset at which quantization begins.
+    ///   - constraint: The grammar constraint to compute the next mask from.
+    ///   - vocabSize: The grammar's vocabulary size.
+    ///   - logitDim: The model's logit dimension.
+    /// - Returns: The freshly computed mask and its prebuilt additive sample
+    ///   array (see `buildMaskArray`).
+    private static func advanceMaskOnCPUWhileGPURuns(
+        logits: MLXArray,
+        cache: inout [KVCache],
+        kvBits: Int?,
+        kvGroupSize: Int,
+        quantizedKvStart: Int,
+        constraint: GrammarConstraint,
+        vocabSize: Int,
+        logitDim: Int
+    ) throws -> (MaskResult, MLXArray?) {
+        maybeQuantizeKVCache(
+            cache: &cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
+            quantizedKVStart: quantizedKvStart)
+
+        // Kick off GPU computation asynchronously
+        asyncEval(logits)
+
+        // Overlap: compute the next mask AND build its sample array on the
+        // CPU while the GPU runs the forward pass.
+        let mask = try constraint.computeMask()
+        let maskArray = buildMaskArray(for: mask, vocabSize: vocabSize, logitDim: logitDim)
+
+        // Wait for GPU to finish (may already be done)
+        eval(logits)
+
+        return (mask, maskArray)
     }
 
     /// The outcome of a `run` call that reached a stop state: everything a
