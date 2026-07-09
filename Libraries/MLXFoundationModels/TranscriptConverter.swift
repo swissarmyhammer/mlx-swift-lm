@@ -56,7 +56,7 @@ struct TranscriptConverter {
                 // the next turn's prompt rather than being silently dropped.
                 guard let text = extractText(from: response.segments, includeStructure: true)
                 else {
-                    logger.warning("Skipping response entry with no text content")
+                    logger.warning("Skipping response entry with no text or structure content")
                     return []
                 }
                 return [Chat.Message.assistant(text)]
