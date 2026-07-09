@@ -2097,6 +2097,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 ? toolAwareInput
                 : LMInput(
                     tokens: MLXArray(toolAwareTokens + reasoningTokenIDs))
+            // Phase 1's reasoning tokens can push the prompt over the
+            // context window even when the original `toolAwareInput` (validated
+            // above) was within it -- re-validate the actual Phase 2 input,
+            // not just its no-reasoning-tokens starting point.
+            try Self.validateContextSize(
+                tokenCount: phase2Input.text.tokens.size, contextLength: contextLength)
             // Shared budget (match the unconstrained path): the
             // envelope continues under the remaining budget, floored
             // at the completion reserve so it always has room to close

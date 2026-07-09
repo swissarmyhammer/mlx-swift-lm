@@ -110,6 +110,124 @@ private struct ContextSizeFixedLengthTokenizer: MLXLMCommon.Tokenizer {
     }
 }
 
+/// A SentencePiece-style byte-fallback tokenizer (`<0xNN>` per-byte vocab --
+/// the same shape as `EagerFallbackPrepareOrderingTests.EagerFallbackByteFallbackTokenizer`
+/// / `ToolCallingSchemaTests.makeByteTokenizer()`, both proven to compile a
+/// real `GrammarConstraint`). Unlike `ContextSizeFixedLengthTokenizer` (which
+/// can't round-trip real text), this one actually encodes/decodes real UTF-8
+/// bytes, so it doubles as both `applyChatTemplate`'s tool-aware prompt AND
+/// the tokenizer `ReasoningTokenCollector`'s `NaiveStreamingDetokenizer`
+/// decodes Phase 1's generated tokens through -- required for the
+/// think-then-call regression test below, the only test in this file whose
+/// prompt actually reaches real xgrammar/`GrammarConstraint` compilation
+/// (every other test's context-size check fires before `prepareConstraintSetup`
+/// ever runs).
+private struct ContextSizeThinkThenCallByteTokenizer: MLXLMCommon.Tokenizer {
+    private static let vocabSize = 256
+
+    /// Rendered as-is (byte-encoded) for `applyChatTemplate` -- the test
+    /// controls this directly instead of deriving it from `messages`/`tools`.
+    let promptText: String
+
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        Array(text.utf8).map { Int($0) }
+    }
+
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        String(bytes: tokenIds.map { UInt8($0 & 0xFF) }, encoding: .utf8) ?? ""
+    }
+
+    func convertTokenToId(_ token: String) -> Int? {
+        guard token.hasPrefix("<0x"), token.hasSuffix(">") else { return nil }
+        return UInt8(token.dropFirst(3).dropLast(), radix: 16).map(Int.init)
+    }
+
+    func convertIdToToken(_ id: Int) -> String? {
+        guard id >= 0 && id < Self.vocabSize else { return nil }
+        return String(format: "<0x%02X>", id)
+    }
+
+    var bosToken: String? { nil }
+    var eosToken: String? { String(format: "<0x%02X>", Self.vocabSize - 1) }
+    var unknownToken: String? { nil }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] {
+        encode(text: promptText, addSpecialTokens: false)
+    }
+}
+
+/// Thrown from `ContextSizeReasoningCloseModel.prepare` on any call after the
+/// first, proving Phase 2 (`executeToolCallingPhase2`/`GuidedGenerationLoop.run`,
+/// which starts its own `TokenIterator` and so calls `prepare` again) was
+/// reached. A dedicated error (rather than reusing
+/// `ContextSizeGenerationProbeModel`/`ContextSizeGenerationProbeError`) because
+/// this model's *first* `prepare` call must succeed -- it needs to actually
+/// drive Phase 1's reasoning-token generation loop -- so "generation was
+/// reached" here specifically means "generation reached a SECOND round",
+/// i.e. Phase 2 starting.
+private struct ContextSizeReasoningPhase2ReachedError: Error {}
+
+/// A `LanguageModel` whose `prepare` succeeds exactly once (see
+/// `ContextSizeReasoningPhase2ReachedError`) and whose `callAsFunction`
+/// deterministically emits a planned token sequence via one-hot logits at
+/// each generated position -- the same idiom as `MockMainModel` in
+/// `MTPSpeculativeTokenIteratorTests.swift`, minus the MTP-specific state
+/// hooks this test doesn't need. Drives Phase 1's real (if tiny) token-by-token
+/// generation loop so it closes normally -- having generated a controlled,
+/// non-zero number of reasoning tokens -- rather than being cut off at
+/// `maxTokens` (a cut-off Phase 1 returns before `phase2Input` is ever built,
+/// which would prove nothing about this test's fix).
+private final class ContextSizeReasoningCloseModel: Module, MLXLMCommon.LanguageModel,
+    KVCacheDimensionProvider
+{
+    var kvHeads: [Int] { [1] }
+
+    /// Token values returned in increasing generated-position order (index 0
+    /// covers the prompt's first position). Only the LAST position of each
+    /// forward call is ever sampled (`TokenIterator.convertToToken` reads
+    /// `logits[..., -1, ...]`), so entries covering the prompt's earlier
+    /// positions are never consulted and can be filler.
+    private let plannedTokens: [Int32]
+    private var position = 0
+    private var prepareCallCount = 0
+
+    init(plannedTokens: [Int32]) {
+        self.plannedTokens = plannedTokens
+        super.init()
+    }
+
+    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+        prepareCallCount += 1
+        guard prepareCallCount == 1 else {
+            throw ContextSizeReasoningPhase2ReachedError()
+        }
+        return .tokens(input.text)
+    }
+
+    /// Returns deterministic one-hot logits at each position so the default
+    /// (non-zero-temperature) categorical sampler picks the planned token: the
+    /// gap between the planned token's logit and every other's is large enough
+    /// that softmax collapses every other token's probability to (numerically)
+    /// zero, making the sample deterministic in practice without needing
+    /// `.greedy`/argmax sampling to be forced explicitly.
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        let positions = inputs.dim(-1)
+        let vocab = 256
+        var data = [Float](repeating: 0, count: positions * vocab)
+        for i in 0 ..< positions {
+            let tokIdx = position + i
+            let tok = tokIdx < plannedTokens.count ? Int(plannedTokens[tokIdx]) : 0
+            data[i * vocab + tok] = 100
+        }
+        position += positions
+        return MLXArray(data, [1, positions, vocab])
+    }
+}
+
 /// Builds an `MLXLanguageModel` backed by a real on-disk `config.json`
 /// (so `Executor.respond`'s `context.configuration.modelDirectory` resolves
 /// and the context-length decode in `prepareRespondSetup` has something to
@@ -128,6 +246,14 @@ private struct ContextSizeFixedLengthTokenizer: MLXLMCommon.Tokenizer {
 ///   - tokenizer: The `Tokenizer` `context.tokenizer` resolves to. Only the
 ///     tool-calling test needs to control this (`applyChatTemplate`'s
 ///     output length); every other path renders through `processor` instead.
+///   - model: A factory for the `context.model` stand-in, invoked fresh
+///     inside the (`@Sendable`) `load` closure below -- a factory rather
+///     than a plain instance because `LanguageModel` isn't `Sendable`, so an
+///     already-constructed instance can't be captured across the closure
+///     boundary. Defaults to `ContextSizeGenerationProbeModel`, which throws
+///     the instant real generation starts; only the think-then-call
+///     regression test needs to override this with a model that actually
+///     generates (Phase 1 must run for real to produce reasoning tokens).
 /// - Returns: The constructed model, and a `cleanup` closure the caller must
 ///   run (via `defer`) to remove the temporary model directory.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -136,7 +262,10 @@ private func makeContextSizeTestModel(
     processor: any UserInputProcessor,
     capabilities: [LanguageModelCapabilities.Capability] = [],
     reasoningConfig: ReasoningConfig? = nil,
-    tokenizer: any MLXLMCommon.Tokenizer = ByteTokenizer()
+    tokenizer: any MLXLMCommon.Tokenizer = ByteTokenizer(),
+    model modelFactory: @escaping @Sendable () -> any MLXLMCommon.LanguageModel = {
+        ContextSizeGenerationProbeModel()
+    }
 ) throws -> (model: MLXLanguageModel, cleanup: () -> Void) {
     let modelDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent("mlx-context-size-test-\(UUID().uuidString)", isDirectory: true)
@@ -161,7 +290,7 @@ private func makeContextSizeTestModel(
             ModelContainer(
                 context: ModelContext(
                     configuration: configuration,
-                    model: ContextSizeGenerationProbeModel(),
+                    model: modelFactory(),
                     processor: processor,
                     tokenizer: tokenizer))
         })
@@ -352,6 +481,98 @@ struct ContextSizeValidationTests {
             model: model,
             request: makeContextSizeTestRequest(enabledTools: [weatherTool]),
             expectedContextSize: 4, expectedTokenCount: 10)
+    }
+
+    @Test(
+        """
+        Phase 1's reasoning tokens pushing the tool-aware prompt over the context length \
+        throws contextSizeExceeded before Phase 2 starts (think-then-call path)
+        """
+    )
+    func exceedingContextLengthAfterThinkThenCallPhase1ThrowsBeforePhase2() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // `.templateFlag` is required for `makeThinkThenCallConfig` to resolve
+        // think-then-call at all (see `runToolCalling`), alongside declaring
+        // `.reasoning`. The tool-aware prompt text is exactly the reasoning
+        // config's start delimiter, unclosed -- `reasoningPrimedInside`
+        // (which decodes the prompt's tail) then reports the prompt as
+        // already inside a reasoning span, mirroring a DeepSeek-R1-style
+        // template that prefills `<think>` into the assistant turn. That
+        // means Phase 1 only has to generate the CLOSING delimiter to close
+        // cleanly, not the opening one too -- keeping the real generation
+        // loop this test drives trivially short.
+        let reasoningConfig = ReasoningConfig(
+            startDelimiter: "<think>", endDelimiter: "</think>",
+            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true))
+        let promptText = "<think>"
+        let tokenizer = ContextSizeThinkThenCallByteTokenizer(promptText: promptText)
+        let promptTokenCount = Array(promptText.utf8).count
+
+        // Phase 1 must generate a real, small number of tokens before
+        // closing `</think>` -- one byte-token per character of the closing
+        // delimiter, via a model that deterministically emits them in order.
+        // Entries before index `promptTokenCount - 1` are never read (only
+        // the LAST position of each forward call is sampled), so they're
+        // filler.
+        let closingDelimiterTokens = Array("</think>".utf8).map { Int32($0) }
+        let plannedTokens =
+            Array(repeating: Int32(0), count: promptTokenCount - 1) + closingDelimiterTokens
+
+        // Sits strictly between the prompt alone (7 tokens, within limits --
+        // the INITIAL `toolAwareInput` check must pass) and prompt + Phase
+        // 1's reasoning tokens (7 + 8 = 15, over limit) -- proving the fix's
+        // re-validation of `phase2Input`, not the earlier, already-covered
+        // `toolAwareInput` check.
+        let contextLength = 10
+
+        let (model, cleanup) = try makeContextSizeTestModel(
+            maxPositionEmbeddings: contextLength,
+            processor: ContextSizeFixedLengthProcessor(tokenCount: 0),
+            capabilities: [.toolCalling, .reasoning],
+            reasoningConfig: reasoningConfig,
+            tokenizer: tokenizer,
+            model: { ContextSizeReasoningCloseModel(plannedTokens: plannedTokens) })
+        defer { cleanup() }
+
+        let weatherTool = Transcript.ToolDefinition(
+            name: "get_weather", description: "Get current weather",
+            parameters: ContextSizeWeatherArgs.generationSchema)
+
+        let executor = try makeMLXExecutor(for: model)
+        let channel = LanguageModelExecutorGenerationChannel()
+        let drainer = Task<Void, Never> {
+            do {
+                for try await _ in channel {}
+            } catch {
+                // Draining only; the typed error surfaces via respond()'s throw below.
+            }
+        }
+        defer { drainer.cancel() }
+
+        do {
+            try await executor.respond(
+                to: makeContextSizeTestRequest(enabledTools: [weatherTool]),
+                model: model, streamingInto: channel)
+            Issue.record("Expected LanguageModelError.contextSizeExceeded")
+        } catch is ContextSizeReasoningPhase2ReachedError {
+            Issue.record(
+                """
+                Phase 2 was reached even though Phase 1's reasoning tokens push the prompt \
+                over the model's context length -- the Phase-2 re-validation either didn't \
+                run or didn't fire.
+                """
+            )
+        } catch let error as LanguageModelError {
+            guard case .contextSizeExceeded(let details) = error else {
+                Issue.record("Expected .contextSizeExceeded, got \(error)")
+                return
+            }
+            #expect(details.contextSize == contextLength)
+            #expect(details.tokenCount == promptTokenCount + closingDelimiterTokens.count)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
     }
 }
 
