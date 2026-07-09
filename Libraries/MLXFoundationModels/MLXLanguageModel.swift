@@ -845,6 +845,79 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
         }
 
+        /// Calls `processor.prepare(input:)`, remapping a failure to
+        /// `LanguageModelError.unsupportedTranscriptContent` when `messages`
+        /// carries any image content.
+        ///
+        /// The concrete VLM's own image-specific errors (mismatched image
+        /// count, unsupported resolution, decode/resize failure --
+        /// `MLXVLM.VLMError` and its per-architecture siblings) live in
+        /// MLXVLM, which MLXFoundationModels deliberately does not depend on
+        /// (see Package.swift's "runtime trampoline discovery" note), so
+        /// this maps by content shape -- an image is present somewhere in
+        /// what's being prepared -- rather than by catching a module-private
+        /// error type. A failure while `messages` carries no images passes
+        /// through unchanged: remapping unconditionally would misrepresent
+        /// an unrelated failure (a tokenizer/config issue, say) as a
+        /// vision-content problem. Cancellation and already-typed
+        /// `LanguageModelError`s also pass through unchanged, so this never
+        /// re-wraps a case another layer already mapped correctly.
+        ///
+        /// `messages` is `LanguageModelExecutorGenerationRequest`'s full,
+        /// re-rendered transcript, not just new content since the prior
+        /// round (the `LanguageModelExecutor` protocol has no session
+        /// identity -- every `respond()` call receives the complete history
+        /// again, see `TranscriptConverter`'s doc comment). So this can
+        /// still remap a failure that's unrelated to imagery if an *earlier*
+        /// turn carried an image and a *later*, text-only turn's `prepare`
+        /// call happens to fail for some other reason -- there is no
+        /// narrower signal available without the concrete `VLMError` type.
+        /// This is accepted as the best available precision given the
+        /// architecture boundary above: an image genuinely present anywhere
+        /// in the rendered prompt is exactly what the processor has to
+        /// handle on every call (a multi-turn VLM conversation re-processes
+        /// every referenced image each round), so "an image is somewhere in
+        /// what's being prepared" is a real, non-fabricated correlate of
+        /// "this failure could be image-related" -- narrowing to only the
+        /// newest turn would *miss* genuine image failures instead (e.g. a
+        /// `VLMError.singleImageAllowed`-shaped rejection triggered by an
+        /// older image still in scope, even though the newest turn added no
+        /// new one).
+        ///
+        /// - Parameters:
+        ///   - processor: The model's `UserInputProcessor`.
+        ///   - input: The `UserInput` to prepare.
+        ///   - messages: The request's full rendered chat messages, checked
+        ///     for image content.
+        ///   - transcriptEntries: The request's full transcript, to name the
+        ///     entries that carried the image content in the mapped error.
+        /// - Throws: `LanguageModelError.unsupportedTranscriptContent` when
+        ///   `processor` fails while `messages` carries image content; the
+        ///   original error otherwise.
+        static func preparedInputMappingImageFailures(
+            processor: any UserInputProcessor,
+            input: UserInput,
+            messages: [Chat.Message],
+            transcriptEntries: some Collection<Transcript.Entry>
+        ) async throws -> LMInput {
+            do {
+                return try await processor.prepare(input: input)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as LanguageModelError {
+                throw error
+            } catch {
+                guard messages.contains(where: { !$0.images.isEmpty }) else { throw error }
+                throw LanguageModelError.unsupportedTranscriptContent(
+                    LanguageModelError.UnsupportedTranscriptContent(
+                        unsupportedContent: TranscriptConverter.entriesWithImages(
+                            for: transcriptEntries),
+                        debugDescription:
+                            "This request includes image content the local vision pipeline could not process: \(error.localizedDescription)"
+                    ))
+            }
+        }
+
         /// Configuration for creating and caching executors.
         public struct Configuration: Hashable, Sendable {
             /// The model identifier this executor uses for loading and metadata.
@@ -1147,7 +1220,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let userInput = UserInput(chat: messages)
             let input: LMInput? =
                 if needsEagerInput {
-                    try await context.processor.prepare(input: userInput)
+                    try await Self.preparedInputMappingImageFailures(
+                        processor: context.processor, input: userInput, messages: messages,
+                        transcriptEntries: request.transcript)
                 } else {
                     nil
                 }
@@ -1217,6 +1292,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 suppressedInput = try await Self.preparedInput(
                     messages: messages, reasoningConfig: suppressionConfig,
                     thinkingEnabled: false, processor: context.processor,
+                    transcriptEntries: request.transcript,
                     cannotDisableMessage:
                         "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
                 )
@@ -1234,6 +1310,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 let reasoningInput = try await Self.preparedInput(
                     messages: messages, reasoningConfig: reasoningConfig,
                     thinkingEnabled: thinkingEnabled, processor: context.processor,
+                    transcriptEntries: request.transcript,
                     cannotDisableMessage:
                         "This model always reasons; reasoning cannot be disabled via reasoningLevel."
                 )
@@ -2471,6 +2548,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             reasoningConfig: ReasoningConfig,
             thinkingEnabled: Bool?,
             processor: any UserInputProcessor,
+            transcriptEntries: some Collection<Transcript.Entry>,
             cannotDisableMessage: String
         ) async throws -> LMInput {
             let additionalContext: [String: any Sendable]?
@@ -2483,8 +2561,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         capability: .reasoning,
                         debugDescription: cannotDisableMessage))
             }
-            return try await processor.prepare(
-                input: UserInput(chat: messages, additionalContext: additionalContext))
+            return try await preparedInputMappingImageFailures(
+                processor: processor,
+                input: UserInput(chat: messages, additionalContext: additionalContext),
+                messages: messages, transcriptEntries: transcriptEntries)
         }
 
         /// Maps a requested reasoning level to a thinking on/off/unspecified

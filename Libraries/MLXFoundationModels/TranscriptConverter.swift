@@ -254,6 +254,34 @@ struct TranscriptConverter {
             return .ciImage(imageAttachment.ciImage)
         }
     }
+
+    /// The transcript entries that carry at least one image attachment
+    /// segment (an `.instructions` or `.prompt` entry with an
+    /// `.attachment(.image)` segment -- the only entry kinds `extractImages`
+    /// is ever consulted for; `.response`/`.toolCalls`/`.toolOutput` never
+    /// carry attachment segments in this converter's design).
+    ///
+    /// Used to populate `LanguageModelError.UnsupportedTranscriptContent`'s
+    /// `unsupportedContent` when the local vision pipeline fails to process
+    /// this round's image content, so the typed error names exactly which
+    /// transcript entries carried it.
+    ///
+    /// - Parameter entries: Transcript entries from FoundationModels
+    /// - Returns: The entries carrying image content, in transcript order
+    static func entriesWithImages(for entries: some Collection<Transcript.Entry>)
+        -> [Transcript.Entry]
+    {
+        entries.filter { entry in
+            switch entry {
+            case .instructions(let instructions):
+                return !extractImages(from: instructions.segments).isEmpty
+            case .prompt(let prompt):
+                return !extractImages(from: prompt.segments).isEmpty
+            default:
+                return false
+            }
+        }
+    }
 }
 
 #endif  // canImport(FoundationModels)
