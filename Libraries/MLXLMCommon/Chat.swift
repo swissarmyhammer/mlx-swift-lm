@@ -84,6 +84,12 @@ public enum Chat {
             Self(role: .user, content: content, images: images, videos: videos, audios: audios)
         }
 
+        /// Creates a tool-result message containing the output of an executed tool.
+        ///
+        /// - Parameters:
+        ///   - content: The tool's text (or JSON-rendered structured) result.
+        ///   - images: Image attachments the tool's result carried, if any.
+        ///   - id: Correlates this result with the tool call that produced it.
         public static func tool(
             _ content: String, images: [UserInput.Image] = [], id: String? = nil
         ) -> Self {
