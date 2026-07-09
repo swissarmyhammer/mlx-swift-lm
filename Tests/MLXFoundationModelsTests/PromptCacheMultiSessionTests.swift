@@ -120,7 +120,7 @@ struct PromptCacheMultiSessionTests {
     func concurrentSessionsStayIsolatedAndReuse() async throws {
         let cache = PromptCache()
         let modelID = "multi-session-concurrent-\(UUID().uuidString)"
-        let sessionCount = PromptCache.maxSlotsPerModel  // at cap: everyone can keep a slot
+        let sessionCount = PromptCache.defaultMaxSlotsPerModel  // at cap: everyone can keep a slot
         let turnCount = 5
         let models = (0 ..< sessionCount).map { _ in PromptCacheProbeModel() }
 
@@ -198,7 +198,7 @@ struct PromptCacheMultiSessionTests {
         // Round-robin over more sessions than slots: by the time a session's
         // next turn arrives, its slot has been LRU-evicted by the sessions
         // that ran in between.
-        let sessionCount = PromptCache.maxSlotsPerModel + 2
+        let sessionCount = PromptCache.defaultMaxSlotsPerModel + 2
         let turnCount = 3
 
         var sessions = (0 ..< sessionCount).map { SimulatedSession(id: $0) }

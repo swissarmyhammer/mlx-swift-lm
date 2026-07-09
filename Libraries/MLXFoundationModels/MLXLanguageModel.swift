@@ -546,6 +546,26 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         await promptCache.evictAll()
     }
 
+    /// Sets how many conversations can retain reusable KV-cache state per
+    /// model (default `4`), process-wide — the same scope as ``evictAll()``.
+    ///
+    /// FoundationModels never tells the executor how many
+    /// `LanguageModelSession`s exist, so this capacity cannot be inferred
+    /// from session concurrency — declare it to match how many
+    /// conversations your app interleaves against one model. It bounds KV
+    /// *retention between turns*, not simultaneous generation: any number
+    /// of sessions still work above the limit, but the least recently used
+    /// ones fall back to a full prompt re-prefill on their next turn. Each
+    /// retained conversation holds a full `[KVCache]` in unified memory,
+    /// so raise it deliberately for long contexts.
+    ///
+    /// Clamped to at least 1; use ``evictAll()`` to drop retained state
+    /// outright. Takes effect as generations complete — it does not evict
+    /// immediately.
+    public static func setPromptCacheSlotLimit(_ limit: Int) async {
+        await promptCache.setMaxSlotsPerModel(limit)
+    }
+
     /// Drops this model from the shared cache, freeing the GPU memory held by its
     /// weights. A subsequent `respond()`/`preload()` triggers a fresh load
     /// (reusing the on-disk snapshot if the model was previously downloaded).

@@ -29,14 +29,36 @@ import MLXLMCommon
 /// `MLXLanguageModel`.
 actor PromptCache {
 
-    /// Maximum number of remembered slots kept per model. Bounds
-    /// per-model memory growth under multi-session usage (multiple
+    /// Default for ``maxSlotsPerModel``: how many remembered slots are
+    /// kept per model unless the host app configures otherwise (see
+    /// `MLXLanguageModel.setPromptCacheSlotLimit(_:)`). Bounds per-model
+    /// memory growth under multi-session usage (multiple
     /// concurrent/alternating conversations against the same model) while
     /// still giving several recent conversations a chance at KV-cache
     /// reuse. Matches this being a single-process client library serving
     /// a handful of concurrent sessions, not llama.cpp server's
     /// many-concurrent-client `--parallel N` (commonly much larger).
-    static let maxSlotsPerModel = 4
+    /// There is no session-count signal to derive this from:
+    /// FoundationModels never tells the executor how many
+    /// `LanguageModelSession`s exist, so capacity must be declared, not
+    /// inferred.
+    static let defaultMaxSlotsPerModel = 4
+
+    /// Maximum number of remembered slots kept per model; consulted by
+    /// `store`'s eviction. Actor-isolated mutable state, adjusted via
+    /// ``setMaxSlotsPerModel(_:)``.
+    private var maxSlotsPerModel = PromptCache.defaultMaxSlotsPerModel
+
+    /// Sets how many conversations can retain KV state per model.
+    ///
+    /// Clamped to at least 1 (a zero/negative limit would make `store` a
+    /// no-op and silently disable caching -- an explicit `evictAll()` is
+    /// the way to opt out). Takes effect on subsequent `store` calls; an
+    /// already-over-limit slot list shrinks the next time that model
+    /// stores a slot.
+    func setMaxSlotsPerModel(_ limit: Int) {
+        maxSlotsPerModel = max(1, limit)
+    }
 
     /// One remembered `(token sequence, KV cache)` slot, plus a
     /// monotonically increasing recency stamp.
@@ -417,9 +439,9 @@ actor PromptCache {
     func store(modelID: String, tokens: [Int], cache: SendableBox<[KVCache]>) {
         var slots = entries[modelID] ?? []
         slots.append(Slot(tokens: tokens, cache: cache.consume(), lastUsed: nextRecency()))
-        if slots.count > Self.maxSlotsPerModel {
+        if slots.count > maxSlotsPerModel {
             slots.sort { $0.lastUsed < $1.lastUsed }
-            slots.removeFirst(slots.count - Self.maxSlotsPerModel)
+            slots.removeFirst(slots.count - maxSlotsPerModel)
         }
         entries[modelID] = slots
     }

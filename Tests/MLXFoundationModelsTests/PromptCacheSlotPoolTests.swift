@@ -34,7 +34,7 @@ struct PromptCacheLRUEvictionTests {
         let modelID = "lru-overflow-\(UUID().uuidString)"
 
         // maxSlotsPerModel + 1 slots, stored oldest-first.
-        let sessionCount = PromptCache.maxSlotsPerModel + 1
+        let sessionCount = PromptCache.defaultMaxSlotsPerModel + 1
         var storedSlots: [KVCacheSimple] = []
         for session in 0 ..< sessionCount {
             storedSlots.append(
@@ -66,7 +66,7 @@ struct PromptCacheLRUEvictionTests {
 
         // Fill to the cap, oldest-first: session 0 is the LRU slot.
         var storedSlots: [KVCacheSimple] = []
-        for session in 0 ..< PromptCache.maxSlotsPerModel {
+        for session in 0 ..< PromptCache.defaultMaxSlotsPerModel {
             storedSlots.append(
                 await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(session)))
         }
@@ -86,7 +86,7 @@ struct PromptCacheLRUEvictionTests {
 
         // A fifth prefix overflows the cap.
         await storeWellFormedSlot(
-            cache, modelID: modelID, tokens: sessionTokens(PromptCache.maxSlotsPerModel))
+            cache, modelID: modelID, tokens: sessionTokens(PromptCache.defaultMaxSlotsPerModel))
 
         // Session 1 (now least recently used) was evicted...
         let evicted = await resolveOnce(
@@ -103,18 +103,94 @@ struct PromptCacheLRUEvictionTests {
             "the freshly-touched slot must have been protected from eviction")
     }
 
+    @Test("lowering the slot limit evicts at the new cap on the next store")
+    func loweredSlotLimitEvictsAtNewCap() async {
+        let cache = PromptCache()
+        let modelID = "lru-lowered-\(UUID().uuidString)"
+        await cache.setMaxSlotsPerModel(2)
+
+        var storedSlots: [KVCacheSimple] = []
+        for session in 0 ..< 3 {
+            storedSlots.append(
+                await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(session)))
+        }
+
+        // With the cap at 2, the oldest of the three must be gone...
+        let evicted = await resolveOnce(
+            cache, modelID: modelID, newTokens: sessionTokens(0) + [9], model: model)
+        #expect(
+            cacheIdentity(evicted) != ObjectIdentifier(storedSlots[0]),
+            "with the limit lowered to 2, storing a third slot must evict the oldest")
+
+        // ...and the two newest must both survive.
+        for session in 1 ..< 3 {
+            let resolved = await resolveOnce(
+                cache, modelID: modelID, newTokens: sessionTokens(session) + [9], model: model)
+            #expect(
+                cacheIdentity(resolved) == ObjectIdentifier(storedSlots[session]),
+                "slot for session \(session) must survive under the lowered limit")
+        }
+    }
+
+    @Test("raising the slot limit retains more conversations than the default")
+    func raisedSlotLimitRetainsMoreThanDefault() async {
+        let cache = PromptCache()
+        let modelID = "lru-raised-\(UUID().uuidString)"
+        let limit = PromptCache.defaultMaxSlotsPerModel + 2
+        await cache.setMaxSlotsPerModel(limit)
+
+        var storedSlots: [KVCacheSimple] = []
+        for session in 0 ..< limit {
+            storedSlots.append(
+                await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(session)))
+        }
+
+        for session in 0 ..< limit {
+            let resolved = await resolveOnce(
+                cache, modelID: modelID, newTokens: sessionTokens(session) + [9], model: model)
+            #expect(
+                cacheIdentity(resolved) == ObjectIdentifier(storedSlots[session]),
+                "with the limit raised to \(limit), all \(limit) slots must survive (session \(session))"
+            )
+        }
+    }
+
+    @Test(
+        "a zero or negative slot limit clamps to one retained conversation, never zero",
+        arguments: [0, -3])
+    func nonPositiveSlotLimitClampsToOne(limit: Int) async {
+        let cache = PromptCache()
+        let modelID = "lru-clamped-\(UUID().uuidString)"
+        await cache.setMaxSlotsPerModel(limit)
+
+        let older = await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(0))
+        let newer = await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(1))
+
+        // Exactly one slot retained: the newest survives, the older is gone.
+        let resolvedNewer = await resolveOnce(
+            cache, modelID: modelID, newTokens: sessionTokens(1) + [9], model: model)
+        #expect(
+            cacheIdentity(resolvedNewer) == ObjectIdentifier(newer),
+            "limit \(limit) must clamp to 1 and still retain the newest conversation")
+        let resolvedOlder = await resolveOnce(
+            cache, modelID: modelID, newTokens: sessionTokens(0) + [9], model: model)
+        #expect(
+            cacheIdentity(resolvedOlder) != ObjectIdentifier(older),
+            "limit \(limit) must clamp to 1 and evict everything but the newest conversation")
+    }
+
     @Test("storing exactly maxSlotsPerModel slots evicts nothing")
     func atCapNothingEvicted() async {
         let cache = PromptCache()
         let modelID = "lru-at-cap-\(UUID().uuidString)"
 
         var storedSlots: [KVCacheSimple] = []
-        for session in 0 ..< PromptCache.maxSlotsPerModel {
+        for session in 0 ..< PromptCache.defaultMaxSlotsPerModel {
             storedSlots.append(
                 await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(session)))
         }
 
-        for session in 0 ..< PromptCache.maxSlotsPerModel {
+        for session in 0 ..< PromptCache.defaultMaxSlotsPerModel {
             let resolved = await resolveOnce(
                 cache, modelID: modelID, newTokens: sessionTokens(session) + [9], model: model)
             #expect(
