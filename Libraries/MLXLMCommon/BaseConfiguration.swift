@@ -191,6 +191,18 @@ public struct BaseConfiguration: Codable, Sendable {
     /// EOS token IDs from config.json. Can be a single Int or an array of Ints.
     public var eosTokenIds: IntOrIntArray?
 
+    /// The model's maximum context window length (in tokens), read from
+    /// `config.json`'s `max_position_embeddings` field.
+    ///
+    /// This is the dominant convention across the architectures this
+    /// repository ports (Llama, Qwen, Gemma, Phi, GLM, Olmo, and most
+    /// others all name it this way), but it is not universal: some
+    /// architectures expose context length under a different key, or omit
+    /// it entirely. Treat `nil` as "unknown" -- callers must skip
+    /// context-size validation rather than guessing a default when this is
+    /// absent.
+    public var contextLength: Int?
+
     /// The default quantization settings.
     @available(*, deprecated, message: "Please use perLayerQuantization instead")
     public var quantization: Quantization? {
@@ -206,5 +218,6 @@ public struct BaseConfiguration: Codable, Sendable {
         case modelType = "model_type"
         case quantizationContainer = "quantization"
         case eosTokenIds = "eos_token_id"
+        case contextLength = "max_position_embeddings"
     }
 }

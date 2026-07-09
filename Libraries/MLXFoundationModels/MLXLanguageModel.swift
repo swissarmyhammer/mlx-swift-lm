@@ -1050,6 +1050,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             /// declared, a reasoning config resolved, and no tools/schema
             /// are in play.
             let reasoningSetup: (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?
+            /// The model's context window length, read from `config.json`'s
+            /// `max_position_embeddings` field. `nil` when the model's
+            /// configuration doesn't expose a recognized context-length
+            /// field, in which case `dispatchGeneration`/`runToolCalling`
+            /// skip context-size validation rather than guessing a default.
+            let contextLength: Int?
         }
 
         /// Unwraps a `RespondSetup` field that's `nil` only when tools are
@@ -1071,6 +1077,37 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 )
             }
             return value
+        }
+
+        /// Throws `LanguageModelError.contextSizeExceeded` when a prompt's
+        /// real token count exceeds the model's context window, so a
+        /// transcript that has grown too large for the model fails with an
+        /// accurate typed error before any generation work (weight compute,
+        /// grammar setup) is attempted -- rather than crashing, silently
+        /// truncating, or surfacing an unrelated low-level error deeper in
+        /// the generation path.
+        ///
+        /// `contextLength` is `nil` when `config.json` doesn't expose a
+        /// recognized context-length field -- naming varies by architecture
+        /// (see `BaseConfiguration.contextLength`) and some omit it
+        /// entirely. There is nothing trustworthy to compare against in
+        /// that case, so the check is skipped rather than guessing a
+        /// default that could reject a request the model can actually
+        /// serve.
+        ///
+        /// - Parameters:
+        ///   - tokenCount: The prompt's actual token count, as tokenized for this request.
+        ///   - contextLength: The model's context window length, if known.
+        /// - Throws: `LanguageModelError.contextSizeExceeded` when `tokenCount` exceeds `contextLength`.
+        private static func validateContextSize(tokenCount: Int, contextLength: Int?) throws {
+            guard let contextLength, tokenCount > contextLength else { return }
+            throw LanguageModelError.contextSizeExceeded(
+                LanguageModelError.ContextSizeExceeded(
+                    contextSize: contextLength,
+                    tokenCount: tokenCount,
+                    debugDescription:
+                        "The transcript's prompt (\(tokenCount) tokens) exceeds this model's context window (\(contextLength) tokens)."
+                ))
         }
 
         /// Renders the prompt, resolves the per-instance configuration, and
@@ -1126,12 +1163,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 contentsOf:
                     context.configuration.modelDirectory
                     .appendingPathComponent("config.json"))
-            let modelType =
-                configData.flatMap {
-                    try? JSONDecoder.json5().decode(
-                        BaseConfiguration.self, from: $0
-                    ).modelType
-                } ?? ""
+            let baseConfiguration = configData.flatMap {
+                try? JSONDecoder.json5().decode(BaseConfiguration.self, from: $0)
+            }
+            let modelType = baseConfiguration?.modelType ?? ""
+            // Only recognized when `config.json` exposes
+            // `max_position_embeddings` (the dominant convention across the
+            // architectures this repository ports); `nil` otherwise, which
+            // `dispatchGeneration`/`runToolCalling` treat as "unknown --
+            // skip validation" rather than guessing a default.
+            let contextLength = baseConfiguration?.contextLength
             let descriptor = ModelDescriptor(
                 modelType: modelType,
                 modelId: modelID,
@@ -1215,12 +1256,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             return RespondSetup(
                 input: input, resolved: resolved, effectiveInput: effectiveInput,
-                reasoningSetup: reasoningSetup)
+                reasoningSetup: reasoningSetup, contextLength: contextLength)
         }
 
         /// Dispatches to the tool-calling, guided-generation, or plain-text
         /// path based on the request's tools/schema -- the three-way branch
         /// `respond()`'s `container.perform` closure previously ran inline.
+        ///
+        /// Each branch validates the resolved prompt's token count against
+        /// `setup.contextLength` before doing any generation work (weight
+        /// compute, grammar setup) -- see `validateContextSize`. The
+        /// tool-calling branch re-tokenizes independently, so it performs
+        /// its own check inside `runToolCalling` once that prompt exists.
         ///
         /// - Parameters:
         ///   - setup: The prepared prompt/configuration bundle from `prepareRespondSetup`.
@@ -1262,6 +1309,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     requestedMaxTokens: requestedMaxTokens,
                     requestedSamplingMode: requestedSamplingMode,
                     declaresReasoning: declaresReasoning, resolved: setup.resolved,
+                    contextLength: setup.contextLength,
                     entryID: entryID, toolCallsEntryID: toolCallsEntryID,
                     reasoningEntryID: reasoningEntryID, context: context,
                     channel: channel)
@@ -1272,6 +1320,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // guaranteed present here.
                 let input = Self.unwrapSetupField(
                     setup.input, fieldName: "input", contextPath: "guided-generation")
+                try Self.validateContextSize(
+                    tokenCount: input.text.tokens.size, contextLength: setup.contextLength)
                 try await runGuidedGeneration(
                     schemaJSON: schemaJSON, input: input, modelID: modelID,
                     requestedMaxTokens: requestedMaxTokens, entryID: entryID,
@@ -1283,6 +1333,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // path.
                 let fallbackInput = Self.unwrapSetupField(
                     setup.effectiveInput, fieldName: "effectiveInput", contextPath: "text-generation")
+                // `runTextGeneration` feeds `reasoningSetup.input` instead of
+                // `fallbackInput` whenever reasoning is active (see its
+                // body) -- validate whichever prompt will actually reach
+                // generation, not always the baseline `fallbackInput`.
+                let promptToValidate = setup.reasoningSetup?.input ?? fallbackInput
+                try Self.validateContextSize(
+                    tokenCount: promptToValidate.text.tokens.size, contextLength: setup.contextLength)
                 try await runTextGeneration(
                     reasoningSetup: setup.reasoningSetup,
                     fallbackInput: fallbackInput,
@@ -1919,12 +1976,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - requestedSamplingMode: The caller's sampling mode override, if any.
         ///   - declaresReasoning: Whether `.reasoning` was declared at init.
         ///   - resolved: The resolved model configuration.
+        ///   - contextLength: The model's context window length, if known;
+        ///     validated against the re-tokenized tool-aware prompt before
+        ///     any grammar/generation work runs.
         ///   - entryID: The response entry to stream output into.
         ///   - toolCallsEntryID: The entry to stream tool-call events into.
         ///   - reasoningEntryID: The entry to stream think-then-call reasoning into.
         ///   - context: The loaded model context.
         ///   - channel: The generation channel to send events on.
-        /// - Throws: Whatever the grammar/tokenizer/generation calls throw.
+        /// - Throws: `LanguageModelError.contextSizeExceeded` when the
+        ///   tool-aware prompt exceeds `contextLength`, or whatever the
+        ///   grammar/tokenizer/generation calls throw.
         /// - Returns: `false` only when think-then-call Phase 1 was cut off
         ///   before `</think>` closed -- Phase 1 already synchronized the
         ///   GPU on its way out, so the caller must skip its own tail
@@ -1938,6 +2000,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedSamplingMode: MLXSamplingMode?,
             declaresReasoning: Bool,
             resolved: ModelConfiguration,
+            contextLength: Int?,
             entryID: String,
             toolCallsEntryID: String,
             reasoningEntryID: String,
@@ -1985,6 +2048,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 additionalContext: reasoningContext
             )
             let toolAwareInput = LMInput(tokens: MLXArray(toolAwareTokens))
+            try Self.validateContextSize(
+                tokenCount: toolAwareInput.text.tokens.size, contextLength: contextLength)
 
             let toolCallingGrammar =
                 try SchemaConverter.encodeToolCallingGrammar(
