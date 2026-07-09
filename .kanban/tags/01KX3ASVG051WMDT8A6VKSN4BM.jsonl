@@ -1,0 +1,1 @@
+{"id":"01KX3ASVG0EGJ0J5VFRNS02RMS","timestamp":"2026-07-09T11:39:26.080251Z","op":"create","item_id":"01KX3ASVG051WMDT8A6VKSN4BM","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: '5319e7'\n+tag_name: if\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: '5319e7'\n-tag_name: if\n","transaction_id":null}
