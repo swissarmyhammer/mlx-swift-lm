@@ -74,6 +74,32 @@ struct TranscriptConverterTests {
     }
 
     @Test
+    func testStructuredResponseSegmentCarriesJSONContent() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // A prior turn's response was a guided/structured generation (a
+        // Generable result carried as a `.structure` segment, not `.text`).
+        // Replaying that turn into the next prompt must not silently drop
+        // the structured content.
+        let structured = Transcript.StructuredSegment(
+            source: "assistant",
+            content: try GeneratedContent(json: #"{"tempF": 72, "condition": "sunny"}"#))
+        let response = Transcript.Response(
+            assetIDs: [],
+            segments: [.structure(structured)]
+        )
+
+        let entries: [Transcript.Entry] = [.response(response)]
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        #expect(messages.count == 1)
+        let message = messages.first!
+        #expect(message.role == .assistant)
+        #expect(message.content.contains("72"))
+        #expect(message.content.contains("sunny"))
+    }
+
+    @Test
     func testMultipleSegmentsAreConcatenated() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 

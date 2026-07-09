@@ -48,8 +48,14 @@ struct TranscriptConverter {
                     emptyWarning: "Skipping prompt entry with no text or image content")
 
             case .response(let response):
-                // Assistant message for previous responses
-                guard let text = extractText(from: response.segments) else {
+                // Assistant message for previous responses. Includes
+                // `.structure` segments (like `.toolOutput` below): a prior
+                // turn's response may have been a guided/structured
+                // generation (a `Generable` result carried as `.structure`,
+                // not `.text`), and that content must survive replay into
+                // the next turn's prompt rather than being silently dropped.
+                guard let text = extractText(from: response.segments, includeStructure: true)
+                else {
                     logger.warning("Skipping response entry with no text content")
                     return []
                 }
@@ -191,14 +197,24 @@ struct TranscriptConverter {
 
     /// Extracts text content from transcript segments.
     ///
-    /// Concatenates all text segments with newlines.
-    /// Skips images, structured content, and other non-text segments.
+    /// Concatenates all text segments with newlines. By default, skips
+    /// images, structured content, and other non-text segments -- this is
+    /// the right behavior for `.instructions`/`.prompt` entries, which are
+    /// system/user text and should stay `.text`-only.
     ///
-    /// - Parameter segments: Array of transcript segments
+    /// - Parameters:
+    ///   - segments: Array of transcript segments
+    ///   - includeStructure: When true, `.structure` segments are also
+    ///     included (rendered as their JSON). Passed `true` for `.response`
+    ///     entries, where a prior turn's guided/structured generation must
+    ///     survive replay into the next turn's prompt rather than being
+    ///     silently dropped; defaults to `false` for every other call site.
     /// - Returns: Concatenated text, or nil if no text content found
-    private static func extractText(from segments: [Transcript.Segment]) -> String? {
+    private static func extractText(
+        from segments: [Transcript.Segment], includeStructure: Bool = false
+    ) -> String? {
         let combined = extractConcatenatedText(
-            from: segments, includeStructure: false, logContext: "extractText")
+            from: segments, includeStructure: includeStructure, logContext: "extractText")
         return combined.isEmpty ? nil : combined
     }
 
