@@ -894,7 +894,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Throws: `LanguageModelError.unsupportedTranscriptContent` when
         ///   `processor` fails while `messages` carries image content; the
         ///   original error otherwise.
-        static func preparedInputMappingImageFailures(
+        private static func preparedInputMappingImageFailures(
             processor: any UserInputProcessor,
             input: UserInput,
             messages: [Chat.Message],
