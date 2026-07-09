@@ -28,6 +28,7 @@ import Testing
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 /// Actor-concurrency tests proving concurrent `resolve`/`store` calls never hand the same `KVCache` instance to two callers.
+///
 /// Uses the shared `PromptCacheProbeModel` from `PromptCacheTestSupport.swift`.
 @Suite("PromptCache actor-concurrency: no double-checkout of a KVCache instance")
 struct PromptCacheConcurrencyTests {
@@ -187,8 +188,9 @@ struct PromptCacheConcurrencyTests {
 
 /// Tracks which `KVCache` instances (by `ObjectIdentifier`) are currently
 /// checked out across concurrent `Task`s, recording a violation if the same
-/// identity is checked out twice before being checked back in. An actor
-/// itself, so its own bookkeeping can't race regardless of how many
+/// identity is checked out twice before being checked back in.
+///
+/// An actor itself, so its own bookkeeping can't race regardless of how many
 /// `Task`s call into it concurrently.
 private actor CheckoutTracker {
     private var outstanding: Set<ObjectIdentifier> = []

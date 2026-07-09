@@ -54,8 +54,10 @@ func makeSlotCache(tokenCount: Int) -> KVCacheSimple {
 /// A NON-trimmable cache positioned at `tokenCount`: `RotatingKVCache`
 /// reports `isTrimmable == false` once `offset >= maxCacheSize` (its window
 /// has rotated, so earlier positions are gone and a prefix trim is
-/// meaningless). Used to drive `decide`/`applyDecision` down their
-/// rebuild-instead-of-trim fallbacks.
+/// meaningless).
+///
+/// Used to drive `decide`/`applyDecision` down their rebuild-instead-of-trim
+/// fallbacks.
 func makeNonTrimmableSlotCache(tokenCount: Int) -> RotatingKVCache {
     let cache = RotatingKVCache(maxSize: tokenCount)
     cache.offset = tokenCount
