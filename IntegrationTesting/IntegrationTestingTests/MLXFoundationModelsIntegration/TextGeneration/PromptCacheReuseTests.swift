@@ -9,8 +9,10 @@
 //
 // Loads a real model, so it lives in the IntegrationTesting xcodeproj
 // alongside the other `TextGeneration` tests that exercise `respond()`
-// end-to-end (see `UpdateUsageEmissionTests`, whose `collectFinalUsage`
-// helper this test's `respondCollectingTextAndUsage` mirrors).
+// end-to-end. Uses `Support/FMTestHelpers.swift`'s shared
+// `respondCollectingTextAndUsage` (mirroring `UpdateUsageEmissionTests`'
+// `collectFinalUsage`), also used by `PromptCacheEquivalenceTests` and
+// `PromptCacheGuidedRoundTripTests`.
 //
 // `PromptCache` is a single process-global actor keyed by `modelID` (mirrors
 // `MLXLanguageModel`'s `ModelCache`), so this test's two rounds only observe
@@ -27,12 +29,26 @@ import FoundationModels
 import MLXLMCommon
 @testable import MLXFoundationModels
 
-@Suite(.serialized, .timeLimit(.minutes(5)))
+@Suite(
+    .serialized, .timeLimit(.minutes(5)),
+    .enabled(
+        if: ProcessInfo.processInfo.isOperatingSystemAtLeast(
+            OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)),
+        "Requires the iOS/macOS/visionOS 27 FoundationModels APIs"))
 struct PromptCacheReuseTests {
 
+    // Previously a `guard #available(...) else { return }` at the top of
+    // the test body: on an OS below the 27 floor, that made the test
+    // report PASSED with zero assertions ever run -- a silent no-op
+    // indistinguishable from a real pass in CI output. The `@available`
+    // attribute directly on the function (below) makes the compiler enforce
+    // the same floor statically, and the suite's `.enabled(if:)` trait
+    // (above) makes swift-testing report this test as explicitly SKIPPED
+    // (not passed) when the floor isn't met, so a "green" run can no longer
+    // hide an unmet OS requirement.
     @Test("Second respond() round prefills only the appended suffix, not the whole transcript")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func secondRoundPrefillsOnlyAppendedSuffix() async throws {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let model = makeTestModel(TestFixtures.defaultModelID)
         let executor = try makeMLXExecutor(for: model)
 
@@ -91,36 +107,6 @@ struct PromptCacheReuseTests {
 
         await releaseAllGPUMemory()
     }
-}
-
-/// Drains `executor.respond(...)`'s event stream, returning the concatenated
-/// response text and the prompt token count from the last `.updateUsage`
-/// event -- the same last-write-wins convention `UpdateUsageEmissionTests`'
-/// `collectFinalUsage` documents (the framework's usage aggregator replaces
-/// totals wholesale on each event).
-@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-private func respondCollectingTextAndUsage(
-    _ executor: MLXLanguageModel.Executor,
-    request: LanguageModelExecutorGenerationRequest,
-    model: MLXLanguageModel
-) async throws -> (text: String, promptTokenCount: Int) {
-    let stream = try await executeResponse(executor, request: request, model: model)
-    var text = ""
-    var promptTokenCount: Int?
-    for try await event in stream {
-        guard let response = event as? LanguageModelExecutorGenerationChannel.Response else {
-            continue
-        }
-        if case .appendText(let delta) = response.action {
-            text += delta.content
-        }
-        if case .updateUsage(let usage) = response.action {
-            promptTokenCount = usage.input.totalTokenCount
-        }
-    }
-    let count = try #require(
-        promptTokenCount, "Expected at least one .updateUsage event before stream completion")
-    return (text, count)
 }
 
 #endif  // FoundationModelsIntegration

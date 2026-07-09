@@ -318,6 +318,54 @@ func executeResponse(
     TestResponseStream(executor: executor, request: request, model: model)
 }
 
+/// Drains `executor.respond(...)`'s event stream, returning the concatenated
+/// response text plus the prompt/cached/output token counts from the last
+/// `.updateUsage` event -- last-write-wins (the framework's usage aggregator
+/// replaces totals wholesale on each event; see `UpdateUsageEmissionTests`'
+/// `collectFinalUsage`).
+///
+/// Shared by every `PromptCache*Tests` file that needs some subset of
+/// `(text, promptTokenCount, cachedTokenCount, outputTokenCount)` -- a
+/// caller that only cares about the text (or doesn't care about
+/// `cachedTokenCount`/`outputTokenCount`) simply ignores the fields it
+/// doesn't need, rather than each file hand-rolling its own near-identical
+/// stream-draining variant. `outputTokenCount` in particular lets a caller
+/// compute a PRIOR round's full stored slot length
+/// (`promptTokenCount + outputTokenCount`) to distinguish a later round's
+/// `.trimTo` (partial reuse: `0 < cachedTokenCount < priorFullLength`) from
+/// `.reuseSuffix` (full-prefix reuse: `cachedTokenCount == priorFullLength`)
+/// -- see `PromptCacheEquivalenceTests.editedEarlierTurnForcesTrimAndMatchesFreshRebuild`.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func respondCollectingTextAndUsage(
+    _ executor: MLXLanguageModel.Executor,
+    request: LanguageModelExecutorGenerationRequest,
+    model: MLXLanguageModel
+) async throws -> (
+    text: String, promptTokenCount: Int, cachedTokenCount: Int, outputTokenCount: Int
+) {
+    let stream = try await executeResponse(executor, request: request, model: model)
+    var text = ""
+    var promptTokenCount: Int?
+    var cachedTokenCount = 0
+    var outputTokenCount = 0
+    for try await event in stream {
+        guard let response = event as? LanguageModelExecutorGenerationChannel.Response else {
+            continue
+        }
+        if case .appendText(let delta) = response.action {
+            text += delta.content
+        }
+        if case .updateUsage(let usage) = response.action {
+            promptTokenCount = usage.input.totalTokenCount
+            cachedTokenCount = usage.input.cachedTokenCount
+            outputTokenCount = usage.output.totalTokenCount
+        }
+    }
+    let count = try #require(
+        promptTokenCount, "Expected at least one .updateUsage event before stream completion")
+    return (text, count, cachedTokenCount, outputTokenCount)
+}
+
 // MARK: - GPU Memory Management
 
 /// Releases all GPU memory: synchronizes pending GPU work, evicts cached models,
