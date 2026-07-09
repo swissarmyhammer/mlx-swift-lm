@@ -801,7 +801,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// reasoning) honors `samplingMode` identically. `maxTokens` is the
         /// already-resolved budget -- callers keep their own default/budget
         /// arithmetic, so this helper owns only temperature + sampling resolution.
-        static func makeParameters(
+        private static func makeParameters(
             maxTokens: Int,
             requestedTemperature: Double?,
             samplingMode: MLXSamplingMode?
