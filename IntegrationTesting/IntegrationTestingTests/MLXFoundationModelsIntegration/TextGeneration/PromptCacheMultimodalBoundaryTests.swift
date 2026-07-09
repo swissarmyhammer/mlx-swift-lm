@@ -41,6 +41,7 @@ import CoreGraphics
 import MLXLMCommon
 @testable import MLXFoundationModels
 
+/// Integration test proving a sandwiched multimodal round neither disturbs a surrounding text-only cache entry nor is itself ever cached.
 @Suite(
     .serialized, .timeLimit(.minutes(10)),
     .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_VLM_INTEGRATION"] == "1"))

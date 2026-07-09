@@ -47,6 +47,7 @@ private final class ConcurrencyProbeModel: Module, MLXLMCommon.LanguageModel,
     }
 }
 
+/// Actor-concurrency tests proving concurrent `resolve`/`store` calls never hand the same `KVCache` instance to two callers.
 @Suite("PromptCache actor-concurrency: no double-checkout of a KVCache instance")
 struct PromptCacheConcurrencyTests {
 

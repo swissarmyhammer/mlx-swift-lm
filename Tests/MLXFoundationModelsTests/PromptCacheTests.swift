@@ -8,6 +8,7 @@ import Testing
 
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
+/// Tests for `PromptCache.decide`'s prefix/trim/rebuild decision logic.
 @Suite("PromptCache prefix/trim/rebuild decision")
 struct PromptCacheDecisionTests {
 
@@ -139,6 +140,7 @@ struct PromptCacheAdvanceReconciliationTests {
     }
 }
 
+/// Tests for `PromptCache.selectSlot`'s multi-slot longest-common-prefix candidate selection.
 @Suite("PromptCache multi-slot longest-common-prefix selection")
 struct PromptCacheSlotSelectionTests {
 
@@ -192,6 +194,7 @@ struct PromptCacheSlotSelectionTests {
     }
 }
 
+/// Tests for `PromptCache.trimAndVerify`'s trim-then-confirm-offset verification logic.
 @Suite("PromptCache trim-and-verify")
 struct PromptCacheTrimAndVerifyTests {
 
@@ -276,10 +279,17 @@ private struct SplitMix64: RandomNumberGenerator {
     }
 }
 
-/// A short, sharply overlapping token vocabulary (0..<6) so randomly
+/// Number of randomly generated cases each property test runs -- large
+/// enough to exercise rare branches (e.g. a full-length prefix match) with
+/// high probability, given the deterministic `SplitMix64` seed.
+private let propertyTestIterationCount = 2000
+
+/// A short, sharply overlapping token vocabulary size (0..<4) so randomly
 /// generated sequences frequently share genuine prefixes -- with a large
 /// vocabulary, almost every random pair would diverge at token 0, never
 /// exercising `.reuseSuffix` or a nontrivial `.trimTo`.
+private let testVocabularySize = 4
+
 private func randomTokenSequence(
     length: Int, vocabulary: Int, using generator: inout SplitMix64
 ) -> [Int] {
@@ -311,13 +321,13 @@ struct PromptCacheDecidePropertyTests {
     func decideInvariantsHoldAcrossRandomCases() {
         var generator = SplitMix64(seed: 0xC0FF_EE12_3456_789A)
 
-        for _ in 0 ..< 2000 {
+        for _ in 0 ..< propertyTestIterationCount {
             let cachedLength = Int(generator.next() % 9)
             let newLength = Int(generator.next() % 9)
             let cachedTokens = randomTokenSequence(
-                length: cachedLength, vocabulary: 4, using: &generator)
+                length: cachedLength, vocabulary: testVocabularySize, using: &generator)
             let newTokens = randomTokenSequence(
-                length: newLength, vocabulary: 4, using: &generator)
+                length: newLength, vocabulary: testVocabularySize, using: &generator)
             let isTrimmable = generator.next() % 2 == 0
 
             let decision = PromptCache.decide(
@@ -394,14 +404,16 @@ struct PromptCacheSelectSlotPropertyTests {
     func selectSlotInvariantsHoldAcrossRandomCases() {
         var generator = SplitMix64(seed: 0x5EED_FACE_D00D_1234)
 
-        for _ in 0 ..< 2000 {
+        for _ in 0 ..< propertyTestIterationCount {
             let candidateCount = Int(generator.next() % 5)
             let newLength = Int(generator.next() % 8)
-            let newTokens = randomTokenSequence(length: newLength, vocabulary: 4, using: &generator)
+            let newTokens = randomTokenSequence(
+                length: newLength, vocabulary: testVocabularySize, using: &generator)
 
             let candidates: [(tokens: [Int], lastUsed: Int)] = (0 ..< candidateCount).map { _ in
                 let length = Int(generator.next() % 8)
-                let tokens = randomTokenSequence(length: length, vocabulary: 4, using: &generator)
+                let tokens = randomTokenSequence(
+                    length: length, vocabulary: testVocabularySize, using: &generator)
                 let lastUsed = Int(generator.next() % 100)
                 return (tokens: tokens, lastUsed: lastUsed)
             }

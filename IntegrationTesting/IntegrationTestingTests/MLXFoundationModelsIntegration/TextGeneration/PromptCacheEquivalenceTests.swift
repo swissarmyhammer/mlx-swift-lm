@@ -50,6 +50,7 @@ import FoundationModels
 import MLXLMCommon
 @testable import MLXFoundationModels
 
+/// Integration tests proving cached-run output stays byte-identical to a fresh, cache-evicted rebuild, across a plain multi-turn conversation and an edited-earlier-turn trim.
 @Suite(
     .serialized, .timeLimit(.minutes(10)),
     .enabled(

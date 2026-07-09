@@ -47,6 +47,7 @@ private struct PromptCacheRoundTripAnswer {
     var answer: String
 }
 
+/// Integration test proving a guided-generation round's cache entry is actually stored and reused by a follow-up turn, matching a fresh rebuild.
 @Suite(
     .serialized, .timeLimit(.minutes(10)),
     .enabled(

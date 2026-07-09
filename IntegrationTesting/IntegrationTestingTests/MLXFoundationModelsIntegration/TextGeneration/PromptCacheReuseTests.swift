@@ -29,6 +29,7 @@ import FoundationModels
 import MLXLMCommon
 @testable import MLXFoundationModels
 
+/// Integration test proving a second `respond()` round prefills only the appended suffix, not the whole (now-longer) transcript.
 @Suite(
     .serialized, .timeLimit(.minutes(5)),
     .enabled(
@@ -51,6 +52,7 @@ struct PromptCacheReuseTests {
     func secondRoundPrefillsOnlyAppendedSuffix() async throws {
         let model = makeTestModel(TestFixtures.defaultModelID)
         let executor = try makeMLXExecutor(for: model)
+        let generationOptions = GenerationOptions(maximumResponseTokens: 8)
 
         let firstUserText = "Say 'hi' in exactly one word."
         let firstTranscript = Transcript(entries: [
@@ -61,7 +63,7 @@ struct PromptCacheReuseTests {
         ])
         let firstRequest = makeExecutorRequest(
             transcript: firstTranscript,
-            generationOptions: GenerationOptions(maximumResponseTokens: 8)
+            generationOptions: generationOptions
         )
         let first = try await respondCollectingTextAndUsage(
             executor, request: firstRequest, model: model)
@@ -89,7 +91,7 @@ struct PromptCacheReuseTests {
         ])
         let secondRequest = makeExecutorRequest(
             transcript: secondTranscript,
-            generationOptions: GenerationOptions(maximumResponseTokens: 8)
+            generationOptions: generationOptions
         )
         let second = try await respondCollectingTextAndUsage(
             executor, request: secondRequest, model: model)
