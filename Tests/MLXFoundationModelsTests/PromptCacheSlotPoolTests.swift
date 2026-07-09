@@ -38,23 +38,23 @@ struct PromptCacheLRUEvictionTests {
         var storedSlots: [KVCacheSimple] = []
         for session in 0 ..< sessionCount {
             storedSlots.append(
-                await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(session)))
+                await storeWellFormedSlot(cache: cache, modelID: modelID, tokens: sessionTokens(session)))
         }
 
         // The oldest slot (session 0) must be gone: its continuation rebuilds.
         let evicted = await resolveOnce(
-            cache, modelID: modelID, newTokens: sessionTokens(0) + [9], model: model)
+            cache: cache, modelID: modelID, newTokens: sessionTokens(0) + [9], model: model)
         #expect(
-            cacheIdentity(evicted) != ObjectIdentifier(storedSlots[0]),
+            cacheIdentity(resolved: evicted) != ObjectIdentifier(storedSlots[0]),
             "the least-recently-used slot must have been evicted at the cap")
         #expect(evicted.tokensToFeed == sessionTokens(0) + [9])
 
         // Every newer slot survived: each continuation reuses its exact instance.
         for session in 1 ..< sessionCount {
             let resolved = await resolveOnce(
-                cache, modelID: modelID, newTokens: sessionTokens(session) + [9], model: model)
+                cache: cache, modelID: modelID, newTokens: sessionTokens(session) + [9], model: model)
             #expect(
-                cacheIdentity(resolved) == ObjectIdentifier(storedSlots[session]),
+                cacheIdentity(resolved: resolved) == ObjectIdentifier(storedSlots[session]),
                 "slot for session \(session) should have survived LRU eviction")
         }
     }
@@ -68,7 +68,7 @@ struct PromptCacheLRUEvictionTests {
         var storedSlots: [KVCacheSimple] = []
         for session in 0 ..< PromptCache.defaultMaxSlotsPerModel {
             storedSlots.append(
-                await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(session)))
+                await storeWellFormedSlot(cache: cache, modelID: modelID, tokens: sessionTokens(session)))
         }
 
         // Touch session 0: check its slot out and store it back grown by one
@@ -76,8 +76,8 @@ struct PromptCacheLRUEvictionTests {
         // recency stamp is now the newest, making session 1 the LRU slot.
         let touchedTokens = sessionTokens(0) + [7]
         let touched = await resolveOnce(
-            cache, modelID: modelID, newTokens: touchedTokens, model: model)
-        #expect(cacheIdentity(touched) == ObjectIdentifier(storedSlots[0]))
+            cache: cache, modelID: modelID, newTokens: touchedTokens, model: model)
+        #expect(cacheIdentity(resolved: touched) == ObjectIdentifier(storedSlots[0]))
         // `KVCache.offset` is get-only through the protocol; the reused
         // instance is the `KVCacheSimple` this test stored.
         try #require(touched.cache[0] as? KVCacheSimple).offset = touchedTokens.count
@@ -86,20 +86,20 @@ struct PromptCacheLRUEvictionTests {
 
         // A fifth prefix overflows the cap.
         await storeWellFormedSlot(
-            cache, modelID: modelID, tokens: sessionTokens(PromptCache.defaultMaxSlotsPerModel))
+            cache: cache, modelID: modelID, tokens: sessionTokens(PromptCache.defaultMaxSlotsPerModel))
 
         // Session 1 (now least recently used) was evicted...
         let evicted = await resolveOnce(
-            cache, modelID: modelID, newTokens: sessionTokens(1) + [9], model: model)
+            cache: cache, modelID: modelID, newTokens: sessionTokens(1) + [9], model: model)
         #expect(
-            cacheIdentity(evicted) != ObjectIdentifier(storedSlots[1]),
+            cacheIdentity(resolved: evicted) != ObjectIdentifier(storedSlots[1]),
             "the untouched oldest slot must be the one evicted")
 
         // ...while the touched session 0 survived.
         let survivor = await resolveOnce(
-            cache, modelID: modelID, newTokens: touchedTokens + [9], model: model)
+            cache: cache, modelID: modelID, newTokens: touchedTokens + [9], model: model)
         #expect(
-            cacheIdentity(survivor) == ObjectIdentifier(storedSlots[0]),
+            cacheIdentity(resolved: survivor) == ObjectIdentifier(storedSlots[0]),
             "the freshly-touched slot must have been protected from eviction")
     }
 
@@ -112,22 +112,22 @@ struct PromptCacheLRUEvictionTests {
         var storedSlots: [KVCacheSimple] = []
         for session in 0 ..< 3 {
             storedSlots.append(
-                await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(session)))
+                await storeWellFormedSlot(cache: cache, modelID: modelID, tokens: sessionTokens(session)))
         }
 
         // With the cap at 2, the oldest of the three must be gone...
         let evicted = await resolveOnce(
-            cache, modelID: modelID, newTokens: sessionTokens(0) + [9], model: model)
+            cache: cache, modelID: modelID, newTokens: sessionTokens(0) + [9], model: model)
         #expect(
-            cacheIdentity(evicted) != ObjectIdentifier(storedSlots[0]),
+            cacheIdentity(resolved: evicted) != ObjectIdentifier(storedSlots[0]),
             "with the limit lowered to 2, storing a third slot must evict the oldest")
 
         // ...and the two newest must both survive.
         for session in 1 ..< 3 {
             let resolved = await resolveOnce(
-                cache, modelID: modelID, newTokens: sessionTokens(session) + [9], model: model)
+                cache: cache, modelID: modelID, newTokens: sessionTokens(session) + [9], model: model)
             #expect(
-                cacheIdentity(resolved) == ObjectIdentifier(storedSlots[session]),
+                cacheIdentity(resolved: resolved) == ObjectIdentifier(storedSlots[session]),
                 "slot for session \(session) must survive under the lowered limit")
         }
     }
@@ -142,14 +142,14 @@ struct PromptCacheLRUEvictionTests {
         var storedSlots: [KVCacheSimple] = []
         for session in 0 ..< limit {
             storedSlots.append(
-                await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(session)))
+                await storeWellFormedSlot(cache: cache, modelID: modelID, tokens: sessionTokens(session)))
         }
 
         for session in 0 ..< limit {
             let resolved = await resolveOnce(
-                cache, modelID: modelID, newTokens: sessionTokens(session) + [9], model: model)
+                cache: cache, modelID: modelID, newTokens: sessionTokens(session) + [9], model: model)
             #expect(
-                cacheIdentity(resolved) == ObjectIdentifier(storedSlots[session]),
+                cacheIdentity(resolved: resolved) == ObjectIdentifier(storedSlots[session]),
                 "with the limit raised to \(limit), all \(limit) slots must survive (session \(session))"
             )
         }
@@ -163,19 +163,19 @@ struct PromptCacheLRUEvictionTests {
         let modelID = "lru-clamped-\(UUID().uuidString)"
         await cache.setMaxSlotsPerModel(limit)
 
-        let older = await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(0))
-        let newer = await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(1))
+        let older = await storeWellFormedSlot(cache: cache, modelID: modelID, tokens: sessionTokens(0))
+        let newer = await storeWellFormedSlot(cache: cache, modelID: modelID, tokens: sessionTokens(1))
 
         // Exactly one slot retained: the newest survives, the older is gone.
         let resolvedNewer = await resolveOnce(
-            cache, modelID: modelID, newTokens: sessionTokens(1) + [9], model: model)
+            cache: cache, modelID: modelID, newTokens: sessionTokens(1) + [9], model: model)
         #expect(
-            cacheIdentity(resolvedNewer) == ObjectIdentifier(newer),
+            cacheIdentity(resolved: resolvedNewer) == ObjectIdentifier(newer),
             "limit \(limit) must clamp to 1 and still retain the newest conversation")
         let resolvedOlder = await resolveOnce(
-            cache, modelID: modelID, newTokens: sessionTokens(0) + [9], model: model)
+            cache: cache, modelID: modelID, newTokens: sessionTokens(0) + [9], model: model)
         #expect(
-            cacheIdentity(resolvedOlder) != ObjectIdentifier(older),
+            cacheIdentity(resolved: resolvedOlder) != ObjectIdentifier(older),
             "limit \(limit) must clamp to 1 and evict everything but the newest conversation")
     }
 
@@ -187,14 +187,14 @@ struct PromptCacheLRUEvictionTests {
         var storedSlots: [KVCacheSimple] = []
         for session in 0 ..< PromptCache.defaultMaxSlotsPerModel {
             storedSlots.append(
-                await storeWellFormedSlot(cache, modelID: modelID, tokens: sessionTokens(session)))
+                await storeWellFormedSlot(cache: cache, modelID: modelID, tokens: sessionTokens(session)))
         }
 
         for session in 0 ..< PromptCache.defaultMaxSlotsPerModel {
             let resolved = await resolveOnce(
-                cache, modelID: modelID, newTokens: sessionTokens(session) + [9], model: model)
+                cache: cache, modelID: modelID, newTokens: sessionTokens(session) + [9], model: model)
             #expect(
-                cacheIdentity(resolved) == ObjectIdentifier(storedSlots[session]),
+                cacheIdentity(resolved: resolved) == ObjectIdentifier(storedSlots[session]),
                 "at the cap, no slot should have been evicted (session \(session))")
         }
     }
@@ -213,20 +213,20 @@ struct PromptCacheEvictionScopeTests {
         let modelB = "evict-all-b-\(UUID().uuidString)"
         let tokensA = [1, 2, 3]
         let tokensB = [4, 5, 6]
-        let storedSlotA = await storeWellFormedSlot(cache, modelID: modelA, tokens: tokensA)
-        let storedSlotB = await storeWellFormedSlot(cache, modelID: modelB, tokens: tokensB)
+        let storedSlotA = await storeWellFormedSlot(cache: cache, modelID: modelA, tokens: tokensA)
+        let storedSlotB = await storeWellFormedSlot(cache: cache, modelID: modelB, tokens: tokensB)
 
         await cache.evictAll()
 
         let resolvedA = await resolveOnce(
-            cache, modelID: modelA, newTokens: tokensA + [9], model: model)
+            cache: cache, modelID: modelA, newTokens: tokensA + [9], model: model)
         let resolvedB = await resolveOnce(
-            cache, modelID: modelB, newTokens: tokensB + [9], model: model)
+            cache: cache, modelID: modelB, newTokens: tokensB + [9], model: model)
         #expect(
-            cacheIdentity(resolvedA) != ObjectIdentifier(storedSlotA),
+            cacheIdentity(resolved: resolvedA) != ObjectIdentifier(storedSlotA),
             "evictAll must drop model A's slot")
         #expect(
-            cacheIdentity(resolvedB) != ObjectIdentifier(storedSlotB),
+            cacheIdentity(resolved: resolvedB) != ObjectIdentifier(storedSlotB),
             "evictAll must drop model B's slot")
         #expect(
             resolvedA.tokensToFeed == tokensA + [9], "a post-eviction round rebuilds from scratch")
@@ -241,21 +241,21 @@ struct PromptCacheEvictionScopeTests {
         let modelB = "remove-b-\(UUID().uuidString)"
         let tokensA = [1, 2, 3]
         let tokensB = [4, 5, 6]
-        let storedSlotA = await storeWellFormedSlot(cache, modelID: modelA, tokens: tokensA)
-        let storedSlotB = await storeWellFormedSlot(cache, modelID: modelB, tokens: tokensB)
+        let storedSlotA = await storeWellFormedSlot(cache: cache, modelID: modelA, tokens: tokensA)
+        let storedSlotB = await storeWellFormedSlot(cache: cache, modelID: modelB, tokens: tokensB)
 
         await cache.remove(modelID: modelA)
 
         let resolvedA = await resolveOnce(
-            cache, modelID: modelA, newTokens: tokensA + [9], model: model)
+            cache: cache, modelID: modelA, newTokens: tokensA + [9], model: model)
         #expect(
-            cacheIdentity(resolvedA) != ObjectIdentifier(storedSlotA),
+            cacheIdentity(resolved: resolvedA) != ObjectIdentifier(storedSlotA),
             "remove must drop the named model's slot")
 
         let resolvedB = await resolveOnce(
-            cache, modelID: modelB, newTokens: tokensB + [9], model: model)
+            cache: cache, modelID: modelB, newTokens: tokensB + [9], model: model)
         #expect(
-            cacheIdentity(resolvedB) == ObjectIdentifier(storedSlotB),
+            cacheIdentity(resolved: resolvedB) == ObjectIdentifier(storedSlotB),
             "remove must NOT disturb a different model's slot")
     }
 
@@ -270,23 +270,23 @@ struct PromptCacheEvictionScopeTests {
         let modelA = "isolation-a-\(UUID().uuidString)"
         let modelB = "isolation-b-\(UUID().uuidString)"
         let tokens = [1, 2, 3, 4]
-        let storedSlotA = await storeWellFormedSlot(cache, modelID: modelA, tokens: tokens)
+        let storedSlotA = await storeWellFormedSlot(cache: cache, modelID: modelA, tokens: tokens)
 
         // Model B asks with the exact same tokens: KV state is conditioned
         // on the MODEL, not just the token sequence, so handing model A's
         // cache to model B would silently corrupt B's attention.
         let resolvedB = await resolveOnce(
-            cache, modelID: modelB, newTokens: tokens + [5], model: model)
+            cache: cache, modelID: modelB, newTokens: tokens + [5], model: model)
         #expect(
-            cacheIdentity(resolvedB) != ObjectIdentifier(storedSlotA),
+            cacheIdentity(resolved: resolvedB) != ObjectIdentifier(storedSlotA),
             "model A's KVCache instance must never be handed out for model B")
         #expect(resolvedB.tokensToFeed == tokens + [5], "model B starts from scratch")
 
         // And model A's slot is still there for model A.
         let resolvedA = await resolveOnce(
-            cache, modelID: modelA, newTokens: tokens + [5], model: model)
+            cache: cache, modelID: modelA, newTokens: tokens + [5], model: model)
         #expect(
-            cacheIdentity(resolvedA) == ObjectIdentifier(storedSlotA),
+            cacheIdentity(resolved: resolvedA) == ObjectIdentifier(storedSlotA),
             "model A's slot must be untouched by model B's resolve")
     }
 }

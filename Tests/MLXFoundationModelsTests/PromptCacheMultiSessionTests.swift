@@ -52,7 +52,7 @@ private func runTurn(
     model: any MLXLMCommon.LanguageModel
 ) async throws -> (cache: [KVCache], tokensToFeed: [Int]) {
     let newTokens = session.tokens + [10 + turn]
-    let resolved = await resolveOnce(cache, modelID: modelID, newTokens: newTokens, model: model)
+    let resolved = await resolveOnce(cache: cache, modelID: modelID, newTokens: newTokens, model: model)
 
     // "Generate" a one-token response: position the cache as if the fed
     // tokens plus the response had gone through the model, mirroring the
@@ -98,7 +98,7 @@ struct PromptCacheMultiSessionTests {
 
                 if let previousIdentity {
                     #expect(
-                        cacheIdentity(resolved) == previousIdentity,
+                        cacheIdentity(resolved: resolved) == previousIdentity,
                         "session \(index) turn \(turn) must reuse its own KV state despite interleaved sessions"
                     )
                     #expect(
@@ -144,7 +144,7 @@ struct PromptCacheMultiSessionTests {
                                 &session, turn: turn, cache: cache, modelID: modelID,
                                 model: sessionModel)
                         else { continue }
-                        let identity = cacheIdentity(resolved)
+                        let identity = cacheIdentity(resolved: resolved)
                         identities.append(identity)
                         if identity == previousIdentity { selfReuses += 1 }
                         await Task.yield()
@@ -216,7 +216,7 @@ struct PromptCacheMultiSessionTests {
                 // top of the checked-out state must reconstruct exactly the
                 // prompt it asked for -- a wrong-prefix reuse would violate
                 // this by feeding a suffix that doesn't extend its own prefix.
-                if cacheIdentity(resolved) == previousIdentity {
+                if cacheIdentity(resolved: resolved) == previousIdentity {
                     #expect(
                         expectedPrompt.suffix(resolved.tokensToFeed.count)
                             == resolved.tokensToFeed[...],

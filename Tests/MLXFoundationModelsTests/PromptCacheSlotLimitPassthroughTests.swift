@@ -70,7 +70,7 @@ extension FoundationModelsCacheTests {
             let resolvedOlder = await MLXLanguageModel.resolvePromptCache(
                 modelID: modelID, newTokens: olderTokens + [9], model: model, parameters: nil)
             #expect(
-                cacheIdentity(resolvedOlder) != ObjectIdentifier(olderCache),
+                cacheIdentity(resolved: resolvedOlder) != ObjectIdentifier(olderCache),
                 "setPromptCacheSlotLimit(1) must have reached the process-global cache and evicted the older slot")
             #expect(
                 resolvedOlder.tokensToFeed == olderTokens + [9], "an evicted slot rebuilds from the full prompt")
@@ -79,7 +79,7 @@ extension FoundationModelsCacheTests {
             let resolvedNewer = await MLXLanguageModel.resolvePromptCache(
                 modelID: modelID, newTokens: newerTokens + [9], model: model, parameters: nil)
             #expect(
-                cacheIdentity(resolvedNewer) == ObjectIdentifier(newerCache),
+                cacheIdentity(resolved: resolvedNewer) == ObjectIdentifier(newerCache),
                 "the newest slot must survive under the limit set via the public passthrough")
 
             // Restore the default so no other test in this process observes a

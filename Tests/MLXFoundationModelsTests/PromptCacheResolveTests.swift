@@ -27,13 +27,13 @@ struct PromptCacheResolveTests {
         let cache = PromptCache()
         let modelID = "resolve-suffix-\(UUID().uuidString)"
         let storedTokens = [1, 2, 3, 4]
-        let storedSlot = await storeWellFormedSlot(cache, modelID: modelID, tokens: storedTokens)
+        let storedSlot = await storeWellFormedSlot(cache: cache, modelID: modelID, tokens: storedTokens)
 
         let resolved = await resolveOnce(
-            cache, modelID: modelID, newTokens: storedTokens + [5, 6], model: model)
+            cache: cache, modelID: modelID, newTokens: storedTokens + [5, 6], model: model)
 
         #expect(
-            cacheIdentity(resolved) == ObjectIdentifier(storedSlot),
+            cacheIdentity(resolved: resolved) == ObjectIdentifier(storedSlot),
             "the stored KVCache instance must be reused")
         #expect(resolved.tokensToFeed == [5, 6])
         #expect(
@@ -52,13 +52,13 @@ struct PromptCacheResolveTests {
         let cache = PromptCache()
         let modelID = "resolve-regenerate-\(UUID().uuidString)"
         let storedTokens = [1, 2, 3, 4]
-        let storedSlot = await storeWellFormedSlot(cache, modelID: modelID, tokens: storedTokens)
+        let storedSlot = await storeWellFormedSlot(cache: cache, modelID: modelID, tokens: storedTokens)
 
         let resolved = await resolveOnce(
-            cache, modelID: modelID, newTokens: storedTokens, model: model)
+            cache: cache, modelID: modelID, newTokens: storedTokens, model: model)
 
         #expect(
-            cacheIdentity(resolved) == ObjectIdentifier(storedSlot),
+            cacheIdentity(resolved: resolved) == ObjectIdentifier(storedSlot),
             "the stored KVCache instance must be reused")
         #expect(resolved.tokensToFeed == [4], "exactly the final token must be re-fed")
         #expect(
@@ -72,13 +72,13 @@ struct PromptCacheResolveTests {
         let cache = PromptCache()
         let modelID = "resolve-trim-\(UUID().uuidString)"
         let storedSlot = await storeWellFormedSlot(
-            cache, modelID: modelID, tokens: [1, 2, 3, 4])
+            cache: cache, modelID: modelID, tokens: [1, 2, 3, 4])
 
         let resolved = await resolveOnce(
-            cache, modelID: modelID, newTokens: [1, 2, 9, 10], model: model)
+            cache: cache, modelID: modelID, newTokens: [1, 2, 9, 10], model: model)
 
         #expect(
-            cacheIdentity(resolved) == ObjectIdentifier(storedSlot),
+            cacheIdentity(resolved: resolved) == ObjectIdentifier(storedSlot),
             "the stored KVCache instance must be reused")
         #expect(
             resolved.tokensToFeed == [9, 10], "only the tokens beyond the common prefix are fed")
@@ -97,13 +97,13 @@ struct PromptCacheResolveTests {
         let cache = PromptCache()
         let modelID = "resolve-shrunk-\(UUID().uuidString)"
         let storedSlot = await storeWellFormedSlot(
-            cache, modelID: modelID, tokens: [1, 2, 3, 4])
+            cache: cache, modelID: modelID, tokens: [1, 2, 3, 4])
 
         let resolved = await resolveOnce(
-            cache, modelID: modelID, newTokens: [1, 2, 3], model: model)
+            cache: cache, modelID: modelID, newTokens: [1, 2, 3], model: model)
 
         #expect(
-            cacheIdentity(resolved) == ObjectIdentifier(storedSlot),
+            cacheIdentity(resolved: resolved) == ObjectIdentifier(storedSlot),
             "the stored KVCache instance must be reused")
         #expect(resolved.tokensToFeed == [3], "exactly the last still-common token must be re-fed")
         #expect(
@@ -121,10 +121,10 @@ struct PromptCacheResolveTests {
 
         let newTokens = [1, 2, 9, 10]
         let resolved = await resolveOnce(
-            cache, modelID: modelID, newTokens: newTokens, model: model)
+            cache: cache, modelID: modelID, newTokens: newTokens, model: model)
 
         #expect(
-            cacheIdentity(resolved) != ObjectIdentifier(slotCache),
+            cacheIdentity(resolved: resolved) != ObjectIdentifier(slotCache),
             "a non-trimmable diverged cache must never be handed back to the caller")
         #expect(resolved.tokensToFeed == newTokens, "a rebuild feeds every token from scratch")
         #expect(resolved.cache[0].offset == 0, "a rebuilt cache starts empty")
@@ -145,9 +145,9 @@ struct PromptCacheResolveTests {
         await cache.store(modelID: modelID, tokens: storedTokens, cache: SendableBox([slotCache]))
 
         let resolved = await resolveOnce(
-            cache, modelID: modelID, newTokens: storedTokens, model: model)
+            cache: cache, modelID: modelID, newTokens: storedTokens, model: model)
 
-        #expect(cacheIdentity(resolved) != ObjectIdentifier(slotCache))
+        #expect(cacheIdentity(resolved: resolved) != ObjectIdentifier(slotCache))
         #expect(resolved.tokensToFeed == storedTokens, "a rebuild feeds every token from scratch")
     }
 
@@ -169,10 +169,10 @@ struct PromptCacheResolveTests {
         await cache.store(modelID: modelID, tokens: storedTokens, cache: SendableBox([slotCache]))
 
         let resolved = await resolveOnce(
-            cache, modelID: modelID, newTokens: [1, 2, 9], model: model)
+            cache: cache, modelID: modelID, newTokens: [1, 2, 9], model: model)
 
         #expect(
-            cacheIdentity(resolved) != ObjectIdentifier(slotCache),
+            cacheIdentity(resolved: resolved) != ObjectIdentifier(slotCache),
             "an unverifiable trim must surrender the slot and rebuild")
         #expect(resolved.tokensToFeed == [1, 2, 9], "a rebuild feeds every token from scratch")
     }
@@ -199,10 +199,10 @@ struct PromptCacheResolveTests {
             modelID: modelID, tokens: storedTokens, cache: SendableBox([layer0, layer1]))
 
         let resolved = await resolveOnce(
-            cache, modelID: modelID, newTokens: storedTokens, model: model)
+            cache: cache, modelID: modelID, newTokens: storedTokens, model: model)
 
         #expect(
-            cacheIdentity(resolved) != ObjectIdentifier(layer0),
+            cacheIdentity(resolved: resolved) != ObjectIdentifier(layer0),
             "an unverifiable regeneration trim must surrender the slot and rebuild")
         #expect(resolved.tokensToFeed == storedTokens, "a rebuild feeds every token from scratch")
     }
@@ -212,19 +212,19 @@ struct PromptCacheResolveTests {
         let cache = PromptCache()
         let modelID = "resolve-consume-\(UUID().uuidString)"
         let storedTokens = [1, 2, 3]
-        let storedSlot = await storeWellFormedSlot(cache, modelID: modelID, tokens: storedTokens)
+        let storedSlot = await storeWellFormedSlot(cache: cache, modelID: modelID, tokens: storedTokens)
 
         let first = await resolveOnce(
-            cache, modelID: modelID, newTokens: storedTokens + [4], model: model)
-        #expect(cacheIdentity(first) == ObjectIdentifier(storedSlot))
+            cache: cache, modelID: modelID, newTokens: storedTokens + [4], model: model)
+        #expect(cacheIdentity(resolved: first) == ObjectIdentifier(storedSlot))
 
         // The slot was removed on checkout and never stored back (as if the
         // first round's generation were still in flight), so a second
         // resolve finds nothing and rebuilds.
         let second = await resolveOnce(
-            cache, modelID: modelID, newTokens: storedTokens + [5], model: model)
+            cache: cache, modelID: modelID, newTokens: storedTokens + [5], model: model)
         #expect(
-            cacheIdentity(second) != ObjectIdentifier(storedSlot),
+            cacheIdentity(resolved: second) != ObjectIdentifier(storedSlot),
             "a checked-out slot must not be available to a second caller until stored back")
         #expect(second.tokensToFeed == storedTokens + [5])
     }

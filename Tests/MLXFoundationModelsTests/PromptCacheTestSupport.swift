@@ -47,34 +47,35 @@ final class PromptCacheProbeModel: Module, MLXLMCommon.LanguageModel,
     }
 }
 
-/// A trimmable cache positioned as if `tokenCount` tokens had been fed
-/// through it -- the state `Executor.commitPromptCache` stores alongside a
-/// slot's tokens, where `trimAndVerify`'s offset arithmetic holds.
+/// A trimmable cache positioned as if `tokenCount` tokens had been fed through it.
+///
+/// This is the state `Executor.commitPromptCache` stores alongside a slot's
+/// tokens, where `trimAndVerify`'s offset arithmetic holds.
 func makeSlotCache(tokenCount: Int) -> KVCacheSimple {
     let cache = KVCacheSimple()
     cache.offset = tokenCount
     return cache
 }
 
-/// A NON-trimmable cache positioned at `tokenCount`: `RotatingKVCache`
-/// reports `isTrimmable == false` once `offset >= maxCacheSize` (its window
-/// has rotated, so earlier positions are gone and a prefix trim is
-/// meaningless).
+/// A NON-trimmable cache positioned at `tokenCount`.
 ///
-/// Used to drive `decide`/`applyDecision` down their rebuild-instead-of-trim
-/// fallbacks.
+/// `RotatingKVCache` reports `isTrimmable == false` once `offset >=
+/// maxCacheSize` (its window has rotated, so earlier positions are gone and
+/// a prefix trim is meaningless). Used to drive `decide`/`applyDecision`
+/// down their rebuild-instead-of-trim fallbacks.
 func makeNonTrimmableSlotCache(tokenCount: Int) -> RotatingKVCache {
     let cache = RotatingKVCache(maxSize: tokenCount)
     cache.offset = tokenCount
     return cache
 }
 
-/// One `resolve()` round against `cache`, hiding the single-use
-/// `SendableBox` plumbing (`consume()` traps on a second call, so each
-/// resolve needs a fresh box around the model and must consume the result
-/// exactly once).
+/// One `resolve()` round against a cache.
+///
+/// Hides the single-use `SendableBox` plumbing (`consume()` traps on a
+/// second call, so each resolve needs a fresh box around the model and must
+/// consume the result exactly once).
 func resolveOnce(
-    _ cache: PromptCache, modelID: String, newTokens: [Int],
+    cache: PromptCache, modelID: String, newTokens: [Int],
     model: any MLXLMCommon.LanguageModel
 ) async -> (cache: [KVCache], tokensToFeed: [Int]) {
     await cache.resolve(
@@ -82,10 +83,12 @@ func resolveOnce(
     ).consume()
 }
 
-/// Stores `tokens` for `modelID` backed by a trimmable cache whose offset
-/// matches `tokens.count` -- the well-formed slot shape every reuse path
-/// assumes -- and returns the stored INSTANCE (not just its identity) so a
-/// later `resolve()` can prove (or disprove) reuse of this exact instance.
+/// Stores well-formed slots of tokens backed by a trimmable cache.
+///
+/// The cache's offset matches `tokens.count` -- the well-formed slot shape
+/// every reuse path assumes -- and the stored INSTANCE (not just its
+/// identity) is returned so a later `resolve()` can prove (or disprove)
+/// reuse of this exact instance.
 ///
 /// Callers must keep the returned instance alive until their last identity
 /// assertion: once `PromptCache` evicts a slot, the actor drops its only
@@ -96,20 +99,19 @@ func resolveOnce(
 /// because the use itself keeps the instance alive to that point.
 @discardableResult
 func storeWellFormedSlot(
-    _ cache: PromptCache, modelID: String, tokens: [Int]
+    cache: PromptCache, modelID: String, tokens: [Int]
 ) async -> KVCacheSimple {
     let slotCache = makeSlotCache(tokenCount: tokens.count)
     await cache.store(modelID: modelID, tokens: tokens, cache: SendableBox([slotCache]))
     return slotCache
 }
 
-/// Identity of the single layer cache in a resolved result -- the probe
-/// model is single-layer (`kvHeads == [1]`), so every result carries exactly
-/// one cache.
+/// Identity of the single layer cache in a resolved result.
 ///
-/// `KVCache` isn't statically class-constrained, but every conformer in this
-/// codebase is a class.
-func cacheIdentity(_ resolved: (cache: [KVCache], tokensToFeed: [Int])) -> ObjectIdentifier {
+/// The probe model is single-layer (`kvHeads == [1]`), so every result
+/// carries exactly one cache. `KVCache` isn't statically class-constrained,
+/// but every conformer in this codebase is a class.
+func cacheIdentity(resolved: (cache: [KVCache], tokensToFeed: [Int])) -> ObjectIdentifier {
     ObjectIdentifier(resolved.cache[0] as AnyObject)
 }
 
