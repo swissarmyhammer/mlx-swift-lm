@@ -562,6 +562,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Clamped to at least 1; use ``evictAll()`` to drop retained state
     /// outright. Takes effect as generations complete — it does not evict
     /// immediately.
+    ///
+    /// - Parameter limit: How many conversations can retain KV-cache state
+    ///   per model; clamped to at least 1.
     public static func setPromptCacheSlotLimit(_ limit: Int) async {
         await promptCache.setMaxSlotsPerModel(limit)
     }
