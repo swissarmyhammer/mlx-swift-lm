@@ -27,27 +27,8 @@ import Testing
 
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
-/// Minimal `LanguageModel` stand-in whose only job is to hand
-/// `PromptCache.resolve`/`applyDecision` a fresh, distinguishable
-/// `[KVCache]` on every `newCache(parameters:)` call (via
-/// `KVCacheDimensionProvider`'s default implementation) -- `prepare`/
-/// `callAsFunction` are never invoked by `PromptCache` and simply trap if
-/// they somehow were.
-private final class ConcurrencyProbeModel: Module, MLXLMCommon.LanguageModel,
-    KVCacheDimensionProvider
-{
-    var kvHeads: [Int] { [1] }
-
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
-        fatalError("not exercised by PromptCache concurrency tests")
-    }
-
-    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        fatalError("not exercised by PromptCache concurrency tests")
-    }
-}
-
 /// Actor-concurrency tests proving concurrent `resolve`/`store` calls never hand the same `KVCache` instance to two callers.
+/// Uses the shared `PromptCacheProbeModel` from `PromptCacheTestSupport.swift`.
 @Suite("PromptCache actor-concurrency: no double-checkout of a KVCache instance")
 struct PromptCacheConcurrencyTests {
 
@@ -60,7 +41,7 @@ struct PromptCacheConcurrencyTests {
     )
     func concurrentResolveNeverDoubleChecksOutASlot() async {
         let cache = PromptCache()
-        let model: any LanguageModel = ConcurrencyProbeModel()
+        let model: any LanguageModel = PromptCacheProbeModel()
         let modelID = "concurrency-probe-\(UUID().uuidString)"
 
         let storedTokens = [1, 2, 3, 4, 5]
@@ -146,7 +127,7 @@ struct PromptCacheConcurrencyTests {
     )
     func sustainedConcurrentChurnNeverDoubleChecksOut() async {
         let cache = PromptCache()
-        let model: any LanguageModel = ConcurrencyProbeModel()
+        let model: any LanguageModel = PromptCacheProbeModel()
         let modelID = "concurrency-churn-\(UUID().uuidString)"
 
         // Seed one slot so early callers have something to contend for.
