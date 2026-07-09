@@ -31,6 +31,11 @@ import MLXNN
 final class PromptCacheProbeModel: Module, MLXLMCommon.LanguageModel,
     KVCacheDimensionProvider, @unchecked Sendable
 {
+    /// Number of KV-attention heads per layer, one entry per layer.
+    ///
+    /// A single layer with one head is the minimal shape `KVCacheDimensionProvider`
+    /// needs to build a real `[KVCache]` via `newCache(parameters:)` -- this probe
+    /// never runs actual attention, so the specific count is otherwise arbitrary.
     var kvHeads: [Int] { [1] }
 
     func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
@@ -100,8 +105,10 @@ func storeWellFormedSlot(
 
 /// Identity of the single layer cache in a resolved result -- the probe
 /// model is single-layer (`kvHeads == [1]`), so every result carries exactly
-/// one cache. `KVCache` isn't statically class-constrained, but every
-/// conformer in this codebase is a class.
+/// one cache.
+///
+/// `KVCache` isn't statically class-constrained, but every conformer in this
+/// codebase is a class.
 func cacheIdentity(_ resolved: (cache: [KVCache], tokensToFeed: [Int])) -> ObjectIdentifier {
     ObjectIdentifier(resolved.cache[0] as AnyObject)
 }
