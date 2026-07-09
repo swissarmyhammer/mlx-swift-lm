@@ -48,7 +48,7 @@ private struct SimulatedSession {
 /// store back the grown sequence. Returns the resolved result (for
 /// assertions) and mutates the session's history and stored identity.
 private func runTurn(
-    _ session: inout SimulatedSession, turn: Int, cache: PromptCache, modelID: String,
+    session: inout SimulatedSession, turn: Int, cache: PromptCache, modelID: String,
     model: any MLXLMCommon.LanguageModel
 ) async throws -> (cache: [KVCache], tokensToFeed: [Int]) {
     let newTokens = session.tokens + [10 + turn]
@@ -94,7 +94,8 @@ struct PromptCacheMultiSessionTests {
                 }
                 let previousLength = sessions[index].tokens.count
                 let resolved = try await runTurn(
-                    &sessions[index], turn: turn, cache: cache, modelID: modelID, model: model)
+                    session: &sessions[index], turn: turn, cache: cache, modelID: modelID,
+                    model: model)
 
                 if let previousIdentity {
                     #expect(
@@ -141,7 +142,7 @@ struct PromptCacheMultiSessionTests {
                         }
                         guard
                             let resolved = try? await runTurn(
-                                &session, turn: turn, cache: cache, modelID: modelID,
+                                session: &session, turn: turn, cache: cache, modelID: modelID,
                                 model: sessionModel)
                         else { continue }
                         let identity = cacheIdentity(resolved: resolved)
@@ -210,7 +211,8 @@ struct PromptCacheMultiSessionTests {
                 }
                 let expectedPrompt = sessions[index].tokens + [10 + turn]
                 let resolved = try await runTurn(
-                    &sessions[index], turn: turn, cache: cache, modelID: modelID, model: model)
+                    session: &sessions[index], turn: turn, cache: cache, modelID: modelID,
+                    model: model)
 
                 // Safety invariant, reuse or not: what the caller feeds on
                 // top of the checked-out state must reconstruct exactly the
