@@ -83,10 +83,15 @@ struct TranscriptConverter {
                 // always differs from the round that made the call --
                 // dropping empty outputs would make the two rounds' rendered
                 // prompts identical and risk the model repeating the same
-                // call forever.
+                // call forever. Image attachment segments (e.g. a tool that
+                // returns a photo) ride along as message images, mirroring
+                // the instructions/prompt path, so they are not silently
+                // dropped.
                 return [
                     Chat.Message.tool(
-                        extractToolOutputText(from: toolOutput.segments), id: toolOutput.id)
+                        extractToolOutputText(from: toolOutput.segments),
+                        images: extractImages(from: toolOutput.segments),
+                        id: toolOutput.id)
                 ]
 
             case .reasoning:
@@ -256,10 +261,11 @@ struct TranscriptConverter {
     }
 
     /// The transcript entries that carry at least one image attachment
-    /// segment (an `.instructions` or `.prompt` entry with an
-    /// `.attachment(.image)` segment -- the only entry kinds `extractImages`
-    /// is ever consulted for; `.response`/`.toolCalls`/`.toolOutput` never
-    /// carry attachment segments in this converter's design).
+    /// segment: an `.instructions` or `.prompt` entry with an
+    /// `.attachment(.image)` segment, or a `.toolOutput` entry whose result
+    /// included one (e.g. a tool that returns a photo) -- the only entry
+    /// kinds `extractImages` is ever consulted for; `.response`/`.toolCalls`
+    /// never carry attachment segments in this converter's design.
     ///
     /// Used to populate `LanguageModelError.UnsupportedTranscriptContent`'s
     /// `unsupportedContent` when the local vision pipeline fails to process
@@ -277,6 +283,8 @@ struct TranscriptConverter {
                 return !extractImages(from: instructions.segments).isEmpty
             case .prompt(let prompt):
                 return !extractImages(from: prompt.segments).isEmpty
+            case .toolOutput(let toolOutput):
+                return !extractImages(from: toolOutput.segments).isEmpty
             default:
                 return false
             }

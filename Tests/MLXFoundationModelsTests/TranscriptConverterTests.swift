@@ -463,6 +463,31 @@ struct TranscriptConverterTests {
     }
 
     @Test
+    func testToolOutputImageAttachmentIsNotSilentlyDropped() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let attachment = Transcript.AttachmentSegment(
+            content: .image(Transcript.ImageAttachment(makeSolidCGImage())),
+            label: "photo")
+        let entries: [Transcript.Entry] = [
+            .toolOutput(
+                Transcript.ToolOutput(
+                    id: "call-1", toolName: "take_photo",
+                    segments: [
+                        .text(Transcript.TextSegment(content: "Here is the photo")),
+                        .attachment(attachment),
+                    ]))
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        #expect(messages.count == 1)
+        #expect(messages[0].role == .tool)
+        #expect(messages[0].content == "Here is the photo")
+        #expect(messages[0].images.count == 1)
+    }
+
+    @Test
     func testToolCallAndOutputOrderingPreserved() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 

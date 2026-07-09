@@ -84,8 +84,10 @@ public enum Chat {
             Self(role: .user, content: content, images: images, videos: videos, audios: audios)
         }
 
-        public static func tool(_ content: String, id: String? = nil) -> Self {
-            Self(role: .tool, content: content, tool: id.map { .result(id: $0) })
+        public static func tool(
+            _ content: String, images: [UserInput.Image] = [], id: String? = nil
+        ) -> Self {
+            Self(role: .tool, content: content, images: images, tool: id.map { .result(id: $0) })
         }
 
         public enum Role: String, Sendable {

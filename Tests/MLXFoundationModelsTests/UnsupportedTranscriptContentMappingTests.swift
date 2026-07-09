@@ -126,6 +126,60 @@ struct UnsupportedTranscriptContentMappingTests {
         }
     }
 
+    @Test(
+        "Tool-output image attachment surfaces as unsupportedTranscriptContent, naming the tool-output entry"
+    )
+    func toolOutputImageProcessingFailureMapsToTypedError() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let modelID = "test/vision-tooloutput-processing-failure-\(UUID().uuidString)"
+        let model = makeVisionModel(modelID: modelID, processor: ImageFailingProcessor())
+        let executor = try makeMLXExecutor(for: model)
+
+        let attachment = Transcript.AttachmentSegment(
+            content: .image(Transcript.ImageAttachment(makeSolidCGImage())),
+            label: "photo")
+        let toolOutput = Transcript.ToolOutput(
+            id: "call-1", toolName: "take_photo",
+            segments: [
+                .text(Transcript.TextSegment(content: "Here is the photo")),
+                .attachment(attachment),
+            ])
+        let request = makeExecutorRequest(
+            transcript: Transcript(entries: [.toolOutput(toolOutput)]))
+        let channel = LanguageModelExecutorGenerationChannel()
+        let drainer = Task<Void, Never> {
+            do {
+                for try await _ in channel {}
+            } catch {
+                // Draining only; the probe error surfaces via respond()'s throw below.
+            }
+        }
+        defer { drainer.cancel() }
+
+        do {
+            try await executor.respond(to: request, model: model, streamingInto: channel)
+            Issue.record("Expected unsupportedTranscriptContent, but respond returned")
+        } catch let error as LanguageModelError {
+            guard case .unsupportedTranscriptContent(let payload) = error else {
+                Issue.record("Expected unsupportedTranscriptContent, got \(error)")
+                return
+            }
+            // The tool-output entry itself carried the image, so it -- not
+            // just `.instructions`/`.prompt` entries -- must be named here.
+            #expect(payload.unsupportedContent.count == 1)
+            guard case .toolOutput = payload.unsupportedContent.first else {
+                Issue.record(
+                    "Expected the tool-output entry to be named, got \(String(describing: payload.unsupportedContent.first))"
+                )
+                return
+            }
+        } catch {
+            Issue.record(
+                "Expected LanguageModelError.unsupportedTranscriptContent, got: \(error)")
+        }
+    }
+
     @Test("Text-only prepare failure passes through unchanged, not remapped to unsupportedTranscriptContent")
     func textOnlyProcessingFailurePassesThroughUnchanged() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
