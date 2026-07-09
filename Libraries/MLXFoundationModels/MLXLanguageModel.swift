@@ -1750,33 +1750,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     action: .updateMetadata([Self.incompleteOutputMetadataKey: true])))
         }
 
-        /// Sends a single text delta for `entryID`.
+        /// Sends a single text or reasoning delta for `entryID`.
         ///
         /// - Parameters:
         ///   - text: The delta text to append.
-        ///   - entryID: The response entry to stream into.
+        ///   - entryID: The response/reasoning entry to stream into.
         ///   - channel: The generation channel to send the delta on.
-        private static func sendTextDelta(
-            _ text: String, entryID: String, channel: LanguageModelExecutorGenerationChannel
+        ///   - isReasoning: `true` to send on the `.reasoning` channel entry,
+        ///     `false` to send on the `.response` channel entry.
+        private static func sendDelta(
+            _ text: String, entryID: String, channel: LanguageModelExecutorGenerationChannel,
+            isReasoning: Bool
         ) async {
-            await channel.send(
-                .response(
-                    entryID: entryID, action: .appendText(text, tokenCount: textDeltaTokenCount)))
-        }
-
-        /// Sends a single reasoning delta for `entryID`. Mirrors `sendTextDelta`
-        /// for the `.reasoning` channel entry instead of `.response`.
-        ///
-        /// - Parameters:
-        ///   - text: The delta text to append.
-        ///   - entryID: The reasoning entry to stream into.
-        ///   - channel: The generation channel to send the delta on.
-        private static func sendReasoningDelta(
-            _ text: String, entryID: String, channel: LanguageModelExecutorGenerationChannel
-        ) async {
-            await channel.send(
-                .reasoning(
-                    entryID: entryID, action: .appendText(text, tokenCount: textDeltaTokenCount)))
+            if isReasoning {
+                await channel.send(
+                    .reasoning(
+                        entryID: entryID, action: .appendText(text, tokenCount: textDeltaTokenCount)))
+            } else {
+                await channel.send(
+                    .response(
+                        entryID: entryID, action: .appendText(text, tokenCount: textDeltaTokenCount)))
+            }
         }
 
         /// Sends the authoritative `.updateUsage` event for `entryID`.
@@ -2479,7 +2473,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 .makeStream()
             async let forwarder: Void = {
                 for await text in textStream {
-                    await Self.sendTextDelta(text, entryID: entryID, channel: channel)
+                    await Self.sendDelta(text, entryID: entryID, channel: channel, isReasoning: false)
                 }
             }()
 
@@ -2530,7 +2524,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             switch generation {
             case .chunk(let text):
                 emittedText += text
-                await Self.sendTextDelta(text, entryID: entryID, channel: channel)
+                await Self.sendDelta(text, entryID: entryID, channel: channel, isReasoning: false)
             case .info(let info):
                 // MLX-LM emits one .info event at end-of-generation with
                 // an authoritative scalar output count
@@ -2807,9 +2801,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             for segment in segments {
                 switch segment {
                 case .reasoning(let text):
-                    await sendReasoningDelta(text, entryID: reasoningEntryID, channel: channel)
+                    await sendDelta(text, entryID: reasoningEntryID, channel: channel, isReasoning: true)
                 case .response(let text):
-                    await sendTextDelta(text, entryID: responseEntryID, channel: channel)
+                    await sendDelta(text, entryID: responseEntryID, channel: channel, isReasoning: false)
                 }
             }
         }
@@ -3068,7 +3062,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             else {
                 // Malformed output. The grammar should have prevented this;
                 // emit the raw buffer as text so failures surface loudly.
-                await Self.sendTextDelta(outputBuffer, entryID: entryID, channel: channel)
+                await Self.sendDelta(outputBuffer, entryID: entryID, channel: channel, isReasoning: false)
                 return
             }
 
@@ -3113,7 +3107,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } else {
                 text = ""
             }
-            await sendTextDelta(text, entryID: entryID, channel: channel)
+            await sendDelta(text, entryID: entryID, channel: channel, isReasoning: false)
         }
 
         /// Handles a real (developer-declared) tool call: re-serializes its
