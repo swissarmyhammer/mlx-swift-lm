@@ -1,0 +1,197 @@
+// Copyright © 2026 Apple Inc.
+
+#if FoundationModelsIntegration
+#if canImport(FoundationModels, _version: 2)
+
+import Foundation
+import MLX
+import MLXLMCommon
+
+extension PromptCache {
+
+    /// One fixed-size token-range slice of a verified `KVCacheSimple` stack, with
+    /// its own tensors materialized as OWNED, evaluated, contiguous copies (see
+    /// `ownedCopy(of:)` -- the copies never alias the source cache's buffers).
+    ///
+    /// Chunks form a hash chain via ``parentKey``/``chunkKey`` (see
+    /// ``PromptCache/chunkKey(parentKey:tokens:)``): identical token prefixes
+    /// produce identical keys, and keys diverge from the first point two token
+    /// sequences differ. `Hasher` is per-process seeded, so a `chunkKey` must
+    /// never be persisted or compared across process launches.
+    struct StoredChunk {
+        /// The token ids this chunk covers -- exactly `chunkSize` long (see
+        /// `sliceChunks`, which never stores a partial tail).
+        var tokens: [Int]
+
+        /// Per-layer key/value tensor slices, in the same layer order as the
+        /// source `[KVCache]`. Each tensor is an owned copy (see
+        /// ``PromptCache/ownedCopy(of:)``), independent of the source cache's
+        /// buffers.
+        var layers: [(keys: MLXArray, values: MLXArray)]
+
+        /// The chunk chain's previous link -- `PromptCache.rootChunkKey` for the
+        /// first chunk of a sequence, otherwise the preceding chunk's `chunkKey`.
+        var parentKey: Int
+
+        /// This chunk's own hash-chain key: `hash(parentKey, tokens)` (see
+        /// ``PromptCache/chunkKey(parentKey:tokens:)``).
+        var chunkKey: Int
+
+        /// Real retained memory footprint of ``layers``' owned tensors, in
+        /// bytes -- computed from the owned copies themselves (`MLXArray.nbytes`),
+        /// so it reflects what's actually retained, not the source's footprint.
+        var byteSize: Int
+
+        /// Recency stamp for eviction bookkeeping. `sliceChunks` is a pure
+        /// function with no clock/counter of its own, so every freshly sliced
+        /// chunk starts at `0`; the storage layer that checks chunks into its
+        /// cache is responsible for stamping a real recency value.
+        var lastUsed: Int
+    }
+
+    /// Root parent key for the first chunk in a sequence -- a fixed seed distinct
+    /// from any real chunk key (which are `Hasher`-derived and, in practice,
+    /// unpredictable, making an accidental collision with this sentinel
+    /// vanishingly unlikely).
+    static let rootChunkKey = 0
+
+    /// Computes the next link in a chunk's hash chain from its parent's key and
+    /// its own token ids.
+    ///
+    /// `Hasher`'s per-process randomized seed means two chunks with the same
+    /// `parentKey`/`tokens` produce the same `chunkKey` only within the same
+    /// process (see `StoredChunk`'s doc comment) -- this is a chain identity
+    /// check for prefix reuse within one running process, not a stable content
+    /// hash.
+    ///
+    /// - Parameters:
+    ///   - parentKey: The preceding chunk's `chunkKey`, or `rootChunkKey` for
+    ///     the first chunk in a sequence.
+    ///   - tokens: This chunk's token ids.
+    /// - Returns: This chunk's `chunkKey`.
+    nonisolated static func chunkKey(parentKey: Int, tokens: [Int]) -> Int {
+        var hasher = Hasher()
+        hasher.combine(parentKey)
+        for token in tokens {
+            hasher.combine(token)
+        }
+        return hasher.finalize()
+    }
+
+    /// Materializes `array` as a genuinely OWNED, contiguous, already-evaluated
+    /// copy, backed by fresh Swift-native memory that shares nothing with
+    /// `array`'s underlying buffer.
+    ///
+    /// This matters because an MLX index slice (e.g.
+    /// `array[.ellipsis, a..<b, 0...]`) always evaluates via
+    /// `shared_buffer_slice`/`copy_shared_buffer` (see
+    /// `mlx/backend/common/slicing.cpp`) -- a zero-copy view that shares the
+    /// SOURCE array's entire underlying allocator buffer, unconditionally, not
+    /// merely when the slice happens to be contiguous. Calling `.eval()` on
+    /// such a slice does not copy any data either: it only detaches the
+    /// *compute graph* (`array::detach()` in `array.cpp` clears the array's
+    /// `inputs`), which is orthogonal to the *buffer* its data still points
+    /// into. So a naive "slice, then eval" chunk keeps the ENTIRE source
+    /// cache's buffer allocated for as long as the chunk lives, even after the
+    /// source `KVCacheSimple` itself is unreachable -- defeating both eviction
+    /// and `byteSize` (confirmed empirically: `PromptCacheChunkTests
+    /// .chunkCopiesReleaseSourceBufferMemory` fails against exactly this naive
+    /// implementation, showing active memory retained at ~the full source
+    /// cache's footprint).
+    ///
+    /// Round-tripping through `asData(access: .copy)` (a `Data` the docs
+    /// guarantee is an independent, contiguous copy, unconditionally) and back
+    /// through `MLXArray(data:)` sidesteps the shared buffer entirely: the
+    /// result is built from `mlx_array_new_data`, which copies its input bytes
+    /// into a fresh `mlx::core::array` allocation with no graph and no shared
+    /// buffer.
+    private static func ownedCopy(of array: MLXArray) -> MLXArray {
+        let owned = MLXArray(data: array.asData(access: .copy))
+        owned.eval()
+        return owned
+    }
+
+    /// Cuts `tokens`/`cache` into fixed-size, non-overlapping token-range
+    /// chunks, one covering each full `chunkSize`-token span; any trailing
+    /// partial span (fewer than `chunkSize` tokens) is dropped, not stored.
+    ///
+    /// Requires every layer in `cache` to be a `KVCacheSimple` whose `offset`
+    /// exactly matches `tokens.count` and whose `state` is the expected
+    /// `[keys, values]` pair -- mirroring `isTrimmable`'s degradation pattern
+    /// for `RotatingKVCache`/`ChunkedKVCache`, this function returns `nil`
+    /// rather than guess at a layer type it can't safely slice.
+    ///
+    /// Every returned chunk's tensors are owned, evaluated copies (see
+    /// ``ownedCopy(of:)``), and `chunkKey`s form a hash chain (see
+    /// ``chunkKey(parentKey:tokens:)``) so identical token prefixes -- even
+    /// sliced from different `[KVCache]` instances -- produce identical keys.
+    ///
+    /// - Parameters:
+    ///   - tokens: The full token sequence `cache` currently reflects.
+    ///   - cache: The cache stack to slice, one entry per model layer.
+    ///   - chunkSize: How many tokens each stored chunk covers.
+    /// - Returns: One `StoredChunk` per full `chunkSize`-token span (possibly
+    ///   empty, if `tokens.count < chunkSize`), or `nil` if any layer isn't a
+    ///   verified, fully-offset `KVCacheSimple`.
+    nonisolated static func sliceChunks(
+        tokens: [Int], cache: [KVCache], chunkSize: Int
+    ) -> [StoredChunk]? {
+        guard chunkSize > 0, !cache.isEmpty else { return nil }
+
+        var simpleLayers: [KVCacheSimple] = []
+        simpleLayers.reserveCapacity(cache.count)
+        for layer in cache {
+            // `as? KVCacheSimple` alone is not enough: `ChunkedKVCache` is a
+            // SUBCLASS of `KVCacheSimple` (see `Libraries/MLXLMCommon/KVCache.swift`)
+            // that overrides `update`/`trim`/`copy`/`metaState` but not
+            // `state`/`isTrimmable`. Once its `maybeTrimFront()` has physically
+            // trimmed `keys`/`values` down to its own chunk size while `offset`
+            // keeps tracking the full logical token position, the inherited
+            // `state` getter's `offset == keys.dim(2)` branch no longer holds,
+            // and slicing against it would use the wrong physical extent. An
+            // exact dynamic-type check excludes every such subclass, matching
+            // this function's own "not chunkable" degradation for any cache
+            // shape it can't safely reason about.
+            guard type(of: layer) == KVCacheSimple.self,
+                let simple = layer as? KVCacheSimple,
+                simple.offset == tokens.count,
+                simple.state.count == 2
+            else { return nil }
+            simpleLayers.append(simple)
+        }
+
+        let chunkCount = tokens.count / chunkSize
+        var parentKey = rootChunkKey
+        var chunks: [StoredChunk] = []
+        chunks.reserveCapacity(chunkCount)
+
+        for index in 0 ..< chunkCount {
+            let start = index * chunkSize
+            let end = start + chunkSize
+            let chunkTokens = Array(tokens[start ..< end])
+
+            var layers: [(keys: MLXArray, values: MLXArray)] = []
+            layers.reserveCapacity(simpleLayers.count)
+            var byteSize = 0
+            for simple in simpleLayers {
+                let state = simple.state
+                let keys = ownedCopy(of: state[0][.ellipsis, start ..< end, 0...])
+                let values = ownedCopy(of: state[1][.ellipsis, start ..< end, 0...])
+                byteSize += keys.nbytes + values.nbytes
+                layers.append((keys: keys, values: values))
+            }
+
+            let key = chunkKey(parentKey: parentKey, tokens: chunkTokens)
+            chunks.append(
+                StoredChunk(
+                    tokens: chunkTokens, layers: layers, parentKey: parentKey, chunkKey: key,
+                    byteSize: byteSize, lastUsed: 0))
+            parentKey = key
+        }
+
+        return chunks
+    }
+}
+
+#endif
+#endif
