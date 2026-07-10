@@ -50,7 +50,7 @@ struct StopTokenSourceTests {
     }
 
     @Test("eosTokenIds in the configuration are included directly")
-    func eosTokenIdsFromConfigurationAreIncluded() {
+    func eosTokenIDsFromConfigurationAreIncluded() {
         let tokenizer = ListTokenizer(tokens: ["a", "b"], eosID: nil)
         var config = ModelConfiguration(id: "test")
         config.eosTokenIds = [99, 100]

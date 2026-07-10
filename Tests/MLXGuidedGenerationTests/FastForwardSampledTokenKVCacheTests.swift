@@ -42,7 +42,7 @@ import Testing
 /// lets `run()`'s stop-token set (`buildStopTokenIDs`) recognize it so the
 /// loop stops before ever trying to decode it as a raw byte.
 private struct ByteTokenizer: MLXLMCommon.Tokenizer {
-    static let eosTokenId = 255
+    static let eosTokenID = 255
     private static let eosTokenString = "<eos>"
 
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
@@ -54,13 +54,13 @@ private struct ByteTokenizer: MLXLMCommon.Tokenizer {
     }
 
     func convertTokenToId(_ token: String) -> Int? {
-        if token == Self.eosTokenString { return Self.eosTokenId }
+        if token == Self.eosTokenString { return Self.eosTokenID }
         guard let byte = token.utf8.first, token.utf8.count == 1 else { return nil }
         return Int(byte)
     }
 
     func convertIdToToken(_ id: Int) -> String? {
-        if id == Self.eosTokenId { return Self.eosTokenString }
+        if id == Self.eosTokenID { return Self.eosTokenString }
         guard id >= 0, id < 256 else { return nil }
         return String(UnicodeScalar(UInt8(id)))
     }
@@ -97,14 +97,14 @@ private final class RecordingProbeModel: Module, MLXLMCommon.LanguageModel,
     static let vocabSize = 256
 
     var kvHeads: [Int] { [1] }
-    private(set) var fedTokenIds: [Int] = []
+    private(set) var fedTokenIDs: [Int] = []
 
     func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
         .tokens(input.text)
     }
 
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        fedTokenIds.append(contentsOf: inputs.asArray(Int32.self).map(Int.init))
+        fedTokenIDs.append(contentsOf: inputs.asArray(Int32.self).map(Int.init))
         return MLXArray.zeros([1, inputs.size, Self.vocabSize])
     }
 }
@@ -119,7 +119,7 @@ struct FastForwardSampledTokenKVCacheTests {
         return try GrammarTokenizer(
             vocab: vocab,
             vocabType: .byteFallback,
-            eosTokenId: Int32(ByteTokenizer.eosTokenId)
+            eosTokenId: Int32(ByteTokenizer.eosTokenID)
         )
     }
 
@@ -164,7 +164,7 @@ struct FastForwardSampledTokenKVCacheTests {
         // callback below.
         let input = LMInput(tokens: MLXArray([Int32(0)]))
 
-        var committedTokenIds: [Int] = []
+        var committedTokenIDs: [Int] = []
         var emittedText = ""
 
         let result = try GuidedGenerationLoop.run(
@@ -173,7 +173,7 @@ struct FastForwardSampledTokenKVCacheTests {
             constraint: constraint,
             maxTokens: 10,
             vocabSize: RecordingProbeModel.vocabSize,
-            onTokenCommitted: { committedTokenIds.append($0) },
+            onTokenCommitted: { committedTokenIDs.append($0) },
             emit: { text in
                 emittedText += text
                 return true
@@ -183,7 +183,7 @@ struct FastForwardSampledTokenKVCacheTests {
         #expect(emittedText == "ABCD", "all four grammar-forced bytes must still reach the caller")
         #expect(result.tokenCount == 4)
 
-        // The bug: without the fix, `committedTokenIds` is only [66, 67, 68]
+        // The bug: without the fix, `committedTokenIDs` is only [66, 67, 68]
         // ("B", "C", "D") -- the sampled token 'A' (65) that triggered the
         // FF batch is silently never fed through the model, even though it
         // was emitted and accepted by the grammar. 'D' (68) IS correctly
@@ -192,13 +192,13 @@ struct FastForwardSampledTokenKVCacheTests {
         // empty FF batch); the grammar's actual EOS token (255) is what's
         // correctly absent, stopped on before ever being committed/emitted.
         #expect(
-            committedTokenIds == [65, 66, 67, 68],
-            "sampled token 'A' (65) must be fed through the model alongside its FF batch ['B'=66, 'C'=67] -- got \(committedTokenIds)"
+            committedTokenIDs == [65, 66, 67, 68],
+            "sampled token 'A' (65) must be fed through the model alongside its FF batch ['B'=66, 'C'=67] -- got \(committedTokenIDs)"
         )
 
         // Cross-check against the model's own call log: every generation
         // token reported via `onTokenCommitted` must correspond to an
         // actual forward pass, and the prompt token (0) must precede them.
-        #expect(model.fedTokenIds == [0, 65, 66, 67, 68])
+        #expect(model.fedTokenIDs == [0, 65, 66, 67, 68])
     }
 }
