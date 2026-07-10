@@ -127,6 +127,27 @@ extension PromptCache {
         return owned
     }
 
+    /// Slices and copies a single layer's key/value tensors for one chunk's
+    /// token range, producing OWNED, evaluated, non-aliasing tensors (see
+    /// ``ownedCopy(of:)`` -- the same buffer-independence guarantee applies
+    /// here, since this is exactly the per-layer slice `sliceChunks` used to
+    /// perform inline).
+    ///
+    /// - Parameters:
+    ///   - layer: The source layer's verified `KVCacheSimple` state.
+    ///   - start: The chunk's starting token offset (inclusive).
+    ///   - end: The chunk's ending token offset (exclusive).
+    /// - Returns: The layer's owned `keys`/`values` slices for this chunk,
+    ///   plus their combined retained byte footprint (`MLXArray.nbytes`).
+    private static func sliceChunkLayer(
+        layer: KVCacheSimple, start: Int, end: Int
+    ) -> (keys: MLXArray, values: MLXArray, byteSize: Int) {
+        let state = layer.state
+        let keys = ownedCopy(of: state[0][.ellipsis, start ..< end, 0...])
+        let values = ownedCopy(of: state[1][.ellipsis, start ..< end, 0...])
+        return (keys: keys, values: values, byteSize: keys.nbytes + values.nbytes)
+    }
+
     /// Cuts `tokens`/`cache` into fixed-size, non-overlapping token-range
     /// chunks, one covering each full `chunkSize`-token span; any trailing
     /// partial span (fewer than `chunkSize` tokens) is dropped, not stored.
@@ -190,11 +211,9 @@ extension PromptCache {
             layers.reserveCapacity(simpleLayers.count)
             var byteSize = 0
             for simple in simpleLayers {
-                let state = simple.state
-                let keys = ownedCopy(of: state[0][.ellipsis, start ..< end, 0...])
-                let values = ownedCopy(of: state[1][.ellipsis, start ..< end, 0...])
-                byteSize += keys.nbytes + values.nbytes
-                layers.append((keys: keys, values: values))
+                let sliced = sliceChunkLayer(layer: simple, start: start, end: end)
+                byteSize += sliced.byteSize
+                layers.append((keys: sliced.keys, values: sliced.values))
             }
 
             let key = chunkKey(parentKey: parentKey, tokens: chunkTokens)
