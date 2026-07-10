@@ -85,43 +85,36 @@ private struct ContextSizeReasoningAwareProcessor: UserInputProcessor {
     }
 }
 
-/// A `Tokenizer` whose `applyChatTemplate` always returns a fixed-length
-/// token array. The tool-calling path re-tokenizes independently via
-/// `context.tokenizer.applyChatTemplate` (bypassing `UserInputProcessor`
-/// entirely -- see `runToolCalling`), so this is what the tool-calling
-/// regression test uses to control that path's prompt length directly.
-private struct ContextSizeFixedLengthTokenizer: MLXLMCommon.Tokenizer {
-    let tokenCount: Int
+/// A `UserInputProcessor` that renders through a real `Tokenizer`'s
+/// `applyChatTemplate`, threading `tools`/`additionalContext` from the
+/// `UserInput` exactly as a real conformer (e.g. `LLMUserInputProcessor`)
+/// does. `runToolCalling` retokenizes via `context.processor.prepare(input:)`
+/// (routing through the model's own `UserInputProcessor` so media and
+/// model-specific message rendering survive -- see `runToolCalling`'s doc
+/// comment), so this is what the think-then-call regression test below uses
+/// to get a real, decodable token sequence out of that path instead of an
+/// opaque fixed-length one.
+private struct ContextSizeRealTokenizingProcessor: UserInputProcessor {
+    let tokenizer: any MLXLMCommon.Tokenizer
 
-    func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
-    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
-    func convertTokenToId(_ token: String) -> Int? { nil }
-    func convertIdToToken(_ id: Int) -> String? { nil }
-    var bosToken: String? { nil }
-    var eosToken: String? { nil }
-    var unknownToken: String? { nil }
-
-    func applyChatTemplate(
-        messages: [[String: any Sendable]],
-        tools: [[String: any Sendable]]?,
-        additionalContext: [String: any Sendable]?
-    ) throws -> [Int] {
-        Array(repeating: 1, count: tokenCount)
+    func prepare(input: UserInput) async throws -> LMInput {
+        let tokens = try tokenizer.applyChatTemplate(
+            messages: [], tools: input.tools, additionalContext: input.additionalContext)
+        return LMInput(tokens: MLXArray(tokens))
     }
 }
 
 /// A SentencePiece-style byte-fallback tokenizer (`<0xNN>` per-byte vocab --
 /// the same shape as `EagerFallbackPrepareOrderingTests.EagerFallbackByteFallbackTokenizer`
 /// / `ToolCallingSchemaTests.makeByteTokenizer()`, both proven to compile a
-/// real `GrammarConstraint`). Unlike `ContextSizeFixedLengthTokenizer` (which
-/// can't round-trip real text), this one actually encodes/decodes real UTF-8
-/// bytes, so it doubles as both `applyChatTemplate`'s tool-aware prompt AND
-/// the tokenizer `ReasoningTokenCollector`'s `NaiveStreamingDetokenizer`
-/// decodes Phase 1's generated tokens through -- required for the
-/// think-then-call regression test below, the only test in this file whose
-/// prompt actually reaches real xgrammar/`GrammarConstraint` compilation
-/// (every other test's context-size check fires before `prepareConstraintSetup`
-/// ever runs).
+/// real `GrammarConstraint`). This one actually encodes/decodes real UTF-8
+/// bytes, so it doubles as both `ContextSizeRealTokenizingProcessor`'s
+/// tool-aware prompt source AND the tokenizer
+/// `ReasoningTokenCollector`'s `NaiveStreamingDetokenizer` decodes Phase 1's
+/// generated tokens through -- required for the think-then-call regression
+/// test below, the only test in this file whose prompt actually reaches real
+/// xgrammar/`GrammarConstraint` compilation (every other test's context-size
+/// check fires before `prepareConstraintSetup` ever runs).
 private struct ContextSizeThinkThenCallByteTokenizer: MLXLMCommon.Tokenizer {
     private static let vocabSize = 256
 
@@ -243,9 +236,14 @@ private final class ContextSizeReasoningCloseModel: Module, MLXLMCommon.Language
 ///     for the reasoning-path regression test).
 ///   - reasoningConfig: Threaded into the model's `ModelConfiguration` so
 ///     `resolved.reasoningConfig` is non-nil for the reasoning-path test.
-///   - tokenizer: The `Tokenizer` `context.tokenizer` resolves to. Only the
-///     tool-calling test needs to control this (`applyChatTemplate`'s
-///     output length); every other path renders through `processor` instead.
+///   - tokenizer: The `Tokenizer` `context.tokenizer` resolves to. Every
+///     path -- including tool-calling, which routes through
+///     `context.processor.prepare(input:)` rather than calling
+///     `applyChatTemplate` directly (see `runToolCalling`) -- renders
+///     through `processor`; this is only consulted directly by a processor
+///     that itself calls `tokenizer.applyChatTemplate` (e.g.
+///     `ContextSizeRealTokenizingProcessor`) and by grammar/decode paths
+///     that need a real, decodable vocab.
 ///   - model: A factory for the `context.model` stand-in, invoked fresh
 ///     inside the (`@Sendable`) `load` closure below -- a factory rather
 ///     than a plain instance because `LanguageModel` isn't `Sendable`, so an
@@ -462,15 +460,15 @@ struct ContextSizeValidationTests {
     func exceedingContextLengthThrowsBeforeGenerationToolCalling() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
-        // The tool-calling path re-tokenizes independently via
-        // `context.tokenizer.applyChatTemplate`, not `context.processor` --
-        // the fixed-length processor is irrelevant here, so the tokenizer
+        // The tool-calling path re-tokenizes via
+        // `context.processor.prepare(input:)` (routing through the model's
+        // own `UserInputProcessor` rather than calling `applyChatTemplate`
+        // directly -- see `runToolCalling`), so the fixed-length processor
         // is what controls this path's (over-limit) prompt length.
         let (model, cleanup) = try makeContextSizeTestModel(
             maxPositionEmbeddings: 4,
-            processor: ContextSizeFixedLengthProcessor(tokenCount: 0),
-            capabilities: [.toolCalling],
-            tokenizer: ContextSizeFixedLengthTokenizer(tokenCount: 10))
+            processor: ContextSizeFixedLengthProcessor(tokenCount: 10),
+            capabilities: [.toolCalling])
         defer { cleanup() }
 
         let weatherTool = Transcript.ToolDefinition(
@@ -528,7 +526,7 @@ struct ContextSizeValidationTests {
 
         let (model, cleanup) = try makeContextSizeTestModel(
             maxPositionEmbeddings: contextLength,
-            processor: ContextSizeFixedLengthProcessor(tokenCount: 0),
+            processor: ContextSizeRealTokenizingProcessor(tokenizer: tokenizer),
             capabilities: [.toolCalling, .reasoning],
             reasoningConfig: reasoningConfig,
             tokenizer: tokenizer,

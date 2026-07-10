@@ -1255,12 +1255,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             /// the model's *default* (non-tool-aware) chat template, before
             /// any reasoning-suppression rewrite. `nil` when tools are
             /// enabled: the tool-calling branch re-tokenizes independently
-            /// via a tool-aware `applyChatTemplate(tools:)` call and never
-            /// reads this field, so rendering it eagerly is both wasted
-            /// work and unsafe -- a continuation round's `messages` can
-            /// contain a replayed `.tool`-role message, and the default
-            /// template of a toolCalling-capable model isn't guaranteed to
-            /// handle `role == "tool"`.
+            /// via its own `context.processor.prepare(input:)` call (with
+            /// `tools:` populated, taking the tool-aware template branch --
+            /// see `runToolCalling`) and never reads this field, so
+            /// rendering it eagerly is both wasted work and unsafe -- a
+            /// continuation round's `messages` can contain a replayed
+            /// `.tool`-role message, and the default (no-`tools`) template
+            /// of a toolCalling-capable model isn't guaranteed to handle
+            /// `role == "tool"`.
             let input: LMInput?
             /// The per-instance configuration resolved from `config.json`.
             let resolved: ModelConfiguration
@@ -1356,15 +1358,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             configurationResolver: any ModelConfigurationResolver
         ) async throws -> RespondSetup {
             // Only render the prompt through the model's *default*
-            // (non-tool-aware) UserInputProcessor when the tool-calling
+            // (no-`tools`) UserInputProcessor call when the tool-calling
             // branch won't run: `runToolCalling` re-tokenizes independently
-            // via a tool-aware `applyChatTemplate(tools:)` call and never
-            // reads `input`/`effectiveInput`/`reasoningSetup`, so this
-            // render would be both wasted work and unsafe on that branch --
-            // a continuation round's `messages` can carry a replayed
+            // via its own `context.processor.prepare(input:)` call (with
+            // `tools:` populated, taking the tool-aware template branch --
+            // see `runToolCalling`) and never reads
+            // `input`/`effectiveInput`/`reasoningSetup`, so this render
+            // would be both wasted work and unsafe on that branch -- a
+            // continuation round's `messages` can carry a replayed
             // `.tool`-role message (see `TranscriptConverter.mlxMessages`),
             // and nothing guarantees a toolCalling-capable model's default
-            // template handles `role == "tool"`.
+            // (no-`tools`) template handles `role == "tool"`.
             let needsEagerInput = request.enabledToolDefinitions.isEmpty
             let userInput = UserInput(chat: messages)
             let input: LMInput? =
@@ -2313,8 +2317,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // whatever tool call it emits.
             let toolSpecs = try ToolCallingConversions.makeToolSpecs(
                 from: allTools)
-            let tokenizerMessages = DefaultMessageGenerator().generate(
-                messages: messages)
 
             // Think-then-call is gated to the enable_thinking
             // family (Qwen3/QwQ): their template both renders the tool
@@ -2334,12 +2336,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     forThinkingEnabled: Self.thinkingEnabled(
                         for: request.contextOptions.reasoningLevel))
             }
-            let toolAwareTokens = try context.tokenizer.applyChatTemplate(
-                messages: tokenizerMessages,
-                tools: toolSpecs,
-                additionalContext: reasoningContext
-            )
-            let toolAwareInput = LMInput(tokens: MLXArray(toolAwareTokens))
+            // Route through the model's own `UserInputProcessor` -- the
+            // same one the eager (non-tool) path uses in
+            // `prepareRespondSetup` -- instead of hand-rolling
+            // `DefaultMessageGenerator()` + a raw `applyChatTemplate`
+            // call. A hardcoded `DefaultMessageGenerator()` silently
+            // diverges from what the model actually needs on two axes:
+            // some text models render a system-role-free template via
+            // `NoSystemMessageGenerator` (see `LlamaModel.messageGenerator`),
+            // and VLMs render image/video placeholders via their own
+            // generator (see `Qwen2VLMessageGenerator.generate(message:)`)
+            // *and* need their pixel data processed into
+            // `LMInput.image`/`.video`/`.audio` -- work `applyChatTemplate`
+            // alone never does. Passing `tools:`/`additionalContext:`
+            // through `UserInput` still drives the processor down the
+            // exact tool-aware `applyChatTemplate` branch this used to
+            // call directly.
+            let toolAwareUserInput = UserInput(
+                chat: messages, tools: toolSpecs, additionalContext: reasoningContext)
+            let toolAwareInput = try await Self.preparedInputMappingImageFailures(
+                processor: context.processor, input: toolAwareUserInput, messages: messages,
+                transcriptEntries: request.transcript)
             try Self.validateContextSize(
                 tokenCount: toolAwareInput.text.tokens.size, contextLength: contextLength)
 
@@ -2383,12 +2400,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             // Phase 2 continues from the model's completed reasoning;
             // carry the raw IDs (no decode/re-encode) so the grammar
-            // starts from the exact post-`</think>` state.
+            // starts from the exact post-`</think>` state. Also carry
+            // forward `toolAwareInput`'s `.image`/`.video`/`.audio` --
+            // rebuilding from a bare token array here would silently
+            // drop any media the prompt carried, exactly the bug this
+            // path used to have unconditionally.
             let phase2Input =
                 reasoningTokenIDs.isEmpty
                 ? toolAwareInput
                 : LMInput(
-                    tokens: MLXArray(toolAwareTokens + reasoningTokenIDs))
+                    text: .init(
+                        tokens: MLXArray(
+                            toolAwareInput.text.tokens.asArray(Int.self) + reasoningTokenIDs)),
+                    image: toolAwareInput.image,
+                    video: toolAwareInput.video,
+                    audio: toolAwareInput.audio)
             // Phase 1's reasoning tokens can push the prompt over the
             // context window even when the original `toolAwareInput` (validated
             // above) was within it -- re-validate the actual Phase 2 input,

@@ -24,23 +24,31 @@ private struct EagerFallbackWeatherArgs {
 }
 
 /// Thrown by `EagerFallbackProbeProcessor.prepare` when it is asked to
-/// render a transcript that includes a `.tool`-role message. Standing in
-/// for a toolCalling-capable model whose *default* (non-tool-aware) chat
-/// template can't handle a replayed `.tool`-role message (see
-/// `TranscriptConverter.mlxMessages`) -- exactly the eager,
-/// unconditional `context.processor.prepare` call `prepareRespondSetup`
-/// must skip once the tool-calling branch is going to be taken.
+/// render a transcript that includes a `.tool`-role message WITHOUT any
+/// `tools` in scope. Standing in for a toolCalling-capable model whose
+/// *default* (no-`tools`) chat template can't handle a replayed
+/// `.tool`-role message (see `TranscriptConverter.mlxMessages`) -- exactly
+/// the eager, unconditional `context.processor.prepare` call
+/// `prepareRespondSetup` must skip once the tool-calling branch is going to
+/// be taken. `runToolCalling` also calls `context.processor.prepare`, but
+/// supplies `tools:` (see `runToolCalling`'s doc comment), which is what a
+/// real chat template branches on to render/accept `role == "tool"` --
+/// mirrored here by only throwing when `input.tools` is empty.
 private struct EagerFallbackProbeError: Error {}
 
 /// A `UserInputProcessor` that throws `EagerFallbackProbeError` if handed
-/// any message with `.tool` role. `respond()` must never reach this call
-/// on the tool-calling path: `runToolCalling` re-tokenizes independently
-/// via a tool-aware `applyChatTemplate(tools:)` call and never reads
-/// `prepareRespondSetup`'s eagerly rendered `input`/`effectiveInput`.
+/// any message with `.tool` role and no `tools` in scope. `respond()` must
+/// never reach a NO-`tools` call on the tool-calling path: the eager
+/// fallback render in `prepareRespondSetup` is skipped once tools are
+/// enabled, and `runToolCalling`'s own tool-aware retokenization always
+/// supplies `tools:` (at minimum the final-answer tool), so a `.tool`-role
+/// message is always paired with a populated `tools` array by the time
+/// this processor sees it on that path.
 private struct EagerFallbackProbeProcessor: UserInputProcessor {
     func prepare(input: UserInput) async throws -> LMInput {
         if case .chat(let messages) = input.prompt,
-            messages.contains(where: { $0.role == .tool })
+            messages.contains(where: { $0.role == .tool }),
+            (input.tools?.isEmpty ?? true)
         {
             throw EagerFallbackProbeError()
         }
