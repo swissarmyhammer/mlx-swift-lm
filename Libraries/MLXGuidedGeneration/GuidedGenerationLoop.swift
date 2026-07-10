@@ -597,14 +597,8 @@ public enum GuidedGenerationLoop {
         // not a sample from these logits, forces every `ffToken` that
         // follows), so only the last FF token's logits are kept below,
         // exactly as before this token was added to the batch.
-        let sampledInput = LMInput.Text(tokens: MLXArray([Int32(tokenId)]))
-        let sampledResult = model(
-            sampledInput[text: .newAxis],
-            cache: cacheOrNil(state.cache),
-            state: state.modelState
-        )
-        state.modelState = sampledResult.state
-        onTokenCommitted?(tokenId)
+        _ = feedTokenThroughModel(
+            tokenId, state: &state, model: model, onTokenCommitted: onTokenCommitted)
 
         // Process FF tokens one at a time to update KV cache.
         // Batching (T_q > 1 with populated cache) triggers an MLX
@@ -614,17 +608,11 @@ public enum GuidedGenerationLoop {
         // (e.g., Gemma 3). Single-token passes (T_q=1) use the
         // optimized Metal kernel and skip the mask entirely.
         for (i, ffToken) in ffTokens.enumerated() {
-            let tokenInput = LMInput.Text(tokens: MLXArray([ffToken]))
-            let result = model(
-                tokenInput[text: .newAxis],
-                cache: cacheOrNil(state.cache),
-                state: state.modelState
-            )
-            state.modelState = result.state
-            onTokenCommitted?(Int(ffToken))
+            let logits = feedTokenThroughModel(
+                Int(ffToken), state: &state, model: model, onTokenCommitted: onTokenCommitted)
             // Only need logits from the last FF token
             if i == ffTokens.count - 1 {
-                state.logits = result.logits
+                state.logits = logits
             }
         }
 
@@ -643,6 +631,32 @@ public enum GuidedGenerationLoop {
     /// both need this identical empty-to-nil translation.
     private static func cacheOrNil(_ cache: [KVCache]) -> [KVCache]? {
         cache.isEmpty ? nil : cache
+    }
+
+    /// Feeds a single token through the model to advance the KV cache at
+    /// `state`'s current position, updating `state.modelState` and firing
+    /// `onTokenCommitted`.
+    ///
+    /// Every call already computes fresh logits as part of the forward
+    /// pass -- this always returns them and lets each call site decide
+    /// whether to keep them (e.g. only the last token of an FF batch needs
+    /// its logits kept for the next sampling step; a token fed only to
+    /// populate the cache can discard them).
+    private static func feedTokenThroughModel(
+        _ tokenId: Int,
+        state: inout LoopState,
+        model: any LanguageModel,
+        onTokenCommitted: ((Int) -> Void)?
+    ) -> MLXArray {
+        let input = LMInput.Text(tokens: MLXArray([Int32(tokenId)]))
+        let result = model(
+            input[text: .newAxis],
+            cache: cacheOrNil(state.cache),
+            state: state.modelState
+        )
+        state.modelState = result.state
+        onTokenCommitted?(tokenId)
+        return result.logits
     }
 
     /// Feeds the sampled token through the model (no fast-forward was
@@ -668,15 +682,8 @@ public enum GuidedGenerationLoop {
         logitDim: Int
     ) throws {
         // Normal single-token forward pass (lazy)
-        let nextInput = LMInput.Text(tokens: MLXArray([Int32(tokenId)]))
-        let result = model(
-            nextInput[text: .newAxis],
-            cache: cacheOrNil(state.cache),
-            state: state.modelState
-        )
-        state.modelState = result.state
-        state.logits = result.logits
-        onTokenCommitted?(tokenId)
+        state.logits = feedTokenThroughModel(
+            tokenId, state: &state, model: model, onTokenCommitted: onTokenCommitted)
 
         try updateMaskAfterForwardPass(
             state: &state, kvBits: kvBits, kvGroupSize: kvGroupSize,
