@@ -491,14 +491,12 @@ actor PromptCache {
     func insert(modelID: String, chunks: [StoredChunk]) {
         var models = chunkStore[modelID] ?? [:]
         for chunk in chunks {
-            if var existing = models[chunk.chunkKey] {
-                existing.lastUsed = nextRecency()
-                models[chunk.chunkKey] = existing
-            } else {
-                var fresh = chunk
-                fresh.lastUsed = nextRecency()
-                models[chunk.chunkKey] = fresh
-            }
+            // `entry` binds to the EXISTING stored chunk when its key is
+            // already present (dedup: only `lastUsed` changes, tensors
+            // untouched), or to the new `chunk` parameter when absent.
+            var entry = models[chunk.chunkKey] ?? chunk
+            entry.lastUsed = nextRecency()
+            models[chunk.chunkKey] = entry
         }
         chunkStore[modelID] = models
     }
