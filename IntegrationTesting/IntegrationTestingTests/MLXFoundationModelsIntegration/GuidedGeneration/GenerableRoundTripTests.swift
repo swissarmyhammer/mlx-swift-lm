@@ -312,7 +312,7 @@ struct GenerableRoundTripTests {
             )
             let completionReserve = Swift.max(structuralReserve * 3, maxTokens / 4)
             let hardReserve = structuralReserve * 8
-            let (whitespaceBias, whitespaceTokenIds) = WhitespaceTokenBias.compute(
+            let (whitespaceBias, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
                 tokenizer: context.tokenizer
             )
 
@@ -328,7 +328,7 @@ struct GenerableRoundTripTests {
                 hardReserve: hardReserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIds: whitespaceTokenIds
+                whitespaceTokenIDs: whitespaceTokenIDs
             ) { text in
                 collected += text
                 return true

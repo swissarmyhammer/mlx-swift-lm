@@ -94,7 +94,7 @@ private actor ModelCache {
     /// In-flight loads tagged as a warmup of an already-present model, which
     /// must NOT surface as `.downloading` (there is no user-facing download).
     /// A subset of `loadingTasks`' keys. See `load` and `isDownloading`.
-    private var suppressedLoadIds: Set<String> = []
+    private var suppressedLoadIDs: Set<String> = []
     private var xgTokenizers: [String: GrammarTokenizer] = [:]
     /// Cached compiled constraint templates keyed by (modelID, schemaJSON).
     /// Clone from template instead of recompiling the grammar each request.
@@ -152,7 +152,7 @@ private actor ModelCache {
         // Tag a warmup-of-an-already-present model out of the `.downloading`
         // signal (computed by the caller as warmup AND modelExistsOnDisk()).
         if suppressDownloadingState {
-            suppressedLoadIds.insert(modelID)
+            suppressedLoadIDs.insert(modelID)
         }
 
         do {
@@ -183,7 +183,7 @@ private actor ModelCache {
         guard loadingTasks[modelID] === loadTask else { return loaded }
         containers[modelID] = loaded
         loadingTasks[modelID] = nil
-        suppressedLoadIds.remove(modelID)
+        suppressedLoadIDs.remove(modelID)
         lastErrors[modelID] = nil
         return loaded
     }
@@ -200,7 +200,7 @@ private actor ModelCache {
     private func recordLoadFailure(modelID: String, loadTask: LoadTask, error: Error) {
         guard loadingTasks[modelID] === loadTask else { return }
         loadingTasks[modelID] = nil
-        suppressedLoadIds.remove(modelID)
+        suppressedLoadIDs.remove(modelID)
         lastErrors[modelID] = error
     }
 
@@ -214,7 +214,7 @@ private actor ModelCache {
     /// - Parameter modelID: The model identifier to check.
     /// - Returns: `true` when a genuine (non-suppressed) download is in flight.
     func isDownloading(modelID: String) -> Bool {
-        loadingTasks[modelID] != nil && !suppressedLoadIds.contains(modelID)
+        loadingTasks[modelID] != nil && !suppressedLoadIDs.contains(modelID)
     }
 
     /// The most recent load error for the given model, if a previous attempt
@@ -362,7 +362,7 @@ private actor ModelCache {
     func evictAll() {
         containers.removeAll()
         loadingTasks.removeAll()
-        suppressedLoadIds.removeAll()
+        suppressedLoadIDs.removeAll()
         xgTokenizers.removeAll()
         constraintTemplates.removeAll()
         tokenizerBiases.removeAll()
@@ -384,7 +384,7 @@ private actor ModelCache {
         // `loadingTasks` holds a `LoadTask` box; cancel the wrapped `Task`.
         loadingTasks[modelID]?.task.cancel()
         loadingTasks.removeValue(forKey: modelID)
-        suppressedLoadIds.remove(modelID)
+        suppressedLoadIDs.remove(modelID)
         containers.removeValue(forKey: modelID)
         xgTokenizers.removeValue(forKey: modelID)
         constraintTemplates = constraintTemplates.filter {
@@ -2193,7 +2193,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     hardReserve: hardReserve,
                     closingBias: setup.closingBias,
                     whitespaceBias: setup.whitespaceBias,
-                    whitespaceTokenIds: setup.whitespaceTokenIDs,
+                    whitespaceTokenIDs: setup.whitespaceTokenIDs,
                     cache: slot.cache,
                     onTokenCommitted: { generatedTokenIDs.append($0) }
                 ) { text in

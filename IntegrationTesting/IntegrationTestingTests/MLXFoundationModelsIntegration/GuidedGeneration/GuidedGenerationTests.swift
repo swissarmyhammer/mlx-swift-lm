@@ -345,7 +345,7 @@ struct GuidedGenerationTests {
                 tokenizer: context.tokenizer,
                 eosTokenId: context.tokenizer.eosTokenId
             )
-            let (whitespaceBias, whitespaceTokenIds) = WhitespaceTokenBias.compute(
+            let (whitespaceBias, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
                 tokenizer: context.tokenizer
             )
             let reserve = CompletionReserve.estimate(
@@ -369,7 +369,7 @@ struct GuidedGenerationTests {
                 hardReserve: hardReserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIds: whitespaceTokenIds,
+                whitespaceTokenIDs: whitespaceTokenIDs,
                 diagnosticLog: diagnosticLog
             ) { text in
                 collected += text
@@ -514,7 +514,7 @@ struct GuidedGenerationTests {
                 tokenizer: context.tokenizer,
                 eosTokenId: context.tokenizer.eosTokenId
             )
-            let (whitespaceBias, whitespaceTokenIds) = WhitespaceTokenBias.compute(
+            let (whitespaceBias, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
                 tokenizer: context.tokenizer
             )
 
@@ -541,7 +541,7 @@ struct GuidedGenerationTests {
                 hardReserve: hardReserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIds: whitespaceTokenIds
+                whitespaceTokenIDs: whitespaceTokenIDs
             ) { text in
                 collected += text
                 return true

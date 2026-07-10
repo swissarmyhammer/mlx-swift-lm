@@ -86,7 +86,7 @@ public enum GuidedGenerationLoop {
     ///   - whitespaceBias: Pre-computed negative logit bias array penalizing
     ///     whitespace-only tokens (from `WhitespaceTokenBias.compute`). Nil
     ///     disables whitespace suppression.
-    ///   - whitespaceTokenIds: Set of token IDs classified as whitespace-only.
+    ///   - whitespaceTokenIDs: Set of token IDs classified as whitespace-only.
     ///     Used by the run tracker to detect consecutive whitespace runs.
     ///   - diagnosticLog: When true, flush the grammar constraint's diagnostic
     ///     logs after the run completes. Defaults to false.
@@ -148,7 +148,7 @@ public enum GuidedGenerationLoop {
         hardReserve: Int = 0,
         closingBias: MLXArray? = nil,
         whitespaceBias: MLXArray? = nil,
-        whitespaceTokenIds: Set<Int> = [],
+        whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
         cache: [KVCache]? = nil,
         onTokenCommitted: ((Int) -> Void)? = nil,
@@ -158,7 +158,7 @@ public enum GuidedGenerationLoop {
         let initialCache = cache ?? model.newCache(parameters: nil)
 
         // Build EOS token set
-        let stopTokenIds = Self.buildStopTokenIds(
+        let stopTokenIDs = Self.buildStopTokenIDs(
             tokenizer: context.tokenizer,
             configuration: context.configuration
         )
@@ -168,7 +168,7 @@ public enum GuidedGenerationLoop {
 
         let detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
         var grammarStopped = false
-        let whitespaceTracker = WhitespaceRunTracker(whitespaceTokenIDs: whitespaceTokenIds)
+        let whitespaceTracker = WhitespaceRunTracker(whitespaceTokenIDs: whitespaceTokenIDs)
 
         // Pre-compute bias arrays used in the zone policy.
         //
@@ -186,7 +186,7 @@ public enum GuidedGenerationLoop {
                 {
                     let biasLen = bias.shape[0]
                     var penalty = [Float32](repeating: 0.0, count: biasLen)
-                    for eos in stopTokenIds where eos >= 0 && eos < biasLen {
+                    for eos in stopTokenIDs where eos >= 0 && eos < biasLen {
                         penalty[eos] = logitRejectionPenalty
                     }
                     return MLXArray(penalty)
@@ -237,7 +237,7 @@ public enum GuidedGenerationLoop {
                 break
             }
 
-            let tokenId = applyBiasAndSample(
+            let tokenID = applyBiasAndSample(
                 state: &state,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
@@ -261,20 +261,20 @@ public enum GuidedGenerationLoop {
             // `applyMaskAndSample` set it to -inf, so argmax would not
             // have selected it.
             if state.mask.needsApply,
-                tokenId == context.tokenizer.unknownTokenId || stopTokenIds.contains(tokenId)
+                tokenID == context.tokenizer.unknownTokenId || stopTokenIDs.contains(tokenID)
             {
                 logStopReason(
-                    diagnosticLog: diagnosticLog, "EOS/unk tokenId=\(tokenId)",
+                    diagnosticLog: diagnosticLog, "EOS/unk tokenID=\(tokenID)",
                     tokenCount: state.tokenCount)
                 grammarStopped = true
                 break
             }
 
             // Commit to grammar
-            let commitResult = try constraint.commitToken(Int32(tokenId))
+            let commitResult = try constraint.commitToken(Int32(tokenID))
 
             // Yield the sampled token
-            if emitToken(tokenId, state: &state, emit: emit) { break }
+            if emitToken(tokenID, state: &state, emit: emit) { break }
 
             // Periodic progress logging (once per main loop iteration, not per FF token)
             if state.tokenCount % 50 == 0 {
@@ -297,7 +297,7 @@ public enum GuidedGenerationLoop {
             let shouldStop: Bool
             if !ffTokens.isEmpty {
                 shouldStop = try processFastForwardTokens(
-                    tokenId,
+                    tokenID,
                     ffTokens,
                     state: &state,
                     maxTokens: maxTokens,
@@ -313,7 +313,7 @@ public enum GuidedGenerationLoop {
                 )
             } else {
                 try advanceSingleSampledToken(
-                    tokenId,
+                    tokenID,
                     state: &state,
                     model: model,
                     onTokenCommitted: onTokenCommitted,
@@ -468,15 +468,15 @@ public enum GuidedGenerationLoop {
             maskArray: state.maskArray,
             closingBias: activeBias
         )
-        let tokenId = Int(token)
+        let tokenID = Int(token)
 
         // Track the sampled token for whitespace run detection.
         // Fast-forward tokens are NOT tracked (they are grammar-forced).
         if whitespaceBias != nil {
-            _ = state.whitespaceTracker.record(tokenID: tokenId)
+            _ = state.whitespaceTracker.record(tokenID: tokenID)
         }
 
-        return tokenId
+        return tokenID
     }
 
     /// Computes the hard-zone logit bias: forces closing tokens (zeroing
@@ -498,7 +498,7 @@ public enum GuidedGenerationLoop {
         return hardBias
     }
 
-    /// Detokenizes `tokenId`, appends any resulting text to the accumulated
+    /// Detokenizes `tokenID`, appends any resulting text to the accumulated
     /// output, and forwards it through `emit`. Shared by the sampled-token
     /// yield in `run()`'s main loop and the fast-forward emission loop in
     /// `processFastForwardTokens`, so both honor the same stop contract.
@@ -508,9 +508,9 @@ public enum GuidedGenerationLoop {
     ///   incremented only on the non-stopping path, matching the token
     ///   accounting the two original call sites both relied on.
     private static func emitToken(
-        _ tokenId: Int, state: inout LoopState, emit: (String) -> Bool
+        _ tokenID: Int, state: inout LoopState, emit: (String) -> Bool
     ) -> Bool {
-        state.detokenizer.append(token: tokenId)
+        state.detokenizer.append(token: tokenID)
         if let text = state.detokenizer.next() {
             state.accumulatedText += text
             if !emit(text) {
@@ -532,14 +532,14 @@ public enum GuidedGenerationLoop {
     /// into a single top-level call.
     ///
     /// - Parameters:
-    ///   - tokenId: The token just sampled and committed to the grammar
+    ///   - tokenID: The token just sampled and committed to the grammar
     ///     this iteration (the one whose commit produced `ffTokens`).
     ///     `CommitResult.tokens` never echoes this id back (see
     ///     `GrammarConstraint.commitToken`'s doc comment), so unlike the
     ///     non-FF path (`advanceSingleSampledToken`), nothing upstream of
     ///     this call has fed it through the model yet. It must get its own
     ///     forward pass here -- feeding `ffTokens` directly without it
-    ///     would silently skip `tokenId`'s KV-cache entry, leaving every
+    ///     would silently skip `tokenID`'s KV-cache entry, leaving every
     ///     later position's attention unable to see a token that was
     ///     nonetheless emitted and accepted by the grammar.
     ///   - ffTokens: The jump-forward token ids from `CommitResult.tokens`
@@ -548,7 +548,7 @@ public enum GuidedGenerationLoop {
     ///     `tokenCount` (via `emitToken`) and `cache`/`modelState`/`logits`/
     ///     `mask`/`maskArray`.
     ///   - maxTokens: Generation budget; FF emission stops (without
-    ///     feeding `tokenId` or the FF tokens to the model) once reached.
+    ///     feeding `tokenID` or the FF tokens to the model) once reached.
     ///   - model, onTokenCommitted, kvBits, kvGroupSize, quantizedKvStart,
     ///     constraint, vocabSize, logitDim: See `run`'s parameters/locals
     ///     of the same names.
@@ -557,7 +557,7 @@ public enum GuidedGenerationLoop {
     ///   budget was exhausted mid-batch) and `run`'s main loop must break;
     ///   `false` to continue.
     private static func processFastForwardTokens(
-        _ tokenId: Int,
+        _ tokenID: Int,
         _ ffTokens: [Int32],
         state: inout LoopState,
         maxTokens: Int,
@@ -577,7 +577,7 @@ public enum GuidedGenerationLoop {
         // here would only stop this batch, leaving `run`'s main loop to
         // run another full iteration -- wasting GPU work and violating
         // the caller's stop contract. Propagate through the `Bool`
-        // return and let the caller break its own `while`. (`tokenId`
+        // return and let the caller break its own `while`. (`tokenID`
         // itself was already emitted by `run()`'s main loop before this
         // function was called, so only `ffTokens` need emitting here.)
         for ffToken in ffTokens {
@@ -598,7 +598,7 @@ public enum GuidedGenerationLoop {
         // follows), so only the last FF token's logits are kept below,
         // exactly as before this token was added to the batch.
         _ = feedTokenThroughModel(
-            tokenId, state: &state, model: model, onTokenCommitted: onTokenCommitted)
+            tokenID, state: &state, model: model, onTokenCommitted: onTokenCommitted)
 
         // Process FF tokens one at a time to update KV cache.
         // Batching (T_q > 1 with populated cache) triggers an MLX
@@ -643,19 +643,19 @@ public enum GuidedGenerationLoop {
     /// its logits kept for the next sampling step; a token fed only to
     /// populate the cache can discard them).
     private static func feedTokenThroughModel(
-        _ tokenId: Int,
+        _ tokenID: Int,
         state: inout LoopState,
         model: any LanguageModel,
         onTokenCommitted: ((Int) -> Void)?
     ) -> MLXArray {
-        let input = LMInput.Text(tokens: MLXArray([Int32(tokenId)]))
+        let input = LMInput.Text(tokens: MLXArray([Int32(tokenID)]))
         let result = model(
             input[text: .newAxis],
             cache: cacheOrNil(state.cache),
             state: state.modelState
         )
         state.modelState = result.state
-        onTokenCommitted?(tokenId)
+        onTokenCommitted?(tokenID)
         return result.logits
     }
 
@@ -670,7 +670,7 @@ public enum GuidedGenerationLoop {
     ///   `state` is mutated the same way `processFastForwardTokens`
     ///   mutates it (`cache`/`modelState`/`logits`/`mask`/`maskArray`).
     private static func advanceSingleSampledToken(
-        _ tokenId: Int,
+        _ tokenID: Int,
         state: inout LoopState,
         model: any LanguageModel,
         onTokenCommitted: ((Int) -> Void)?,
@@ -683,7 +683,7 @@ public enum GuidedGenerationLoop {
     ) throws {
         // Normal single-token forward pass (lazy)
         state.logits = feedTokenThroughModel(
-            tokenId, state: &state, model: model, onTokenCommitted: onTokenCommitted)
+            tokenID, state: &state, model: model, onTokenCommitted: onTokenCommitted)
 
         try updateMaskAfterForwardPass(
             state: &state, kvBits: kvBits, kvGroupSize: kvGroupSize,
@@ -877,20 +877,20 @@ public enum GuidedGenerationLoop {
     ///    some Gemma variants in `LLMModelFactory`). Callers needing extra
     ///    stop tokens add them here (via the model configuration), not as a
     ///    per-call argument.
-    static func buildStopTokenIds(
+    static func buildStopTokenIDs(
         tokenizer: any Tokenizer,
         configuration: ModelConfiguration
     ) -> Set<Int> {
-        var stopTokenIds = Set(configuration.eosTokenIds)
+        var stopTokenIDs = Set(configuration.eosTokenIds)
         if let eos = tokenizer.eosTokenId {
-            stopTokenIds.insert(eos)
+            stopTokenIDs.insert(eos)
         }
         for token in configuration.extraEOSTokens {
             if let id = tokenizer.convertTokenToId(token) {
-                stopTokenIds.insert(id)
+                stopTokenIDs.insert(id)
             }
         }
-        return stopTokenIds
+        return stopTokenIDs
     }
 
     /// Apply a *prebuilt* grammar mask and optional bias to logits, then argmax.

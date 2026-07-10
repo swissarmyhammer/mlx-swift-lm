@@ -141,7 +141,7 @@ struct MultiModelGuidedGenerationTests {
                 tokenizer: context.tokenizer,
                 eosTokenId: context.tokenizer.eosTokenId
             )
-            let (whitespaceBias, whitespaceTokenIds) = WhitespaceTokenBias.compute(
+            let (whitespaceBias, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
                 tokenizer: context.tokenizer
             )
             let reserve = CompletionReserve.estimate(
@@ -159,7 +159,7 @@ struct MultiModelGuidedGenerationTests {
                 completionReserve: reserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIds: whitespaceTokenIds
+                whitespaceTokenIDs: whitespaceTokenIDs
             ) { text in
                 collected += text
                 return true
@@ -267,7 +267,7 @@ struct MultiModelGuidedGenerationTests {
                 tokenizer: context.tokenizer,
                 eosTokenId: context.tokenizer.eosTokenId
             )
-            let (whitespaceBias, whitespaceTokenIds) = WhitespaceTokenBias.compute(
+            let (whitespaceBias, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
                 tokenizer: context.tokenizer
             )
             let reserve = CompletionReserve.estimate(
@@ -288,7 +288,7 @@ struct MultiModelGuidedGenerationTests {
                 completionReserve: reserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIds: whitespaceTokenIds
+                whitespaceTokenIDs: whitespaceTokenIDs
             ) { text in
                 collected += text
                 tokenCount += 1

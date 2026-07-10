@@ -39,7 +39,7 @@ import Testing
 /// `GrammarConstraint`'s `hostTokenizer` and `context.tokenizer` -- its
 /// `encode`/`decode` round-trip is all `emitFastForwardLocked`'s boundary
 /// trim and `NaiveStreamingDetokenizer` need, and registering the EOS id
-/// lets `run()`'s stop-token set (`buildStopTokenIds`) recognize it so the
+/// lets `run()`'s stop-token set (`buildStopTokenIDs`) recognize it so the
 /// loop stops before ever trying to decode it as a raw byte.
 private struct ByteTokenizer: MLXLMCommon.Tokenizer {
     static let eosTokenId = 255

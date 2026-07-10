@@ -76,16 +76,16 @@ private final class GuidedPromptSeamCaptureProcessor: UserInputProcessor, @unche
     }
 }
 
-/// Counts occurrences of `schemaJson` across `messages`' `content` -- the
+/// Counts occurrences of `schemaJSON` across `messages`' `content` -- the
 /// tokenizable text a `UserInputProcessor` renders into the prompt, so this
 /// is a faithful proxy for "how many times the schema appears in the
 /// tokenized prompt" without needing a real tokenizer. Shared by both test
 /// suites below: `GuidedGenerationSchemaPromptTests` (isolated helper calls)
 /// and `GuidedGenerationPromptSeamTests` (the real `Executor.respond` seam).
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-private func countSchemaOccurrences(in messages: [Chat.Message], schemaJson: String) -> Int {
+private func countSchemaOccurrences(in messages: [Chat.Message], schemaJSON: String) -> Int {
     messages.reduce(0) { count, message in
-        count + message.content.components(separatedBy: schemaJson).count - 1
+        count + message.content.components(separatedBy: schemaJSON).count - 1
     }
 }
 
@@ -109,21 +109,21 @@ private func countSchemaOccurrences(in messages: [Chat.Message], schemaJson: Str
 ///   proving the wiring itself, not just the isolated helper.
 ///
 /// Investigation established the adapter has no schema-in-prompt rendering
-/// of its own to begin with (`schemaJson` only ever feeds xgrammar's
+/// of its own to begin with (`schemaJSON` only ever feeds xgrammar's
 /// constrained-decoding constraint, never prompt text), so "preserve current
 /// behavior" for every value of the flag means "the seam never adds
 /// anything" -- both suites assert exactly that.
 @Suite("Guided-generation prompt-assembly helpers honor ContextOptions.includeSchemaInPrompt (isolated)")
 struct GuidedGenerationSchemaPromptTests {
 
-    private static let schemaJson = #"{"type":"object","properties":{"answer":{"type":"string"}}}"#
+    private static let schemaJSON = #"{"type":"object","properties":{"answer":{"type":"string"}}}"#
 
-    /// Counts occurrences of `schemaJson` across the assembled messages'
+    /// Counts occurrences of `schemaJSON` across the assembled messages'
     /// `content`. Delegates to the file-level `countSchemaOccurrences(in:
-    /// schemaJson:)` shared with `GuidedGenerationPromptSeamTests` below.
+    /// schemaJSON:)` shared with `GuidedGenerationPromptSeamTests` below.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func schemaOccurrences(in messages: [Chat.Message]) -> Int {
-        countSchemaOccurrences(in: messages, schemaJson: schemaJson)
+        countSchemaOccurrences(in: messages, schemaJSON: schemaJSON)
     }
 
     @Test("includeSchemaInPrompt == true: the seam adds nothing extra")
@@ -132,7 +132,7 @@ struct GuidedGenerationSchemaPromptTests {
         let messages: [Chat.Message] = [.user("Describe today's weather.")]
 
         let result = MLXLanguageModel.Executor.guidedGenerationMessages(
-            from: messages, schemaJSON: Self.schemaJson, includeSchemaInPrompt: true)
+            from: messages, schemaJSON: Self.schemaJSON, includeSchemaInPrompt: true)
 
         #expect(result.count == messages.count)
         #expect(Self.schemaOccurrences(in: result) == 0)
@@ -144,7 +144,7 @@ struct GuidedGenerationSchemaPromptTests {
         let messages: [Chat.Message] = [.user("Describe today's weather.")]
 
         let result = MLXLanguageModel.Executor.guidedGenerationMessages(
-            from: messages, schemaJSON: Self.schemaJson, includeSchemaInPrompt: false)
+            from: messages, schemaJSON: Self.schemaJSON, includeSchemaInPrompt: false)
 
         #expect(result.count == messages.count)
         #expect(Self.schemaOccurrences(in: result) == 0)
@@ -156,7 +156,7 @@ struct GuidedGenerationSchemaPromptTests {
         let messages: [Chat.Message] = [.user("Describe today's weather.")]
 
         let result = MLXLanguageModel.Executor.guidedGenerationMessages(
-            from: messages, schemaJSON: Self.schemaJson, includeSchemaInPrompt: nil)
+            from: messages, schemaJSON: Self.schemaJSON, includeSchemaInPrompt: nil)
 
         #expect(result.count == messages.count)
         #expect(Self.schemaOccurrences(in: result) == 0)
@@ -175,11 +175,11 @@ struct GuidedGenerationSchemaPromptTests {
         // text itself (whatever assembled the transcript -- the framework's
         // own default prompt construction, or the developer's own manual
         // `Prompt` segments).
-        let messages: [Chat.Message] = [.user("Schema: \(Self.schemaJson)")]
+        let messages: [Chat.Message] = [.user("Schema: \(Self.schemaJSON)")]
 
         for includeSchemaInPrompt in [true, false, nil] {
             let result = MLXLanguageModel.Executor.guidedGenerationMessages(
-                from: messages, schemaJSON: Self.schemaJson,
+                from: messages, schemaJSON: Self.schemaJSON,
                 includeSchemaInPrompt: includeSchemaInPrompt)
             #expect(
                 Self.schemaOccurrences(in: result) == 1,
@@ -228,12 +228,12 @@ struct GuidedGenerationPromptSeamTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func makeRequest(
         embedSchemaInPromptText: Bool,
-        schemaJson: String,
+        schemaJSON: String,
         includeSchemaInPrompt: Bool?
     ) -> LanguageModelExecutorGenerationRequest {
         let promptText =
             embedSchemaInPromptText
-            ? "Respond matching this schema: \(schemaJson)"
+            ? "Respond matching this schema: \(schemaJSON)"
             : "Describe today's weather."
         let prompt = Transcript.Prompt(
             segments: [.text(Transcript.TextSegment(content: promptText))],
@@ -255,10 +255,10 @@ struct GuidedGenerationPromptSeamTests {
         embedSchemaInPromptText: Bool,
         includeSchemaInPrompt: Bool?
     ) async throws -> Int {
-        let schemaJson = try SchemaConverter.encodeToJSON(
+        let schemaJSON = try SchemaConverter.encodeToJSON(
             GuidedPromptSeamSchemaArgs.generationSchema)
         let request = makeRequest(
-            embedSchemaInPromptText: embedSchemaInPromptText, schemaJson: schemaJson,
+            embedSchemaInPromptText: embedSchemaInPromptText, schemaJSON: schemaJSON,
             includeSchemaInPrompt: includeSchemaInPrompt)
 
         let modelDirectory = FileManager.default.temporaryDirectory
@@ -328,7 +328,7 @@ struct GuidedGenerationPromptSeamTests {
                 "UserInputProcessor.prepare was never called -- the real seam wasn't reached")
             return -1
         }
-        return countSchemaOccurrences(in: captured, schemaJson: schemaJson)
+        return countSchemaOccurrences(in: captured, schemaJSON: schemaJSON)
     }
 
     @Test(
