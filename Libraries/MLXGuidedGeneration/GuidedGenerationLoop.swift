@@ -204,8 +204,8 @@ public enum GuidedGenerationLoop {
 
         // Pre-compute the first mask + its sample array (no overlap possible for
         // the first iteration). Subsequent arrays are built in the overlap window.
-        let initialMask = try constraint.computeMask()
-        let initialMaskArray = buildMaskArray(for: initialMask, vocabSize: vocabSize, logitDim: logitDim)
+        let (initialMask, initialMaskArray) = try computeMaskAndArray(
+            constraint: constraint, vocabSize: vocabSize, logitDim: logitDim)
 
         var state = LoopState(
             cache: initialCache,
@@ -708,7 +708,7 @@ public enum GuidedGenerationLoop {
     /// Quantizes the KV cache and computes the next grammar mask in the
     /// CPU/GPU overlap window, updating `state.cache`/`state.mask`/
     /// `state.maskArray` in place. Thin wrapper around
-    /// `advanceMaskOnCPUWhileGPURuns` that threads `LoopState` through, so
+    /// `advanceMaskOnCpuWhileGpuRuns` that threads `LoopState` through, so
     /// `processFastForwardTokens` and `advanceSingleSampledToken` -- which
     /// both need this identical post-forward-pass sequence -- can call it
     /// with a single line instead of duplicating the tuple-destructuring
@@ -728,7 +728,7 @@ public enum GuidedGenerationLoop {
         vocabSize: Int,
         logitDim: Int
     ) throws {
-        (state.mask, state.maskArray) = try Self.advanceMaskOnCPUWhileGPURuns(
+        (state.mask, state.maskArray) = try Self.advanceMaskOnCpuWhileGpuRuns(
             logits: state.logits, cache: &state.cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
             quantizedKvStart: quantizedKvStart, constraint: constraint,
             vocabSize: vocabSize, logitDim: logitDim)
@@ -754,7 +754,7 @@ public enum GuidedGenerationLoop {
     ///   - logitDim: The model's logit dimension.
     /// - Returns: The freshly computed mask and its prebuilt additive sample
     ///   array (see `buildMaskArray`).
-    private static func advanceMaskOnCPUWhileGPURuns(
+    private static func advanceMaskOnCpuWhileGpuRuns(
         logits: MLXArray,
         cache: inout [KVCache],
         kvBits: Int?,
@@ -773,12 +773,31 @@ public enum GuidedGenerationLoop {
 
         // Overlap: compute the next mask AND build its sample array on the
         // CPU while the GPU runs the forward pass.
-        let mask = try constraint.computeMask()
-        let maskArray = buildMaskArray(for: mask, vocabSize: vocabSize, logitDim: logitDim)
+        let (mask, maskArray) = try computeMaskAndArray(
+            constraint: constraint, vocabSize: vocabSize, logitDim: logitDim)
 
         // Wait for GPU to finish (may already be done)
         eval(logits)
 
+        return (mask, maskArray)
+    }
+
+    /// Computes the grammar constraint's next mask and its prebuilt additive
+    /// sample array in one call. Shared by the pre-loop initial-mask setup in
+    /// `run()` and by `advanceMaskOnCpuWhileGpuRuns`'s CPU/GPU overlap window,
+    /// both of which need this identical compute-then-build pair.
+    ///
+    /// - Parameters:
+    ///   - constraint: The grammar constraint to compute the next mask from.
+    ///   - vocabSize: The grammar's vocabulary size.
+    ///   - logitDim: The model's logit dimension.
+    /// - Returns: The freshly computed mask and its prebuilt additive sample
+    ///   array (see `buildMaskArray`).
+    private static func computeMaskAndArray(
+        constraint: GrammarConstraint, vocabSize: Int, logitDim: Int
+    ) throws -> (MaskResult, MLXArray?) {
+        let mask = try constraint.computeMask()
+        let maskArray = buildMaskArray(for: mask, vocabSize: vocabSize, logitDim: logitDim)
         return (mask, maskArray)
     }
 
