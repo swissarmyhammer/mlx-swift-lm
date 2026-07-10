@@ -415,7 +415,7 @@ actor PromptCache {
     ///
     /// - Parameters:
     ///   - observedTokenCount: How many real token IDs were observed
-    ///     (e.g. `generatedTokenIDs.count`).
+    ///     (e.g. `generatedTokenIds.count`).
     ///   - cacheAdvance: The cache's real `offset` advance beyond the
     ///     prompt tokens fed this round.
     /// - Returns: How the caller should proceed.

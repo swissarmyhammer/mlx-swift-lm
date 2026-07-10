@@ -14,12 +14,12 @@ import Testing
 @Suite
 struct StopTokenSourceTests {
 
-    /// Configurable tokenizer: token at index `i` has id `i`; `eosID` (if set)
+    /// Configurable tokenizer: token at index `i` has id `i`; `eosId` (if set)
     /// is surfaced as the tokenizer's primary EOS. Mirrors the existing
     /// `SmallTokenizer`/`ByteTokenizer` stubs in this target.
     private struct ListTokenizer: MLXLMCommon.Tokenizer {
         let tokens: [String]
-        let eosID: Int?
+        let eosId: Int?
 
         func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
         func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
@@ -29,7 +29,7 @@ struct StopTokenSourceTests {
             return tokens[id]
         }
         var bosToken: String? { nil }
-        var eosToken: String? { eosID.flatMap { convertIdToToken($0) } }
+        var eosToken: String? { eosId.flatMap { convertIdToToken($0) } }
         var unknownToken: String? { nil }
         func applyChatTemplate(
             messages: [[String: any Sendable]],
@@ -40,7 +40,7 @@ struct StopTokenSourceTests {
 
     @Test("extraEOSTokens in the configuration are mapped to ids and included")
     func extraEOSTokensFromConfigurationAreIncluded() {
-        let tokenizer = ListTokenizer(tokens: ["a", "<end_of_turn>", "b"], eosID: nil)
+        let tokenizer = ListTokenizer(tokens: ["a", "<end_of_turn>", "b"], eosId: nil)
         let config = ModelConfiguration(id: "test", extraEOSTokens: ["<end_of_turn>"])
 
         let stop = GuidedGenerationLoop.buildStopTokenIds(
@@ -51,7 +51,7 @@ struct StopTokenSourceTests {
 
     @Test("eosTokenIds in the configuration are included directly")
     func eosTokenIdsFromConfigurationAreIncluded() {
-        let tokenizer = ListTokenizer(tokens: ["a", "b"], eosID: nil)
+        let tokenizer = ListTokenizer(tokens: ["a", "b"], eosId: nil)
         var config = ModelConfiguration(id: "test")
         config.eosTokenIds = [99, 100]
 
@@ -64,7 +64,7 @@ struct StopTokenSourceTests {
 
     @Test("the tokenizer's primary EOS is included")
     func tokenizerPrimaryEOSIsIncluded() {
-        let tokenizer = ListTokenizer(tokens: ["a", "</s>"], eosID: 1)
+        let tokenizer = ListTokenizer(tokens: ["a", "</s>"], eosId: 1)
         let config = ModelConfiguration(id: "test")
 
         let stop = GuidedGenerationLoop.buildStopTokenIds(
@@ -76,7 +76,7 @@ struct StopTokenSourceTests {
     @Test("all three configuration-borne sources union together")
     func allSourcesUnion() {
         let tokenizer = ListTokenizer(
-            tokens: ["a", "<end_of_turn>", "</s>"], eosID: 2)
+            tokens: ["a", "<end_of_turn>", "</s>"], eosId: 2)
         var config = ModelConfiguration(id: "test", extraEOSTokens: ["<end_of_turn>"])
         config.eosTokenIds = [99]
 

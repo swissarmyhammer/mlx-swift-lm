@@ -94,7 +94,7 @@ private actor ModelCache {
     /// In-flight loads tagged as a warmup of an already-present model, which
     /// must NOT surface as `.downloading` (there is no user-facing download).
     /// A subset of `loadingTasks`' keys. See `load` and `isDownloading`.
-    private var suppressedLoadIDs: Set<String> = []
+    private var suppressedLoadIds: Set<String> = []
     private var xgTokenizers: [String: GrammarTokenizer] = [:]
     /// Cached compiled constraint templates keyed by (modelID, schemaJSON).
     /// Clone from template instead of recompiling the grammar each request.
@@ -152,7 +152,7 @@ private actor ModelCache {
         // Tag a warmup-of-an-already-present model out of the `.downloading`
         // signal (computed by the caller as warmup AND modelExistsOnDisk()).
         if suppressDownloadingState {
-            suppressedLoadIDs.insert(modelID)
+            suppressedLoadIds.insert(modelID)
         }
 
         do {
@@ -183,7 +183,7 @@ private actor ModelCache {
         guard loadingTasks[modelID] === loadTask else { return loaded }
         containers[modelID] = loaded
         loadingTasks[modelID] = nil
-        suppressedLoadIDs.remove(modelID)
+        suppressedLoadIds.remove(modelID)
         lastErrors[modelID] = nil
         return loaded
     }
@@ -200,7 +200,7 @@ private actor ModelCache {
     private func recordLoadFailure(modelID: String, loadTask: LoadTask, error: Error) {
         guard loadingTasks[modelID] === loadTask else { return }
         loadingTasks[modelID] = nil
-        suppressedLoadIDs.remove(modelID)
+        suppressedLoadIds.remove(modelID)
         lastErrors[modelID] = error
     }
 
@@ -214,7 +214,7 @@ private actor ModelCache {
     /// - Parameter modelID: The model identifier to check.
     /// - Returns: `true` when a genuine (non-suppressed) download is in flight.
     func isDownloading(modelID: String) -> Bool {
-        loadingTasks[modelID] != nil && !suppressedLoadIDs.contains(modelID)
+        loadingTasks[modelID] != nil && !suppressedLoadIds.contains(modelID)
     }
 
     /// The most recent load error for the given model, if a previous attempt
@@ -362,7 +362,7 @@ private actor ModelCache {
     func evictAll() {
         containers.removeAll()
         loadingTasks.removeAll()
-        suppressedLoadIDs.removeAll()
+        suppressedLoadIds.removeAll()
         xgTokenizers.removeAll()
         constraintTemplates.removeAll()
         tokenizerBiases.removeAll()
@@ -384,7 +384,7 @@ private actor ModelCache {
         // `loadingTasks` holds a `LoadTask` box; cancel the wrapped `Task`.
         loadingTasks[modelID]?.task.cancel()
         loadingTasks.removeValue(forKey: modelID)
-        suppressedLoadIDs.remove(modelID)
+        suppressedLoadIds.remove(modelID)
         containers.removeValue(forKey: modelID)
         xgTokenizers.removeValue(forKey: modelID)
         constraintTemplates = constraintTemplates.filter {
@@ -1185,9 +1185,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // UUID — they live in separate transcript entries. We preserve the
             // framework-supplied `request.id` for tracing by stamping it into
             // the response metadata below, rather than reusing it as an entry id.
-            let entryID = UUID().uuidString
-            let toolCallsEntryID = UUID().uuidString
-            let reasoningEntryID = UUID().uuidString
+            let entryId = UUID().uuidString
+            let toolCallsEntryId = UUID().uuidString
+            let reasoningEntryId = UUID().uuidString
             // Captured before the actor hop so the perform closure doesn't
             // capture `model`. Reasoning is gated strictly on the declared
             // capability; the resolver-patched configuration supplies the
@@ -1199,7 +1199,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // Send metadata first
                 await channel.send(
                     .response(
-                        entryID: entryID,
+                        entryID: entryId,
                         action: .updateMetadata([
                             "modelID": modelID,
                             "requestID": request.id.uuidString,
@@ -1220,9 +1220,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         modelID: modelID, schemaJSON: schemaJSON,
                         requestedMaxTokens: requestedMaxTokens,
                         requestedSamplingMode: requestedSamplingMode,
-                        declaresReasoning: declaresReasoning, entryID: entryID,
-                        toolCallsEntryID: toolCallsEntryID,
-                        reasoningEntryID: reasoningEntryID, context: context,
+                        declaresReasoning: declaresReasoning, entryId: entryId,
+                        toolCallsEntryId: toolCallsEntryId,
+                        reasoningEntryId: reasoningEntryId, context: context,
                         channel: channel)
                     guard completedNormally else { return }
 
@@ -1550,9 +1550,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - requestedMaxTokens: The caller's token budget override, if any.
         ///   - requestedSamplingMode: The caller's sampling mode override, if any.
         ///   - declaresReasoning: Whether `.reasoning` was declared at init.
-        ///   - entryID: The response entry to stream output into.
-        ///   - toolCallsEntryID: The entry to stream tool-call events into.
-        ///   - reasoningEntryID: The entry to stream think-then-call/reasoning output into.
+        ///   - entryId: The response entry to stream output into.
+        ///   - toolCallsEntryId: The entry to stream tool-call events into.
+        ///   - reasoningEntryId: The entry to stream think-then-call/reasoning output into.
         ///   - context: The loaded model context.
         ///   - channel: The generation channel to send events on.
         /// - Returns: `false` only when `runToolCalling`'s think-then-call Phase 1
@@ -1569,9 +1569,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedMaxTokens: Int?,
             requestedSamplingMode: MLXSamplingMode?,
             declaresReasoning: Bool,
-            entryID: String,
-            toolCallsEntryID: String,
-            reasoningEntryID: String,
+            entryId: String,
+            toolCallsEntryId: String,
+            reasoningEntryId: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> Bool {
@@ -1582,8 +1582,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     requestedSamplingMode: requestedSamplingMode,
                     declaresReasoning: declaresReasoning, resolved: setup.resolved,
                     contextLength: setup.contextLength,
-                    entryID: entryID, toolCallsEntryID: toolCallsEntryID,
-                    reasoningEntryID: reasoningEntryID, context: context,
+                    entryId: entryId, toolCallsEntryId: toolCallsEntryId,
+                    reasoningEntryId: reasoningEntryId, context: context,
                     channel: channel)
             } else if let schemaJSON {
                 // `prepareRespondSetup` only omits `guidedInput` when tools
@@ -1600,7 +1600,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     tokenCount: input.text.tokens.size, contextLength: setup.contextLength)
                 try await runGuidedGeneration(
                     schemaJSON: schemaJSON, input: input, modelID: modelID,
-                    requestedMaxTokens: requestedMaxTokens, entryID: entryID,
+                    requestedMaxTokens: requestedMaxTokens, entryId: entryId,
                     context: context, channel: channel)
                 return true
             } else {
@@ -1622,8 +1622,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: request.generationOptions.temperature,
                     samplingMode: requestedSamplingMode,
-                    responseEntryID: entryID,
-                    reasoningEntryID: reasoningEntryID,
+                    responseEntryId: entryId,
+                    reasoningEntryId: reasoningEntryId,
                     context: context,
                     channel: channel
                 )
@@ -1787,47 +1787,47 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// several call sites that report it don't repeat the bare literal.
         private static let textDeltaTokenCount = 1
 
-        /// Sends the incomplete-output metadata signal for `entryID`.
+        /// Sends the incomplete-output metadata signal for `entryId`.
         ///
         /// - Parameters:
-        ///   - entryID: The response entry the signal applies to.
+        ///   - entryId: The response entry the signal applies to.
         ///   - channel: The generation channel to send the signal on.
         private static func sendIncompleteOutputMetadata(
-            entryID: String, channel: LanguageModelExecutorGenerationChannel
+            entryId: String, channel: LanguageModelExecutorGenerationChannel
         ) async {
             await channel.send(
                 .response(
-                    entryID: entryID,
+                    entryID: entryId,
                     action: .updateMetadata([Self.incompleteOutputMetadataKey: true])))
         }
 
-        /// Sends a single text or reasoning delta for `entryID`.
+        /// Sends a single text or reasoning delta for `entryId`.
         ///
         /// - Parameters:
         ///   - text: The delta text to append.
-        ///   - entryID: The response/reasoning entry to stream into.
+        ///   - entryId: The response/reasoning entry to stream into.
         ///   - channel: The generation channel to send the delta on.
         ///   - isReasoning: `true` to send on the `.reasoning` channel entry,
         ///     `false` to send on the `.response` channel entry.
         private static func sendDelta(
-            _ text: String, entryID: String, channel: LanguageModelExecutorGenerationChannel,
+            _ text: String, entryId: String, channel: LanguageModelExecutorGenerationChannel,
             isReasoning: Bool
         ) async {
             if isReasoning {
                 await channel.send(
                     .reasoning(
-                        entryID: entryID, action: .appendText(text, tokenCount: textDeltaTokenCount)))
+                        entryID: entryId, action: .appendText(text, tokenCount: textDeltaTokenCount)))
             } else {
                 await channel.send(
                     .response(
-                        entryID: entryID, action: .appendText(text, tokenCount: textDeltaTokenCount)))
+                        entryID: entryId, action: .appendText(text, tokenCount: textDeltaTokenCount)))
             }
         }
 
-        /// Sends the authoritative `.updateUsage` event for `entryID`.
+        /// Sends the authoritative `.updateUsage` event for `entryId`.
         ///
         /// - Parameters:
-        ///   - entryID: The response entry the usage applies to.
+        ///   - entryId: The response entry the usage applies to.
         ///   - promptTokenCount: The prompt's total token count (the full
         ///     transcript, not shrunk by any `PromptCache` reuse -- see
         ///     `PromptCacheSlot.cachedTokenCount`).
@@ -1847,7 +1847,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///     `outputTokenCount`.
         ///   - channel: The generation channel to send the event on.
         private static func sendUsageUpdate(
-            entryID: String,
+            entryId: String,
             promptTokenCount: Int,
             cachedTokenCount: Int,
             outputTokenCount: Int,
@@ -1856,7 +1856,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) async {
             await channel.send(
                 .response(
-                    entryID: entryID,
+                    entryID: entryId,
                     action: .updateUsage(
                         input: .init(
                             totalTokenCount: promptTokenCount,
@@ -1942,27 +1942,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// that doesn't match it risks seeding a future round with token
         /// values that don't correspond to real cache state (wrong
         /// positions, wrong attention). A mismatch here means
-        /// `generatedTokenIDs` can't be trusted to reflect `cache`
+        /// `generatedTokenIds` can't be trusted to reflect `cache`
         /// exactly, so the entry is dropped rather than stored.
         ///
         /// - Parameters:
         ///   - slot: The slot this round generated with. A no-op when
         ///     `slot.cache` is `nil` (this round didn't participate in
         ///     prompt-cache reuse -- see `isTextOnly`).
-        ///   - generatedTokenIDs: This round's generated token IDs, in
+        ///   - generatedTokenIds: This round's generated token IDs, in
         ///     order -- the REAL IDs the model produced (from a raw
         ///     `.token(Int)`/`onTokenCommitted` stream), never a
         ///     re-encoding of decoded text.
         private static func commitPromptCache(
-            modelID: String, slot: PromptCacheSlot, generatedTokenIDs: [Int]
+            modelID: String, slot: PromptCacheSlot, generatedTokenIds: [Int]
         ) async {
             guard let cache = slot.cache else { return }
-            guard !generatedTokenIDs.isEmpty else { return }
+            guard !generatedTokenIds.isEmpty else { return }
             let cacheAdvance = (cache.first?.offset ?? slot.promptTokens.count)
                 - slot.promptTokens.count
             let shouldStore: Bool
             switch PromptCache.reconcileCacheAdvance(
-                observedTokenCount: generatedTokenIDs.count, cacheAdvance: cacheAdvance)
+                observedTokenCount: generatedTokenIds.count, cacheAdvance: cacheAdvance)
             {
             case .matches:
                 shouldStore = true
@@ -1975,7 +1975,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     canTrimPromptCache(cache),
                     PromptCache.trimAndVerify(
                         cache, from: slot.promptTokens.count + cacheAdvance,
-                        to: slot.promptTokens.count + generatedTokenIDs.count)
+                        to: slot.promptTokens.count + generatedTokenIds.count)
                 else {
                     await MLXLanguageModel.removePromptCache(modelID: modelID)
                     return
@@ -1993,7 +1993,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 return
             }
             await MLXLanguageModel.storePromptCache(
-                modelID: modelID, tokens: slot.promptTokens + generatedTokenIDs, cache: cache)
+                modelID: modelID, tokens: slot.promptTokens + generatedTokenIds, cache: cache)
         }
 
         /// Variant of `commitPromptCache` for `runUnconstrained`'s
@@ -2046,7 +2046,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 await MLXLanguageModel.removePromptCache(modelID: modelID)
                 return
             }
-            await commitPromptCache(modelID: modelID, slot: slot, generatedTokenIDs: trustedTokens)
+            await commitPromptCache(modelID: modelID, slot: slot, generatedTokenIds: trustedTokens)
         }
 
         /// Runs think-then-call Phase 1: unconstrained reasoning until
@@ -2062,8 +2062,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - maxTokens: The resolved token budget for this request.
         ///   - request: The generation request (temperature/reasoning options).
         ///   - requestedSamplingMode: The caller's sampling mode override, if any.
-        ///   - reasoningEntryID: The entry to stream reasoning segments into.
-        ///   - entryID: The response entry (for the incomplete-output signal).
+        ///   - reasoningEntryId: The entry to stream reasoning segments into.
+        ///   - entryId: The response entry (for the incomplete-output signal).
         ///   - context: The loaded model context.
         ///   - channel: The generation channel to send events on.
         /// - Throws: Whatever `runToolCallReasoningPhase` throws.
@@ -2075,8 +2075,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             maxTokens: Int,
             request: LanguageModelExecutorGenerationRequest,
             requestedSamplingMode: MLXSamplingMode?,
-            reasoningEntryID: String,
-            entryID: String,
+            reasoningEntryId: String,
+            entryId: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> (tokenIDs: [Int], cutOff: Bool) {
@@ -2087,15 +2087,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 primedInside: primedInside, maxTokens: maxTokens,
                 requestedTemperature: request.generationOptions.temperature,
                 samplingMode: requestedSamplingMode,
-                reasoningEntryID: reasoningEntryID,
-                responseEntryID: entryID,
+                reasoningEntryId: reasoningEntryId,
+                responseEntryId: entryId,
                 context: context, channel: channel)
             guard phase1.closed else {
                 // Cut off mid-thought (budget exhausted before `</think>`).
                 // Don't prefill a truncated thought into the grammar —
                 // signal and finish. Phase 1 already synchronized the GPU
                 // on its way out.
-                await Self.sendIncompleteOutputMetadata(entryID: entryID, channel: channel)
+                await Self.sendIncompleteOutputMetadata(entryId: entryId, channel: channel)
                 return (phase1.tokenIDs, true)
             }
             return (phase1.tokenIDs, false)
@@ -2204,7 +2204,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // Real committed token IDs, reported as `run` feeds them
             // through the model -- never a re-encoding of `onText`'s
             // decoded text (see `PromptCache.reconcileCacheAdvance`).
-            var generatedTokenIDs: [Int] = []
+            var generatedTokenIds: [Int] = []
             do {
                 let result = try GuidedGenerationLoop.run(
                     input: slot.feedInput,
@@ -2218,7 +2218,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     whitespaceBias: setup.whitespaceBias,
                     whitespaceTokenIds: setup.whitespaceTokenIds,
                     cache: slot.cache,
-                    onTokenCommitted: { generatedTokenIDs.append($0) }
+                    onTokenCommitted: { generatedTokenIds.append($0) }
                 ) { text in
                     onText(text)
                 }
@@ -2229,7 +2229,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } catch GuidedGenerationError.incompleteOutput {
                 // Grammar exhausted maxTokens before reaching a stop state.
                 // Deltas already emitted (or buffered) are best-effort
-                // output; `generatedTokenIDs` still holds every token
+                // output; `generatedTokenIds` still holds every token
                 // `onTokenCommitted` reported before the throw, so a
                 // partial cache commit below is still trustworthy. Report
                 // that same count for usage too -- `GuidedGenerationLoop.run`
@@ -2237,14 +2237,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // tally accumulated via `onTokenCommitted` is exactly what
                 // `RunResult.tokenCount` would have been, matching how
                 // `runReasoning` already reports usage on incomplete output.
-                generatedTokenCount = generatedTokenIDs.count
+                generatedTokenCount = generatedTokenIds.count
                 incomplete = true
             }
             await Self.commitPromptCache(
                 modelID: modelID,
                 slot: PromptCacheSlot(
                     cache: finalCache, feedInput: slot.feedInput, promptTokens: slot.promptTokens),
-                generatedTokenIDs: generatedTokenIDs)
+                generatedTokenIds: generatedTokenIds)
             return (generatedTokenCount, slot.cachedTokenCount, incomplete)
         }
 
@@ -2322,9 +2322,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - contextLength: The model's context window length, if known;
         ///     validated against the re-tokenized tool-aware prompt before
         ///     any grammar/generation work runs.
-        ///   - entryID: The response entry to stream output into.
-        ///   - toolCallsEntryID: The entry to stream tool-call events into.
-        ///   - reasoningEntryID: The entry to stream think-then-call reasoning into.
+        ///   - entryId: The response entry to stream output into.
+        ///   - toolCallsEntryId: The entry to stream tool-call events into.
+        ///   - reasoningEntryId: The entry to stream think-then-call reasoning into.
         ///   - context: The loaded model context.
         ///   - channel: The generation channel to send events on.
         /// - Throws: `LanguageModelError.contextSizeExceeded` when the
@@ -2344,9 +2344,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             declaresReasoning: Bool,
             resolved: ModelConfiguration,
             contextLength: Int?,
-            entryID: String,
-            toolCallsEntryID: String,
-            reasoningEntryID: String,
+            entryId: String,
+            toolCallsEntryId: String,
+            reasoningEntryId: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> Bool {
@@ -2439,7 +2439,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     reasoningConfig: reasoningConfig, toolAwareInput: toolAwareInput,
                     maxTokens: setup.maxTokens,
                     request: request, requestedSamplingMode: requestedSamplingMode,
-                    reasoningEntryID: reasoningEntryID, entryID: entryID,
+                    reasoningEntryId: reasoningEntryId, entryId: entryId,
                     context: context, channel: channel)
                 reasoningTokenIDs = phase1.tokenIDs
                 guard !phase1.cutOff else { return false }
@@ -2485,8 +2485,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             try await emitToolCallingEvent(
                 outputBuffer: outputBuffer,
                 userResponseSchema: request.schema,
-                entryID: entryID,
-                toolCallsEntryID: toolCallsEntryID,
+                entryId: entryId,
+                toolCallsEntryId: toolCallsEntryId,
                 channel: channel
             )
 
@@ -2494,7 +2494,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let reasoningCount = reasoningTokenIDs.count
             let totalOutput = generatedTokenCount + reasoningCount
             await Self.sendUsageUpdate(
-                entryID: entryID,
+                entryId: entryId,
                 promptTokenCount: toolAwareInput.text.tokens.size,
                 cachedTokenCount: phase2.cachedTokenCount,
                 outputTokenCount: totalOutput,
@@ -2502,7 +2502,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 channel: channel)
 
             if incomplete {
-                await Self.sendIncompleteOutputMetadata(entryID: entryID, channel: channel)
+                await Self.sendIncompleteOutputMetadata(entryId: entryId, channel: channel)
             }
 
             return true
@@ -2604,7 +2604,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - input: The rendered prompt to generate from.
         ///   - modelID: The model identifier for constraint/tokenizer caches.
         ///   - requestedMaxTokens: The caller's token budget override, if any.
-        ///   - entryID: The response entry to stream output into.
+        ///   - entryId: The response entry to stream output into.
         ///   - context: The loaded model context.
         ///   - channel: The generation channel to send events on.
         /// - Throws: Whatever the grammar/generation calls throw.
@@ -2613,7 +2613,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             input: LMInput,
             modelID: String,
             requestedMaxTokens: Int?,
-            entryID: String,
+            entryId: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -2634,7 +2634,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 .makeStream()
             async let forwarder: Void = {
                 for await text in textStream {
-                    await Self.sendDelta(text, entryID: entryID, channel: channel, isReasoning: false)
+                    await Self.sendDelta(text, entryId: entryId, channel: channel, isReasoning: false)
                 }
             }()
 
@@ -2650,7 +2650,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             await forwarder
 
             await Self.sendUsageUpdate(
-                entryID: entryID,
+                entryId: entryId,
                 promptTokenCount: input.text.tokens.size,
                 cachedTokenCount: result.cachedTokenCount,
                 outputTokenCount: generatedTokenCount,
@@ -2658,7 +2658,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 channel: channel)
 
             if incomplete {
-                await Self.sendIncompleteOutputMetadata(entryID: entryID, channel: channel)
+                await Self.sendIncompleteOutputMetadata(entryId: entryId, channel: channel)
             }
         }
 
@@ -2672,20 +2672,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - generation: The generation event to process.
         ///   - emittedText: The full decoded text emitted so far (mutated:
         ///     appended to on `.chunk`).
-        ///   - entryID: The response entry to stream output into.
+        ///   - entryId: The response entry to stream output into.
         ///   - slot: This round's prompt-cache slot, for usage reporting.
         ///   - channel: The generation channel to send events on.
         private static func handleGenerationEvent(
             _ generation: Generation,
             emittedText: inout String,
-            entryID: String,
+            entryId: String,
             slot: PromptCacheSlot,
             channel: LanguageModelExecutorGenerationChannel
         ) async {
             switch generation {
             case .chunk(let text):
                 emittedText += text
-                await Self.sendDelta(text, entryID: entryID, channel: channel, isReasoning: false)
+                await Self.sendDelta(text, entryId: entryId, channel: channel, isReasoning: false)
             case .info(let info):
                 // MLX-LM emits one .info event at end-of-generation with
                 // an authoritative scalar output count
@@ -2699,7 +2699,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // cache's effect observable end-to-end without
                 // shrinking the reported prompt size.
                 await Self.sendUsageUpdate(
-                    entryID: entryID,
+                    entryId: entryId,
                     promptTokenCount: slot.promptTokens.count,
                     cachedTokenCount: slot.cachedTokenCount,
                     outputTokenCount: info.generationTokenCount,
@@ -2718,7 +2718,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - requestedMaxTokens: The caller's token budget override, if any.
         ///   - requestedTemperature: The caller's temperature override, if any.
         ///   - samplingMode: The caller's sampling mode override, if any.
-        ///   - entryID: The response entry to stream output into.
+        ///   - entryId: The response entry to stream output into.
         ///   - context: The loaded model context.
         ///   - channel: The generation channel to send events on.
         /// - Throws: `CancellationError` if the task is cancelled mid-loop.
@@ -2727,7 +2727,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingMode: MLXSamplingMode?,
-            entryID: String,
+            entryId: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -2750,7 +2750,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             ) {
                 try Task.checkCancellation()
                 await Self.handleGenerationEvent(
-                    generation, emittedText: &emittedText, entryID: entryID, slot: slot,
+                    generation, emittedText: &emittedText, entryId: entryId, slot: slot,
                     channel: channel)
             }
 
@@ -2768,8 +2768,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - requestedMaxTokens: The caller's token budget override, if any.
         ///   - requestedTemperature: The caller's temperature override, if any.
         ///   - samplingMode: The caller's sampling mode override, if any.
-        ///   - responseEntryID: The response entry to stream output into.
-        ///   - reasoningEntryID: The entry to stream reasoning segments into.
+        ///   - responseEntryId: The response entry to stream output into.
+        ///   - reasoningEntryId: The entry to stream reasoning segments into.
         ///   - context: The loaded model context.
         ///   - channel: The generation channel to send events on.
         /// - Throws: Whatever `runReasoning`/`runUnconstrained` throws.
@@ -2779,8 +2779,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingMode: MLXSamplingMode?,
-            responseEntryID: String,
-            reasoningEntryID: String,
+            responseEntryId: String,
+            reasoningEntryId: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -2792,8 +2792,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: requestedTemperature,
                     samplingMode: samplingMode,
-                    responseEntryID: responseEntryID,
-                    reasoningEntryID: reasoningEntryID,
+                    responseEntryId: responseEntryId,
+                    reasoningEntryId: reasoningEntryId,
                     context: context,
                     channel: channel)
             } else {
@@ -2802,7 +2802,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: requestedTemperature,
                     samplingMode: samplingMode,
-                    entryID: responseEntryID,
+                    entryId: responseEntryId,
                     context: context,
                     channel: channel)
             }
@@ -2859,8 +2859,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - requestedMaxTokens: The caller's token budget override, if any.
         ///   - requestedTemperature: The caller's temperature override, if any.
         ///   - samplingMode: The caller's sampling mode override, if any.
-        ///   - responseEntryID: The response entry to stream `.response` segments into.
-        ///   - reasoningEntryID: The entry to stream `.reasoning` segments into.
+        ///   - responseEntryId: The response entry to stream `.response` segments into.
+        ///   - reasoningEntryId: The entry to stream `.reasoning` segments into.
         ///   - context: The loaded model context.
         ///   - channel: The generation channel to send events on.
         /// - Throws: `CancellationError` if the task is cancelled mid-loop.
@@ -2871,8 +2871,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingMode: MLXSamplingMode?,
-            responseEntryID: String,
-            reasoningEntryID: String,
+            responseEntryId: String,
+            reasoningEntryId: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -2887,7 +2887,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
             var reasoningTokenCount = 0
             var completionInfo: GenerateCompletionInfo?
-            var generatedTokenIDs: [Int] = []
+            var generatedTokenIds: [Int] = []
 
             let slot = await makePromptCacheSlot(input: input, context: context, parameters: params)
 
@@ -2897,14 +2897,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 try Task.checkCancellation()
                 switch generation {
                 case .token(let token):
-                    generatedTokenIDs.append(token)
+                    generatedTokenIds.append(token)
                     if let segments = Self.processReasoningToken(
                         token, emitter: &emitter, detokenizer: &detokenizer,
                         reasoningTokenCount: &reasoningTokenCount)
                     {
                         await Self.sendSegments(
-                            segments, responseEntryID: responseEntryID,
-                            reasoningEntryID: reasoningEntryID, channel: channel)
+                            segments, responseEntryId: responseEntryId,
+                            reasoningEntryId: reasoningEntryId, channel: channel)
                     }
                 case .info(let info):
                     completionInfo = info
@@ -2912,8 +2912,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
 
             await Self.sendSegments(
-                emitter.finalize(), responseEntryID: responseEntryID,
-                reasoningEntryID: reasoningEntryID, channel: channel)
+                emitter.finalize(), responseEntryId: responseEntryId,
+                reasoningEntryId: reasoningEntryId, channel: channel)
 
             // If generation ended while still inside a thinking block, the model
             // was cut off mid-thought (e.g. it exhausted the token budget before
@@ -2922,7 +2922,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // the guided path's `incompleteOutput` convention.
             if emitter.isInsideReasoning {
                 await Self.sendIncompleteOutputMetadata(
-                    entryID: responseEntryID, channel: channel)
+                    entryId: responseEntryId, channel: channel)
             }
 
             if let info = completionInfo {
@@ -2934,7 +2934,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // prefix; report the full transcript length from
                 // `slot.promptTokens` plus how much was served from cache.
                 await Self.sendUsageUpdate(
-                    entryID: responseEntryID,
+                    entryId: responseEntryId,
                     promptTokenCount: slot.promptTokens.count,
                     cachedTokenCount: slot.cachedTokenCount,
                     outputTokenCount: info.generationTokenCount,
@@ -2943,28 +2943,28 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
 
             await Self.commitPromptCache(
-                modelID: modelID, slot: slot, generatedTokenIDs: generatedTokenIDs)
+                modelID: modelID, slot: slot, generatedTokenIds: generatedTokenIds)
         }
 
         /// Routes each of `segments` to the appropriate channel entry, in order.
         ///
         /// - Parameters:
         ///   - segments: The scanned segments to route, in emission order.
-        ///   - responseEntryID: The entry `.response` segments stream into.
-        ///   - reasoningEntryID: The entry `.reasoning` segments stream into.
+        ///   - responseEntryId: The entry `.response` segments stream into.
+        ///   - reasoningEntryId: The entry `.reasoning` segments stream into.
         ///   - channel: The generation channel to send events on.
         private static func sendSegments(
             _ segments: [ReasoningEventEmitter.Segment],
-            responseEntryID: String,
-            reasoningEntryID: String,
+            responseEntryId: String,
+            reasoningEntryId: String,
             channel: LanguageModelExecutorGenerationChannel
         ) async {
             for segment in segments {
                 switch segment {
                 case .reasoning(let text):
-                    await sendDelta(text, entryID: reasoningEntryID, channel: channel, isReasoning: true)
+                    await sendDelta(text, entryId: reasoningEntryId, channel: channel, isReasoning: true)
                 case .response(let text):
-                    await sendDelta(text, entryID: responseEntryID, channel: channel, isReasoning: false)
+                    await sendDelta(text, entryId: responseEntryId, channel: channel, isReasoning: false)
                 }
             }
         }
@@ -3067,8 +3067,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - maxTokens: The resolved token budget for this request.
         ///   - requestedTemperature: The caller's temperature override, if any.
         ///   - samplingMode: The caller's sampling mode override, if any.
-        ///   - reasoningEntryID: The entry to stream reasoning segments into.
-        ///   - responseEntryID: The response entry to stream `.response` segments into.
+        ///   - reasoningEntryId: The entry to stream reasoning segments into.
+        ///   - responseEntryId: The response entry to stream `.response` segments into.
         ///   - context: The loaded model context.
         ///   - channel: The generation channel to send events on.
         /// - Throws: `CancellationError` if the task is cancelled mid-loop; whatever
@@ -3082,8 +3082,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             maxTokens: Int,
             requestedTemperature: Double?,
             samplingMode: MLXSamplingMode?,
-            reasoningEntryID: String,
-            responseEntryID: String,
+            reasoningEntryId: String,
+            responseEntryId: String,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> (tokenIDs: [Int], closed: Bool) {
@@ -3104,7 +3104,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             do {
                 closed = try await collectReasoningTokens(
                     stream: stream, collector: &collector,
-                    responseEntryID: responseEntryID, reasoningEntryID: reasoningEntryID,
+                    responseEntryId: responseEntryId, reasoningEntryId: reasoningEntryId,
                     channel: channel)
             } catch {
                 // Drain the generation task before propagating, but do NOT sync
@@ -3120,11 +3120,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             Stream.gpu.synchronize()
 
             await Self.sendSegments(
-                collector.finalize(), responseEntryID: responseEntryID,
-                reasoningEntryID: reasoningEntryID, channel: channel)
+                collector.finalize(), responseEntryId: responseEntryId,
+                reasoningEntryId: reasoningEntryId, channel: channel)
 
             await Self.commitPromptCache(
-                modelID: modelID, slot: slot, generatedTokenIDs: collector.reasoningTokenIDs)
+                modelID: modelID, slot: slot, generatedTokenIds: collector.reasoningTokenIDs)
 
             return (collector.reasoningTokenIDs, closed)
         }
@@ -3137,8 +3137,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Parameters:
         ///   - stream: The raw token stream from `generateTokensTask`.
         ///   - collector: The reasoning-token collector to feed tokens into.
-        ///   - responseEntryID: The entry `.response` segments stream into.
-        ///   - reasoningEntryID: The entry `.reasoning` segments stream into.
+        ///   - responseEntryId: The entry `.response` segments stream into.
+        ///   - reasoningEntryId: The entry `.reasoning` segments stream into.
         ///   - channel: The generation channel to send events on.
         /// - Throws: `CancellationError` if the task is cancelled mid-loop.
         /// - Returns: Whether the collector's reasoning span closed
@@ -3146,16 +3146,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private func collectReasoningTokens(
             stream: AsyncStream<TokenGeneration>,
             collector: inout ReasoningTokenCollector,
-            responseEntryID: String,
-            reasoningEntryID: String,
+            responseEntryId: String,
+            reasoningEntryId: String,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> Bool {
             for await generation in stream {
                 try Task.checkCancellation()
                 guard case .token(let token) = generation else { continue }
                 await Self.sendSegments(
-                    collector.ingest(token), responseEntryID: responseEntryID,
-                    reasoningEntryID: reasoningEntryID, channel: channel)
+                    collector.ingest(token), responseEntryId: responseEntryId,
+                    reasoningEntryId: reasoningEntryId, channel: channel)
                 if collector.shouldStopAfterReasoning {
                     return true
                 }
@@ -3196,22 +3196,22 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - If `name` is any real tool: emit a single `.toolCallDelta`
         ///   with the arguments JSON and a freshly minted toolCallID.
         ///
-        /// `entryID` and `toolCallsEntryID` must be distinct: SKILL.md requires
+        /// `entryId` and `toolCallsEntryId` must be distinct: SKILL.md requires
         /// `.response` and `.toolCalls` to live in separate transcript entries.
         ///
         /// - Parameters:
         ///   - outputBuffer: The full buffered generation output (a JSON tool-call envelope).
         ///   - userResponseSchema: The developer's response schema, if any.
-        ///   - entryID: The response entry to stream a final-answer/fallback text delta into.
-        ///   - toolCallsEntryID: The entry to stream a real tool-call event into.
+        ///   - entryId: The response entry to stream a final-answer/fallback text delta into.
+        ///   - toolCallsEntryId: The entry to stream a real tool-call event into.
         ///   - channel: The generation channel to send the event on.
         /// - Throws: Never currently -- `throws` matches the call chain's
         ///   shape from `runToolCalling` down; no step here actually throws today.
         private func emitToolCallingEvent(
             outputBuffer: String,
             userResponseSchema: GenerationSchema?,
-            entryID: String,
-            toolCallsEntryID: String,
+            entryId: String,
+            toolCallsEntryId: String,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
             let unwrapped = Self.unwrapToolCallMarkers(outputBuffer)
@@ -3223,17 +3223,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             else {
                 // Malformed output. The grammar should have prevented this;
                 // emit the raw buffer as text so failures surface loudly.
-                await Self.sendDelta(outputBuffer, entryID: entryID, channel: channel, isReasoning: false)
+                await Self.sendDelta(outputBuffer, entryId: entryId, channel: channel, isReasoning: false)
                 return
             }
 
             if name == FinalAnswerTool.toolName {
                 await Self.handleFinalAnswerTool(
                     obj: obj, userResponseSchema: userResponseSchema,
-                    entryID: entryID, channel: channel)
+                    entryId: entryId, channel: channel)
             } else {
                 await Self.handleRealTool(
-                    obj: obj, name: name, toolCallsEntryID: toolCallsEntryID, channel: channel)
+                    obj: obj, name: name, toolCallsEntryId: toolCallsEntryId, channel: channel)
             }
         }
 
@@ -3249,12 +3249,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Parameters:
         ///   - obj: The parsed tool-call envelope (`{"name":..., "arguments":...}`).
         ///   - userResponseSchema: The developer's response schema, if any.
-        ///   - entryID: The response entry to stream the final answer into.
+        ///   - entryId: The response entry to stream the final answer into.
         ///   - channel: The generation channel to send the event on.
         private static func handleFinalAnswerTool(
             obj: [String: Any],
             userResponseSchema: GenerationSchema?,
-            entryID: String,
+            entryId: String,
             channel: LanguageModelExecutorGenerationChannel
         ) async {
             let text: String
@@ -3268,7 +3268,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } else {
                 text = ""
             }
-            await sendDelta(text, entryID: entryID, channel: channel, isReasoning: false)
+            await sendDelta(text, entryId: entryId, channel: channel, isReasoning: false)
         }
 
         /// Handles a real (developer-declared) tool call: re-serializes its
@@ -3278,12 +3278,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Parameters:
         ///   - obj: The parsed tool-call envelope (`{"name":..., "arguments":...}`).
         ///   - name: The tool's name.
-        ///   - toolCallsEntryID: The entry to stream the tool-call event into.
+        ///   - toolCallsEntryId: The entry to stream the tool-call event into.
         ///   - channel: The generation channel to send the event on.
         private static func handleRealTool(
             obj: [String: Any],
             name: String,
-            toolCallsEntryID: String,
+            toolCallsEntryId: String,
             channel: LanguageModelExecutorGenerationChannel
         ) async {
             guard
@@ -3294,7 +3294,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
             await channel.send(
                 .toolCalls(
-                    entryID: toolCallsEntryID,
+                    entryID: toolCallsEntryId,
                     action: .toolCall(
                         id: UUID().uuidString,
                         name: name,
