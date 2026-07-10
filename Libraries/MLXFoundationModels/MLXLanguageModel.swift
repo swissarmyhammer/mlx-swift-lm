@@ -1213,7 +1213,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     let setup = try await prepareRespondSetup(
                         request: request, messages: messages, modelID: modelID,
                         context: context, declaresReasoning: declaresReasoning,
-                        configurationResolver: configurationResolver)
+                        configurationResolver: configurationResolver, schemaJSON: schemaJSON)
 
                     let completedNormally = try await dispatchGeneration(
                         setup: setup, request: request, messages: messages,
@@ -1274,6 +1274,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             /// declared, a reasoning config resolved, and no tools/schema
             /// are in play.
             let reasoningSetup: (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?
+            /// The prompt actually fed into guided generation: `messages`
+            /// routed through ``Executor/guidedGenerationMessages(from:schemaJSON:includeSchemaInPrompt:)``
+            /// when the request carries a schema, so `ContextOptions.includeSchemaInPrompt`
+            /// is consulted at the seam where the guided-generation prompt is
+            /// actually assembled -- not just `input`, which never consults
+            /// the schema at all. Equal to `input` today in every case (that
+            /// seam is currently a no-op -- see its doc comment), but re-
+            /// rendered separately only when it would actually differ, so a
+            /// future schema-in-prompt renderer added there does not need to
+            /// touch this call site to take effect. `nil` under the same
+            /// condition as `input` (tools enabled), and also when the
+            /// request carries no schema at all.
+            let guidedInput: LMInput?
             /// The model's context window length, read from `config.json`'s
             /// `max_position_embeddings` field. `nil` when the model's
             /// configuration doesn't expose a recognized context-length
@@ -1346,6 +1359,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - context: The loaded model context (tokenizer, configuration, processor).
         ///   - declaresReasoning: Whether `.reasoning` was declared at init.
         ///   - configurationResolver: Patches the per-call `ModelConfiguration` read from `config.json`.
+        ///   - schemaJSON: The developer-supplied JSON schema, if any, already
+        ///     encoded. Used only to build `guidedInput`'s schema-in-prompt
+        ///     rendering; the grammar constraint itself is compiled from this
+        ///     same value independently in `runGuidedGeneration`.
         /// - Returns: A `RespondSetup` bundling the resolved configuration and effective input.
         /// - Throws: Whatever `UserInputProcessor.prepare`, capability validation, or
         ///   reasoning-prompt preparation throw.
@@ -1355,7 +1372,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             modelID: String,
             context: ModelContext,
             declaresReasoning: Bool,
-            configurationResolver: any ModelConfigurationResolver
+            configurationResolver: any ModelConfigurationResolver,
+            schemaJSON: String?
         ) async throws -> RespondSetup {
             // Only render the prompt through the model's *default*
             // (no-`tools`) UserInputProcessor call when the tool-calling
@@ -1483,9 +1501,34 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // that case too -- exactly the branch that never reads it.
             let effectiveInput = suppressedInput ?? input
 
+            // The prompt actually fed to guided generation. Honors
+            // `ContextOptions.includeSchemaInPrompt` at the seam where the
+            // guided-generation prompt is assembled -- see
+            // `guidedGenerationMessages(from:schemaJSON:includeSchemaInPrompt:)`.
+            // Only re-renders when that seam actually appended something
+            // (i.e. `includeSchemaInPrompt` did not say `true`): reusing
+            // `input` unchanged otherwise avoids a second, wasted
+            // `UserInputProcessor.prepare` call for byte-identical messages.
+            let guidedInput: LMInput?
+            if needsEagerInput, let schemaJSON, let input {
+                let guidedMessages = Self.guidedGenerationMessages(
+                    from: messages, schemaJSON: schemaJSON,
+                    includeSchemaInPrompt: request.contextOptions.includeSchemaInPrompt)
+                if guidedMessages.count == messages.count {
+                    guidedInput = input
+                } else {
+                    guidedInput = try await Self.preparedInputMappingImageFailures(
+                        processor: context.processor, input: UserInput(chat: guidedMessages),
+                        messages: guidedMessages, transcriptEntries: request.transcript)
+                }
+            } else {
+                guidedInput = nil
+            }
+
             return RespondSetup(
                 input: input, resolved: resolved, effectiveInput: effectiveInput,
-                reasoningSetup: reasoningSetup, contextLength: contextLength)
+                reasoningSetup: reasoningSetup, guidedInput: guidedInput,
+                contextLength: contextLength)
         }
 
         /// Dispatches to the tool-calling, guided-generation, or plain-text
@@ -1543,12 +1586,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     reasoningEntryID: reasoningEntryID, context: context,
                     channel: channel)
             } else if let schemaJSON {
-                // `prepareRespondSetup` only omits `input` when tools are
-                // enabled, which this `else if` already excludes (the
-                // tool-calling branch above returns first) -- `input` is
-                // guaranteed present here.
+                // `prepareRespondSetup` only omits `guidedInput` when tools
+                // are enabled, which this `else if` already excludes (the
+                // tool-calling branch above returns first) -- `guidedInput`
+                // is guaranteed present here. Validate whichever prompt will
+                // actually reach generation -- `guidedInput`, which may carry
+                // the adapter's own schema-in-prompt rendering on top of
+                // `input` -- mirroring how the reasoning path below validates
+                // its own primed prompt rather than always the baseline.
                 let input = Self.unwrapSetupField(
-                    setup.input, fieldName: "input", contextPath: "guided-generation")
+                    setup.guidedInput, fieldName: "guidedInput", contextPath: "guided-generation")
                 try Self.validateContextSize(
                     tokenCount: input.text.tokens.size, contextLength: setup.contextLength)
                 try await runGuidedGeneration(
@@ -2459,6 +2506,94 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
 
             return true
+        }
+
+        /// Whether the guided-generation prompt-assembly seam
+        /// (``guidedGenerationMessages(from:schemaJSON:includeSchemaInPrompt:)``)
+        /// is allowed to add the adapter's own schema rendering to the
+        /// prompt, per `ContextOptions.includeSchemaInPrompt`. This adapter
+        /// has no such rendering to add today (see that function's doc
+        /// comment), so the two branches currently behave identically --
+        /// but the gate itself is real and correctly derived, ready for
+        /// whichever branch a future schema-in-prompt renderer lands in.
+        ///
+        /// **SDK ground truth** (macOS 27 SDK's `FoundationModels.swiftinterface`,
+        /// which this project's own conventions treat as authoritative over
+        /// any other source): `ContextOptions.includeSchemaInPrompt` is a
+        /// plain `Bool?` defaulting to `nil` in `ContextOptions`'s own
+        /// memberwise initializer -- but every schema-taking
+        /// `LanguageModelSession.respond`/`streamResponse` overload
+        /// (`respond(to:schema:...)`, `respond(generating:...)`, etc.)
+        /// instead defaults its own `contextOptions:` parameter to
+        /// `ContextOptions(includeSchemaInPrompt: true)`. That asymmetry is
+        /// the field's real contract: when a developer goes through the
+        /// framework's own schema-based convenience API without overriding
+        /// `contextOptions`, the framework's default is `true` -- it already
+        /// assumes/arranges for the schema to be present in the prompt, so a
+        /// third-party executor must not add a second copy. `nil` therefore
+        /// only reaches an executor when a caller has deliberately stepped
+        /// off that convenience default (e.g. constructing `ContextOptions`
+        /// or a `Transcript.Prompt` directly) -- an explicit, lower-level
+        /// path this adapter cannot assume already embedded the schema.
+        /// Given that, `nil` is treated identically to `false`: "not
+        /// confirmed already in the prompt" -- the conservative reading that
+        /// never silently drops the schema from a local (often smaller,
+        /// weaker) open-weight model's prompt just because the caller didn't
+        /// say either way. `true` is the only value that suppresses the
+        /// adapter's own rendering.
+        ///
+        /// - Parameter includeSchemaInPrompt: `request.contextOptions.includeSchemaInPrompt`.
+        /// - Returns: `false` only when `includeSchemaInPrompt == true`; `true` for `false`/`nil`.
+        static func shouldInjectSchemaIntoPrompt(includeSchemaInPrompt: Bool?) -> Bool {
+            includeSchemaInPrompt != true
+        }
+
+        /// The guided-generation prompt-assembly seam: builds the messages
+        /// actually rendered into the guided-generation prompt, gated by
+        /// `ContextOptions.includeSchemaInPrompt` (see
+        /// ``shouldInjectSchemaIntoPrompt(includeSchemaInPrompt:)``).
+        ///
+        /// This adapter has no schema-in-prompt rendering of its own to add
+        /// today: `schemaJSON` only ever feeds xgrammar's constrained-
+        /// decoding constraint (`runGuidedGeneration` via
+        /// `prepareConstraintSetup`), never prompt text -- the rendered
+        /// prompt is 100% whatever `TranscriptConverter.mlxMessages` produced
+        /// from `request.transcript`. Both branches below therefore return
+        /// `messages` unchanged, preserving that behavior exactly regardless
+        /// of `includeSchemaInPrompt`'s value. This function still exists,
+        /// and is still wired into `prepareRespondSetup`, as the single seam
+        /// any *future* adapter-side schema-in-prompt rendering must route
+        /// through: `shouldInjectSchemaIntoPrompt` gates the branch that
+        /// would add one, so a `true` value (the app has already put the
+        /// schema in the prompt) can never end up with two renderings once
+        /// such a feature exists -- it is deliberately guarded from day one
+        /// rather than left for a future change to get wrong.
+        ///
+        /// Independent of prompt text either way: the grammar/schema-based
+        /// sampling constraint xgrammar compiles from `schemaJSON` in
+        /// `runGuidedGeneration` always applies, regardless of
+        /// `includeSchemaInPrompt` -- constrained decoding is not something
+        /// this flag can or should disable.
+        ///
+        /// - Parameters:
+        ///   - messages: The transcript-rendered messages for this round,
+        ///     before any adapter-side schema rendering.
+        ///   - schemaJSON: The developer-supplied JSON schema, already
+        ///     encoded. Unused today (see above); threaded through so a
+        ///     future schema-in-prompt renderer has it available at this
+        ///     exact seam without a signature change.
+        ///   - includeSchemaInPrompt: `request.contextOptions.includeSchemaInPrompt`.
+        /// - Returns: `messages`, unchanged.
+        static func guidedGenerationMessages(
+            from messages: [Chat.Message],
+            schemaJSON: String,
+            includeSchemaInPrompt: Bool?
+        ) -> [Chat.Message] {
+            guard Self.shouldInjectSchemaIntoPrompt(includeSchemaInPrompt: includeSchemaInPrompt)
+            else {
+                return messages
+            }
+            return messages
         }
 
         /// Guided-generation path: streams text deltas constrained to the
