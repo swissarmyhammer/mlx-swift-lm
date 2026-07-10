@@ -4,6 +4,7 @@
 #if canImport(FoundationModels, _version: 2)
 
 import Foundation
+import MLX
 import MLXLMCommon
 
 /// Per-model, multi-slot KV-cache reuse for `MLXLanguageModel.Executor`.
@@ -570,6 +571,75 @@ actor PromptCache {
     /// private storage shape.
     func chunkCount(modelID: String) -> Int {
         chunkStore[modelID]?.count ?? 0
+    }
+
+    /// Builds a fresh, PRIVATE `[KVCache]` stack from `chunks` (the result of
+    /// ``lookupLongestPrefix(modelID:newTokens:chunkSize:)``), one
+    /// `KVCacheSimple` per layer: for each layer, concatenates every chunk's
+    /// key/value slices in chain order and installs the result via a fresh
+    /// `KVCacheSimple`'s `state` setter (which derives `offset` from
+    /// `keys.dim(2)`, so the assembled cache's offset lands exactly on the
+    /// matched token count -- see `KVCacheSimple.state`'s setter in
+    /// `Libraries/MLXLMCommon/KVCache.swift`).
+    ///
+    /// The result is PRIVATE: `chunks`' tensors are immutable, owned copies
+    /// (see `StoredChunk`/`ownedCopy(of:)` in `PromptCacheChunks.swift`), and
+    /// every call to `assemble` produces its own independent tensors (see
+    /// below) -- so there is no checkout, no steal, and no double-checkout
+    /// hazard by construction, unlike the slot pool's `resolve`/`store`
+    /// check-out-and-return dance.
+    ///
+    /// `concatenated(_:axis:)` alone is NOT sufficient to guarantee
+    /// independence: `mlx::core::concatenate` special-cases a SINGLE input
+    /// array by returning that exact array unchanged (`mlx/ops.cpp`:
+    /// `if (arrays.size() == 1) { return arrays[0]; }`), never allocating a
+    /// fresh buffer or invoking the `Concatenate` primitive at all in that
+    /// case -- so when a layer has exactly one matched chunk, a bare
+    /// `concatenated([chunk.keys], axis: 2)` would hand back the chunk
+    /// store's own tensor BY REFERENCE. (Two or more inputs always DO get a
+    /// fresh buffer: `Concatenate::eval_cpu`/`eval_gpu` unconditionally
+    /// `malloc`s a new output buffer and copies every input into it -- see
+    /// `mlx/backend/{cpu,metal}/...`.) Routing every layer's result through
+    /// ``ownedCopy(of:)`` (shared with `sliceChunks`) closes that gap
+    /// unconditionally, regardless of how many chunks matched.
+    ///
+    /// This is a standalone, nonisolated unit: nothing in
+    /// `MLXLanguageModel.swift`'s `Executor` calls it yet, matching
+    /// `sliceChunks`/`insert`/`lookupLongestPrefix`'s additive-only status
+    /// (wiring the chunk store into `resolve()` is a later task).
+    ///
+    /// - Parameters:
+    ///   - chunks: The longest matching chunk prefix (from
+    ///     `lookupLongestPrefix`), in chain order (oldest first). Empty
+    ///     yields an empty `[KVCache]` -- callers should feed everything
+    ///     against a freshly built cache in that case (the existing
+    ///     `model.newCache(parameters:)` fallback), since `assemble` has no
+    ///     `model`/`parameters` to build one itself.
+    ///   - layerCount: How many `KVCacheSimple` layers to build -- every
+    ///     `StoredChunk` in `chunks` must have exactly this many `layers`, or
+    ///     assembly is refused (see below); mirrors `sliceChunks`'s own
+    ///     degrade-to-`nil` convention for a shape it can't safely reason
+    ///     about, rather than trapping on an out-of-range `layers` index.
+    /// - Returns: One freshly assembled `KVCacheSimple` per layer, offset at
+    ///   the matched token count; empty when `chunks` is empty or any
+    ///   chunk's `layers.count` doesn't match `layerCount`.
+    nonisolated static func assemble(chunks: [StoredChunk], layerCount: Int) -> [KVCache] {
+        guard !chunks.isEmpty, layerCount > 0,
+            chunks.allSatisfy({ $0.layers.count == layerCount })
+        else { return [] }
+
+        var result: [KVCache] = []
+        result.reserveCapacity(layerCount)
+        for layerIndex in 0 ..< layerCount {
+            let keys = ownedCopy(of: concatenated(chunks.map { $0.layers[layerIndex].keys }, axis: 2))
+            let values = ownedCopy(
+                of: concatenated(chunks.map { $0.layers[layerIndex].values }, axis: 2))
+
+            let layerCache = KVCacheSimple()
+            layerCache.state = [keys, values]
+            result.append(layerCache)
+        }
+        return result
     }
 }
 

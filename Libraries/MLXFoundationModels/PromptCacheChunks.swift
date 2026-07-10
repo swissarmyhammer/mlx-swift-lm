@@ -112,7 +112,16 @@ extension PromptCache {
     /// result is built from `mlx_array_new_data`, which copies its input bytes
     /// into a fresh `mlx::core::array` allocation with no graph and no shared
     /// buffer.
-    private static func ownedCopy(of array: MLXArray) -> MLXArray {
+    ///
+    /// Not `private`: also used by `PromptCache.assemble(chunks:layerCount:)`
+    /// (`PromptCache.swift`) to force a genuinely fresh buffer after
+    /// `concatenated(...)` -- necessary because `mlx::core::concatenate`
+    /// special-cases a SINGLE input array by returning that exact array
+    /// unchanged (`mlx/ops.cpp`: `if (arrays.size() == 1) { return arrays[0]; }`),
+    /// never allocating a fresh buffer or invoking the `Concatenate` primitive
+    /// in that case -- so a lone matched chunk's concatenation result would
+    /// otherwise alias the chunk store's own owned tensor by reference.
+    static func ownedCopy(of array: MLXArray) -> MLXArray {
         let owned = MLXArray(data: array.asData(access: .copy))
         owned.eval()
         return owned
