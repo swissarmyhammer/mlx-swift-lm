@@ -2553,6 +2553,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// `ContextOptions.includeSchemaInPrompt` (see
         /// ``shouldInjectSchemaIntoPrompt(includeSchemaInPrompt:)``).
         ///
+        /// **This function has no observable effect today: every branch of
+        /// its guard/if-else returns `messages` unchanged.** That is
+        /// deliberate scaffolding, not an oversight left uncleaned. Fixing
+        /// the schema-duplication concern that motivated this seam turned up
+        /// no existing double-injection bug -- schema text was never
+        /// rendered into the prompt to begin with (see below) -- so there is
+        /// nothing to suppress here today, and no logic was removed to reach
+        /// this state.
+        ///
         /// This adapter has no schema-in-prompt rendering of its own to add
         /// today: `schemaJSON` only ever feeds xgrammar's constrained-
         /// decoding constraint (`runGuidedGeneration` via
@@ -2567,7 +2576,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// would add one, so a `true` value (the app has already put the
         /// schema in the prompt) can never end up with two renderings once
         /// such a feature exists -- it is deliberately guarded from day one
-        /// rather than left for a future change to get wrong.
+        /// rather than left for a future change to get wrong. When that
+        /// feature lands, its schema-in-prompt rendering replaces this
+        /// function's `return messages` in the branch gated by
+        /// `shouldInjectSchemaIntoPrompt` returning `true` -- the only branch
+        /// that should ever inject schema text -- with no restructuring of
+        /// this function or its callers required.
         ///
         /// Independent of prompt text either way: the grammar/schema-based
         /// sampling constraint xgrammar compiles from `schemaJSON` in
@@ -2583,7 +2597,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///     future schema-in-prompt renderer has it available at this
         ///     exact seam without a signature change.
         ///   - includeSchemaInPrompt: `request.contextOptions.includeSchemaInPrompt`.
-        /// - Returns: `messages`, unchanged.
+        /// - Returns: `messages`, unchanged in both branches today -- see
+        ///   above for why that is deliberate rather than dead code.
         static func guidedGenerationMessages(
             from messages: [Chat.Message],
             schemaJSON: String,
