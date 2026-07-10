@@ -76,6 +76,19 @@ private final class GuidedPromptSeamCaptureProcessor: UserInputProcessor, @unche
     }
 }
 
+/// Counts occurrences of `schemaJSON` across `messages`' `content` -- the
+/// tokenizable text a `UserInputProcessor` renders into the prompt, so this
+/// is a faithful proxy for "how many times the schema appears in the
+/// tokenized prompt" without needing a real tokenizer. Shared by both test
+/// suites below: `GuidedGenerationSchemaPromptTests` (isolated helper calls)
+/// and `GuidedGenerationPromptSeamTests` (the real `Executor.respond` seam).
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+private func countSchemaOccurrences(in messages: [Chat.Message], schemaJSON: String) -> Int {
+    messages.reduce(0) { count, message in
+        count + message.content.components(separatedBy: schemaJSON).count - 1
+    }
+}
+
 /// Regression coverage for `ContextOptions.includeSchemaInPrompt` at the
 /// guided-generation prompt-assembly seam.
 ///
@@ -106,15 +119,11 @@ struct GuidedGenerationSchemaPromptTests {
     private static let schemaJSON = #"{"type":"object","properties":{"answer":{"type":"string"}}}"#
 
     /// Counts occurrences of `schemaJSON` across the assembled messages'
-    /// `content` -- the tokenizable text a `UserInputProcessor` renders into
-    /// the prompt, so this is a faithful proxy for "how many times the
-    /// schema appears in the tokenized prompt" without needing a real
-    /// tokenizer.
+    /// `content`. Delegates to the file-level `countSchemaOccurrences(in:
+    /// schemaJSON:)` shared with `GuidedGenerationPromptSeamTests` below.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func schemaOccurrences(in messages: [Chat.Message]) -> Int {
-        messages.reduce(0) { count, message in
-            count + message.content.components(separatedBy: schemaJSON).count - 1
-        }
+        countSchemaOccurrences(in: messages, schemaJSON: schemaJSON)
     }
 
     @Test("includeSchemaInPrompt == true: the seam adds nothing extra")
@@ -319,9 +328,7 @@ struct GuidedGenerationPromptSeamTests {
                 "UserInputProcessor.prepare was never called -- the real seam wasn't reached")
             return -1
         }
-        return captured.reduce(0) { count, message in
-            count + message.content.components(separatedBy: schemaJSON).count - 1
-        }
+        return countSchemaOccurrences(in: captured, schemaJSON: schemaJSON)
     }
 
     @Test(
