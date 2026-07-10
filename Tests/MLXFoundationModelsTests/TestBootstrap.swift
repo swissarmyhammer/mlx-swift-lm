@@ -51,8 +51,7 @@ enum MetalLibraryTestBootstrap {
             // Best-effort: if this fails, the original mlx "Failed to load
             // the default metallib" error will surface on first GPU eval,
             // same as before this bootstrap existed.
-            FileHandle.standardError.write(
-                Data("MetalLibraryTestBootstrap: \(error)\n".utf8))
+            logError("MetalLibraryTestBootstrap: \(error)")
         }
     }()
 
