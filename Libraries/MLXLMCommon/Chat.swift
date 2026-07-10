@@ -94,6 +94,21 @@ public enum Chat {
             self.tool = tool
         }
 
+        /// Shared factory helper backing the role-specific factory methods
+        /// (``system(_:images:videos:)``, ``assistant(_:images:videos:toolCalls:)``,
+        /// ``user(_:images:videos:audios:)``, ``tool(_:images:id:)``). Each
+        /// public factory delegates here, passing only the parameters
+        /// relevant to its own external signature.
+        private static func create(
+            role: Role, content: String,
+            images: [UserInput.Image] = [],
+            videos: [UserInput.Video] = [],
+            audios: [UserInput.Audio] = [],
+            tool: Tool? = nil
+        ) -> Self {
+            Self(role: role, content: content, images: images, videos: videos, audios: audios, tool: tool)
+        }
+
         /// Creates a system message that provides instructions or context to the model.
         ///
         /// - Parameters:
@@ -104,7 +119,7 @@ public enum Chat {
         public static func system(
             _ content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = []
         ) -> Self {
-            Self(role: .system, content: content, images: images, videos: videos)
+            create(role: .system, content: content, images: images, videos: videos)
         }
 
         /// Creates an assistant message, optionally carrying tool calls the model requested.
@@ -121,7 +136,7 @@ public enum Chat {
             videos: [UserInput.Video] = [],
             toolCalls: [ToolCall]? = nil
         ) -> Self {
-            Self(
+            create(
                 role: .assistant, content: content, images: images, videos: videos,
                 tool: toolCalls.map { .calls($0) })
         }
@@ -140,7 +155,7 @@ public enum Chat {
             videos: [UserInput.Video] = [],
             audios: [UserInput.Audio] = []
         ) -> Self {
-            Self(role: .user, content: content, images: images, videos: videos, audios: audios)
+            create(role: .user, content: content, images: images, videos: videos, audios: audios)
         }
 
         /// Creates a tool-result message containing the output of an executed tool.
@@ -152,7 +167,7 @@ public enum Chat {
         public static func tool(
             _ content: String, images: [UserInput.Image] = [], id: String? = nil
         ) -> Self {
-            Self(role: .tool, content: content, images: images, tool: id.map { .result(id: $0) })
+            create(role: .tool, content: content, images: images, tool: id.map { .result(id: $0) })
         }
 
         /// The role of a message's sender within a chat conversation.
