@@ -36,6 +36,9 @@
 
 import Foundation
 
+/// Installs a metallib symlink to fix Swift Package Manager test binary path
+/// resolution for GPU-device tests (see the file header above for the full
+/// root-cause writeup).
 enum MetalLibraryTestBootstrap {
 
     /// Runs the symlink installation exactly once per test process. Callers
@@ -63,29 +66,34 @@ enum MetalLibraryTestBootstrap {
 
     private static func installSymlinkIfNeeded() throws {
         guard let binaryDirectory = currentTestBinaryDirectory() else {
-            FileHandle.standardError.write(
-                Data(
-                    """
-                    MetalLibraryTestBootstrap: could not determine the running test \
-                    binary's directory; GPU-device tests may crash with "Failed to \
-                    load the default metallib".\n
-                    """.utf8))
+            logError(
+                """
+                MetalLibraryTestBootstrap: could not determine the running test \
+                binary's directory; GPU-device tests may crash with "Failed to \
+                load the default metallib".
+                """)
             return
         }
         let symlinkURL = binaryDirectory.appendingPathComponent("mlx.metallib")
         if FileManager.default.fileExists(atPath: symlinkURL.path) { return }
         guard let metallibURL = locateDefaultMetallib(testBundle: Bundle(for: BundleAnchor.self))
         else {
-            FileHandle.standardError.write(
-                Data(
-                    """
-                    MetalLibraryTestBootstrap: could not locate \
-                    mlx-swift_Cmlx.bundle/default.metallib; GPU-device tests may crash \
-                    with "Failed to load the default metallib".\n
-                    """.utf8))
+            logError(
+                """
+                MetalLibraryTestBootstrap: could not locate \
+                mlx-swift_Cmlx.bundle/default.metallib; GPU-device tests may crash \
+                with "Failed to load the default metallib".
+                """)
             return
         }
         try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: metallibURL)
+    }
+
+    /// Writes `message` to stderr followed by a newline. Shared by the
+    /// best-effort diagnostic paths in `installSymlinkIfNeeded`, which log
+    /// and continue rather than fail the bootstrap outright.
+    private static func logError(_ message: String) {
+        FileHandle.standardError.write(Data((message + "\n").utf8))
     }
 
     /// Directory containing the running test binary -- mirrors mlx's
