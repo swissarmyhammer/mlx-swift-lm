@@ -9,6 +9,13 @@ import MLXLMCommon
 
 extension PromptCache {
 
+    /// Key type for the chunk hash chain: a `Hasher`-derived, per-process value
+    /// (see ``chunkKey(parentKey:tokens:)``), never persisted or compared across
+    /// process launches. Named distinctly from a bare `Int` for readability at
+    /// the chunk-store call sites (``insert(modelID:chunks:)``,
+    /// ``lookupLongestPrefix(modelID:newTokens:chunkSize:)``).
+    typealias ChunkKey = Int
+
     /// One fixed-size token-range slice of a verified `KVCacheSimple` stack, with
     /// its own tensors materialized as OWNED, evaluated, contiguous copies (see
     /// `ownedCopy(of:)` -- the copies never alias the source cache's buffers).

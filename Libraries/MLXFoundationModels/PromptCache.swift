@@ -82,9 +82,19 @@ actor PromptCache {
     /// use `lastUsed` for recency, not array position.
     private var entries: [String: [Slot]] = [:]
 
-    /// Monotonic source for `Slot.lastUsed`. Actor isolation serializes
-    /// every read/increment, so this is a strict per-call counter with no
-    /// concurrent-access races.
+    /// Per-model chunk store: each model's chunks keyed by their own
+    /// ``ChunkKey`` (see `PromptCacheChunks.swift`'s hash chain), ADDITIVE to
+    /// (not a replacement of) ``entries``'s slot pool -- `resolve()`/`store()`
+    /// still serve `MLXLanguageModel.swift`'s `Executor` in production today;
+    /// nothing yet wires this store's ``insert(modelID:chunks:)``/
+    /// ``lookupLongestPrefix(modelID:newTokens:chunkSize:)`` into cache
+    /// reconstruction (a later "Assembly" task does that). See
+    /// ``insert(modelID:chunks:)`` for dedup semantics.
+    private var chunkStore: [String: [ChunkKey: StoredChunk]] = [:]
+
+    /// Monotonic source for `Slot.lastUsed`/`StoredChunk.lastUsed`. Actor
+    /// isolation serializes every read/increment, so this is a strict
+    /// per-call counter with no concurrent-access races.
     private var recencyCounter = 0
 
     private func nextRecency() -> Int {
@@ -446,14 +456,121 @@ actor PromptCache {
         entries[modelID] = slots
     }
 
-    /// Drops every model's remembered slots. Mirrors `ModelCache.evictAll`.
+    /// Drops every model's remembered slots and chunk store. Mirrors
+    /// `ModelCache.evictAll`.
     func evictAll() {
         entries.removeAll()
+        chunkStore.removeAll()
     }
 
-    /// Drops one model's remembered slots. Mirrors `ModelCache.remove`.
+    /// Drops one model's remembered slots and chunk store. Mirrors
+    /// `ModelCache.remove`.
     func remove(modelID: String) {
         entries.removeValue(forKey: modelID)
+        chunkStore.removeValue(forKey: modelID)
+    }
+
+    // MARK: - Chunk store
+
+    /// Checks freshly sliced chunks (see `PromptCache.sliceChunks`) into
+    /// `modelID`'s chunk store, deduplicating by ``ChunkKey``.
+    ///
+    /// A key already present is dedup'd: only its `lastUsed` is refreshed --
+    /// its tensors are NEVER replaced, since an existing entry's tensors are
+    /// already a byte-for-byte-equivalent owned copy for the same
+    /// `(parentKey, tokens)` chain position (dedup existing is the entire
+    /// point: two conversations sharing a prefix must retain that prefix's KV
+    /// state exactly once). A new key is stored fresh, stamped with the
+    /// current recency.
+    ///
+    /// - Parameters:
+    ///   - modelID: The model identifier this chunk store is scoped to.
+    ///   - chunks: Freshly sliced chunks to check in, in chain order (as
+    ///     `sliceChunks` returns them, though this method doesn't require
+    ///     that order itself).
+    func insert(modelID: String, chunks: [StoredChunk]) {
+        var models = chunkStore[modelID] ?? [:]
+        for chunk in chunks {
+            if var existing = models[chunk.chunkKey] {
+                existing.lastUsed = nextRecency()
+                models[chunk.chunkKey] = existing
+            } else {
+                var fresh = chunk
+                fresh.lastUsed = nextRecency()
+                models[chunk.chunkKey] = fresh
+            }
+        }
+        chunkStore[modelID] = models
+    }
+
+    /// Walks `modelID`'s chunk hash chain from the root over chunk-aligned
+    /// windows of `newTokens`, returning the longest prefix of matching,
+    /// verified chunks.
+    ///
+    /// CRITICAL: the walk is capped at `newTokens.count - 1` tokens, so at
+    /// least one token always remains unmatched for the caller to feed --
+    /// generation always needs >=1 fresh token to produce new logits, even
+    /// when the entire prompt is otherwise covered by stored chunks (this is
+    /// the chunk-store equivalent of the slot pool's `regenerateLastToken`/
+    /// n_past-- trick, but simpler: rather than trimming one token back off a
+    /// full match, the walk itself never consumes the prompt's last token).
+    ///
+    /// COLLISION SAFETY: a key match only counts if the stored chunk's
+    /// `tokens` are element-equal to the chunk-aligned window being matched
+    /// (a cheap array compare, SGLang-style) -- a 64-bit `Hasher` collision
+    /// would otherwise silently serve the wrong KV state, the worst possible
+    /// cache failure. Any mismatch is treated as a miss and stops the walk
+    /// immediately, exactly like a genuinely absent key.
+    ///
+    /// Every matched chunk's `lastUsed` is touched (bumped to the current
+    /// recency) before being returned, for future LRU eviction bookkeeping.
+    ///
+    /// - Parameters:
+    ///   - modelID: The model identifier this chunk store is scoped to.
+    ///   - newTokens: The freshly-tokenized full prompt for this round.
+    ///   - chunkSize: How many tokens each stored chunk covers (must match
+    ///     the `chunkSize` chunks were originally sliced with).
+    /// - Returns: The longest prefix of chunks whose chained keys and token
+    ///   content both match `newTokens`, oldest-in-chain first, boxed for the
+    ///   crossing back out of actor isolation (see `SendableBox`'s doc --
+    ///   `StoredChunk`'s `MLXArray` tensors aren't `Sendable`, the same reason
+    ///   `resolve`'s `[KVCache]` result is boxed); empty when even the first
+    ///   chunk-aligned window misses or fails the collision check.
+    func lookupLongestPrefix(
+        modelID: String, newTokens: [Int], chunkSize: Int
+    ) -> SendableBox<[StoredChunk]> {
+        guard chunkSize > 0, var models = chunkStore[modelID] else { return SendableBox([]) }
+
+        let maxChunkCount = (newTokens.count - 1) / chunkSize
+        guard maxChunkCount > 0 else { return SendableBox([]) }
+
+        var parentKey = PromptCache.rootChunkKey
+        var matched: [StoredChunk] = []
+        matched.reserveCapacity(maxChunkCount)
+
+        for index in 0 ..< maxChunkCount {
+            let start = index * chunkSize
+            let end = start + chunkSize
+            let window = Array(newTokens[start ..< end])
+            let key = PromptCache.chunkKey(parentKey: parentKey, tokens: window)
+
+            guard var chunk = models[key], chunk.tokens == window else { break }
+
+            chunk.lastUsed = nextRecency()
+            models[key] = chunk
+            matched.append(chunk)
+            parentKey = key
+        }
+
+        chunkStore[modelID] = models
+        return SendableBox(matched)
+    }
+
+    /// Number of distinct chunks currently stored for `modelID` -- exposes
+    /// dedup/eviction bookkeeping for tests without leaking the actor's
+    /// private storage shape.
+    func chunkCount(modelID: String) -> Int {
+        chunkStore[modelID]?.count ?? 0
     }
 }
 
