@@ -42,7 +42,7 @@ enum ConstraintKind {
 struct TokenizerBias: @unchecked Sendable {
     let closing: MLXArray
     let whitespace: MLXArray
-    let whitespaceTokenIDs: Set<Int>
+    let whitespaceTokenIds: Set<Int>
 }
 
 // MARK: - Constraint Setup
@@ -59,7 +59,7 @@ struct ConstraintSetup {
     let closingBias: MLXArray
     let structuralReserve: Int
     let whitespaceBias: MLXArray
-    let whitespaceTokenIDs: Set<Int>
+    let whitespaceTokenIds: Set<Int>
 
     /// Derives completion/hard reserves for whatever `maxTokens` budget is
     /// actually in play for a given generation call. Reserves must always
@@ -278,13 +278,13 @@ private actor ModelCache {
             tokenizer: tokenizer,
             eosTokenId: tokenizer.eosTokenId
         )
-        let (whitespace, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
+        let (whitespace, whitespaceTokenIds) = WhitespaceTokenBias.compute(
             tokenizer: tokenizer
         )
         let bias = TokenizerBias(
             closing: closing,
             whitespace: whitespace,
-            whitespaceTokenIDs: whitespaceTokenIDs
+            whitespaceTokenIds: whitespaceTokenIds
         )
         tokenizerBiases[modelID] = bias
         return bias
@@ -1723,7 +1723,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 xgTokenizer: xgTokenizer, constraint: constraint, maxTokens: maxTokens,
                 closingBias: bias.closing, structuralReserve: structuralReserve,
                 whitespaceBias: bias.whitespace,
-                whitespaceTokenIDs: bias.whitespaceTokenIDs
+                whitespaceTokenIds: bias.whitespaceTokenIds
             )
         }
 
@@ -2169,7 +2169,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     hardReserve: hardReserve,
                     closingBias: setup.closingBias,
                     whitespaceBias: setup.whitespaceBias,
-                    whitespaceTokenIds: setup.whitespaceTokenIDs,
+                    whitespaceTokenIds: setup.whitespaceTokenIds,
                     cache: slot.cache,
                     onTokenCommitted: { generatedTokenIDs.append($0) }
                 ) { text in

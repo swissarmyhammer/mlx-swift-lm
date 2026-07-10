@@ -449,11 +449,7 @@ public enum GuidedGenerationLoop {
             if let bias = closingBias {
                 if hardReserve > 0 && state.tokenCount >= maxTokens - hardReserve {
                     // Hard zone: force closing tokens, suppress everything else.
-                    var hardBias = which(bias .> 0, Float32(0.0), logitRejectionPenalty)
-                    if let eosPenalty {
-                        hardBias = hardBias + eosPenalty
-                    }
-                    activeBias = hardBias
+                    activeBias = hardZoneBias(bias: bias, eosPenalty: eosPenalty)
                 } else if state.tokenCount >= maxTokens - completionReserve {
                     // Soft zone: nudge toward closing tokens, no EOS penalty.
                     activeBias = bias
@@ -480,6 +476,25 @@ public enum GuidedGenerationLoop {
         }
 
         return tokenId
+    }
+
+    /// Computes the hard-zone logit bias: forces closing tokens (zeroing
+    /// their bias) and suppresses every other token with
+    /// `logitRejectionPenalty`, additionally penalizing EOS positions when
+    /// `eosPenalty` is available. Extracted from `applyBiasAndSample` to
+    /// keep the hard-zone branch from nesting a 4th level deep.
+    ///
+    /// - Parameters:
+    ///   - bias: The closing-token bias array (positive at closing tokens).
+    ///   - eosPenalty: Precomputed EOS-position penalty; added on top of the
+    ///     forced-closing bias when present.
+    /// - Returns: The hard-zone bias array to apply to logits.
+    private static func hardZoneBias(bias: MLXArray, eosPenalty: MLXArray?) -> MLXArray {
+        var hardBias = which(bias .> 0, Float32(0.0), logitRejectionPenalty)
+        if let eosPenalty {
+            hardBias = hardBias + eosPenalty
+        }
+        return hardBias
     }
 
     /// Detokenizes `tokenId`, appends any resulting text to the accumulated

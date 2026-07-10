@@ -197,7 +197,7 @@ struct HardReserveStressTests {
                 tokenizer: context.tokenizer,
                 eosTokenId: context.tokenizer.eosTokenId
             )
-            let (whitespaceBias, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
+            let (whitespaceBias, whitespaceTokenIds) = WhitespaceTokenBias.compute(
                 tokenizer: context.tokenizer
             )
 
@@ -213,7 +213,7 @@ struct HardReserveStressTests {
                 hardReserve: hardReserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIds: whitespaceTokenIDs,
+                whitespaceTokenIds: whitespaceTokenIds,
                 diagnosticLog: false
             ) { text in
                 collected += text
