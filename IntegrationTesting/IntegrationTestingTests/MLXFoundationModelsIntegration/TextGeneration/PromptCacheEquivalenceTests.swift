@@ -3,7 +3,9 @@
 // Correctness-equivalence integration tests for `PromptCache`: the review
 // that drove the multi-slot redesign (see kanban task `qawe2hb`) called
 // this class of test "non-negotiable" -- unit tests on `PromptCache`'s pure
-// `decide`/`selectSlot` functions can prove the DECISION logic is correct,
+// chunk-matching functions (`lookupLongestPrefix`/`assemble`, since the
+// chunk-path cutover in kanban `cthbfmw` replaced the slot-pool's
+// `decide`/`selectSlot`) can prove the MATCHING logic is correct,
 // but only a real model run can catch "wrong tokens attended to": a cache
 // reuse that silently feeds the model a KV state that doesn't correspond
 // to what it's being told the prompt is, producing plausible-looking but
@@ -134,9 +136,9 @@ struct PromptCacheEquivalenceTests {
 
     @Test(
         """
-        Editing an earlier turn (forcing PromptCache.decide's .trimTo path and a real \
-        KVCache.trim() call) still produces output identical to a fresh, cache-evicted \
-        rebuild of the same edited transcript
+        Editing an earlier turn (forcing the chunk-store walk to stop at the last shared \
+        chunk boundary and feed the diverging suffix) still produces output identical to a \
+        fresh, cache-evicted rebuild of the same edited transcript
         """
     )
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -171,13 +173,15 @@ struct PromptCacheEquivalenceTests {
         // different (guaranteed to differ from whatever the model actually
         // said) before appending a new user turn. The rendered prompt
         // shares a genuine, nonzero common prefix with round 1's stored
-        // slot (the preamble + first user turn) but diverges at the edited
-        // assistant reply -- exactly `PromptCache.decide`'s
-        // `.trimTo(commonPrefixLength: N > 0, thenSuffix: M > 0)` case,
-        // never exercised by any other test with a REAL `KVCache.trim()`
-        // call (only `PromptCacheTests`' pure-function tests and
-        // `PromptCacheReuseTests`' clean-prefix-extension case, which hits
-        // `.reuseSuffix` instead).
+        // chunks (the preamble + first user turn) but diverges at the
+        // edited assistant reply -- exactly the case where
+        // `PromptCache.lookupLongestPrefix`'s chunk walk matches some
+        // leading chunks (`0 < matched < stored chunk count`) then stops at
+        // the first diverging chunk, never exercised by any other test with
+        // a REAL model run (only `PromptCacheChunkStoreTests`'/
+        // `PromptCacheChunkCutoverTests`' pure-function tests and
+        // `PromptCacheReuseTests`' clean-prefix-extension case, which
+        // matches every stored chunk instead).
         let editedFirstReply = firstOutput == "Hello!" ? "Hi there!" : "Hello!"
         let secondUserText = "Now say 'bye' in exactly one word."
         let editedTranscript = Transcript(entries: [
@@ -201,24 +205,27 @@ struct PromptCacheEquivalenceTests {
             executor, request: cachedRequest, model: model)
         let cachedOutput = cached.text
 
-        // Confirm this round genuinely took `.trimTo`, not `.reuseSuffix` or
-        // `.rebuild` -- otherwise the output-equality check below could
+        // Confirm this round genuinely matched a partial chunk prefix, not
+        // zero chunks (full rebuild) or every stored chunk (clean
+        // extension) -- otherwise the output-equality check below could
         // pass for the wrong reason (e.g. a tokenizer quirk collapsing the
-        // edit into a full prefix match) without ever exercising the trim
-        // path this test claims to cover. `cachedTokenCount` reports
-        // `commonPrefixLength` under `.trimTo` specifically: `0` would mean
-        // `.rebuild` (no overlap found), and `== firstStoredSlotLength`
-        // would mean `.reuseSuffix` (the whole prior slot matched as a
-        // clean prefix, i.e. the edit didn't actually change the tokenized
-        // prefix). Strictly between the two proves a genuine partial trim.
+        // edit into a full prefix match) without ever exercising the
+        // diverging-suffix path this test claims to cover.
+        // `cachedTokenCount` reports how many of the edited transcript's
+        // tokens were served from matched chunks: `0` would mean no chunks
+        // matched (full rebuild), and `== firstStoredSlotLength` would mean
+        // every one of round 1's stored chunks still matched (the edit
+        // didn't actually change the tokenized prefix). Strictly between
+        // the two proves a genuine partial chunk match followed by a
+        // diverging suffix.
         #expect(
             cached.cachedTokenCount > 0 && cached.cachedTokenCount < firstStoredSlotLength,
             """
-            expected a genuine partial reuse (.trimTo) with \
+            expected a genuine partial chunk match with \
             0 < cachedTokenCount < firstStoredSlotLength(\(firstStoredSlotLength)), got \
             cachedTokenCount = \(cached.cachedTokenCount) -- this round did not take the \
-            .trimTo path the test claims to exercise (0 means .rebuild; \
-            == \(firstStoredSlotLength) would mean .reuseSuffix)
+            partial-chunk-match path the test claims to exercise (0 means no chunks matched; \
+            == \(firstStoredSlotLength) would mean every stored chunk still matched)
             """
         )
 
@@ -235,7 +242,7 @@ struct PromptCacheEquivalenceTests {
             """
             edited-earlier-turn cached output (\(cachedOutput)) diverged from a fresh, \
             cache-evicted rebuild of the identical (edited) transcript (\(freshOutput)) -- \
-            the .trimTo / KVCache.trim() path produced different generated tokens
+            the partial-chunk-match / diverging-suffix path produced different generated tokens
             """
         )
 

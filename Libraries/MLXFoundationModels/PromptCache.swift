@@ -7,188 +7,85 @@ import Foundation
 import MLX
 import MLXLMCommon
 
-/// Per-model, multi-slot KV-cache reuse for `MLXLanguageModel.Executor`.
+/// Per-model, chunked shared KV-cache store for `MLXLanguageModel.Executor`.
 ///
 /// FoundationModels' `LanguageModelExecutor` protocol has no session
 /// identity: `Executor.respond(to:model:streamingInto:)` receives the
 /// *full* transcript on every round with no indication of which prior
 /// round (if any) it continues, or whether this is even the same session
 /// as last time. `PromptCache` keys reuse on the token prefix itself
-/// instead: it remembers, per model, up to a handful of recent
-/// `(token sequence, [KVCache])` slots, and on each round compares the
-/// freshly-tokenized prompt against every remembered slot's tokens --
-/// picking the one with the longest common prefix (LCP) -- to decide
-/// whether to reuse that slot's cache unchanged, trim it back to a common
-/// prefix, or (if no slot has any useful overlap) rebuild from scratch.
+/// instead -- but not as a handful of whole-conversation slots checked out
+/// and returned. Each model's KV state is sliced into fixed-size,
+/// content-addressed chunks (see `PromptCacheChunks.swift`'s
+/// `sliceChunks`/`StoredChunk`) that form a hash chain over chunk-aligned
+/// token windows (`chunkKey`), stored once in a per-model shared pool
+/// (``chunkStore``) and deduplicated across every conversation that shares
+/// a prefix -- SGLang RadixAttention-style, not llama.cpp server's
+/// per-conversation slot pool this actor used before this cutover.
 ///
-/// Modeled on llama.cpp server's slot pool (`--parallel N`, LCP-based slot
-/// selection with an LRU fallback) scaled down for a single-process client
-/// library rather than a many-concurrent-client server; mirrors
-/// `ModelCache`'s per-model-actor-cache pattern in `MLXLanguageModel.swift`
-/// otherwise: a private actor, instantiated once as a process-global
-/// `static let`, exposed to `Executor` through thin passthrough statics on
-/// `MLXLanguageModel`.
+/// `resolve` walks the stored chunk chain against the freshly-tokenized
+/// prompt (``lookupLongestPrefix(modelID:newTokens:chunkSize:)``),
+/// assembles any matched chunks into a fresh, PRIVATE `[KVCache]`
+/// (``assemble(chunks:layerCount:)``), and feeds only the suffix past the
+/// matched prefix. Because chunks are read-only and every `resolve` gets
+/// its own assembled copy, there is no checkout, no steal, and no
+/// double-checkout hazard by construction -- unlike the old slot pool's
+/// resolve/store check-out-and-return dance, nothing is ever removed from
+/// the store on a read. `store` slices a completed round's cache into
+/// chunks (``PromptCache/sliceChunks(tokens:cache:chunkSize:)``) and checks
+/// them into the shared pool (``insert(modelID:chunks:)``), where dedup
+/// means two conversations sharing a prefix retain that prefix's KV state
+/// exactly once.
+///
+/// Assembly always produces a CONTIGUOUS copy of the matched chunks' K/V
+/// tensors (see ``assemble(chunks:layerCount:)``'s `ownedCopy(of:)` use):
+/// MLX's scaled-dot-product-attention kernel requires contiguous K/V
+/// tensors, so a naive "reference the chunk store's own tensors" assembly
+/// would either force a copy at attention time anyway or crash on a
+/// non-contiguous input -- assembly pays that copy cost once, up front,
+/// rather than repeatedly inside the hot generation loop.
+///
+/// KNOWN WINDOW: as of this cutover, the chunk store has NO capacity bound
+/// -- it grows without eviction until a later task (kanban `2sdt6dj`) adds
+/// byte-budget LRU eviction. Acceptable on this branch because chunking
+/// itself already bounds memory better than the old slot pool did (a
+/// shared prefix is stored once, not once per conversation), but a
+/// long-running process serving many distinct prompts will still grow
+/// ``chunkStore`` unboundedly until that follow-up lands.
+///
+/// Mirrors `ModelCache`'s per-model-actor-cache pattern in
+/// `MLXLanguageModel.swift` otherwise: a private actor, instantiated once
+/// as a process-global `static let`, exposed to `Executor` through thin
+/// passthrough statics on `MLXLanguageModel`.
 actor PromptCache {
 
-    /// Default for ``maxSlotsPerModel``: how many remembered slots are
-    /// kept per model unless the host app configures otherwise (see
-    /// `MLXLanguageModel.setPromptCacheSlotLimit(_:)`). Bounds per-model
-    /// memory growth under multi-session usage (multiple
-    /// concurrent/alternating conversations against the same model) while
-    /// still giving several recent conversations a chance at KV-cache
-    /// reuse. Matches this being a single-process client library serving
-    /// a handful of concurrent sessions, not llama.cpp server's
-    /// many-concurrent-client `--parallel N` (commonly much larger).
-    /// There is no session-count signal to derive this from:
-    /// FoundationModels never tells the executor how many
-    /// `LanguageModelSession`s exist, so capacity must be declared, not
-    /// inferred.
-    static let defaultMaxSlotsPerModel = 4
-
-    /// Maximum number of remembered slots kept per model; consulted by
-    /// `store`'s eviction. Actor-isolated mutable state, adjusted via
-    /// ``setMaxSlotsPerModel(_:)``.
-    private var maxSlotsPerModel = PromptCache.defaultMaxSlotsPerModel
-
-    /// Sets how many conversations can retain KV state per model.
-    ///
-    /// Clamped to at least 1 (a zero/negative limit would make `store` a
-    /// no-op and silently disable caching -- an explicit `evictAll()` is
-    /// the way to opt out). Takes effect on subsequent `store` calls; an
-    /// already-over-limit slot list shrinks the next time that model
-    /// stores a slot.
-    func setMaxSlotsPerModel(_ limit: Int) {
-        maxSlotsPerModel = max(1, limit)
-    }
-
-    /// One remembered `(token sequence, KV cache)` slot, plus a
-    /// monotonically increasing recency stamp.
-    ///
-    /// `lastUsed` is a plain counter, not a wall-clock timestamp: recency
-    /// here only needs *relative* ordering (which slot is newer), and the
-    /// actor's serialized isolation already guarantees the counter
-    /// strictly increases across calls -- a counter sidesteps any
-    /// wall-clock testability concern entirely (fake/frozen clocks,
-    /// `ContinuousClock` resolution in test contexts, etc.) without
-    /// inventing a new injectable-clock pattern this codebase doesn't
-    /// otherwise have.
-    private struct Slot {
-        var tokens: [Int]
-        var cache: [KVCache]
-        var lastUsed: Int
-    }
-
-    /// Remembered slots per model, newest-recency-stamp last is NOT
-    /// guaranteed (slots are only appended, never re-sorted on read) --
-    /// use `lastUsed` for recency, not array position.
-    private var entries: [String: [Slot]] = [:]
+    /// Default token span each stored chunk covers (see `sliceChunks`/
+    /// `lookupLongestPrefix`). Not yet configurable: an actor-isolated
+    /// `chunkSize` property plus `setChunkSize(_:)` (which must
+    /// `evictAll()` on a genuine change, since changing the span makes
+    /// every existing chunk's hash-chain key meaningless) is a follow-up
+    /// task (kanban `bbda7xg`) -- `resolve`/`store` reference this
+    /// constant directly until then. 64 balances fork-point granularity
+    /// (how finely two conversations sharing a prefix can diverge and
+    /// still share chunks) against per-chunk bookkeeping overhead and
+    /// hash-chain walk length.
+    static let defaultChunkSize = 64
 
     /// Per-model chunk store: each model's chunks keyed by their own
-    /// ``ChunkKey`` (see `PromptCacheChunks.swift`'s hash chain), ADDITIVE to
-    /// (not a replacement of) ``entries``'s slot pool -- `resolve()`/`store()`
-    /// still serve `MLXLanguageModel.swift`'s `Executor` in production today;
-    /// nothing yet wires this store's ``insert(modelID:chunks:)``/
-    /// ``lookupLongestPrefix(modelID:newTokens:chunkSize:)`` into cache
-    /// reconstruction (a later "Assembly" task does that). See
-    /// ``insert(modelID:chunks:)`` for dedup semantics.
+    /// ``ChunkKey`` (see `PromptCacheChunks.swift`'s hash chain) -- the
+    /// sole backing store for `resolve()`/`store()` since this cutover
+    /// (see this actor's own doc comment). See ``insert(modelID:chunks:)``
+    /// for dedup semantics.
     private var chunkStore: [String: [ChunkKey: StoredChunk]] = [:]
 
-    /// Monotonic source for `Slot.lastUsed`/`StoredChunk.lastUsed`. Actor
-    /// isolation serializes every read/increment, so this is a strict
-    /// per-call counter with no concurrent-access races.
+    /// Monotonic source for `StoredChunk.lastUsed`. Actor isolation
+    /// serializes every read/increment, so this is a strict per-call
+    /// counter with no concurrent-access races.
     private var recencyCounter = 0
 
     private func nextRecency() -> Int {
         recencyCounter += 1
         return recencyCounter
-    }
-
-    /// How to seed a generation call's `[KVCache]` and which tokens to
-    /// actually feed it, given what (if anything) is remembered for a
-    /// model and the freshly-tokenized prompt for this round.
-    enum Decision: Equatable {
-        /// The remembered tokens are a prefix of the new tokens: reuse the
-        /// cache unchanged and feed only the trailing `count` new tokens.
-        case reuseSuffix(count: Int)
-        /// The sequences diverge after `commonPrefixLength` tokens, and
-        /// the cache supports trimming back to that point; feed
-        /// `thenSuffix` tokens (the new tokens beyond the common prefix)
-        /// after trimming.
-        case trimTo(commonPrefixLength: Int, thenSuffix: Int)
-        /// No usable overlap (or the cache can't be trimmed to one):
-        /// rebuild a fresh cache and feed every new token.
-        case rebuild
-    }
-
-    /// Pure prefix-match/trim/rebuild decision. No I/O, no actor state --
-    /// unit-tested directly by `PromptCacheTests`, independent of any
-    /// cache/actor machinery. Operates on a single `(cachedTokens, cache)`
-    /// candidate; `selectSlot` is the layer above this that picks *which*
-    /// of a model's several remembered slots to run this against.
-    ///
-    /// - Parameters:
-    ///   - cachedTokens: The token sequence the KV cache currently
-    ///     reflects; empty when nothing has been cached for this model yet.
-    ///   - newTokens: The freshly-tokenized prompt for this round.
-    ///   - isTrimmable: Whether every cache in the `[KVCache]` array
-    ///     supports `trim(_:)` (see `canTrimPromptCache`).
-    /// - Returns: How to seed generation for this round.
-    nonisolated static func decide(
-        cachedTokens: [Int], newTokens: [Int], isTrimmable: Bool
-    ) -> Decision {
-        guard !cachedTokens.isEmpty else { return .rebuild }
-
-        if newTokens.count >= cachedTokens.count,
-            Array(newTokens.prefix(cachedTokens.count)) == cachedTokens
-        {
-            return .reuseSuffix(count: newTokens.count - cachedTokens.count)
-        }
-
-        let commonPrefixLength = zip(cachedTokens, newTokens)
-            .prefix { $0 == $1 }
-            .count
-        guard isTrimmable else { return .rebuild }
-        return .trimTo(
-            commonPrefixLength: commonPrefixLength,
-            thenSuffix: newTokens.count - commonPrefixLength)
-    }
-
-    /// Picks the best of a model's remembered slots to check out for
-    /// `newTokens`, by longest-common-prefix (LCP) length against each
-    /// candidate's tokens -- ties go to the most recently used
-    /// (higher `lastUsed`).
-    ///
-    /// Returns `nil` when every candidate's LCP is zero: no candidate has
-    /// any usable overlap with `newTokens`, so checking one out would be
-    /// strictly worse than a plain rebuild (it would immediately hit
-    /// `decide`'s `commonPrefixLength == 0` trim-to-nothing case, which is
-    /// no cheaper than rebuilding and needlessly evicts a slot that might
-    /// still be useful for a *different* incoming prompt).
-    ///
-    /// - Parameters:
-    ///   - candidates: Each remembered slot's tokens and recency stamp,
-    ///     in the same order as the caller's slot storage (so the
-    ///     returned index can be used to remove the chosen slot).
-    ///   - newTokens: The freshly-tokenized prompt for this round.
-    /// - Returns: The index into `candidates` of the best slot, or `nil`
-    ///   if none has any overlap.
-    nonisolated static func selectSlot(
-        candidates: [(tokens: [Int], lastUsed: Int)], newTokens: [Int]
-    ) -> Int? {
-        var bestIndex: Int?
-        var bestLCP = 0
-        var bestLastUsed = Int.min
-        for (index, candidate) in candidates.enumerated() {
-            let lcp = zip(candidate.tokens, newTokens).prefix { $0 == $1 }.count
-            guard lcp > 0 else { continue }
-            guard lcp > bestLCP || (lcp == bestLCP && candidate.lastUsed > bestLastUsed) else {
-                continue
-            }
-            bestIndex = index
-            bestLCP = lcp
-            bestLastUsed = candidate.lastUsed
-        }
-        return bestIndex
     }
 
     /// Trims `cache` from `currentOffset` back to `targetOffset`,
@@ -223,129 +120,46 @@ actor PromptCache {
         return cache.allSatisfy { $0.offset == targetOffset }
     }
 
-    /// llama.cpp server's "n_past--" trick: when the incoming prompt is
-    /// fully covered by a slot's cache up to `commonPrefixLength` -- a
-    /// full-prefix reuse with nothing new to feed (`decide`'s
-    /// `.reuseSuffix(count: 0)`), or a trim that leaves no new suffix
-    /// (`.trimTo(_, thenSuffix: 0)`) -- generation still needs at least
-    /// one token fed through the model to produce fresh logits. Rather
-    /// than rebuild the whole cache from scratch, trim back one token
-    /// short of `commonPrefixLength` and feed exactly that one token
-    /// again: a single-token forward pass instead of a full re-prefill.
-    ///
-    /// Falls back to a rebuild when the cache isn't trimmable, when there
-    /// is nothing to trim back to (`commonPrefixLength == 0`), or when
-    /// the trim doesn't verify (see `trimAndVerify`).
-    ///
-    /// - Parameters:
-    ///   - cache: The candidate slot's cache.
-    ///   - cachedTokenCount: The candidate slot's token count (the
-    ///     cache's assumed current offset).
-    ///   - commonPrefixLength: How much of the candidate's tokens match
-    ///     `newTokens` (see `decide`).
-    ///   - newTokens: The freshly-tokenized prompt for this round.
-    ///   - model: The loaded model, for building a fresh cache on rebuild.
-    ///   - parameters: Generation parameters for a rebuilt cache.
-    /// - Returns: The `[KVCache]` to generate with and the one token to feed.
-    nonisolated private static func regenerateLastToken(
-        cache: [KVCache], cachedTokenCount: Int, commonPrefixLength: Int,
-        newTokens: [Int], model: any LanguageModel, parameters: GenerateParameters?
-    ) -> (cache: [KVCache], tokensToFeed: [Int]) {
-        guard commonPrefixLength > 0, canTrimPromptCache(cache),
-            trimAndVerify(cache, from: cachedTokenCount, to: commonPrefixLength - 1)
-        else {
-            return (model.newCache(parameters: parameters), newTokens)
-        }
-        return (cache, [newTokens[commonPrefixLength - 1]])
-    }
-
-    /// Applies `decide`'s outcome against one checked-out slot: the
-    /// shared control flow behind `resolve`, factored out so the
-    /// trim-verification (see `trimAndVerify`) and n_past-- (see
-    /// `regenerateLastToken`) logic each have one call site.
-    nonisolated private static func applyDecision(
-        _ decision: Decision, slot: Slot, newTokens: [Int],
-        model: any LanguageModel, parameters: GenerateParameters?
-    ) -> (cache: [KVCache], tokensToFeed: [Int]) {
-        switch decision {
-        case .reuseSuffix(let count) where count > 0:
-            return (slot.cache, Array(newTokens.suffix(count)))
-
-        case .reuseSuffix:
-            // count == 0: full match, nothing new to feed.
-            return regenerateLastToken(
-                cache: slot.cache, cachedTokenCount: slot.tokens.count,
-                commonPrefixLength: slot.tokens.count, newTokens: newTokens,
-                model: model, parameters: parameters)
-
-        case .trimTo(let commonPrefixLength, let thenSuffix) where thenSuffix > 0:
-            guard
-                trimAndVerify(
-                    slot.cache, from: slot.tokens.count, to: commonPrefixLength)
-            else {
-                return (model.newCache(parameters: parameters), newTokens)
-            }
-            return (slot.cache, Array(newTokens.suffix(thenSuffix)))
-
-        case .trimTo(let commonPrefixLength, _):
-            // thenSuffix == 0: the new prompt is fully covered by the
-            // slot's cache (a shrunk/edited-earlier prompt), nothing new
-            // to feed.
-            return regenerateLastToken(
-                cache: slot.cache, cachedTokenCount: slot.tokens.count,
-                commonPrefixLength: commonPrefixLength, newTokens: newTokens,
-                model: model, parameters: parameters)
-
-        case .rebuild:
-            return (model.newCache(parameters: parameters), newTokens)
-        }
-    }
-
     /// Resolves the `[KVCache]` to generate with and the tokens to
-    /// actually feed it this round, selecting the best-matching remembered
-    /// slot for `modelID` (see `selectSlot`) and applying `decide`'s
-    /// outcome against it (see `applyDecision`).
+    /// actually feed it this round: walks `modelID`'s stored chunk chain
+    /// against `newTokens` (``lookupLongestPrefix(modelID:newTokens:chunkSize:)``),
+    /// assembles any matched chunks into a fresh, PRIVATE cache
+    /// (``assemble(chunks:layerCount:)``), and feeds only the suffix past
+    /// the matched prefix. No chunks match (including the first call for a
+    /// model) ⇒ a freshly built cache, feeding every token.
     ///
-    /// Removes (rather than merely reads) the *selected* slot from
-    /// `modelID`'s slot list: `KVCache` instances are plain classes with
-    /// no internal synchronization, so handing the same instances to two
-    /// concurrent generation calls for the same model would race.
-    /// Removing here means a second concurrent call either selects a
-    /// *different* slot (if one has useful overlap for its own prompt) or
-    /// finds nothing and safely rebuilds; `store` checks a (possibly
-    /// different, newer) slot back in once generation completes.
+    /// Nothing is checked out or removed here: chunks are read-only and
+    /// every call gets its own assembled copy, so this cannot race a
+    /// concurrent call for the same model -- see this actor's own doc
+    /// comment on the chunk store's checkout-free design.
     ///
     /// - Parameters:
     ///   - modelID: The model identifier this cache is scoped to.
     ///   - newTokens: The freshly-tokenized full prompt for this round.
-    ///   - model: The loaded model, for building a fresh cache on rebuild.
+    ///   - model: The loaded model, for building a fresh cache when no
+    ///     chunk has any overlap.
     ///   - parameters: Generation parameters, threaded into
     ///     `model.newCache(parameters:)` so a rebuilt cache matches what
     ///     the generation call would have created unassisted (e.g.
     ///     `maxKVSize`-driven rotating caches).
     /// - Returns: The `[KVCache]` to pass as generation's `cache:`
     ///   argument, and the token subsequence to actually feed (a suffix of
-    ///   `newTokens`, or all of `newTokens` on rebuild).
+    ///   `newTokens`, or all of `newTokens` when nothing matched).
     func resolve(
         modelID: String, newTokens: [Int], model: SendableBox<any LanguageModel>,
         parameters: GenerateParameters?
     ) -> SendableBox<(cache: [KVCache], tokensToFeed: [Int])> {
         let model = model.consume()
-        var slots = entries[modelID] ?? []
-        let candidates = slots.map { (tokens: $0.tokens, lastUsed: $0.lastUsed) }
-        guard let bestIndex = Self.selectSlot(candidates: candidates, newTokens: newTokens) else {
+        let chunks = lookupLongestPrefix(
+            modelID: modelID, newTokens: newTokens, chunkSize: Self.defaultChunkSize
+        ).consume()
+        guard let layerCount = chunks.first?.layers.count else {
             return SendableBox((model.newCache(parameters: parameters), newTokens))
         }
-
-        let slot = slots.remove(at: bestIndex)
-        entries[modelID] = slots.isEmpty ? nil : slots
-
-        let decision = Self.decide(
-            cachedTokens: slot.tokens, newTokens: newTokens,
-            isTrimmable: canTrimPromptCache(slot.cache))
-        let result = Self.applyDecision(
-            decision, slot: slot, newTokens: newTokens, model: model, parameters: parameters)
-        return SendableBox(result)
+        let matchedTokenCount = chunks.count * Self.defaultChunkSize
+        let assembled = Self.assemble(chunks: chunks, layerCount: layerCount)
+        return SendableBox(
+            (assembled, Array(newTokens.suffix(newTokens.count - matchedTokenCount))))
     }
 
     /// Pure reconciliation between a re-encoded text's token count and a
@@ -440,34 +254,37 @@ actor PromptCache {
         }
     }
 
-    /// Remembers `tokens`/`cache` as a new slot for this model, evicting
-    /// the least-recently-used slot(s) if the model's slot count would
-    /// exceed `maxSlotsPerModel`.
+    /// Slices this round's `(tokens, cache)` into fixed-size chunks
+    /// (``PromptCache/sliceChunks(tokens:cache:chunkSize:)``) and checks
+    /// them into `modelID`'s shared chunk store (``insert(modelID:chunks:)``).
+    ///
+    /// Silently drops the round when `cache`'s layers aren't a chunkable
+    /// shape (see `sliceChunks`'s degradation for `RotatingKVCache`/
+    /// `ChunkedKVCache`/an offset mismatch) -- the same degradation the
+    /// old slot pool had for a non-trimmable cache: this round simply
+    /// contributes nothing reusable, and the next round for this model
+    /// rebuilds from scratch.
     ///
     /// Called once a generation call completes and its actual token count
     /// has been verified against `cache`'s own `offset` (see
     /// `Executor.commitPromptCache`).
     func store(modelID: String, tokens: [Int], cache: SendableBox<[KVCache]>) {
-        var slots = entries[modelID] ?? []
-        slots.append(Slot(tokens: tokens, cache: cache.consume(), lastUsed: nextRecency()))
-        if slots.count > maxSlotsPerModel {
-            slots.sort { $0.lastUsed < $1.lastUsed }
-            slots.removeFirst(slots.count - maxSlotsPerModel)
-        }
-        entries[modelID] = slots
+        guard
+            let chunks = Self.sliceChunks(
+                tokens: tokens, cache: cache.consume(), chunkSize: Self.defaultChunkSize)
+        else { return }
+        insert(modelID: modelID, chunks: chunks)
     }
 
-    /// Drops every model's remembered slots and chunk store. Mirrors
+    /// Drops every model's remembered chunk store. Mirrors
     /// `ModelCache.evictAll`.
     func evictAll() {
-        entries.removeAll()
         chunkStore.removeAll()
     }
 
-    /// Drops one model's remembered slots and chunk store. Mirrors
+    /// Drops one model's remembered chunk store. Mirrors
     /// `ModelCache.remove`.
     func remove(modelID: String) {
-        entries.removeValue(forKey: modelID)
         chunkStore.removeValue(forKey: modelID)
     }
 
@@ -510,9 +327,10 @@ actor PromptCache {
     /// least one token always remains unmatched for the caller to feed --
     /// generation always needs >=1 fresh token to produce new logits, even
     /// when the entire prompt is otherwise covered by stored chunks (this is
-    /// the chunk-store equivalent of the slot pool's `regenerateLastToken`/
-    /// n_past-- trick, but simpler: rather than trimming one token back off a
-    /// full match, the walk itself never consumes the prompt's last token).
+    /// the chunk-store equivalent of the old (now-removed) slot pool's
+    /// single-token-regeneration/n_past-- trick, but simpler: rather than
+    /// trimming one token back off a full match, the walk itself never
+    /// consumes the prompt's last token).
     ///
     /// COLLISION SAFETY: a key match only counts if the stored chunk's
     /// `tokens` are element-equal to the chunk-aligned window being matched
@@ -586,7 +404,7 @@ actor PromptCache {
     /// (see `StoredChunk`/`ownedCopy(of:)` in `PromptCacheChunks.swift`), and
     /// every call to `assemble` produces its own independent tensors (see
     /// below) -- so there is no checkout, no steal, and no double-checkout
-    /// hazard by construction, unlike the slot pool's `resolve`/`store`
+    /// hazard by construction, unlike the old slot pool's `resolve`/`store`
     /// check-out-and-return dance.
     ///
     /// `concatenated(_:axis:)` alone is NOT sufficient to guarantee
@@ -603,10 +421,8 @@ actor PromptCache {
     /// ``ownedCopy(of:)`` (shared with `sliceChunks`) closes that gap
     /// unconditionally, regardless of how many chunks matched.
     ///
-    /// This is a standalone, nonisolated unit: nothing in
-    /// `MLXLanguageModel.swift`'s `Executor` calls it yet, matching
-    /// `sliceChunks`/`insert`/`lookupLongestPrefix`'s additive-only status
-    /// (wiring the chunk store into `resolve()` is a later task).
+    /// Called directly by `resolve()` to build the `[KVCache]` a matched
+    /// chunk prefix seeds generation with.
     ///
     /// - Parameters:
     ///   - chunks: The longest matching chunk prefix (from

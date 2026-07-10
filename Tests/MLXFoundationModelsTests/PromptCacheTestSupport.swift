@@ -1,12 +1,12 @@
 // Copyright © 2026 Apple Inc.
 //
-// Shared fixtures for the `PromptCache` actor-level test suites
-// (`PromptCacheResolveTests`, `PromptCacheSlotPoolTests`,
-// `PromptCacheMultiSessionTests`, `PromptCacheConcurrencyTests`): a minimal
-// `LanguageModel` probe, cache constructors positioned as if real tokens had
-// been fed, and a `resolve()` convenience that hides the single-use
-// `SendableBox` plumbing. Internal (not `private`) so every suite shares one
-// definition instead of re-declaring per-file copies.
+// Shared fixtures for the `PromptCache` actor-level test suites (currently
+// `PromptCacheChunkCutoverTests`, which exercises `resolve()`/`store()` on
+// the chunk path): a minimal `LanguageModel` probe, cache constructors
+// positioned as if real tokens had been fed, and a `resolve()` convenience
+// that hides the single-use `SendableBox` plumbing. Internal (not `private`)
+// so every suite shares one definition instead of re-declaring per-file
+// copies.
 //
 // None of these fixtures evaluate an `MLXArray` -- `makeSlotCache`/
 // `makeNonTrimmableSlotCache` only position a cache's `offset`, so this file
@@ -28,7 +28,7 @@ import MLXNN
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 /// Minimal `LanguageModel` stand-in whose only job is to hand
-/// `PromptCache.resolve`/`applyDecision` a fresh, distinguishable
+/// `PromptCache.resolve` a fresh, distinguishable
 /// `[KVCache]` on every `newCache(parameters:)` call (via
 /// `KVCacheDimensionProvider`'s default implementation) -- `prepare`/
 /// `callAsFunction` are never invoked by `PromptCache` and simply trap if
@@ -71,8 +71,9 @@ func makeSlotCache(tokenCount: Int) -> KVCacheSimple {
 ///
 /// `RotatingKVCache` reports `isTrimmable == false` once `offset >=
 /// maxCacheSize` (its window has rotated, so earlier positions are gone and
-/// a prefix trim is meaningless). Used to drive `decide`/`applyDecision`
-/// down their rebuild-instead-of-trim fallbacks.
+/// a prefix trim is meaningless). Also unchunkable by `sliceChunks` (only a
+/// verified `KVCacheSimple` layer can be sliced), so `store()` silently
+/// drops a round backed by this cache.
 func makeNonTrimmableSlotCache(tokenCount: Int) -> RotatingKVCache {
     let cache = RotatingKVCache(maxSize: tokenCount)
     cache.offset = tokenCount

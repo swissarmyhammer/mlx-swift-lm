@@ -6,13 +6,15 @@
 // at `newTokens.count - 1` so generation always has >=1 fresh token to feed,
 // collision-safety verified by a token-array compare on every key match).
 //
-// This is ADDITIVE state alongside the existing `entries: [String: [Slot]]`
-// slot-pool mechanism `resolve()`/`store()` use (see `PromptCacheSlotPoolTests`,
-// `PromptCacheMultiSessionTests`): `MLXLanguageModel.swift`'s `Executor` still
-// calls `resolve`/`store`/`evictAll`/`remove` in production today, with no
-// wiring yet from the chunk store into cache reconstruction (a later
-// "Assembly" task). These tests exercise the chunk store in isolation,
-// independent of the slot mechanism.
+// This chunk store IS the production path: `resolve()`/`store()` call
+// straight into `lookupLongestPrefix`/`insert` (the earlier slot-pool
+// mechanism -- `entries: [String: [Slot]]`, `selectSlot`, `decide` -- was
+// deleted once the cutover to chunks landed, kanban cthbfmw).
+// `MLXLanguageModel.swift`'s `Executor` calls `resolve`/`store`/`evictAll`/
+// `remove`, which now assemble cache state from these chunks on every call.
+// These tests exercise the chunk store in isolation, independent of
+// `resolve()`/`store()`'s assemble/slice logic (see
+// `PromptCacheChunkCutoverTests` for that wiring).
 //
 // No fixture here evaluates real tensor CONTENT (unlike `PromptCacheChunkTests`,
 // which slices real `KVCacheSimple` stacks and checks tensor values) -- chunks
