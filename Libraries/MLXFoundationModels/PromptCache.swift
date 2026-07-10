@@ -537,10 +537,11 @@ actor PromptCache {
     func lookupLongestPrefix(
         modelID: String, newTokens: [Int], chunkSize: Int
     ) -> SendableBox<[StoredChunk]> {
-        guard chunkSize > 0, var models = chunkStore[modelID] else { return SendableBox([]) }
-
-        let maxChunkCount = (newTokens.count - 1) / chunkSize
-        guard maxChunkCount > 0 else { return SendableBox([]) }
+        // Computed before the guard (rather than dividing unconditionally) so an
+        // invalid chunkSize can't crash on integer division-by-zero, letting both
+        // the invalid-chunkSize and empty-result cases share one early-exit guard.
+        let maxChunkCount = chunkSize > 0 ? (newTokens.count - 1) / chunkSize : 0
+        guard maxChunkCount > 0, var models = chunkStore[modelID] else { return SendableBox([]) }
 
         var parentKey = PromptCache.rootChunkKey
         var matched: [StoredChunk] = []
