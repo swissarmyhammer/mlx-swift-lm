@@ -7,6 +7,16 @@
 // been fed, and a `resolve()` convenience that hides the single-use
 // `SendableBox` plumbing. Internal (not `private`) so every suite shares one
 // definition instead of re-declaring per-file copies.
+//
+// None of these fixtures evaluate an `MLXArray` -- `makeSlotCache`/
+// `makeNonTrimmableSlotCache` only position a cache's `offset`, so this file
+// needs no GPU bootstrap of its own. If a future fixture here starts
+// evaluating tensors on the default (GPU) device under plain `swift test`,
+// see `TestBootstrap.swift`'s `MetalLibraryTestBootstrap`: it root-fixes
+// mlx-swift's metallib PATH RESOLUTION for that context (kanban 23ff1zx,
+// memory note `swiftpm-test-gpu-metallib-limit`) by symlinking
+// `mlx.metallib` next to the running test binary, rather than pinning to
+// the CPU device.
 
 import Foundation
 import MLX
