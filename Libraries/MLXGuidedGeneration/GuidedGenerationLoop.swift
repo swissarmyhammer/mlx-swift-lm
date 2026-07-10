@@ -297,6 +297,7 @@ public enum GuidedGenerationLoop {
             let shouldStop: Bool
             if !ffTokens.isEmpty {
                 shouldStop = try processFastForwardTokens(
+                    tokenId,
                     ffTokens,
                     state: &state,
                     maxTokens: maxTokens,
@@ -522,22 +523,32 @@ public enum GuidedGenerationLoop {
 
     /// Handles a non-empty fast-forward batch after committing the sampled
     /// token: yields each FF token's text through `emit` (honoring
-    /// `maxTokens` and the caller's stop signal), feeds the FF tokens
-    /// through the model one at a time to advance the KV cache, and
-    /// finally quantizes the cache and computes the next mask in the
-    /// CPU/GPU overlap window. Extracting this out of `run()`'s main loop
-    /// collapses two blocks that were each nested 4-5 levels deep (the
+    /// `maxTokens` and the caller's stop signal), feeds the sampled token
+    /// AND the FF tokens through the model one at a time to advance the KV
+    /// cache, and finally quantizes the cache and computes the next mask in
+    /// the CPU/GPU overlap window. Extracting this out of `run()`'s main
+    /// loop collapses two blocks that were each nested 4-5 levels deep (the
     /// FF-token emission loop and the FF-token batch-finalization loop)
     /// into a single top-level call.
     ///
     /// - Parameters:
+    ///   - tokenId: The token just sampled and committed to the grammar
+    ///     this iteration (the one whose commit produced `ffTokens`).
+    ///     `CommitResult.tokens` never echoes this id back (see
+    ///     `GrammarConstraint.commitToken`'s doc comment), so unlike the
+    ///     non-FF path (`advanceSingleSampledToken`), nothing upstream of
+    ///     this call has fed it through the model yet. It must get its own
+    ///     forward pass here -- feeding `ffTokens` directly without it
+    ///     would silently skip `tokenId`'s KV-cache entry, leaving every
+    ///     later position's attention unable to see a token that was
+    ///     nonetheless emitted and accepted by the grammar.
     ///   - ffTokens: The jump-forward token ids from `CommitResult.tokens`
     ///     (never includes the sampled token that triggered them).
     ///   - state: Loop state; mutates `detokenizer`/`accumulatedText`/
     ///     `tokenCount` (via `emitToken`) and `cache`/`modelState`/`logits`/
     ///     `mask`/`maskArray`.
     ///   - maxTokens: Generation budget; FF emission stops (without
-    ///     feeding the remaining FF tokens to the model) once reached.
+    ///     feeding `tokenId` or the FF tokens to the model) once reached.
     ///   - model, onTokenCommitted, kvBits, kvGroupSize, quantizedKvStart,
     ///     constraint, vocabSize, logitDim: See `run`'s parameters/locals
     ///     of the same names.
@@ -546,6 +557,7 @@ public enum GuidedGenerationLoop {
     ///   budget was exhausted mid-batch) and `run`'s main loop must break;
     ///   `false` to continue.
     private static func processFastForwardTokens(
+        _ tokenId: Int,
         _ ffTokens: [Int32],
         state: inout LoopState,
         maxTokens: Int,
@@ -565,7 +577,9 @@ public enum GuidedGenerationLoop {
         // here would only stop this batch, leaving `run`'s main loop to
         // run another full iteration -- wasting GPU work and violating
         // the caller's stop contract. Propagate through the `Bool`
-        // return and let the caller break its own `while`.
+        // return and let the caller break its own `while`. (`tokenId`
+        // itself was already emitted by `run()`'s main loop before this
+        // function was called, so only `ffTokens` need emitting here.)
         for ffToken in ffTokens {
             if state.tokenCount >= maxTokens {
                 return true
@@ -574,6 +588,23 @@ public enum GuidedGenerationLoop {
                 return true
             }
         }
+
+        // Feed the sampled token through the model FIRST, before any FF
+        // token. It occupies the KV-cache position immediately after the
+        // prior forward pass and immediately before `ffTokens[0]`'s -- the
+        // same single-token forward pass `advanceSingleSampledToken` does
+        // on the non-FF path. Its logits are irrelevant here (the grammar,
+        // not a sample from these logits, forces every `ffToken` that
+        // follows), so only the last FF token's logits are kept below,
+        // exactly as before this token was added to the batch.
+        let sampledInput = LMInput.Text(tokens: MLXArray([Int32(tokenId)]))
+        let sampledResult = model(
+            sampledInput[text: .newAxis],
+            cache: cacheOrNil(state.cache),
+            state: state.modelState
+        )
+        state.modelState = sampledResult.state
+        onTokenCommitted?(tokenId)
 
         // Process FF tokens one at a time to update KV cache.
         // Batching (T_q > 1 with populated cache) triggers an MLX
