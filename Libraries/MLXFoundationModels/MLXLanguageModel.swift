@@ -2169,7 +2169,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     hardReserve: hardReserve,
                     closingBias: setup.closingBias,
                     whitespaceBias: setup.whitespaceBias,
-                    whitespaceTokenIDs: setup.whitespaceTokenIDs,
+                    whitespaceTokenIds: setup.whitespaceTokenIDs,
                     cache: slot.cache,
                     onTokenCommitted: { generatedTokenIDs.append($0) }
                 ) { text in

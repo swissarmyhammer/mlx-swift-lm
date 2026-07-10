@@ -159,7 +159,7 @@ struct MultiModelGuidedGenerationTests {
                 completionReserve: reserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIDs: whitespaceTokenIDs
+                whitespaceTokenIds: whitespaceTokenIDs
             ) { text in
                 collected += text
                 return true
@@ -288,7 +288,7 @@ struct MultiModelGuidedGenerationTests {
                 completionReserve: reserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIDs: whitespaceTokenIDs
+                whitespaceTokenIds: whitespaceTokenIDs
             ) { text in
                 collected += text
                 tokenCount += 1

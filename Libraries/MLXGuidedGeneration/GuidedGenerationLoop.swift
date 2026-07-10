@@ -44,8 +44,13 @@ public enum GuidedGenerationLoop {
 
     /// Attoseconds per millisecond -- the divisor needed to fold
     /// `Duration.components.attoseconds` into the same millisecond count
-    /// as `components.seconds * 1000` for progress/final-stats logging.
+    /// as `components.seconds * millisecondsPerSecond` for progress/final-stats
+    /// logging (see `durationToMilliseconds`).
     private static let attosecondsPerMillisecond: Int64 = 1_000_000_000_000_000
+
+    /// Milliseconds per second -- shared by `durationToMilliseconds`'s
+    /// elapsed-time conversion.
+    private static let millisecondsPerSecond: Int64 = 1000
 
     /// Runs the guided generation loop, yielding text deltas through `emit`.
     ///
@@ -81,7 +86,7 @@ public enum GuidedGenerationLoop {
     ///   - whitespaceBias: Pre-computed negative logit bias array penalizing
     ///     whitespace-only tokens (from `WhitespaceTokenBias.compute`). Nil
     ///     disables whitespace suppression.
-    ///   - whitespaceTokenIDs: Set of token IDs classified as whitespace-only.
+    ///   - whitespaceTokenIds: Set of token IDs classified as whitespace-only.
     ///     Used by the run tracker to detect consecutive whitespace runs.
     ///   - diagnosticLog: When true, flush the grammar constraint's diagnostic
     ///     logs after the run completes. Defaults to false.
@@ -143,7 +148,7 @@ public enum GuidedGenerationLoop {
         hardReserve: Int = 0,
         closingBias: MLXArray? = nil,
         whitespaceBias: MLXArray? = nil,
-        whitespaceTokenIDs: Set<Int> = [],
+        whitespaceTokenIds: Set<Int> = [],
         diagnosticLog: Bool = false,
         cache: [KVCache]? = nil,
         onTokenCommitted: ((Int) -> Void)? = nil,
@@ -153,7 +158,7 @@ public enum GuidedGenerationLoop {
         let initialCache = cache ?? model.newCache(parameters: nil)
 
         // Build EOS token set
-        let stopTokenIDs = Self.buildStopTokenIDs(
+        let stopTokenIds = Self.buildStopTokenIds(
             tokenizer: context.tokenizer,
             configuration: context.configuration
         )
@@ -163,7 +168,7 @@ public enum GuidedGenerationLoop {
 
         let detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
         var grammarStopped = false
-        let whitespaceTracker = WhitespaceRunTracker(whitespaceTokenIDs: whitespaceTokenIDs)
+        let whitespaceTracker = WhitespaceRunTracker(whitespaceTokenIDs: whitespaceTokenIds)
 
         // Pre-compute bias arrays used in the zone policy.
         //
@@ -181,7 +186,7 @@ public enum GuidedGenerationLoop {
                 {
                     let biasLen = bias.shape[0]
                     var penalty = [Float32](repeating: 0.0, count: biasLen)
-                    for eos in stopTokenIDs where eos >= 0 && eos < biasLen {
+                    for eos in stopTokenIds where eos >= 0 && eos < biasLen {
                         penalty[eos] = logitRejectionPenalty
                     }
                     return MLXArray(penalty)
@@ -232,7 +237,7 @@ public enum GuidedGenerationLoop {
                 break
             }
 
-            let tokenID = applyBiasAndSample(
+            let tokenId = applyBiasAndSample(
                 state: &state,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
@@ -256,20 +261,20 @@ public enum GuidedGenerationLoop {
             // `applyMaskAndSample` set it to -inf, so argmax would not
             // have selected it.
             if state.mask.needsApply,
-                tokenID == context.tokenizer.unknownTokenId || stopTokenIDs.contains(tokenID)
+                tokenId == context.tokenizer.unknownTokenId || stopTokenIds.contains(tokenId)
             {
                 logStopReason(
-                    diagnosticLog: diagnosticLog, "EOS/unk tokenID=\(tokenID)",
+                    diagnosticLog: diagnosticLog, "EOS/unk tokenId=\(tokenId)",
                     tokenCount: state.tokenCount)
                 grammarStopped = true
                 break
             }
 
             // Commit to grammar
-            let commitResult = try constraint.commitToken(Int32(tokenID))
+            let commitResult = try constraint.commitToken(Int32(tokenId))
 
             // Yield the sampled token
-            if emitToken(tokenID, state: &state, emit: emit) { break }
+            if emitToken(tokenId, state: &state, emit: emit) { break }
 
             // Periodic progress logging (once per main loop iteration, not per FF token)
             if state.tokenCount % 50 == 0 {
@@ -307,7 +312,7 @@ public enum GuidedGenerationLoop {
                 )
             } else {
                 try advanceSingleSampledToken(
-                    tokenID,
+                    tokenId,
                     state: &state,
                     model: model,
                     onTokenCommitted: onTokenCommitted,
@@ -325,9 +330,7 @@ public enum GuidedGenerationLoop {
 
         // Log final generation stats
         let totalElapsed = clock.now - startInstant
-        let totalMs =
-            totalElapsed.components.seconds * 1000 + totalElapsed.components.attoseconds
-            / attosecondsPerMillisecond
+        let totalMs = durationToMilliseconds(totalElapsed)
         logger.info("\(logPrefix) done tokens=\(state.tokenCount) elapsed=\(totalMs)ms")
 
         // Flush any xgrammar warnings (limit exceedances, parser state)
@@ -468,18 +471,18 @@ public enum GuidedGenerationLoop {
             maskArray: state.maskArray,
             closingBias: activeBias
         )
-        let tokenID = Int(token)
+        let tokenId = Int(token)
 
         // Track the sampled token for whitespace run detection.
         // Fast-forward tokens are NOT tracked (they are grammar-forced).
         if whitespaceBias != nil {
-            _ = state.whitespaceTracker.record(tokenID: tokenID)
+            _ = state.whitespaceTracker.record(tokenID: tokenId)
         }
 
-        return tokenID
+        return tokenId
     }
 
-    /// Detokenizes `tokenID`, appends any resulting text to the accumulated
+    /// Detokenizes `tokenId`, appends any resulting text to the accumulated
     /// output, and forwards it through `emit`. Shared by the sampled-token
     /// yield in `run()`'s main loop and the fast-forward emission loop in
     /// `processFastForwardTokens`, so both honor the same stop contract.
@@ -489,9 +492,9 @@ public enum GuidedGenerationLoop {
     ///   incremented only on the non-stopping path, matching the token
     ///   accounting the two original call sites both relied on.
     private static func emitToken(
-        _ tokenID: Int, state: inout LoopState, emit: (String) -> Bool
+        _ tokenId: Int, state: inout LoopState, emit: (String) -> Bool
     ) -> Bool {
-        state.detokenizer.append(token: tokenID)
+        state.detokenizer.append(token: tokenId)
         if let text = state.detokenizer.next() {
             state.accumulatedText += text
             if !emit(text) {
@@ -568,7 +571,7 @@ public enum GuidedGenerationLoop {
             let tokenInput = LMInput.Text(tokens: MLXArray([ffToken]))
             let result = model(
                 tokenInput[text: .newAxis],
-                cache: state.cache.isEmpty ? nil : state.cache,
+                cache: cacheOrNil(state.cache),
                 state: state.modelState
             )
             state.modelState = result.state
@@ -579,15 +582,21 @@ public enum GuidedGenerationLoop {
             }
         }
 
-        // Quantize the KV cache, compute the next mask, and overlap
-        // that CPU work with the forward pass's GPU work (matching
-        // the unconstrained TokenIterator's quantization behavior).
-        (state.mask, state.maskArray) = try Self.advanceMaskOnCPUWhileGPURuns(
-            logits: state.logits, cache: &state.cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
+        try updateMaskAfterForwardPass(
+            state: &state, kvBits: kvBits, kvGroupSize: kvGroupSize,
             quantizedKvStart: quantizedKvStart, constraint: constraint,
             vocabSize: vocabSize, logitDim: logitDim)
 
         return false
+    }
+
+    /// Returns `cache` wrapped as an optional for the model's `cache:`
+    /// parameter, or `nil` when `cache` is empty (signaling "no prior state"
+    /// to the model on the very first forward pass). Shared by the
+    /// fast-forward and single-sampled-token forward-pass call sites, which
+    /// both need this identical empty-to-nil translation.
+    private static func cacheOrNil(_ cache: [KVCache]) -> [KVCache]? {
+        cache.isEmpty ? nil : cache
     }
 
     /// Feeds the sampled token through the model (no fast-forward was
@@ -601,7 +610,7 @@ public enum GuidedGenerationLoop {
     ///   `state` is mutated the same way `processFastForwardTokens`
     ///   mutates it (`cache`/`modelState`/`logits`/`mask`/`maskArray`).
     private static func advanceSingleSampledToken(
-        _ tokenID: Int,
+        _ tokenId: Int,
         state: inout LoopState,
         model: any LanguageModel,
         onTokenCommitted: ((Int) -> Void)?,
@@ -613,21 +622,18 @@ public enum GuidedGenerationLoop {
         logitDim: Int
     ) throws {
         // Normal single-token forward pass (lazy)
-        let nextInput = LMInput.Text(tokens: MLXArray([Int32(tokenID)]))
+        let nextInput = LMInput.Text(tokens: MLXArray([Int32(tokenId)]))
         let result = model(
             nextInput[text: .newAxis],
-            cache: state.cache.isEmpty ? nil : state.cache,
+            cache: cacheOrNil(state.cache),
             state: state.modelState
         )
         state.modelState = result.state
         state.logits = result.logits
-        onTokenCommitted?(tokenID)
+        onTokenCommitted?(tokenId)
 
-        // Quantize the KV cache, compute the next mask, and overlap
-        // that CPU work with the forward pass's GPU work (matching
-        // the unconstrained TokenIterator's quantization behavior).
-        (state.mask, state.maskArray) = try Self.advanceMaskOnCPUWhileGPURuns(
-            logits: state.logits, cache: &state.cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
+        try updateMaskAfterForwardPass(
+            state: &state, kvBits: kvBits, kvGroupSize: kvGroupSize,
             quantizedKvStart: quantizedKvStart, constraint: constraint,
             vocabSize: vocabSize, logitDim: logitDim)
     }
@@ -669,11 +675,48 @@ public enum GuidedGenerationLoop {
         state: LoopState, clock: ContinuousClock, startInstant: ContinuousClock.Instant
     ) {
         let elapsed = clock.now - startInstant
-        let ms =
-            elapsed.components.seconds * 1000 + elapsed.components.attoseconds
-            / attosecondsPerMillisecond
+        let ms = durationToMilliseconds(elapsed)
         let prefix = String(state.accumulatedText.prefix(200))
         logger.info("\(logPrefix) token=\(state.tokenCount) elapsed=\(ms)ms text=\(prefix)")
+    }
+
+    /// Converts an elapsed `Duration` since some start instant into total
+    /// milliseconds, combining whole seconds with the sub-second attosecond
+    /// remainder. Shared by `run()`'s final-stats log and `logProgress()`'s
+    /// periodic log, both of which need the same elapsed-time-to-milliseconds
+    /// conversion.
+    private static func durationToMilliseconds(_ duration: Duration) -> Int64 {
+        duration.components.seconds * millisecondsPerSecond
+            + duration.components.attoseconds / attosecondsPerMillisecond
+    }
+
+    /// Quantizes the KV cache and computes the next grammar mask in the
+    /// CPU/GPU overlap window, updating `state.cache`/`state.mask`/
+    /// `state.maskArray` in place. Thin wrapper around
+    /// `advanceMaskOnCPUWhileGPURuns` that threads `LoopState` through, so
+    /// `processFastForwardTokens` and `advanceSingleSampledToken` -- which
+    /// both need this identical post-forward-pass sequence -- can call it
+    /// with a single line instead of duplicating the tuple-destructuring
+    /// call.
+    ///
+    /// - Parameters:
+    ///   - state: Loop state; mutates `cache`/`mask`/`maskArray`. Reads
+    ///     `logits` (the just-produced forward-pass output).
+    ///   - kvBits, kvGroupSize, quantizedKvStart, constraint, vocabSize,
+    ///     logitDim: See `run`'s parameters/locals of the same names.
+    private static func updateMaskAfterForwardPass(
+        state: inout LoopState,
+        kvBits: Int?,
+        kvGroupSize: Int,
+        quantizedKvStart: Int,
+        constraint: GrammarConstraint,
+        vocabSize: Int,
+        logitDim: Int
+    ) throws {
+        (state.mask, state.maskArray) = try Self.advanceMaskOnCPUWhileGPURuns(
+            logits: state.logits, cache: &state.cache, kvBits: kvBits, kvGroupSize: kvGroupSize,
+            quantizedKvStart: quantizedKvStart, constraint: constraint,
+            vocabSize: vocabSize, logitDim: logitDim)
     }
 
     /// Quantizes the KV cache (a no-op unless `kvBits` is set), then computes
@@ -762,20 +805,20 @@ public enum GuidedGenerationLoop {
     ///    some Gemma variants in `LLMModelFactory`). Callers needing extra
     ///    stop tokens add them here (via the model configuration), not as a
     ///    per-call argument.
-    static func buildStopTokenIDs(
+    static func buildStopTokenIds(
         tokenizer: any Tokenizer,
         configuration: ModelConfiguration
     ) -> Set<Int> {
-        var stopTokenIDs = Set(configuration.eosTokenIds)
+        var stopTokenIds = Set(configuration.eosTokenIds)
         if let eos = tokenizer.eosTokenId {
-            stopTokenIDs.insert(eos)
+            stopTokenIds.insert(eos)
         }
         for token in configuration.extraEOSTokens {
             if let id = tokenizer.convertTokenToId(token) {
-                stopTokenIDs.insert(id)
+                stopTokenIds.insert(id)
             }
         }
-        return stopTokenIDs
+        return stopTokenIds
     }
 
     /// Apply a *prebuilt* grammar mask and optional bias to logits, then argmax.

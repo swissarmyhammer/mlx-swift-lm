@@ -34,7 +34,7 @@ struct StopTokenRegressionIntegrationTests {
     func gemmaStopSetIncludesEndOfTurn() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         try await withContext(modelID: TestFixtures.gemmaModelID) { tokenizer, configuration in
-            let stopSet = GuidedGenerationLoop.buildStopTokenIDs(
+            let stopSet = GuidedGenerationLoop.buildStopTokenIds(
                 tokenizer: tokenizer,
                 configuration: configuration
             )
@@ -61,7 +61,7 @@ struct StopTokenRegressionIntegrationTests {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         try await withContext(modelID: TestFixtures.defaultModelID) {
             tokenizer, configuration in
-            let stopSet = GuidedGenerationLoop.buildStopTokenIDs(
+            let stopSet = GuidedGenerationLoop.buildStopTokenIds(
                 tokenizer: tokenizer,
                 configuration: configuration
             )
@@ -88,11 +88,11 @@ struct StopTokenRegressionIntegrationTests {
                     "Test fixture tokenizer is missing <|endoftext|>; cannot verify union")
                 return
             }
-            let baseline = GuidedGenerationLoop.buildStopTokenIDs(
+            let baseline = GuidedGenerationLoop.buildStopTokenIds(
                 tokenizer: tokenizer, configuration: configuration)
             var extendedConfig = configuration
             extendedConfig.extraEOSTokens.insert("<|endoftext|>")
-            let extended = GuidedGenerationLoop.buildStopTokenIDs(
+            let extended = GuidedGenerationLoop.buildStopTokenIds(
                 tokenizer: tokenizer, configuration: extendedConfig)
             #expect(extended.contains(extraTokenID))
             #expect(extended == baseline.union([extraTokenID]))
@@ -102,15 +102,15 @@ struct StopTokenRegressionIntegrationTests {
         }
     }
 
-    /// Two `buildStopTokenIDs` calls with the same inputs produce the same
+    /// Two `buildStopTokenIds` calls with the same inputs produce the same
     /// stop set — the function is a pure projection of tokenizer + config.
-    @Test("buildStopTokenIDs is deterministic for identical inputs")
-    func buildStopTokenIDsIsDeterministic() async throws {
+    @Test("buildStopTokenIds is deterministic for identical inputs")
+    func buildStopTokenIdsIsDeterministic() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         try await withContext(modelID: TestFixtures.gemmaModelID) { tokenizer, configuration in
-            let baseline = GuidedGenerationLoop.buildStopTokenIDs(
+            let baseline = GuidedGenerationLoop.buildStopTokenIds(
                 tokenizer: tokenizer, configuration: configuration)
-            let repeated = GuidedGenerationLoop.buildStopTokenIDs(
+            let repeated = GuidedGenerationLoop.buildStopTokenIds(
                 tokenizer: tokenizer, configuration: configuration)
             #expect(baseline == repeated)
         }

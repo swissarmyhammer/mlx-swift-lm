@@ -369,7 +369,7 @@ struct GuidedGenerationTests {
                 hardReserve: hardReserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIDs: whitespaceTokenIDs,
+                whitespaceTokenIds: whitespaceTokenIDs,
                 diagnosticLog: diagnosticLog
             ) { text in
                 collected += text
@@ -541,7 +541,7 @@ struct GuidedGenerationTests {
                 hardReserve: hardReserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIDs: whitespaceTokenIDs
+                whitespaceTokenIds: whitespaceTokenIDs
             ) { text in
                 collected += text
                 return true

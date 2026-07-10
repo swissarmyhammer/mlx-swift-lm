@@ -43,7 +43,7 @@ struct StopTokenSourceTests {
         let tokenizer = ListTokenizer(tokens: ["a", "<end_of_turn>", "b"], eosID: nil)
         let config = ModelConfiguration(id: "test", extraEOSTokens: ["<end_of_turn>"])
 
-        let stop = GuidedGenerationLoop.buildStopTokenIDs(
+        let stop = GuidedGenerationLoop.buildStopTokenIds(
             tokenizer: tokenizer, configuration: config)
 
         #expect(stop == [1])  // only the configured extra token; ids 0 ("a") and 2 ("b") excluded
@@ -55,7 +55,7 @@ struct StopTokenSourceTests {
         var config = ModelConfiguration(id: "test")
         config.eosTokenIds = [99, 100]
 
-        let stop = GuidedGenerationLoop.buildStopTokenIDs(
+        let stop = GuidedGenerationLoop.buildStopTokenIds(
             tokenizer: tokenizer, configuration: config)
 
         #expect(stop.contains(99))
@@ -67,7 +67,7 @@ struct StopTokenSourceTests {
         let tokenizer = ListTokenizer(tokens: ["a", "</s>"], eosID: 1)
         let config = ModelConfiguration(id: "test")
 
-        let stop = GuidedGenerationLoop.buildStopTokenIDs(
+        let stop = GuidedGenerationLoop.buildStopTokenIds(
             tokenizer: tokenizer, configuration: config)
 
         #expect(stop == [1])  // empty config ⇒ tokenizer EOS is the only stop id
@@ -80,7 +80,7 @@ struct StopTokenSourceTests {
         var config = ModelConfiguration(id: "test", extraEOSTokens: ["<end_of_turn>"])
         config.eosTokenIds = [99]
 
-        let stop = GuidedGenerationLoop.buildStopTokenIDs(
+        let stop = GuidedGenerationLoop.buildStopTokenIds(
             tokenizer: tokenizer, configuration: config)
 
         #expect(stop.contains(1))  // extraEOSTokens → "<end_of_turn>"

@@ -213,7 +213,7 @@ struct HardReserveStressTests {
                 hardReserve: hardReserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIDs: whitespaceTokenIDs,
+                whitespaceTokenIds: whitespaceTokenIDs,
                 diagnosticLog: false
             ) { text in
                 collected += text
