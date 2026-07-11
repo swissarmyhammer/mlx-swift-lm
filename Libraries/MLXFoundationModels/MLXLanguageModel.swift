@@ -638,7 +638,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///   - modelID: The model identifier to store the prompt cache under.
     ///   - tokens: The full prompt-plus-generated token sequence this round produced.
     ///   - cache: The `[KVCache]` state to persist for the next round.
-    static func storePromptCache(modelID: String, tokens: [Int], cache: [KVCache]) async {
+    private static func storePromptCache(modelID: String, tokens: [Int], cache: [KVCache]) async {
         await promptCache.store(modelID: modelID, tokens: tokens, cache: SendableBox(cache))
     }
 
