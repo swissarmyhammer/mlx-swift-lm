@@ -341,6 +341,38 @@ struct PromptCacheByteBudgetTests {
             await cache.chunkCount(modelID: modelA) == 2,
             "model A's touched chunk and its newly-inserted chunk must both survive")
     }
+
+    // MARK: - 6. currentByteBudget() round-trip (review finding, kanban 2sdt6dj)
+
+    /// `currentByteBudget()` (`PromptCache.swift`) had no test consumer of its
+    /// own -- unlike its siblings `totalStoredByteCount`/`chunkCount`, both
+    /// exercised throughout this file -- flagged by review. Asserts
+    /// `setByteBudget(_:)`'s effect is directly observable through the getter,
+    /// mirroring `PromptCacheChunkTests`'s `setChunkSize`/getter round-trip
+    /// coverage for the sibling `chunkSize` property.
+    @Test("setByteBudget's effect is observable via currentByteBudget()")
+    func setByteBudgetIsObservableViaCurrentByteBudget() async {
+        let cache = PromptCache()
+        let budget = 12_345
+
+        await cache.setByteBudget(budget)
+
+        #expect(await cache.currentByteBudget() == budget)
+    }
+
+    @Test(
+        "setByteBudget clamps non-positive requests up to 1, observable via currentByteBudget()",
+        arguments: [0, -3]
+    )
+    func setByteBudgetClampsNonPositiveToOneObservably(requested: Int) async {
+        let cache = PromptCache()
+
+        await cache.setByteBudget(requested)
+
+        #expect(
+            await cache.currentByteBudget() == 1,
+            "requested byte budget \(requested) must clamp to 1")
+    }
 }
 
 #endif
