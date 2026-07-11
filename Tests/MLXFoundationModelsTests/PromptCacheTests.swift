@@ -37,11 +37,23 @@ struct PromptCacheReconciliationTests {
         #expect(trusted == nil)
     }
 
-    @Test("fewer re-encoded tokens than the cache's real advance is untrustworthy")
-    func fewerReencodedTokensIsUntrustworthy() {
+    @Test("two or more fewer re-encoded tokens than the cache's real advance is untrustworthy")
+    func twoOrMoreFewerReencodedTokensIsUntrustworthy() {
         let trusted = PromptCache.reconcileGeneratedTokens(
-            reencoded: [10, 11], actualGeneratedCount: 3)
+            reencoded: [10, 11], actualGeneratedCount: 4)
         #expect(trusted == nil)
+    }
+
+    @Test(
+        """
+        one fewer re-encoded token than the cache's real advance (terminal EOS/stop \
+        token decodes to empty text) is trusted as-is
+        """
+    )
+    func oneFewerReencodedTokenIsTrustedAsIs() {
+        let trusted = PromptCache.reconcileGeneratedTokens(
+            reencoded: [10, 11, 12], actualGeneratedCount: 4)
+        #expect(trusted == [10, 11, 12])
     }
 
     // The four tests above exercise `reconcileGeneratedTokens` with hand-picked
@@ -87,6 +99,72 @@ struct PromptCacheReconciliationTests {
             reencoded: reencoded, actualGeneratedCount: actualGeneratedCount)
 
         #expect(trusted == Array(reencoded.dropLast()))
+    }
+
+    @Test(
+        """
+        realistic decoded text, cache advance one MORE than the re-encoded tokens \
+        (terminal EOS/stop token decodes to empty text) trusts the re-encoded tokens as-is
+        """
+    )
+    func realisticTextTerminalEOSOffByOneTrustsReencodingAsIs() {
+        // The mirror image of `realisticTextNaturalStopOffByOneDropsTrailingToken`
+        // above: here the model's actual final generated token IS the EOS/stop
+        // token itself. That token advances `cache.offset` (contributing to
+        // `actualGeneratedCount`) but decodes to no text at all, so re-encoding
+        // `emittedText` recovers one FEWER token than the cache's real advance.
+        // Trusting the shorter re-encoding as-is (rather than rejecting it)
+        // lets the caller's `reconcileCacheAdvance`/`trimCacheByOne` path bring
+        // the cache back in sync instead of wiping the entire entry.
+        let tokenizer = ByteTokenizer()
+        let emittedText = "Absolutely, here is a short poem about autumn leaves falling gently."
+        let reencoded = tokenizer.encode(text: emittedText, addSpecialTokens: false)
+        let actualGeneratedCount = reencoded.count + 1
+
+        let trusted = PromptCache.reconcileGeneratedTokens(
+            reencoded: reencoded, actualGeneratedCount: actualGeneratedCount)
+
+        #expect(trusted == reencoded)
+    }
+
+    @Test(
+        """
+        the terminal-EOS-decodes-to-empty-text reconciliation composes with \
+        reconcileCacheAdvance/trimAndVerify to correctly trim and store the cache
+        """
+    )
+    func terminalEOSCaseComposesWithCacheAdvanceTrimAndVerify() {
+        // End-to-end (at the pure-function level): proves the RESULT of
+        // feeding `reconcileGeneratedTokens`'s trusted (shorter) array into
+        // the same `reconcileCacheAdvance` + `trimAndVerify` machinery
+        // `commitPromptCache(modelID:slot:generatedTokenIDs:)` uses is a
+        // correctly trimmed cache -- not just that reconciliation returns
+        // non-nil.
+        let tokenizer = ByteTokenizer()
+        let emittedText = "Absolutely, here is a short poem about autumn leaves falling gently."
+        let reencoded = tokenizer.encode(text: emittedText, addSpecialTokens: false)
+        let promptTokenCount = 20
+        // The cache's real offset advance includes the EOS/stop token that
+        // decoded to no text, so it is one MORE than the re-encoding recovers.
+        let actualGeneratedCount = reencoded.count + 1
+
+        let trusted = PromptCache.reconcileGeneratedTokens(
+            reencoded: reencoded, actualGeneratedCount: actualGeneratedCount)
+        #expect(trusted == reencoded)
+
+        let outcome = PromptCache.reconcileCacheAdvance(
+            observedTokenCount: trusted!.count, cacheAdvance: actualGeneratedCount)
+        #expect(outcome == .trimCacheByOne)
+
+        let cache = KVCacheSimple()
+        cache.offset = promptTokenCount + actualGeneratedCount
+
+        let verified = PromptCache.trimAndVerify(
+            [cache], from: promptTokenCount + actualGeneratedCount,
+            to: promptTokenCount + trusted!.count)
+
+        #expect(verified == true)
+        #expect(cache.offset == promptTokenCount + reencoded.count)
     }
 }
 

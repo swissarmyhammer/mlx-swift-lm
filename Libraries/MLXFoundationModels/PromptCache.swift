@@ -351,16 +351,32 @@ actor PromptCache {
     /// other generation path threads real token IDs through directly (see
     /// `reconcileCacheAdvance`), so this is deliberately narrow in scope.
     ///
-    /// Accepts an exact count match, or a count exactly one *more* than
-    /// `actualGeneratedCount` -- dropping the reconstruction's trailing
-    /// token in that case. `TokenIterator`'s next()-ahead prefetch design
-    /// (see `MLXLMCommon/Evaluate.swift`) discards the terminal EOS/stop
-    /// token without ever passing it to a stream consumer once that token
-    /// has already been fed through the model, so the emitted text's full
+    /// Accepts an exact count match, a count exactly one *more* than
+    /// `actualGeneratedCount`, or a count exactly one *fewer*.
+    ///
+    /// One more: `TokenIterator`'s next()-ahead prefetch design (see
+    /// `MLXLMCommon/Evaluate.swift`) discards the terminal EOS/stop token
+    /// without ever passing it to a stream consumer once that token has
+    /// already been fed through the model, so the emitted text's full
     /// re-encoding legitimately lands one token ahead of the cache's real
-    /// advance on that (common, successful) natural-stop exit path. Any
-    /// other mismatch (including a re-encoding that is too *short*) is
-    /// untrustworthy.
+    /// advance on that (common, successful) natural-stop exit path -- the
+    /// trailing token is dropped before storing.
+    ///
+    /// One fewer: the model's actual final generated token can itself BE
+    /// the EOS/stop token. That token advances `cache.offset` (contributing
+    /// to `actualGeneratedCount`) but decodes to no text at all (special
+    /// tokens produce empty content from the streaming detokenizer), so
+    /// re-encoding `emittedText` recovers one FEWER token than the cache's
+    /// real advance. Rather than fabricating a guessed token ID for the
+    /// missing EOS position, this trusts the shorter `reencoded` array
+    /// as-is: the caller (`Executor.commitPromptCache(...generatedTokenIDs:)`)
+    /// independently calls `reconcileCacheAdvance`, which recognizes the
+    /// resulting one-token gap (`cacheAdvance - observedTokenCount == 1`)
+    /// as `.trimCacheByOne` and trims the cache back into sync via
+    /// `trimAndVerify` -- so this function doesn't need to trim anything
+    /// itself, it only needs to stop rejecting the reconstruction.
+    ///
+    /// Any other mismatch is untrustworthy.
     ///
     /// - Parameters:
     ///   - reencoded: The re-encoded token IDs for the round's emitted text.
@@ -377,6 +393,8 @@ actor PromptCache {
             return reencoded
         case actualGeneratedCount + 1:
             return Array(reencoded.dropLast())
+        case actualGeneratedCount - 1:
+            return reencoded
         default:
             return nil
         }

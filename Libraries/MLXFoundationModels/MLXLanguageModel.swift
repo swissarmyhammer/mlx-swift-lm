@@ -2266,6 +2266,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// in `PromptCache.decide` and safely falls back to trim/rebuild
         /// rather than reusing it.
         ///
+        /// Also accepts a count exactly one *fewer* than the cache's
+        /// offset advance: the mirror-image case where the model's actual
+        /// final generated token IS the EOS/stop token, which advances
+        /// `cache`'s offset but decodes to no text at all, so re-encoding
+        /// `emittedText` recovers one fewer token than the cache's real
+        /// advance. `reconcileGeneratedTokens` trusts that shorter
+        /// reconstruction as-is (no fabricated token ID for the missing
+        /// EOS position), and this composes with the `generatedTokenIDs`
+        /// overload above: its own `PromptCache.reconcileCacheAdvance`
+        /// call recognizes the resulting one-token gap as
+        /// `.trimCacheByOne` and trims the cache back into sync via
+        /// `trimAndVerify` before storing -- no additional handling is
+        /// needed here.
+        ///
         /// - Parameters:
         ///   - slot: The slot this round generated with.
         ///   - emittedText: The full decoded text this round generated.
