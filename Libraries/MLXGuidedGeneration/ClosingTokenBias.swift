@@ -24,7 +24,7 @@ public enum ClosingTokenBias {
     ///
     /// Tier 1 (+200): EOS token
     /// Tier 2 (+100): `"`, `}`, `]`, single digits `0`-`9`
-    public static func compute(tokenizer: any Tokenizer, eosTokenId: Int?) -> MLXArray {
+    public static func compute(tokenizer: any Tokenizer, eosTokenID: Int?) -> MLXArray {
         // Discover vocab size by scanning token IDs
         var vocabSize = 0
         while tokenizer.convertIdToToken(vocabSize) != nil {
@@ -43,7 +43,7 @@ public enum ClosingTokenBias {
         }
 
         // Tier 1 applied last so it overrides tier 2 if EOS overlaps
-        if let eos = eosTokenId, eos >= 0, eos < vocabSize {
+        if let eos = eosTokenID, eos >= 0, eos < vocabSize {
             biases[eos] = tier1Bias
         }
 

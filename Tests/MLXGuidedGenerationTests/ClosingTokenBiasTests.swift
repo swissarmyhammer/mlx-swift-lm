@@ -50,7 +50,7 @@ struct ClosingTokenBiasTests {
             "9",  // 5
             "abc",  // 6 (not closing)
         ])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: nil)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: nil)
         let values = bias.asArray(Float.self)
 
         #expect(values[0] == 100.0)  // "
@@ -69,7 +69,7 @@ struct ClosingTokenBiasTests {
             "<EOS>",  // 1 - EOS
             "abc",  // 2 - none
         ])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 1)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: 1)
         let values = bias.asArray(Float.self)
 
         #expect(values[0] == 100.0)  // tier 2 only
@@ -83,7 +83,7 @@ struct ClosingTokenBiasTests {
             "\"",  // 0 - tier 2 AND EOS
             "abc",  // 1
         ])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 0)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: 0)
         let values = bias.asArray(Float.self)
 
         // EOS bias overrides tier-2
@@ -100,7 +100,7 @@ struct ClosingTokenBiasTests {
             "{",  // opening - not in tier 2
             "[",  // opening - not in tier 2
         ])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: nil)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: nil)
         let values = bias.asArray(Float.self)
 
         #expect(values == [0.0, 0.0, 0.0, 0.0, 0.0])
@@ -109,7 +109,7 @@ struct ClosingTokenBiasTests {
     @Test("Vocab size discovery scans until convertIdToToken returns nil")
     func vocabSizeDiscoveryWorks() {
         let tok = ListTokenizer(tokens: ["a", "b", "}", "]", "\""])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: nil)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: nil)
 
         // Discovered vocab size should be 5
         #expect(bias.shape == [5])
@@ -118,7 +118,7 @@ struct ClosingTokenBiasTests {
     @Test("Out-of-range EOS id is ignored")
     func outOfRangeEOSIgnored() {
         let tok = ListTokenizer(tokens: ["a", "}"])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 999)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: 999)
         let values = bias.asArray(Float.self)
 
         #expect(values[0] == 0.0)

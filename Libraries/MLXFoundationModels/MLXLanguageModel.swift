@@ -295,7 +295,7 @@ private actor ModelCache {
         getOrCreateCached(modelID: modelID, cache: &tokenizerBiases) {
             let closing = ClosingTokenBias.compute(
                 tokenizer: tokenizer,
-                eosTokenId: tokenizer.eosTokenId
+                eosTokenID: tokenizer.eosTokenId
             )
             let (whitespace, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
                 tokenizer: tokenizer
