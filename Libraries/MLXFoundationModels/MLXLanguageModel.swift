@@ -94,7 +94,7 @@ private actor ModelCache {
     /// In-flight loads tagged as a warmup of an already-present model, which
     /// must NOT surface as `.downloading` (there is no user-facing download).
     /// A subset of `loadingTasks`' keys. See `load` and `isDownloading`.
-    private var suppressedLoadIDs = Set<String>()
+    private var suppressedLoadIDs: Set<String> = []
     private var xgTokenizers: [String: GrammarTokenizer] = [:]
     /// Cached compiled constraint templates keyed by (modelID, schemaJSON).
     /// Clone from template instead of recompiling the grammar each request.
