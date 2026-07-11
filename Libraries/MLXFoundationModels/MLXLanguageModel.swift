@@ -1265,13 +1265,34 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let modelID = self.modelID
             try await container.perform(nonSendable: messages) { context, messages in
                 let input = try await context.processor.prepare(input: UserInput(chat: messages))
+
+                // Bail out before ever materializing `tokens` below: unlike
+                // `makePromptCacheSlot` (whose callers need a real, uncached
+                // response either way, multimodal or not), this method has
+                // nothing left to do for a multimodal transcript, so there's
+                // no reason to pay for `.asArray(Int.self)` -- a real
+                // host-side pull of the token buffer -- just to discard it.
+                // `resolvePromptCacheIfTextOnly` below re-checks this same
+                // gate, but that re-check is just a cheap boolean read of
+                // `input`, not the array materialization this guard exists
+                // to skip.
                 guard Self.isTextOnly(input) else { return }
 
                 let tokens = input.text.tokens.asArray(Int.self)
                 guard !tokens.isEmpty else { return }
 
-                let resolved = await MLXLanguageModel.resolvePromptCache(
-                    modelID: modelID, newTokens: tokens, model: context.model, parameters: nil)
+                // Shares its resolve→gate logic with `makePromptCacheSlot`
+                // via `resolvePromptCacheIfTextOnly` -- see that method's
+                // doc for why the two don't also share `PromptCacheSlot`
+                // itself: a multimodal `nil` there means "generate for real
+                // anyway, just uncached" (`makePromptCacheSlot`'s callers
+                // always need a response), whereas here it means "nothing
+                // left to do," so this skips outright instead of running a
+                // wasted prefill over unused multimodal input.
+                guard
+                    let resolved = await resolvePromptCacheIfTextOnly(
+                        input: input, tokens: tokens, model: context.model, parameters: nil)
+                else { return }
 
                 // Drain a zero-token generation to run the prefill forward
                 // pass -- advancing `resolved.cache`'s offset to exactly
@@ -2074,6 +2095,36 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
         }
 
+        /// The `isTextOnly` gate plus the `PromptCache.resolve` call it
+        /// guards -- the one piece of resolve→gate logic shared verbatim by
+        /// `makePromptCacheSlot` and `populatePromptCacheChunks`. Returns
+        /// `nil` for multimodal `input` (see `isTextOnly`) without ever
+        /// touching `model`, leaving each caller free to decide what "not
+        /// cacheable" means for it: `makePromptCacheSlot` still needs to
+        /// generate a real, uncached response either way, while
+        /// `populatePromptCacheChunks` has nothing left to do and skips
+        /// outright.
+        ///
+        /// - Parameters:
+        ///   - input: The full, unreduced prompt for this round.
+        ///   - tokens: `input.text.tokens`, already extracted by the caller
+        ///     (both callers need it regardless of this gate's outcome, so
+        ///     it isn't re-derived here).
+        ///   - model: The model to resolve the cache against.
+        ///   - parameters: Generation parameters, threaded through to a
+        ///     rebuilt cache (see `PromptCache.resolve`); `nil` for the
+        ///     grammar-constrained paths, matching
+        ///     `GuidedGenerationLoop.run`'s own `model.newCache(parameters:
+        ///     nil)`.
+        private func resolvePromptCacheIfTextOnly(
+            input: LMInput, tokens: [Int], model: any MLXLMCommon.LanguageModel,
+            parameters: GenerateParameters?
+        ) async -> (cache: [KVCache], tokensToFeed: [Int])? {
+            guard Self.isTextOnly(input) else { return nil }
+            return await MLXLanguageModel.resolvePromptCache(
+                modelID: modelID, newTokens: tokens, model: model, parameters: parameters)
+        }
+
         /// Resolves a generation call's prompt-cache participation against
         /// `input`. See `PromptCacheSlot`.
         ///
@@ -2089,12 +2140,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             input: LMInput, context: ModelContext, parameters: GenerateParameters?
         ) async -> PromptCacheSlot {
             let promptTokens = input.text.tokens.asArray(Int.self)
-            guard Self.isTextOnly(input) else {
+            guard
+                let resolved = await resolvePromptCacheIfTextOnly(
+                    input: input, tokens: promptTokens, model: context.model,
+                    parameters: parameters)
+            else {
                 return PromptCacheSlot(cache: nil, feedInput: input, promptTokens: promptTokens)
             }
-            let resolved = await MLXLanguageModel.resolvePromptCache(
-                modelID: modelID, newTokens: promptTokens, model: context.model,
-                parameters: parameters)
             return PromptCacheSlot(
                 cache: resolved.cache,
                 feedInput: LMInput(tokens: MLXArray(resolved.tokensToFeed)),
