@@ -1146,7 +1146,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             subsystem: mlxFoundationModelsLoggingSubsystem, category: "Prewarm")
 
         /// Prewarms the model: loads weights and pre-compiles Metal shaders so
-        /// the first `respond()` pays no cold-start shader-JIT cost.
+        /// the first `respond()` pays no cold-start shader-JIT cost, and
+        /// proactively populates the shared prompt-cache chunk store with
+        /// `transcript`'s own token prefix (see
+        /// `populatePromptCacheChunks(model:transcript:)`).
         ///
         /// This is the protocol witness for `LanguageModelExecutor`'s
         /// `prewarm(model:transcript:)`. The signature must match the
@@ -1159,13 +1162,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Fire-and-forget, mirroring Apple's SLM/PCCLM executors and the
         /// framework's own `session.prewarm()`: the method is synchronous and
         /// non-throwing, so it spawns a detached warmup `Task` and returns
-        /// immediately. The `Task` is best-effort — a failure is logged, never
-        /// surfaced to or crashed on the caller.
+        /// immediately. Both steps below are best-effort — a failure in
+        /// either is logged, never surfaced to or crashed on the caller —
+        /// and a prompt-cache-population failure never skips (or is skipped
+        /// by) the shader warmup, since the two are independently useful
+        /// even if one fails.
         ///
         /// - Parameters:
         ///   - model: The live model instance to warm.
-        ///   - transcript: Accepted per protocol; the shader warmup uses a
-        ///     fixed dummy prompt and does not depend on it.
+        ///   - transcript: The transcript whose token prefix should be
+        ///     proactively cached (see
+        ///     `populatePromptCacheChunks(model:transcript:)`); the shader
+        ///     warmup itself still uses a fixed dummy prompt and does not
+        ///     depend on it.
         public func prewarm(model: MLXLanguageModel, transcript: Transcript) {
             Task.detached {
                 do {
@@ -1175,6 +1184,114 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         "MLX prewarm failed for \(model.modelID, privacy: .public): \(error.localizedDescription, privacy: .public)"
                     )
                 }
+                do {
+                    try await self.populatePromptCacheChunks(model: model, transcript: transcript)
+                } catch {
+                    Self.logger.error(
+                        "MLX prompt-cache prewarm failed for \(model.modelID, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                    )
+                }
+            }
+        }
+
+        /// Proactively populates the shared prompt-cache chunk store with
+        /// `transcript`'s own token prefix, so a later `respond()` round that
+        /// continues this transcript reuses it starting on its FIRST round
+        /// (`PromptCacheSlot.cachedTokenCount > 0`) instead of paying full
+        /// prefill lazily. This is what makes `prewarm(model:transcript:)`
+        /// genuinely valuable for a `FoundationModelsRouter`-style fork
+        /// scenario: prewarming the shared PARENT transcript before any fork
+        /// session's first `respond()` means every fork's first turn hits
+        /// the shared prefix, rather than the first fork alone paying to
+        /// build it.
+        ///
+        /// Mirrors `respond()`'s own resolve→prefill→store cycle (see
+        /// `makePromptCacheSlot`/`commitPromptCache`), reusing the exact same
+        /// `resolvePromptCache`/`storePromptCache` entry points every real
+        /// generation round goes through -- so a transcript whose prefix is
+        /// already fully cached (e.g. prewarming the same transcript twice)
+        /// does near-zero work: `resolvePromptCache` finds the existing
+        /// chunk chain and only the capped remainder (at most `chunkSize -
+        /// 1` tokens -- see `PromptCache.lookupLongestPrefix`'s doc)
+        /// prefills, and storing the same `(tokens, cache)` pair again is a
+        /// dedup no-op (`PromptCache.insert` only refreshes the existing
+        /// chunks' `lastUsed`).
+        ///
+        /// Unlike a real generation round, the "prefill" here generates
+        /// ZERO tokens (`GenerateParameters(maxTokens: 0)`): prewarm is
+        /// speculative warmup, not answering the transcript, so sampling a
+        /// real reply would waste GPU time producing output nobody reads
+        /// (and a wrong/unwanted reply can't be un-emitted once it exists).
+        /// With no generated tokens there is nothing to reconcile against
+        /// `cache`'s `offset` advance the way `commitPromptCache`'s
+        /// `generatedTokenIDs`-based reconciliation does (and that
+        /// function's own `!generatedTokenIDs.isEmpty` guard would in fact
+        /// make it silently drop a zero-token round entirely) -- the
+        /// forward pass itself is the ground truth once it completes, so
+        /// this stores directly via `MLXLanguageModel.storePromptCache`
+        /// instead of routing through `commitPromptCache`.
+        ///
+        /// Multimodal transcripts are skipped without error, via the exact
+        /// same `isTextOnly` gate `makePromptCacheSlot` uses: reducing a
+        /// multimodal prompt to a raw token suffix would drop image/video/
+        /// audio content the chunk store has nowhere to carry. A transcript
+        /// that converts to no chat messages at all (e.g. empty, or only
+        /// dropped `.reasoning` entries) is also a no-op -- there is no real
+        /// prefix to cache, and forcing a dummy prompt here (as `warmUp()`
+        /// does for shader JIT) would only ever match a dummy continuation,
+        /// never a real one.
+        ///
+        /// Not `private`: also a direct test seam, mirroring
+        /// `hasCachedXgTokenizer` -- callable and awaitable directly (unlike
+        /// the fire-and-forget `prewarm(model:transcript:)`, which only
+        /// reaches this indirectly from inside a detached `Task`), so a test
+        /// can observe the chunk store deterministically once this method
+        /// returns.
+        ///
+        /// - Parameters:
+        ///   - model: The live model instance to warm the transcript's
+        ///     prefix cache for.
+        ///   - transcript: The transcript whose token prefix should be
+        ///     proactively cached.
+        /// - Throws: Whatever container loading, message preparation, or the
+        ///   prefill forward pass throws.
+        func populatePromptCacheChunks(
+            model: MLXLanguageModel, transcript: Transcript
+        ) async throws {
+            let messages = TranscriptConverter.mlxMessages(for: transcript)
+            guard !messages.isEmpty else { return }
+
+            let container = try await model.loadContainer()
+            let modelID = self.modelID
+            try await container.perform(nonSendable: messages) { context, messages in
+                let input = try await context.processor.prepare(input: UserInput(chat: messages))
+                guard Self.isTextOnly(input) else { return }
+
+                let tokens = input.text.tokens.asArray(Int.self)
+                guard !tokens.isEmpty else { return }
+
+                let resolved = await MLXLanguageModel.resolvePromptCache(
+                    modelID: modelID, newTokens: tokens, model: context.model, parameters: nil)
+
+                // Drain a zero-token generation to run the prefill forward
+                // pass -- advancing `resolved.cache`'s offset to exactly
+                // `tokens.count` -- without sampling (or committing to) any
+                // reply text; see this method's doc comment for why a real
+                // answer here would be wasted, un-readable, un-undoable work.
+                for await _ in try generate(
+                    input: LMInput(tokens: MLXArray(resolved.tokensToFeed)),
+                    cache: resolved.cache,
+                    parameters: GenerateParameters(maxTokens: 0),
+                    context: context
+                ) {
+                    // No output tokens are ever produced (maxTokens: 0); the
+                    // loop body never runs. Draining the stream to
+                    // completion is what waits for the prefill's GPU work
+                    // and its internal `Stream().synchronize()` to finish.
+                }
+
+                await MLXLanguageModel.storePromptCache(
+                    modelID: modelID, tokens: tokens, cache: resolved.cache)
             }
         }
 
