@@ -31,26 +31,6 @@ struct PromptCacheAssembleTests {
         _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     }
 
-    // MARK: - Fixtures
-
-    /// Mirrors `PromptCacheChunkTests.makeCache`: a fully-packed `KVCacheSimple`
-    /// layer covering exactly `tokenCount` positions with distinct,
-    /// position-derived content (not zeros), so assembled content can be
-    /// checked byte-for-byte against the source.
-    private func makeCache(tokenCount: Int, headDim: Int = 4, valueOffset: Int = 0)
-        -> KVCacheSimple
-    {
-        let cache = KVCacheSimple()
-        let count = tokenCount * headDim
-        let keys = MLXArray(
-            Int32(valueOffset) ..< Int32(valueOffset + count), [1, 1, tokenCount, headDim])
-        let values = MLXArray(
-            Int32(valueOffset + 10_000) ..< Int32(valueOffset + 10_000 + count),
-            [1, 1, tokenCount, headDim])
-        cache.state = [keys, values]
-        return cache
-    }
-
     // MARK: - Content correctness
 
     @Test(
@@ -60,7 +40,7 @@ struct PromptCacheAssembleTests {
         let chunkSize = 4
         let chunkCount = 3
         let tokenCount = chunkSize * chunkCount
-        let cache = makeCache(tokenCount: tokenCount)
+        let cache = makeChunkableCache(tokenCount: tokenCount)
         let tokens = Array(0 ..< tokenCount)
         let chunks = PromptCache.sliceChunks(tokens: tokens, cache: [cache], chunkSize: chunkSize)!
 
@@ -82,8 +62,8 @@ struct PromptCacheAssembleTests {
         let chunkSize = 4
         let chunkCount = 2
         let tokenCount = chunkSize * chunkCount
-        let cache0 = makeCache(tokenCount: tokenCount, valueOffset: 0)
-        let cache1 = makeCache(tokenCount: tokenCount, valueOffset: 500)
+        let cache0 = makeChunkableCache(tokenCount: tokenCount, valueOffset: 0)
+        let cache1 = makeChunkableCache(tokenCount: tokenCount, valueOffset: 500)
         let tokens = Array(0 ..< tokenCount)
         let chunks = PromptCache.sliceChunks(
             tokens: tokens, cache: [cache0, cache1], chunkSize: chunkSize)!
@@ -116,7 +96,7 @@ struct PromptCacheAssembleTests {
     )
     func mismatchedLayerCountYieldsEmptyStack() {
         let chunkSize = 4
-        let cache = makeCache(tokenCount: chunkSize)
+        let cache = makeChunkableCache(tokenCount: chunkSize)
         let tokens = Array(0 ..< chunkSize)
         let chunks = PromptCache.sliceChunks(tokens: tokens, cache: [cache], chunkSize: chunkSize)!
         #expect(chunks[0].layers.count == 1)
@@ -133,7 +113,7 @@ struct PromptCacheAssembleTests {
         let chunkSize = 4
         let chunkCount = 3
         let tokenCount = chunkSize * chunkCount
-        let cache = makeCache(tokenCount: tokenCount)
+        let cache = makeChunkableCache(tokenCount: tokenCount)
         let tokens = Array(0 ..< tokenCount)
         let chunks = PromptCache.sliceChunks(tokens: tokens, cache: [cache], chunkSize: chunkSize)!
 
@@ -153,7 +133,7 @@ struct PromptCacheAssembleTests {
         let headDim = 4
         let chunkCount = 3
         let tokenCount = chunkSize * chunkCount
-        let cache = makeCache(tokenCount: tokenCount, headDim: headDim)
+        let cache = makeChunkableCache(tokenCount: tokenCount, headDim: headDim)
         let tokens = Array(0 ..< tokenCount)
         let chunks = PromptCache.sliceChunks(tokens: tokens, cache: [cache], chunkSize: chunkSize)!
         let matched = Array(chunks.prefix(2))
@@ -185,7 +165,7 @@ struct PromptCacheAssembleTests {
     func assembleTwiceReturnsDistinctInstancesWithEqualContent() {
         let chunkSize = 4
         let tokenCount = chunkSize * 2
-        let cache = makeCache(tokenCount: tokenCount)
+        let cache = makeChunkableCache(tokenCount: tokenCount)
         let tokens = Array(0 ..< tokenCount)
         let chunks = PromptCache.sliceChunks(tokens: tokens, cache: [cache], chunkSize: chunkSize)!
 
@@ -215,7 +195,7 @@ struct PromptCacheAssembleTests {
     func concurrentAssembleCallsReturnDistinctInstancesWithEqualContent() async {
         let chunkSize = 4
         let tokenCount = chunkSize * 2
-        let cache = makeCache(tokenCount: tokenCount)
+        let cache = makeChunkableCache(tokenCount: tokenCount)
         let tokens = Array(0 ..< tokenCount)
         let chunks = PromptCache.sliceChunks(tokens: tokens, cache: [cache], chunkSize: chunkSize)!
 
@@ -264,7 +244,7 @@ struct PromptCacheAssembleTests {
     )
     func singleChunkAssemblyAllocatesIndependentBuffer() {
         let chunkSize = 4
-        let cache = makeCache(tokenCount: chunkSize)
+        let cache = makeChunkableCache(tokenCount: chunkSize)
         let tokens = Array(0 ..< chunkSize)
         let chunks = PromptCache.sliceChunks(tokens: tokens, cache: [cache], chunkSize: chunkSize)!
         #expect(chunks.count == 1)
@@ -300,7 +280,7 @@ struct PromptCacheAssembleTests {
     )
     func mutatingSourceChunkBufferInPlaceAfterAssemblyLeavesAssembledCacheUnchanged() {
         let chunkSize = 4
-        let cache = makeCache(tokenCount: chunkSize)
+        let cache = makeChunkableCache(tokenCount: chunkSize)
         let tokens = Array(0 ..< chunkSize)
         let chunks = PromptCache.sliceChunks(tokens: tokens, cache: [cache], chunkSize: chunkSize)!
 
