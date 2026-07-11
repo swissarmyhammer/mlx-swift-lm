@@ -1,22 +1,24 @@
 // Copyright © 2026 Apple Inc.
 //
-// Shared fixtures for the `PromptCache` actor-level test suites (currently
-// `PromptCacheChunkCutoverTests`, which exercises `resolve()`/`store()` on
-// the chunk path): a minimal `LanguageModel` probe, cache constructors
-// positioned as if real tokens had been fed, and a `resolve()` convenience
-// that hides the single-use `SendableBox` plumbing. Internal (not `private`)
-// so every suite shares one definition instead of re-declaring per-file
-// copies.
+// Shared fixtures for the `PromptCache` actor-level test suites
+// (`PromptCacheChunkCutoverTests`, `PromptCacheResolveTests`,
+// `PromptCacheEvictionScopeTests`, `PromptCacheConcurrencyTests`): a minimal
+// `LanguageModel` probe, cache constructors mirroring the two shapes
+// `store()`/`sliceChunks` actually reason about, and a `resolve()`
+// convenience that hides the single-use `SendableBox` plumbing. Internal
+// (not `private`) so every suite shares one definition instead of
+// re-declaring per-file copies.
 //
-// None of these fixtures evaluate an `MLXArray` -- `makeSlotCache`/
-// `makeNonTrimmableSlotCache` only position a cache's `offset`, so this file
-// needs no GPU bootstrap of its own. If a future fixture here starts
-// evaluating tensors on the default (GPU) device under plain `swift test`,
-// see `TestBootstrap.swift`'s `MetalLibraryTestBootstrap`: it root-fixes
-// mlx-swift's metallib PATH RESOLUTION for that context (kanban 23ff1zx,
-// memory note `swiftpm-test-gpu-metallib-limit`) by symlinking
-// `mlx.metallib` next to the running test binary, rather than pinning to
-// the CPU device.
+// `makeUnchunkableCache` only positions a cache's `offset` (no real tensor
+// content) since `sliceChunks` rejects a `RotatingKVCache` layer on its type
+// check alone, before ever inspecting `state` -- so this fixture needs no
+// GPU bootstrap of its own. `makeChunkableCache` populates real `MLXArray`
+// content, because `store()` routes through `sliceChunks`, which requires a
+// genuine `KVCacheSimple.state` (not just `offset`) to slice -- callers of
+// that fixture force a real GPU-device eval under plain `swift test`; see
+// `TestBootstrap.swift`'s `MetalLibraryTestBootstrap` (kanban 23ff1zx,
+// memory note `swiftpm-test-gpu-metallib-limit`) for why those suites'
+// `init()` bootstrap call is required.
 
 import Foundation
 import MLX
@@ -57,26 +59,47 @@ final class PromptCacheProbeModel: Module, MLXLMCommon.LanguageModel,
     }
 }
 
-/// A trimmable cache positioned as if `tokenCount` tokens had been fed through it.
+/// A NON-chunkable cache positioned at `tokenCount`.
 ///
-/// This is the state `Executor.commitPromptCache` stores alongside a slot's
-/// tokens, where `trimAndVerify`'s offset arithmetic holds.
-func makeSlotCache(tokenCount: Int) -> KVCacheSimple {
-    let cache = KVCacheSimple()
+/// `RotatingKVCache` reports `isTrimmable == false` once `offset >=
+/// maxCacheSize` (its window has rotated, so earlier positions are gone),
+/// and -- more to the point for the chunk store -- `sliceChunks` rejects it
+/// on its dynamic-type check alone, before ever inspecting `state`: only a
+/// verified `KVCacheSimple` layer can be sliced, so `store()` silently drops
+/// a round backed by this cache.
+func makeUnchunkableCache(tokenCount: Int) -> RotatingKVCache {
+    let cache = RotatingKVCache(maxSize: tokenCount)
     cache.offset = tokenCount
     return cache
 }
 
-/// A NON-trimmable cache positioned at `tokenCount`.
+/// A fully-packed, chunkable `KVCacheSimple` layer covering exactly
+/// `tokenCount` sequence positions, with distinct, position-derived key/value
+/// content (not zeros) -- mirroring `PromptCacheChunkTests.makeCache`.
 ///
-/// `RotatingKVCache` reports `isTrimmable == false` once `offset >=
-/// maxCacheSize` (its window has rotated, so earlier positions are gone and
-/// a prefix trim is meaningless). Also unchunkable by `sliceChunks` (only a
-/// verified `KVCacheSimple` layer can be sliced), so `store()` silently
-/// drops a round backed by this cache.
-func makeNonTrimmableSlotCache(tokenCount: Int) -> RotatingKVCache {
-    let cache = RotatingKVCache(maxSize: tokenCount)
-    cache.offset = tokenCount
+/// Setting `state` directly (rather than feeding through
+/// `update(keys:values:)`) leaves `offset == keys.dim(2) == tokenCount`
+/// exactly, the "verified" shape `sliceChunks` (and therefore `store()`)
+/// requires. Real content (rather than placeholder zeros) lets a caller
+/// verify slice/assembly correctness by tensor value, not just shape, should
+/// a test need that; most `store()`-only callers only care that the shape is
+/// genuine.
+///
+/// - Parameters:
+///   - tokenCount: How many sequence positions this layer covers.
+///   - headDim: Per-token feature width for both keys and values.
+///   - valueOffset: Shifts every element's value upward -- lets a multi-layer
+///     test build layers with non-overlapping content ranges to verify
+///     per-layer independence.
+func makeChunkableCache(tokenCount: Int, headDim: Int = 4, valueOffset: Int = 0) -> KVCacheSimple {
+    let cache = KVCacheSimple()
+    let count = tokenCount * headDim
+    let keys = MLXArray(
+        Int32(valueOffset) ..< Int32(valueOffset + count), [1, 1, tokenCount, headDim])
+    let values = MLXArray(
+        Int32(valueOffset + 10_000) ..< Int32(valueOffset + 10_000 + count),
+        [1, 1, tokenCount, headDim])
+    cache.state = [keys, values]
     return cache
 }
 
@@ -92,29 +115,6 @@ func resolveOnce(
     await cache.resolve(
         modelID: modelID, newTokens: newTokens, model: SendableBox(model), parameters: nil
     ).consume()
-}
-
-/// Stores well-formed slots of tokens backed by a trimmable cache.
-///
-/// The cache's offset matches `tokens.count` -- the well-formed slot shape
-/// every reuse path assumes -- and the stored INSTANCE (not just its
-/// identity) is returned so a later `resolve()` can prove (or disprove)
-/// reuse of this exact instance.
-///
-/// Callers must keep the returned instance alive until their last identity
-/// assertion: once `PromptCache` evicts a slot, the actor drops its only
-/// other reference, and a deallocated cache's address can be recycled for a
-/// later `newCache()` allocation -- an `ObjectIdentifier` collision that
-/// makes a genuine rebuild look like a (forbidden) reuse. Comparing against
-/// `ObjectIdentifier(<live instance>)` at assertion time rules that out,
-/// because the use itself keeps the instance alive to that point.
-@discardableResult
-func storeWellFormedSlot(
-    cache: PromptCache, modelID: String, tokens: [Int]
-) async -> KVCacheSimple {
-    let slotCache = makeSlotCache(tokenCount: tokens.count)
-    await cache.store(modelID: modelID, tokens: tokens, cache: SendableBox([slotCache]))
-    return slotCache
 }
 
 /// Identity of the single layer cache in a resolved result.

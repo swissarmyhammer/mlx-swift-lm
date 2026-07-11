@@ -141,7 +141,7 @@ struct PromptCacheChunkCutoverTests {
 
         await cache.store(
             modelID: modelID, tokens: tokens,
-            cache: SendableBox([makeNonTrimmableSlotCache(tokenCount: tokens.count)]))
+            cache: SendableBox([makeUnchunkableCache(tokenCount: tokens.count)]))
 
         #expect(await cache.chunkCount(modelID: modelID) == 0)
 
