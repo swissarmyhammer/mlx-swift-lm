@@ -460,6 +460,86 @@ struct PromptCacheChunkTests {
             await cache.chunkCount(modelID: modelID) == 3,
             "requested chunkSize \(requested) must clamp to 1, chunking every token individually")
     }
+
+    // MARK: - sliceTailChunk (kanban 5ra1wzm): the trailing partial span
+
+    @Test(
+        "sliceTailChunk captures the trailing partial span sliceChunks leaves uncovered"
+    )
+    func sliceTailChunkCapturesTrailingPartialSpan() {
+        let chunkSize = 8
+        let tokenCount = 2 * chunkSize + 5
+        let cache = makeCache(tokenCount: tokenCount)
+        let tokens = Array(0 ..< tokenCount)
+
+        let fullChunks = PromptCache.sliceChunks(tokens: tokens, cache: [cache], chunkSize: chunkSize)!
+        #expect(fullChunks.count == 2, "sliceChunks itself must still only slice full chunks")
+
+        let parentKey = fullChunks.last!.chunkKey
+        let tail = PromptCache.sliceTailChunk(
+            tokens: tokens, cache: [cache], chunkSize: chunkSize, parentKey: parentKey)!
+
+        #expect(tail.tokens == Array(tokens[(2 * chunkSize)...]))
+        #expect(tail.tokens.count == 5)
+        #expect(tail.parentKey == parentKey)
+        #expect(tail.chunkKey == PromptCache.chunkKey(parentKey: parentKey, tokens: tail.tokens))
+        #expect(tail.byteSize > 0)
+
+        let sourceKeys = cache.state[0]
+        let sourceValues = cache.state[1]
+        let expectedKeys = sourceKeys[.ellipsis, (2 * chunkSize)..., 0...]
+        let expectedValues = sourceValues[.ellipsis, (2 * chunkSize)..., 0...]
+        #expect((tail.layers[0].keys .== expectedKeys).all().item())
+        #expect((tail.layers[0].values .== expectedValues).all().item())
+    }
+
+    @Test("sliceTailChunk returns nil when tokens.count is an exact multiple of chunkSize")
+    func sliceTailChunkReturnsNilForExactMultiple() {
+        let chunkSize = 8
+        let tokenCount = chunkSize * 3
+        let cache = makeCache(tokenCount: tokenCount)
+        let tokens = Array(0 ..< tokenCount)
+
+        let tail = PromptCache.sliceTailChunk(
+            tokens: tokens, cache: [cache], chunkSize: chunkSize,
+            parentKey: PromptCache.rootChunkKey)
+
+        #expect(tail == nil, "an exact multiple of chunkSize has no partial span to store")
+    }
+
+    @Test("sliceTailChunk chains from the caller-supplied parentKey even when there are no full chunks")
+    func sliceTailChunkChainsFromSuppliedParentKeyWithNoFullChunks() {
+        let chunkSize = 64
+        let tokenCount = 40
+        let cache = makeCache(tokenCount: tokenCount)
+        let tokens = Array(0 ..< tokenCount)
+
+        #expect(
+            PromptCache.sliceChunks(tokens: tokens, cache: [cache], chunkSize: chunkSize)?.isEmpty
+                == true, "fewer tokens than one chunk yields zero full chunks")
+
+        let tail = PromptCache.sliceTailChunk(
+            tokens: tokens, cache: [cache], chunkSize: chunkSize,
+            parentKey: PromptCache.rootChunkKey)!
+
+        #expect(tail.tokens == tokens)
+        #expect(tail.parentKey == PromptCache.rootChunkKey)
+    }
+
+    @Test("sliceTailChunk mirrors sliceChunks's non-chunkable degradation")
+    func sliceTailChunkReturnsNilForUnchunkableCache() {
+        let chunkSize = 8
+        let tokenCount = chunkSize + 3
+        let rotating = RotatingKVCache(maxSize: tokenCount * 2)
+        rotating.offset = tokenCount
+        let tokens = Array(0 ..< tokenCount)
+
+        let tail = PromptCache.sliceTailChunk(
+            tokens: tokens, cache: [rotating], chunkSize: chunkSize,
+            parentKey: PromptCache.rootChunkKey)
+
+        #expect(tail == nil)
+    }
 }
 
 #endif

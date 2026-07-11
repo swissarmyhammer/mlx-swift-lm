@@ -98,12 +98,23 @@ struct PromptCacheReuseTests {
         #expect(!second.text.isEmpty, "Second round should produce some response text")
 
         #expect(
-            second.promptTokenCount < first.promptTokenCount,
+            second.cachedTokenCount > 0,
             """
-            Second round's prompt token count (\(second.promptTokenCount)) should be smaller \
-            than the first round's (\(first.promptTokenCount)) -- proof the cache reused the \
-            first round's KV state and prefilled only the appended suffix, not the whole \
-            (now-longer) transcript from scratch.
+            Second round's cached token count (\(second.cachedTokenCount)) should be positive \
+            -- proof the cache reused the first round's KV state rather than prefilling the \
+            whole (now-longer) transcript from scratch. (`promptTokenCount` is deliberately the \
+            full transcript length since commit 1c9751b and never shrinks, so it can't be the \
+            success signal here.)
+            """
+        )
+        #expect(
+            second.promptTokenCount - second.cachedTokenCount < first.promptTokenCount,
+            """
+            Second round's uncached suffix (\(second.promptTokenCount) - \
+            \(second.cachedTokenCount) = \(second.promptTokenCount - second.cachedTokenCount)) \
+            should be smaller than the first round's full prompt token count \
+            (\(first.promptTokenCount)) -- proof only the appended suffix was actually fed to \
+            the model, not the whole (now-longer) transcript from scratch.
             """
         )
 

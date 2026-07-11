@@ -207,10 +207,17 @@ struct PromptCacheConcurrencyTests {
 
         // Bookkeeping consistency: every call's grown tokens share the exact
         // same seed prefix and are only 2 tokens longer (short of another
-        // full chunk boundary), so the churn must dedup down to exactly the
-        // seeded chunks -- never fewer (corruption/loss) and never more (a
-        // dedup failure under concurrent insert).
-        #expect(await cache.chunkCount(modelID: modelID) == seedChunkCount)
+        // full chunk boundary), so the FULL chunks must dedup down to
+        // exactly the seeded chunks -- never fewer (corruption/loss) and
+        // never more (a dedup failure under concurrent insert). On top of
+        // that, `store()` also checks in a trailing partial-span TAIL chunk
+        // for each call's 2-token remainder (kanban 5ra1wzm) -- but only ONE
+        // tail is ever retained per hash-chain attachment point (see
+        // `PromptCache.activeTailKey`'s doc comment), so no matter which
+        // worker's `store()` call happens to run last, the store settles at
+        // exactly `seedChunkCount + 1` (the seeded full chunks, plus the one
+        // surviving tail), never growing without bound across the churn.
+        #expect(await cache.chunkCount(modelID: modelID) == seedChunkCount + 1)
     }
 }
 

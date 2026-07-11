@@ -26,8 +26,11 @@ extension PromptCache {
     /// sequences differ. `Hasher` is per-process seeded, so a `chunkKey` must
     /// never be persisted or compared across process launches.
     struct StoredChunk {
-        /// The token ids this chunk covers -- exactly `chunkSize` long (see
-        /// `sliceChunks`, which never stores a partial tail).
+        /// The token ids this chunk covers -- exactly `chunkSize` long for a
+        /// FULL chunk (see `sliceChunks`), or a variable, shorter-than-
+        /// `chunkSize` span for a TAIL chunk (see `sliceTailChunk`, which
+        /// slices exactly the trailing partial span `sliceChunks` itself
+        /// leaves uncovered).
         var tokens: [Int]
 
         /// Per-layer key/value tensor slices, in the same layer order as the
@@ -148,32 +151,28 @@ extension PromptCache {
         return (keys: keys, values: values, byteSize: keys.nbytes + values.nbytes)
     }
 
-    /// Cuts `tokens`/`cache` into fixed-size, non-overlapping token-range
-    /// chunks, one covering each full `chunkSize`-token span; any trailing
-    /// partial span (fewer than `chunkSize` tokens) is dropped, not stored.
+    /// Verifies that every layer in `cache` is a chunkable, fully-offset
+    /// `KVCacheSimple` layer -- shared by `sliceChunks` and `sliceTailChunk`,
+    /// since both need the identical verification before slicing any span of
+    /// `cache`'s tensors.
     ///
-    /// Requires every layer in `cache` to be a `KVCacheSimple` whose `offset`
-    /// exactly matches `tokens.count` and whose `state` is the expected
-    /// `[keys, values]` pair -- mirroring `isTrimmable`'s degradation pattern
-    /// for `RotatingKVCache`/`ChunkedKVCache`, this function returns `nil`
-    /// rather than guess at a layer type it can't safely slice.
-    ///
-    /// Every returned chunk's tensors are owned, evaluated copies (see
-    /// ``ownedCopy(of:)``), and `chunkKey`s form a hash chain (see
-    /// ``chunkKey(parentKey:tokens:)``) so identical token prefixes -- even
-    /// sliced from different `[KVCache]` instances -- produce identical keys.
+    /// Requires every layer to be a `KVCacheSimple` whose `offset` exactly
+    /// matches `tokenCount` and whose `state` is the expected `[keys,
+    /// values]` pair -- mirroring `isTrimmable`'s degradation pattern for
+    /// `RotatingKVCache`/`ChunkedKVCache`, this function returns `nil` rather
+    /// than guess at a layer type it can't safely slice.
     ///
     /// - Parameters:
-    ///   - tokens: The full token sequence `cache` currently reflects.
-    ///   - cache: The cache stack to slice, one entry per model layer.
-    ///   - chunkSize: How many tokens each stored chunk covers.
-    /// - Returns: One `StoredChunk` per full `chunkSize`-token span (possibly
-    ///   empty, if `tokens.count < chunkSize`), or `nil` if any layer isn't a
-    ///   verified, fully-offset `KVCacheSimple`.
-    nonisolated static func sliceChunks(
-        tokens: [Int], cache: [KVCache], chunkSize: Int
-    ) -> [StoredChunk]? {
-        guard chunkSize > 0, !cache.isEmpty else { return nil }
+    ///   - cache: The cache stack to verify, one entry per model layer.
+    ///   - tokenCount: The token count every layer's `offset` must exactly
+    ///     match.
+    /// - Returns: One verified `KVCacheSimple` per layer, in the same order
+    ///   as `cache`; `nil` if `cache` is empty or any layer isn't a verified,
+    ///   fully-offset `KVCacheSimple`.
+    private static func verifiedSimpleLayers(
+        cache: [KVCache], tokenCount: Int
+    ) -> [KVCacheSimple]? {
+        guard !cache.isEmpty else { return nil }
 
         var simpleLayers: [KVCacheSimple] = []
         simpleLayers.reserveCapacity(cache.count)
@@ -191,11 +190,42 @@ extension PromptCache {
             // shape it can't safely reason about.
             guard type(of: layer) == KVCacheSimple.self,
                 let simple = layer as? KVCacheSimple,
-                simple.offset == tokens.count,
+                simple.offset == tokenCount,
                 simple.state.count == 2
             else { return nil }
             simpleLayers.append(simple)
         }
+        return simpleLayers
+    }
+
+    /// Cuts `tokens`/`cache` into fixed-size, non-overlapping token-range
+    /// chunks, one covering each full `chunkSize`-token span; any trailing
+    /// partial span (fewer than `chunkSize` tokens) is left uncovered here --
+    /// see ``sliceTailChunk(tokens:cache:chunkSize:parentKey:)``, which slices
+    /// exactly that remainder into its own variable-length chunk.
+    ///
+    /// Requires every layer in `cache` to be a verified, fully-offset
+    /// `KVCacheSimple` (see ``verifiedSimpleLayers(cache:tokenCount:)``);
+    /// returns `nil` rather than guess at a layer type it can't safely slice.
+    ///
+    /// Every returned chunk's tensors are owned, evaluated copies (see
+    /// ``ownedCopy(of:)``), and `chunkKey`s form a hash chain (see
+    /// ``chunkKey(parentKey:tokens:)``) so identical token prefixes -- even
+    /// sliced from different `[KVCache]` instances -- produce identical keys.
+    ///
+    /// - Parameters:
+    ///   - tokens: The full token sequence `cache` currently reflects.
+    ///   - cache: The cache stack to slice, one entry per model layer.
+    ///   - chunkSize: How many tokens each stored chunk covers.
+    /// - Returns: One `StoredChunk` per full `chunkSize`-token span (possibly
+    ///   empty, if `tokens.count < chunkSize`), or `nil` if any layer isn't a
+    ///   verified, fully-offset `KVCacheSimple`.
+    nonisolated static func sliceChunks(
+        tokens: [Int], cache: [KVCache], chunkSize: Int
+    ) -> [StoredChunk]? {
+        guard chunkSize > 0,
+            let simpleLayers = verifiedSimpleLayers(cache: cache, tokenCount: tokens.count)
+        else { return nil }
 
         let chunkCount = tokens.count / chunkSize
         var parentKey = rootChunkKey
@@ -225,6 +255,63 @@ extension PromptCache {
         }
 
         return chunks
+    }
+
+    /// Slices `tokens`/`cache`'s trailing PARTIAL span -- the `tokens.count %
+    /// chunkSize` tokens left over after the last full `chunkSize`-token
+    /// chunk (exactly the remainder ``sliceChunks(tokens:cache:chunkSize:)``
+    /// leaves uncovered) -- into its own variable-length "tail" `StoredChunk`,
+    /// an SGLang-style radix-node shorter than `chunkSize`.
+    ///
+    /// Keyed exactly like any other chunk in the hash chain (see
+    /// ``chunkKey(parentKey:tokens:)``), chained from the caller-supplied
+    /// `parentKey` -- typically the last full chunk's `chunkKey`, or
+    /// `PromptCache.rootChunkKey` when `tokens.count < chunkSize` (no full
+    /// chunks at all). This is what makes a conversation prefix SHORTER than
+    /// one full chunk -- previously stored as NOTHING, since `sliceChunks`
+    /// alone slices zero chunks for it -- reusable: even a single stored tail
+    /// chunk gives a future lookup something to match a longest-common-prefix
+    /// against.
+    ///
+    /// Reuses ``sliceChunkLayer(layer:start:end:)`` -- the tail's tensors are
+    /// owned, evaluated copies exactly like any full chunk's (see that
+    /// function's own doc comment for the ownership guarantee).
+    ///
+    /// - Parameters:
+    ///   - tokens: The full token sequence `cache` currently reflects.
+    ///   - cache: The cache stack to slice, one entry per model layer.
+    ///   - chunkSize: How many tokens each FULL chunk covers -- the tail is
+    ///     whatever remains after `tokens.count / chunkSize` full chunks.
+    ///   - parentKey: This tail's hash-chain attachment point (the preceding
+    ///     full chunk's `chunkKey`, or `PromptCache.rootChunkKey`).
+    /// - Returns: The trailing partial-span `StoredChunk`, or `nil` when the
+    ///   tail span is empty (`tokens.count` is an exact multiple of
+    ///   `chunkSize` -- nothing to store, not an error) or `cache`'s layers
+    ///   aren't a verified, chunkable `KVCacheSimple` stack (mirrors
+    ///   `sliceChunks`'s own degradation).
+    nonisolated static func sliceTailChunk(
+        tokens: [Int], cache: [KVCache], chunkSize: Int, parentKey: Int
+    ) -> StoredChunk? {
+        guard chunkSize > 0 else { return nil }
+        let start = (tokens.count / chunkSize) * chunkSize
+        guard start < tokens.count,
+            let simpleLayers = verifiedSimpleLayers(cache: cache, tokenCount: tokens.count)
+        else { return nil }
+
+        let tailTokens = Array(tokens[start...])
+        var layers: [(keys: MLXArray, values: MLXArray)] = []
+        layers.reserveCapacity(simpleLayers.count)
+        var byteSize = 0
+        for simple in simpleLayers {
+            let sliced = sliceChunkLayer(layer: simple, start: start, end: tokens.count)
+            byteSize += sliced.byteSize
+            layers.append((keys: sliced.keys, values: sliced.values))
+        }
+
+        let key = chunkKey(parentKey: parentKey, tokens: tailTokens)
+        return StoredChunk(
+            tokens: tailTokens, layers: layers, parentKey: parentKey, chunkKey: key,
+            byteSize: byteSize, lastUsed: 0)
     }
 }
 

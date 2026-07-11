@@ -91,6 +91,29 @@ actor PromptCache {
     /// for dedup semantics.
     private var chunkStore: [String: [ChunkKey: StoredChunk]] = [:]
 
+    /// Per-model index of the currently ACTIVE tail chunk at each hash-chain
+    /// attachment point: `activeTailKey[modelID][parentKey]` is the
+    /// ``ChunkKey`` of the one tail `StoredChunk` (see
+    /// `PromptCacheChunks.sliceTailChunk` -- a variable-length, sub-`chunkSize`
+    /// chunk covering a conversation's trailing partial span) currently
+    /// checked into ``chunkStore`` at that chain position, if any.
+    ///
+    /// Tails are stored in ``chunkStore`` alongside full chunks (both are
+    /// `StoredChunk`s, keyed by their own `ChunkKey`), so byte accounting and
+    /// LRU/orphan eviction (``totalStoredBytes``, ``evictChunkAndDescendants(modelID:key:)``,
+    /// ``globalLRUChunk()``) already see and reclaim them without any change.
+    /// This index exists only so ``insertTail(modelID:tail:)`` can find and
+    /// replace the PREVIOUS tail at a given attachment point in O(1): unlike a
+    /// full chunk's content (which never changes once written), a tail's
+    /// content changes on nearly every turn -- a growing conversation appends
+    /// new tokens each round, producing a different tail (and therefore a
+    /// different `chunkKey`) even though it's still chained from the SAME
+    /// `parentKey`. Retaining every historical tail at a position would only
+    /// ever serve the stalest one usefully for at most one turn before
+    /// becoming garbage, so this actor keeps just ONE active tail per
+    /// attachment point.
+    private var activeTailKey: [String: [ChunkKey: ChunkKey]] = [:]
+
     /// Total bytes currently accounted across EVERY model's chunk store
     /// (``StoredChunk/byteSize``, summed) -- a single, process-global count
     /// rather than one per model. See ``byteBudget``'s doc comment for why
@@ -260,19 +283,43 @@ actor PromptCache {
     /// - Returns: The `[KVCache]` to pass as generation's `cache:`
     ///   argument, and the token subsequence to actually feed (a suffix of
     ///   `newTokens`, or all of `newTokens` when nothing matched).
+    ///
+    /// After the full-chunk walk, also looks for a stored TAIL chunk chained
+    /// from the matched prefix's endpoint (``lookupTailMatch(modelID:newTokens:consumedTokenCount:parentKey:remainingBudget:)``)
+    /// and, if found, extends the match by its longest-common-prefix overlap
+    /// with `newTokens`' remaining suffix -- this is what makes a
+    /// conversation prefix SHORTER than one full chunk (previously cached as
+    /// NOTHING at all) reusable, and what lets a growing conversation reuse
+    /// everything but its newest tokens even between full-chunk boundaries.
+    /// The combined full-chunk + tail match still never consumes the ENTIRE
+    /// prompt: `lookupLongestPrefix`'s own cap already leaves >=1 token of
+    /// budget, and the tail match is additionally capped by whatever budget
+    /// remains after the full chunks (see `lookupTailMatch`'s
+    /// `remainingBudget` parameter).
     func resolve(
         modelID: String, newTokens: [Int], model: SendableBox<any LanguageModel>,
         parameters: GenerateParameters?
     ) -> SendableBox<(cache: [KVCache], tokensToFeed: [Int])> {
         let model = model.consume()
-        let chunks = lookupLongestPrefix(
+        let fullChunks = lookupLongestPrefix(
             modelID: modelID, newTokens: newTokens, chunkSize: chunkSize
         ).consume()
-        guard let layerCount = chunks.first?.layers.count else {
+        let consumedByFullChunks = fullChunks.count * chunkSize
+        let tailParentKey = fullChunks.last?.chunkKey ?? Self.rootChunkKey
+        let remainingBudget = (newTokens.count - 1) - consumedByFullChunks
+        let tailMatch = lookupTailMatch(
+            modelID: modelID, newTokens: newTokens, consumedTokenCount: consumedByFullChunks,
+            parentKey: tailParentKey, remainingBudget: remainingBudget)
+
+        guard let layerCount = (fullChunks.first ?? tailMatch?.chunk)?.layers.count else {
             return SendableBox((model.newCache(parameters: parameters), newTokens))
         }
-        let matchedTokenCount = chunks.count * chunkSize
-        let assembled = Self.assemble(chunks: chunks, layerCount: layerCount)
+
+        let assembleChunks = tailMatch.map { fullChunks + [$0.chunk] } ?? fullChunks
+        let matchedTokenCount = consumedByFullChunks + (tailMatch?.matchedLength ?? 0)
+        let assembled = Self.assemble(
+            chunks: assembleChunks, layerCount: layerCount,
+            lastChunkMatchedLength: tailMatch?.matchedLength)
         return SendableBox(
             (assembled, Array(newTokens.suffix(newTokens.count - matchedTokenCount))))
     }
@@ -371,7 +418,12 @@ actor PromptCache {
 
     /// Slices this round's `(tokens, cache)` into fixed-size chunks
     /// (``PromptCache/sliceChunks(tokens:cache:chunkSize:)``) and checks
-    /// them into `modelID`'s shared chunk store (``insert(modelID:chunks:)``).
+    /// them into `modelID`'s shared chunk store (``insert(modelID:chunks:)``),
+    /// then does the same for the trailing partial TAIL span, if any
+    /// (``PromptCache/sliceTailChunk(tokens:cache:chunkSize:parentKey:)``,
+    /// checked in via ``insertTail(modelID:tail:)``) -- this is what makes a
+    /// conversation prefix SHORTER than one full chunk reusable at all,
+    /// rather than silently dropped.
     ///
     /// Silently drops the round when `cache`'s layers aren't a chunkable
     /// shape (see `sliceChunks`'s degradation for `RotatingKVCache`/
@@ -384,17 +436,25 @@ actor PromptCache {
     /// has been verified against `cache`'s own `offset` (see
     /// `Executor.commitPromptCache`).
     func store(modelID: String, tokens: [Int], cache: SendableBox<[KVCache]>) {
+        let cacheValue = cache.consume()
         guard
-            let chunks = Self.sliceChunks(
-                tokens: tokens, cache: cache.consume(), chunkSize: chunkSize)
+            let chunks = Self.sliceChunks(tokens: tokens, cache: cacheValue, chunkSize: chunkSize)
         else { return }
         insert(modelID: modelID, chunks: chunks)
+
+        let tailParentKey = chunks.last?.chunkKey ?? Self.rootChunkKey
+        if let tail = Self.sliceTailChunk(
+            tokens: tokens, cache: cacheValue, chunkSize: chunkSize, parentKey: tailParentKey)
+        {
+            insertTail(modelID: modelID, tail: tail)
+        }
     }
 
     /// Drops every model's remembered chunk store. Mirrors
     /// `ModelCache.evictAll`.
     func evictAll() {
         chunkStore.removeAll()
+        activeTailKey.removeAll()
         totalStoredBytes = 0
     }
 
@@ -403,6 +463,7 @@ actor PromptCache {
     func remove(modelID: String) {
         guard let removed = chunkStore.removeValue(forKey: modelID) else { return }
         totalStoredBytes -= removed.values.reduce(0) { $0 + $1.byteSize }
+        activeTailKey.removeValue(forKey: modelID)
     }
 
     /// Reconfigures this actor's total byte budget across EVERY model's
@@ -501,6 +562,59 @@ actor PromptCache {
         evictToBudget()
     }
 
+    /// Checks a freshly sliced TAIL chunk (see
+    /// `PromptCache.sliceTailChunk(tokens:cache:chunkSize:parentKey:)`) into
+    /// `modelID`'s chunk store at its hash-chain attachment point
+    /// (`tail.parentKey`), replacing whatever tail previously occupied that
+    /// SAME position (see ``activeTailKey``'s doc comment for why only one
+    /// tail is ever retained per attachment point).
+    ///
+    /// A tail whose key EXACTLY matches the position's current occupant is a
+    /// true dedup hit (identical content stored again): only `lastUsed` is
+    /// refreshed, no bytes double-counted -- mirrors
+    /// ``insert(modelID:chunks:)``'s own dedup semantics for full chunks. A
+    /// tail with a DIFFERENT key (or the same key but already evicted by
+    /// budget pressure, in which case removal is a harmless no-op) is
+    /// installed fresh after reclaiming whatever it replaces.
+    ///
+    /// - Parameters:
+    ///   - modelID: The model identifier this chunk store is scoped to.
+    ///   - tail: The freshly sliced tail chunk to check in.
+    func insertTail(modelID: String, tail: StoredChunk) {
+        var models = chunkStore[modelID] ?? [:]
+        var tailIndex = activeTailKey[modelID] ?? [:]
+
+        if let existingKey = tailIndex[tail.parentKey], existingKey == tail.chunkKey,
+            var entry = models[existingKey]
+        {
+            // Identical tail already active at this position: dedup, refresh
+            // recency only -- the tensors are already a byte-for-byte match.
+            entry.lastUsed = nextRecency()
+            models[existingKey] = entry
+            chunkStore[modelID] = models
+            return
+        }
+
+        if let existingKey = tailIndex[tail.parentKey],
+            let evicted = models.removeValue(forKey: existingKey)
+        {
+            // A stale tail (different content, since it didn't dedup above --
+            // or the same key but already evicted by budget pressure, in
+            // which case this is a harmless no-op) previously occupied this
+            // attachment point; only one tail is ever retained per position.
+            totalStoredBytes -= evicted.byteSize
+        }
+
+        var entry = tail
+        entry.lastUsed = nextRecency()
+        models[tail.chunkKey] = entry
+        totalStoredBytes += entry.byteSize
+        tailIndex[tail.parentKey] = tail.chunkKey
+        chunkStore[modelID] = models
+        activeTailKey[modelID] = tailIndex
+        evictToBudget()
+    }
+
     /// Walks `modelID`'s chunk hash chain from the root over chunk-aligned
     /// windows of `newTokens`, returning the longest prefix of matching,
     /// verified chunks.
@@ -564,6 +678,65 @@ actor PromptCache {
 
         chunkStore[modelID] = models
         return SendableBox(matched)
+    }
+
+    /// Finds the currently active TAIL chunk chained from `parentKey` (see
+    /// ``activeTailKey``) for `modelID`, and computes how many of its
+    /// leading tokens the suffix of `newTokens` starting at
+    /// `consumedTokenCount` (the token count already matched by the full
+    /// chunk walk) actually agrees with -- the longest common prefix
+    /// between the tail's stored tokens and that suffix.
+    ///
+    /// The match is capped by `remainingBudget` (typically `newTokens.count
+    /// - 1 - consumedTokenCount`, preserving `lookupLongestPrefix`'s own
+    /// "at least one token always remains to feed" invariant across the
+    /// FULL-chunk-walk-plus-tail-match combined) so the tail alone can never
+    /// push the total matched count to cover the entire prompt.
+    ///
+    /// COLLISION SAFETY is inherent here, not a separate check: the matched
+    /// length is derived from actual element-by-element token equality
+    /// against the tail's own stored `tokens`, never from trusting a
+    /// computed hash key alone -- mirroring `lookupLongestPrefix`'s own
+    /// token-array compare.
+    ///
+    /// - Parameters:
+    ///   - modelID: The model identifier this chunk store is scoped to.
+    ///   - newTokens: The freshly-tokenized full prompt for this round.
+    ///   - consumedTokenCount: How many of `newTokens`' leading tokens the
+    ///     full-chunk walk already matched -- the offset the tail's
+    ///     candidate suffix starts at.
+    ///   - parentKey: The full-chunk walk's endpoint (the last matched
+    ///     chunk's `chunkKey`, or `PromptCache.rootChunkKey` when no full
+    ///     chunk matched) -- the tail's hash-chain attachment point.
+    ///   - remainingBudget: The maximum number of additional tokens the tail
+    ///     match may cover, on top of `consumedTokenCount`.
+    /// - Returns: The matched tail chunk and how many of its leading tokens
+    ///   matched (between `1` and `min(tail.tokens.count, remainingBudget)`),
+    ///   or `nil` when no tail is chained at `parentKey`, `remainingBudget`
+    ///   is `<= 0`, or the very first token already diverges.
+    private func lookupTailMatch(
+        modelID: String, newTokens: [Int], consumedTokenCount: Int, parentKey: ChunkKey,
+        remainingBudget: Int
+    ) -> (chunk: StoredChunk, matchedLength: Int)? {
+        guard remainingBudget > 0,
+            var models = chunkStore[modelID],
+            let tailKey = activeTailKey[modelID]?[parentKey],
+            var tail = models[tailKey]
+        else { return nil }
+
+        let cap = min(tail.tokens.count, remainingBudget)
+        var matchedLength = 0
+        while matchedLength < cap,
+            tail.tokens[matchedLength] == newTokens[consumedTokenCount + matchedLength]
+        {
+            matchedLength += 1
+        }
+        guard matchedLength > 0 else { return nil }
+
+        tail.lastUsed = nextRecency()
+        models[tailKey] = tail
+        chunkStore[modelID] = models
+        return (chunk: tail, matchedLength: matchedLength)
     }
 
     /// Number of distinct chunks currently stored for `modelID` -- exposes
@@ -639,6 +812,13 @@ actor PromptCache {
         guard var models = chunkStore[modelID], let evicted = models.removeValue(forKey: key)
         else { return }
         totalStoredBytes -= evicted.byteSize
+        if activeTailKey[modelID]?[evicted.parentKey] == key {
+            // The evicted entry was itself the active tail at its
+            // attachment point -- clear the index so a future `insertTail`
+            // doesn't dedup-compare against, or redundantly try to re-evict,
+            // a key no longer in the store.
+            activeTailKey[modelID]?[evicted.parentKey] = nil
+        }
         let childKeys = models.filter { $0.value.parentKey == key }.map(\.key)
         chunkStore[modelID] = models
         for childKey in childKeys {
@@ -705,26 +885,71 @@ actor PromptCache {
     ///     assembly is refused (see below); mirrors `sliceChunks`'s own
     ///     degrade-to-`nil` convention for a shape it can't safely reason
     ///     about, rather than trapping on an out-of-range `layers` index.
+    ///   - lastChunkMatchedLength: When the LAST chunk in `chunks` is a
+    ///     partially-matched TAIL (see `PromptCacheChunks.sliceTailChunk`),
+    ///     how many of its leading tokens actually matched (from
+    ///     `lookupTailMatch`'s longest-common-prefix walk) -- that chunk's
+    ///     tensors are sliced down to this length (axis 2, the sequence
+    ///     axis) BEFORE concatenation. `nil` when every chunk in `chunks` is
+    ///     a full, wholly-matched chunk (the common case).
     /// - Returns: One freshly assembled `KVCacheSimple` per layer, offset at
-    ///   the matched token count; empty when `chunks` is empty or any
-    ///   chunk's `layers.count` doesn't match `layerCount`.
-    nonisolated static func assemble(chunks: [StoredChunk], layerCount: Int) -> [KVCache] {
+    ///   the matched token count; empty when `chunks` is empty, any
+    ///   chunk's `layers.count` doesn't match `layerCount`, or
+    ///   `lastChunkMatchedLength` is out of the last chunk's token range.
+    nonisolated static func assemble(
+        chunks: [StoredChunk], layerCount: Int, lastChunkMatchedLength: Int? = nil
+    ) -> [KVCache] {
         guard !chunks.isEmpty, layerCount > 0,
             chunks.allSatisfy({ $0.layers.count == layerCount })
         else { return [] }
+        let lastIndex = chunks.count - 1
+        if let lastChunkMatchedLength {
+            guard lastChunkMatchedLength > 0, lastChunkMatchedLength <= chunks[lastIndex].tokens.count
+            else { return [] }
+        }
 
         var result: [KVCache] = []
         result.reserveCapacity(layerCount)
         for layerIndex in 0 ..< layerCount {
-            let keys = ownedCopy(of: concatenated(chunks.map { $0.layers[layerIndex].keys }, axis: 2))
-            let values = ownedCopy(
-                of: concatenated(chunks.map { $0.layers[layerIndex].values }, axis: 2))
+            let keyParts = chunks.enumerated().map { index, chunk in
+                slicedToMatchedLength(
+                    chunk.layers[layerIndex].keys,
+                    matchedLength: index == lastIndex ? lastChunkMatchedLength : nil)
+            }
+            let valueParts = chunks.enumerated().map { index, chunk in
+                slicedToMatchedLength(
+                    chunk.layers[layerIndex].values,
+                    matchedLength: index == lastIndex ? lastChunkMatchedLength : nil)
+            }
+            let keys = ownedCopy(of: concatenated(keyParts, axis: 2))
+            let values = ownedCopy(of: concatenated(valueParts, axis: 2))
 
             let layerCache = KVCacheSimple()
             layerCache.state = [keys, values]
             result.append(layerCache)
         }
         return result
+    }
+
+    /// Slices `array` down to its first `matchedLength` sequence positions
+    /// (axis 2) when a partial TAIL match requires it, leaving `array`
+    /// unchanged otherwise.
+    ///
+    /// The slice itself aliases `array`'s underlying buffer (see
+    /// ``ownedCopy(of:)``'s doc comment on `Slice`/`copy_shared_buffer`) --
+    /// harmless here because `assemble` always routes the final concatenated
+    /// result back through ``ownedCopy(of:)`` before returning, exactly as
+    /// it already does for the no-slice path.
+    ///
+    /// - Parameters:
+    ///   - array: The chunk layer's key or value tensor.
+    ///   - matchedLength: How many leading sequence positions actually
+    ///     matched, or `nil` when this isn't the partially-matched last chunk.
+    /// - Returns: `array` sliced to `0..<matchedLength`, or `array` itself
+    ///   when `matchedLength` is `nil`.
+    private static func slicedToMatchedLength(_ array: MLXArray, matchedLength: Int?) -> MLXArray {
+        guard let matchedLength else { return array }
+        return array[.ellipsis, 0 ..< matchedLength, 0...]
     }
 }
 

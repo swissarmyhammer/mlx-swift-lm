@@ -152,7 +152,13 @@ struct PromptCacheResolveTests {
         let resolvedAgain = await resolveOnce(
             cache: cache, modelID: modelID, newTokens: thirdTurnTokens, model: model)
 
-        let expectedStoredTokenCount = (grownTokens.count / chunkSize) * chunkSize
+        // `store()` persists both complete, chunk-aligned chunks AND the
+        // trailing partial-span TAIL chunk (kanban 5ra1wzm) -- `grownTokens`
+        // is NOT an exact multiple of `chunkSize` here (19 tokens at
+        // chunkSize 4), so the stored tail lets this resolve reuse ALL of
+        // `grownTokens`, not merely its largest chunk-aligned multiple,
+        // capped only by the `thirdTurnTokens.count - 1` invariant.
+        let expectedStoredTokenCount = min(grownTokens.count, thirdTurnTokens.count - 1)
         #expect(resolvedAgain.cache[0].offset == expectedStoredTokenCount)
         #expect(
             resolvedAgain.tokensToFeed.count == thirdTurnTokens.count - expectedStoredTokenCount)

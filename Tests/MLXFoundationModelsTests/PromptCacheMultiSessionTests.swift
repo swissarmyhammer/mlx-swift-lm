@@ -220,19 +220,26 @@ struct PromptCacheMultiSessionTests {
                     continue
                 }
 
-                // `store()` only ever persists complete, chunk-aligned
-                // chunks (see `sliceChunks`), so the matched prefix on this
-                // resolve is exactly the largest chunk-aligned multiple of
-                // what was stored last turn -- regardless of how many OTHER
-                // sessions' rounds interleaved in between.
-                let expectedMatchedTokenCount = (previousStoredTokenCount / chunkSize) * chunkSize
+                // `store()` persists both complete, chunk-aligned chunks AND
+                // the trailing partial-span TAIL chunk (kanban 5ra1wzm), so
+                // the matched prefix on this resolve reuses ALL of what was
+                // stored last turn -- not merely the largest chunk-aligned
+                // multiple -- capped only by the invariant that at least one
+                // token must always remain to feed. Since `newTokens` here is
+                // always exactly `previousStoredTokenCount` plus this turn's
+                // one new user token, the matched count is
+                // `previousStoredTokenCount` itself (comfortably under the
+                // `newTokens.count - 1` cap), leaving exactly one token fed --
+                // regardless of how many OTHER sessions' rounds interleaved in
+                // between.
+                let expectedMatchedTokenCount = min(previousStoredTokenCount, newTokens.count - 1)
                 let expectedFeedCount = newTokens.count - expectedMatchedTokenCount
                 #expect(
                     resolved.tokensToFeed.count == expectedFeedCount,
                     """
                     session \(index) turn \(turn): expected exactly \(expectedFeedCount) tokens fed \
-                    past its last chunk boundary, got \(resolved.tokensToFeed.count) -- an interleaved \
-                    sibling session must never steal or evict this session's chunks
+                    (full-chunk AND tail reuse combined), got \(resolved.tokensToFeed.count) -- an \
+                    interleaved sibling session must never steal or evict this session's chunks
                     """
                 )
                 #expect(resolved.tokensToFeed == Array(newTokens.suffix(expectedFeedCount)))

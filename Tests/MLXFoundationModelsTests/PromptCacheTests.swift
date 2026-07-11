@@ -43,6 +43,51 @@ struct PromptCacheReconciliationTests {
             reencoded: [10, 11], actualGeneratedCount: 3)
         #expect(trusted == nil)
     }
+
+    // The four tests above exercise `reconcileGeneratedTokens` with hand-picked
+    // integer literals. The two below instead drive it with token IDs a real
+    // `Tokenizer` conformance actually produced from a realistic decoded model
+    // response (`ByteTokenizer`, also used elsewhere in this file/target --
+    // see `TestHelpers.swift` -- gives every byte its own token ID, a genuine
+    // `encode(text:addSpecialTokens:)` call rather than a synthetic count),
+    // proving `commitPromptCache(...emittedText:tokenizer:)`'s call site --
+    // which always feeds it a real tokenizer's `encode` output, never a
+    // hand-built array -- reconciles correctly for that shape of input.
+
+    @Test("realistic decoded text, exact count match, trusts the re-encoded tokens unchanged")
+    func realisticTextExactCountMatchTrusted() {
+        let tokenizer = ByteTokenizer()
+        let emittedText = "Sure! Here's a haiku about the ocean:\n\nWaves crash on the shore."
+        let reencoded = tokenizer.encode(text: emittedText, addSpecialTokens: false)
+
+        let trusted = PromptCache.reconcileGeneratedTokens(
+            reencoded: reencoded, actualGeneratedCount: reencoded.count)
+
+        #expect(trusted == reencoded)
+    }
+
+    @Test(
+        """
+        realistic decoded text, cache advance one short (natural-stop-token \
+        prefetch case), drops the trailing re-encoded token
+        """
+    )
+    func realisticTextNaturalStopOffByOneDropsTrailingToken() {
+        // Mirrors the doc comment on `commitPromptCache(...emittedText:tokenizer:)`:
+        // `TokenIterator`'s next()-ahead prefetch discards the terminal
+        // EOS/stop token that already advanced the cache without ever handing
+        // it to the emitted-text stream, so the cache's real offset advance
+        // legitimately lands one token short of the full re-encoding.
+        let tokenizer = ByteTokenizer()
+        let emittedText = "Absolutely, here is a short poem about autumn leaves falling gently."
+        let reencoded = tokenizer.encode(text: emittedText, addSpecialTokens: false)
+        let actualGeneratedCount = reencoded.count - 1
+
+        let trusted = PromptCache.reconcileGeneratedTokens(
+            reencoded: reencoded, actualGeneratedCount: actualGeneratedCount)
+
+        #expect(trusted == Array(reencoded.dropLast()))
+    }
 }
 
 @Suite("PromptCache real-token-ID cache-advance reconciliation")
