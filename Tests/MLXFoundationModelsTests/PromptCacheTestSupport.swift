@@ -71,6 +71,9 @@ final class PromptCacheProbeModel: Module, MLXLMCommon.LanguageModel,
 /// a round backed by this cache.
 ///
 /// - Parameter tokenCount: How many sequence positions to position the cache's `offset` at.
+/// - Returns: A `RotatingKVCache` whose `offset` is set to `tokenCount` and whose
+///   `state` is left empty -- `sliceChunks` rejects it by dynamic type alone, so
+///   `store()` silently drops any round backed by this cache.
 func makeUnchunkableCache(tokenCount: Int) -> RotatingKVCache {
     let cache = RotatingKVCache(maxSize: tokenCount)
     cache.offset = tokenCount
@@ -95,6 +98,9 @@ func makeUnchunkableCache(tokenCount: Int) -> RotatingKVCache {
 ///   - valueOffset: Shifts every element's value upward -- lets a multi-layer
 ///     test build layers with non-overlapping content ranges to verify
 ///     per-layer independence.
+/// - Returns: A `KVCacheSimple` with `state` set to distinct key/value
+///   `MLXArray`s of shape `[1, 1, tokenCount, headDim]`, so `offset` reports
+///   exactly `tokenCount` and `sliceChunks`/`store()` see a genuine, sliceable layer.
 func makeChunkableCache(tokenCount: Int, headDim: Int = 4, valueOffset: Int = 0) -> KVCacheSimple {
     let cache = KVCacheSimple()
     let count = tokenCount * headDim
@@ -119,6 +125,11 @@ func makeChunkableCache(tokenCount: Int, headDim: Int = 4, valueOffset: Int = 0)
 ///   - newTokens: The full prompt token sequence for this round.
 ///   - model: The language model whose `newCache(parameters:)` builds a fresh `[KVCache]`
 ///     when no stored prefix matches.
+/// - Returns: `cache`, the `[KVCache]` to generate this round with (either the
+///   matched-and-assembled prefix cache, or a freshly-built one when nothing
+///   matched), paired with `tokensToFeed`, the subsequence of `newTokens` still
+///   needing to be fed through the model -- a suffix when a prefix matched, or
+///   all of `newTokens` otherwise.
 func resolveOnce(
     cache: PromptCache, modelID: String, newTokens: [Int],
     model: any MLXLMCommon.LanguageModel
@@ -135,6 +146,8 @@ func resolveOnce(
 /// but every conformer in this codebase is a class.
 ///
 /// - Parameter resolved: A `resolve()` round's result, as returned by `resolveOnce`.
+/// - Returns: The `ObjectIdentifier` of `resolved.cache`'s single layer instance,
+///   for comparing whether two rounds returned the same or distinct cache instances.
 func cacheIdentity(resolved: (cache: [KVCache], tokensToFeed: [Int])) -> ObjectIdentifier {
     ObjectIdentifier(resolved.cache[0] as AnyObject)
 }
