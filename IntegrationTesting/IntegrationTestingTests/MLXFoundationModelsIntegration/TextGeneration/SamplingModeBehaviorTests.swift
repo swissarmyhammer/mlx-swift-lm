@@ -43,8 +43,10 @@ struct SamplingModeBehaviorTests {
     private func responseText(_ stream: TestResponseStream) async throws -> String {
         var response = ""
         for try await event in stream {
-            if let r = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let fragment) = r.action
+            if let r = reflectedChannelPayload(
+                of: event, caseLabel: "response", as: LanguageModelExecutorGenerationChannel.Response.self),
+                let fragment = reflectedChannelPayload(
+                    of: r.action, caseLabel: "appendText", as: LanguageModelExecutorGenerationChannel.TextFragment.self)
             {
                 response += fragment.content
             }

@@ -1,0 +1,42 @@
+---
+assignees:
+- claude-code
+position_column: todo
+position_ordinal: '9980'
+title: Add full Parameters/Returns/Throws doc blocks across GuidedGenerationLoop.swift's pre-existing functions
+---
+## What
+Surfaced by review pressure on `w7nvvg8`'s KV-cache correctness fix, but confirmed genuinely pre-existing — `git diff HEAD~1..HEAD` on the reviewed commit (`3506e85`) shows the ONLY function added/changed was `feedTokenThroughModel` (which already has a substantive multi-paragraph doc comment, just not in the exact formal `- Parameters:`/`- Returns:`/`- Throws:` block format this validator wants). All 16 findings are on OTHER, untouched, pre-existing functions.
+
+Mirrors the same class of debt already tracked for `MLXLanguageModel.swift` (`9jtbtkd`, done) and `Chat.swift` (`2yyn7f7`, done) — a whole-file `///` doc-comment sweep is needed for `Libraries/MLXGuidedGeneration/GuidedGenerationLoop.swift`.
+
+## Review Findings (2026-07-10 02:25) — full list to address
+
+- [ ] `prefillAndGetLogits` (~line 177, 3 params, throws, non-Void return) — needs `- Parameters:`, `- Returns:`, `- Throws:`.
+- [ ] Function at ~line 330 (throws) — needs `- Throws:`.
+- [ ] Function at ~line 351 (3 params, non-Void return, likely `advanceSingleSampledToken` or similar) — needs `- Parameters:` (has `- Returns:` already).
+- [ ] Function at ~line 409 (non-Void return) — needs `- Returns:`.
+- [ ] Function at ~line 498 (4 params, non-Void return) — needs `- Parameters:` and `- Returns:`.
+- [ ] `applyBiasAndSample` (~line 521, 9 params, throws) — currently uses vague cross-references ("see run's parameter of the same name") instead of documenting each parameter directly; needs a proper `- Parameters:` block listing all 9 individually, plus `- Throws:`.
+- [ ] Function at ~line 568 (2 params, likely `hardZoneBias`) — needs `- Parameters:` for `state`/`vocabSize` (or its actual params).
+- [ ] Function at ~line 584 (2 params) — needs `- Parameters:`.
+- [ ] Function at ~line 595 (3 params, likely `logProgress` or similar) — needs `- Parameters:` for `state`/`clock`/`startInstant`.
+- [ ] Function at ~line 605 (non-Void return, likely `durationToMilliseconds`) — needs `- Returns:`.
+- [ ] Function at ~line 620 (throws, likely `computeMaskAndArray`) — needs `- Throws:`.
+- [ ] Function at ~line 647 (throws) — needs `- Throws:`.
+- [ ] Function at ~line 685 (throws, likely `advanceMaskOnCpuWhileGpuRuns`) — needs `- Throws:`.
+- [ ] `buildStopTokenIds` (~line 753, 2 params, non-Void return) — needs `- Parameters:` for `tokenizer`/`configuration` and `- Returns:`.
+- [ ] `buildMaskArray` or similar (~line 810, 3 params, non-Void return) — needs `- Parameters:` for `maskPtr`/`maskBitCount`/`totalCount` and `- Returns:`.
+- [ ] `Tests/MLXGuidedGenerationTests/FastForwardSampledTokenKVCacheTests.swift:126` — throwing test function missing `- Throws:`. (Per the review skill's test-refactor exception, adding a doc comment to a test may be acceptable since it's additive documentation, not restructuring — but confirm this test predates or postdates recent commits before deciding whether it's in scope here or should be dropped as pre-existing test code.)
+
+Line numbers are from the review pass at commit `3506e85` — the file will have shifted by the time this task is picked up; re-locate each function by name/signature rather than trusting exact line numbers.
+
+## Acceptance Criteria
+- [ ] Every function above gets full `- Parameters:`/`- Returns:`/`- Throws:` sections as applicable, matching the style already used elsewhere in the file (e.g. `hardZoneBias`, `processFastForwardTokens` after `w7nvvg8`'s fix).
+- [ ] `applyBiasAndSample`'s 9-parameter block specifically needs each parameter documented directly, not cross-referenced to `run()`'s parameters of the same name.
+- [ ] No behavior change — documentation only.
+- [ ] Build clean, full test suite green (MLXGuidedGenerationTests, MLXFoundationModelsTests).
+- [ ] A local review pass (`review sha` scoped to the commit) confirms zero remaining missing-doc findings for this file.
+
+## Scope
+`Libraries/MLXGuidedGeneration/GuidedGenerationLoop.swift` (and the one test-file finding, if in scope). Not urgent/blocking — pre-existing documentation debt, not a correctness bug.

@@ -67,12 +67,20 @@ struct ReasoningCapabilityGateTests {
         var response = ""
         var reasoning = ""
         for try await event in stream {
-            if let r = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let fragment) = r.action
+            if let r = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                let fragment = reflectedChannelPayload(
+                    of: r.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self)
             {
                 response += fragment.content
-            } else if let r = event as? LanguageModelExecutorGenerationChannel.Reasoning,
-                case .appendText(let fragment) = r.action
+            } else if let r = reflectedChannelPayload(
+                of: event, caseLabel: "reasoning",
+                as: LanguageModelExecutorGenerationChannel.Reasoning.self),
+                let fragment = reflectedChannelPayload(
+                    of: r.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self)
             {
                 reasoning += fragment.content
             }

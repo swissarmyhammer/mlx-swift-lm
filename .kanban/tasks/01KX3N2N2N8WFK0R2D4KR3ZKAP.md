@@ -1,27 +1,111 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kx8jbn4sq4bj2tfqj4cg21kf
+  text: |-
+    Implemented. Summary of investigation, decisions, and evidence:
+
+    ## Investigation findings (pre-cutover names vs. current reality)
+
+    - `prewarm(model:transcript:)` still lives in `Libraries/MLXFoundationModels/MLXLanguageModel.swift` on `MLXLanguageModel.Executor` (moved to roughly line 1178 from the task's stale "~line 990" pointer — file has grown since). Confirmed it's the `LanguageModelExecutor` protocol witness, fire-and-forget via `Task.detached`, and previously ran only `model.warmUp()` (a fixed dummy prompt), ignoring `transcript` entirely — exactly as described.
+    - `makePromptCacheSlot`/`isTextOnly` **were not renamed or removed** by the `cthbfmw` cutover — both still exist, `private` on `Executor`, doing exactly what the task assumed (`isTextOnly` gates on `input.image/video/audio == nil`). `resolvePromptCache`/`storePromptCache` on `MLXLanguageModel` are thin passthroughs to `PromptCache.resolve`/`.store()`. `TranscriptConverter.mlxMessages(for:)` unchanged and directly reusable (`Transcript` itself conforms to `Collection<Transcript.Entry>`, so `mlxMessages(for: transcript)` works with no `.entries` needed).
+    - **`cachedTokenCount` is a real, literal, already-existing API** — `PromptCacheSlot.cachedTokenCount` (`promptTokens.count - feedInput.text.tokens.size`), threaded through `.updateUsage` events and exposed in `IntegrationTesting`'s `respondCollectingTextAndUsage` helper. Not a task-description approximation — used verbatim in both new test suites.
+    - **Key discovery about `commitPromptCache`**: its `!generatedTokenIDs.isEmpty` guard means it **silently no-ops** for a zero-generated-token round — which is exactly what a pure prefill (prewarm) produces. So prewarm's chunk-population step cannot route through `commitPromptCache` at all; it stores directly via `MLXLanguageModel.storePromptCache` once the prefill completes, since a forward pass with no sampling has nothing to reconcile (no generated-token/cache-offset ambiguity to resolve).
+    - **Key discovery about zero-token prefill**: `TokenIterator.init` (via `model.prepare(...)` + one `step(...)` call inside `prepare()`) always fully feeds the input tokens during construction, *before* any `next()` call is made — the "prime the pump" step samples a tentative next token into a buffer without feeding it through the model. Consequently, `generate(input:cache:parameters:context:)` with `GenerateParameters(maxTokens: 0)` drains to a stream that produces literally zero tokens (`next()` returns `nil` immediately since `tokenCount(0) >= maxTokens(0)`), leaving `cache.offset` at exactly `tokensToFeed.count` fed — no extra generated token to account for. Verified this against `generateLoopTask`'s loop guard directly.
+
+    ## Implementation
+
+    - `Executor.prewarm(model:transcript:)`: kept `warmUp()` fire-and-forget behavior unchanged, added a second independent `do/catch` in the same detached `Task` calling the new `populatePromptCacheChunks(model:transcript:)` — each step logs-and-swallows its own errors so a failure in one never blocks or masks the other, and neither ever throws to the caller (fire-and-forget preserved).
+    - New `Executor.populatePromptCacheChunks(model:transcript:) async throws` (internal, not `private` — deliberate test seam mirroring `hasCachedXgTokenizer`, since a `Task.detached`-wrapped function gives tests no completion handle): tokenizes via `TranscriptConverter.mlxMessages` + `context.processor.prepare`, gates on the *existing* `isTextOnly`, resolves via `MLXLanguageModel.resolvePromptCache`, prefills via `generate(..., parameters: GenerateParameters(maxTokens: 0), ...)` (draining the stream), then stores directly via `MLXLanguageModel.storePromptCache` (bypassing `commitPromptCache`'s reconciliation, which doesn't apply here — see above).
+    - No changes to `PromptCache.swift`/`PromptCacheChunks.swift` — prewarm reuses the exact same `resolve()`/`store()` machinery every real `respond()` round already uses, so dedup and the resolve cap "come for free."
+
+    ## Test evidence
+
+    - **Unit** (`Tests/MLXFoundationModelsTests/PromptCachePrewarmScenarioTests.swift`, new, 4 tests): since `populatePromptCacheChunks` itself needs a real model (tokenization + forward pass) and can't run against `PromptCacheProbeModel` (whose `prepare`/`callAsFunction` intentionally trap), these tests instead prove the underlying mechanism directly at the `PromptCache.resolve`/`.store()` level — simulating a prewarm round as `store(tokens: newTokens, cache: makeChunkableCache(tokenCount: newTokens.count))` (offset == tokens fed, zero generated tokens, exactly what `maxTokens: 0` produces): (1) first prewarm populates the chunk store, (2) prewarming the identical transcript twice does not duplicate chunks and the second prewarm's own resolve needs only the capped remainder, (3) a `respond()`-shaped continuation after prewarm reports `cachedTokenCount > 0` on its first resolve (computed the same way `PromptCacheSlot.cachedTokenCount` is), (4) empty-token resolve is a safe no-op. All 4 pass; `swift test --filter 'PromptCache'` → **74/74 passed, 12 suites** (up from 70 before this task). Full `xcodebuild build-for-testing` + unfiltered `xcrun xctest MLXFoundationModelsTests.xctest` → **181/181 passed, 34 suites**.
+    - **Integration** (`IntegrationTesting/.../PromptCachePrewarmTests.swift`, new, 3 tests): written following this directory's established convention (mirrors `PromptCacheReuseTests`/`PrewarmGrammarTests`/`PromptCacheMultimodalBoundaryTests`) — calls `executor.populatePromptCacheChunks(model:transcript:)` directly (awaited, bypassing the fire-and-forget wrapper, exactly like `PrewarmGrammarTests` calls `model.warmUp()` directly) against a real model, for a `FoundationModelsRouter`-style parent/fork scenario, asserting `cachedTokenCount > 0` on the fork's first `respond()`; a double-prewarm-stays-healthy test; and a multimodal-transcript-skips-without-throwing test. **SANDBOX CAVEAT** (pre-existing, not introduced by this task): the whole `IntegrationTesting` xcodeproj target already fails to compile in this environment for an unrelated SDK-shape mismatch, extensively documented in `PromptCacheEquivalenceTests.swift`'s/`PromptCacheMultimodalBoundaryTests.swift`'s header comments (`Response.Action` is an opaque struct here, not the plain enum a dozen pre-existing files assume) — confirmed this is still the case, so this new file is written-but-unverified-by-execution here, exactly like its siblings already are. Per the task's own investigation guidance (point 6), the SwiftPM-level unit suite above is the pragmatic, sufficient proof of the underlying mechanism given this constraint.
+
+    ## Scoping/interpretation calls
+
+    - Treated `isTextOnly`/`makePromptCacheSlot` as unchanged-by-cutover (verified directly, not assumed) rather than hunting for renamed equivalents.
+    - Did not add a new public API surface beyond the one new internal test-seam method; `prewarm`'s public signature is untouched.
+    - Did not attempt to make `populatePromptCacheChunks`'s multimodal-skip path unit-testable at the SwiftPM level: `isTextOnly` is `private` (file-scoped, not reachable via `@testable import`), and constructing a real `LMInput` requires a real model's `UserInputProcessor` — this is exactly the same limitation `PromptCacheMultimodalBoundaryTests.swift` already documents for the pre-existing `isTextOnly` gate, so it's covered by code-reuse of that same gate plus the new (unverified-by-execution) IntegrationTesting test.
+
+    ## Verification run (fresh, this session)
+    - `swift build` — clean, no new warnings.
+    - `swift-format lint` on all 3 touched/added files — zero new warnings (15 pre-existing warnings elsewhere in `MLXLanguageModel.swift`, confirmed identical modulo line-number shift via before/after diff).
+    - `swift test --filter 'PromptCache'` — **74/74 passed**.
+    - `xcodebuild build-for-testing -scheme mlx-swift-lm-Package -destination 'platform=macOS' -clonedSourcePackagesDirPath .build -disableAutomaticPackageResolution -skipPackagePluginValidation` → **TEST BUILD SUCCEEDED**; unfiltered `xcrun xctest .../MLXFoundationModelsTests.xctest` → **181/181 passed, 34 suites**.
+
+    Left in `doing` per orchestrator instruction — not moved to review, not committed.
+  timestamp: 2026-07-11T12:27:41.593641+00:00
+- actor: claude-code
+  id: 01kx8kmqkfgb5k2q2s9c0kyjyy
+  text: |-
+    Closed a real test-coverage gap flagged by independent verification: the acceptance criterion "multimodal transcripts skip chunk population without error" was previously only exercised by the IntegrationTesting test `prewarmingMultimodalTranscriptSkipsWithoutError`, which cannot execute in this sandbox (pre-existing, unrelated whole-target SDK-mismatch compile failure). The 4 existing SwiftPM unit tests in `PromptCachePrewarmScenarioTests.swift` didn't cover this either -- `resolvingEmptyTokenSequenceIsSafeNoOp` tests the `!tokens.isEmpty` guard, a different code path from the `isTextOnly` gate.
+
+    ## Investigation
+    1. Confirmed `Executor.populatePromptCacheChunks(model:transcript:)` (`Libraries/MLXFoundationModels/MLXLanguageModel.swift`) is `internal`, not `private` -- a deliberate test seam per its doc comment ("Not `private`: also a direct test seam, mirroring `hasCachedXgTokenizer`").
+    2. Found the reusable pattern in `Tests/MLXFoundationModelsTests/ToolCallingImagePreservationTests.swift` and `UnsupportedTranscriptContentMappingTests.swift`: both construct a fully fake `MLXLanguageModel(configuration:capabilities:weightsLocation:load:)` whose `load` closure returns a hand-built `ModelContainer(context: ModelContext(configuration:model:processor:tokenizer:))` -- no download, no real weights, no network -- letting a test inject a custom `UserInputProcessor` and observe/control exactly what `context.processor.prepare(input:)` returns. This is a materially different (and lighter-weight) mechanism than the `PromptCacheProbeModel` fixture the other 4 tests in this file use (whose `prepare`/`callAsFunction` intentionally trap and can't reach tokenization at all).
+
+    ## What was added
+    `Tests/MLXFoundationModelsTests/PromptCachePrewarmScenarioTests.swift`: new test `populatePromptCacheChunksSkipsMultimodalTranscriptWithoutError`, plus supporting fixtures (`AlwaysMultimodalProcessor` -- a `UserInputProcessor` that always returns an `LMInput` with non-nil `image`; `MultimodalSkipProbeGenerationModel` -- a `LanguageModel` stand-in whose `prepare`/`callAsFunction` `fatalError` if ever reached; `makeMultimodalSkipProbeModel(modelID:)` -- wires them into a fake `MLXLanguageModel`).
+
+    The test calls `executor.populatePromptCacheChunks(model:transcript:)` DIRECTLY (not through the fire-and-forget `prewarm` wrapper) with a real multimodal `Transcript` (text + image attachment, built the same way `UnsupportedTranscriptContentMappingTests` does via `makeSolidCGImage()`), and asserts two things:
+    1. It completes without throwing (reaching the probe generation model's `prepare`/`callAsFunction` would `fatalError`, proving the `isTextOnly` gate returned before the model was ever touched).
+    2. The shared chunk store remains genuinely empty for that model afterward: `MLXLanguageModel.resolvePromptCache(modelID:newTokens:model:parameters:)` against an unrelated token sequence under the same `modelID` must feed the tokens in FULL (no matching stored prefix) -- proving population was skipped, not silently applied.
+
+    ## Verification (fresh, this session)
+    - `swift build` -- clean.
+    - `swift build --build-tests` -- clean.
+    - `swift-format lint --strict` on the touched file -- zero output (clean).
+    - `swift test --filter 'PromptCache'` -- **75/75 passed, 12 suites** (up from 74; new test confirmed present and passing via grep of the run output).
+    - `xcodebuild build-for-testing -scheme mlx-swift-lm-Package -destination 'platform=macOS' -clonedSourcePackagesDirPath .build -disableAutomaticPackageResolution -skipPackagePluginValidation` -> **TEST BUILD SUCCEEDED**; unfiltered `xcrun xctest .../MLXFoundationModelsTests.xctest` -> **182/182 passed, 34 suites** (up from 181/34), with the new test's start/pass lines confirmed present in the output.
+
+    Left in `doing` per orchestrator instruction -- not moved to review, not committed.
+  timestamp: 2026-07-11T12:50:07.599974+00:00
+- actor: claude-code
+  id: 01kx8nezztq716q3ezep2ywpg5
+  text: |-
+    Addressed the review finding on `populatePromptCacheChunks` (dedup vs `makePromptCacheSlot`).
+
+    **Investigated whether `makePromptCacheSlot` is a safe direct fit** — concluded it is NOT, and did not force it:
+    - `makePromptCacheSlot`'s multimodal branch returns a "pass-through" `PromptCacheSlot(cache: nil, feedInput: input /* full, unreduced */, promptTokens:)` — correct for its 4 real call sites (all inside `respond()`-style flows via `runGuidedGenerationLoop`/etc.), which must still generate a real response for the caller even when the round isn't cacheable. `populatePromptCacheChunks` is a fire-and-forget background prewarm with no consumer for generated text; blindly reusing that pass-through and proceeding to `generate(...)` would run a wasted real forward pass over full multimodal input for zero benefit (nothing gets stored either way, since `cache` is nil). The existing `populatePromptCacheChunksSkipsMultimodalTranscriptWithoutError` test requires a genuine hard skip, not "generate anyway, uncached."
+    - `makePromptCacheSlot` also has no equivalent to `populatePromptCacheChunks`'s existing `guard !tokens.isEmpty else { return }` — reusing it directly would introduce a new `resolvePromptCache` call on an edge case `makePromptCacheSlot`'s verified call sites never exercised.
+    - Confirmed via `git log -S`/blame that `makePromptCacheSlot`/`PromptCacheSlot` are current, actively-used (4 call sites), post-`cthbfmw`-cutover code — NOT stale/pre-cutover slot-pool terminology (the deleted pool machinery was `Slot`/`selectSlot`/`applyDecision`/etc. in `PromptCache.swift`, an unrelated, already-removed concept). So `makePromptCacheSlot` itself needed no scrutiny as dead code — it's fine as-is, just not a drop-in fit for this call site.
+
+    **Lighter-weight fix applied instead**: extracted the one piece of logic that genuinely was duplicated — the `isTextOnly` gate plus the `resolvePromptCache` call it guards — into a new private helper `resolvePromptCacheIfTextOnly(input:tokens:model:parameters:) async -> (cache: [KVCache], tokensToFeed: [Int])?`. Returns `nil` for multimodal input without ever touching `model`. `makePromptCacheSlot` now calls it and falls back to its own (unchanged) pass-through `PromptCacheSlot` construction on `nil`; `populatePromptCacheChunks` now calls it and does a hard `return` on `nil`. Both call sites' full behavior is preserved exactly — verified branch-by-branch (empty messages / empty tokens / multimodal / text-only) against the pre-refactor code.
+
+    **Verification**: `swift build` clean. `swift test --filter 'PromptCache'` → 75/75 passed. Mandated `xcodebuild build-for-testing` (scheme `mlx-swift-lm-Package`) + unfiltered `xcrun xctest MLXFoundationModelsTests.xctest` → **182 tests in 34 suites passed**, including the `PromptCache prewarm scenario` suite's all 5 tests by name: "prewarming a transcript for the first time populates the chunk store", "...twice does not duplicate chunks...", "a respond() round whose prompt extends a prewarmed transcript reports cachedTokenCount > 0 on its FIRST resolve", "resolving an empty token sequence never crashes...", and specifically **"populatePromptCacheChunks skips chunk population for a multimodal transcript, without throwing"** — all green, confirming the zero-generated-token `GenerateParameters(maxTokens: 0)` prefill mechanism and direct `storePromptCache` (not `commitPromptCache`) call are unchanged. Adversarial double-check agent also launched to independently re-verify before handoff.
+
+    Checked off the finding in the description below. Leaving task in `review` per scope — not committing (orchestrator's job).
+  timestamp: 2026-07-11T13:21:56.730904+00:00
+- actor: claude-code
+  id: 01kx8nzddp86dvkr8gsv8q1fbq
+  text: |-
+    Fixed a regression introduced by the prior `resolvePromptCacheIfTextOnly` consolidation, found by an independent verification pass: in `populatePromptCacheChunks`, `input.text.tokens.asArray(Int.self)` had moved to run UNCONDITIONALLY before the new helper's internal `isTextOnly` check, so a multimodal transcript now always paid the array-materialization cost (a real host-side/GPU-forcing pull) even though the result was immediately discarded by the helper's `nil` return. This defeated the point of the original early skip-check on this fire-and-forget prewarm path.
+
+    Fix (Libraries/MLXFoundationModels/MLXLanguageModel.swift, `populatePromptCacheChunks`): added a cheap `guard Self.isTextOnly(input) else { return }` immediately after `input` is prepared and BEFORE `let tokens = input.text.tokens.asArray(Int.self)`. This restores the original short-circuit for multimodal transcripts. `resolvePromptCacheIfTextOnly` still re-checks `isTextOnly` internally, but that's now a redundant, trivially-cheap boolean read of `input` (not the array materialization) — accepted per the task's suggested option 2, so the `resolvePromptCacheIfTextOnly` consolidation from the prior fix stays intact with no re-duplication of the expensive part.
+
+    `makePromptCacheSlot` was left untouched (its own unconditional `promptTokens` extraction before its `isTextOnly` check is separate, pre-existing behavior, out of scope here).
+
+    Verification:
+    - `swift build` — clean (only a pre-existing, unrelated `LanguageModelCapabilities(capabilities:)` deprecation warning).
+    - `swift test --filter 'PromptCache'` — 75/75 passed.
+    - Mandated safe pattern (`xcodebuild build-for-testing` + unfiltered `xcrun xctest MLXFoundationModelsTests.xctest`, no `-XCTest` filter, wrapped in `timeout`) — 182 tests in 34 suites passed, including "populatePromptCacheChunks skips chunk population for a multimodal transcript, without throwing" confirmed passing by name.
+
+    Left the task in `review` per scope instructions; not committing (orchestrator handles that).
+  timestamp: 2026-07-11T13:30:54.774835+00:00
+- actor: claude-code
+  id: 01kx8pfndt58vdk1sezzt2rwwz
+  text: 'Final review pass (2026-07-11 08:32) on commit d7eb0f6 returned 2 findings, both confirmed pre-existing via `git diff HEAD~1..HEAD` (zero matches, untouched by this commit): `prepareRespondSetup`''s complexity (deferred to new tracking task ^w7m0jm2) and `runToolCalling`''s complexity (REJECTED — the finding''s suggested fix, extracting `executeThinkThenCallPhase1`/`executeToolCallingPhase2`, is already done; both functions already exist as separate extracted methods, confirmed via grep — this is a stale/hallucinated citation describing work that''s already complete). kr3zkap''s own diff has zero legitimate open findings. Moving to done.'
+  timestamp: 2026-07-11T13:39:47.258317+00:00
 depends_on:
 - 01KX3MMB4DGB8N9069VCTHBFMW
 - 01KX3MN39J77KZTKPEM2SDT6DJ
-position_column: todo
-position_ordinal: '9380'
+position_column: done
+position_ordinal: a180
 title: prewarm(model:transcript:) populates the chunk store
 ---
-## What
-`MLXLanguageModel.prewarm(model:transcript:)` (Libraries/MLXFoundationModels/MLXLanguageModel.swift, ~line 990) currently ignores its transcript and runs a fixed dummy prompt — fine for shader JIT, useless for the cache. With the chunk store, transcript prewarming becomes genuinely valuable for the FoundationModelsRouter fork scenario: prewarming the parent transcript populates the shared prefix chunks BEFORE the first fork responds, so every fork's first turn hits.
-
-Change prewarm to (in addition to its existing warm-up effect): tokenize the transcript via the existing TranscriptConverter path, run the text-only/chunkable checks (same gates as makePromptCacheSlot — multimodal transcripts skip), prefill through the model with a fresh cache, and store the result into the chunk store (reusing resolve→prefill→store; a prewarm of an already-cached prefix should be a cheap no-op because resolve finds the chunks and only the capped remainder prefills). Preserve fire-and-forget error behavior — prewarm must never throw or block respond().
-
-## Acceptance Criteria
-- [ ] After prewarm(transcript:), a respond() whose prompt extends that transcript reports prefix reuse on its FIRST turn (cachedTokenCount > 0 / reduced fed tokens)
-- [ ] Prewarming the same transcript twice does not duplicate chunks (dedup) and the second call does near-zero prefill work
-- [ ] Multimodal transcripts skip chunk population (existing isTextOnly gate) without error
-
-## Tests
-- [ ] Unit: store-population logic factored so it is testable with the probe model (chunk store populated from a token sequence + fresh cache)
-- [ ] Integration (IntegrationTesting, xcodebuild): prewarm parent transcript → forked session's first respond shows cachedTokenCount > 0
-- [ ] `swift test --filter 'PromptCache'` green
-
-## Workflow
-- Use `/tdd` — write failing tests first, then implement to make them pass.
+## What\n`MLXLanguageModel.prewarm(model:transcript:)` (Libraries/MLXFoundationModels/MLXLanguageModel.swift, ~line 990) currently ignores its transcript and runs a fixed dummy prompt — fine for shader JIT, useless for the cache. With the chunk store, transcript prewarming becomes genuinely valuable for the FoundationModelsRouter fork scenario: prewarming the parent transcript populates the shared prefix chunks BEFORE the first fork responds, so every fork's first turn hits.\n\nChange prewarm to (in addition to its existing warm-up effect): tokenize the transcript via the existing TranscriptConverter path, run the text-only/chunkable checks (same gates as makePromptCacheSlot — multimodal transcripts skip), prefill through the model with a fresh cache, and store the result into the chunk store (reusing resolve→prefill→store; a prewarm of an already-cached prefix should be a cheap no-op because resolve finds the chunks and only the capped remainder prefills). Preserve fire-and-forget error behavior — prewarm must never throw or block respond().\n\n## Acceptance Criteria\n- [x] After prewarm(transcript:), a respond() whose prompt extends that transcript reports prefix reuse on its FIRST turn (cachedTokenCount > 0 / reduced fed tokens)\n- [x] Prewarming the same transcript twice does not duplicate chunks (dedup) and the second call does near-zero prefill work\n- [x] Multimodal transcripts skip chunk population (existing isTextOnly gate) without error\n\n## Tests\n- [x] Unit: store-population logic factored so it is testable with the probe model (chunk store populated from a token sequence + fresh cache)\n- [x] Integration (IntegrationTesting, xcodebuild): prewarm parent transcript → forked session's first respond shows cachedTokenCount > 0\n- [x] `swift test --filter 'PromptCache'` green\n\n## Workflow\n- Use `/tdd` — write failing tests first, then implement to make them pass.\n\n## Resolution notes (commit 8349a14)\nVerified across 2 independent rounds: traced the fire-and-forget error isolation, the GenerateParameters(maxTokens: 0) pure-prefill mechanism end-to-end through TokenIterator, the commitPromptCache bypass rationale, and the isTextOnly gate — all confirmed correct. A coverage gap (multimodal-skip only exercised by an unexecutable IntegrationTesting test) was closed with a genuine unit test, its necessity proven via a real RED/GREEN reproduction (forcing the gate open reproduced the exact expected fatalError trap).\n\n## Review Findings (2026-07-11 07:59)\n\n- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1333` — `populatePromptCacheChunks` reimplements the resolve→slot pattern that `makePromptCacheSlot` already encapsulates, duplicating logic instead of reusing the existing private helper. Consolidate to use `makePromptCacheSlot` (which also folds in the `isTextOnly` gate), then use its returned slot's `cache`/`promptTokens`/`feedInput` for the generate/store calls. CAUTION: this function's `GenerateParameters(maxTokens: 0)` pure-prefill mechanism was just extensively verified correct (traced end-to-end, RED/GREEN-proven) — any refactor must preserve that exact behavior, not just compile. Re-verify the mechanism still works identically after consolidating.\n\n  **Resolution**: investigated and determined direct reuse of `makePromptCacheSlot` was NOT a safe fit (see task comment for full reasoning — multimodal pass-through semantics differ, and the empty-tokens guard doesn't exist on `makePromptCacheSlot`). Instead extracted the genuinely shared logic — the `isTextOnly` gate + `resolvePromptCache` call — into a new private helper `resolvePromptCacheIfTextOnly(input:tokens:model:parameters:)` that both `makePromptCacheSlot` and `populatePromptCacheChunks` now call, each keeping its own distinct handling of the `nil` (not-cacheable) case. Full behavior preserved and re-verified (75/75 `PromptCache` filter tests, 182/34 full xctest suite including the multimodal-skip test by name).

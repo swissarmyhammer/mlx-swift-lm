@@ -79,21 +79,35 @@ struct ToolCallingReasoningTests {
     private func collect(_ stream: TestResponseStream) async throws -> Collected {
         var c = Collected()
         for try await event in stream {
-            if let r = event as? LanguageModelExecutorGenerationChannel.Reasoning,
-                case .appendText(let fragment) = r.action
+            if let r = reflectedChannelPayload(
+                of: event, caseLabel: "reasoning",
+                as: LanguageModelExecutorGenerationChannel.Reasoning.self),
+                let fragment = reflectedChannelPayload(
+                    of: r.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self)
             {
                 c.reasoning += fragment.content
-            } else if let t = event as? LanguageModelExecutorGenerationChannel.ToolCalls,
-                case .toolCall(let toolCall) = t.action,
-                case .appendArguments(let argsDelta) = toolCall.action
+            } else if let t = reflectedChannelPayload(
+                of: event, caseLabel: "toolCalls",
+                as: LanguageModelExecutorGenerationChannel.ToolCalls.self),
+                let toolCall = reflectedChannelPayload(
+                    of: t.action, caseLabel: "toolCall",
+                    as: LanguageModelExecutorGenerationChannel.ToolCalls.ToolCall.self),
+                let argsDelta = reflectedChannelPayload(
+                    of: toolCall.action, caseLabel: "appendArguments",
+                    as: LanguageModelExecutorGenerationChannel.ToolCalls.ToolCall.ArgumentsFragment.self)
             {
                 if c.toolCallName == nil {
                     c.toolCallName = toolCall.name
                     c.reasoningBeforeToolCall = !c.reasoning.isEmpty
                 }
                 c.toolArgs += argsDelta.content
-            } else if let r = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let fragment) = r.action
+            } else if let r = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                let fragment = reflectedChannelPayload(
+                    of: r.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self)
             {
                 c.response += fragment.content
             }

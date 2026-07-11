@@ -61,17 +61,25 @@ struct GuidedGenerationIntegrationTests {
         #expect(events.count >= 2, "Should produce metadata and text events")
 
         guard
-            let firstResponse = events.first
-                as? LanguageModelExecutorGenerationChannel.Response,
-            case .updateMetadata = firstResponse.action
+            let firstEvent = events.first,
+            let firstResponse = reflectedChannelPayload(
+                of: firstEvent, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+            reflectedChannelPayload(
+                of: firstResponse.action, caseLabel: "updateMetadata",
+                as: LanguageModelExecutorGenerationChannel.Metadata.self) != nil
         else {
             Issue.record("First event should be metadataUpdate")
             return
         }
 
         let hasText = events.contains { event in
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText = response.action
+            if let response = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                reflectedChannelPayload(
+                    of: response.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self) != nil
             {
                 return true
             }
@@ -100,8 +108,12 @@ struct GuidedGenerationIntegrationTests {
 
         var hasText = false
         for try await event in stream {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText = response.action
+            if let response = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                reflectedChannelPayload(
+                    of: response.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self) != nil
             {
                 hasText = true
                 break
@@ -139,8 +151,12 @@ struct GuidedGenerationIntegrationTests {
         let stream1 = try await executeResponse(executor, request: request1, model: model)
         var text1 = ""
         for try await event in stream1 {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
+            if let response = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                let delta = reflectedChannelPayload(
+                    of: response.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self)
             {
                 text1 += delta.content
             }
@@ -159,8 +175,12 @@ struct GuidedGenerationIntegrationTests {
         let stream2 = try await executeResponse(executor, request: request2, model: model)
         var text2 = ""
         for try await event in stream2 {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
+            if let response = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                let delta = reflectedChannelPayload(
+                    of: response.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self)
             {
                 text2 += delta.content
             }
@@ -187,8 +207,12 @@ struct GuidedGenerationIntegrationTests {
         let stream3 = try await executeResponse(executor, request: request3, model: model)
         var text3 = ""
         for try await event in stream3 {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
+            if let response = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                let delta = reflectedChannelPayload(
+                    of: response.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self)
             {
                 text3 += delta.content
             }
@@ -220,8 +244,12 @@ struct GuidedGenerationIntegrationTests {
                 let stream = try await executeResponse(executor, request: request, model: model)
                 var text = ""
                 for try await event in stream {
-                    if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                        case .appendText(let delta) = response.action
+                    if let response = reflectedChannelPayload(
+                        of: event, caseLabel: "response",
+                        as: LanguageModelExecutorGenerationChannel.Response.self),
+                        let delta = reflectedChannelPayload(
+                            of: response.action, caseLabel: "appendText",
+                            as: LanguageModelExecutorGenerationChannel.TextFragment.self)
                     {
                         text += delta.content
                     }
@@ -244,8 +272,12 @@ struct GuidedGenerationIntegrationTests {
                 let stream = try await executeResponse(executor, request: request, model: model)
                 var text = ""
                 for try await event in stream {
-                    if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                        case .appendText(let delta) = response.action
+                    if let response = reflectedChannelPayload(
+                        of: event, caseLabel: "response",
+                        as: LanguageModelExecutorGenerationChannel.Response.self),
+                        let delta = reflectedChannelPayload(
+                            of: response.action, caseLabel: "appendText",
+                            as: LanguageModelExecutorGenerationChannel.TextFragment.self)
                     {
                         text += delta.content
                     }
@@ -292,8 +324,13 @@ struct GuidedGenerationIntegrationTests {
         }
 
         let incompleteIdx = events.firstIndex { event in
-            guard let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .updateMetadata(let metadata) = response.action
+            guard
+                let response = reflectedChannelPayload(
+                    of: event, caseLabel: "response",
+                    as: LanguageModelExecutorGenerationChannel.Response.self),
+                let metadata = reflectedChannelPayload(
+                    of: response.action, caseLabel: "updateMetadata",
+                    as: LanguageModelExecutorGenerationChannel.Metadata.self)
             else { return false }
             return (metadata.values["incompleteOutput"] as? Bool) == true
         }
@@ -304,8 +341,12 @@ struct GuidedGenerationIntegrationTests {
 
         if let incompleteIdx,
             let lastTextIdx = events.lastIndex(where: {
-                if let response = $0 as? LanguageModelExecutorGenerationChannel.Response,
-                    case .appendText = response.action
+                if let response = reflectedChannelPayload(
+                    of: $0, caseLabel: "response",
+                    as: LanguageModelExecutorGenerationChannel.Response.self),
+                    reflectedChannelPayload(
+                        of: response.action, caseLabel: "appendText",
+                        as: LanguageModelExecutorGenerationChannel.TextFragment.self) != nil
                 {
                     return true
                 } else {

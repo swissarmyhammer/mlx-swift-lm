@@ -69,9 +69,15 @@ struct FoundationModelsToolCallingTests {
         var textContent = ""
 
         for try await event in stream {
-            if let toolCalls = event as? LanguageModelExecutorGenerationChannel.ToolCalls,
-                case .toolCall(let toolCall) = toolCalls.action,
-                case .appendArguments(let argsDelta) = toolCall.action
+            if let toolCalls = reflectedChannelPayload(
+                of: event, caseLabel: "toolCalls",
+                as: LanguageModelExecutorGenerationChannel.ToolCalls.self),
+                let toolCall = reflectedChannelPayload(
+                    of: toolCalls.action, caseLabel: "toolCall",
+                    as: LanguageModelExecutorGenerationChannel.ToolCalls.ToolCall.self),
+                let argsDelta = reflectedChannelPayload(
+                    of: toolCall.action, caseLabel: "appendArguments",
+                    as: LanguageModelExecutorGenerationChannel.ToolCalls.ToolCall.ArgumentsFragment.self)
             {
                 if toolCall.name == "get_weather" {
                     sawWeatherToolCall = true
@@ -81,8 +87,12 @@ struct FoundationModelsToolCallingTests {
                         parsed != nil,
                         "Tool call arguments should be valid JSON: \(argsDelta.content)")
                 }
-            } else if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
+            } else if let response = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                let delta = reflectedChannelPayload(
+                    of: response.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self)
             {
                 sawText = true
                 textContent += delta.content
@@ -148,14 +158,24 @@ struct FoundationModelsToolCallingTests {
         var textContent = ""
 
         for try await event in stream {
-            if let toolCalls = event as? LanguageModelExecutorGenerationChannel.ToolCalls,
-                case .toolCall(let toolCall) = toolCalls.action,
-                case .appendArguments(let argsDelta) = toolCall.action
+            if let toolCalls = reflectedChannelPayload(
+                of: event, caseLabel: "toolCalls",
+                as: LanguageModelExecutorGenerationChannel.ToolCalls.self),
+                let toolCall = reflectedChannelPayload(
+                    of: toolCalls.action, caseLabel: "toolCall",
+                    as: LanguageModelExecutorGenerationChannel.ToolCalls.ToolCall.self),
+                let argsDelta = reflectedChannelPayload(
+                    of: toolCall.action, caseLabel: "appendArguments",
+                    as: LanguageModelExecutorGenerationChannel.ToolCalls.ToolCall.ArgumentsFragment.self)
             {
                 toolCallName = toolCall.name
                 toolCallArguments = argsDelta.content
-            } else if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText(let delta) = response.action
+            } else if let response = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                let delta = reflectedChannelPayload(
+                    of: response.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self)
             {
                 textContent += delta.content
             }

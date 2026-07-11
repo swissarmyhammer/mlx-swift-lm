@@ -45,8 +45,12 @@ struct PrewarmGrammarTests {
 
         var hasText = false
         for try await event in stream {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText = response.action
+            if let response = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                reflectedChannelPayload(
+                    of: response.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self) != nil
             {
                 hasText = true
                 break
@@ -78,8 +82,12 @@ struct PrewarmGrammarTests {
 
         var hasText = false
         for try await event in stream {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText = response.action
+            if let response = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                reflectedChannelPayload(
+                    of: response.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self) != nil
             {
                 hasText = true
                 break

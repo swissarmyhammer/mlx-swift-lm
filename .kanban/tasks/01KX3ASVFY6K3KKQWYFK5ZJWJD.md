@@ -10,8 +10,12 @@ comments:
   id: 01kx3c8k2xtrrbsmpsfypqw8sn
   text: 'Done and green. PromptCacheResolveTests.swift now has 8 tests: all applyDecision branches through resolve(), including the double-check reviewer''s requested case (identical prompt + trimmable-but-mispositioned multi-layer cache → regenerateLastToken''s trimAndVerify failure → rebuild; also the only multi-layer exercise of trimAndVerify''s allSatisfy). Identity assertions compare against live instances to rule out ObjectIdentifier address-recycling false positives. Verified: swift test --filter ''PromptCache'' → 47 tests / 12 suites pass; PromptCache.swift 100% line+region+function coverage (was 79.4%); double-check adversarial review returned one finding, fixed. Ready for /review.'
   timestamp: 2026-07-09T12:04:57.565791+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01kx3ydkrp1tz03nxrx096w3h9
+  text: Coverage delivered in Tests/MLXFoundationModelsTests/PromptCacheResolveTests.swift, covering all 5 scenarios in the acceptance criteria (identical-prompt regeneration, non-trimmable fallback, successful trim-reuse, shrunk-prompt regeneration, applyDecision .rebuild for a non-trimmable diverging cache) plus 3 additional trim-verification-failure edge cases found during implementation. Committed across c4e37a4 (initial), 938e83b/2f80dfc/61b58c3/dd32e04 (doc-format and naming-convention review fixes). Full mandated suite green throughout (145/145 in the relevant bundle), review clean.
+  timestamp: 2026-07-09T17:22:16.470264+00:00
+position_column: done
+position_ordinal: '8880'
 title: Add actor-level resolve() tests covering regenerateLastToken and every applyDecision branch
 ---
 Libraries/MLXFoundationModels/PromptCache.swift — uncovered lines 220-227 (regenerateLastToken), 242-246 (.reuseSuffix count==0), 255 (successful .trimTo reuse with suffix), 258-264 (.trimTo thenSuffix==0, shrunk prompt), 267 (applyDecision .rebuild for a non-trimmable diverging cache).

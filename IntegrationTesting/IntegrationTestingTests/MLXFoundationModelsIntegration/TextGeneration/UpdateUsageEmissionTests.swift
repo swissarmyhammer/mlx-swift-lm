@@ -135,8 +135,11 @@ private func collectFinalUsage(
 ) async throws -> (input: Int, output: Int) {
     var lastUsage: (input: Int, output: Int)?
     for try await event in stream {
-        if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-            case .updateUsage(let usage) = response.action
+        if let response = reflectedChannelPayload(
+            of: event, caseLabel: "response", as: LanguageModelExecutorGenerationChannel.Response.self),
+            let usage = reflectedChannelPayload(
+                of: response.action, caseLabel: "updateUsage",
+                as: LanguageModelExecutorGenerationChannel.Usage.self)
         {
             lastUsage = (usage.input.totalTokenCount, usage.output.totalTokenCount)
         }

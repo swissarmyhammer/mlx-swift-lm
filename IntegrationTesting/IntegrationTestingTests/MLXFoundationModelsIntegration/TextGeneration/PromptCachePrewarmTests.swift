@@ -56,6 +56,7 @@ struct PromptCachePrewarmTests {
     private static let sharedInstructions =
         "You are a helpful assistant that answers trivia questions concisely."
 
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func parentTranscript() -> Transcript {
         Transcript(entries: [
             .instructions(
@@ -68,6 +69,7 @@ struct PromptCachePrewarmTests {
     /// A "fork" transcript: the shared parent prefix, plus one new
     /// fork-specific user turn -- exactly what a forked session's first
     /// `respond()` call would receive.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func forkTranscript(question: String) -> Transcript {
         Transcript(entries: [
             .instructions(

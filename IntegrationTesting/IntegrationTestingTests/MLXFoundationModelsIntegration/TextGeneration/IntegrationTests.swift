@@ -105,8 +105,14 @@ struct IntegrationTests {
         try? await respondTask.value
 
         // First event should be metadata
-        guard let response = events.first as? LanguageModelExecutorGenerationChannel.Response,
-            case .updateMetadata(let metadata) = response.action
+        guard
+            let firstEvent = events.first,
+            let response = reflectedChannelPayload(
+                of: firstEvent, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+            let metadata = reflectedChannelPayload(
+                of: response.action, caseLabel: "updateMetadata",
+                as: LanguageModelExecutorGenerationChannel.Metadata.self)
         else {
             Issue.record("First event should be metadataUpdate")
             return
@@ -313,8 +319,12 @@ struct IntegrationTests {
 
         var tokenCount = 0
         for try await event in channel {
-            if let response = event as? LanguageModelExecutorGenerationChannel.Response,
-                case .appendText = response.action
+            if let response = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self),
+                reflectedChannelPayload(
+                    of: response.action, caseLabel: "appendText",
+                    as: LanguageModelExecutorGenerationChannel.TextFragment.self) != nil
             {
                 tokenCount += 1
             }
