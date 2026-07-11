@@ -674,6 +674,55 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         await promptCache.setChunkSize(size)
     }
 
+    /// Reconfigures the shared prompt cache's total byte budget across
+    /// every cached model (see `PromptCache.byteBudget`'s doc comment for
+    /// why this budget is GLOBAL rather than per-model), clamping
+    /// non-positive requests up to `1` (mirroring
+    /// `setPromptCacheChunkSize(_:)`'s own `max(1, _)` clamp) -- an
+    /// explicit caller value above `1` is trusted as-is, even a very small
+    /// one; only the UNCONFIGURED default
+    /// (`PromptCache.defaultByteBudget()`) is clamped up to the larger
+    /// `PromptCache.minimumByteBudget` floor. Immediately evicts the
+    /// globally least-recently-used chunk -- and,
+    /// transitively, every chunk chained under it
+    /// (`PromptCache.evictChunkAndDescendants(modelID:key:)`) -- repeatedly
+    /// until the store is back at or under the new budget: evicting a
+    /// chunk always orphans its chain descendants (a future
+    /// `PromptCache.lookupLongestPrefix` walk can never reach past a
+    /// missing parent), so this actor reclaims a whole orphaned lineage's
+    /// bytes immediately rather than leaving dead weight in the store for
+    /// a later sweep.
+    ///
+    /// PEAK-MEMORY MODEL: this budget bounds the STORE only. Every
+    /// `resolve()` additionally materializes ONE assembled prefix copy per
+    /// in-flight request (`PromptCache.assemble(chunks:layerCount:)`'s
+    /// `ownedCopy` tensors), so peak unified memory roughly tracks:
+    ///
+    /// ```
+    /// peak ≈ byteBudget + (in-flight requests × assembled-prefix size)
+    /// ```
+    ///
+    /// ...and chunk residency competes with MLX's own GPU buffer cache
+    /// (`MLX.Memory.cacheLimit`, which itself defaults to the FULL memory
+    /// limit) and the model weights themselves for the SAME physical
+    /// unified-memory pool. The default budget
+    /// (`PromptCache.defaultByteBudget()`) derives from MLX's reported GPU
+    /// working-set size (`MLX.GPU.maxRecommendedWorkingSetBytes()`,
+    /// backed by Metal's `recommendedMaxWorkingSetSize`) but claims only a
+    /// quarter of it (`PromptCache.unifiedMemoryBudgetFraction`) --
+    /// falling back to a fixed 2 GiB (`PromptCache.fallbackDefaultByteBudget`)
+    /// when MLX can't report a working-set size -- so there is explicit
+    /// headroom left over for model weights, MLX's own GPU cache, and
+    /// assembly copies. Callers running with many concurrent in-flight
+    /// requests, very large assembled prefixes, or a large
+    /// `Memory.cacheLimit` should pass a smaller explicit budget here.
+    ///
+    /// - Parameter bytes: The requested total byte budget across every
+    ///   model's stored chunks; clamped up to `1`.
+    public static func setPromptCacheByteBudget(_ bytes: Int) async {
+        await promptCache.setByteBudget(bytes)
+    }
+
     /// Drops this model from the shared cache, freeing the GPU memory held by its
     /// weights. A subsequent `respond()`/`preload()` triggers a fresh load
     /// (reusing the on-disk snapshot if the model was previously downloaded).

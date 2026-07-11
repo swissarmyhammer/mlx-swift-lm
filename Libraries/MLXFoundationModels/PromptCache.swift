@@ -45,13 +45,23 @@ import MLXLMCommon
 /// non-contiguous input -- assembly pays that copy cost once, up front,
 /// rather than repeatedly inside the hot generation loop.
 ///
-/// KNOWN WINDOW: as of this cutover, the chunk store has NO capacity bound
-/// -- it grows without eviction until a later task (kanban `2sdt6dj`) adds
-/// byte-budget LRU eviction. Acceptable on this branch because chunking
-/// itself already bounds memory better than the old slot pool did (a
-/// shared prefix is stored once, not once per conversation), but a
-/// long-running process serving many distinct prompts will still grow
-/// ``chunkStore`` unboundedly until that follow-up lands.
+/// CAPACITY: the chunk store is bounded by a GLOBAL byte budget shared
+/// across every cached model (``byteBudget``), not a per-model budget --
+/// see that property's doc comment for why a single shared pool is the
+/// right scope for a process serving multiple models. Every
+/// ``insert(modelID:chunks:)`` that pushes the store's accounted total
+/// (``totalStoredBytes``) over budget runs ``evictToBudget()``, which
+/// evicts the globally least-recently-used chunk -- and, transitively,
+/// every chunk chained under it (``evictChunkAndDescendants(modelID:key:)``)
+/// -- until the store is back under budget. Transitive eviction is
+/// deliberate: evicting a chunk orphans its descendants (a future
+/// ``lookupLongestPrefix(modelID:newTokens:chunkSize:)`` walk can never
+/// reach past a missing parent), and this actor reclaims that orphaned
+/// lineage's bytes immediately rather than leaving dead weight in the
+/// store for a later sweep. See
+/// `MLXLanguageModel.setPromptCacheByteBudget(_:)` for the public API and
+/// the full peak-memory model the budget participates in (kanban
+/// `2sdt6dj`).
 ///
 /// Mirrors `ModelCache`'s per-model-actor-cache pattern in
 /// `MLXLanguageModel.swift` otherwise: a private actor, instantiated once
@@ -80,6 +90,108 @@ actor PromptCache {
     /// (see this actor's own doc comment). See ``insert(modelID:chunks:)``
     /// for dedup semantics.
     private var chunkStore: [String: [ChunkKey: StoredChunk]] = [:]
+
+    /// Total bytes currently accounted across EVERY model's chunk store
+    /// (``StoredChunk/byteSize``, summed) -- a single, process-global count
+    /// rather than one per model. See ``byteBudget``'s doc comment for why
+    /// this actor treats the byte budget (and therefore this total) as
+    /// shared across every model it caches, not scoped per model.
+    ///
+    /// Maintained incrementally (incremented on a genuinely NEW key in
+    /// ``insert(modelID:chunks:)``, decremented in
+    /// ``evictChunkAndDescendants(modelID:key:)``/``remove(modelID:)``/
+    /// ``evictAll()``) rather than recomputed by scanning `chunkStore`, so
+    /// checking it against ``byteBudget`` after every insert is O(1).
+    private var totalStoredBytes = 0
+
+    /// The total byte budget every cached model's stored chunks share,
+    /// enforced by ``evictToBudget()`` after every
+    /// ``insert(modelID:chunks:)``.
+    ///
+    /// GLOBAL across models (not per-model) by design: every model this
+    /// actor caches competes for the SAME physical unified-memory pool (see
+    /// `MLXLanguageModel.setPromptCacheByteBudget(_:)`'s peak-memory model),
+    /// and this is a single-process cache that may hold multiple models at
+    /// once (``chunkStore``'s doc comment). A per-model split would either
+    /// have to be decided up front -- starving whichever model isn't
+    /// currently busy while wasting headroom on one nobody has touched in a
+    /// while -- or reduce back to a global figure anyway to reason about
+    /// real memory pressure. A single shared budget instead lets whichever
+    /// model is actively serving requests claim more of the pool, with
+    /// `lastUsed`-driven LRU naturally reclaiming from cold models first.
+    ///
+    /// Changed only through ``setByteBudget(_:)`` (reached publicly via
+    /// `MLXLanguageModel.setPromptCacheByteBudget(_:)`), which re-runs
+    /// ``evictToBudget()`` immediately in case the new value is smaller
+    /// than what's currently stored. ``setByteBudget(_:)`` clamps only up
+    /// to `1` (mirroring ``setChunkSize(_:)``'s own `max(1, size)`
+    /// pattern) -- a caller EXPLICITLY requesting a small budget (a
+    /// memory-constrained embedded scenario, or a test asserting eviction
+    /// behavior under tight pressure) is trusted to mean it. The larger
+    /// ``minimumByteBudget`` floor applies only to the UNCONFIGURED
+    /// default (``defaultByteBudget()``), not to an explicit caller value.
+    private var byteBudget = PromptCache.defaultByteBudget()
+
+    /// Floor applied only to the DERIVED/fallback default
+    /// (``defaultByteBudget()``), never to an explicit caller-supplied
+    /// value passed to ``setByteBudget(_:)`` (which clamps only up to `1`
+    /// -- see ``byteBudget``'s doc comment for why those two floors
+    /// differ).
+    ///
+    /// A single stored chunk's real byte footprint is a function of the
+    /// model's layer count, per-layer head/embedding dimensions, and this
+    /// actor's own `chunkSize` -- none of which this actor can inspect in
+    /// the abstract (it caches chunks for whatever models happen to load),
+    /// so this is a conservative, hand-picked floor rather than a computed
+    /// "exactly one chunk" size: 16 MiB comfortably holds many chunks'
+    /// worth of KV state for typical small-to-mid model configurations, so
+    /// an UNCONFIGURED budget clamped to this floor is never reasonably a
+    /// single-chunk-or-less budget in practice -- avoiding a pathological
+    /// default (e.g. a broken working-set query returning near-zero) that
+    /// would otherwise evict every chunk on every insert.
+    static let minimumByteBudget = 16 * 1_024 * 1_024
+
+    /// Fixed fallback default byte budget when MLX cannot report a device
+    /// working-set size (see ``defaultByteBudget()``) -- 2 GiB, a size that
+    /// comfortably holds many chunks' worth of KV state across typical
+    /// small-to-mid model configurations without assuming any particular
+    /// device's actual capacity.
+    static let fallbackDefaultByteBudget = 2 * 1_024 * 1_024 * 1_024
+
+    /// Fraction of the device's reported GPU working-set size (see
+    /// ``defaultByteBudget()``) this store claims by default.
+    ///
+    /// Deliberately well under `1.0`: the SAME unified-memory pool this
+    /// fraction is drawn from also has to hold the model's own weights
+    /// (typically the largest fixed consumer), MLX's own GPU buffer cache
+    /// (`Memory.cacheLimit`, which itself defaults to the FULL memory
+    /// limit -- see `MLX.Memory.cacheLimit`'s doc comment), and one
+    /// assembled prefix copy PER IN-FLIGHT request
+    /// (``assemble(chunks:layerCount:)``). Reserving only a quarter of the
+    /// working set for the persistent chunk store leaves the remaining
+    /// three quarters as headroom for those other consumers -- see
+    /// `MLXLanguageModel.setPromptCacheByteBudget(_:)`'s doc comment for
+    /// the full peak-memory model this trades against.
+    static let unifiedMemoryBudgetFraction = 0.25
+
+    /// Derives this actor's default byte budget from MLX's reported GPU
+    /// working-set size (``MLX/GPU/maxRecommendedWorkingSetBytes()``,
+    /// backed by Metal's `recommendedMaxWorkingSetSize`) when available,
+    /// scaled by ``unifiedMemoryBudgetFraction`` to leave headroom for
+    /// model weights, MLX's own GPU buffer cache, and assembled-prefix
+    /// copies (see that constant's doc comment). Falls back to
+    /// ``fallbackDefaultByteBudget`` when MLX reports no usable working-set
+    /// size (e.g. no GPU device). Either way, the result is clamped up to
+    /// ``minimumByteBudget``.
+    ///
+    /// - Returns: The derived (or fallback) default byte budget.
+    static func defaultByteBudget() -> Int {
+        guard let workingSet = MLX.GPU.maxRecommendedWorkingSetBytes(), workingSet > 0 else {
+            return max(minimumByteBudget, fallbackDefaultByteBudget)
+        }
+        let derived = Int(Double(workingSet) * unifiedMemoryBudgetFraction)
+        return max(minimumByteBudget, derived)
+    }
 
     /// Monotonic source for `StoredChunk.lastUsed`. Actor isolation
     /// serializes every read/increment, so this is a strict per-call
@@ -283,12 +395,35 @@ actor PromptCache {
     /// `ModelCache.evictAll`.
     func evictAll() {
         chunkStore.removeAll()
+        totalStoredBytes = 0
     }
 
     /// Drops one model's remembered chunk store. Mirrors
     /// `ModelCache.remove`.
     func remove(modelID: String) {
-        chunkStore.removeValue(forKey: modelID)
+        guard let removed = chunkStore.removeValue(forKey: modelID) else { return }
+        totalStoredBytes -= removed.values.reduce(0) { $0 + $1.byteSize }
+    }
+
+    /// Reconfigures this actor's total byte budget across EVERY model's
+    /// stored chunks (see ``byteBudget``'s doc comment for the GLOBAL-scope
+    /// rationale), clamping non-positive requests up to `1` -- the same
+    /// `max(1, _)` pattern ``setChunkSize(_:)`` uses. Unlike
+    /// ``defaultByteBudget()``'s ``minimumByteBudget`` floor, an explicit
+    /// caller value is trusted as-is above `1`: a caller asking for a tiny
+    /// budget means it (a memory-constrained scenario, or a test asserting
+    /// eviction behavior under tight pressure), and clamping it up to a
+    /// multi-megabyte floor would silently defeat that intent.
+    ///
+    /// Immediately runs ``evictToBudget()`` in case the new value is
+    /// smaller than what's currently stored -- a caller lowering the
+    /// budget expects eviction to happen right away, not lazily deferred
+    /// to the next `insert(modelID:chunks:)`.
+    ///
+    /// - Parameter bytes: The requested total byte budget; clamped up to `1`.
+    func setByteBudget(_ bytes: Int) {
+        byteBudget = max(1, bytes)
+        evictToBudget()
     }
 
     /// Reconfigures this actor's chunk span for every future `resolve()`/
@@ -347,14 +482,23 @@ actor PromptCache {
     func insert(modelID: String, chunks: [StoredChunk]) {
         var models = chunkStore[modelID] ?? [:]
         for chunk in chunks {
-            // `entry` binds to the EXISTING stored chunk when its key is
-            // already present (dedup: only `lastUsed` changes, tensors
-            // untouched), or to the new `chunk` parameter when absent.
-            var entry = models[chunk.chunkKey] ?? chunk
-            entry.lastUsed = nextRecency()
-            models[chunk.chunkKey] = entry
+            if var entry = models[chunk.chunkKey] {
+                // Dedup hit: only `lastUsed` changes, tensors untouched --
+                // and `totalStoredBytes` is unaffected, since this key's
+                // bytes are already accounted.
+                entry.lastUsed = nextRecency()
+                models[chunk.chunkKey] = entry
+            } else {
+                // Genuinely new key: store it fresh, stamped with the
+                // current recency, and account its bytes.
+                var entry = chunk
+                entry.lastUsed = nextRecency()
+                models[chunk.chunkKey] = entry
+                totalStoredBytes += entry.byteSize
+            }
         }
         chunkStore[modelID] = models
+        evictToBudget()
     }
 
     /// Walks `modelID`'s chunk hash chain from the root over chunk-aligned
@@ -427,6 +571,93 @@ actor PromptCache {
     /// private storage shape.
     func chunkCount(modelID: String) -> Int {
         chunkStore[modelID]?.count ?? 0
+    }
+
+    /// Total bytes currently accounted across every model's chunk store --
+    /// exposes byte-budget bookkeeping for tests without leaking the
+    /// actor's private storage shape (mirrors ``chunkCount(modelID:)``).
+    func totalStoredByteCount() -> Int {
+        totalStoredBytes
+    }
+
+    /// This actor's currently configured byte budget -- test seam mirroring
+    /// ``chunkCount(modelID:)``/``totalStoredByteCount()``.
+    func currentByteBudget() -> Int {
+        byteBudget
+    }
+
+    // MARK: - Byte-budget LRU eviction
+
+    /// The globally least-recently-used chunk across EVERY model's store --
+    /// the eviction candidate ``evictToBudget()`` removes first -- or `nil`
+    /// when every model's store is empty.
+    ///
+    /// Scans every model's `lastUsed` directly rather than maintaining a
+    /// separate ordered LRU index: eviction only runs when an insert pushes
+    /// ``totalStoredBytes`` over ``byteBudget``, and even a long-running
+    /// process's chunk store stays small relative to a linear scan's cost
+    /// (bounded by how many distinct token-prefix chunks are actually
+    /// resident, not by request volume).
+    ///
+    /// - Returns: The model id and chunk key of the globally
+    ///   least-recently-used chunk, or `nil` when every model's store is empty.
+    private func globalLRUChunk() -> (modelID: String, key: ChunkKey)? {
+        var best: (modelID: String, key: ChunkKey, lastUsed: Int)?
+        for (modelID, chunks) in chunkStore {
+            for (key, chunk) in chunks {
+                if best == nil || chunk.lastUsed < best!.lastUsed {
+                    best = (modelID, key, chunk.lastUsed)
+                }
+            }
+        }
+        return best.map { (modelID: $0.modelID, key: $0.key) }
+    }
+
+    /// Removes `key` from `modelID`'s store, reclaiming its bytes, then
+    /// recursively evicts every chunk chained under it (any chunk whose
+    /// `parentKey == key`) so a lineage's WHOLE byte footprint is reclaimed
+    /// in one pass -- not just the directly-evicted chunk's own bytes.
+    ///
+    /// ORPHAN-RECLAMATION STRATEGY: evicting a chunk always orphans its
+    /// chain descendants -- ``lookupLongestPrefix(modelID:newTokens:chunkSize:)``
+    /// already stops its walk at the first missing parent, so a descendant
+    /// whose ancestor is gone is unreachable from any future lookup, even
+    /// though it's still sitting in `chunkStore` taking up bytes. This
+    /// actor reclaims that whole orphaned lineage TRANSITIVELY, right here,
+    /// rather than leaving orphans in the store for a later lazy sweep: a
+    /// lazy sweep would need its own pass to find unreachable chunks (no
+    /// cheaper than this recursive walk) while leaving ``totalStoredBytes``
+    /// overcounting reachable-only memory in the meantime -- which would
+    /// let ``evictToBudget()`` under-evict, stopping as soon as the RAW
+    /// total dropped under budget even though part of that total is
+    /// orphaned dead weight that can never be reached again.
+    ///
+    /// - Parameters:
+    ///   - modelID: The model whose store to evict from.
+    ///   - key: The chunk key to remove, along with everything chained under it.
+    private func evictChunkAndDescendants(modelID: String, key: ChunkKey) {
+        guard var models = chunkStore[modelID], let evicted = models.removeValue(forKey: key)
+        else { return }
+        totalStoredBytes -= evicted.byteSize
+        let childKeys = models.filter { $0.value.parentKey == key }.map(\.key)
+        chunkStore[modelID] = models
+        for childKey in childKeys {
+            evictChunkAndDescendants(modelID: modelID, key: childKey)
+        }
+    }
+
+    /// Evicts the globally least-recently-used chunk -- and, transitively,
+    /// its whole lineage (``evictChunkAndDescendants(modelID:key:)``) --
+    /// repeatedly until ``totalStoredBytes`` is at or under ``byteBudget``,
+    /// or every model's store is empty.
+    ///
+    /// Called after every ``insert(modelID:chunks:)`` and from
+    /// ``setByteBudget(_:)`` whenever the budget shrinks below what's
+    /// currently stored.
+    private func evictToBudget() {
+        while totalStoredBytes > byteBudget, let victim = globalLRUChunk() {
+            evictChunkAndDescendants(modelID: victim.modelID, key: victim.key)
+        }
     }
 
     /// Builds a fresh, PRIVATE `[KVCache]` stack from `chunks` (the result of
