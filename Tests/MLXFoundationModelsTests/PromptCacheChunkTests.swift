@@ -356,6 +356,110 @@ struct PromptCacheChunkTests {
             #expect(chunk.byteSize == expectedTotal)
         }
     }
+
+    // MARK: - Configurable chunk size (kanban bbda7xg)
+
+    /// Store/resolve round-trips at a configured chunk size using MORE than
+    /// `2 * chunkSize` tokens, then asserts ACTUAL reuse on a second resolve
+    /// of an extension of that prompt: `tokensToFeed` must be strictly
+    /// smaller than the full extended prompt. A > 2×chunkSize token count
+    /// guarantees at least two full chunks are sliced and stored (never a
+    /// vacuous zero-chunks-stored pass), and the extension shares every
+    /// stored chunk's exact token content, so a correct implementation must
+    /// reuse them.
+    @Test(
+        "store/resolve round-trips with actual reuse at a configured chunk size",
+        arguments: [1, 64, 256]
+    )
+    func configurableChunkSizeRoundTripsWithReuse(chunkSize: Int) async {
+        let cache = PromptCache()
+        await cache.setChunkSize(chunkSize)
+        let modelID = "chunk-size-roundtrip-\(chunkSize)-\(UUID().uuidString)"
+        let model = PromptCacheProbeModel()
+        let tokenCount = 2 * chunkSize + 7
+        let tokens = Array(0 ..< tokenCount)
+
+        await cache.store(
+            modelID: modelID, tokens: tokens,
+            cache: SendableBox([makeCache(tokenCount: tokenCount)]))
+
+        let storedChunkCount = await cache.chunkCount(modelID: modelID)
+        #expect(
+            storedChunkCount > 0,
+            "chunkSize \(chunkSize): expected at least one chunk actually stored, ruling out a vacuous pass"
+        )
+
+        let extensionTokens = tokens + Array(90_000 ..< 90_005)
+        let resolved = await resolveOnce(
+            cache: cache, modelID: modelID, newTokens: extensionTokens, model: model)
+
+        #expect(
+            resolved.tokensToFeed.count < extensionTokens.count,
+            "chunkSize \(chunkSize): expected actual reuse -- tokensToFeed must be strictly smaller than the full prompt"
+        )
+    }
+
+    @Test("setChunkSize to a new value evicts all stored chunks")
+    func setChunkSizeToNewValueEvictsStore() async {
+        let cache = PromptCache()
+        let modelID = "chunk-size-change-evicts-\(UUID().uuidString)"
+        let chunkSize = 8
+        let tokens = Array(0 ..< (chunkSize * 3))
+
+        await cache.setChunkSize(chunkSize)
+        await cache.store(
+            modelID: modelID, tokens: tokens,
+            cache: SendableBox([makeCache(tokenCount: tokens.count)]))
+        #expect(await cache.chunkCount(modelID: modelID) > 0)
+
+        await cache.setChunkSize(chunkSize * 2)
+
+        #expect(
+            await cache.chunkCount(modelID: modelID) == 0,
+            "changing chunkSize to a genuinely different value must evict all stored chunks")
+    }
+
+    @Test("setChunkSize to the SAME (already-clamped) value does not evict stored chunks")
+    func setChunkSizeToSameValueDoesNotEvict() async {
+        let cache = PromptCache()
+        let modelID = "chunk-size-same-no-evict-\(UUID().uuidString)"
+        let chunkSize = 8
+        let tokens = Array(0 ..< (chunkSize * 3))
+
+        await cache.setChunkSize(chunkSize)
+        await cache.store(
+            modelID: modelID, tokens: tokens,
+            cache: SendableBox([makeCache(tokenCount: tokens.count)]))
+        let countBefore = await cache.chunkCount(modelID: modelID)
+        #expect(countBefore > 0)
+
+        await cache.setChunkSize(chunkSize)
+
+        #expect(
+            await cache.chunkCount(modelID: modelID) == countBefore,
+            "setting the same chunkSize again must not evict stored chunks")
+    }
+
+    @Test("setChunkSize clamps non-positive requests up to 1", arguments: [0, -3])
+    func setChunkSizeClampsNonPositiveToOne(requested: Int) async {
+        let cache = PromptCache()
+        let modelID = "chunk-size-clamp-\(requested)-\(UUID().uuidString)"
+
+        await cache.setChunkSize(requested)
+
+        // A clamped chunkSize of 1 chunks every single token -- store 3
+        // tokens and expect exactly 3 stored chunks, proving the effective
+        // chunkSize is 1, not `requested` (0 or negative, which would slice
+        // zero or crash on division by zero).
+        let tokens = Array(0 ..< 3)
+        await cache.store(
+            modelID: modelID, tokens: tokens,
+            cache: SendableBox([makeCache(tokenCount: tokens.count)]))
+
+        #expect(
+            await cache.chunkCount(modelID: modelID) == 3,
+            "requested chunkSize \(requested) must clamp to 1, chunking every token individually")
+    }
 }
 
 #endif

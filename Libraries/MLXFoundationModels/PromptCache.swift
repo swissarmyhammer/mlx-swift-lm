@@ -60,16 +60,19 @@ import MLXLMCommon
 actor PromptCache {
 
     /// Default token span each stored chunk covers (see `sliceChunks`/
-    /// `lookupLongestPrefix`). Not yet configurable: an actor-isolated
-    /// `chunkSize` property plus `setChunkSize(_:)` (which must
-    /// `evictAll()` on a genuine change, since changing the span makes
-    /// every existing chunk's hash-chain key meaningless) is a follow-up
-    /// task (kanban `bbda7xg`) -- `resolve`/`store` reference this
-    /// constant directly until then. 64 balances fork-point granularity
-    /// (how finely two conversations sharing a prefix can diverge and
-    /// still share chunks) against per-chunk bookkeeping overhead and
-    /// hash-chain walk length.
+    /// `lookupLongestPrefix`) -- the initial value of this actor's
+    /// `chunkSize` property, until `setChunkSize(_:)` changes it. 64
+    /// balances fork-point granularity (how finely two conversations
+    /// sharing a prefix can diverge and still share chunks) against
+    /// per-chunk bookkeeping overhead and hash-chain walk length.
     static let defaultChunkSize = 64
+
+    /// This actor's currently configured chunk span, threaded into every
+    /// `resolve()`/`store()` call (see `lookupLongestPrefix`/`sliceChunks`'s
+    /// own `chunkSize` parameters). Changed only through `setChunkSize(_:)`,
+    /// which enforces the `>= 1` invariant and evicts the store on a
+    /// genuine change -- see that method's doc comment.
+    private var chunkSize = PromptCache.defaultChunkSize
 
     /// Per-model chunk store: each model's chunks keyed by their own
     /// ``ChunkKey`` (see `PromptCacheChunks.swift`'s hash chain) -- the
@@ -151,12 +154,12 @@ actor PromptCache {
     ) -> SendableBox<(cache: [KVCache], tokensToFeed: [Int])> {
         let model = model.consume()
         let chunks = lookupLongestPrefix(
-            modelID: modelID, newTokens: newTokens, chunkSize: Self.defaultChunkSize
+            modelID: modelID, newTokens: newTokens, chunkSize: chunkSize
         ).consume()
         guard let layerCount = chunks.first?.layers.count else {
             return SendableBox((model.newCache(parameters: parameters), newTokens))
         }
-        let matchedTokenCount = chunks.count * Self.defaultChunkSize
+        let matchedTokenCount = chunks.count * chunkSize
         let assembled = Self.assemble(chunks: chunks, layerCount: layerCount)
         return SendableBox(
             (assembled, Array(newTokens.suffix(newTokens.count - matchedTokenCount))))
@@ -271,7 +274,7 @@ actor PromptCache {
     func store(modelID: String, tokens: [Int], cache: SendableBox<[KVCache]>) {
         guard
             let chunks = Self.sliceChunks(
-                tokens: tokens, cache: cache.consume(), chunkSize: Self.defaultChunkSize)
+                tokens: tokens, cache: cache.consume(), chunkSize: chunkSize)
         else { return }
         insert(modelID: modelID, chunks: chunks)
     }
@@ -286,6 +289,41 @@ actor PromptCache {
     /// `ModelCache.remove`.
     func remove(modelID: String) {
         chunkStore.removeValue(forKey: modelID)
+    }
+
+    /// Reconfigures this actor's chunk span for every future `resolve()`/
+    /// `store()` call, clamping non-positive requests up to `1`.
+    ///
+    /// Every stored chunk's ``ChunkKey`` chains over fixed-width,
+    /// `chunkSize`-token windows (see `sliceChunks`/`lookupLongestPrefix`'s
+    /// own doc comments): a chunk keyed under one span is not a valid
+    /// chunk-aligned window under a DIFFERENT span, so a genuine change
+    /// would otherwise let `lookupLongestPrefix` walk the OLD chain against
+    /// NEW-span-aligned windows -- comparing windows that don't correspond
+    /// to any real chunk boundary, either missing every match (best case)
+    /// or, if a stale key ever collided with a new window's key by
+    /// coincidence, serving the wrong KV state entirely (worst case, the
+    /// same collision hazard `lookupLongestPrefix`'s own token compare
+    /// guards against). Rather than risk either, a genuine change
+    /// unconditionally calls ``evictAll()``, discarding every model's
+    /// stored chunks so the next `resolve()`/`store()` rebuilds from
+    /// scratch under the new span.
+    ///
+    /// Setting the SAME (already-clamped) value is a deliberate no-op past
+    /// the clamp: comparing `clamped` against the CURRENT `chunkSize`
+    /// before evicting means a caller that redundantly re-asserts the
+    /// existing span (e.g. re-reading a config value on every request)
+    /// does not pay a needless full-store eviction.
+    ///
+    /// - Parameter size: The requested chunk span in tokens; clamped to
+    ///   `>= 1` (a chunk spanning zero or negative tokens is meaningless
+    ///   and would divide-by-zero in `lookupLongestPrefix`'s chunk-count
+    ///   math).
+    func setChunkSize(_ size: Int) {
+        let clamped = max(1, size)
+        guard clamped != chunkSize else { return }
+        chunkSize = clamped
+        evictAll()
     }
 
     // MARK: - Chunk store

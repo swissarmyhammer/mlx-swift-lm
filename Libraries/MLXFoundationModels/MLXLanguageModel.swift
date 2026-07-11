@@ -648,6 +648,32 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         await promptCache.evictAll()
     }
 
+    /// Reconfigures the shared prompt cache's chunk span for every model,
+    /// clamping non-positive requests up to `1` (see `PromptCache.setChunkSize`).
+    ///
+    /// A chunk's hash-chain key is only valid for the span it was sliced
+    /// under, so a genuine change to `size` evicts every model's stored
+    /// chunks -- the next `resolvePromptCache` rebuilds from scratch.
+    /// Setting the SAME (already-clamped) span again is a no-op: nothing is
+    /// evicted.
+    ///
+    /// Trade-off: a SMALLER chunk size gives finer fork-point granularity --
+    /// two conversations sharing a prefix can diverge, and still share
+    /// cached state up to that point, at a shorter interval -- at the cost
+    /// of more per-chunk bookkeeping and a longer hash-chain walk on every
+    /// lookup. A LARGER chunk size shares more coarsely (a shared prefix
+    /// must run the full span before it counts as reusable) but keeps
+    /// bookkeeping and walk length down. Either way, the tail of a prompt
+    /// past the last chunk boundary always re-prefills in full
+    /// (`lookupLongestPrefix` only ever matches whole chunk-aligned
+    /// windows), so the worst-case EXTRA prefill work a larger span
+    /// introduces is bounded by `chunkSize - 1` tokens.
+    ///
+    /// - Parameter size: The requested chunk span in tokens; clamped to `>= 1`.
+    public static func setPromptCacheChunkSize(_ size: Int) async {
+        await promptCache.setChunkSize(size)
+    }
+
     /// Drops this model from the shared cache, freeing the GPU memory held by its
     /// weights. A subsequent `respond()`/`preload()` triggers a fresh load
     /// (reusing the on-disk snapshot if the model was previously downloaded).
