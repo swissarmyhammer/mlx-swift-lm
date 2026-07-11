@@ -56,6 +56,30 @@ struct PromptCacheReconciliationTests {
         #expect(trusted == [10, 11, 12])
     }
 
+    @Test(
+        """
+        a round that generated a SINGLE token which was itself the EOS/stop token \
+        (decoding to empty text, so re-encoding yields zero tokens) is trusted as an \
+        empty array rather than rejected
+        """
+    )
+    func pureEOSSingleTokenRoundReencodesToEmptyAndIsTrustedAsIs() {
+        // actualGeneratedCount: 1 means the cache's real offset advanced by
+        // exactly one token this round, and that one token was the
+        // EOS/stop token itself -- it decodes to no text at all, so
+        // `emittedText` is empty and re-encoding it yields zero tokens.
+        // `commitPromptCache(...generatedTokenIDs:)`'s own
+        // `guard !generatedTokenIDs.isEmpty else { return }` then leaves
+        // any prior stored cache entry untouched rather than storing or
+        // removing anything for this round -- there is nothing new to
+        // add, but (unlike the old `nil`-triggered `removePromptCache`)
+        // a previously valid cache entry from an earlier round is no
+        // longer needlessly destroyed by this round's edge case.
+        let trusted = PromptCache.reconcileGeneratedTokens(
+            reencoded: [], actualGeneratedCount: 1)
+        #expect(trusted == [])
+    }
+
     // The four tests above exercise `reconcileGeneratedTokens` with hand-picked
     // integer literals. The two below instead drive it with token IDs a real
     // `Tokenizer` conformance actually produced from a realistic decoded model

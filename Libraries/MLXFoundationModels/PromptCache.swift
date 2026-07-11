@@ -376,6 +376,22 @@ actor PromptCache {
     /// `trimAndVerify` -- so this function doesn't need to trim anything
     /// itself, it only needs to stop rejecting the reconstruction.
     ///
+    /// This trusts the SHORTFALL is the trailing EOS position by count
+    /// alone, not by verifying content -- a false positive (some other,
+    /// non-EOS cause of a one-token-short re-encoding) would store a
+    /// `trustedTokens` array that doesn't actually match the real token
+    /// IDs the trimmed cache's tensors were produced from. That is caught
+    /// downstream rather than left as silent corruption:
+    /// `lookupLongestPrefix`'s and `lookupTailMatch`'s collision-safety
+    /// checks (`chunk.tokens == window`, longest-common-prefix) always
+    /// re-verify stored token content against a fresh, independent
+    /// re-tokenization of the full transcript before ever reusing a
+    /// chunk, so a wrongly-guessed entry simply stops matching at that
+    /// boundary next round (a cache-reuse miss, i.e. falls back to
+    /// rebuilding from there) rather than serving mismatched KV state --
+    /// the same protection the existing `actualGeneratedCount + 1` case
+    /// above already relies on.
+    ///
     /// Any other mismatch is untrustworthy.
     ///
     /// - Parameters:
