@@ -152,4 +152,50 @@ func cacheIdentity(resolved: (cache: [KVCache], tokensToFeed: [Int])) -> ObjectI
     ObjectIdentifier(resolved.cache[0] as AnyObject)
 }
 
+/// Reaches PAST the Swift `MLXArray` wrapper to the actual underlying
+/// C++ buffer address, via the public ``MLXArray/asData(access:)`` API's
+/// ``MLXArray/AccessMethod/noCopy`` mode -- which wraps
+/// `mlx_array_data_uint8(ctx)`'s pointer directly, with no copy (see
+/// `MLXArray+Bytes.swift` in the vendored `mlx-swift` package).
+///
+/// This is NOT the same thing `ObjectIdentifier` comparison checks:
+/// `MLXArray.concatenated(...)` always constructs a brand-new Swift
+/// wrapper object for its result, regardless of whether the underlying
+/// MLX C++ buffer is shared with an input -- so comparing
+/// `ObjectIdentifier`s can never distinguish "genuinely fresh buffer"
+/// from "same C++ buffer, new Swift wrapper" (confirmed empirically: a
+/// prior version of `PromptCacheAssembleTests` compared `ObjectIdentifier`s
+/// and passed even with `ownedCopy(of:)` temporarily removed from
+/// `assemble`'s single-chunk path). Comparing raw buffer addresses closes
+/// that gap: two arrays with the SAME address are backed by the identical
+/// C++ buffer no matter how many distinct Swift wrapper objects point at it.
+///
+/// Shared by `PromptCacheAssembleTests` (single-chunk `assemble()`
+/// buffer-ownership proof) and `PromptCacheMultiSessionTests` (concurrent-
+/// session buffer isolation proof) -- both need the same past-the-wrapper
+/// check, so this lives here rather than as a per-file private duplicate.
+///
+/// - Parameter array: The array whose underlying buffer address to read.
+/// - Returns: The raw base address of `array`'s backing C++ buffer, or
+///   `nil` if the buffer is empty.
+func rawBufferAddress(of array: MLXArray) -> UInt? {
+    array.asData(access: .noCopy).data.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
+}
+
+/// Writes directly into `array`'s underlying buffer, in place, at its
+/// first raw byte -- bypasses MLX's functional update path (and
+/// `KVCacheSimple.update()`'s functional replace) entirely, reaching
+/// through ``MLXArray/asData(access:)``'s ``MLXArray/AccessMethod/noCopy``
+/// mode -- which wraps the actual backing pointer with no copy -- and
+/// writing through it directly, so any OTHER array that genuinely shares
+/// this same underlying buffer would observe the change.
+///
+/// - Parameter array: The array to mutate in place.
+func mutateFirstElementInPlace(of array: MLXArray) {
+    array.asData(access: .noCopy).data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+        UnsafeMutableRawPointer(mutating: raw.baseAddress!)
+            .storeBytes(of: Int32(-1), as: Int32.self)
+    }
+}
+
 #endif

@@ -247,43 +247,6 @@ struct PromptCacheAssembleTests {
         #expect((firstSimple.state[1] .== secondSimple.state[1]).all().item())
     }
 
-    /// Reaches PAST the Swift `MLXArray` wrapper to the actual underlying
-    /// C++ buffer address, via the public ``MLXArray/asData(access:)`` API's
-    /// ``MLXArray/AccessMethod/noCopy`` mode -- which wraps
-    /// `mlx_array_data_uint8(ctx)`'s pointer directly, with no copy (see
-    /// `MLXArray+Bytes.swift` in the vendored `mlx-swift` package).
-    ///
-    /// This is NOT the same thing `ObjectIdentifier` comparison checks:
-    /// `MLXArray.concatenated(...)` always constructs a brand-new Swift
-    /// wrapper object for its result, regardless of whether the underlying
-    /// MLX C++ buffer is shared with an input -- so comparing
-    /// `ObjectIdentifier`s can never distinguish "genuinely fresh buffer"
-    /// from "same C++ buffer, new Swift wrapper" (confirmed empirically: a
-    /// prior version of this test compared `ObjectIdentifier`s and passed
-    /// even with `ownedCopy(of:)` temporarily removed from `assemble`'s
-    /// single-chunk path). Comparing raw buffer addresses closes that gap:
-    /// two arrays with the SAME address are backed by the identical C++
-    /// buffer no matter how many distinct Swift wrapper objects point at it.
-    private func rawBufferAddress(of array: MLXArray) -> UInt? {
-        array.asData(access: .noCopy).data.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
-    }
-
-    /// Writes directly into `array`'s underlying buffer, in place, at its
-    /// first raw byte -- bypasses MLX's functional update path entirely.
-    /// Unlike `liveKeys[...] = zeros` (the prior version of this test's
-    /// approach), which builds a NEW array via a functional/scatter-style
-    /// update and never touches the original buffer in place, this reaches
-    /// through ``MLXArray/asData(access:)``'s ``MLXArray/AccessMethod/noCopy``
-    /// mode -- which wraps the actual backing pointer with no copy -- and
-    /// writes through it directly, so any OTHER array that genuinely shares
-    /// this same underlying buffer would observe the change.
-    private func mutateFirstElementInPlace(of array: MLXArray) {
-        array.asData(access: .noCopy).data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            UnsafeMutableRawPointer(mutating: raw.baseAddress!)
-                .storeBytes(of: Int32(-1), as: Int32.self)
-        }
-    }
-
     /// Regression test for a real MLX behavior discovered during
     /// implementation: `mlx::core::concatenate` special-cases a SINGLE input
     /// array by returning that exact array unchanged (`if (arrays.size() == 1)

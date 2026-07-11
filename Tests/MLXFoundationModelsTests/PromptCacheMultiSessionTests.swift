@@ -332,39 +332,11 @@ struct PromptCacheMultiSessionTests {
 
     // MARK: - 3. Concurrent isolation
 
-    /// Reaches PAST the Swift `MLXArray` wrapper to the actual underlying
-    /// C++ buffer address, exactly mirroring `PromptCacheAssembleTests`'s
-    /// own helper of the same shape. `ObjectIdentifier`/`.==` comparison
-    /// alone cannot distinguish "genuinely fresh buffer" from "same C++
-    /// buffer, new Swift wrapper" -- and neither can `KVCacheSimple
-    /// .update()`: its reset path always CONSTRUCTS a brand-new
-    /// concatenated array and reassigns `self.keys`/`self.values` to it (a
-    /// functional replace, never an in-place mutation), so calling
-    /// `update()` on one session's cache could never, by itself, prove the
-    /// underlying buffer wasn't aliased with another session's -- it would
-    /// "pass" this test even if `assemble()` handed back a stored chunk's
-    /// own buffer by reference. Reading through `asData(access: .noCopy)`
-    /// and writing through the raw pointer closes that gap.
-    ///
-    /// - Parameter array: The array whose underlying buffer address to read.
-    /// - Returns: The raw base address of `array`'s backing C++ buffer, or
-    ///   `nil` if the buffer is empty.
-    private func rawBufferAddress(of array: MLXArray) -> UInt? {
-        array.asData(access: .noCopy).data.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
-    }
-
-    /// Writes directly into `array`'s underlying buffer, in place, at its
-    /// first raw byte -- bypasses `KVCacheSimple.update()`'s functional
-    /// replace path entirely, so any OTHER array that genuinely shares this
-    /// same underlying buffer would observe the change.
-    ///
-    /// - Parameter array: The array to mutate in place.
-    private func mutateFirstElementInPlace(of array: MLXArray) {
-        array.asData(access: .noCopy).data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            UnsafeMutableRawPointer(mutating: raw.baseAddress!)
-                .storeBytes(of: Int32(-1), as: Int32.self)
-        }
-    }
+    // `rawBufferAddress(of:)` and `mutateFirstElementInPlace(of:)` -- the
+    // past-the-Swift-wrapper buffer-address read and raw in-place write used
+    // below -- live in the shared `PromptCacheTestSupport.swift` (also used
+    // by `PromptCacheAssembleTests`'s single-chunk buffer-ownership proof)
+    // rather than as a per-file private duplicate.
 
     @Test(
         """
