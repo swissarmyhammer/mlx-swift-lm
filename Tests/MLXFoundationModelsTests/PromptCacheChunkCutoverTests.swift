@@ -44,23 +44,6 @@ struct PromptCacheChunkCutoverTests {
         _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     }
 
-    // MARK: - Fixtures
-
-    /// A fully-packed `KVCacheSimple` layer covering exactly `tokenCount`
-    /// sequence positions, mirroring `PromptCacheChunkTests.makeCache`:
-    /// setting `state` directly (rather than via `update(keys:values:)`)
-    /// leaves `offset == keys.dim(2) == tokenCount` exactly, the "verified"
-    /// shape `sliceChunks` (and therefore `store()`) requires.
-    private func makeCache(tokenCount: Int, headDim: Int = 4) -> KVCacheSimple {
-        let cache = KVCacheSimple()
-        let count = tokenCount * headDim
-        let keys = MLXArray(Int32(0) ..< Int32(count), [1, 1, tokenCount, headDim])
-        let values = MLXArray(
-            Int32(10_000) ..< Int32(10_000 + count), [1, 1, tokenCount, headDim])
-        cache.state = [keys, values]
-        return cache
-    }
-
     // MARK: - Extension turn / no-checkout reuse
 
     @Test(
@@ -78,7 +61,7 @@ struct PromptCacheChunkCutoverTests {
 
         await cache.store(
             modelID: modelID, tokens: firstTurnTokens,
-            cache: SendableBox([makeCache(tokenCount: firstTurnTokens.count)]))
+            cache: SendableBox([makeChunkableCache(tokenCount: firstTurnTokens.count)]))
 
         let extensionTokens = firstTurnTokens + Array(90_000 ..< 90_005)
         let expectedMatchedChunkCount = firstTurnTokens.count / chunkSize
@@ -113,7 +96,7 @@ struct PromptCacheChunkCutoverTests {
 
         await cache.store(
             modelID: modelID, tokens: firstTurnTokens,
-            cache: SendableBox([makeCache(tokenCount: firstTurnTokens.count)]))
+            cache: SendableBox([makeChunkableCache(tokenCount: firstTurnTokens.count)]))
 
         // Shares the first two chunks verbatim, then diverges for the rest
         // of what would have been the third chunk plus a further tail --

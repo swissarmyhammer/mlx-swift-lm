@@ -50,10 +50,12 @@ final class PromptCacheProbeModel: Module, MLXLMCommon.LanguageModel,
     /// never runs actual attention, so the specific count is otherwise arbitrary.
     var kvHeads: [Int] { [1] }
 
+    /// Protocol conformance stub; not invoked by PromptCache and will trap if called.
     func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
         fatalError("not exercised by PromptCache tests")
     }
 
+    /// Protocol conformance stub; not invoked by PromptCache and will trap if called.
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         fatalError("not exercised by PromptCache tests")
     }
@@ -67,6 +69,8 @@ final class PromptCacheProbeModel: Module, MLXLMCommon.LanguageModel,
 /// on its dynamic-type check alone, before ever inspecting `state`: only a
 /// verified `KVCacheSimple` layer can be sliced, so `store()` silently drops
 /// a round backed by this cache.
+///
+/// - Parameter tokenCount: How many sequence positions to position the cache's `offset` at.
 func makeUnchunkableCache(tokenCount: Int) -> RotatingKVCache {
     let cache = RotatingKVCache(maxSize: tokenCount)
     cache.offset = tokenCount
@@ -108,6 +112,13 @@ func makeChunkableCache(tokenCount: Int, headDim: Int = 4, valueOffset: Int = 0)
 /// Hides the single-use `SendableBox` plumbing (`consume()` traps on a
 /// second call, so each resolve needs a fresh box around the model and must
 /// consume the result exactly once).
+///
+/// - Parameters:
+///   - cache: The `PromptCache` actor to resolve against.
+///   - modelID: The model identity the round is stored/resolved under.
+///   - newTokens: The full prompt token sequence for this round.
+///   - model: The language model whose `newCache(parameters:)` builds a fresh `[KVCache]`
+///     when no stored prefix matches.
 func resolveOnce(
     cache: PromptCache, modelID: String, newTokens: [Int],
     model: any MLXLMCommon.LanguageModel
@@ -122,6 +133,8 @@ func resolveOnce(
 /// The probe model is single-layer (`kvHeads == [1]`), so every result
 /// carries exactly one cache. `KVCache` isn't statically class-constrained,
 /// but every conformer in this codebase is a class.
+///
+/// - Parameter resolved: A `resolve()` round's result, as returned by `resolveOnce`.
 func cacheIdentity(resolved: (cache: [KVCache], tokensToFeed: [Int])) -> ObjectIdentifier {
     ObjectIdentifier(resolved.cache[0] as AnyObject)
 }

@@ -107,7 +107,7 @@ struct PromptCacheConcurrencyTests {
         #expect(resultBoxes.count == callerCount)
         let resolved = resultBoxes.map { $0.consume() }
 
-        let identities = resolved.map { ObjectIdentifier($0.cache[0] as AnyObject) }
+        let identities = resolved.map(cacheIdentity)
         #expect(
             Set(identities).count == callerCount,
             "expected \(callerCount) distinct assembled instances, got \(Set(identities).count) -- a concurrent resolve() handed the same instance to more than one caller"
