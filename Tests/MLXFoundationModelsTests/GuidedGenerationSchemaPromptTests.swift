@@ -129,7 +129,7 @@ struct GuidedGenerationSchemaPromptTests {
     @Test("includeSchemaInPrompt == true: the seam adds nothing extra")
     func trueAddsNothingExtra() {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let messages: [Chat.Message] = [.user("Describe today's weather.")]
+        let messages: [Chat.Message] = [.user(content: "Describe today's weather.")]
 
         let result = MLXLanguageModel.Executor.guidedGenerationMessages(
             from: messages, schemaJSON: Self.schemaJSON, includeSchemaInPrompt: true)
@@ -141,7 +141,7 @@ struct GuidedGenerationSchemaPromptTests {
     @Test("includeSchemaInPrompt == false: current behavior is unchanged -- still nothing added")
     func falseAddsNothingExtra() {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let messages: [Chat.Message] = [.user("Describe today's weather.")]
+        let messages: [Chat.Message] = [.user(content: "Describe today's weather.")]
 
         let result = MLXLanguageModel.Executor.guidedGenerationMessages(
             from: messages, schemaJSON: Self.schemaJSON, includeSchemaInPrompt: false)
@@ -153,7 +153,7 @@ struct GuidedGenerationSchemaPromptTests {
     @Test("includeSchemaInPrompt == nil: same as false -- current behavior is unchanged")
     func nilAddsNothingExtra() {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let messages: [Chat.Message] = [.user("Describe today's weather.")]
+        let messages: [Chat.Message] = [.user(content: "Describe today's weather.")]
 
         let result = MLXLanguageModel.Executor.guidedGenerationMessages(
             from: messages, schemaJSON: Self.schemaJSON, includeSchemaInPrompt: nil)
@@ -175,7 +175,7 @@ struct GuidedGenerationSchemaPromptTests {
         // text itself (whatever assembled the transcript -- the framework's
         // own default prompt construction, or the developer's own manual
         // `Prompt` segments).
-        let messages: [Chat.Message] = [.user("Schema: \(Self.schemaJSON)")]
+        let messages: [Chat.Message] = [.user(content: "Schema: \(Self.schemaJSON)")]
 
         for includeSchemaInPrompt in [true, false, nil] {
             let result = MLXLanguageModel.Executor.guidedGenerationMessages(

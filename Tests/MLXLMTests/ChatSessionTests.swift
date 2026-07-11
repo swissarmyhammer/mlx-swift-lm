@@ -107,9 +107,9 @@ public class ChatSessionTests: XCTestCase {
         let session = ChatSession(model(), generateParameters: generationParameters)
 
         let result = try await session.respond(to: [
-            .user("hello"),
-            .assistant("hi"),
-            .user("hello again"),
+            .user(content: "hello"),
+            .assistant(content: "hi"),
+            .user(content: "hello again"),
         ])
         XCTAssertGreaterThan(result.count, targetLength, result)
     }
@@ -119,9 +119,9 @@ public class ChatSessionTests: XCTestCase {
 
         var result = ""
         for try await part in session.streamResponse(to: [
-            .user("hello"),
-            .assistant("hi"),
-            .user("hello again"),
+            .user(content: "hello"),
+            .assistant(content: "hi"),
+            .user(content: "hello again"),
         ]) {
             result += part
         }
@@ -136,14 +136,14 @@ public class ChatSessionTests: XCTestCase {
             messageGenerator: RecordingMessageGenerator(continuation: continuation))
         let history: [Chat.Message] = (0 ..< 8).flatMap { index in
             [
-                .user("question \(index)"),
-                .assistant("answer \(index)"),
+                .user(content: "question \(index)"),
+                .assistant(content: "answer \(index)"),
             ]
         }
         let continuations: [[Chat.Message]] = [
-            [.tool("first tool result")],
-            [.tool("second tool result")],
-            [.user("final answer")],
+            [.tool(content: "first tool result")],
+            [.tool(content: "second tool result")],
+            [.user(content: "final answer")],
         ]
         let session = ChatSession(
             model(processor: processor),
@@ -480,7 +480,7 @@ public class ChatSessionTests: XCTestCase {
 
     func testCurrentCacheNilForHistorySessionBeforeGeneration() async throws {
         // .history state should behave like .empty: no cache until first generation
-        let history: [Chat.Message] = [.user("hello"), .assistant("hi")]
+        let history: [Chat.Message] = [.user(content: "hello"), .assistant(content: "hi")]
         let session = ChatSession(
             model(), history: history, generateParameters: generationParameters)
         await session.withCache { cache in
@@ -490,7 +490,7 @@ public class ChatSessionTests: XCTestCase {
 
     func testCurrentCacheNonNilForHistorySessionAfterGeneration() async throws {
         // after generation from .history state, cache transitions to .kvcache
-        let history: [Chat.Message] = [.user("hello"), .assistant("hi")]
+        let history: [Chat.Message] = [.user(content: "hello"), .assistant(content: "hi")]
         let session = ChatSession(
             model(),
             history: history,

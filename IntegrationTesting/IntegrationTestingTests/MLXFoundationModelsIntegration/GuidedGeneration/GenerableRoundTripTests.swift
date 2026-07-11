@@ -299,7 +299,7 @@ struct GenerableRoundTripTests {
             )
 
             let userInput = UserInput(
-                chat: [.user(prompt)],
+                chat: [.user(content: prompt)],
                 processing: .init()
             )
             let input = try await context.processor.prepare(input: userInput)

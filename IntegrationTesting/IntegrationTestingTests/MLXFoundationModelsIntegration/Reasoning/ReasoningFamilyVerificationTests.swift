@@ -35,7 +35,8 @@ struct ReasoningFamilyVerificationTests {
         return try await container.perform { context in
             let input = try await context.processor.prepare(
                 input: UserInput(
-                    chat: [.user("What is 17 times 24?")], additionalContext: additionalContext)
+                    chat: [.user(content: "What is 17 times 24?")],
+                    additionalContext: additionalContext)
             )
             let tokens = input.text.tokens.asArray(Int.self)
             let tail = context.tokenizer.decode(tokenIds: Array(tokens.suffix(48)))

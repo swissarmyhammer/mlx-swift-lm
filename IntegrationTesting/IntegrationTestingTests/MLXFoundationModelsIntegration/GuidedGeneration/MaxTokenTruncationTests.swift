@@ -56,7 +56,7 @@ struct MaxTokenTruncationTests {
             )
 
             let userInput = UserInput(
-                chat: [.user("Fill in the contact form.")],
+                chat: [.user(content: "Fill in the contact form.")],
                 processing: .init()
             )
             let input = try await context.processor.prepare(input: userInput)
@@ -151,7 +151,7 @@ struct MaxTokenTruncationTests {
             )
 
             let userInput = UserInput(
-                chat: [.user("List three colors.")],
+                chat: [.user(content: "List three colors.")],
                 processing: .init()
             )
             let input = try await context.processor.prepare(input: userInput)

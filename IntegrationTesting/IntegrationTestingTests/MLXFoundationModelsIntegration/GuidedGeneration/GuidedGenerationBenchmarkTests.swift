@@ -394,7 +394,7 @@ struct GuidedGenerationBenchmarkTests {
     private func warmup(container: ModelContainer) async throws {
         try await container.perform { context in
             let userInput = UserInput(
-                chat: [.user("Hi")],
+                chat: [.user(content: "Hi")],
                 processing: .init()
             )
             let input = try await context.processor.prepare(input: userInput)
@@ -411,7 +411,7 @@ struct GuidedGenerationBenchmarkTests {
     ) async throws -> RunResult {
         try await container.perform { context in
             let userInput = UserInput(
-                chat: [.user(Self.benchmarkPrompt)],
+                chat: [.user(content: Self.benchmarkPrompt)],
                 processing: .init()
             )
             let input = try await context.processor.prepare(input: userInput)
@@ -459,7 +459,7 @@ struct GuidedGenerationBenchmarkTests {
             )
 
             let userInput = UserInput(
-                chat: [.user(Self.benchmarkPrompt)],
+                chat: [.user(content: Self.benchmarkPrompt)],
                 processing: .init()
             )
             let input = try await context.processor.prepare(input: userInput)

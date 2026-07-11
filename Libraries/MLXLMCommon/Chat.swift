@@ -10,8 +10,8 @@ public enum Chat {
     /// A single structured chat message: a role, text content, optional
     /// media attachments, and optional tool-call metadata.
     ///
-    /// Use the ``system(_:images:videos:)``, ``assistant(_:images:videos:toolCalls:)``,
-    /// ``user(_:images:videos:audios:)``, and ``tool(_:images:id:)`` factory
+    /// Use the ``system(content:images:videos:)``, ``assistant(content:images:videos:toolCalls:)``,
+    /// ``user(content:images:videos:audios:)``, and ``tool(content:images:id:)`` factory
     /// methods to construct role-specific messages, or the memberwise
     /// ``init(role:content:images:videos:audios:tool:)`` directly.
     public struct Message {
@@ -60,8 +60,8 @@ public enum Chat {
             }
 
             /// Tool calls emitted by an assistant message.
-            public static func calls(_ calls: [ToolCall]) -> Self {
-                Self(storage: .calls(calls))
+            public static func calls(toolCalls: [ToolCall]) -> Self {
+                Self(storage: .calls(toolCalls))
             }
 
             /// Id of the assistant tool call answered by a tool message.
@@ -95,8 +95,8 @@ public enum Chat {
         }
 
         /// Shared factory helper backing the role-specific factory methods
-        /// (``system(_:images:videos:)``, ``assistant(_:images:videos:toolCalls:)``,
-        /// ``user(_:images:videos:audios:)``, ``tool(_:images:id:)``). Each
+        /// (``system(content:images:videos:)``, ``assistant(content:images:videos:toolCalls:)``,
+        /// ``user(content:images:videos:audios:)``, ``tool(content:images:id:)``). Each
         /// public factory delegates here, passing only the parameters
         /// relevant to its own external signature.
         private static func create(
@@ -117,7 +117,7 @@ public enum Chat {
         ///   - videos: Video attachments associated with the message.
         /// - Returns: A new ``Message`` with the ``Role/system`` role.
         public static func system(
-            _ content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = []
+            content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = []
         ) -> Self {
             create(role: .system, content: content, images: images, videos: videos)
         }
@@ -131,14 +131,14 @@ public enum Chat {
         ///   - toolCalls: Tool calls emitted by the assistant, if any.
         /// - Returns: A new ``Message`` with the ``Role/assistant`` role.
         public static func assistant(
-            _ content: String,
+            content: String,
             images: [UserInput.Image] = [],
             videos: [UserInput.Video] = [],
             toolCalls: [ToolCall]? = nil
         ) -> Self {
             create(
                 role: .assistant, content: content, images: images, videos: videos,
-                tool: toolCalls.map { .calls($0) })
+                tool: toolCalls.map { .calls(toolCalls: $0) })
         }
 
         /// Creates a user message.
@@ -150,7 +150,7 @@ public enum Chat {
         ///   - audios: Audio attachments associated with the message.
         /// - Returns: A new ``Message`` with the ``Role/user`` role.
         public static func user(
-            _ content: String,
+            content: String,
             images: [UserInput.Image] = [],
             videos: [UserInput.Video] = [],
             audios: [UserInput.Audio] = []
@@ -165,7 +165,7 @@ public enum Chat {
         ///   - images: Image attachments the tool's result carried, if any.
         ///   - id: Correlates this result with the tool call that produced it.
         public static func tool(
-            _ content: String, images: [UserInput.Image] = [], id: String? = nil
+            content: String, images: [UserInput.Image] = [], id: String? = nil
         ) -> Self {
             create(role: .tool, content: content, images: images, tool: id.map { .result(id: $0) })
         }
@@ -295,7 +295,7 @@ extension MessageGenerator {
     public func generate(from input: UserInput) -> [Message] {
         switch input.prompt {
         case .text(let text):
-            generate(messages: [.user(text)])
+            generate(messages: [.user(content: text)])
         case .messages(let messages):
             messages
         case .chat(let messages):

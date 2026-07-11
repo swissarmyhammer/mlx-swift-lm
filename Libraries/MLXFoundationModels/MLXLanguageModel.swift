@@ -934,7 +934,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // pre-forward-pass throw this just synchronizes an idle stream.
             defer { Stream.gpu.synchronize() }
             let input = try await context.processor.prepare(
-                input: UserInput(chat: [.user("warmup")]))
+                input: UserInput(chat: [.user(content: "warmup")]))
             let params = GenerateParameters(maxTokens: 1)
             for await _ in try MLXLMCommon.generate(
                 input: input, parameters: params, context: context
@@ -1363,7 +1363,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var collected = TranscriptConverter.mlxMessages(for: request.transcript)
             // MLX tokenizer crashes on empty chat input; provide a fallback.
             if collected.isEmpty {
-                collected = [Chat.Message.user("")]
+                collected = [Chat.Message.user(content: "")]
             }
             let messages = collected
 

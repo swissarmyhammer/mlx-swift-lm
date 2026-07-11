@@ -590,7 +590,7 @@ public final class ChatSession {
 
                     var messages: [Chat.Message] = []
                     if let instructions {
-                        messages.append(.system(instructions))
+                        messages.append(.system(content: instructions))
                     }
 
                     // prepare the cache, if needed.  note:
@@ -777,7 +777,7 @@ public final class ChatSession {
                         {
                             for toolCall in pendingToolCalls {
                                 let toolResult = try await toolDispatch(toolCall)
-                                messages.append(.tool(toolResult, id: toolCall.id))
+                                messages.append(.tool(content: toolResult, id: toolCall.id))
                             }
                             continue restart
                         }

@@ -24,9 +24,9 @@ struct ToolCallIdTests {
         )
 
         let messages: [Chat.Message] = [
-            .assistant("", toolCalls: [weatherCall, timeCall]),
-            .tool(#"{"temperature":18}"#, id: "call_123"),
-            .tool(#"{"time":"12:00"}"#, id: "call_456"),
+            .assistant(content: "", toolCalls: [weatherCall, timeCall]),
+            .tool(content: #"{"temperature":18}"#, id: "call_123"),
+            .tool(content: #"{"time":"12:00"}"#, id: "call_456"),
         ]
 
         let rawMessages = DefaultMessageGenerator().generate(messages: messages)
@@ -68,7 +68,7 @@ struct ToolCallIdTests {
 
     @Test("Plain messages do not emit tool metadata")
     func plainMessageDoesNotEmitToolMetadata() throws {
-        let dictionary = DefaultMessageGenerator().generate(message: .user("hi"))
+        let dictionary = DefaultMessageGenerator().generate(message: .user(content: "hi"))
 
         #expect(dictionary["role"] as? String == "user")
         #expect(dictionary["content"] as? String == "hi")
@@ -136,8 +136,8 @@ struct ToolCallIdTests {
         #expect(id.hasPrefix("call_"))
 
         let messages: [Chat.Message] = [
-            .assistant("", toolCalls: [toolCall]),
-            .tool(#"{"temperature":18}"#, id: id),
+            .assistant(content: "", toolCalls: [toolCall]),
+            .tool(content: #"{"temperature":18}"#, id: id),
         ]
         let rawMessages = DefaultMessageGenerator().generate(messages: messages)
         let calls = try #require(rawMessages[0]["tool_calls"] as? [[String: any Sendable]])
@@ -193,7 +193,7 @@ struct ToolCallIdTests {
     @Test("Tool result continuations preserve explicit ids")
     func toolResultContinuationsPreserveExplicitIDs() {
         let messages: [Chat.Message] = [
-            .tool(#"{"temperature":18}"#, id: "call_123")
+            .tool(content: #"{"temperature":18}"#, id: "call_123")
         ]
 
         let rawMessages = DefaultMessageGenerator().generate(messages: messages)

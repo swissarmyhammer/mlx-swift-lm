@@ -35,7 +35,7 @@ struct TranscriptConverter {
                 // not silently dropped.
                 return makeTextImageMessage(
                     from: instructions.segments,
-                    make: { Chat.Message.system($0, images: $1) },
+                    make: { Chat.Message.system(content: $0, images: $1) },
                     emptyWarning: "Skipping instructions entry with no text or image content")
 
             case .prompt(let prompt):
@@ -44,7 +44,7 @@ struct TranscriptConverter {
                 // images; text is still concatenated as before.
                 return makeTextImageMessage(
                     from: prompt.segments,
-                    make: { Chat.Message.user($0, images: $1) },
+                    make: { Chat.Message.user(content: $0, images: $1) },
                     emptyWarning: "Skipping prompt entry with no text or image content")
 
             case .response(let response):
@@ -59,7 +59,7 @@ struct TranscriptConverter {
                     logger.warning("Skipping response entry with no text or structure content")
                     return []
                 }
-                return [Chat.Message.assistant(text)]
+                return [Chat.Message.assistant(content: text)]
 
             case .toolCalls(let toolCalls):
                 // One assistant message per tool call, each carrying the
@@ -72,7 +72,8 @@ struct TranscriptConverter {
                 // not a template's own `tool_calls` re-rendering of it.
                 return toolCalls.map { call in
                     Chat.Message.assistant(
-                        "{\"\(ToolCallEnvelopeKey.name)\": \(jsonStringLiteral(call.toolName)), "
+                        content:
+                            "{\"\(ToolCallEnvelopeKey.name)\": \(jsonStringLiteral(call.toolName)), "
                             + "\"\(ToolCallEnvelopeKey.arguments)\": \(call.arguments.jsonString)}")
                 }
 
@@ -89,7 +90,7 @@ struct TranscriptConverter {
                 // dropped.
                 return [
                     Chat.Message.tool(
-                        extractToolOutputText(from: toolOutput.segments),
+                        content: extractToolOutputText(from: toolOutput.segments),
                         images: extractImages(from: toolOutput.segments),
                         id: toolOutput.id)
                 ]
@@ -142,7 +143,8 @@ struct TranscriptConverter {
     /// - Parameter value: The string to encode.
     /// - Returns: The quoted, escaped JSON string literal.
     private static func jsonStringLiteral(_ value: String) -> String {
-        if let data = try? JSONSerialization.data(withJSONObject: value, options: .fragmentsAllowed),
+        if let data = try? JSONSerialization.data(
+            withJSONObject: value, options: .fragmentsAllowed),
             let json = String(data: data, encoding: .utf8)
         {
             return json
