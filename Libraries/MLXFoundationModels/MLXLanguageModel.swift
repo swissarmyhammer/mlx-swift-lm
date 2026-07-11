@@ -206,7 +206,9 @@ private actor ModelCache {
 
     /// Whether a *genuine download* is in flight for the given model: a load
     /// task is running and it was not tagged as a warmup of an already-present
-    /// model. Drives `availability`'s `.downloading` state, so a background
+    /// model.
+    ///
+    /// Drives `availability`'s `.downloading` state, so a background
     /// warmup of an already-downloaded model does not spuriously report
     /// `.downloading`. (A warmup that triggers a real fetch is not tagged and
     /// does report here.)
@@ -272,6 +274,7 @@ private actor ModelCache {
     }
 
     /// Whether an `GrammarTokenizer` is already cached for the given model.
+    ///
     /// Used by `MLXLanguageModel.hasCachedXgTokenizer` so tests can assert
     /// that `warmUp()` pre-created it (a genuine cache hit) rather than only
     /// that a later guided respond happens to succeed.
@@ -492,7 +495,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     public var modelID: String { configuration.name }
 
     /// Loads the model container for this model, returning a cached instance
-    /// when one exists. Shares the process-global cache that `respond()`,
+    /// when one exists.
+    ///
+    /// Shares the process-global cache that `respond()`,
     /// `preload()`, and `session.prewarm()` use, so a caller working directly
     /// with the lower-level `ModelContainer` reuses the adapter's cache.
     ///
@@ -643,7 +648,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     }
 
     /// Drops one model's remembered prompt cache without touching the
-    /// container/tokenizer/constraint caches. Used when a round's actual
+    /// container/tokenizer/constraint caches.
+    ///
+    /// Used when a round's actual
     /// generated content can't be reconciled with `cache`'s own `offset`
     /// (see `Executor.commitPromptCache`) -- the entry is untrustworthy,
     /// so the next round rebuilds instead of risking a stale reuse.
@@ -654,7 +661,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     }
 
     /// Evicts every cached model, tokenizer, constraint template, and per-model
-    /// tokenizer bias, freeing the GPU memory held by model weights. Subsequent
+    /// tokenizer bias, freeing the GPU memory held by model weights.
+    ///
+    /// Subsequent
     /// requests reload from the on-disk cache.
     ///
     /// Safe to call during in-flight `respond()`/`warmUp()` work: each holds its
@@ -742,7 +751,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     }
 
     /// Drops this model from the shared cache, freeing the GPU memory held by its
-    /// weights. A subsequent `respond()`/`preload()` triggers a fresh load
+    /// weights.
+    ///
+    /// A subsequent `respond()`/`preload()` triggers a fresh load
     /// (reusing the on-disk snapshot if the model was previously downloaded).
     ///
     /// Safe to call during an in-flight `respond()`: that call retains its own
@@ -976,7 +987,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
         /// Translate FoundationModels' `GenerationOptions.SamplingMode` into the
         /// backend-local `MLXSamplingMode`, dropping the best-effort `seed`
-        /// (MLX's samplers expose no seed-injection hook). No mode set (`nil`)
+        /// (MLX's samplers expose no seed-injection hook).
+        ///
+        /// No mode set (`nil`)
         /// and any future/unknown `Kind` both map to `nil` -- "use the provider
         /// default" -- so an unrecognized case never traps and never reaches the
         /// resolver. All value policy lives in `resolveSamplingParameters`; this
