@@ -258,6 +258,20 @@ actor PromptCache {
         return cache.allSatisfy { $0.offset == targetOffset }
     }
 
+    /// The hash-chain attachment point for a tail chunked off the END of
+    /// `chunks` -- the last chunk's own `chunkKey`, or ``rootChunkKey`` when
+    /// `chunks` is empty (no full chunks at all). Shared by ``resolve``
+    /// (the matched-prefix chain endpoint) and ``store`` (the freshly
+    /// sliced full-chunk chain endpoint), which otherwise each recompute
+    /// this identical expression from their own `[StoredChunk]`.
+    ///
+    /// - Parameter chunks: The full-chunk chain, in chain order.
+    /// - Returns: The `ChunkKey` a tail chained off `chunks`' end should use
+    ///   as its `parentKey`.
+    private func parentKeyOf(_ chunks: [StoredChunk]) -> ChunkKey {
+        chunks.last?.chunkKey ?? Self.rootChunkKey
+    }
+
     /// Resolves the `[KVCache]` to generate with and the tokens to
     /// actually feed it this round: walks `modelID`'s stored chunk chain
     /// against `newTokens` (``lookupLongestPrefix(modelID:newTokens:chunkSize:)``),
@@ -305,7 +319,7 @@ actor PromptCache {
             modelID: modelID, newTokens: newTokens, chunkSize: chunkSize
         ).consume()
         let consumedByFullChunks = fullChunks.count * chunkSize
-        let tailParentKey = fullChunks.last?.chunkKey ?? Self.rootChunkKey
+        let tailParentKey = parentKeyOf(fullChunks)
         let remainingBudget = (newTokens.count - 1) - consumedByFullChunks
         let tailMatch = lookupTailMatch(
             modelID: modelID, newTokens: newTokens, consumedTokenCount: consumedByFullChunks,
@@ -442,7 +456,7 @@ actor PromptCache {
         else { return }
         insert(modelID: modelID, chunks: chunks)
 
-        let tailParentKey = chunks.last?.chunkKey ?? Self.rootChunkKey
+        let tailParentKey = parentKeyOf(chunks)
         if let tail = Self.sliceTailChunk(
             tokens: tokens, cache: cacheValue, chunkSize: chunkSize, parentKey: tailParentKey)
         {

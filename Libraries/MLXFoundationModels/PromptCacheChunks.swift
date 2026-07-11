@@ -198,6 +198,36 @@ extension PromptCache {
         return simpleLayers
     }
 
+    /// Slices every layer in `simpleLayers` over the shared `[start, end)`
+    /// token span and accumulates their owned tensors and combined byte
+    /// footprint -- the per-chunk inner loop shared by ``sliceChunks(tokens:cache:chunkSize:)``
+    /// (called once per fixed `chunkSize` span) and
+    /// ``sliceTailChunk(tokens:cache:chunkSize:parentKey:)`` (called once
+    /// over the trailing partial span); the two differ only in which
+    /// `[start, end)` span they pass.
+    ///
+    /// - Parameters:
+    ///   - simpleLayers: The verified layer stack to slice (see
+    ///     ``verifiedSimpleLayers(cache:tokenCount:)``).
+    ///   - start: The span's starting token offset (inclusive).
+    ///   - end: The span's ending token offset (exclusive).
+    /// - Returns: One owned `(keys, values)` pair per layer, in the same
+    ///   order as `simpleLayers`, plus their combined retained byte
+    ///   footprint (`MLXArray.nbytes`).
+    private static func sliceLayers(
+        simpleLayers: [KVCacheSimple], start: Int, end: Int
+    ) -> (layers: [(keys: MLXArray, values: MLXArray)], byteSize: Int) {
+        var layers: [(keys: MLXArray, values: MLXArray)] = []
+        layers.reserveCapacity(simpleLayers.count)
+        var byteSize = 0
+        for simple in simpleLayers {
+            let sliced = sliceChunkLayer(layer: simple, start: start, end: end)
+            byteSize += sliced.byteSize
+            layers.append((keys: sliced.keys, values: sliced.values))
+        }
+        return (layers, byteSize)
+    }
+
     /// Cuts `tokens`/`cache` into fixed-size, non-overlapping token-range
     /// chunks, one covering each full `chunkSize`-token span; any trailing
     /// partial span (fewer than `chunkSize` tokens) is left uncovered here --
@@ -237,20 +267,12 @@ extension PromptCache {
             let end = start + chunkSize
             let chunkTokens = Array(tokens[start ..< end])
 
-            var layers: [(keys: MLXArray, values: MLXArray)] = []
-            layers.reserveCapacity(simpleLayers.count)
-            var byteSize = 0
-            for simple in simpleLayers {
-                let sliced = sliceChunkLayer(layer: simple, start: start, end: end)
-                byteSize += sliced.byteSize
-                layers.append((keys: sliced.keys, values: sliced.values))
-            }
-
+            let sliced = sliceLayers(simpleLayers: simpleLayers, start: start, end: end)
             let key = chunkKey(parentKey: parentKey, tokens: chunkTokens)
             chunks.append(
                 StoredChunk(
-                    tokens: chunkTokens, layers: layers, parentKey: parentKey, chunkKey: key,
-                    byteSize: byteSize, lastUsed: 0))
+                    tokens: chunkTokens, layers: sliced.layers, parentKey: parentKey,
+                    chunkKey: key, byteSize: sliced.byteSize, lastUsed: 0))
             parentKey = key
         }
 
@@ -299,19 +321,11 @@ extension PromptCache {
         else { return nil }
 
         let tailTokens = Array(tokens[start...])
-        var layers: [(keys: MLXArray, values: MLXArray)] = []
-        layers.reserveCapacity(simpleLayers.count)
-        var byteSize = 0
-        for simple in simpleLayers {
-            let sliced = sliceChunkLayer(layer: simple, start: start, end: tokens.count)
-            byteSize += sliced.byteSize
-            layers.append((keys: sliced.keys, values: sliced.values))
-        }
-
+        let sliced = sliceLayers(simpleLayers: simpleLayers, start: start, end: tokens.count)
         let key = chunkKey(parentKey: parentKey, tokens: tailTokens)
         return StoredChunk(
-            tokens: tailTokens, layers: layers, parentKey: parentKey, chunkKey: key,
-            byteSize: byteSize, lastUsed: 0)
+            tokens: tailTokens, layers: sliced.layers, parentKey: parentKey, chunkKey: key,
+            byteSize: sliced.byteSize, lastUsed: 0)
     }
 }
 
