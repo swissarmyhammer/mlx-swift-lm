@@ -94,7 +94,7 @@ private actor ModelCache {
     /// In-flight loads tagged as a warmup of an already-present model, which
     /// must NOT surface as `.downloading` (there is no user-facing download).
     /// A subset of `loadingTasks`' keys. See `load` and `isDownloading`.
-    private var suppressedLoadIDs: Set<String> = []
+    private var suppressedLoadIDs = Set<String>()
     private var xgTokenizers: [String: GrammarTokenizer] = [:]
     /// Cached compiled constraint templates keyed by (modelID, schemaJSON).
     /// Clone from template instead of recompiling the grammar each request.
@@ -226,6 +226,30 @@ private actor ModelCache {
         lastErrors[modelID]
     }
 
+    /// Gets or creates a cached value for `modelID`, storing anything newly
+    /// created back into `cache` so subsequent calls hit the cache. Shared by
+    /// `makeXgTokenizer` and `makeTokenizerBias`, which differ only in which
+    /// cache they populate and how the value is created.
+    ///
+    /// - Parameters:
+    ///   - modelID: The cache key to look up and populate.
+    ///   - cache: The dictionary to check for a hit and store a miss into.
+    ///   - create: Produces the value when `modelID` isn't already cached.
+    /// - Returns: The cached or newly created value.
+    /// - Throws: Whatever `create` throws.
+    private func getOrCreateCached<T>(
+        modelID: String,
+        cache: inout [String: T],
+        create: () throws -> T
+    ) rethrows -> T {
+        if let cached = cache[modelID] {
+            return cached
+        }
+        let value = try create()
+        cache[modelID] = value
+        return value
+    }
+
     /// Gets or creates a cached GrammarTokenizer for the given model.
     ///
     /// - Parameters:
@@ -237,17 +261,14 @@ private actor ModelCache {
         modelID: String,
         tokenizer: any Tokenizer
     ) throws -> GrammarTokenizer {
-        if let cached = xgTokenizers[modelID] {
-            return cached
+        try getOrCreateCached(modelID: modelID, cache: &xgTokenizers) {
+            let vocab = TokenizerVocabExtractor.extractForGrammar(from: tokenizer)
+            return try GrammarTokenizer(
+                vocab: vocab.vocab,
+                vocabType: vocab.vocabType,
+                eosTokenId: Int32(tokenizer.eosTokenId ?? 0)
+            )
         }
-        let vocab = TokenizerVocabExtractor.extractForGrammar(from: tokenizer)
-        let xgTokenizer = try GrammarTokenizer(
-            vocab: vocab.vocab,
-            vocabType: vocab.vocabType,
-            eosTokenId: Int32(tokenizer.eosTokenId ?? 0)
-        )
-        xgTokenizers[modelID] = xgTokenizer
-        return xgTokenizer
     }
 
     /// Whether an `GrammarTokenizer` is already cached for the given model.
@@ -271,23 +292,20 @@ private actor ModelCache {
         modelID: String,
         tokenizer: any Tokenizer
     ) -> TokenizerBias {
-        if let cached = tokenizerBiases[modelID] {
-            return cached
+        getOrCreateCached(modelID: modelID, cache: &tokenizerBiases) {
+            let closing = ClosingTokenBias.compute(
+                tokenizer: tokenizer,
+                eosTokenId: tokenizer.eosTokenId
+            )
+            let (whitespace, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
+                tokenizer: tokenizer
+            )
+            return TokenizerBias(
+                closing: closing,
+                whitespace: whitespace,
+                whitespaceTokenIDs: whitespaceTokenIDs
+            )
         }
-        let closing = ClosingTokenBias.compute(
-            tokenizer: tokenizer,
-            eosTokenId: tokenizer.eosTokenId
-        )
-        let (whitespace, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
-            tokenizer: tokenizer
-        )
-        let bias = TokenizerBias(
-            closing: closing,
-            whitespace: whitespace,
-            whitespaceTokenIDs: whitespaceTokenIDs
-        )
-        tokenizerBiases[modelID] = bias
-        return bias
     }
 
     /// Gets a fresh constraint by cloning a cached template, or compiles and caches one first.
