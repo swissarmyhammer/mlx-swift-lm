@@ -1995,6 +1995,132 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             )
         }
 
+        // MARK: - Channel & Error Surface Conformance
+        //
+        // Audited against the macOS 27 SDK's
+        // `FoundationModels.swiftmodule/*.swiftinterface` (ground truth --
+        // not WWDC docs/videos, which can lag or gloss over the exact case
+        // list). Every `LanguageModelExecutorGenerationChannel` channel-action
+        // case and every `LanguageModelError` case is accounted for below as
+        // Emitted or Deliberately-N/A-because-X; no case is silently
+        // unimplemented. If a future audit finds a case that's genuinely
+        // needed (not legitimately N/A), that becomes its own kanban task
+        // rather than a silent gap here.
+        //
+        // ## Response channel (`Response.Action`)
+        // - `.appendText` -- EMITTED. `sendDelta(isReasoning: false)` on every
+        //   unconstrained/guided/tool-calling response chunk.
+        // - `.updateMetadata` -- EMITTED. The `modelID`/`requestID` stamp sent
+        //   at the top of `respond()`, and `sendIncompleteOutputMetadata`
+        //   when generation is cut off by the token budget.
+        // - `.updateUsage` -- EMITTED. `sendUsageUpdate`, once per round (see
+        //   its doc comment: usage is single-source-of-truth, never summed
+        //   from per-delta events).
+        // - `.replaceTextSegment` -- N/A. MLX decoding is append-only and
+        //   text-only: this adapter never revises text it has already
+        //   streamed.
+        // - `.updateCustomSegment` -- N/A. Custom transcript segments are a
+        //   developer-defined extension point; this adapter has no custom
+        //   segment type to produce.
+        // - `.addAttachmentSegment` / `.removeAttachmentSegment` -- N/A. This
+        //   adapter's generation output is text-only -- no attachment
+        //   content is ever produced, so none is ever added or removed.
+        //
+        // ## Tool-calls channel (`ToolCalls.Action` and nested `ToolCall.Action`)
+        // - `.toolCall(_:.appendArguments)` -- EMITTED. `handleRealTool` sends
+        //   exactly one `.appendArguments` per detected real tool call -- the
+        //   grammar-constrained envelope is decoded in full before this
+        //   fires, so there is no partial-arguments stream to append
+        //   further to.
+        // - `.toolCall(_:.updateMetadata)` -- N/A. No per-tool-call metadata
+        //   is produced today.
+        // - `.removeToolCall` -- N/A. Tool calls are emitted atomically as
+        //   one complete envelope; there is never a partially-emitted call
+        //   to retract.
+        // - Entry-level `.updateMetadata` / `.updateUsage` on `ToolCalls` --
+        //   N/A. Usage is reported exactly once, on the `.response` entry
+        //   (see `sendUsageUpdate`'s single-source-of-truth design);
+        //   duplicating it onto the `.toolCalls` entry would double-count
+        //   for any consumer that sums usage across entries.
+        //
+        // ## Reasoning channel (`Reasoning.Action`)
+        // - `.appendText` -- EMITTED. `sendDelta(isReasoning: true)` for
+        //   every `<think>...</think>`-routed chunk (see
+        //   `ReasoningEventEmitter`).
+        // - `.replaceTextSegment` -- N/A. Same append-only rationale as the
+        //   response channel.
+        // - `.updateSignature` -- N/A. A reasoning signature is an Apple
+        //   on-device/PCC-only concept -- cryptographically attesting the
+        //   reasoning came from Apple's own model. Open-weights MLX models
+        //   have no signing key and no equivalent artifact to attach.
+        // - `.updateMetadata` / `.updateUsage` -- N/A. Same
+        //   single-source-of-truth rationale as `ToolCalls` above: usage and
+        //   incomplete-output metadata for a round live on the `.response`
+        //   entry only.
+        //
+        // ## Thrown errors (`LanguageModelError`)
+        // - `.contextSizeExceeded` -- THROWN. `validateContextSize`, when a
+        //   prompt (or, for think-then-call, Phase 2's reasoning-extended
+        //   prompt) exceeds the model's context window.
+        // - `.unsupportedCapability` -- THROWN. Images without `.vision`
+        //   declared, and forced/declared reasoning the resolved prompt
+        //   strategy can't honor (see `validateReasoningCapability` /
+        //   `additionalContextOrThrowCapabilityError`).
+        // - `.unsupportedGenerationGuide` -- THROWN. `mapGrammarError` maps
+        //   xgrammar's `invalidJSONSchema` (a developer-authored
+        //   `GenerationSchema` xgrammar outright rejects) to this case.
+        // - `.unsupportedTranscriptContent` -- THROWN.
+        //   `preparedInputMappingImageFailures` maps a `UserInputProcessor`
+        //   failure to this case when the transcript carries image content
+        //   the concrete model can't process.
+        // - `.rateLimited` -- N/A. Local, on-device inference has no
+        //   request-rate gate to violate; this case models a network/service
+        //   quota this adapter has no equivalent of.
+        // - `.guardrailViolation` / `.refusal` -- N/A. Both model Apple's
+        //   built-in safety classifier rejecting (or explaining a rejection
+        //   of) content. This adapter runs open-weights models with no
+        //   equivalent built-in content-safety system to report through --
+        //   any model-side refusal comes back as ordinary generated text,
+        //   not a typed error.
+        // - `.unsupportedLanguageOrLocale` -- N/A. This adapter does not gate
+        //   on locale; it decodes whatever token stream the model produces
+        //   regardless of language.
+        // - `.timeout` -- N/A. Models a network/service round-trip timing
+        //   out (Apple's Private Cloud Compute path); local MLX generation
+        //   has no network round trip. It is bounded instead by
+        //   `GenerationOptions.maximumResponseTokens` (`defaultMaxTokens`),
+        //   and external cancellation surfaces as `CancellationError`, not
+        //   this case.
+        //
+        // ## Well-formedness invariants (see `ExecutorEventWellFormednessTests.swift`)
+        // - Every `.appendText`/`.appendArguments` event this adapter emits
+        //   carries `textDeltaTokenCount` (`1`, never `0`) -- the SDK's
+        //   `TextFragment`/`ArgumentsFragment.tokenCount` is a non-optional
+        //   `Int`, so it must always be an honest, nonzero count.
+        // - `entryID`/`reasoningEntryID`/`toolCallsEntryID` are minted
+        //   exactly once per `respond()` round (its three `UUID().uuidString`
+        //   locals) and threaded unchanged through every nested call for
+        //   that round -- every fragment belonging to one round's
+        //   response/reasoning/tool-calls entry carries the same id.
+        // - `sendUsageUpdate` is the single authoritative `.updateUsage` per
+        //   round (never per-delta), and clamps `cachedTokenCount`/
+        //   `reasoningTokenCount` to their respective totals via
+        //   `clampedUsageCounts` so a round's reported usage can never
+        //   overstate itself.
+        // - `LanguageModelExecutorGenerationChannel.Event` (and every nested
+        //   `Action` type) is opaque once constructed -- the swiftinterface
+        //   exposes only static factory functions, no public accessors to
+        //   read a value back out. No test -- not even a full end-to-end
+        //   `respond()` run -- can drain a channel and confirm the entryID
+        //   *value* an emitted `Event` actually carries. The
+        //   well-formedness tests instead assert on these values at the
+        //   point this adapter computes them, using the very helpers below
+        //   (widened from `private` to package-internal access for that
+        //   purpose), against a real channel to prove every send actually
+        //   completes; the entryID-stability guarantee above remains a
+        //   structural property of `respond()`'s source, not something
+        //   re-verified at runtime.
+
         /// Metadata key signaling the model's output was cut off before
         /// completing naturally (budget exhausted mid-thought or
         /// mid-structure), so a consumer doesn't mistake a partial answer
@@ -2006,14 +2132,22 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// adapter emits carries exactly one already-decoded chunk, so this
         /// is always `1`, never a real per-chunk token tally -- named so the
         /// several call sites that report it don't repeat the bare literal.
-        private static let textDeltaTokenCount = 1
+        ///
+        /// Package-internal (not `private`) so
+        /// `ExecutorEventWellFormednessTests.swift` can assert on it
+        /// directly -- see the "Well-formedness invariants" note above.
+        static let textDeltaTokenCount = 1
 
         /// Sends the incomplete-output metadata signal for `entryID`.
+        ///
+        /// Package-internal (not `private`) so
+        /// `ExecutorEventWellFormednessTests.swift` can call it directly --
+        /// see the "Well-formedness invariants" note above.
         ///
         /// - Parameters:
         ///   - entryID: The response entry the signal applies to.
         ///   - channel: The generation channel to send the signal on.
-        private static func sendIncompleteOutputMetadata(
+        static func sendIncompleteOutputMetadata(
             entryID: String, channel: LanguageModelExecutorGenerationChannel
         ) async {
             await channel.send(
@@ -2024,13 +2158,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
         /// Sends a single text or reasoning delta for `entryID`.
         ///
+        /// Package-internal (not `private`) so
+        /// `ExecutorEventWellFormednessTests.swift` can call it directly --
+        /// see the "Well-formedness invariants" note above.
+        ///
         /// - Parameters:
         ///   - text: The delta text to append.
         ///   - entryID: The response/reasoning entry to stream into.
         ///   - channel: The generation channel to send the delta on.
         ///   - isReasoning: `true` to send on the `.reasoning` channel entry,
         ///     `false` to send on the `.response` channel entry.
-        private static func sendDelta(
+        static func sendDelta(
             _ text: String, entryID: String, channel: LanguageModelExecutorGenerationChannel,
             isReasoning: Bool
         ) async {
@@ -2045,7 +2183,43 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
         }
 
+        /// Clamps a round's `cachedTokenCount`/`reasoningTokenCount` to their
+        /// respective totals before they're embedded in a `.updateUsage`
+        /// event, so a mismatched upstream count (e.g. the tool-calling
+        /// think-then-call path's cache count, computed against Phase 2's
+        /// longer prompt) can never overstate itself in the reported usage.
+        ///
+        /// Pulled out of `sendUsageUpdate` as a pure function -- with no
+        /// `LanguageModelExecutorGenerationChannel` dependency -- so this
+        /// adapter's usage-well-formedness guarantee is directly
+        /// unit-testable; see the "Well-formedness invariants" note above
+        /// `sendIncompleteOutputMetadata`.
+        ///
+        /// - Parameters:
+        ///   - promptTokenCount: The prompt's total token count.
+        ///   - cachedTokenCount: The candidate cached-token count, clamped to
+        ///     `promptTokenCount`.
+        ///   - outputTokenCount: The generated output's total token count.
+        ///   - reasoningTokenCount: The candidate reasoning-token count,
+        ///     clamped to `outputTokenCount`.
+        /// - Returns: The clamped `(cachedTokenCount, reasoningTokenCount)` pair.
+        static func clampedUsageCounts(
+            promptTokenCount: Int,
+            cachedTokenCount: Int,
+            outputTokenCount: Int,
+            reasoningTokenCount: Int
+        ) -> (cachedTokenCount: Int, reasoningTokenCount: Int) {
+            (
+                Swift.min(cachedTokenCount, promptTokenCount),
+                Swift.min(reasoningTokenCount, outputTokenCount)
+            )
+        }
+
         /// Sends the authoritative `.updateUsage` event for `entryID`.
+        ///
+        /// Package-internal (not `private`) so
+        /// `ExecutorEventWellFormednessTests.swift` can call it directly --
+        /// see the "Well-formedness invariants" note above.
         ///
         /// - Parameters:
         ///   - entryID: The response entry the usage applies to.
@@ -2055,19 +2229,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - cachedTokenCount: How many of `promptTokenCount` were served
         ///     from a prior round's `PromptCache` slot rather than re-fed
         ///     this round; 0 when this round didn't reuse a cache. Clamped
-        ///     to `promptTokenCount`: the tool-calling think-then-call path
-        ///     computes this against Phase 2's prompt (the base tool-aware
-        ///     input plus Phase 1's reasoning tokens), which can be longer
-        ///     than `promptTokenCount` itself (the base input alone, to
-        ///     avoid double-counting reasoning tokens as both prompt and
-        ///     output) -- without the clamp that mismatch could report more
-        ///     cached tokens than the prompt is claimed to contain.
+        ///     to `promptTokenCount` via `clampedUsageCounts`: the
+        ///     tool-calling think-then-call path computes this against
+        ///     Phase 2's prompt (the base tool-aware input plus Phase 1's
+        ///     reasoning tokens), which can be longer than `promptTokenCount`
+        ///     itself (the base input alone, to avoid double-counting
+        ///     reasoning tokens as both prompt and output) -- without the
+        ///     clamp that mismatch could report more cached tokens than the
+        ///     prompt is claimed to contain.
         ///   - outputTokenCount: The generated output's total token count.
         ///   - reasoningTokenCount: The subset of the output spent on
         ///     reasoning (0 on paths that don't reason); clamped to
-        ///     `outputTokenCount`.
+        ///     `outputTokenCount` via `clampedUsageCounts`.
         ///   - channel: The generation channel to send the event on.
-        private static func sendUsageUpdate(
+        static func sendUsageUpdate(
             entryID: String,
             promptTokenCount: Int,
             cachedTokenCount: Int,
@@ -2075,16 +2250,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             reasoningTokenCount: Int,
             channel: LanguageModelExecutorGenerationChannel
         ) async {
+            let clamped = Self.clampedUsageCounts(
+                promptTokenCount: promptTokenCount, cachedTokenCount: cachedTokenCount,
+                outputTokenCount: outputTokenCount, reasoningTokenCount: reasoningTokenCount)
             await channel.send(
                 .response(
                     entryID: entryID,
                     action: .updateUsage(
                         input: .init(
                             totalTokenCount: promptTokenCount,
-                            cachedTokenCount: Swift.min(cachedTokenCount, promptTokenCount)),
+                            cachedTokenCount: clamped.cachedTokenCount),
                         output: .init(
                             totalTokenCount: outputTokenCount,
-                            reasoningTokenCount: Swift.min(reasoningTokenCount, outputTokenCount))
+                            reasoningTokenCount: clamped.reasoningTokenCount)
                     )))
         }
 
