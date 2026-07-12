@@ -1,0 +1,8 @@
+---
+assignees:
+- claude-code
+position_column: done
+position_ordinal: a580
+title: Review of 0d26e8b..HEAD (prewarm population + finding consumption)
+---
+Scope: 0d26e8b..HEAD at review time (8349a14 prewarm chunk population = task ^kr3zkap; d7eb0f6 resolve-gate helper + prewarm regression fix; de41a70 finding consumption).\n\nRULING CONTEXT: the single finding below is ping-pong #2 — the previous round demanded `Set<String> = []` → `Set<String>()` (applied in de41a70); this round demands the reverse. The idioms validator rule has now been fixed at the source (swissarmyhammer builtin swift/rules/idioms.md, commit 9b93e4204: Set is ExpressibleByArrayLiteral, the annotated literal form `Set<String> = []` wins, flip-flopping is a validator error; installed copy synced). Apply the finding below ONCE as the final state — no future round can flip it back.\n\nNOTE: the real-model integration verification run this same day found the prewarm feature (8349a14) does not yet deliver end-to-end for sub-chunk transcripts — see task ^5ra1wzm (partial-tail chunk storage); ^kr3zkap should not close until ^5ra1wzm lands and PromptCachePrewarmTests pass.\n\n## Review Findings (2026-07-11 09:50)\n\n- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:186` — Empty-collection variables use a literal with a type annotation, not a call. Current code uses call syntax `Set<String>()` which violates the idiom. Change to `private var suppressedLoadIDs: Set<String> = []` to follow the idiom for empty-collection initialization. #review\n\n## Review Findings (2026-07-11 11:37)\n\nClean — zero new findings (review sha 1885b56f0..HEAD, i.e. HEAD~1..HEAD). Set() literal fix committed at `1885b56f05e0b4e63b90aec904d69a9ffa5e2aff`.

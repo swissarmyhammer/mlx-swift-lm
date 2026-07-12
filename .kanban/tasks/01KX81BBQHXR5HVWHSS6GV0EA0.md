@@ -1,8 +1,47 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: 9f80
+comments:
+- actor: claude-code
+  id: 01kx9b5xeynhc9ktmwjq9wbt96
+  text: |-
+    Located and fixed all 7 doc comments by quoted text (line numbers had shifted, as expected):
+    1. loadContainer() -- "Loads the model container..." (blank line inserted after "when one exists.")
+    2. removePromptCache(modelID:) -- "Drops one model's remembered prompt cache..." (blank line after "container/tokenizer/constraint caches.")
+    3. hasCachedXgTokenizer(modelID:) -- "Whether an `GrammarTokenizer` is already cached..." (blank line after "given model.")
+    4. evictAll()-equivalent cache-eviction static func -- "Evicts every cached model..." (blank line after "model weights.")
+    5. evict() -- "Drops this model from the shared cache..." (blank line after "held by its weights.")
+    6. isDownloadInFlight-equivalent (genuine-download check) -- "Whether a *genuine download* is in flight..." (blank line after "...already-present model.")
+    7. samplingMode(from:) shim (nested private/internal type) -- 3-sentence run-on, blank line inserted after "...no seed-injection hook)."
+
+    Confirmed via `git diff` that only these 7 blank-line insertions changed -- no wording changes, no other doc comments touched, no production code changed.
+
+    Verification:
+    - `swift build`: exit 0, clean (one pre-existing unrelated deprecation warning at a different line, not touched by this change).
+    - `xcodebuild build-for-testing -scheme mlx-swift-lm-Package -destination 'platform=macOS' -clonedSourcePackagesDirPath .build -disableAutomaticPackageResolution -skipPackagePluginValidation`: TEST BUILD SUCCEEDED.
+    - `xcrun xctest` (unfiltered) per bundle, all green:
+      - MLXFoundationModelsTests: 203 tests / 36 suites passed
+      - CXGrammarTests: 7 tests / 5 suites passed
+      - MLXGuidedGenerationTests: 63 tests / 14 suites passed
+      - MLXLMTests: 245 tests / 19 suites passed
+
+    Adversarial double-check dispatched for sign-off. Task left in `doing` per process -- not committed, ready for /review.
+  timestamp: 2026-07-11T19:41:27.902446+00:00
+- actor: claude-code
+  id: 01kx9bavsyan3bgpd45b8yc82y
+  text: 'Adversarial double-check: PASS. Confirmed diff is exactly the 7 blank-line insertions (19 insertions/6 deletions, 1 file), correct placement at each site, no wording changes, no other doc comments touched, doc-comment attachment to declarations intact. Noted 18 other pre-existing doc comments in the file have the same run-on pattern but are explicitly out of scope for this task. Task left in `doing`, not committed, ready for /review.'
+  timestamp: 2026-07-11T19:44:10.046817+00:00
+- actor: claude-code
+  id: 01kx9c3zxdh0fjx8bb0y3e706y
+  text: |-
+    Committed at `495823f885d4d6283f3f6b684eb664a680934084` (1 file, 19 insertions/6 deletions — pure blank-line splits at all 7 doc comments, verified by adversarial double-check before committing).
+
+    Review (`review sha HEAD~1..HEAD`) returned 5 findings, ALL REJECTED as out-of-scope/stale: `git diff HEAD~1..HEAD` confirms the only touched hunks are at lines 206-987 (the 7 doc-comment sites). The 5 findings cite abbreviated variable names (`finalAnswerDef`, `obj`, `argsStr`) at lines 1571-1902 — entirely pre-existing tool-calling code this commit never touched. Genuine pre-existing debt, out of scope for a doc-comment-only fix; not tracked further here since it's a separate naming-convention concern in unrelated code, not part of this task's own diff.
+
+    Task's own scope (7 doc-comment blank-line splits) is complete and verified. Moving to done.
+  timestamp: 2026-07-11T19:57:53.453108+00:00
+position_column: done
+position_ordinal: ab80
 title: Fix blank-line doc-comment formatting on 7 pre-existing MLXLanguageModel.swift functions
 ---
 ## What

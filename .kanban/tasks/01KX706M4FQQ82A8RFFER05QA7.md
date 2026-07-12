@@ -1,8 +1,39 @@
 ---
 assignees:
 - claude-code
-position_column: doing
-position_ordinal: '80'
+comments:
+- actor: claude-code
+  id: 01kx8z94v3p6a3xbshffe2768j
+  text: |-
+    Renamed `ClosingTokenBias.compute`'s `eosTokenId` parameter to `eosTokenID`, plus every call site's argument label. Definition + inline usage:
+
+    - `Libraries/MLXGuidedGeneration/ClosingTokenBias.swift` — `func compute(tokenizer:eosTokenID:)` signature, plus the `if let eos = eosTokenID, ...` body reference.
+
+    Call sites updated (13 total across 6 files; the task title said "8" but investigation found more — all handled):
+
+    - `Libraries/MLXFoundationModels/MLXLanguageModel.swift` (production, in `makeTokenizerBias`) — 1 call site.
+    - `Tests/MLXGuidedGenerationTests/ClosingTokenBiasTests.swift` — 6 call sites (all one-line literal args: `nil`, `1`, `0`, `nil`, `nil`, `999`).
+    - `IntegrationTesting/.../GuidedGeneration/GenerableRoundTripTests.swift` — 1 call site.
+    - `IntegrationTesting/.../GuidedGeneration/GuidedGenerationTests.swift` — 2 call sites.
+    - `IntegrationTesting/.../GuidedGeneration/HardReserveStressTests.swift` — 1 call site.
+    - `IntegrationTesting/.../GuidedGeneration/MultiModelGuidedGenerationTests.swift` — 2 call sites.
+
+    Scope discipline: did NOT touch other, unrelated `eosTokenId`-named symbols that are independent of this function — `XGrammarBridge.init(vocab:vocabType:eosTokenId:)`, `GrammarTokenizer`/`MLXLanguageModel.makeXgTokenizer`'s `Int32` eosTokenId param, `MLXLLM` model configs (`FalconH1`, `NemotronLabsDiffusion`, `Qwen3VL`), `CXGrammarTests` local fixture structs/JSON golden files, `Tests/MLXFoundationModelsTests/ToolCallingSchemaTests.swift`, `Tests/MLXGuidedGenerationTests/ConstraintCachingTests.swift` / `FastForwardSampledTokenKVCacheTests.swift` / `PublicAPISurfaceTests.swift`, `Tests/MLXLMTests/Gemma4UnifiedTests.swift` / `TestTokenizer.swift` (a Tokenizer-protocol-conforming stub whose own `eosTokenId` property is the external `MLXLMCommon.Tokenizer` protocol contract, not `ClosingTokenBias.compute`'s parameter). Also left `tokenizer.eosTokenId` (the `Tokenizer` protocol property, external/upstream) as the argument *value* at every call site — only the argument *label* changed to `eosTokenID:`.
+
+    Verification (all green):
+    - `swift build` — clean, no new warnings/errors.
+    - `git grep -n 'eosTokenId\b' Libraries/ Tests/ IntegrationTesting/` — down from 113 to 105 matching lines; remaining 105 are all confirmed-unrelated occurrences listed above (verified none reference `ClosingTokenBias.compute`).
+    - `xcodebuild build-for-testing -scheme mlx-swift-lm-Package ...` then unfiltered `xcrun xctest` per bundle: `MLXFoundationModelsTests.xctest` 186/186 passed, `MLXGuidedGenerationTests.xctest` 63/63 passed (includes `ClosingTokenBiasTests`), `MLXLMTests.xctest` 245/245 passed.
+    - `xcodebuild build-for-testing -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting ...` — TEST BUILD SUCCEEDED, no `error:` lines (the previously-documented FMTestHelpers SDK-mismatch issue did not surface this run).
+
+    Task left in `doing` per scope discipline — not moved or committed.
+  timestamp: 2026-07-11T16:13:30.851036+00:00
+- actor: claude-code
+  id: 01kx9088d2xjd5zkrvq6sdr6p7
+  text: Review of commit 734b1c1 (2026-07-11 11:20) returned 8 findings, all the same test-helper duplication class (collectText/transcript/assertValidJSON/sanitize/inline-setup) already established and dropped multiple times earlier this session across these exact same 4 IntegrationTesting files. This commit's diff was a pure argument-label rename (eosTokenId→eosTokenID) — confirmed via `git diff` that none of the flagged helper functions were touched. Dropped under the review skill's blanket test-refactor exception (confirmed pre-existing, predates this commit entirely). Moving to done.
+  timestamp: 2026-07-11T16:30:30.306931+00:00
+position_column: done
+position_ordinal: a480
 title: Rename ClosingTokenBias.compute's eosTokenId parameter to eosTokenID (8 call sites incl. production)
 ---
 ## What
