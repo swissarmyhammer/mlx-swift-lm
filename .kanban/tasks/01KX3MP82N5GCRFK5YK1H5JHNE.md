@@ -31,8 +31,8 @@ comments:
 depends_on:
 - 01KX3MNKS2VPNP2G73HAP4MG4Y
 - 01KX3MMR8RVJZV7HHX7BBDA7XG
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ad80
 title: 'Integration: fork reuse and byte-identical equivalence end-to-end with a real model'
 ---
 ## What
