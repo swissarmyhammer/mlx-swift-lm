@@ -22,8 +22,8 @@ comments:
 
     Adversarial double-check agent dispatched to verify no subtle behavior change before handoff.
   timestamp: 2026-07-12T07:27:19.018665+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: b180
 title: Reduce prepareRespondSetup's cognitive complexity (state-dependency across multiple prompt-rendering gates)
 ---
 ## What
