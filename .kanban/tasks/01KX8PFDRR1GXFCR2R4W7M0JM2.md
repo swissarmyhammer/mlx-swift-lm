@@ -6,8 +6,24 @@ comments:
   id: 01kx8qgpq0txhvxqgks7a7a298
   text: Re-flagged (with shifted line numbers, ~2138) in a later review pass on commit de41a70, confirmed pre-existing/untouched by that commit — same function, same reasoning/suppression/guidedInput gate complexity already tracked here. No new scope, just confirming this task's relevance persists.
   timestamp: 2026-07-11T13:57:49.920439+00:00
-position_column: todo
-position_ordinal: a080
+- actor: claude-code
+  id: 01kxakjbzax8g79k3438gyzebj
+  text: |-
+    Implemented. Extraction shape (after reading the actual 105+ line function): split into two helpers rather than the suggested single PromptVariants-with-eager-field shape, to preserve exact throw ordering.
+
+    1. `RespondConfigResolution` struct (resolved config + contextLength) + `resolveRespondConfiguration(modelID:context:declaresReasoning:configurationResolver:) throws -> RespondConfigResolution` -- owns the config.json read/decode/resolve + validateReasoningCapability call (the "configuration-resolution" half).
+    2. `PromptVariants` struct (suppressed/reasoningSetup/guided fields, deliberately NOT including the eager render) + `preparePromptVariants(request:messages:context:declaresReasoning:resolved:needsEagerInput:input:schemaJSON:) async throws -> PromptVariants` -- owns mayRunReasoningPath + the suppression/reasoning/guided-input gates (the "rendering" half).
+
+    `prepareRespondSetup` itself now: renders the eager input directly (unchanged, must stay first), calls resolveRespondConfiguration, calls preparePromptVariants, computes effectiveInput = variants.suppressed ?? input, returns RespondSetup. ~85 lines -> ~55 lines, and each gate's condition now lives in exactly one place instead of being interleaved with the config-resolution chain.
+
+    Kept eager render OUTSIDE the PromptVariants struct/method (unlike the task's suggested shape) specifically because it must execute strictly before config resolution to preserve the original throw order (eager render's error must still win over a later capability-validation error if a request would trigger both) -- moving it into a method gated on `resolved` would have reordered that.
+
+    Verification: `swift build --target MLXFoundationModels` clean (only a pre-existing unrelated deprecation warning at line 843). Full `swift test`: 207 tests / 37 suites in MLXFoundationModelsTests all green, plus MLXGuidedGeneration's 7 tests green -- no failures anywhere. `git diff --stat` confirms only MLXLanguageModel.swift (plus kanban bookkeeping files) touched. Local `review working` pass: 0 findings. runToolCalling/executeThinkThenCallPhase1/executeToolCallingPhase2 untouched, confirmed out of scope.
+
+    Adversarial double-check agent dispatched to verify no subtle behavior change before handoff.
+  timestamp: 2026-07-12T07:27:19.018665+00:00
+position_column: doing
+position_ordinal: '80'
 title: Reduce prepareRespondSetup's cognitive complexity (state-dependency across multiple prompt-rendering gates)
 ---
 ## What

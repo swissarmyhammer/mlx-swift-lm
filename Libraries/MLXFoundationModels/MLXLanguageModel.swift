@@ -1568,10 +1568,241 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 ))
         }
 
+        /// Bundles the per-instance configuration `prepareRespondSetup` needs
+        /// once `config.json` has been read and the resolver has run: the
+        /// resolved ``ModelConfiguration`` (reasoning config, extra stop
+        /// tokens) and the model's context-window length, if known.
+        ///
+        /// Split out of `prepareRespondSetup` so the "read config.json,
+        /// decode it, resolve it, validate the reasoning capability" chain
+        /// reads as one self-contained step, separate from the prompt-
+        /// rendering gates in ``PromptVariants`` that consume its result.
+        private struct RespondConfigResolution {
+            /// The per-instance configuration resolved from `config.json`.
+            let resolved: ModelConfiguration
+            /// The model's context window length, read from `config.json`'s
+            /// `max_position_embeddings` field. `nil` when the model's
+            /// configuration doesn't expose a recognized context-length
+            /// field, in which case `dispatchGeneration`/`runToolCalling`
+            /// skip context-size validation rather than guessing a default.
+            let contextLength: Int?
+        }
+
+        /// Reads `config.json`, resolves the per-instance ``ModelConfiguration``,
+        /// and validates the reasoning capability gate against it -- everything
+        /// `prepareRespondSetup` needs before it can compute the reasoning-
+        /// dependent prompt-rendering gates in ``PromptVariants``.
+        ///
+        /// - Parameters:
+        ///   - modelID: The model identifier used to build the `ModelDescriptor`.
+        ///   - context: The loaded model context (tokenizer, configuration).
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - configurationResolver: Patches the per-call `ModelConfiguration`
+        ///     read from `config.json`.
+        /// - Returns: The resolved configuration and context length.
+        /// - Throws: `LanguageModelError.unsupportedCapability` when the
+        ///   resolved configuration always reasons but `.reasoning` was not
+        ///   declared (see `validateReasoningCapability`).
+        private func resolveRespondConfiguration(
+            modelID: String,
+            context: ModelContext,
+            declaresReasoning: Bool,
+            configurationResolver: any ModelConfigurationResolver
+        ) throws -> RespondConfigResolution {
+            // Resolve the per-instance configuration. Held strictly as
+            // a local; it never lands in context.configuration or
+            // Executor.Configuration, so two instances with the same id
+            // but different resolvers don't cross-contaminate through
+            // the shared caches. Identity is read from
+            // context.configuration (above, at load time) and never
+            // from `resolved`.
+            let configData = try? Data(
+                contentsOf:
+                    context.configuration.modelDirectory
+                    .appendingPathComponent("config.json"))
+            let baseConfiguration = configData.flatMap {
+                try? JSONDecoder.json5().decode(BaseConfiguration.self, from: $0)
+            }
+            let modelType = baseConfiguration?.modelType ?? ""
+            // Only recognized when `config.json` exposes
+            // `max_position_embeddings` (the dominant convention across the
+            // architectures this repository ports); `nil` otherwise, which
+            // `dispatchGeneration`/`runToolCalling` treat as "unknown --
+            // skip validation" rather than guessing a default.
+            let contextLength = baseConfiguration?.contextLength
+            let descriptor = ModelDescriptor(
+                modelType: modelType,
+                modelId: modelID,
+                configData: configData,
+                tokenizer: context.tokenizer)
+            let resolved = configurationResolver.resolve(
+                context.configuration, for: descriptor)
+
+            // Capability gate. When the caller omits `.reasoning`
+            // but the resolved configuration carries a reasoning
+            // config, the model must not be allowed to think:
+            //
+            // - Toggleable strategies (`.templateFlag`) re-render the
+            //   prompt with thinking off (handled by `preparePromptVariants`).
+            // - Non-suppressible strategies (`.alwaysOn`) raise
+            //   `unsupportedCapability` BEFORE generation, regardless
+            //   of which path (tools / schema / unconstrained) the
+            //   request would otherwise take. The throw is
+            //   path-independent so a tool-calling or schema-guided
+            //   request on a model that always reasons surfaces the
+            //   same typed error the unconstrained path does, never a
+            //   silent leak through the grammar's malformed-output
+            //   fallback.
+            try validateReasoningCapability(
+                declaresReasoning: declaresReasoning, resolved: resolved)
+
+            return RespondConfigResolution(resolved: resolved, contextLength: contextLength)
+        }
+
+        /// Bundles the reasoning-suppression, reasoning-priming, and guided-
+        /// input prompt-rendering gates `prepareRespondSetup` must track
+        /// together once the per-instance configuration is resolved -- see
+        /// `preparePromptVariants` for how each field is computed.
+        /// Deliberately does not include the eager (tooling-gated) render:
+        /// that gate runs before configuration resolution (see
+        /// `prepareRespondSetup`) and doesn't depend on `resolved`, so it
+        /// stays a plain local there.
+        private struct PromptVariants {
+            /// The reasoning-suppressed render, when thinking must be forced
+            /// off; `nil` when suppression doesn't apply.
+            let suppressed: LMInput?
+            /// The reasoning-primed render plus its config and primed-state,
+            /// when declared reasoning applies; `nil` otherwise.
+            let reasoningSetup: (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?
+            /// The guided-generation render honoring `includeSchemaInPrompt`;
+            /// `nil` when tools are enabled or the request carries no schema.
+            let guided: LMInput?
+        }
+
+        /// Computes the reasoning-suppression, reasoning-priming, and guided-
+        /// input prompt-rendering gates, once the per-instance configuration
+        /// has been resolved and the eager render is in hand. Each gate is
+        /// independently conditioned (tool state, schema presence, declared
+        /// vs. resolved reasoning), but all three read from the same
+        /// `resolved`/`input`/`messages`, so they are computed together here
+        /// rather than re-derived inline across `prepareRespondSetup`.
+        ///
+        /// - Parameters:
+        ///   - request: The generation request; supplies tool/schema gating and reasoning level.
+        ///   - messages: The rendered chat messages for this round.
+        ///   - context: The loaded model context (tokenizer, processor).
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - resolved: The per-instance configuration already resolved from `config.json`.
+        ///   - needsEagerInput: Whether tools are disabled, so the eager
+        ///     render (and, in turn, the guided-input render) is meaningful.
+        ///   - input: The eager render `prepareRespondSetup` already computed,
+        ///     or `nil` when tools are enabled.
+        ///   - schemaJSON: The developer-supplied JSON schema, if any, already
+        ///     encoded. Used only to build the guided render's schema-in-prompt
+        ///     rendering; the grammar constraint itself is compiled from this
+        ///     same value independently in `runGuidedGeneration`.
+        /// - Returns: The `PromptVariants` bundling every gate's render.
+        /// - Throws: Whatever `UserInputProcessor.prepare` or reasoning-prompt
+        ///   preparation throw.
+        private func preparePromptVariants(
+            request: LanguageModelExecutorGenerationRequest,
+            messages: [Chat.Message],
+            context: ModelContext,
+            declaresReasoning: Bool,
+            resolved: ModelConfiguration,
+            needsEagerInput: Bool,
+            input: LMInput?,
+            schemaJSON: String?
+        ) async throws -> PromptVariants {
+            // Reasoning is only consumed by the unconstrained path
+            // (no tools, no schema). On the guided/tool paths the
+            // grammar already constrains output, so suppression-prep
+            // would be wasted work.
+            let mayRunReasoningPath =
+                request.enabledToolDefinitions.isEmpty && request.schema == nil
+
+            // When .reasoning is OMITTED on the unconstrained path,
+            // re-render the prompt with thinking off so the model
+            // doesn't emit `<think>`. Toggleable-only;
+            // .alwaysOn was already rejected by `resolveRespondConfiguration`.
+            let suppressedInput: LMInput?
+            if mayRunReasoningPath, !declaresReasoning,
+                let suppressionConfig = resolved.reasoningConfig
+            {
+                suppressedInput = try await Self.preparedInput(
+                    messages: messages, reasoningConfig: suppressionConfig,
+                    thinkingEnabled: false, processor: context.processor,
+                    transcriptEntries: request.transcript,
+                    cannotDisableMessage: Self.alwaysReasoningDebugDescription
+                )
+            } else {
+                suppressedInput = nil
+            }
+
+            let reasoningSetup:
+                (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?
+            if mayRunReasoningPath, declaresReasoning,
+                let reasoningConfig = resolved.reasoningConfig
+            {
+                let thinkingEnabled = Self.thinkingEnabled(
+                    for: request.contextOptions.reasoningLevel)
+                let reasoningInput = try await Self.preparedInput(
+                    messages: messages, reasoningConfig: reasoningConfig,
+                    thinkingEnabled: thinkingEnabled, processor: context.processor,
+                    transcriptEntries: request.transcript,
+                    cannotDisableMessage:
+                        "This model always reasons; reasoning cannot be disabled via reasoningLevel."
+                )
+                reasoningSetup = (
+                    reasoningInput, reasoningConfig,
+                    Self.reasoningPrimedInside(
+                        input: reasoningInput, reasoningConfig: reasoningConfig,
+                        tokenizer: context.tokenizer)
+                )
+            } else {
+                reasoningSetup = nil
+            }
+
+            // The prompt actually fed to guided generation. Honors
+            // `ContextOptions.includeSchemaInPrompt` at the seam where the
+            // guided-generation prompt is assembled -- see
+            // `guidedGenerationMessages(from:schemaJSON:includeSchemaInPrompt:)`.
+            // Only re-renders when that seam actually appended something
+            // (i.e. `includeSchemaInPrompt` did not say `true`): reusing
+            // `input` unchanged otherwise avoids a second, wasted
+            // `UserInputProcessor.prepare` call for byte-identical messages.
+            let guidedInput: LMInput?
+            if needsEagerInput, let schemaJSON, let input {
+                let guidedMessages = Self.guidedGenerationMessages(
+                    from: messages, schemaJSON: schemaJSON,
+                    includeSchemaInPrompt: request.contextOptions.includeSchemaInPrompt)
+                if guidedMessages.count == messages.count {
+                    guidedInput = input
+                } else {
+                    guidedInput = try await Self.preparedInputMappingImageFailures(
+                        processor: context.processor, input: UserInput(chat: guidedMessages),
+                        messages: guidedMessages, transcriptEntries: request.transcript)
+                }
+            } else {
+                guidedInput = nil
+            }
+
+            return PromptVariants(
+                suppressed: suppressedInput, reasoningSetup: reasoningSetup, guided: guidedInput)
+        }
+
         /// Renders the prompt, resolves the per-instance configuration, and
         /// prepares whatever the reasoning path needs -- everything
         /// `respond()`'s `container.perform` closure must do before it can
         /// dispatch to one of the three generation paths.
+        ///
+        /// Delegates to ``resolveRespondConfiguration(modelID:context:declaresReasoning:configurationResolver:)``
+        /// for the config-resolution chain and
+        /// ``preparePromptVariants(request:messages:context:declaresReasoning:resolved:needsEagerInput:input:schemaJSON:)``
+        /// for the reasoning/guided-input rendering gates, so this function
+        /// itself only renders the eager (tooling-gated) prompt, calls both
+        /// helpers in the order their throws must observe, and combines the
+        /// results into a `RespondSetup`.
         ///
         /// - Parameters:
         ///   - request: The generation request; supplies tool/schema gating and reasoning level.
@@ -1619,137 +1850,33 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     nil
                 }
 
-            // Resolve the per-instance configuration. Held strictly as
-            // a local; it never lands in context.configuration or
-            // Executor.Configuration, so two instances with the same id
-            // but different resolvers don't cross-contaminate through
-            // the shared caches. Identity is read from
-            // context.configuration (above, at load time) and never
-            // from `resolved`.
-            let configData = try? Data(
-                contentsOf:
-                    context.configuration.modelDirectory
-                    .appendingPathComponent("config.json"))
-            let baseConfiguration = configData.flatMap {
-                try? JSONDecoder.json5().decode(BaseConfiguration.self, from: $0)
-            }
-            let modelType = baseConfiguration?.modelType ?? ""
-            // Only recognized when `config.json` exposes
-            // `max_position_embeddings` (the dominant convention across the
-            // architectures this repository ports); `nil` otherwise, which
-            // `dispatchGeneration`/`runToolCalling` treat as "unknown --
-            // skip validation" rather than guessing a default.
-            let contextLength = baseConfiguration?.contextLength
-            let descriptor = ModelDescriptor(
-                modelType: modelType,
-                modelId: modelID,
-                configData: configData,
-                tokenizer: context.tokenizer)
-            let resolved = configurationResolver.resolve(
-                context.configuration, for: descriptor)
+            // Config resolution (and its reasoning-capability validation)
+            // must run *after* the eager render above and *before* the
+            // reasoning/guided-input gates below -- both a genuine ordering
+            // dependency (the gates below read `resolved`) and a preserved
+            // throw order (a request that would fail both the eager render
+            // and the capability check surfaces the same error it always
+            // has: the eager render's).
+            let configResolution = try resolveRespondConfiguration(
+                modelID: modelID, context: context, declaresReasoning: declaresReasoning,
+                configurationResolver: configurationResolver)
 
-            // Capability gate. When the caller omits `.reasoning`
-            // but the resolved configuration carries a reasoning
-            // config, the model must not be allowed to think:
-            //
-            // - Toggleable strategies (`.templateFlag`) re-render the
-            //   prompt with thinking off (handled below per path).
-            // - Non-suppressible strategies (`.alwaysOn`) raise
-            //   `unsupportedCapability` BEFORE generation, regardless
-            //   of which path (tools / schema / unconstrained) the
-            //   request would otherwise take. The throw is
-            //   path-independent so a tool-calling or schema-guided
-            //   request on a model that always reasons surfaces the
-            //   same typed error the unconstrained path does, never a
-            //   silent leak through the grammar's malformed-output
-            //   fallback.
-            try validateReasoningCapability(
-                declaresReasoning: declaresReasoning, resolved: resolved)
-
-            // Reasoning is only consumed by the unconstrained path
-            // (no tools, no schema). On the guided/tool paths the
-            // grammar already constrains output, so suppression-prep
-            // would be wasted work.
-            let mayRunReasoningPath =
-                request.enabledToolDefinitions.isEmpty && request.schema == nil
-
-            // When .reasoning is OMITTED on the unconstrained path,
-            // re-render the prompt with thinking off so the model
-            // doesn't emit `<think>`. Toggleable-only;
-            // .alwaysOn was already rejected above.
-            let suppressedInput: LMInput?
-            if mayRunReasoningPath, !declaresReasoning,
-                let suppressionConfig = resolved.reasoningConfig
-            {
-                suppressedInput = try await Self.preparedInput(
-                    messages: messages, reasoningConfig: suppressionConfig,
-                    thinkingEnabled: false, processor: context.processor,
-                    transcriptEntries: request.transcript,
-                    cannotDisableMessage: Self.alwaysReasoningDebugDescription
-                )
-            } else {
-                suppressedInput = nil
-            }
-
-            let reasoningSetup:
-                (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?
-            if mayRunReasoningPath, declaresReasoning,
-                let reasoningConfig = resolved.reasoningConfig
-            {
-                let thinkingEnabled = Self.thinkingEnabled(
-                    for: request.contextOptions.reasoningLevel)
-                let reasoningInput = try await Self.preparedInput(
-                    messages: messages, reasoningConfig: reasoningConfig,
-                    thinkingEnabled: thinkingEnabled, processor: context.processor,
-                    transcriptEntries: request.transcript,
-                    cannotDisableMessage:
-                        "This model always reasons; reasoning cannot be disabled via reasoningLevel."
-                )
-                reasoningSetup = (
-                    reasoningInput, reasoningConfig,
-                    Self.reasoningPrimedInside(
-                        input: reasoningInput, reasoningConfig: reasoningConfig,
-                        tokenizer: context.tokenizer)
-                )
-            } else {
-                reasoningSetup = nil
-            }
+            let variants = try await preparePromptVariants(
+                request: request, messages: messages, context: context,
+                declaresReasoning: declaresReasoning, resolved: configResolution.resolved,
+                needsEagerInput: needsEagerInput, input: input, schemaJSON: schemaJSON)
 
             // The prompt actually fed into generation: the suppressed
             // prompt when we're forcing thinking off, otherwise the
             // baseline `input` rendered above. Both operands are `nil`
             // together when tools are enabled, so this stays `nil` in
             // that case too -- exactly the branch that never reads it.
-            let effectiveInput = suppressedInput ?? input
-
-            // The prompt actually fed to guided generation. Honors
-            // `ContextOptions.includeSchemaInPrompt` at the seam where the
-            // guided-generation prompt is assembled -- see
-            // `guidedGenerationMessages(from:schemaJSON:includeSchemaInPrompt:)`.
-            // Only re-renders when that seam actually appended something
-            // (i.e. `includeSchemaInPrompt` did not say `true`): reusing
-            // `input` unchanged otherwise avoids a second, wasted
-            // `UserInputProcessor.prepare` call for byte-identical messages.
-            let guidedInput: LMInput?
-            if needsEagerInput, let schemaJSON, let input {
-                let guidedMessages = Self.guidedGenerationMessages(
-                    from: messages, schemaJSON: schemaJSON,
-                    includeSchemaInPrompt: request.contextOptions.includeSchemaInPrompt)
-                if guidedMessages.count == messages.count {
-                    guidedInput = input
-                } else {
-                    guidedInput = try await Self.preparedInputMappingImageFailures(
-                        processor: context.processor, input: UserInput(chat: guidedMessages),
-                        messages: guidedMessages, transcriptEntries: request.transcript)
-                }
-            } else {
-                guidedInput = nil
-            }
+            let effectiveInput = variants.suppressed ?? input
 
             return RespondSetup(
-                input: input, resolved: resolved, effectiveInput: effectiveInput,
-                reasoningSetup: reasoningSetup, guidedInput: guidedInput,
-                contextLength: contextLength)
+                input: input, resolved: configResolution.resolved, effectiveInput: effectiveInput,
+                reasoningSetup: variants.reasoningSetup, guidedInput: variants.guided,
+                contextLength: configResolution.contextLength)
         }
 
         /// Dispatches to the tool-calling, guided-generation, or plain-text
