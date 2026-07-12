@@ -377,6 +377,18 @@ public enum GuidedGenerationLoop {
     /// a matching prefix and the tokens must be run through the model;
     /// `.logits` means `prepare` already produced the initial step (e.g.
     /// reusing a previous round's cache).
+    ///
+    /// - Parameters:
+    ///   - input: Prepared model input (prompt already tokenized).
+    ///   - model: The language model to prepare and, if needed, run the
+    ///     initial forward pass on.
+    ///   - cache: The KV cache to prepare against; mutated in place by
+    ///     `model.prepare`/`model.callAsFunction` as usual for `KVCache`'s
+    ///     reference semantics.
+    /// - Returns: The first logits and model state for `run()`'s loop to
+    ///   begin sampling from.
+    /// - Throws: Rethrows any error `model.prepare(_:cache:windowSize:)`
+    ///   throws while preparing `input` against `cache`.
     private static func prefillAndGetLogits(
         input: LMInput, model: any LanguageModel, cache: [KVCache]
     ) throws -> (logits: MLXArray, modelState: LMOutput.State?) {
@@ -399,13 +411,20 @@ public enum GuidedGenerationLoop {
     ///
     /// - Parameters:
     ///   - state: Loop state; reads `logits`/`maskArray`/`mask` and updates
-    ///     `whitespaceTracker`.
-    ///   - closingBias: See `run`'s parameter of the same name.
-    ///   - whitespaceBias: See `run`'s parameter of the same name.
-    ///   - eosPenalty: Precomputed EOS-position penalty applied in the hard
-    ///     zone; see `run`'s local of the same name.
-    ///   - maxTokens, completionReserve, hardReserve: Zone thresholds; see
-    ///     `run`'s parameters of the same names.
+    ///     `whitespaceTracker` with the sampled token.
+    ///   - closingBias: Pre-computed logit bias array favoring closing
+    ///     tokens; `nil` disables soft/hard zone biasing entirely.
+    ///   - whitespaceBias: Pre-computed negative logit bias array penalizing
+    ///     whitespace-only tokens; `nil` disables whitespace suppression.
+    ///   - eosPenalty: Precomputed EOS-position penalty applied on top of
+    ///     the forced-closing bias in the hard zone; `nil` when
+    ///     `closingBias` is `nil`.
+    ///   - maxTokens: Generation budget; combined with `completionReserve`/
+    ///     `hardReserve` to determine the current zone.
+    ///   - completionReserve: Number of tokens before `maxTokens` at which
+    ///     the soft closing zone activates.
+    ///   - hardReserve: Number of tokens before `maxTokens` at which the
+    ///     hard closing zone activates; `0` disables it.
     /// - Returns: The sampled token ID.
     private static func applyBiasAndSample(
         state: inout LoopState,
@@ -503,6 +522,12 @@ public enum GuidedGenerationLoop {
     /// yield in `run()`'s main loop and the fast-forward emission loop in
     /// `processFastForwardTokens`, so both honor the same stop contract.
     ///
+    /// - Parameters:
+    ///   - tokenID: The token id to detokenize and emit.
+    ///   - state: Loop state; mutates `detokenizer`/`accumulatedText` and,
+    ///     on the non-stopping path, `tokenCount`.
+    ///   - emit: Callback for the detokenized text delta; returning `false`
+    ///     requests a stop.
     /// - Returns: `true` if `emit` returned `false` (caller must stop
     ///   generation immediately); `false` otherwise. `state.tokenCount` is
     ///   incremented only on the non-stopping path, matching the token
@@ -549,13 +574,31 @@ public enum GuidedGenerationLoop {
     ///     `mask`/`maskArray`.
     ///   - maxTokens: Generation budget; FF emission stops (without
     ///     feeding `tokenID` or the FF tokens to the model) once reached.
-    ///   - model, onTokenCommitted, kvBits, kvGroupSize, quantizedKvStart,
-    ///     constraint, vocabSize, logitDim: See `run`'s parameters/locals
-    ///     of the same names.
-    ///   - emit: See `run`'s `emit:` parameter.
+    ///   - model: The language model to feed `tokenID` and `ffTokens`
+    ///     through, one token at a time, to advance the KV cache.
+    ///   - onTokenCommitted: Invoked, in order, with each token id actually
+    ///     fed through `model` this call (`tokenID` then every `ffTokens`
+    ///     entry); `nil` is a no-op.
+    ///   - kvBits: Bit width for KV-cache quantization, or `nil` to disable
+    ///     it for this call.
+    ///   - kvGroupSize: Group size used when quantizing the KV cache.
+    ///   - quantizedKvStart: Token offset at which KV-cache quantization
+    ///     begins.
+    ///   - constraint: The grammar constraint whose next mask is computed
+    ///     after the FF batch is fed through the model.
+    ///   - vocabSize: The grammar's vocabulary size, used to interpret the
+    ///     mask bitmask.
+    ///   - logitDim: The model's logit dimension, used to size the mask
+    ///     array.
+    ///   - emit: Callback for each text delta; returning `false` requests a
+    ///     stop.
     /// - Returns: `true` if the caller's `emit` requested a stop (or the
     ///   budget was exhausted mid-batch) and `run`'s main loop must break;
     ///   `false` to continue.
+    /// - Throws: Rethrows whatever `updateMaskAfterForwardPass` throws
+    ///   (ultimately `GrammarError.maskComputationFailed` from
+    ///   `constraint.computeMask()`) while computing the next mask after
+    ///   the FF batch.
     private static func processFastForwardTokens(
         _ tokenID: Int,
         _ ffTokens: [Int32],
@@ -629,6 +672,9 @@ public enum GuidedGenerationLoop {
     /// to the model on the very first forward pass). Shared by the
     /// fast-forward and single-sampled-token forward-pass call sites, which
     /// both need this identical empty-to-nil translation.
+    ///
+    /// - Parameter cache: The KV cache to translate.
+    /// - Returns: `cache` unchanged, or `nil` if `cache` is empty.
     private static func cacheOrNil(_ cache: [KVCache]) -> [KVCache]? {
         cache.isEmpty ? nil : cache
     }
@@ -642,6 +688,16 @@ public enum GuidedGenerationLoop {
     /// whether to keep them (e.g. only the last token of an FF batch needs
     /// its logits kept for the next sampling step; a token fed only to
     /// populate the cache can discard them).
+    ///
+    /// - Parameters:
+    ///   - tokenID: The token id to feed through `model`.
+    ///   - state: Loop state; reads `cache`/`modelState` and writes the
+    ///     updated `modelState` back.
+    ///   - model: The language model to run the single-token forward pass
+    ///     on.
+    ///   - onTokenCommitted: Invoked with `tokenID` after the forward pass;
+    ///     `nil` is a no-op.
+    /// - Returns: The forward pass's output logits.
     private static func feedTokenThroughModel(
         _ tokenID: Int,
         state: inout LoopState,
@@ -666,9 +722,30 @@ public enum GuidedGenerationLoop {
     /// `processFastForwardTokens`; kept separate since this path has none
     /// of the batch/emission concerns that FF handling does.
     ///
-    /// - Parameters: See `run`'s parameters/locals of the same names;
-    ///   `state` is mutated the same way `processFastForwardTokens`
-    ///   mutates it (`cache`/`modelState`/`logits`/`mask`/`maskArray`).
+    /// - Parameters:
+    ///   - tokenID: The token sampled and committed to the grammar this
+    ///     iteration (no fast-forward batch was produced for it).
+    ///   - state: Loop state; mutated the same way `processFastForwardTokens`
+    ///     mutates it (`cache`/`modelState`/`logits`/`mask`/`maskArray`).
+    ///   - model: The language model to feed `tokenID` through to advance
+    ///     the KV cache.
+    ///   - onTokenCommitted: Invoked with `tokenID` after the forward pass;
+    ///     `nil` is a no-op.
+    ///   - kvBits: Bit width for KV-cache quantization, or `nil` to disable
+    ///     it for this call.
+    ///   - kvGroupSize: Group size used when quantizing the KV cache.
+    ///   - quantizedKvStart: Token offset at which KV-cache quantization
+    ///     begins.
+    ///   - constraint: The grammar constraint whose next mask is computed
+    ///     after the forward pass.
+    ///   - vocabSize: The grammar's vocabulary size, used to interpret the
+    ///     mask bitmask.
+    ///   - logitDim: The model's logit dimension, used to size the mask
+    ///     array.
+    /// - Throws: Rethrows whatever `updateMaskAfterForwardPass` throws
+    ///   (ultimately `GrammarError.maskComputationFailed` from
+    ///   `constraint.computeMask()`) while computing the next mask after
+    ///   the forward pass.
     private static func advanceSingleSampledToken(
         _ tokenID: Int,
         state: inout LoopState,
@@ -693,6 +770,11 @@ public enum GuidedGenerationLoop {
 
     /// Logs a diagnostic mask-state snapshot for the token about to be
     /// sampled. Callers gate this on `diagnosticLog` themselves.
+    ///
+    /// - Parameters:
+    ///   - state: Loop state; reads `mask` and `tokenCount`.
+    ///   - vocabSize: The grammar's vocabulary size, used to interpret the
+    ///     mask bitmask.
     private static func logMaskSnapshot(state: LoopState, vocabSize: Int) {
         let snapshot = state.mask.mask.withUnsafeBufferPointer { buffer -> MaskSnapshot in
             let ptr: UnsafePointer<UInt32>? =
@@ -717,6 +799,12 @@ public enum GuidedGenerationLoop {
     /// Logs a "why did the loop stop" diagnostic line when `diagnosticLog`
     /// is enabled; no-op otherwise. Centralizes the `logPrefix` +
     /// `stopReasonFragment` template shared by every stop-reason log site.
+    ///
+    /// - Parameters:
+    ///   - diagnosticLog: When `false`, this call is a no-op.
+    ///   - reason: The stop-reason fragment to log (e.g.
+    ///     `"mask.isTerminated"`).
+    ///   - tokenCount: The token count at which the loop stopped.
     private static func logStopReason(diagnosticLog: Bool, _ reason: String, tokenCount: Int) {
         guard diagnosticLog else { return }
         logger.info("\(logPrefix)\(stopReasonFragment)\(reason) at token \(tokenCount)")
@@ -724,6 +812,12 @@ public enum GuidedGenerationLoop {
 
     /// Logs periodic generation progress (once per main loop iteration,
     /// not per FF token).
+    ///
+    /// - Parameters:
+    ///   - state: Loop state; reads `tokenCount` and `accumulatedText`.
+    ///   - clock: The clock `startInstant` was captured from, used to
+    ///     compute elapsed time.
+    ///   - startInstant: The instant generation began.
     private static func logProgress(
         state: LoopState, clock: ContinuousClock, startInstant: ContinuousClock.Instant
     ) {
@@ -738,6 +832,9 @@ public enum GuidedGenerationLoop {
     /// remainder. Shared by `run()`'s final-stats log and `logProgress()`'s
     /// periodic log, both of which need the same elapsed-time-to-milliseconds
     /// conversion.
+    ///
+    /// - Parameter duration: The elapsed duration to convert.
+    /// - Returns: The equivalent duration in whole milliseconds.
     private static func durationToMilliseconds(_ duration: Duration) -> Int64 {
         duration.components.seconds * millisecondsPerSecond
             + duration.components.attoseconds / attosecondsPerMillisecond
@@ -755,8 +852,20 @@ public enum GuidedGenerationLoop {
     /// - Parameters:
     ///   - state: Loop state; mutates `cache`/`mask`/`maskArray`. Reads
     ///     `logits` (the just-produced forward-pass output).
-    ///   - kvBits, kvGroupSize, quantizedKvStart, constraint, vocabSize,
-    ///     logitDim: See `run`'s parameters/locals of the same names.
+    ///   - kvBits: Bit width for KV-cache quantization, or `nil` to disable
+    ///     it for this call.
+    ///   - kvGroupSize: Group size used when quantizing the KV cache.
+    ///   - quantizedKvStart: Token offset at which KV-cache quantization
+    ///     begins.
+    ///   - constraint: The grammar constraint to compute the next mask
+    ///     from.
+    ///   - vocabSize: The grammar's vocabulary size, used to interpret the
+    ///     mask bitmask.
+    ///   - logitDim: The model's logit dimension, used to size the mask
+    ///     array.
+    /// - Throws: Rethrows whatever `advanceMaskOnCpuWhileGpuRuns` throws
+    ///   (ultimately `GrammarError.maskComputationFailed` from
+    ///   `constraint.computeMask()`).
     private static func updateMaskAfterForwardPass(
         state: inout LoopState,
         kvBits: Int?,
@@ -792,6 +901,9 @@ public enum GuidedGenerationLoop {
     ///   - logitDim: The model's logit dimension.
     /// - Returns: The freshly computed mask and its prebuilt additive sample
     ///   array (see `buildMaskArray`).
+    /// - Throws: Rethrows whatever `computeMaskAndArray` throws (ultimately
+    ///   `GrammarError.maskComputationFailed` from
+    ///   `constraint.computeMask()`).
     private static func advanceMaskOnCpuWhileGpuRuns(
         logits: MLXArray,
         cache: inout [KVCache],
@@ -831,6 +943,8 @@ public enum GuidedGenerationLoop {
     ///   - logitDim: The model's logit dimension.
     /// - Returns: The freshly computed mask and its prebuilt additive sample
     ///   array (see `buildMaskArray`).
+    /// - Throws: Rethrows `GrammarError.maskComputationFailed` if
+    ///   `constraint.computeMask()` fails to compute the next mask.
     private static func computeMaskAndArray(
         constraint: GrammarConstraint, vocabSize: Int, logitDim: Int
     ) throws -> (MaskResult, MLXArray?) {
@@ -877,6 +991,13 @@ public enum GuidedGenerationLoop {
     ///    some Gemma variants in `LLMModelFactory`). Callers needing extra
     ///    stop tokens add them here (via the model configuration), not as a
     ///    per-call argument.
+    ///
+    /// - Parameters:
+    ///   - tokenizer: The tokenizer whose primary EOS id and extra-token
+    ///     lookups (`convertTokenToId`) contribute to the result.
+    ///   - configuration: The model configuration whose `eosTokenIds` and
+    ///     `extraEOSTokens` contribute to the result.
+    /// - Returns: The set of token ids that terminate generation.
     static func buildStopTokenIDs(
         tokenizer: any Tokenizer,
         configuration: ModelConfiguration
@@ -949,6 +1070,14 @@ public enum GuidedGenerationLoop {
     /// critical path at sample time. `logitDim` is the model's logit dimension
     /// (constant across the generation); `vocabSize` is the grammar bitmask's
     /// valid-bit count.
+    ///
+    /// - Parameters:
+    ///   - mask: The freshly computed grammar mask to convert.
+    ///   - vocabSize: The grammar bitmask's valid-bit count.
+    ///   - logitDim: The model's logit dimension; the returned array's
+    ///     length.
+    /// - Returns: The additive mask array, or `nil` when `mask.needsApply`
+    ///   is `false` (the grammar forces all tokens, so no mask is needed).
     static func buildMaskArray(for mask: MaskResult, vocabSize: Int, logitDim: Int) -> MLXArray? {
         guard mask.needsApply else { return nil }
         return mask.mask.withUnsafeBufferPointer { buffer -> MLXArray? in
@@ -974,6 +1103,16 @@ public enum GuidedGenerationLoop {
     ///
     /// Internal (not private) so the mask-build microbenchmark can time it in
     /// isolation.
+    ///
+    /// - Parameters:
+    ///   - maskPtr: Pointer to the packed bitmask's backing storage (1 bit
+    ///     per token).
+    ///   - maskBitCount: The number of valid bits in the mask (the
+    ///     tokenizer vocab size).
+    ///   - totalCount: The model's logit dimension; the returned array's
+    ///     length.
+    /// - Returns: An `MLXArray` of length `totalCount` with `0.0` at
+    ///   allowed positions and `-.infinity` elsewhere.
     static func bitmaskToMLXArray(
         _ maskPtr: UnsafePointer<UInt32>,
         maskBitCount: Int,

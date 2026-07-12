@@ -123,6 +123,9 @@ struct FastForwardSampledTokenKVCacheTests {
         )
     }
 
+    /// - Throws: Rethrows any error from building the grammar tokenizer or
+    ///   constraint, or from `GuidedGenerationLoop.run`, surfacing setup or
+    ///   generation failures as a test failure rather than swallowing them.
     @Test(
         """
         The sampled token that triggers a non-empty FF batch gets its own model \
