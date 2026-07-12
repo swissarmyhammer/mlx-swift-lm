@@ -70,6 +70,12 @@ struct PromptCacheReuseTests {
         #expect(!first.text.isEmpty, "First round should produce some response text")
         #expect(first.promptTokenCount > 0, "First round's prompt token count should be positive")
 
+        // The FULL length of what round 1 actually stores (prompt tokens +
+        // its own real generated reply tokens) -- the yardstick the
+        // magnitude-bounded check below holds round 2's reuse to, mirroring
+        // `PromptCacheForkReuseTests`' `sharedPrefixStoredLength`.
+        let sharedPrefixTokens = first.promptTokenCount + first.outputTokenCount
+
         // Second round's transcript replays the first round's own answer as
         // an assistant entry (mirroring what a real `LanguageModelSession`
         // does) and appends one new user turn. Without cache reuse this
@@ -97,24 +103,25 @@ struct PromptCacheReuseTests {
             executor, request: secondRequest, model: model)
         #expect(!second.text.isEmpty, "Second round should produce some response text")
 
+        // Magnitude-bounded, not just `> 0`: a single stray cached token out
+        // of a much longer prefix would satisfy `> 0` but prove nothing.
+        // Round 2 replays round 1's OWN real reply verbatim before its new
+        // question, so its rendered prefix is a byte-for-byte continuation
+        // of round 1's stored tokens -- confirmed by a real run (this
+        // exact scenario measured `cachedTokenCount == sharedPrefixTokens`,
+        // i.e. slack 0). The `- 1` here is the one KNOWN, documented slop
+        // source for this continuation shape: `PromptCache
+        // .reconcileCacheAdvance`'s `.trimCacheByOne` case, where the
+        // cache's real offset can legitimately land exactly one token
+        // ahead of the observed generated-token count.
         #expect(
-            second.cachedTokenCount > 0,
+            second.cachedTokenCount >= sharedPrefixTokens - 1,
             """
-            Second round's cached token count (\(second.cachedTokenCount)) should be positive \
-            -- proof the cache reused the first round's KV state rather than prefilling the \
-            whole (now-longer) transcript from scratch. (`promptTokenCount` is deliberately the \
-            full transcript length since commit 1c9751b and never shrinks, so it can't be the \
-            success signal here.)
-            """
-        )
-        #expect(
-            second.promptTokenCount - second.cachedTokenCount < first.promptTokenCount,
-            """
-            Second round's uncached suffix (\(second.promptTokenCount) - \
-            \(second.cachedTokenCount) = \(second.promptTokenCount - second.cachedTokenCount)) \
-            should be smaller than the first round's full prompt token count \
-            (\(first.promptTokenCount)) -- proof only the appended suffix was actually fed to \
-            the model, not the whole (now-longer) transcript from scratch.
+            Second round's cached token count (\(second.cachedTokenCount)) should be within \
+            one token of the first round's full stored prefix (\(sharedPrefixTokens) = \
+            \(first.promptTokenCount) prompt + \(first.outputTokenCount) output tokens) -- a \
+            merely-positive bound (or the old promptTokenCount-derived growth check) could pass \
+            with only a small fraction of the prefix actually reused.
             """
         )
 

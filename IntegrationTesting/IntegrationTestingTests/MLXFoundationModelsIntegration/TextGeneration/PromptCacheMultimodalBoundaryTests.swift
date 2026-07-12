@@ -24,13 +24,22 @@
 // mirrors -- this is SKIPPED BY DEFAULT and only runs with
 // `MLX_RUN_VLM_INTEGRATION=1` set, on Apple silicon, on demand.
 //
-// SANDBOX CAVEAT: unverified by execution here for two independent
-// reasons: (1) the whole `IntegrationTesting` target fails to compile
-// against this environment's Xcode-beta/FoundationModels SDK for the
-// pre-existing, unrelated reason documented in
-// `PromptCacheEquivalenceTests.swift`'s header comment, and (2) even once
-// that's fixed, this test is opt-in and was not run here (no multi-GB VLM
-// download in this sandbox).
+// EXPLICITLY UNTESTED (not silently skipped): attempted for real in this
+// environment with `MLX_RUN_VLM_INTEGRATION=1` set (2026-07-12) -- the
+// `IntegrationTesting` target itself builds and runs fine now (the
+// pre-existing SDK-incompatibility this caveat used to describe no longer
+// reproduces; see `PromptCacheEquivalenceTests.swift`'s header), and this
+// sandbox DOES have network access and disk space for the multi-GB
+// `Qwen3-VL-4B-Instruct-4bit` download -- confirmed by watching the real
+// download progress past 2.7 GB. What did NOT succeed: the download alone
+// did not finish downloading + loading + running all three rounds within
+// this suite's own `.timeLimit(.minutes(10))` before the run was cut off
+// (`Time limit was exceeded: 600.000 seconds`, `PromptCacheMultimodalBoundaryTests
+// .swift:50`), given this environment's download throughput for a model
+// this size. Raising the suite's own time limit was judged out of scope for
+// this pass (a real behavior change to the test, not just a caveat
+// update) -- left as a follow-up rather than silently declared passing or
+// silently left as a stale, no-longer-accurate "unverified" note.
 
 #if FoundationModelsIntegration
 

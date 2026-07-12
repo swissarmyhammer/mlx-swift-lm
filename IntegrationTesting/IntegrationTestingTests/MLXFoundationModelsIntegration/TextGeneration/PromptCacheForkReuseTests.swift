@@ -121,20 +121,22 @@ struct PromptCacheForkReuseTests {
         let forkA = try await respondCollectingTextAndUsage(
             executor, request: forkARequest, model: model)
         #expect(!forkA.text.isEmpty, "Fork A should produce some response text")
+        // Magnitude-bounded, not just `> 0`: a single stray cached token
+        // would satisfy `> 0` but prove nothing. Fork A replays the
+        // parent's OWN real reply verbatim before its new question, so its
+        // rendered prefix is a byte-for-byte continuation of the parent
+        // round's stored tokens -- the `- 1` slack is the one KNOWN,
+        // documented slop source for this continuation shape:
+        // `PromptCache.reconcileCacheAdvance`'s `.trimCacheByOne` case
+        // (mirrors `PromptCacheReuseTests.secondRoundPrefillsOnlyAppendedSuffix`).
         #expect(
-            forkA.cachedTokenCount > 0,
+            forkA.cachedTokenCount >= sharedPrefixStoredLength - 1,
             """
-            Fork A's first respond() round should reuse the shared parent prefix from chunks -- \
+            Fork A's cached token count (\(forkA.cachedTokenCount)) should be within one token \
+            of the parent round's full stored length (\(sharedPrefixStoredLength)) -- \
             cachedTokenCount == 0 means the fork's own tokenization diverged from the parent's \
-            stored chunks, or nothing was stored for the parent round
-            """
-        )
-        #expect(
-            forkA.promptTokenCount - forkA.cachedTokenCount < sharedPrefixStoredLength,
-            """
-            Fork A's uncached suffix should be smaller than the parent round's full stored \
-            length (\(sharedPrefixStoredLength)) -- proof only fork A's own appended tail was \
-            fed, not the whole shared prefix rebuilt from scratch
+            stored chunks, or nothing was stored for the parent round; a merely-positive bound \
+            could also pass with only a small fraction of the prefix actually reused
             """
         )
 
@@ -156,21 +158,16 @@ struct PromptCacheForkReuseTests {
         let forkB = try await respondCollectingTextAndUsage(
             executor, request: forkBRequest, model: model)
         #expect(!forkB.text.isEmpty, "Fork B should produce some response text")
+        // Magnitude-bounded (see Fork A's identical check above for the
+        // `- 1` slack's justification).
         #expect(
-            forkB.cachedTokenCount > 0,
+            forkB.cachedTokenCount >= sharedPrefixStoredLength - 1,
             """
-            Fork B's first respond() round should ALSO reuse the shared parent prefix from \
-            chunks, even though fork A already resolved (and respond()ed) against it -- \
-            cachedTokenCount == 0 here would mean fork A's round stole or evicted the shared \
-            prefix out from under fork B
-            """
-        )
-        #expect(
-            forkB.promptTokenCount - forkB.cachedTokenCount < sharedPrefixStoredLength,
-            """
-            Fork B's uncached suffix should be smaller than the parent round's full stored \
-            length (\(sharedPrefixStoredLength)) -- proof only fork B's own appended tail was \
-            fed, not the whole shared prefix rebuilt from scratch
+            Fork B's cached token count (\(forkB.cachedTokenCount)) should ALSO be within one \
+            token of the parent round's full stored length (\(sharedPrefixStoredLength)), even \
+            though fork A already resolved (and respond()ed) against it -- a low or zero count \
+            here would mean fork A's round stole or evicted the shared prefix out from under \
+            fork B
             """
         )
 
@@ -197,22 +194,16 @@ struct PromptCacheForkReuseTests {
         #expect(
             !parentContinuation.text.isEmpty, "Parent's continuation should produce response text"
         )
+        // Magnitude-bounded (see Fork A's identical check above for the
+        // `- 1` slack's justification).
         #expect(
-            parentContinuation.cachedTokenCount > 0,
+            parentContinuation.cachedTokenCount >= sharedPrefixStoredLength - 1,
             """
             The parent's OWN continuation, issued after BOTH forks already ran, should still \
-            reuse the shared prefix from chunks -- cachedTokenCount == 0 here would mean one of \
-            the forks' rounds stole or evicted the parent's shared prefix, the exact hazard the \
-            old slot-pool design could not prevent
-            """
-        )
-        #expect(
-            parentContinuation.promptTokenCount - parentContinuation.cachedTokenCount
-                < sharedPrefixStoredLength,
-            """
-            The parent continuation's uncached suffix should be smaller than the parent round's \
-            full stored length (\(sharedPrefixStoredLength)) -- proof only the continuation's \
-            own appended tail was fed, not the whole shared prefix rebuilt from scratch
+            be cached within one token of the full stored length (\(sharedPrefixStoredLength)) \
+            -- a low or zero count here would mean one of the forks' rounds stole or evicted \
+            the parent's shared prefix, the exact hazard the old slot-pool design could not \
+            prevent
             """
         )
 

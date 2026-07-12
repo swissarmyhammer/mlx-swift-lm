@@ -17,17 +17,13 @@
 // wrapper, since a detached `Task` gives a test no handle to await
 // completion before asserting on the result.
 //
-// SANDBOX CAVEAT: unverified by execution here, exactly like
-// `PromptCacheReuseTests`/`PromptCacheEquivalenceTests`/
-// `PromptCacheMultimodalBoundaryTests` already are -- the whole
-// `IntegrationTesting` xcodeproj target fails to compile against this
-// environment's Xcode-beta/FoundationModels SDK for the pre-existing,
-// unrelated reason documented in `PromptCacheEquivalenceTests.swift`'s
-// header comment (`Response.Action`/`.appendText`/`.updateUsage` are an
-// opaque struct with static factory methods in this SDK build, not the
-// plain enum a dozen pre-existing files in this directory assume). Written
-// to compile correctly against the SDK types and follow this directory's
-// established idioms, but not run to a passing result in this sandbox.
+// Verified by real execution in this environment (2026-07-11 20:19 log;
+// re-run at c624207, and again while tightening this file's assertions to a
+// magnitude bound): all three tests pass repeatedly against a real MLX
+// model --
+//   xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj \
+//     -scheme IntegrationTesting -destination 'platform=macOS' \
+//     -only-testing:IntegrationTestingTests/PromptCachePrewarmTests
 
 #if FoundationModelsIntegration
 
@@ -35,6 +31,7 @@ import Testing
 import Foundation
 import FoundationModels
 import CoreGraphics
+import MLX
 import MLXLMCommon
 @testable import MLXFoundationModels
 
@@ -94,6 +91,18 @@ struct PromptCachePrewarmTests {
 
         await MLXLanguageModel.removePromptCache(modelID: model.modelID)
 
+        // The exact tokenized length of the prewarmed parent transcript --
+        // measured through the SAME `TranscriptConverter` + `UserInput`
+        // rendering pipeline `populatePromptCacheChunks` itself uses, so
+        // this is a precise yardstick, not an estimate. Includes the
+        // rendered prefix's trailing "generation prompt" (assistant-header)
+        // tokens, which a fork's own render does NOT reproduce at that
+        // position (it continues straight to a new user turn instead) --
+        // see `sharedPrefixTokenSlack`'s doc for why that gap is the slack
+        // this test's bound tolerates.
+        let sharedPrefixTokens = try await measuredPromptTokenCount(
+            for: Self.parentTranscript(), model: model)
+
         // Prewarm the shared parent prefix BEFORE any fork's first respond()
         // -- mirroring the router prewarming the parent transcript once,
         // ahead of spinning up per-fork sessions.
@@ -109,12 +118,17 @@ struct PromptCachePrewarmTests {
             executor, request: forkRequest, model: model)
 
         #expect(!forkResult.text.isEmpty)
+        // Magnitude-bounded, not just `> 0`: one cached token out of a much
+        // longer prefix would satisfy `> 0` but prove nothing.
         #expect(
-            forkResult.cachedTokenCount > 0,
+            forkResult.cachedTokenCount >= sharedPrefixTokens - sharedPrefixTokenSlack,
             """
-            the fork's FIRST respond() round should reuse the prewarmed shared parent \
-            prefix -- cachedTokenCount == 0 means prewarm never populated the chunk store, \
-            or the fork's own tokenization diverged from the prewarmed prefix
+            the fork's FIRST respond() round cached \(forkResult.cachedTokenCount) tokens, \
+            expected within \(sharedPrefixTokenSlack) of the prewarmed parent prefix's \
+            \(sharedPrefixTokens) tokens -- cachedTokenCount == 0 means prewarm never \
+            populated the chunk store, or the fork's own tokenization diverged from the \
+            prewarmed prefix; a merely-positive bound could also pass with only a small \
+            fraction of the prefix actually reused
             """
         )
 
@@ -132,6 +146,9 @@ struct PromptCachePrewarmTests {
 
         await MLXLanguageModel.removePromptCache(modelID: model.modelID)
 
+        let sharedPrefixTokens = try await measuredPromptTokenCount(
+            for: Self.parentTranscript(), model: model)
+
         // Prewarm the identical parent transcript twice in a row -- the
         // second call should dedup (near-zero additional work), and neither
         // call should throw.
@@ -147,9 +164,15 @@ struct PromptCachePrewarmTests {
             executor, request: forkRequest, model: model)
 
         #expect(!forkResult.text.isEmpty)
+        // Magnitude-bounded (see `forkedSessionFirstRoundReusesPrewarmedParentPrefix`'s
+        // identical check above for the slack's justification).
         #expect(
-            forkResult.cachedTokenCount > 0,
-            "a double-prewarmed prefix must still be reusable by a fork's first respond() round"
+            forkResult.cachedTokenCount >= sharedPrefixTokens - sharedPrefixTokenSlack,
+            """
+            a double-prewarmed prefix must still be reusable by a fork's first respond() \
+            round: cached \(forkResult.cachedTokenCount) tokens, expected within \
+            \(sharedPrefixTokenSlack) of the prewarmed prefix's \(sharedPrefixTokens) tokens
+            """
         )
 
         await releaseAllGPUMemory()
@@ -210,5 +233,50 @@ private func makeSolidCGImageForPrewarmTest(width: Int = 2, height: Int = 2) -> 
     context.fill(CGRect(x: 0, y: 0, width: width, height: height))
     return context.makeImage()!
 }
+
+/// The exact tokenized length of `transcript` as rendered by the same
+/// `TranscriptConverter.mlxMessages` + `UserInput(chat:)` pipeline
+/// `Executor.populatePromptCacheChunks` itself uses -- a precise
+/// measurement, not an estimate, of how many tokens prewarming `transcript`
+/// actually stores.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+private func measuredPromptTokenCount(
+    for transcript: Transcript, model: MLXLanguageModel
+) async throws -> Int {
+    let messages = TranscriptConverter.mlxMessages(for: transcript)
+    let container = try await model.loadContainer()
+    let input = try await container.prepare(input: UserInput(chat: messages))
+    return input.text.tokens.asArray(Int.self).count
+}
+
+/// Slack tolerated between a prewarmed parent transcript's measured token
+/// length and a fork's reported `cachedTokenCount` on its first round.
+///
+/// Not zero: `measuredPromptTokenCount` renders the parent transcript
+/// ALONE, which ends in the chat template's trailing "generation prompt" /
+/// assistant-header tokens (priming the model to reply next). A fork's own
+/// transcript never has that header at the same position -- it continues
+/// straight into a NEW USER turn instead (see `forkTranscript(question:)`)
+/// -- so those trailing tokens are genuine, expected divergence, not a
+/// caching defect. `PromptCache.resolve`'s own doc comment calls this out
+/// by name for exactly this scenario: "the prewarm-stored sequence ends
+/// with generation-prompt/assistant-header tokens that diverge from a
+/// fork's next-turn render at that position -- an exact-whole-tail match
+/// would still yield zero reuse for the prewarm scenario," which is why
+/// longest-common-prefix (not exact-whole-tail) matching is what makes any
+/// reuse possible here at all. Confirmed by a real run against
+/// `TestFixtures.defaultModelID` (measured with `sharedPrefixTokenSlack`
+/// temporarily set to `0`, to see the real gap and prove this bound can
+/// actually fail): prewarming a 21-token instructions-only transcript
+/// yields `cachedTokenCount == 19` on the fork's first round -- a
+/// reproducible 2-token gap, matching the trailing generation-prompt
+/// divergence described above. `4` (2x that measured gap) leaves headroom
+/// for minor template/tokenizer variation while staying far tighter than
+/// `PromptCache.defaultChunkSize` (64), which this file deliberately does
+/// NOT use as its slack: the shared prefix here is itself well under one
+/// chunk, so a 64-token slack would make the bound vacuous
+/// (`sharedPrefixTokens - 64` going negative, satisfied by any
+/// `cachedTokenCount >= 0`).
+private let sharedPrefixTokenSlack = 4
 
 #endif  // FoundationModelsIntegration
