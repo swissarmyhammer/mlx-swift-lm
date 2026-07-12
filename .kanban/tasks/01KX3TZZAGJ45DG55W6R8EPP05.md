@@ -29,8 +29,8 @@ comments:
 
     Re-verified after the fix: `swift test --filter MLXFoundationModelsTests` -- 207 tests / 37 suites, all passing (fresh run).
   timestamp: 2026-07-12T03:19:11.835346+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ae80
 title: 'Executor protocol-surface conformance audit: document deliberate non-use, assert event well-formedness'
 ---
 ## What
@@ -51,3 +51,14 @@ Close the loop on OS27 LanguageModelExecutor conformance by making the adapter's
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass.
+
+## Review Findings (2026-07-11 22:20)
+
+Scope: `review sha HEAD~1..HEAD` (commit 0cf4d7f — "docs(mlx-fm): document executor channel/error surface conformance, add well-formedness tests").
+
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:245` — REJECTED, out of scope. Engine claims `Task<ModelContainer, Error>` should become `Task<ModelContainer, any Error>` on this line. Verified via `git diff 0cf4d7f~1..0cf4d7f -- Libraries/MLXFoundationModels/MLXLanguageModel.swift`: every hunk in this commit's diff falls in the old/new `1995`-`2100` range (doc section + 4 `private`→internal widenings + `clampedUsageCounts` extraction). Line 245 is nowhere near that range, and its actual content (`getOrCreateCached<T>`, a generic cache-or-create helper) doesn't even contain a `Task<ModelContainer, Error>` — that pattern lives at lines 88/89/148, also untouched by this commit. Pre-existing code, misattributed line citation; not this commit's concern.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:246` — REJECTED, out of scope. Same finding/evidence as above (same misattributed `Task<ModelContainer, Error>` claim, line 246 also outside the commit's diff hunks and not matching content).
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:253` — REJECTED, out of scope. Same finding/evidence as above; line 253 is the closing brace of `getOrCreateCached`, untouched by this commit.
+- [x] `Tests/MLXFoundationModelsTests/ExecutorEventWellFormednessTests.swift:116` — FIXED. Confirmed in-scope: this test file is wholly new to this commit (177 insertions, 0 prior lines). The channel-draining `async let` block was duplicated between `deltasSharingOneEntryIDAreAllDelivered` and `usageTotalsAreMonotoneAcrossRounds`. Extracted a shared `@available(iOS 27.0, macOS 27.0, visionOS 27.0, *) private func drainedEventCount(from:expecting:)` and replaced both inline blocks with a single-line call. Verified: `swift test --filter ExecutorEventWellFormednessTests` (4/4 pass) and the full `swift test --filter MLXFoundationModelsTests` (207 tests, 37 suites, all pass).
+
+Outcome: 1 confirmed finding, fixed and verified; 3 findings rejected as out-of-scope pre-existing code with documented diff evidence. No outstanding action items.

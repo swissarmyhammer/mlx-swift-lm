@@ -39,6 +39,27 @@ import Testing
 /// real guarantee there is structural (see
 /// `deltasSharingOneEntryIDAreAllDelivered`'s doc comment for the detail),
 /// not something re-verified at runtime here.
+/// Drains `channel` until `expectedCount` events have been received (or the
+/// channel closes), returning how many were actually seen. Shared by every
+/// test below that only needs to confirm delivery without dropping or
+/// hanging -- `LanguageModelExecutorGenerationChannel.Event`'s opacity (see
+/// the suite doc comment) means none of them can inspect what arrived.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+private func drainedEventCount(
+    from channel: LanguageModelExecutorGenerationChannel, expecting expectedCount: Int
+) async -> Int {
+    var seen = 0
+    do {
+        for try await _ in channel {
+            seen += 1
+            if seen == expectedCount { break }
+        }
+    } catch {
+        // Draining only; a well-formed run never throws here.
+    }
+    return seen
+}
+
 @Suite("Executor channel-emission well-formedness")
 struct ExecutorEventWellFormednessTests {
 
@@ -86,18 +107,7 @@ struct ExecutorEventWellFormednessTests {
         let reasoningEntryID = "round-1-reasoning"
         let expectedEventCount = 4
 
-        async let seenCount: Int = {
-            var seen = 0
-            do {
-                for try await _ in channel {
-                    seen += 1
-                    if seen == expectedEventCount { break }
-                }
-            } catch {
-                // Draining only; a well-formed run never throws here.
-            }
-            return seen
-        }()
+        async let seenCount = drainedEventCount(from: channel, expecting: expectedEventCount)
 
         await MLXLanguageModel.Executor.sendDelta(
             "Hel", entryID: entryID, channel: channel, isReasoning: false)
@@ -138,18 +148,7 @@ struct ExecutorEventWellFormednessTests {
         let channel = LanguageModelExecutorGenerationChannel()
         let expectedEventCount = 2
 
-        async let seenCount: Int = {
-            var seen = 0
-            do {
-                for try await _ in channel {
-                    seen += 1
-                    if seen == expectedEventCount { break }
-                }
-            } catch {
-                // Draining only; a well-formed run never throws here.
-            }
-            return seen
-        }()
+        async let seenCount = drainedEventCount(from: channel, expecting: expectedEventCount)
 
         // Round 2's transcript strictly extends round 1's (the prior
         // round's prompt+response becomes part of round 2's prompt), so its
