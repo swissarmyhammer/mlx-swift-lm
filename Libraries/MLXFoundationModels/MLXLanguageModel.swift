@@ -2732,6 +2732,37 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   `GuidedGenerationError.incompleteOutput`, which is caught here
         ///   and reported via the returned `incomplete` flag instead of
         ///   propagating.
+        /// Resolves the `PromptCacheSlot` to commit after a successful
+        /// `GuidedGenerationLoop.run` call: adopts `resultCache` -- a
+        /// possibly quantization-updated replacement (see
+        /// `GuidedGenerationLoop.RunResult.cache`'s doc) -- only when `slot`
+        /// itself started with a real cache.
+        ///
+        /// `run` ALWAYS returns a concrete, non-nil `[KVCache]` (building one
+        /// internally via `model.newCache` when passed `nil`), so
+        /// unconditionally adopting `resultCache` would turn a multimodal
+        /// round's intentional `nil` (see `isTextOnly`/`makePromptCacheSlot`)
+        /// into a real cache here -- silently defeating the guard that keeps
+        /// image/video/audio-conditioned KV state out of `PromptCache` (it
+        /// would get stored keyed only by `slot.promptTokens`, i.e. the TEXT
+        /// tokens, with no record that the underlying KV state was also
+        /// conditioned on non-text input a later text-only round can't
+        /// reproduce).
+        ///
+        /// - Parameters:
+        ///   - slot: The slot this round generated with.
+        ///   - resultCache: The cache `GuidedGenerationLoop.run`'s
+        ///     `RunResult` returned.
+        /// - Returns: `slot` unchanged when `slot.cache` was `nil`;
+        ///   otherwise `slot` with its cache replaced by `resultCache`.
+        private static func slotAdoptingResultCache(
+            _ slot: PromptCacheSlot, resultCache: [KVCache]
+        ) -> PromptCacheSlot {
+            guard slot.cache != nil else { return slot }
+            return PromptCacheSlot(
+                cache: resultCache, feedInput: slot.feedInput, promptTokens: slot.promptTokens)
+        }
+
         private func runGuidedGenerationLoop(
             input: LMInput,
             context: ModelContext,
@@ -2752,26 +2783,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // `model.newCache(parameters: nil)` -- a rebuilt cache here has
             // the same "flavor" it would have gotten unassisted.
             let slot = await makePromptCacheSlot(input: input, context: context, parameters: nil)
-            // The cache to commit: the slot's own cache unless `run`
-            // returns a (possibly quantization-updated) replacement -- see
-            // `GuidedGenerationLoop.RunResult.cache`'s doc. Stays at
-            // `slot.cache` if `run` throws before returning a result;
-            // `kvBits` is never set on this path today so that's a no-op
-            // in practice (see `RunResult`'s throwing-exit doc).
-            //
-            // Deliberately only overwritten below when `slot.cache` was
-            // non-nil to begin with: `run` ALWAYS returns a concrete,
-            // non-nil `[KVCache]` (building one internally via
-            // `model.newCache` when passed `nil`), so unconditionally
-            // adopting `result.cache` would turn a multimodal round's
-            // intentional `nil` (see `isTextOnly`/`makePromptCacheSlot`)
-            // into a real cache below -- silently defeating the guard
-            // that keeps image/video/audio-conditioned KV state out of
-            // `PromptCache` (it would get stored keyed only by
-            // `slot.promptTokens`, i.e. the TEXT tokens, with no record
-            // that the underlying KV state was also conditioned on
-            // non-text input a later text-only round can't reproduce).
-            var finalCache = slot.cache
+            // The slot to commit: `slot` itself unless `run` returns
+            // (successfully) a replacement cache -- see
+            // `slotAdoptingResultCache`'s doc. Stays at `slot` if `run`
+            // throws before returning a result; `kvBits` is never set on
+            // this path today so that's a no-op in practice (see
+            // `RunResult`'s throwing-exit doc).
+            var finalSlot = slot
             // Real committed token IDs, reported as `run` feeds them
             // through the model -- never a re-encoding of `onText`'s
             // decoded text (see `PromptCache.reconcileCacheAdvance`).
@@ -2794,9 +2812,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     onText(text)
                 }
                 generatedTokenCount = result.tokenCount
-                if slot.cache != nil {
-                    finalCache = result.cache
-                }
+                finalSlot = Self.slotAdoptingResultCache(slot, resultCache: result.cache)
             } catch GuidedGenerationError.incompleteOutput {
                 // Grammar exhausted maxTokens before reaching a stop state.
                 // Deltas already emitted (or buffered) are best-effort
@@ -2812,10 +2828,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 incomplete = true
             }
             await Self.commitPromptCache(
-                modelID: modelID,
-                slot: PromptCacheSlot(
-                    cache: finalCache, feedInput: slot.feedInput, promptTokens: slot.promptTokens),
-                generatedTokenIDs: generatedTokenIDs)
+                modelID: modelID, slot: finalSlot, generatedTokenIDs: generatedTokenIDs)
             return (generatedTokenCount, slot.cachedTokenCount, incomplete)
         }
 
