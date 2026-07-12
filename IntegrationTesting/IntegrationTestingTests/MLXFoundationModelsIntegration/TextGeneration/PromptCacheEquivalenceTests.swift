@@ -29,20 +29,21 @@
 // `Support/FMTestHelpers.swift`) -- run in isolation from other suites
 // touching the same model id for a reliable result.
 //
-// SANDBOX CAVEAT: at the time this file was authored, the entire
-// `IntegrationTesting` xcodeproj target fails to compile against this
-// environment's Xcode-beta/FoundationModels SDK for reasons unrelated to
-// prompt caching (`Response.Action`/`.appendText`/`.updateUsage` are an
-// opaque struct with static factory methods in this SDK build, not the
-// plain enum this file's `if case` pattern matching assumes -- confirmed
-// via a fresh `xcodebuild build-for-testing` run that fails identically
-// across a dozen pre-existing, unrelated files: `UpdateUsageEmissionTests`,
-// `StreamingDeltaTests`, `PlainChatGenerationTests`,
-// `GuidedGenerationIntegrationTests`, `ToolCallingReasoningTests`, etc.).
-// This test is therefore UNVERIFIED BY EXECUTION here, exactly like
-// `PromptCacheReuseTests` already is -- written to compile correctly
-// against the SDK types and follow this file's established idioms, but not
-// run to a passing result in this sandbox.
+// UPDATE (kanban `1h5jhne`): the SDK-incompatibility this file's original
+// caveat described (`Response.Action`/etc. as an opaque struct) no longer
+// reproduces in this environment -- the whole `IntegrationTesting`
+// xcodeproj target builds and this file's suite, including the
+// fork/evictAll addition below, has been run for real against real MLX
+// models (`xcodebuild test -project IntegrationTesting/IntegrationTesting
+// .xcodeproj -scheme IntegrationTesting -destination 'platform=macOS'
+// -only-testing:IntegrationTestingTests/PromptCacheEquivalenceTests`) and
+// passes. One real-execution finding folded in above:
+// `editedEarlierTurnForcesTrimAndMatchesFreshRebuild` originally used
+// `TestFixtures.gemmaModelID`, but Gemma 3's sliding-window `RotatingKVCache`
+// layers (see `Gemma3Text.newCache`) make it unconditionally non-chunkable
+// under `PromptCache.sliceChunks`'s `KVCacheSimple`-only requirement, so
+// `cachedTokenCount` was always `0` for it -- switched to `defaultModelID`,
+// which this test's assertions require.
 
 #if FoundationModelsIntegration
 
@@ -143,7 +144,19 @@ struct PromptCacheEquivalenceTests {
     )
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func editedEarlierTurnForcesTrimAndMatchesFreshRebuild() async throws {
-        let model = makeTestModel(TestFixtures.gemmaModelID)
+        // Deliberately NOT `TestFixtures.gemmaModelID` (unlike this file's
+        // other test): confirmed by real execution (kanban `1h5jhne`) that
+        // Gemma 3's `newCache()` mixes `RotatingKVCache` sliding-window
+        // layers in with its global-attention layers (see
+        // `Gemma3Text.newCache`) -- `PromptCache.sliceChunks`'s
+        // `verifiedSimpleLayers` requires EVERY layer to be a plain
+        // `KVCacheSimple`, so a Gemma 3 cache is never chunkable at all and
+        // `cachedTokenCount` is unconditionally `0` for it, making this
+        // test's own partial-chunk-match assertion below unsatisfiable.
+        // `defaultModelID` has no sliding-window layers, matching the model
+        // choice `PromptCacheReuseTests`/`PromptCacheGuidedRoundTripTests`
+        // already use for the same reason.
+        let model = makeTestModel(TestFixtures.defaultModelID)
         let executor = try makeMLXExecutor(for: model)
         let greedyOptions = GenerationOptions(samplingMode: .greedy, maximumResponseTokens: 8)
 
@@ -243,6 +256,103 @@ struct PromptCacheEquivalenceTests {
             edited-earlier-turn cached output (\(cachedOutput)) diverged from a fresh, \
             cache-evicted rebuild of the identical (edited) transcript (\(freshOutput)) -- \
             the partial-chunk-match / diverging-suffix path produced different generated tokens
+            """
+        )
+
+        await releaseAllGPUMemory()
+    }
+
+    @Test(
+        """
+        A forked-transcript response -- the shared parent prefix extended with a fork-specific \
+        tail, exactly the shape a transcript-seeded LanguageModelSession fork produces -- is \
+        byte-identical to the SAME fork transcript's response after MLXLanguageModel.evictAll() \
+        forces a genuinely fresh model reload and cache rebuild
+        """
+    )
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func forkedTranscriptResponseMatchesFreshRebuildAfterEvictAll() async throws {
+        // `defaultModelID`, not `TestFixtures.gemmaModelID` -- see
+        // `editedEarlierTurnForcesTrimAndMatchesFreshRebuild`'s doc comment:
+        // Gemma 3's sliding-window `RotatingKVCache` layers make it
+        // unconditionally non-chunkable, so `cachedTokenCount` would never
+        // be positive for it.
+        let model = makeTestModel(TestFixtures.defaultModelID)
+        let executor = try makeMLXExecutor(for: model)
+        let greedyOptions = GenerationOptions(samplingMode: .greedy, maximumResponseTokens: 8)
+
+        await MLXLanguageModel.removePromptCache(modelID: model.modelID)
+
+        // Parent turn: establishes the shared prefix a fork extends.
+        let parentUserText = "Say 'hi' in exactly one word."
+        let parentTranscript = Transcript(entries: [
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: parentUserText))],
+                    responseFormat: nil))
+        ])
+        let parentRequest = makeExecutorRequest(
+            transcript: parentTranscript, generationOptions: greedyOptions)
+        let parent = try await respondCollectingTextAndUsage(
+            executor, request: parentRequest, model: model)
+        #expect(!parent.text.isEmpty, "Parent round should produce some response text")
+
+        // Fork transcript: the parent's own entries verbatim (its real reply
+        // included), plus a NEW fork-specific user turn -- exactly what a
+        // forked, transcript-seeded `LanguageModelSession`'s first
+        // `respond()` call would receive (mirrors `PromptCachePrewarmTests`'
+        // `forkTranscript(question:)` and this task's own
+        // `PromptCacheForkReuseTests`).
+        let forkQuestion = "Now say 'bye' in exactly one word."
+        let forkTranscript = Transcript(entries: [
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: parentUserText))],
+                    responseFormat: nil)),
+            .response(
+                Transcript.Response(
+                    assetIDs: [], segments: [.text(Transcript.TextSegment(content: parent.text))])
+            ),
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: forkQuestion))],
+                    responseFormat: nil)),
+        ])
+        let forkRequest = makeExecutorRequest(
+            transcript: forkTranscript, generationOptions: greedyOptions)
+        let forked = try await respondCollectingTextAndUsage(
+            executor, request: forkRequest, model: model)
+        #expect(!forked.text.isEmpty, "Fork round should produce some response text")
+        #expect(
+            forked.cachedTokenCount > 0,
+            """
+            the fork's own respond() round should reuse the parent's cached prefix -- \
+            cachedTokenCount == 0 means nothing was reused, so this test would not actually be \
+            comparing a CACHED fork response against the fresh rebuild below
+            """
+        )
+
+        // Baseline: `MLXLanguageModel.evictAll()` drops BOTH the loaded model
+        // weights AND every model's `PromptCache` chunk store -- a strictly
+        // stronger reset than `removePromptCache(modelID:)` alone (used
+        // elsewhere in this file), which drops only the cache and leaves the
+        // weights resident. Forces a genuinely fresh rebuild from scratch:
+        // reloading the model container from disk, re-tokenizing, and
+        // re-prefilling the identical fork transcript with no prior state at
+        // all.
+        await MLXLanguageModel.evictAll()
+        let freshRequest = makeExecutorRequest(
+            transcript: forkTranscript, generationOptions: greedyOptions)
+        let fresh = try await respondCollectingTextAndUsage(
+            executor, request: freshRequest, model: model)
+
+        #expect(
+            forked.text == fresh.text,
+            """
+            forked-transcript cached output (\(forked.text)) diverged from the same fork \
+            transcript's output after MLXLanguageModel.evictAll() forced a fresh model reload \
+            and cache rebuild (\(fresh.text)) -- the forked prefix reuse produced different \
+            generated tokens than a genuinely fresh run
             """
         )
 
