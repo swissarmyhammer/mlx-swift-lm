@@ -61,6 +61,10 @@ private func decode(_ json: String) throws -> LFM2BidirectionalConfiguration {
 
 struct LFM2BidirectionalTests {
 
+    init() {
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     // MARK: - Configuration
 
     @Test("Embedding config decodes to a CLS-pooled head")

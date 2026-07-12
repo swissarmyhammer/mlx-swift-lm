@@ -12,6 +12,10 @@ import Testing
 @Suite
 struct MaskRelocationTests {
 
+    init() {
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     @Test
     func buildMaskArrayMapsAllowedToZeroAndRestToNegInf() {
         // vocab 8, allow only token id 5.

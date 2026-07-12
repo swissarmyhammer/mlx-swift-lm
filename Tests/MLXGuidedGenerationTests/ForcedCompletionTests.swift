@@ -9,6 +9,10 @@ import Testing
 @Suite
 struct ForcedCompletionSamplingTests {
 
+    init() {
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     @Test("Closing bias overrides model logit, selecting quote over continuation token")
     func closingBiasSelectsQuoteOverContinuation() {
         // 'A' (65) has higher raw logit than '"' (34),

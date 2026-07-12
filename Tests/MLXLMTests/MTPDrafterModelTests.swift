@@ -32,6 +32,7 @@ private final class MockMTPDrafter: Module, MTPDrafterModel {
 
 @Test
 func testMTPDrafterModelProtocolShape() {
+    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let drafter = MockMTPDrafter()
 
     // Mock target (not actually used by MockMTPDrafter; the protocol shape
@@ -96,6 +97,7 @@ private final class DummyLanguageModel: Module, LanguageModel, KVCacheDimensionP
 
 @Test
 func testMTPLastHiddenStatesKeyRoundtrip() {
+    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     var state = LMOutput.State()
     let hidden = MLXArray(
         (0 ..< 8).map { Float($0) }, [1, 1, 8])
@@ -112,6 +114,7 @@ func testMTPLastHiddenStatesKeyRoundtrip() {
 
 @Test
 func testMTPSharedKVStatesKeyRoundtrip() {
+    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     var state = LMOutput.State()
     let kFull = MLXArray.ones([1, 2, 4, 8])
     let vFull = MLXArray.ones([1, 2, 4, 8]) * MLXArray(Float(2))
@@ -155,6 +158,7 @@ func testMTPEmitFlagKeyDefaultsToFalse() {
 
 @Test
 func testMTPStateKeysAreDistinct() {
+    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     var state = LMOutput.State()
     let hidden = MLXArray.zeros([1, 1, 4])
     let kv: [String: (MLXArray, MLXArray)] = [

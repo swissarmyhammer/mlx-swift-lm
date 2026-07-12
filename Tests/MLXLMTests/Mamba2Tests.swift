@@ -8,6 +8,11 @@ import XCTest
 
 final class Mamba2Tests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     private func makeConfig() throws -> Mamba2Configuration {
         let json = """
             {

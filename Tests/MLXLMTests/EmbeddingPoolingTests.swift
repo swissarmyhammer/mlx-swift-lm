@@ -6,6 +6,10 @@ import Testing
 
 struct EmbeddingPoolingTests {
 
+    init() {
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     @Test("Last-token pooling uses the final non-padding token")
     func testLastPoolingRespectsMask() {
         let hiddenStates = MLXArray([

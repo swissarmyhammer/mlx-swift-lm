@@ -112,6 +112,10 @@ private final class RecordingProbeModel: Module, MLXLMCommon.LanguageModel,
 @Suite
 struct FastForwardSampledTokenKVCacheTests {
 
+    init() {
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     private func makeByteFallbackGrammarTokenizer() throws -> GrammarTokenizer {
         let vocab: [String] = (0 ..< RecordingProbeModel.vocabSize).map { byte in
             String(format: "<0x%02X>", byte)

@@ -18,6 +18,10 @@ import Testing
 /// tail layers, and per-layer inputs.
 struct Gemma4ChunkedPrefillTests {
 
+    init() {
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     /// Tiny Gemma4 built from a sparse JSON config (all other fields take
     /// the decoder defaults). 6 text layers with sliding_window_pattern 3
     /// → [sliding, sliding, full, sliding, sliding, full]; the last 2 are

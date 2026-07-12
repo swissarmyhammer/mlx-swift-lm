@@ -7,6 +7,11 @@ import XCTest
 
 final class LFM2MoeRoutingTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     private func makeConfig(useExpertBias: Bool, normTopkProb: Bool = false) throws
         -> LFM2MoEConfiguration
     {

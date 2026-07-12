@@ -44,6 +44,10 @@ private struct ScaleProcessor: LogitProcessor {
 @Suite
 struct CompositeLogitProcessorTests {
 
+    init() {
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     @Test
     func singleProcessorPassthrough() {
         let input = MLXArray([1.0, 2.0, 3.0] as [Float])

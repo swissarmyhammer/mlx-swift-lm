@@ -8,6 +8,11 @@ import XCTest
 
 final class MixtralTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     private func makeConfig() throws -> MixtralConfiguration {
         let json = """
             {

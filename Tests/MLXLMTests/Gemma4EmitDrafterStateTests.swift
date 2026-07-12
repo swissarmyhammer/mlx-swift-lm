@@ -21,6 +21,7 @@ import Testing
 
 @Test
 func testGemma4TextEmitFalseReturnsNoStateBySynthetic() {
+    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let model = makeSyntheticGemma4TextLanguageModel(layerTypes: [
         "full_attention", "sliding_attention",
     ])
@@ -35,6 +36,7 @@ func testGemma4TextEmitFalseReturnsNoStateBySynthetic() {
 
 @Test
 func testGemma4TextEmitTrueWithBothLayerTypesPopulatesStateBySynthetic() {
+    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let model = makeSyntheticGemma4TextLanguageModel(layerTypes: [
         "full_attention", "sliding_attention",
     ])
@@ -65,6 +67,7 @@ func testGemma4TextEmitTrueWithBothLayerTypesPopulatesStateBySynthetic() {
 
 @Test
 func testGemma4TextEmitTrueWithMissingLayerTypeReturnsNilSharedKV() {
+    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let model = makeSyntheticGemma4TextLanguageModel(layerTypes: ["full_attention"])
     let cache = model.newCache(parameters: nil)
     let inputs = MLXArray((0 ..< 4).map { Int32($0) }).reshaped([1, 4])
@@ -81,6 +84,7 @@ func testGemma4TextEmitTrueWithMissingLayerTypeReturnsNilSharedKV() {
 
 @Test
 func testGemma4TextEmitDisabledIsBitIdenticalRegressionBySynthetic() {
+    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let model = makeSyntheticGemma4TextLanguageModel(layerTypes: [
         "full_attention", "sliding_attention",
     ])

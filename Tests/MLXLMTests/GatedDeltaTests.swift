@@ -7,6 +7,11 @@ import XCTest
 
 public class GatedDeltaTests: XCTestCase {
 
+    override public func setUp() {
+        super.setUp()
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     private struct Inputs {
         let q, k, v, a, b, aLog, dtBias: MLXArray
     }

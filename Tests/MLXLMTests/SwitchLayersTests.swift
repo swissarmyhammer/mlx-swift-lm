@@ -3,6 +3,11 @@ import MLXLMCommon
 import XCTest
 
 final class SwitchLayersTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
     func testWeightedExpertSumMatchesGenericExpression() {
         let outputs = MLXArray(0 ..< 24).asType(.float32).reshaped(2, 3, 4)
         let weights = MLXArray([Float](arrayLiteral: 0.25, 0.75, 1.0, 0.0, 0.5, 0.5))

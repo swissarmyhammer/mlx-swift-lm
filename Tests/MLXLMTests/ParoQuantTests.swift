@@ -6,6 +6,11 @@ import XCTest
 
 public class ParoQuantTests: XCTestCase {
 
+    override public func setUp() {
+        super.setUp()
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     // MARK: - Pair Packing
 
     func testPairPackingEncodesCorrectly() {

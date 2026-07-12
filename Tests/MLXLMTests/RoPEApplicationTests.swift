@@ -9,6 +9,10 @@ import Testing
 @Suite(.serialized)
 struct RoPEApplicationTests {
 
+    init() {
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     /// Gemma3nAttention applies rope, updates the cache and applies rope again.
     /// Ensure that it is correctly implemented.  We can observe prefill vs single token
     /// generaton and they should produce the same answers if implemented correctly.

@@ -39,6 +39,10 @@ private struct ListTokenizer: MLXLMCommon.Tokenizer {
 @Suite
 struct ClosingTokenBiasTests {
 
+    init() {
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     @Test("Tier-2 closing characters get +100 bias")
     func tier2CharactersGetHundredBias() {
         let tok = ListTokenizer(tokens: [

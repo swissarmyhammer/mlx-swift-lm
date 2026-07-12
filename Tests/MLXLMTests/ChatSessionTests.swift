@@ -12,6 +12,11 @@ import XCTest
 /// See also ChatSessionIntegrationTests
 public class ChatSessionTests: XCTestCase {
 
+    override public func setUp() {
+        super.setUp()
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     private struct RecordedMessage: Equatable, Sendable {
         var role: Chat.Message.Role
         var content: String

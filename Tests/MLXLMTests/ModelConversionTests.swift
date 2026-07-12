@@ -8,6 +8,11 @@ import XCTest
 
 final class ModelConversionTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+    }
+
     func testModelConversionOptionsDefaultsLeaveQuantizationDefaultsUnspecified() {
         let options = ModelConversionOptions()
 

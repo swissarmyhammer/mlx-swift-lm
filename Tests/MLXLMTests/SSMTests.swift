@@ -5,6 +5,7 @@ import MLXLLM
 import Testing
 
 @Test func testSSMAttnPreservesRecurrentStateDTypeAcrossChunks() throws {
+    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     MLXRandom.seed(7)
 
     let dtype = DType.bfloat16
