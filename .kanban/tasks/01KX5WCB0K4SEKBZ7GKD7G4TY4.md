@@ -38,8 +38,21 @@ comments:
 
     Both corrections are arithmetic-only; the underlying selectivity judgment (which functions actually needed the bootstrap call) was already correct in the code itself. No further code changes needed. Task remains green per all verification evidence above (swift build, swift test on both targets, xcodebuild build-for-testing + xcrun xctest safe pattern, MLXFoundationModelsTests regression check). Leaving in `doing` for review.
   timestamp: 2026-07-12T06:55:58.821034+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01kxajks30vvzmec5ygff4jptn
+  text: |-
+    Review (2026-07-12, scope HEAD~1..HEAD, commit a9163f7): engine returned 2 findings, both rejected as out-of-scope/blanket-exception.
+
+    1. `Tests/MLXLMTests/SampleTests.swift:7` (public class visibility) — cites the pre-existing `public class SampleTests: XCTestCase {` line. Verified via `git diff a9163f7~1..a9163f7`: this commit only inserted a `setUp()` override with the bootstrap call; the class declaration itself is untouched context. Restyling an existing test class is covered by the review skill's blanket exception (no requests to refactor pre-existing test code).
+
+    2. `Tests/MLXLMTests/SpeculativeDecodingTests.swift:53` (duplicate ModelContext construction for mainContext/draftContext) — cites pre-existing constructor calls. Verified via diff: this commit only inserted `_ = MetalLibraryTestBootstrap.ensureColocatedMetallib` as the first line of `init()`; the duplicated construction pattern predates this commit and is untouched. Same blanket exception applies (no restructuring of existing test code).
+
+    Both new TestBootstrap.swift files (in MLXLMTests and MLXGuidedGenerationTests) were reviewed as fair game for genuine defects and drew no findings — they are intentional byte-identical duplicates of the already-approved Tests/MLXFoundationModelsTests/TestBootstrap.swift pattern (task 23ff1zx); a shared-target extraction was already weighed and rejected in this task's own acceptance criteria, so it is not being re-raised as a review finding.
+
+    Net: 0 legitimate findings against this commit's actual diff. Moving to done.
+  timestamp: 2026-07-12T07:10:36.640042+00:00
+position_column: done
+position_ordinal: b080
 title: Apply the swift-test metallib bootstrap fix to MLXLMTests and MLXGuidedGenerationTests
 ---
 ## What
