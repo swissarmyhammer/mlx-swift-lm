@@ -30,5 +30,5 @@ Make the "unbiased normal zone" length scale with `structuralReserve` (the schem
 
 ## Acceptance Criteria
 - [ ] New reserve-sizing policy designed and documented (why it doesn't regress large/nested-schema behavior)
-- [ ] `MultiModelGuidedGenerationTests.intRoundTripGemma3_270m` (currently `.disabled`, added under 68bc1rt) re-enabled and passing
+- [ ] `MultiModelGuidedGenerationTests.intRoundTripGemma3270m` (currently `.disabled`, added under 68bc1rt; renamed from `intRoundTripGemma3_270m` during 68bc1rt's review pass to match this file's lowerCamelCase convention) re-enabled and passing
 - [ ] Full `GuidedGeneration`-suite real-model regression run attached/referenced, zero unexplained failures

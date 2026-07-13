@@ -28,7 +28,7 @@ struct MultiModelGuidedGenerationTests {
     // MARK: - Int Round-Trip Per Model
 
     /// `intRoundTrip`'s own model list, excluding `gemma-3-270m-it-4bit` --
-    /// see `intRoundTripGemma3_270m` immediately below for why that specific
+    /// see `intRoundTripGemma3270m` immediately below for why that specific
     /// model gets its own, currently-`.disabled`, copy of this test instead
     /// of running as a third parameterized case here. Deliberately NOT
     /// filtering the shared `modelIDs` array itself: `stringRoundTrip`,
@@ -117,7 +117,7 @@ struct MultiModelGuidedGenerationTests {
             """
         )
     )
-    func intRoundTripGemma3_270m() async throws {
+    func intRoundTripGemma3270m() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let modelID = TestFixtures.gemmaModelID
         let model = makeTestModel(modelID)

@@ -30,8 +30,8 @@ comments:
 
     Task is green and ready for review. Leaving in doing per the implement workflow.
   timestamp: 2026-07-13T20:15:47.133091+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: b580
 title: 'Full integration-run follow-ups: 4 genuine failures + checkpoint-guard test hygiene'
 ---
 ## What
@@ -55,3 +55,17 @@ TEST HYGIENE (same task): (a) the 7 checkpoint-guard tests record Issues (= suit
 
 ## Workflow
 - Use `/tdd` where a code fix is involved; investigation first for items 2-4 (adapter vs. model determination before any gating).
+
+## Review Findings (2026-07-13 20:35)
+
+Scope: `review sha HEAD~1..HEAD` (commit 7d95475 — "test(integration): gate/fix full-run failures, convert checkpoint guards to skip"). Engine returned 22 findings (22 confirmed by the engine's own self-check). All touched files in this commit are pre-existing IntegrationTesting test files; no production code was touched. Triaged each finding against `git diff 7d95475~1..7d95475` to confirm whether the cited lines actually fall inside this commit's diff, and against the review skill's blanket exception for refactoring/restructuring existing test code.
+
+- [x] 12 naming findings in `CoherenceIntegrationTests.swift` (`bitnetB1582B`, `exaone401_2b`, `gemma31Bqat`, `gemma4E2b`, `glm49b`, `granite33_2b`, `granite40hTiny`, `jamba3b4bit`, `lfm21_2b`, `llama32_1b`, `olmo27b`, `olmoe1b7b`) — REJECTED. Verified via `git diff 7d95475~1..7d95475`: this commit's only change to the file is adding a `.disabled(...)` trait to the pre-existing `olmoe_1B_7B` function; none of these 12 function declarations/names were touched. Out-of-scope (pre-existing code) and covered by the blanket "no refactor of existing test code" exception.
+- [x] `Gemma4AssistantDraftModelIntegrationTests.swift:14` — fixture-download helper duplication vs `MTPRung4TokenParityTests.swift` — REJECTED. `drafterForwardFixturesOrSkip` (both files) is pre-existing and untouched by this commit (diff only touches the 3 checkpoint-guard blocks later in the file); fixing requires restructuring existing test code. Blanket exception + out-of-scope.
+- [x] `Gemma4AssistantDraftModelIntegrationTests.swift:72` — config-loading duplication across the 3 test methods — REJECTED. Pre-existing code, untouched by this commit's diff (only the checkpoint-guard `guard`/`Issue.record` blocks immediately above were converted to `try #require`). Blanket exception + out-of-scope.
+- [x] `MTPRung4TokenParityTests.swift:18` — `mtpFixturesDirOrSkip` duplication (same pair as above) — REJECTED. Pre-existing, untouched (diff starts at line 51, well after this helper). Blanket exception + out-of-scope.
+- [x] `MultiModelGuidedGenerationTests.swift:104` — new `intRoundTripGemma3_270m` duplicates `intRoundTrip`'s body — REJECTED. This is the deliberate documented-root-cause "disabled twin" pattern described in the task; both suggested fixes (extract a shared helper, or fold gemma back into the parameterized list) require restructuring the pre-existing `intRoundTrip` test. Blanket exception.
+- [x] `MultiModelGuidedGenerationTests.swift:240`, `:246`, `:349`, `:357`, `:456` — bias/reserve/constraint-setup duplication across `nestedCountConstrainedAcrossModels`, `itineraryShapedSchemaOnGemma`, `constraintInitWithLargeSchema` — REJECTED. All 5 are pre-existing code outside this commit's two diff hunks (new-file lines 27-44 and 57-141 only). Out-of-scope + blanket exception.
+- [x] `MultiModelGuidedGenerationTests.swift:105` — naming: new function `intRoundTripGemma3_270m` doesn't follow lowerCamelCase — FIXED. Unlike `CoherenceIntegrationTests.swift` (whose underscore convention is a pervasive pre-existing style mirroring HF model IDs, out of scope to change), this file's own sibling tests (`intRoundTrip`, `stringRoundTrip`, `boolRoundTrip`, `nestedCountConstrainedAcrossModels`, `itineraryShapedSchemaOnGemma`) are all pure lowerCamelCase with no underscores, and this function was newly added by this commit (not pre-existing). Renamed to `intRoundTripGemma3270m()` in `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/GuidedGeneration/MultiModelGuidedGenerationTests.swift` (function + its doc-comment cross-reference), and updated the one other reference to the old name in kanban task `t3nynaj`'s acceptance criteria.
+
+Outcome: 21/22 findings rejected with documented evidence (pre-existing/out-of-diff-scope test code, covered by the blanket refactor-existing-tests exception); 1/22 fixed directly (mechanical rename of brand-new test code, no logic change). No open findings remain.
