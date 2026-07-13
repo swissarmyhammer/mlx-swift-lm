@@ -24,8 +24,8 @@ comments:
 
     Task is green and ready for /review. Leaving in doing per /implement convention (review step moves the column).
   timestamp: 2026-07-12T23:48:38.385844+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: b380
 title: 'Strengthen cache-reuse integration assertions: magnitude bounds, tool/reasoning-round coverage, gated multimodal run'
 ---
 ## What
