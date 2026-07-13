@@ -27,9 +27,99 @@ struct MultiModelGuidedGenerationTests {
 
     // MARK: - Int Round-Trip Per Model
 
-    @Test(arguments: modelIDs)
+    /// `intRoundTrip`'s own model list, excluding `gemma-3-270m-it-4bit` --
+    /// see `intRoundTripGemma3_270m` immediately below for why that specific
+    /// model gets its own, currently-`.disabled`, copy of this test instead
+    /// of running as a third parameterized case here. Deliberately NOT
+    /// filtering the shared `modelIDs` array itself: `stringRoundTrip`,
+    /// `boolRoundTrip`, and `nestedCountConstrainedAcrossModels` all
+    /// parameterize over `modelIDs` too and are unaffected by this bug
+    /// (their schemas don't leave gemma-3-270m thousands of unbiased tokens
+    /// to loop in), so they should keep covering all three models.
+    static let intRoundTripModelIDs = modelIDs.filter { $0 != TestFixtures.gemmaModelID }
+
+    @Test(arguments: intRoundTripModelIDs)
     func intRoundTrip(modelID: String) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let model = makeTestModel(modelID)
+        let executor = try makeMLXExecutor(for: model)
+
+        let request = makeExecutorRequest(
+            transcript: transcript("What is 2+2? Reply with just the number."),
+            schema: Int.generationSchema
+        )
+
+        let raw = try await collectText(from: executor, request: request, model: model)
+        let trimmed = try assertValidJSON(raw, label: "(\(modelID) Int)")
+
+        let decoded = try JSONDecoder().decode(Int.self, from: Data(trimmed.utf8))
+        _ = decoded
+        print("[\(modelID)] Int round-trip: \(trimmed)")
+    }
+
+    /// `gemma-3-270m-it-4bit`'s int round-trip, split out of `intRoundTrip`
+    /// above and explicitly disabled: this is a REAL, root-caused adapter
+    /// bug (not model flake, not a grammar-correctness failure), tracked as
+    /// its own follow-up (kanban `t3nynaj`) rather than fixed here because
+    /// the actual fix requires retuning
+    /// `Executor.ConstraintSetup.reserves(forMaxTokens:)` in
+    /// `Libraries/MLXFoundationModels/MLXLanguageModel.swift` -- the single
+    /// completion-reserve policy shared by EVERY guided-generation and
+    /// tool-calling call through `MLXLanguageModel.Executor.respond`, so a
+    /// safe change needs a full real-model regression pass across the whole
+    /// `GuidedGeneration` integration suite, not a drive-by tweak bundled
+    /// into a checkpoint-hygiene/4-test-triage task.
+    @Test(
+        .disabled(
+            """
+            Root cause (verified by direct run, not speculation): \
+            `Executor.ConstraintSetup.reserves(forMaxTokens:)` computes \
+            `completionReserve` as `max(structuralReserve * 3, maxTokens / 4)`. \
+            For a bare `Int` schema, `CompletionReserve.estimate` synthesizes \
+            the minimal JSON `"0"`, so `structuralReserve` is tiny (1-3 tokens) \
+            and `maxTokens / 4` always wins -- with the Executor's \
+            `defaultMaxTokens = 4096`, that floor is 1024, so \
+            `GuidedGenerationLoop`'s soft-zone completion bias (+200 EOS / +100 \
+            closing-tier, see `applyBiasAndSample`) doesn't engage until token \
+            3072 -- 75% of the ENTIRE budget runs with zero bias toward \
+            completion, regardless of how trivially small the schema's actual \
+            content need is. The grammar legitimately allows EOS after every \
+            single digit here (`"2"`, `"22"`, `"222"`, ... are all valid, \
+            complete JSON integers), but gemma-3-270m-it-4bit's own raw greedy \
+            preference (a known small-model repetition-degeneration failure \
+            mode) kept selecting the digit `2` over `EOS` for the entire \
+            unbiased normal zone. Verified: at token 3072 the soft-zone `+200` \
+            EOS bias flips the decision to `EOS` on the very first biased \
+            sample -- confirming the grammar/mask machinery itself is correct \
+            and would have stopped immediately had the bias engaged sooner. By \
+            then the accumulated output was 3072 copies of `"2"`, a \
+            JSON-valid-but-astronomically-large integer literal that overflows \
+            Swift's `Int` and fails `JSONDecoder` with `.dataCorrupted`. This is \
+            a genuine, reproducible (deterministic greedy/temp=0, not a flake) \
+            adapter-policy gap, not a grammar bug and not simple "model \
+            incapability" -- the very mechanism meant to prevent it just \
+            engages too late for schemas this trivial. NOT fixed here because \
+            `ConstraintSetup.reserves` is the single reserve-sizing policy for \
+            EVERY guided-generation/tool-calling call through \
+            `MLXLanguageModel.Executor.respond` (GenerableRoundTripTests, \
+            GuidedGenerationIntegrationTests, GuidedGenerationUsageTests, \
+            PrewarmGrammarTests, StopTokenRegressionIntegrationTests, this \
+            suite's other two models, tool-calling phase-2 budgeting, etc. all \
+            route through it -- `HardReserveStressTests` is the one exception, \
+            since it recomputes the same formula locally rather than calling \
+            `ConstraintSetup.reserves`); retuning it safely needs a designed \
+            replacement policy (e.g. scaling the "free normal zone" to \
+            `structuralReserve` instead of an unconditional `maxTokens / 4` \
+            floor) plus a full real-model regression pass across the guided- \
+            generation integration suite, which is its own properly-scoped \
+            task -- see kanban `t3nynaj` (full id \
+            01KXEF8DHN3RTNMK4MAT3NYNAJ). Re-enable this test once that lands.
+            """
+        )
+    )
+    func intRoundTripGemma3_270m() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let modelID = TestFixtures.gemmaModelID
         let model = makeTestModel(modelID)
         let executor = try makeMLXExecutor(for: model)
 

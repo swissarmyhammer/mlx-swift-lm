@@ -27,6 +27,16 @@ private func drafterForwardFixturesOrSkip(name: String) async -> URL? {
     }
 }
 
+/// The 31B `gemma-4-31B-it-assistant-bf16` drafter checkpoint this suite
+/// requires. It is a ~33GB download not fetched by default; presence gates
+/// the whole suite via `.enabled(if:)` below so environment absence reads
+/// as SKIPPED (not FAILED) in a full-run triage.
+private let gemma4AssistantDrafterModelID = "mlx-community/gemma-4-31B-it-assistant-bf16"
+
+private var gemma4AssistantCheckpointAvailable: Bool {
+    hfSnapshotDir(modelId: gemma4AssistantDrafterModelID) != nil
+}
+
 // MARK: - Gemma4 assistant integration tests
 //
 // Wrapped in `@Suite(.serialized)` so the three tests below (which each load
@@ -34,17 +44,30 @@ private func drafterForwardFixturesOrSkip(name: String) async -> URL? {
 // sequentially. Parallel weight loads against the same checkpoint can race
 // on MLX runtime state and produce non-deterministic numeric divergence in
 // the Rung 2/3 forward parity assertion.
-
-@Suite(.serialized)
+//
+// `.enabled(if:)` gates the whole suite on the 31B checkpoint being present
+// in the HF cache -- these tests report SKIPPED (not FAILED) when it's
+// absent, matching the `MLX_RUN_VLM_INTEGRATION` idiom used elsewhere
+// (see `VisionIntegrationTests`, `PromptCacheMultimodalBoundaryTests`).
+//
+// To exclude this suite from an `xcodebuild test-without-building`
+// invocation by name, use a bare (no `/<test>` suffix, no trailing `()`)
+// `-skip-testing:IntegrationTestingTests/Gemma4AssistantIntegrationTests`
+// -- experimentally verified to reliably exclude every test in this Swift
+// Testing `@Suite` struct. See the header comment in
+// `MTPRung4TokenParityTests.swift` for the full verified `-skip-testing`
+// invocation covering every checkpoint-guarded suite together, and for the
+// (different) identifier rule individual tests need.
+@Suite(.serialized, .enabled(if: gemma4AssistantCheckpointAvailable))
 struct Gemma4AssistantIntegrationTests {
 
     @Test
     func testGemma4AssistantConfigurationDecodesRealCheckpoint() throws {
-        let drafterDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31B-it-assistant-bf16")
-        guard let drafterDir else {
-            Issue.record("31B drafter checkpoint not present in HF cache; skipping")
-            return
-        }
+        // The suite-level `.enabled(if:)` trait already guarantees the
+        // checkpoint is present before this test body runs.
+        let drafterDir = try #require(
+            hfSnapshotDir(modelId: gemma4AssistantDrafterModelID),
+            "31B drafter checkpoint unexpectedly missing despite suite-level .enabled(if:) gate")
         let configURL = drafterDir.appendingPathComponent("config.json")
         let data = try Data(contentsOf: configURL)
         let cfg = try JSONDecoder().decode(Gemma4AssistantConfiguration.self, from: data)
@@ -65,12 +88,11 @@ struct Gemma4AssistantIntegrationTests {
 
     @Test
     func testRung1WeightsLoadFrom31BCheckpoint() throws {
-        guard
-            let drafterDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31B-it-assistant-bf16")
-        else {
-            Issue.record("31B drafter checkpoint not in HF cache; skipping Rung 1")
-            return
-        }
+        // The suite-level `.enabled(if:)` trait already guarantees the
+        // checkpoint is present before this test body runs.
+        let drafterDir = try #require(
+            hfSnapshotDir(modelId: gemma4AssistantDrafterModelID),
+            "31B drafter checkpoint unexpectedly missing despite suite-level .enabled(if:) gate")
         let configURL = drafterDir.appendingPathComponent("config.json")
         let cfg = try JSONDecoder().decode(
             Gemma4AssistantConfiguration.self, from: Data(contentsOf: configURL))
@@ -86,12 +108,11 @@ struct Gemma4AssistantIntegrationTests {
         guard let fixturesDir = await drafterForwardFixturesOrSkip(name: "case_01") else {
             return
         }
-        guard
-            let drafterDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31B-it-assistant-bf16")
-        else {
-            Issue.record("31B drafter checkpoint not in HF cache; skipping Rung 2/3")
-            return
-        }
+        // The suite-level `.enabled(if:)` trait already guarantees the
+        // checkpoint is present before this test body runs.
+        let drafterDir = try #require(
+            hfSnapshotDir(modelId: gemma4AssistantDrafterModelID),
+            "31B drafter checkpoint unexpectedly missing despite suite-level .enabled(if:) gate")
 
         let configURL = drafterDir.appendingPathComponent("config.json")
         let cfg = try JSONDecoder().decode(

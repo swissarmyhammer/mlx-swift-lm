@@ -51,6 +51,18 @@ private struct Rung4BoundDrafter {
 
 nonisolated(unsafe) private var _rung4Cache: Result<Rung4BoundDrafter?, Error>?
 
+/// The two ~33GB checkpoints Rung 4 requires (the bf16 drafter and the
+/// 8-bit target). Presence of both gates the whole suite via
+/// `.enabled(if:)` below so environment absence reads as SKIPPED (not
+/// FAILED) in a full-run triage.
+private let rung4DrafterModelID = "mlx-community/gemma-4-31B-it-assistant-bf16"
+private let rung4TargetModelID = "mlx-community/gemma-4-31b-it-8bit"
+
+private var rung4CheckpointsAvailable: Bool {
+    hfSnapshotDir(modelId: rung4DrafterModelID) != nil
+        && hfSnapshotDir(modelId: rung4TargetModelID) != nil
+}
+
 private func sharedBoundDrafter() throws -> Rung4BoundDrafter? {
     if let cached = _rung4Cache {
         switch cached {
@@ -69,11 +81,11 @@ private func sharedBoundDrafter() throws -> Rung4BoundDrafter? {
 }
 
 private func loadRung4Drafter() throws -> Rung4BoundDrafter? {
-    guard let drafterDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31B-it-assistant-bf16")
+    guard let drafterDir = hfSnapshotDir(modelId: rung4DrafterModelID)
     else {
         return nil
     }
-    guard let targetDir = hfSnapshotDir(modelId: "mlx-community/gemma-4-31b-it-8bit")
+    guard let targetDir = hfSnapshotDir(modelId: rung4TargetModelID)
     else {
         return nil
     }
@@ -112,8 +124,56 @@ private func loadRung4Drafter() throws -> Rung4BoundDrafter? {
 // fixture inputs. They do NOT go through the full
 // `MTPSpeculativeTokenIterator` — that is exercised by
 // `MTPAcceptanceRateTests` once both target and drafter are available.
+//
+// `.enabled(if:)` gates the whole suite on BOTH ~33GB checkpoints (the bf16
+// drafter and the 8-bit target) being present in the HF cache -- these
+// tests report SKIPPED (not FAILED) when either is absent, matching the
+// `MLX_RUN_VLM_INTEGRATION` idiom used elsewhere (see
+// `VisionIntegrationTests`, `PromptCacheMultimodalBoundaryTests`). With
+// this trait in place, an `xcodebuild test` invocation over the whole
+// target already reports these tests as SKIPPED (not FAILED) when the
+// checkpoints are absent, so no `-skip-testing:` exclusion is required for
+// a clean full run -- the invocation below is only for a caller who wants
+// to avoid the (cheap) filesystem probe / suite-setup entirely.
+//
+// ## Verified `-skip-testing` identifiers for Swift Testing suites
+//
+// Experimentally confirmed against this exact suite (Xcode beta w/
+// swift-testing 2073), because the previous full-run attempt found that
+// `-skip-testing:IntegrationTestingTests/<Class>` matched none of the six
+// checkpoint-guarded tests it was tried against:
+//
+// - **Whole-`@Suite`-struct exclusion**: a BARE
+//   `-skip-testing:IntegrationTestingTests/Rung4TokenParityTests` (no
+//   `/<test>` suffix, no trailing `()`) DOES reliably exclude every test in
+//   a Swift Testing `@Suite` struct -- confirmed by diffing the swift-testing
+//   event log with and without the flag.
+// - **Individual-test exclusion** (a struct method OR a free `@Test`
+//   function) REQUIRES a trailing `()` on the last path segment --
+//   `-skip-testing:IntegrationTestingTests/Rung4TokenParityTests/testRung4DraftBlockGreedyMatchesFixture31BCase01Block2`
+//   (no parens) silently matches zero tests, while appending `()` matches
+//   correctly. This is almost certainly why the prior attempt ("worked for
+//   none of the six") failed: guessing the XCTest-style bare-method form
+//   for Swift Testing tests omits the parens Swift Testing's identifier
+//   syntax requires at the leaf level.
+// - The free-function `testMTPDrafterFactoryLoadFromDirectoryWhenCheckpointPresent`
+//   (declared at file scope, not inside a struct) follows the same leaf
+//   rule: it needs `IntegrationTestingTests/testMTPDrafterFactoryLoadFromDirectoryWhenCheckpointPresent()`
+//   with parens, both for `-only-testing:` and `-skip-testing:`.
+//
+// Working invocation excluding every checkpoint-guarded MTP/draft-model
+// suite at once (suite-level bare names; the free function needs `()`):
+//
+// ```
+// xcodebuild test-without-building -project IntegrationTesting.xcodeproj \
+//   -scheme IntegrationTesting -destination 'platform=macOS' \
+//   -skip-testing:IntegrationTestingTests/Rung4TokenParityTests \
+//   -skip-testing:IntegrationTestingTests/Gemma4AssistantIntegrationTests \
+//   -skip-testing:"IntegrationTestingTests/testMTPDrafterFactoryLoadFromDirectoryWhenCheckpointPresent()" \
+//   -parallel-testing-enabled NO
+// ```
 
-@Suite(.serialized)
+@Suite(.serialized, .enabled(if: rung4CheckpointsAvailable))
 struct Rung4TokenParityTests {
     @Test
     func testRung4DraftBlockGreedyMatchesFixture31BCase01Block2() async throws {
@@ -137,12 +197,12 @@ private func assertDraftBlockMatchesFixture(name: String) async throws {
     guard let fixturesDir = await mtpFixturesDirOrSkip(name: name) else {
         return
     }
-    guard let bound = try sharedBoundDrafter() else {
-        Issue.record(
-            "required checkpoint not in HF cache (drafter or 31B 8-bit target); skipping Rung 4 \(name)"
-        )
-        return
-    }
+    // The suite-level `.enabled(if:)` trait already guarantees both
+    // checkpoints (drafter and 31B 8-bit target) are present before this
+    // test body runs.
+    let bound = try #require(
+        try sharedBoundDrafter(),
+        "drafter/target checkpoints unexpectedly missing despite suite-level .enabled(if:) gate")
     let model = bound.drafter
     let target = bound.target
 
