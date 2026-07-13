@@ -44,12 +44,12 @@ let package = Package(
     traits: [
         // Gates the MLXLanguageModel adapter for Apple's FoundationModels
         // framework. Default-on. Disabling the trait compiles MLXFoundationModels
-        // to an effectively empty library (only MLXDownloadProgress survives):
-        // the entire `MLXLanguageModel` / `MLXLanguageModel.Executor` surface
-        // requires FoundationModels types that are not available on platforms
-        // older than iOS/macOS/visionOS 27.0. Consumers targeting older OS versions
-        // can still use this package for MLXLLM / MLXLMCommon / MLXEmbedders
-        // etc. by turning the trait off.
+        // to an empty library: the entire `MLXLanguageModel` / `MLXLanguageModel.Executor`
+        // surface requires FoundationModels types that are not available on platforms
+        // older than iOS/macOS/visionOS 27.0, and the MLXDownloadProgress observable
+        // (whose only producer is that adapter) is gated alongside it. Consumers
+        // targeting older OS versions can still use this package for MLXLLM /
+        // MLXLMCommon / MLXEmbedders etc. by turning the trait off.
         .trait(
             name: "FoundationModelsIntegration",
             description:
@@ -168,8 +168,20 @@ let package = Package(
             dependencies: [
                 "MLXHuggingFaceMacros",
                 "MLXLMCommon",
+                .target(
+                    name: "MLXFoundationModels",
+                    condition: .when(traits: ["FoundationModelsIntegration"])
+                ),
             ],
             path: "Libraries/MLXHuggingFace"
+        ),
+        .testTarget(
+            name: "MLXHuggingFaceMacrosTests",
+            dependencies: [
+                "MLXHuggingFaceMacros",
+                .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
+            ],
+            path: "Tests/MLXHuggingFaceMacrosTests"
         ),
         // C++ bridge for xgrammar: vendored upstream C++17 source under
         // Libraries/MLXCXGrammar/xgrammar/ compiled directly by SPM, plus our
