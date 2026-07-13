@@ -20,12 +20,26 @@ import Foundation
 /// ``buffersEntireResponse`` is `true`, so ``ToolCallProcessor`` defers all
 /// parsing to end-of-sequence rather than trying to split live token chunks.
 public struct GLM4BareToolCallParser: ToolCallParser, Sendable {
+    /// No start tag -- the bare format has no wrapper markers of any kind.
     public let startTag: String? = nil
+    /// No end tag -- the bare format has no wrapper markers of any kind.
     public let endTag: String? = nil
+    /// Always `true`: the function name has no literal marker preceding it,
+    /// so ``ToolCallProcessor`` cannot distinguish it from prose mid-stream
+    /// and must defer parsing to end-of-sequence.
     public let buffersEntireResponse = true
 
+    /// Creates a parser for the bare GLM-4 tool call format.
     public init() {}
 
+    /// Parses a bare function-name line followed by a bare JSON arguments
+    /// object (e.g. `get_weather\n{"location": "Paris"}`) into a ``ToolCall``.
+    /// - Parameters:
+    ///   - content: The full buffered response text.
+    ///   - tools: Unused -- this format carries no type hints, so argument
+    ///     values are taken as-is from the parsed JSON.
+    /// - Returns: The parsed ``ToolCall``, or `nil` if `content` doesn't
+    ///   contain a `{`-prefixed bare JSON arguments object.
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {
         let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let braceIndex = text.firstIndex(of: "{") else { return nil }
