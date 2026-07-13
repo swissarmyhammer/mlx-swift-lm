@@ -9,16 +9,7 @@ import Testing
 ///
 /// The ModelCache stores compiled "template" constraints and clones them
 /// for each request, avoiding repeated grammar compilation (~5-20ms savings).
-@Suite(
-    .disabled(
-        """
-        GrammarConstraint.clone() requires xgrammar's GrammarMatcher::Fork() (xgrammar >= \
-        v0.1.34); the vendored version (v0.1.30) does not provide it, so every clone() \
-        in this suite throws. Production handles the absence gracefully — makeConstraint() \
-        catches forkFailed and recompiles a fresh constraint — so constraint caching is a \
-        perf-only optimization, not a correctness gap. Re-enable when the vendored \
-        xgrammar is bumped to a version with Fork().
-        """))
+@Suite
 struct ConstraintCachingTests {
 
     // MARK: - GrammarConstraint.clone() Tests
