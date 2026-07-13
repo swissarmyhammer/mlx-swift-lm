@@ -29,8 +29,8 @@ comments:
   id: 01kxe5zpxjeg3q7x4mmzehecea
   text: 'Adversarial double-check (independent re-verification, not trusting my own report): PASS. Re-ran `swift test --filter CXGrammarTests` (7/7), `swift test --filter ConstraintCachingTests` (3/3), `swift test --filter MLXGuidedGenerationTests` (63/63), and `swift build` (clean) independently and confirmed `xg_matcher_fork`''s implementation follows the file''s existing ownership/exception-boundary conventions, VERSION/kXGrammarVersion agree at v0.1.34, no stale `.disabled`/"v0.1.30 does not have Fork()" comments remain, and change scope is limited to the vendored xgrammar tree + the two de-skipped test files. No findings. Leaving task in doing for `/review`.'
   timestamp: 2026-07-13T16:46:53.874766+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: b480
 title: 'ConstraintCachingTests suite is skipped: vendored xgrammar lacks GrammarMatcher::Fork() needed for clone()'
 ---
 ## What
