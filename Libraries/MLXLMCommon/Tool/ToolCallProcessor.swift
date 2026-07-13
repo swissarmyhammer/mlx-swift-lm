@@ -85,6 +85,9 @@ public class ToolCallProcessor {
     /// - Parameter chunk: The text chunk to process
     /// - Returns: Regular text that should be displayed (non-tool call content), or `nil` if buffering
     public func processChunk(_ chunk: String) -> String? {
+        if parser.buffersEntireResponse {
+            return processFullBufferChunk(chunk)
+        }
         if isInlineFormat {
             return processInlineChunk(chunk)
         }
@@ -146,6 +149,21 @@ public class ToolCallProcessor {
     }
 
     // MARK: - Private Methods
+
+    /// Process a chunk for formats that must see the entire response before
+    /// parsing (``ToolCallParser/buffersEntireResponse`` is `true`).
+    ///
+    /// These formats have no literal marker preceding their content, so
+    /// nothing can be reliably classified as "plain text" vs. "the start of
+    /// a tool call" mid-stream. Every chunk is silently accumulated; the
+    /// buffered content is parsed once as a whole at end-of-sequence via
+    /// ``processEOS(returnBufferedText:)``, which flushes it back as regular
+    /// text if it doesn't turn out to be a valid tool call.
+    private func processFullBufferChunk(_ chunk: String) -> String? {
+        toolCallBuffer += chunk
+        state = .collectingToolCall
+        return nil
+    }
 
     /// Process chunk for inline formats (no wrapper tags).
     ///

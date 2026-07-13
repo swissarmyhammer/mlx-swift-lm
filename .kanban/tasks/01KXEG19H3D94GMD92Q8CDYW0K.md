@@ -1,8 +1,40 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '8180'
+comments:
+- actor: claude-code
+  id: 01kxerdejj4tfhdtnh28xs9sq9
+  text: |-
+    Implementation complete, verified against the real cached model, adversarial double-check in progress.
+
+    Discriminator found: `mlx-community/GLM-4-9B-0414-4bit`'s actual cached config.json has `model_type: "glm4"` (exact). Confirmed via web research that GLM-4.7-descended checkpoints (e.g. mlx-community/glm-4.7-flash-abliterated-8bit) use `model_type: "glm4_moe"` (MoE architecture) -- a real, load-bearing architectural discriminator (dense vs MoE), available at format-detection time via config.json, matching acceptance criterion path (a).
+
+    Format/parser: added `ToolCallFormat.glm4Bare` ("glm4_bare") + `GLM4BareToolCallParser` (Libraries/MLXLMCommon/Tool/Parsers/GLM4BareToolCallParser.swift). `infer(from:)` now returns `.glm4Bare` for exact `model_type == "glm4"`, keeps `.glm4` (GLM-4.7 envelope, unchanged) for `hasPrefix("glm4")` variants (glm4_moe, glm4_moe_lite, glm4_5, etc.).
+
+    Non-obvious architecture addition: the existing `ToolCallProcessor` inline-format (`startTag == nil`) path assumes the JSON envelope embeds the function name (true for its only prior consumer, Llama3ToolCallParser) and flushes any text before the first `{` as plain chat text immediately -- which would permanently lose GLM-4-9B-0414's bare function-name line before the parser ever saw it, since name and JSON typically arrive in separate streamed chunks. Added a new `ToolCallParser.buffersEntireResponse` protocol property (default false, zero behavior change for all existing parsers) that GLM4BareToolCallParser sets true; `ToolCallProcessor` routes such parsers through a new `processFullBufferChunk` that silently accumulates everything and defers all parsing to `processEOS`. Tradeoff: models using `.glm4Bare` get no incremental token streaming (single flush at EOS) since there's no reliable mid-stream marker for "is this the start of a tool call" in a bare, tag-free format -- verified this doesn't break plain chat via the real-model CoherenceIntegrationTests.glm4_9B test (planets question, non-tool).
+
+    Also updated `Libraries/MLXLLM/LLMModelFactory.swift`'s `glm4_9b_4bit` registration from hardcoded `toolCallFormat: .glm4` to `.glm4Bare` -- necessary because that hardcoded value bypasses `infer()` entirely (`LLMModelFactory._load` only calls `infer()` when `toolCallFormat == nil`), so the format-detection fix alone wouldn't have taken effect for the real registered model.
+
+    Unit tests (Tests/MLXLMTests/ToolTests.swift): 6 new tests for the parser + processor streaming behavior, updated `testToolCallFormatRawValues` and `testToolCallFormatInference` (exact-match vs prefix-match split). `swift test --filter ToolTests`: 63/63 pass. Full `swift test`: 533 tests, 0 failures.
+
+    Real-model verification (xcodebuild build-for-testing + test-without-building against actual cached mlx-community/GLM-4-9B-0414-4bit, not mocked):
+    - ToolCallIntegrationTests/glm4FormatAutoDetection(): PASS (.glm4Bare)
+    - ToolCallIntegrationTests/glm4EndToEnd(): PASS -- real model output correctly parsed into ToolCall(get_weather, location=Paris, unit=celsius), matching the task's exact reproduction.
+    - CoherenceIntegrationTests/glm4_9B() (plain chat, no tools): PASS -- confirms buffersEntireResponse tradeoff doesn't break ordinary generation for this model.
+
+    `.disabled` removed from glm4EndToEnd in IntegrationTesting/IntegrationTestingTests/ToolCallIntegrationTests.swift.
+
+    Adversarial double-check agent launched to scrutinize the buffersEntireResponse architecture change, parser edge cases, discriminator soundness, and scope. Will report back once it returns.
+  timestamp: 2026-07-13T22:08:58.450044+00:00
+- actor: claude-code
+  id: 01kxerkfncytmssn9ys4hbzywr
+  text: |-
+    Adversarial double-check: PASS, no findings. Independently re-ran `swift test --filter ToolTests` (63/63, matched claim), traced the real production call path in Evaluate.swift's TextToolTokenLoopHandler.onGenerationEnd to confirm processEOS is genuinely exercised (not just test-only), confirmed every existing parser inherits buffersEntireResponse=false via the protocol extension default (verified this branch is dead code for all of them, zero behavior change), verified the config.json discriminator directly against the cached snapshot file (not fabricated), confirmed the LLMModelFactory.swift one-line edit was necessary (traced _load's `if toolCallFormat == nil` guard), and confirmed the .disabled trait removal is clean with no orphaned comments.
+
+    Task is green and ready for review. Leaving in doing per the implement workflow.
+  timestamp: 2026-07-13T22:12:16.172419+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'Tool-calling: GLM-4-9B-0414 (older GLM-4, non-4.7) needs a different tool-call parser than GLM4ToolCallParser'
 ---
 ## What

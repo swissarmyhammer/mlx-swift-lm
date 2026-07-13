@@ -19,6 +19,19 @@ public protocol ToolCallParser: Sendable {
     /// Returns `nil` for inline formats that don't use wrapper tags.
     var endTag: String? { get }
 
+    /// Whether this format has no literal marker preceding its content and
+    /// must therefore have the *entire* response buffered before parsing.
+    ///
+    /// Tagged formats (`startTag != nil`) and inline JSON-envelope formats
+    /// (`startTag == nil` but the function name is embedded inside the JSON,
+    /// e.g. `Llama3ToolCallParser`) can both be detected incrementally as
+    /// text streams in. Formats where non-JSON content -- such as a bare
+    /// function name -- may precede the parseable payload with no marker at
+    /// all cannot be distinguished from ordinary prose mid-stream, so
+    /// ``ToolCallProcessor`` defers all parsing for them to end-of-sequence.
+    /// Defaults to `false`.
+    var buffersEntireResponse: Bool { get }
+
     /// Parse the content into a `ToolCall`.
     /// - Parameters:
     ///   - content: The text content to parse (may include tags)
@@ -35,6 +48,8 @@ public protocol ToolCallParser: Sendable {
 }
 
 extension ToolCallParser {
+    public var buffersEntireResponse: Bool { false }
+
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         if let startTag {
             return
@@ -78,6 +93,13 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `func<arg_key>k</arg_key><arg_value>v</arg_value>`
     case glm4
 
+    /// GLM4 bare format used by the original (pre-4.7, non-MoE) GLM-4
+    /// checkpoints, such as GLM-4-9B-0414. No wrapper tags or JSON envelope:
+    /// the function name appears alone, followed by a bare JSON object of
+    /// just the arguments.
+    /// Example: `get_weather\n{"location": "Paris", "unit": "celsius"}`
+    case glm4Bare = "glm4_bare"
+
     /// Gemma function call format.
     /// Example: `<start_function_call>call:name{key:value,k:<escape>str<escape>}<end_function_call>`
     case gemma
@@ -117,6 +139,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
         case .glm4:
             return GLM4ToolCallParser()
+        case .glm4Bare:
+            return GLM4BareToolCallParser()
         case .gemma:
             return GemmaFunctionParser(
                 startTag: "<start_function_call>", endTag: "<end_function_call>",
@@ -186,7 +210,16 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .lfm2
         }
 
-        // GLM4 family (glm4, glm4_moe, glm4_moe_lite, etc.)
+        // GLM4 dense/non-MoE model (exact match): the original, pre-4.7
+        // architecture (e.g. GLM-4-9B-0414). Its chat template never taught
+        // the GLM-4.7 `<tool_call>`/`<arg_key>` envelope -- it emits a bare
+        // function-name line followed by a bare JSON object of arguments.
+        if type == "glm4" {
+            return .glm4Bare
+        }
+
+        // GLM4 MoE family (glm4_moe, glm4_moe_lite, etc.): GLM-4.5/4.6/4.7
+        // descend from this architecture and DO use the envelope above.
         if type.hasPrefix("glm4") {
             return .glm4
         }

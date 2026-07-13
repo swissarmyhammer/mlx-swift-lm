@@ -61,41 +61,7 @@ struct ToolCallIntegrationTests {
         try await ToolCallTests.glm4FormatAutoDetection(container: container)
     }
 
-    @Test(
-        .disabled(
-            """
-            Verified format/detection mismatch, not a "no tool call" model \
-            refusal: `mlx-community/GLM-4-9B-0414-4bit` given "What's the \
-            weather in Paris?" against the weather-tool schema produces a \
-            CORRECT tool call as plain text: `get_weather` on its own line, \
-            then a complete, valid JSON object of just the arguments \
-            (`{"location": "Paris", "unit": "celsius"}`) -- right function, \
-            right args, no truncation -- but with NO envelope of any kind (no \
-            `<tool_call>` tag, no `<arg_key>`/`<arg_value>` XML). Confirmed by \
-            reading this exact snapshot's own `tokenizer_config.json` \
-            `chat_template`: its tool block just prints the function name and \
-            full JSON schema then instructs (in Chinese) "use JSON format for \
-            the parameters" -- it never teaches the model any `<tool_call>` or \
-            `<arg_key>` convention. `GLM4ToolCallParser` (the `.glm4` format \
-            this model's `model_type` auto-detects to) is modeled on \
-            GLM-4.7's tool_parsers/glm47.py convention, which this OLDER \
-            (pre-4.7) GLM-4-0414 checkpoint's own template never established. \
-            No existing parser handles this shape: `JSONToolCallParser` \
-            requires `"name"`/`"arguments"` keys inside the JSON blob itself \
-            (this JSON is bare arguments only, with the name as separate \
-            preceding plain text); `GLM4ToolCallParser`, `XMLFunctionParser`, \
-            `PythonicToolCallParser`, and `MistralToolCallParser` all expect \
-            different envelopes entirely. This is a real, fixable adapter gap, \
-            but the fix is a new `ToolCallParser` (+ possibly a new \
-            `ToolCallFormat` case and a detection rule to distinguish \
-            bare-JSON-style older GLM-4 checkpoints from GLM-4.7's XML-tagged \
-            convention) -- a scoped feature addition beyond the 4-test-triage \
-            scope this task covers. Tracked as kanban `8cdyw0k` (full id \
-            01KXEG19H3D94GMD92Q8CDYW0K). Re-enable once that lands.
-            """
-        )
-    )
-    func glm4EndToEnd() async throws {
+    @Test func glm4EndToEnd() async throws {
         let container = try await models.llmContainer(for: .init(id: IntegrationTestModelIDs.glm4))
         try await ToolCallTests.glm4EndToEndGeneration(container: container)
     }

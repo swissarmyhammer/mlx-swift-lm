@@ -511,8 +511,8 @@ public enum ToolCallTests {
     public static func glm4FormatAutoDetection(container: LLModelContainer) async throws {
         let config = await container.configuration
         try check(
-            config.toolCallFormat == ToolCallFormat.glm4,
-            "Expected .glm4 tool call format, got: \(String(describing: config.toolCallFormat))"
+            config.toolCallFormat == ToolCallFormat.glm4Bare,
+            "Expected .glm4Bare tool call format, got: \(String(describing: config.toolCallFormat))"
         )
     }
 
