@@ -110,14 +110,47 @@ struct ConstraintSetup {
     /// `structuralReserve * normalZoneMultiplier` instead makes the soft
     /// zone engage within single digits of tokens for trivial schemas,
     /// while a modest cap at half of `maxTokens` keeps genuinely large/nested
-    /// schemas from losing their soft-zone runway entirely -- `hardReserve`
-    /// (`structuralReserve * 8`, unchanged) remains the floor under
-    /// `completionReserve`, so the soft zone never collapses to zero width.
+    /// schemas from losing their soft-zone runway entirely.
+    ///
+    /// `hardReserve` (`structuralReserve * 8`) is capped at a QUARTER of
+    /// `maxTokens` -- deliberately a tighter ceiling than `normalZoneLength`'s
+    /// own half-of-`maxTokens` cap, not the same one -- for the same reason
+    /// `normalZoneLength` is capped at all: an inflated or inaccurate
+    /// `structuralReserve` -- e.g. `CompletionReserve.estimate` silently
+    /// falling back to its flat default when a schema contains a construct
+    /// `synthesizeMinimalJSON` doesn't recognize (kanban 7f091xq, the
+    /// tool-calling envelope's `{"name": {"const": ...}}` alternatives before
+    /// that gap was fixed) -- could otherwise push `hardReserve` past
+    /// `maxTokens` itself. When that happens,
+    /// `GuidedGenerationLoop.applyBiasAndSample`'s hard-zone check
+    /// (`tokenCount >= maxTokens - hardReserve`) is true from token 0,
+    /// forcing the *entire* budget through the hard-closing bias instead of
+    /// just its trailing reserve. That bias still permits single-digit
+    /// tokens (`ClosingTokenBias` treats `0`-`9` as closing-tier, needed to
+    /// let a numeric field's own digits through) -- so a schema with an
+    /// open-ended string field can ramble in digits for the whole budget
+    /// without ever selecting the actual closing quote, since digits are
+    /// never suppressed.
+    ///
+    /// The quarter-vs-half asymmetry matters, not just "some cap": capping
+    /// both `hardReserve` and `normalZoneLength` at the SAME `maxTokens / 2`
+    /// ceiling let them collide exactly at that ceiling for large
+    /// `structuralReserve` values (as this fix's own regression test caught
+    /// via adversarial review), making `completionReserve ==
+    /// maxTokens - normalZoneLength == hardReserve` and collapsing the soft
+    /// zone -- the gentle "closing bias, no EOS penalty" phase strictly
+    /// between `hardReserve` and `completionReserve` -- to zero width.
+    /// Capping `hardReserve` a full `maxTokens / 4` below `normalZoneLength`'s
+    /// ceiling guarantees `completionReserve - hardReserve >= maxTokens / 4`
+    /// whenever both caps are the binding constraint (and a strictly wider
+    /// gap otherwise, since `completionReserve`'s `Swift.max(_, hardReserve)`
+    /// only ever widens the gap), so the soft zone always has real runway
+    /// and zone order is never inverted.
     ///
     /// - Parameter maxTokens: The token budget currently in play for this call.
     /// - Returns: The completion reserve and hard reserve derived from `maxTokens`.
     func reserves(forMaxTokens maxTokens: Int) -> (completionReserve: Int, hardReserve: Int) {
-        let hardReserve = structuralReserve * 8
+        let hardReserve = Swift.min(structuralReserve * 8, maxTokens / 4)
         let normalZoneLength = Swift.min(
             structuralReserve * Self.normalZoneMultiplier, maxTokens / 2)
         let completionReserve = Swift.max(maxTokens - normalZoneLength, hardReserve)

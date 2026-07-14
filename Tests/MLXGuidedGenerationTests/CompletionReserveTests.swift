@@ -78,4 +78,35 @@ struct CompletionReserveTests {
         let reserve = CompletionReserve.estimate(schemaJSON: "garbage", tokenizer: tokenizer)
         #expect(reserve == 64)
     }
+
+    @Test("Object with a required const property returns expected count instead of falling back")
+    func objectWithRequiredConstProperty() {
+        // Mirrors the tool-calling envelope's `{"name": {"const": "..."}}`
+        // shape (`SchemaConverter.encodeToolCallingEnvelopeJSON`) -- every
+        // `oneOf` alternative names its tool via `const`, not `enum`/`type`.
+        let schema = #"{"type":"object","required":["name"],"properties":{"name":{"const":"get_weather"}}}"#
+        // Minimal JSON: {"name":"get_weather"} (25 chars => 25 tokens)
+        let expected = #"{"name":"get_weather"}"#.utf8.count
+        let reserve = CompletionReserve.estimate(schemaJSON: schema, tokenizer: tokenizer)
+        #expect(reserve == expected)
+    }
+
+    @Test("Tool-calling envelope schema (oneOf of const-named alternatives) synthesizes its real minimal JSON instead of falling back to the default reserve")
+    func toolCallingEnvelopeSchemaSynthesizesMinimalJSON() {
+        // The exact shape `SchemaConverter.encodeToolCallingEnvelopeJSON`
+        // produces for a real tool + the synthetic `mlx_final_answer` tool:
+        // a `oneOf` of `{name: {const}, arguments: <params>}` objects.
+        // Regression (kanban 7f091xq): before the fix, `const` wasn't
+        // handled, so `synthesizeMinimalJSON` returned `nil` for every
+        // alternative's `name` property, and the WHOLE envelope fell back to
+        // the 64-token default reserve regardless of its actual (much
+        // smaller) minimal-JSON size.
+        let schema = """
+            {"oneOf":[{"type":"object","required":["name","arguments"],"additionalProperties":false,"properties":{"name":{"const":"get_weather"},"arguments":{"type":"object","required":["location"],"properties":{"location":{"type":"string","enum":["Tokyo","Paris","New York"]}}}}},{"type":"object","required":["name","arguments"],"additionalProperties":false,"properties":{"name":{"const":"mlx_final_answer"},"arguments":{"type":"object","required":["response"],"properties":{"response":{"type":"string"}}}}}]}
+            """
+        // `oneOf` synthesizes from the first alternative only.
+        let expected = #"{"name":"get_weather","arguments":{"location":"Tokyo"}}"#.utf8.count
+        let reserve = CompletionReserve.estimate(schemaJSON: schema, tokenizer: tokenizer)
+        #expect(reserve == expected)
+    }
 }

@@ -180,7 +180,17 @@ struct PromptCacheToolReasoningReuseTests {
         let executor = try makeMLXExecutor(for: model)
         var toolContextOptions = ContextOptions()
         toolContextOptions.reasoningLevel = .custom("no_think")
-        let toolOptions = GenerationOptions(maximumResponseTokens: 256)
+        // `.greedy`, matching `reasoningRoundReusesPromptCacheOnRoundTwo`'s
+        // own `greedyOptions` below: without it, this round samples at the
+        // default (non-zero) temperature, so the model nondeterministically
+        // sometimes answers in plain prose instead of invoking any tool at
+        // all -- a real, but SEPARATE and unrelated, intermittent failure
+        // mode from the reserve-sizing regression this suite guards against
+        // (kanban 7f091xq), discovered while re-verifying that fix. Forcing
+        // greedy makes the round's tool-or-not decision -- and everything
+        // downstream of it -- reproducible, matching this test's own
+        // "real model, deterministic" acceptance bar.
+        let toolOptions = GenerationOptions(samplingMode: .greedy, maximumResponseTokens: 256)
 
         await MLXLanguageModel.removePromptCache(modelID: model.modelID)
 

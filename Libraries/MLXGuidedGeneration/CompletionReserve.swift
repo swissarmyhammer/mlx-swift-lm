@@ -51,6 +51,20 @@ public enum CompletionReserve {
             return synthesizeMinimalJSON(defSchema, defs: defs, visited: visited.union([defName]))
         }
 
+        // `const` fixes the value outright -- takes priority over both
+        // `enum` and type-based synthesis. Tool-calling envelope schemas
+        // (`SchemaConverter.encodeToolCallingEnvelopeJSON`) name each `oneOf`
+        // alternative's tool via `{"name": {"const": "<tool name>"}}`, not
+        // `enum`/`type`; without this case, synthesis of that required
+        // `name` property always returned `nil`, which propagated all the
+        // way up through the `object` and `oneOf` cases and made the WHOLE
+        // envelope's `structuralReserve` silently fall back to
+        // `defaultReserve` regardless of the schema's actual (much smaller)
+        // minimal-JSON size (kanban 7f091xq).
+        if let constValue = schema["const"] {
+            return jsonEncode(constValue)
+        }
+
         // Enum takes priority over type-based synthesis
         if let enumValues = schema["enum"] as? [Any], let first = enumValues.first {
             return jsonEncode(first)
