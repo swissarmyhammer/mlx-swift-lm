@@ -62,8 +62,8 @@ comments:
 
     Work is complete and green. Leaving task in `doing` for `/review`.
   timestamp: 2026-07-14T13:00:52.964348+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: b880
 title: 'REGRESSION ad4c4cf: completion-reserve resizing breaks tool-calling round (guided envelope degenerates to digit-spam)'
 ---
 ## What
