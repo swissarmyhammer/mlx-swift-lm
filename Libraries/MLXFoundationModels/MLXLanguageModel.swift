@@ -61,6 +61,34 @@ struct ConstraintSetup {
     let whitespaceBias: MLXArray
     let whitespaceTokenIDs: Set<Int>
 
+    /// Multiplier applied to `structuralReserve` to size the "free" normal
+    /// zone -- the unbiased run of tokens before `GuidedGenerationLoop`'s
+    /// soft-zone completion bias (+200 EOS / +100 closing-tier, see
+    /// `applyBiasAndSample`) engages. Reuses the 3x coefficient the old
+    /// formula already had (the term its `maxTokens / 4` floor always
+    /// overrode) as a numerically-familiar starting point -- NOT because
+    /// other tests corroborate it under this new policy:
+    /// `GenerableRoundTripTests`, `HardReserveStressTests`, and
+    /// `GuidedGenerationTests` each hardcode that same pre-fix
+    /// `max(structuralReserve * 3, maxTokens / 4)` formula verbatim in
+    /// their own local helpers, calling `GuidedGenerationLoop.run` directly
+    /// and bypassing this function entirely, so their passing validates
+    /// only that unrelated direct-call path, not this capped-normal-zone
+    /// policy.
+    ///
+    /// Empirically confirmed against gemma-3-270m-it-4bit's Int-schema
+    /// repetition-degeneration failure (kanban t3nynaj): once the soft zone
+    /// engages, the model's first biased sample flips to `EOS` almost
+    /// immediately (observed at both the original bug's token 3072 and,
+    /// with a first candidate of 10x, at ~token 20 -- still 20 repeated
+    /// digits, enough to overflow `Int`). Since the flip happens on
+    /// essentially the *first* biased token regardless of where the zone
+    /// starts, the fix is to start it as early as the schema's actual
+    /// structural need allows, not to widen the runway -- 3x keeps a small
+    /// margin beyond the bare minimum for genuine per-field content while
+    /// converging in single digits for trivial schemas like a bare `Int`.
+    private static let normalZoneMultiplier = 3
+
     /// Derives completion/hard reserves for whatever `maxTokens` budget is
     /// actually in play for a given generation call. Reserves must always
     /// be computed against the budget they'll be applied to -- never
@@ -68,10 +96,32 @@ struct ConstraintSetup {
     /// reserve can consume the entire (or more than the entire) remaining
     /// budget.
     ///
+    /// The "normal" (unbiased) zone is sized off `structuralReserve` --
+    /// the schema's actual minimal-content need -- rather than an
+    /// unconditional fraction of `maxTokens`. A flat `maxTokens / 4` floor
+    /// left trivial schemas (e.g. a bare `Int`, whose minimal JSON is a
+    /// single digit) with thousands of unbiased tokens to loop in: at the
+    /// Executor's `defaultMaxTokens = 4096`, that floor engaged the soft
+    /// zone only in the last 1024 tokens, so a small model's own
+    /// repetition-degeneration preference could run unchecked for the
+    /// first 3072 -- long enough to produce a JSON-valid but
+    /// astronomically large integer literal that overflows on decode (see
+    /// kanban t3nynaj). Scaling the normal zone to
+    /// `structuralReserve * normalZoneMultiplier` instead makes the soft
+    /// zone engage within single digits of tokens for trivial schemas,
+    /// while a modest cap at half of `maxTokens` keeps genuinely large/nested
+    /// schemas from losing their soft-zone runway entirely -- `hardReserve`
+    /// (`structuralReserve * 8`, unchanged) remains the floor under
+    /// `completionReserve`, so the soft zone never collapses to zero width.
+    ///
     /// - Parameter maxTokens: The token budget currently in play for this call.
     /// - Returns: The completion reserve and hard reserve derived from `maxTokens`.
-        func reserves(forMaxTokens maxTokens: Int) -> (completionReserve: Int, hardReserve: Int) {
-        (Swift.max(structuralReserve * 3, maxTokens / 4), structuralReserve * 8)
+    func reserves(forMaxTokens maxTokens: Int) -> (completionReserve: Int, hardReserve: Int) {
+        let hardReserve = structuralReserve * 8
+        let normalZoneLength = Swift.min(
+            structuralReserve * Self.normalZoneMultiplier, maxTokens / 2)
+        let completionReserve = Swift.max(maxTokens - normalZoneLength, hardReserve)
+        return (completionReserve, hardReserve)
     }
 }
 
