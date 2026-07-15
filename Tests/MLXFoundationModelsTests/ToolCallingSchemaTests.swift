@@ -264,13 +264,9 @@ struct ToolCallingSchemaTests {
             description: "Get current weather",
             parameters: WeatherArgs.generationSchema
         )
-        let grammar = try SchemaConverter.encodeToolCallingGrammar(tools: [weather])
-        let parsed = try parseAsDictionary(grammar)
-        let format = try #require(parsed["format"] as? [String: Any])
-        let elements = try #require(format["elements"] as? [[String: Any]])
-        let wrapped = try #require(elements.first)
-        #expect(wrapped["begin"] as? String == "<tool_call>\n")
-        #expect(wrapped["end"] as? [String] == ["\n</tool_call>"])
+        let arm = try wrappedArm(of: SchemaConverter.encodeToolCallingGrammar(tools: [weather]))
+        #expect(arm.begin == "<tool_call>\n")
+        #expect(arm.end == ["\n</tool_call>"])
     }
 
     /// Regression guard (AC2): the explicit `.json` (Qwen/Llama) format

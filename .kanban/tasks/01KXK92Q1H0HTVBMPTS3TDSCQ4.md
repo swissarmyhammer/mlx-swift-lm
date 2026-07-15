@@ -40,6 +40,15 @@ comments:
   id: 01kxkjd10deky60p5ve572trmr
   text: 'Implement landed green in `doing`. Seam: new data-driven `SchemaConverter.ToolCallStructuralTag { begin, end }` with `.qwen` (historical default, `<tool_call>\n`/`\n</tool_call>`) and `.glm4` (newline-free `<tool_call>`/`</tool_call>`, grounded in GLM4ToolCallParser.startTag/endTag) specs, plus `forFormat(_:)` mapping `.glm4 → .glm4`, everything else (incl. nil/.json) → `.qwen`. `encodeToolCallingGrammar` gained `format: ToolCallFormat? = nil`; `MLXLanguageModel.runToolCalling` threads `context.configuration.toolCallFormat` (same source the parse side reads). Adding a family = one case + one spec constant. Tests (model-free): seam mapping, default→Qwen exact wrapper, Qwen/.json regression guard, GLM4 wrapper. Verified: swift build clean; ToolCallingSchemaTests 12/12; MLXFoundationModelsTests 217/217; ToolTests 64/64. Note on AC2: byte-identical enforced at wrapper (begin/end) level, not full serialized-JSON equality (JSONSerialization key order is unstable). Proceeding to checkpoint commit + review.'
   timestamp: 2026-07-15T19:00:05.261318+00:00
+- actor: claude-code
+  id: 01kxkk2wqpcbq5mfarmaf0k21f
+  text: |-
+    Review finding resolved. `defaultFormatProducesQwenWrapper` was the pure inline reimplementation of `wrappedArm(of:)` (parse -> format -> elements -> wrapped.first -> begin/end). Replaced its 7-line inline body with `let arm = try wrappedArm(of: SchemaConverter.encodeToolCallingGrammar(tools: [weather])); #expect(arm.begin == "<tool_call>\n"); #expect(arm.end == ["\n</tool_call>"])` — same properties asserted, no weakening.
+
+    Scope check for whole-file dedupe: the other two wrapped-arm tests (`grammarExposesWrappedAndBareAlternatives`, `glm4FormatProducesGLM4Wrapper`) assert a superset (wrapped type=="tag", content json_schema shape, bare arm) that `wrappedArm` (returns only begin/end) does not cover; collapsing them would drop assertions, so they were left intact. `qwenJSONFormatSelectsSameWrapperAsDefault` already uses the helper. So exactly one pure reimplementation existed and it now delegates.
+
+    Verified: swift build exit 0; swift test --filter ToolCallingSchemaTests => 12/12 pass; swift test --filter MLXFoundationModelsTests => 217 tests in 38 suites passed; swift format lint on the test file exit 0. Task left green in doing.
+  timestamp: 2026-07-15T19:12:01.782813+00:00
 position_column: doing
 position_ordinal: '80'
 title: Tool-calling structural tag should follow the inferred ToolCallFormat, not hardcode Qwen's <tool_call> wrapper
@@ -60,3 +69,7 @@ Observed with `mlx-community/GLM-4.7-Flash-4bit` driven through `MLXLanguageMode
 - [ ] Qwen-family behavior is unchanged (regression-guard the existing structural tag for `ToolCallFormat` = default/Qwen).
 - [ ] At least GLM4's format is wired (its parser already exists); other formats can follow the same seam incrementally.
 - [ ] Existing tool-calling tests stay green.
+
+## Review Findings (2026-07-15 14:00)
+
+- [x] `Tests/MLXFoundationModelsTests/ToolCallingSchemaTests.swift:337` — Function reimplements the structural-tag parsing logic already extracted into the `wrappedArm` helper. Lines 337–346 parse the grammar, extract format/elements, and access the wrapped arm's begin/end delimiters—the exact same sequence `wrappedArm` (line 416) encapsulates and returns. Replace the inline parsing and cast logic with a call to `wrappedArm`: `let arm = try wrappedArm(of: grammar); #expect(arm.begin == "<tool_call>\n"); #expect(arm.end == ["\n</tool_call>"])`. This reuses the existing extraction logic and reduces duplication within the test suite.
