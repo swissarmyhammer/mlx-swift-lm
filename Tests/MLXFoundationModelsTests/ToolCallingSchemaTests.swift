@@ -5,6 +5,7 @@
 import Testing
 import Foundation
 import MLXGuidedGeneration
+import MLXLMCommon
 import FoundationModels
 @testable import MLXFoundationModels
 
@@ -232,6 +233,106 @@ struct ToolCallingSchemaTests {
         #expect(bareOneOf.count == 1, "single tool produces a single envelope entry")
     }
 
+    // MARK: - Format-Driven Structural Tag
+
+    /// The seam: each `ToolCallFormat` maps to its own wrapper spec, and
+    /// every format without a bespoke wrapper falls back to Qwen's so
+    /// nothing regresses.
+    @Test
+    func structuralTagSeamSelectsWrapperPerFormat() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        // No inference and the explicit Qwen/Llama JSON format both take the
+        // default wrapper.
+        #expect(SchemaConverter.ToolCallStructuralTag.forFormat(nil) == .qwen)
+        #expect(SchemaConverter.ToolCallStructuralTag.forFormat(.json) == .qwen)
+        // Unmapped families fall back to the Qwen wrapper.
+        #expect(SchemaConverter.ToolCallStructuralTag.forFormat(.lfm2) == .qwen)
+        #expect(SchemaConverter.ToolCallStructuralTag.forFormat(.gemma4) == .qwen)
+        // GLM-4.5/4.6/4.7 (glm4_moe) gets its own bespoke wrapper.
+        #expect(SchemaConverter.ToolCallStructuralTag.forFormat(.glm4) == .glm4)
+        // The two specs are genuinely distinct.
+        #expect(SchemaConverter.ToolCallStructuralTag.glm4 != .qwen)
+    }
+
+    /// Regression guard: a `nil` format (no inference) must produce exactly
+    /// the historical Qwen `<tool_call>\n … \n</tool_call>` wrapper.
+    @Test
+    func defaultFormatProducesQwenWrapper() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let weather = Transcript.ToolDefinition(
+            name: "get_weather",
+            description: "Get current weather",
+            parameters: WeatherArgs.generationSchema
+        )
+        let grammar = try SchemaConverter.encodeToolCallingGrammar(tools: [weather])
+        let parsed = try parseAsDictionary(grammar)
+        let format = try #require(parsed["format"] as? [String: Any])
+        let elements = try #require(format["elements"] as? [[String: Any]])
+        let wrapped = try #require(elements.first)
+        #expect(wrapped["begin"] as? String == "<tool_call>\n")
+        #expect(wrapped["end"] as? [String] == ["\n</tool_call>"])
+    }
+
+    /// Regression guard (AC2): the explicit `.json` (Qwen/Llama) format
+    /// selects the same wrapper as the `nil`-format default — the Qwen
+    /// `<tool_call>\n … \n</tool_call>` delimiters, unchanged. (The full
+    /// serialized JSON is *not* compared for byte equality: xgrammar reads
+    /// it as an unordered object and `JSONSerialization` does not emit a
+    /// stable key order, so the wrapper is the meaningful invariant.)
+    @Test
+    func qwenJSONFormatSelectsSameWrapperAsDefault() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let weather = Transcript.ToolDefinition(
+            name: "get_weather",
+            description: "Get current weather",
+            parameters: WeatherArgs.generationSchema
+        )
+        let byDefault = try wrappedArm(
+            of: SchemaConverter.encodeToolCallingGrammar(tools: [weather]))
+        let byJSON = try wrappedArm(
+            of: SchemaConverter.encodeToolCallingGrammar(tools: [weather], format: .json))
+        #expect(byDefault.begin == "<tool_call>\n")
+        #expect(byDefault.end == ["\n</tool_call>"])
+        #expect(byJSON.begin == byDefault.begin)
+        #expect(byJSON.end == byDefault.end)
+    }
+
+    /// AC3: the GLM4 (`glm4_moe`) format wires its native wrapper —
+    /// `<tool_call>`/`</tool_call>` with no inner newlines (see
+    /// `GLM4ToolCallParser` fixtures) — distinct from Qwen's newline-padded
+    /// wrapper.
+    @Test
+    func glm4FormatProducesGLM4Wrapper() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let weather = Transcript.ToolDefinition(
+            name: "get_weather",
+            description: "Get current weather",
+            parameters: WeatherArgs.generationSchema
+        )
+        let grammar = try SchemaConverter.encodeToolCallingGrammar(
+            tools: [weather], format: .glm4)
+        let parsed = try parseAsDictionary(grammar)
+
+        #expect(parsed["type"] as? String == "structural_tag")
+        let format = try #require(parsed["format"] as? [String: Any])
+        let elements = try #require(format["elements"] as? [[String: Any]])
+        #expect(elements.count == 2)
+
+        // Wrapped arm carries GLM's newline-free wrapper.
+        let wrapped = elements[0]
+        #expect(wrapped["type"] as? String == "tag")
+        #expect(wrapped["begin"] as? String == "<tool_call>")
+        #expect(wrapped["end"] as? [String] == ["</tool_call>"])
+
+        // The embedded envelope is unchanged from the default path.
+        let wrappedContent = try #require(wrapped["content"] as? [String: Any])
+        #expect(wrappedContent["type"] as? String == "json_schema")
+
+        // Bare arm still present.
+        let bare = elements[1]
+        #expect(bare["type"] as? String == "json_schema")
+    }
+
     // MARK: - Helpers
 
     private func parseAsDictionary(_ json: String) throws -> [String: Any] {
@@ -241,6 +342,20 @@ struct ToolCallingSchemaTests {
             return [:]
         }
         return obj
+    }
+
+    /// Parses a structural-tag grammar string and returns the wrapped arm's
+    /// `begin`/`end` delimiters — the wrapper invariant the format seam
+    /// selects — without depending on `JSONSerialization`'s (unstable) key
+    /// ordering.
+    private func wrappedArm(of grammar: String) throws -> (begin: String, end: [String]) {
+        let parsed = try parseAsDictionary(grammar)
+        let format = try #require(parsed["format"] as? [String: Any])
+        let elements = try #require(format["elements"] as? [[String: Any]])
+        let wrapped = try #require(elements.first)
+        let begin = try #require(wrapped["begin"] as? String)
+        let end = try #require(wrapped["end"] as? [String])
+        return (begin, end)
     }
 
     private func makeByteTokenizer() throws -> GrammarTokenizer {

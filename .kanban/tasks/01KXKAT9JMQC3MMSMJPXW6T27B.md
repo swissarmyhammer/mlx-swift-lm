@@ -54,8 +54,8 @@ comments:
 
     Verified: `swift build` clean (only pre-existing docc/resource warnings); `swift test --filter TranscriptConverterTests` = 26/26 pass; `swift test --filter MLXFoundationModelsTests` = 213/213 pass. swift-format lint --strict clean; format --in-place produced no changes beyond the edits. Both Review Findings checkboxes flipped to [x]. Leaving green in doing for /review.
   timestamp: 2026-07-15T18:34:26.698720+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: b980
 title: Tool-calling transcript rendering violates Mistral3's strict-alternation chat template (Devstral unusable)
 ---
 ## What

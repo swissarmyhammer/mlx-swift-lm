@@ -4,6 +4,7 @@
 #if canImport(FoundationModels, _version: 2)
 
 import Foundation
+import MLXLMCommon
 import os
 import FoundationModels
 
@@ -14,6 +15,56 @@ enum SchemaConverter {
         subsystem: "com.apple.FoundationModels-MLX",
         category: "SchemaConverter"
     )
+
+    /// The literal begin/end delimiters that bracket a tool-call JSON
+    /// envelope in the structural tag's wrapped arm, for one model family's
+    /// native tool-call format.
+    ///
+    /// The generation constraint must frame the envelope in the *same*
+    /// wrapper the model was trained to emit -- and that the parse side
+    /// (``MLXLanguageModel``'s `unwrapToolCallMarkers`) later strips -- so
+    /// both halves of the tool-call round trip agree with the model's
+    /// training. This is the generation-side mirror of the per-format
+    /// wrapper the parse side already selects through
+    /// ``ToolCallFormat/createParser()``.
+    ///
+    /// Selection is data-driven: ``forFormat(_:)`` is the single seam that
+    /// maps an inferred ``ToolCallFormat`` to its wrapper. Adding a family
+    /// is one `case` plus its spec constant, not a new code path.
+    struct ToolCallStructuralTag: Equatable {
+        /// The literal begin delimiter (e.g. Qwen's `"<tool_call>\n"`).
+        let begin: String
+        /// The literal end delimiter (e.g. Qwen's `"\n</tool_call>"`).
+        let end: String
+
+        /// Qwen/Llama default: `<tool_call>\n … \n</tool_call>`. Also the
+        /// fallback for every format without a bespoke wrapper, so unmapped
+        /// families keep the historical behavior byte-for-byte.
+        static let qwen = ToolCallStructuralTag(begin: "<tool_call>\n", end: "\n</tool_call>")
+
+        /// GLM-4.5/4.6/4.7 (`glm4_moe`): the same `<tool_call>`/`</tool_call>`
+        /// special tokens as Qwen, but GLM's template brackets the payload
+        /// with no surrounding newlines (see ``GLM4ToolCallParser`` and its
+        /// fixtures in `ToolTests`).
+        static let glm4 = ToolCallStructuralTag(begin: "<tool_call>", end: "</tool_call>")
+
+        /// The wrapper for a model's inferred tool-call format. Formats
+        /// without a bespoke wrapper fall back to ``qwen`` so nothing
+        /// regresses.
+        ///
+        /// - Parameter format: The model's inferred ``ToolCallFormat``
+        ///   (`container.configuration.toolCallFormat`), or `nil` when none
+        ///   was inferred.
+        /// - Returns: The structural-tag wrapper to frame the envelope with.
+        static func forFormat(_ format: ToolCallFormat?) -> ToolCallStructuralTag {
+            switch format {
+            case .glm4:
+                return .glm4
+            default:
+                return .qwen
+            }
+        }
+    }
 
     /// Encodes a GenerationSchema to a standard JSON Schema string.
     ///
@@ -72,11 +123,19 @@ enum SchemaConverter {
     }
 
     /// Builds an xgrammar structural-tag JSON that constrains the model
-    /// to emit a tool call either wrapped in Qwen-style
-    /// `<tool_call>...</tool_call>` delimiters or as bare JSON. The
+    /// to emit a tool call either wrapped in the model family's native
+    /// `<tool_call>...</tool_call>`-style delimiters or as bare JSON. The
     /// inner JSON is the envelope produced by
     /// `toolCallingEnvelopeObject` (and serialized by
     /// `encodeToolCallingEnvelopeJSON`).
+    ///
+    /// The wrapper delimiters are selected per model family from the
+    /// inferred ``ToolCallFormat`` via
+    /// ``ToolCallStructuralTag/forFormat(_:)`` -- the generation-side mirror
+    /// of the parser the parse side selects for the same format -- rather
+    /// than unconditionally emitting Qwen's wrapper. A `nil` format (no
+    /// inference) and every family without a bespoke wrapper fall back to
+    /// the Qwen default, so those paths stay byte-identical.
     ///
     /// Structural-tag shape:
     /// ```json
@@ -126,10 +185,18 @@ enum SchemaConverter {
     /// bytes are exactly that string), and accepts it.
     ///
     /// Requires a non-empty tool list.
+    ///
+    /// - Parameters:
+    ///   - tools: The tools the model may call; must be non-empty.
+    ///   - format: The model's inferred ``ToolCallFormat``
+    ///     (`container.configuration.toolCallFormat`). `nil` (the default)
+    ///     and every family without a bespoke wrapper use the Qwen wrapper.
     static func encodeToolCallingGrammar(
-        tools: [Transcript.ToolDefinition]
+        tools: [Transcript.ToolDefinition],
+        format: ToolCallFormat? = nil
     ) throws -> String {
         let envelope = try toolCallingEnvelopeObject(tools: tools)
+        let tag = ToolCallStructuralTag.forFormat(format)
 
         // `json_schema` entries must embed the schema as an inline
         // JSON *object*, not a stringified schema — xgrammar's
@@ -149,9 +216,9 @@ enum SchemaConverter {
                 "elements": [
                     [
                         "type": "tag",
-                        "begin": "<tool_call>\n",
+                        "begin": tag.begin,
                         "content": jsonSchemaFormat,
-                        "end": ["\n</tool_call>"],
+                        "end": [tag.end],
                     ],
                     jsonSchemaFormat,
                 ] as [Any],
