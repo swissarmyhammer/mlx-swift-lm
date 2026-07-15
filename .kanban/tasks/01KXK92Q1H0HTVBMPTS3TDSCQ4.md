@@ -49,8 +49,8 @@ comments:
 
     Verified: swift build exit 0; swift test --filter ToolCallingSchemaTests => 12/12 pass; swift test --filter MLXFoundationModelsTests => 217 tests in 38 suites passed; swift format lint on the test file exit 0. Task left green in doing.
   timestamp: 2026-07-15T19:12:01.782813+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ba80
 title: Tool-calling structural tag should follow the inferred ToolCallFormat, not hardcode Qwen's <tool_call> wrapper
 ---
 ## What
