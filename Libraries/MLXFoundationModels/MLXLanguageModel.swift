@@ -1392,10 +1392,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         func populatePromptCacheChunks(
             model: MLXLanguageModel, transcript: Transcript
         ) async throws {
-            let messages = TranscriptConverter.mlxMessages(for: transcript)
-            guard !messages.isEmpty else { return }
+            // Whether the transcript renders to any messages is
+            // format-invariant, so gate emptiness on the cheap
+            // format-agnostic render *before* paying for a container load --
+            // preserving the original early-return-before-load behavior for an
+            // empty transcript.
+            guard !TranscriptConverter.mlxMessages(for: transcript).isEmpty else { return }
 
             let container = try await model.loadContainer()
+            // Re-render format-aware (see `respond`): a `.mistral` model's
+            // tool-call turns must replay as structured `tool_calls` so its
+            // strict-alternation chat template accepts a warmed transcript
+            // that already contains a tool round.
+            let messages = TranscriptConverter.mlxMessages(
+                for: transcript, toolCallFormat: await container.configuration.toolCallFormat)
+
             let modelID = self.modelID
             try await container.perform(nonSendable: messages) { context, messages in
                 let input = try await context.processor.prepare(input: UserInput(chat: messages))
@@ -1463,13 +1474,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             model: MLXLanguageModel,
             streamingInto channel: LanguageModelExecutorGenerationChannel
         ) async throws {
-            var collected = TranscriptConverter.mlxMessages(for: request.transcript)
-            // MLX tokenizer crashes on empty chat input; provide a fallback.
-            if collected.isEmpty {
-                collected = [Chat.Message.user(content: "")]
-            }
-            let messages = collected
-
             // Vision capability gate (adapter-side). Labeled image
             // attachments arrive as public `.attachment` segments that
             // the SDK's own vision guard never inspects, so the adapter
@@ -1477,8 +1481,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // Throw the same typed error the SDK would, before loading
             // any weights, so a model declared without `.vision` fails
             // fast and identically across the tool / schema / plain paths.
+            // `entriesWithImages` inspects the transcript directly, so this
+            // gate stays before the weight load without depending on the
+            // rendered `messages` below (which are built only after the
+            // container loads, to read the model's tool-call format).
             if !model.capabilities.contains(.vision),
-                messages.contains(where: { !$0.images.isEmpty })
+                !TranscriptConverter.entriesWithImages(for: request.transcript).isEmpty
             {
                 throw LanguageModelError.unsupportedCapability(
                     LanguageModelError.UnsupportedCapability(
@@ -1489,6 +1497,23 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
 
             let container = try await model.loadContainer()
+
+            // Render the transcript into chat messages *after* the container
+            // loads so the model's resolved tool-call format is known: a
+            // `.mistral` model needs its tool-call turns replayed as
+            // structured `tool_calls` (not verbatim assistant text) to satisfy
+            // its strict-alternation chat template. The format is read from
+            // the loaded configuration -- the documented source of truth for
+            // it (see `ModelConfigurationResolver`); non-Mistral families
+            // render exactly as before.
+            let toolCallFormat = await container.configuration.toolCallFormat
+            var collected = TranscriptConverter.mlxMessages(
+                for: request.transcript, toolCallFormat: toolCallFormat)
+            // MLX tokenizer crashes on empty chat input; provide a fallback.
+            if collected.isEmpty {
+                collected = [Chat.Message.user(content: "")]
+            }
+            let messages = collected
 
             // Encode schema to JSON if present
             let schemaJSON: String?

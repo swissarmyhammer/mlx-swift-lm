@@ -21,11 +21,21 @@ struct TranscriptConverter {
     /// (a `.toolCalls` entry carries one call per tool the model invoked in
     /// that round), so entries are flat-mapped rather than compact-mapped.
     ///
-    /// - Parameter entries: Transcript entries from FoundationModels
+    /// - Parameters:
+    ///   - entries: Transcript entries from FoundationModels.
+    ///   - toolCallFormat: The model's tool-call format, used only to choose
+    ///     how a `.toolCalls` entry is replayed into the prompt. `nil` (the
+    ///     default) and every non-`.mistral` value preserve the historical
+    ///     rendering: one assistant message per call carrying the verbatim
+    ///     `{"name":…, "arguments":…}` envelope as text content. `.mistral`
+    ///     instead carries the calls as structured tool-call metadata on a
+    ///     single assistant message (see the `.toolCalls` case) so Mistral's
+    ///     strict-alternation chat template accepts the sequence.
     /// - Returns: Array of MLX Chat.Message objects
-    static func mlxMessages(for entries: some Collection<Transcript.Entry>) -> [Chat
-        .Message]
-    {
+    static func mlxMessages(
+        for entries: some Collection<Transcript.Entry>,
+        toolCallFormat: ToolCallFormat? = nil
+    ) -> [Chat.Message] {
         entries.flatMap { entry -> [Chat.Message] in
             switch entry {
             case .instructions(let instructions):
@@ -62,14 +72,33 @@ struct TranscriptConverter {
                 return [Chat.Message.assistant(content: text)]
 
             case .toolCalls(let toolCalls):
-                // One assistant message per tool call, each carrying the
-                // exact `{"name": ..., "arguments": ...}` envelope text the
-                // Executor's own tool-calling grammar generates (see
-                // `unwrapToolCallMarkers` in MLXLanguageModel.swift) --
-                // replayed verbatim rather than through Chat.Message's
-                // structured `toolCalls:` parameter, so a continuation round
-                // sees byte-identical history to what it actually produced,
-                // not a template's own `tool_calls` re-rendering of it.
+                // Mistral's chat template enforces strict user/assistant
+                // alternation and counts any assistant message *without*
+                // `tool_calls` toward it. Replaying a tool call as verbatim
+                // assistant text content (the default below) is therefore
+                // counted as a plain assistant turn, so a completed round
+                // (user -> tool call -> tool result -> answer) renders as
+                // user, assistant, assistant and the template raises
+                // `TemplateException`. For the `.mistral` format, carry the
+                // round's calls as structured `tool_calls` on a single
+                // assistant message instead: the template excludes it from
+                // alternation and renders it as `[TOOL_CALLS]name[ARGS]args`,
+                // the exact shape Mistral models are trained to consume.
+                if toolCallFormat == .mistral {
+                    return [
+                        Chat.Message.assistant(
+                            content: "", toolCalls: toolCalls.map(mistralToolCall(from:)))
+                    ]
+                }
+                // Every other family: one assistant message per tool call,
+                // each carrying the exact `{"name": ..., "arguments": ...}`
+                // envelope text the Executor's own tool-calling grammar
+                // generates (see `unwrapToolCallMarkers` in
+                // MLXLanguageModel.swift) -- replayed verbatim rather than
+                // through Chat.Message's structured `toolCalls:` parameter, so
+                // a continuation round sees byte-identical history to what it
+                // actually produced, not a template's own `tool_calls`
+                // re-rendering of it.
                 return toolCalls.map { call in
                     Chat.Message.assistant(
                         content:
@@ -170,6 +199,35 @@ struct TranscriptConverter {
         }
         escaped += "\""
         return escaped
+    }
+
+    /// Bridges a FoundationModels `Transcript.ToolCall` into MLXLMCommon's
+    /// structured ``ToolCall`` so a `.mistral`-format `.toolCalls` entry can
+    /// be replayed through the model's own `tool_calls` template branch
+    /// (rendered as `[TOOL_CALLS]name[ARGS]args`) rather than as verbatim
+    /// assistant text content.
+    ///
+    /// The call's arguments arrive as a `GeneratedContent` JSON string;
+    /// they are parsed back into a `[String: any Sendable]` object so the
+    /// template re-serializes them as the `[ARGS]` payload. A non-object or
+    /// unparseable payload degrades to empty arguments rather than throwing
+    /// -- the constrained tool-calling grammar makes malformed arguments
+    /// unreachable in practice, and an empty `{}` still renders a valid turn.
+    ///
+    /// - Parameter call: The transcript tool call to bridge.
+    /// - Returns: The equivalent structured ``ToolCall``.
+    private static func mistralToolCall(from call: Transcript.ToolCall) -> ToolCall {
+        let arguments: [String: any Sendable]
+        if let data = call.arguments.jsonString.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: any Sendable]
+        {
+            arguments = object
+        } else {
+            arguments = [:]
+        }
+        return ToolCall(
+            function: ToolCall.Function(name: call.toolName, arguments: arguments),
+            id: call.id)
     }
 
     /// Extracts and concatenates transcript segment text, with newlines

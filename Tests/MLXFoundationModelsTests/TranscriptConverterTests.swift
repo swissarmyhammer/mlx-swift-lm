@@ -4,6 +4,7 @@ import CoreGraphics
 import Foundation
 import FoundationModels
 import MLXLMCommon
+import MLXVLM
 import Testing
 
 @testable import MLXFoundationModels
@@ -544,6 +545,193 @@ struct TranscriptConverterTests {
         #expect(messages.count == 1)
         #expect(messages[0].content == "line one\nline two")
         #expect(messages[0].images.count == 1)
+    }
+
+    // MARK: - Mistral3 strict-alternation rendering
+
+    /// A completed single-round tool exchange: system instructions, a user
+    /// prompt, the assistant's tool call, the tool's result, and the
+    /// assistant's final answer. This is the shape Mistral3's chat template
+    /// rejected before the format-aware rendering fix — a plain
+    /// assistant-content tool call left two assistant turns adjacent.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func completedToolRoundEntries() throws -> [Transcript.Entry] {
+        let call = Transcript.ToolCall(
+            id: "call-1", toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location": "Tokyo"}"#))
+        return [
+            .instructions(
+                Transcript.Instructions(
+                    segments: [.text(Transcript.TextSegment(content: "Be helpful"))],
+                    toolDefinitions: [])),
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "Weather in Tokyo?"))],
+                    responseFormat: nil)),
+            .toolCalls(Transcript.ToolCalls(id: "tc-1", [call])),
+            .toolOutput(
+                Transcript.ToolOutput(
+                    id: "call-1", toolName: "get_weather",
+                    segments: [.text(Transcript.TextSegment(content: "72F and sunny"))])),
+            .response(
+                Transcript.Response(
+                    assetIDs: [],
+                    segments: [.text(Transcript.TextSegment(content: "It's 72F and sunny."))])),
+        ]
+    }
+
+    /// Mirrors the alternation validator in Mistral3's `chat_template.jinja`
+    /// (the check that raises the reported `TemplateException`). Reproduced
+    /// verbatim from Devstral-Small-2-24B-Instruct-2512-4bit's
+    /// `chat_template.jinja`, whose validator loop (after slicing off a
+    /// leading `system` message) is:
+    ///
+    /// ```jinja
+    /// {%- set ns = namespace(index=0) %}
+    /// {%- for message in loop_messages %}
+    ///     {%- if message.role == 'user' or (message.role == 'assistant'
+    ///            and (message.tool_calls is not defined
+    ///                 or message.tool_calls is none
+    ///                 or message.tool_calls | length == 0)) %}
+    ///         {%- if (message['role'] == 'user') != (ns.index % 2 == 0) %}
+    ///             {{- raise_exception('After the optional system message,
+    ///                 conversation roles must alternate user and assistant
+    ///                 roles except for tool calls and results.') }}
+    ///         {%- endif %}
+    ///         {%- set ns.index = ns.index + 1 %}
+    ///     {%- endif %}
+    /// {%- endfor %}
+    /// ```
+    ///
+    /// i.e. a message counts toward the user/assistant alternation index only
+    /// when it is a `user` message or an `assistant` message WITHOUT
+    /// `tool_calls`; `tool` messages and assistant tool-call messages are
+    /// excluded. Returns the offset of the first message that breaks
+    /// alternation, or `nil` when the sequence is template-acceptable.
+    ///
+    /// This mirror is validated against the real template out-of-band: running
+    /// the actual `chat_template.jinja` over the old (verbatim-content) shape
+    /// raises exactly this exception, while the new structured-`tool_calls`
+    /// shape renders cleanly. The full end-to-end leg (applying the template
+    /// via the real tokenizer during Devstral generation) is the gated
+    /// integration test, which requires the ~13GB model + GPU.
+    private func firstAlternationViolation(in rawMessages: [Message]) -> Int? {
+        var loop = rawMessages
+        if loop.first?["role"] as? String == "system" { loop.removeFirst() }
+        var index = 0
+        for (offset, message) in loop.enumerated() {
+            let role = message["role"] as? String ?? ""
+            let toolCalls = message["tool_calls"] as? [Any]
+            let counted =
+                role == "user"
+                || (role == "assistant" && (toolCalls == nil || toolCalls!.isEmpty))
+            guard counted else { continue }
+            if (role == "user") != (index % 2 == 0) { return offset }
+            index += 1
+        }
+        return nil
+    }
+
+    @Test
+    func testMistralToolRoundRendersTemplateAcceptableAlternation() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let entries = try completedToolRoundEntries()
+        let messages = TranscriptConverter.mlxMessages(for: entries, toolCallFormat: .mistral)
+        let raw = Mistral3MessageGenerator().generate(messages: messages)
+
+        // The sequence must satisfy Mistral's strict user/assistant
+        // alternation once tool-call and tool-result turns are excluded.
+        #expect(firstAlternationViolation(in: raw) == nil)
+
+        // Role sequence: system, user, assistant(tool call), tool, assistant.
+        #expect(messages.map(\.role) == [.system, .user, .assistant, .tool, .assistant])
+
+        // The assistant tool-call turn is carried as structured `tool_calls`
+        // (not verbatim text content) so Mistral's template renders
+        // `[TOOL_CALLS]name[ARGS]args` and excludes it from alternation.
+        let toolCallMessage = raw[2]
+        #expect(toolCallMessage["role"] as? String == "assistant")
+        let calls = try #require(toolCallMessage["tool_calls"] as? [[String: any Sendable]])
+        #expect(calls.count == 1)
+        let function = try #require(calls[0]["function"] as? [String: any Sendable])
+        #expect(function["name"] as? String == "get_weather")
+        let arguments = try #require(function["arguments"] as? [String: any Sendable])
+        #expect(arguments["location"] as? String == "Tokyo")
+    }
+
+    @Test
+    func testVerbatimToolCallRenderingViolatesMistralAlternation() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // Guards the fix's motivation: the default (verbatim-content) tool-call
+        // rendering — correct for Qwen/GLM — is counted as a plain assistant
+        // turn and therefore breaks Mistral's strict alternation, which is
+        // exactly why `.mistral` must render structured `tool_calls` instead.
+        let entries = try completedToolRoundEntries()
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+        let raw = Mistral3MessageGenerator().generate(messages: messages)
+
+        #expect(firstAlternationViolation(in: raw) != nil)
+    }
+
+    @Test
+    func testMistralMultipleToolCallsFoldIntoOneAssistantMessage() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let first = Transcript.ToolCall(
+            id: "call-1", toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location": "Tokyo"}"#))
+        let second = Transcript.ToolCall(
+            id: "call-2", toolName: "get_time",
+            arguments: try GeneratedContent(json: #"{"timezone": "JST"}"#))
+        let entries: [Transcript.Entry] = [
+            .toolCalls(Transcript.ToolCalls(id: "tc-1", [first, second]))
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, toolCallFormat: .mistral)
+
+        // Parallel calls in one round fold into a single assistant turn
+        // carrying both tool calls, so Mistral renders one `<eos>`-terminated
+        // assistant message rather than splitting an eos between the calls.
+        #expect(messages.count == 1)
+        let raw = Mistral3MessageGenerator().generate(message: messages[0])
+        let calls = try #require(raw["tool_calls"] as? [[String: any Sendable]])
+        #expect(calls.count == 2)
+        let names = calls.compactMap {
+            ($0["function"] as? [String: any Sendable])?["name"] as? String
+        }
+        #expect(names == ["get_weather", "get_time"])
+    }
+
+    @Test
+    func testNonMistralToolCallRenderingUnchanged() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let call = Transcript.ToolCall(
+            id: "call-1", toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location": "Tokyo"}"#))
+        let entries: [Transcript.Entry] = [.toolCalls(Transcript.ToolCalls(id: "tc-1", [call]))]
+
+        // Regression guard: `nil` (default), `.json` (Qwen/Llama), and
+        // `.glm4` (GLM) must all keep the historical rendering — one assistant
+        // message per call carrying the verbatim envelope as text content,
+        // with no structured tool metadata that would let a template re-render
+        // it. Only `.mistral` deviates.
+        let defaultMessages = TranscriptConverter.mlxMessages(for: entries)
+        for format in [ToolCallFormat.json, .glm4] {
+            let messages = TranscriptConverter.mlxMessages(for: entries, toolCallFormat: format)
+            #expect(messages.count == 1)
+            #expect(messages[0].role == .assistant)
+            #expect(messages[0].content == defaultMessages[0].content)
+
+            let raw = DefaultMessageGenerator().generate(message: messages[0])
+            #expect(raw["tool_calls"] == nil)
+            let envelope = try #require(
+                try JSONSerialization.jsonObject(with: Data((raw["content"] as? String ?? "").utf8))
+                    as? [String: Any])
+            #expect(envelope["name"] as? String == "get_weather")
+        }
     }
 
 }
