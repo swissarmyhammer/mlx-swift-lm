@@ -46,7 +46,7 @@ private final class ContextSizeGenerationProbeModel: Module, MLXLMCommon.Languag
 {
     var kvHeads: [Int] { [] }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
         throw ContextSizeGenerationProbeError()
     }
 
@@ -193,7 +193,7 @@ private final class ContextSizeReasoningCloseModel: Module, MLXLMCommon.Language
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
         prepareCallCount += 1
         guard prepareCallCount == 1 else {
             throw ContextSizeReasoningPhase2ReachedError()

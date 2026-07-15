@@ -72,7 +72,7 @@ private final class ToolCallingImageProbeGenerationModel: Module, MLXLMCommon.La
 {
     var kvHeads: [Int] { [] }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
         throw ToolCallingImageReachedGenerationError()
     }
 

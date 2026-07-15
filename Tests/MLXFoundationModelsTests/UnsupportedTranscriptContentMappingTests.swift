@@ -51,7 +51,7 @@ private final class TranscriptContentProbeModel: Module, MLXLMCommon.LanguageMod
 {
     var kvHeads: [Int] { [] }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
         fatalError("not reached -- processor.prepare(input:) throws first")
     }
 

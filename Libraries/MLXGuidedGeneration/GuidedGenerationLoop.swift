@@ -387,12 +387,12 @@ public enum GuidedGenerationLoop {
     ///     reference semantics.
     /// - Returns: The first logits and model state for `run()`'s loop to
     ///   begin sampling from.
-    /// - Throws: Rethrows any error `model.prepare(_:cache:windowSize:)`
+    /// - Throws: Rethrows any error `model.prepare(_:cache:state:windowSize:)`
     ///   throws while preparing `input` against `cache`.
     private static func prefillAndGetLogits(
         input: LMInput, model: any LanguageModel, cache: [KVCache]
     ) throws -> (logits: MLXArray, modelState: LMOutput.State?) {
-        switch try model.prepare(input, cache: cache, windowSize: 512) {
+        switch try model.prepare(input, cache: cache, state: nil, windowSize: 512) {
         case .tokens(let tokens):
             let result = model(tokens[text: .newAxis], cache: cache, state: nil)
             return (result.logits, result.state)

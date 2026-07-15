@@ -70,7 +70,7 @@ private final class EagerFallbackGenerationProbeModel: Module, MLXLMCommon.Langu
 {
     var kvHeads: [Int] { [] }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
         throw EagerFallbackGenerationProbeError()
     }
 

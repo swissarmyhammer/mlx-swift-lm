@@ -2,13 +2,16 @@
 // Integration packages inject their own Downloader and TokenizerLoader, then call
 // these functions which run the test and throw on failure.
 
-import CoreImage
 import Foundation
 import MLX
 import MLXEmbedders
 import MLXLLM
 import MLXLMCommon
 import MLXVLM
+
+#if canImport(CoreImage)
+import CoreImage
+#endif
 
 // Both MLXLMCommon and MLXEmbedders define ModelContainer.
 public typealias LLModelContainer = MLXLMCommon.ModelContainer
@@ -185,6 +188,7 @@ public enum ChatSessionTests {
     }
 
     public static func visionModel(container: LLModelContainer) async throws {
+        #if canImport(CoreImage)
         let session = ChatSession(container, generateParameters: generateParameters)
         let redImage = VisionTestImages.solidColor(.red)
 
@@ -196,6 +200,10 @@ public enum ChatSessionTests {
             result.lowercased().contains("red"),
             "Expected 'red' in response, got: \(result)"
         )
+        #else
+        fatalError(
+            "Vision model test requires CoreImage, which is not available on this platform.")
+        #endif
     }
 
     public static func streamDetailsWithTools(container: LLModelContainer) async throws {

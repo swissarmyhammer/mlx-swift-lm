@@ -51,7 +51,7 @@ final class PromptCacheProbeModel: Module, MLXLMCommon.LanguageModel,
     var kvHeads: [Int] { [1] }
 
     /// Protocol conformance stub; not invoked by PromptCache and will trap if called.
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
         fatalError("not exercised by PromptCache tests")
     }
 

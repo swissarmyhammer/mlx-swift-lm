@@ -99,7 +99,7 @@ private final class RecordingProbeModel: Module, MLXLMCommon.LanguageModel,
     var kvHeads: [Int] { [1] }
     private(set) var fedTokenIDs: [Int] = []
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
         .tokens(input.text)
     }
 
