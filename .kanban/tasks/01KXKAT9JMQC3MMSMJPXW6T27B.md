@@ -43,6 +43,17 @@ comments:
   id: 01kxkftwbs2b43cvy1mx7em05x
   text: 'Implement landed green in `doing`. Root cause: TranscriptConverter replayed a `.toolCalls` entry as verbatim assistant *text* (no tool_calls field), so a completed tool round rendered as user, assistant(text), assistant(answer) — two counted assistants → Mistral TemplateException. Fix: for `.mistral` format, render `.toolCalls` as a single assistant Chat.Message with empty content + structured `toolCalls:`; all other formats byte-identical. Also made MLXLanguageModel.respond()/populatePromptCacheChunks() format-aware from container.configuration.toolCallFormat. Verified: `swift build` clean; TranscriptConverterTests 26/26; MLXFoundationModelsTests 213/213. Real-model Devstral E2E (AC#2) deferred — ~13GB download + GPU not feasible here; instead proven at template layer by running the real cached chat_template.jinja (old shape raises the exact TemplateException, new shape renders cleanly). Proceeding to checkpoint commit + review.'
   timestamp: 2026-07-15T18:15:13.529057+00:00
+- actor: claude-code
+  id: 01kxkgy2gaysg94scptsscvabz
+  text: |-
+    Re-picked from review to doing to work the 2025-07-15 13:16 Review Findings (both in Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift). Root-fixed both:
+
+    Finding 1 (doc summary line): reworked the `firstAlternationViolation` doc comment so the first line is a complete single sentence — `/// Mirrors the alternation validator in Mistral3's chat_template.jinja.` — followed by a blank `///` line then the elaboration; the verbatim ```jinja citation block is untouched. Fixed the SAME defect on its sibling `completedToolRoundEntries` doc comment (also opened with a fragment across lines): now `/// Builds a completed single-round tool exchange as transcript entries.` + blank + body. No other `///` doc comments in the file.
+
+    Finding 2 (trivial per-call invariant): `testNonMistralToolCallRenderingUnchanged` now uses TWO tool calls in one entry ([get_weather, get_time]). Asserts `.json`/`.glm4` each produce TWO assistant messages (count==2, roles [.assistant,.assistant], contents == default, tool_calls nil, envelope names == [get_weather, get_time]) — genuinely proving one-message-per-call — and adds a contrast asserting `.mistral` folds the same two calls into ONE. Kept every prior assertion (strengthened, not weakened). No production code changed.
+
+    Verified: `swift build` clean (only pre-existing docc/resource warnings); `swift test --filter TranscriptConverterTests` = 26/26 pass; `swift test --filter MLXFoundationModelsTests` = 213/213 pass. swift-format lint --strict clean; format --in-place produced no changes beyond the edits. Both Review Findings checkboxes flipped to [x]. Leaving green in doing for /review.
+  timestamp: 2026-07-15T18:34:26.698720+00:00
 position_column: doing
 position_ordinal: '80'
 title: Tool-calling transcript rendering violates Mistral3's strict-alternation chat template (Devstral unusable)
@@ -68,3 +79,8 @@ Devstral Small 2 is arguably the strongest open agentic-coding model runnable on
 - [ ] A multi-turn tool-calling exchange (user → assistant tool call → tool output → assistant answer) renders through the mistral3 chat template without TemplateException.
 - [ ] Verified end to end with Devstral-Small-2-24B-Instruct-2512-4bit generating at least one real tool-call round trip.
 - [ ] Non-Mistral families' rendering unchanged (regression-guard Qwen/GLM paths).
+
+## Review Findings (2026-07-15 13:16)
+
+- [x] `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift:326` — The first line of a documentation comment should be a single-sentence summary ending in a period. Line 326 is a sentence fragment that continues across multiple lines. Reorganize the first line so that it forms a complete, standalone sentence ending with a period before continuing elaboration, such as: '/// Mirrors Mistral3's strict user/assistant alternation validator from `chat_template.jinja`.' Then follow with elaboration after a blank `///` line.
+- [x] `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift:497` — The test claims to verify that `.json` and `.glm4` formats 'keep the historical rendering — one assistant message per call', but only tests with a single tool call. The 'one per call' invariant cannot be verified when there is only one call; it is satisfied trivially regardless of whether folding is applied. Extend the test to include a case with two tool calls (e.g., `[first, second]`) and verify that both `.json` and `.glm4` create two messages (one per call), proving they do not fold multiple calls into one message like the `.mistral` format does.

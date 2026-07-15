@@ -549,11 +549,13 @@ struct TranscriptConverterTests {
 
     // MARK: - Mistral3 strict-alternation rendering
 
-    /// A completed single-round tool exchange: system instructions, a user
-    /// prompt, the assistant's tool call, the tool's result, and the
-    /// assistant's final answer. This is the shape Mistral3's chat template
-    /// rejected before the format-aware rendering fix — a plain
-    /// assistant-content tool call left two assistant turns adjacent.
+    /// Builds a completed single-round tool exchange as transcript entries.
+    ///
+    /// The sequence is system instructions, a user prompt, the assistant's
+    /// tool call, the tool's result, and the assistant's final answer. This is
+    /// the shape Mistral3's chat template rejected before the format-aware
+    /// rendering fix — a plain assistant-content tool call left two assistant
+    /// turns adjacent.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func completedToolRoundEntries() throws -> [Transcript.Entry] {
         let call = Transcript.ToolCall(
@@ -580,9 +582,10 @@ struct TranscriptConverterTests {
         ]
     }
 
-    /// Mirrors the alternation validator in Mistral3's `chat_template.jinja`
-    /// (the check that raises the reported `TemplateException`). Reproduced
-    /// verbatim from Devstral-Small-2-24B-Instruct-2512-4bit's
+    /// Mirrors the alternation validator in Mistral3's `chat_template.jinja`.
+    ///
+    /// This is the check that raises the reported `TemplateException`,
+    /// reproduced verbatim from Devstral-Small-2-24B-Instruct-2512-4bit's
     /// `chat_template.jinja`, whose validator loop (after slicing off a
     /// leading `system` message) is:
     ///
@@ -708,30 +711,55 @@ struct TranscriptConverterTests {
     func testNonMistralToolCallRenderingUnchanged() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
-        let call = Transcript.ToolCall(
+        // Two calls in one round: enough to actually exercise the "one
+        // assistant message *per call*" invariant. With a single call the
+        // invariant holds trivially whether or not folding happens, so it must
+        // be probed with more than one call.
+        let first = Transcript.ToolCall(
             id: "call-1", toolName: "get_weather",
             arguments: try GeneratedContent(json: #"{"location": "Tokyo"}"#))
-        let entries: [Transcript.Entry] = [.toolCalls(Transcript.ToolCalls(id: "tc-1", [call]))]
+        let second = Transcript.ToolCall(
+            id: "call-2", toolName: "get_time",
+            arguments: try GeneratedContent(json: #"{"timezone": "JST"}"#))
+        let entries: [Transcript.Entry] = [
+            .toolCalls(Transcript.ToolCalls(id: "tc-1", [first, second]))
+        ]
 
         // Regression guard: `nil` (default), `.json` (Qwen/Llama), and
         // `.glm4` (GLM) must all keep the historical rendering — one assistant
         // message per call carrying the verbatim envelope as text content,
         // with no structured tool metadata that would let a template re-render
-        // it. Only `.mistral` deviates.
+        // it. Unlike `.mistral`, which folds parallel calls into a single
+        // assistant turn, these formats never collapse multiple calls: two
+        // calls yield two messages, one per call. Only `.mistral` deviates.
         let defaultMessages = TranscriptConverter.mlxMessages(for: entries)
+        #expect(defaultMessages.count == 2)
         for format in [ToolCallFormat.json, .glm4] {
             let messages = TranscriptConverter.mlxMessages(for: entries, toolCallFormat: format)
-            #expect(messages.count == 1)
-            #expect(messages[0].role == .assistant)
-            #expect(messages[0].content == defaultMessages[0].content)
 
-            let raw = DefaultMessageGenerator().generate(message: messages[0])
-            #expect(raw["tool_calls"] == nil)
-            let envelope = try #require(
-                try JSONSerialization.jsonObject(with: Data((raw["content"] as? String ?? "").utf8))
-                    as? [String: Any])
-            #expect(envelope["name"] as? String == "get_weather")
+            // The per-call invariant `.mistral` breaks by folding: two calls
+            // stay two assistant messages, one per call, matching default.
+            #expect(messages.count == 2)
+            #expect(messages.map(\.role) == [.assistant, .assistant])
+            #expect(messages.map(\.content) == defaultMessages.map(\.content))
+
+            var toolNames: [String] = []
+            for message in messages {
+                let raw = DefaultMessageGenerator().generate(message: message)
+                #expect(raw["tool_calls"] == nil)
+                let envelope = try #require(
+                    try JSONSerialization.jsonObject(
+                        with: Data((raw["content"] as? String ?? "").utf8)) as? [String: Any])
+                toolNames.append(try #require(envelope["name"] as? String))
+            }
+            #expect(toolNames == ["get_weather", "get_time"])
         }
+
+        // Contrast: `.mistral` folds the same two calls into a single assistant
+        // turn — the very behavior these formats must not adopt.
+        let mistralMessages = TranscriptConverter.mlxMessages(
+            for: entries, toolCallFormat: .mistral)
+        #expect(mistralMessages.count == 1)
     }
 
 }
