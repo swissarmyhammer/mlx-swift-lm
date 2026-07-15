@@ -2621,6 +2621,33 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 promptTokens: promptTokens)
         }
 
+        /// Trims `cache` back into sync with the observed generated-token
+        /// count after `PromptCache.reconcileCacheAdvance` reported
+        /// `.trimCacheByOne`: the cache's real offset is one token ahead of
+        /// what was observed (see `reconcileCacheAdvance`'s doc), so trim it
+        /// back to match rather than storing a token count that doesn't
+        /// correspond to the cache's actual state.
+        ///
+        /// - Parameters:
+        ///   - cache: The slot's KV cache to trim.
+        ///   - slot: The slot this round generated with (supplies the
+        ///     prompt-token baseline the offsets are relative to).
+        ///   - cacheAdvance: `cache`'s observed offset advance beyond
+        ///     `slot.promptTokens`.
+        ///   - generatedTokenCount: The observed generated-token count to
+        ///     trim back to.
+        /// - Returns: `true` when the cache was trimmable and the trim
+        ///   verified, so the entry is safe to store; `false` when it must
+        ///   be dropped instead.
+        private static func trimCacheIfValid(
+            _ cache: [KVCache], slot: PromptCacheSlot, cacheAdvance: Int, generatedTokenCount: Int
+        ) -> Bool {
+            canTrimPromptCache(cache)
+                && PromptCache.trimAndVerify(
+                    cache, from: slot.promptTokens.count + cacheAdvance,
+                    to: slot.promptTokens.count + generatedTokenCount)
+        }
+
         /// Reconciles this round's actual generated token IDs against
         /// `cache`'s own authoritative `offset` advance beyond
         /// `slot.promptTokens`, then persists (or invalidates)
@@ -2656,26 +2683,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             case .matches:
                 shouldStore = true
             case .trimCacheByOne:
-                // The cache's real offset is one token ahead of what we
-                // observed (see `PromptCache.reconcileCacheAdvance`'s doc);
-                // trim it back to match rather than storing a token count
-                // that doesn't correspond to the cache's actual state.
-                guard
-                    canTrimPromptCache(cache),
-                    PromptCache.trimAndVerify(
-                        cache, from: slot.promptTokens.count + cacheAdvance,
-                        to: slot.promptTokens.count + generatedTokenIDs.count)
-                else {
-                    await MLXLanguageModel.removePromptCache(modelID: modelID)
-                    return
-                }
-                shouldStore = true
+                shouldStore = trimCacheIfValid(
+                    cache, slot: slot, cacheAdvance: cacheAdvance,
+                    generatedTokenCount: generatedTokenIDs.count)
             case .untrustworthy:
                 shouldStore = false
             }
             // Both surviving cases (`.matches`, and `.trimCacheByOne` once
-            // the trim above succeeds) persist the same entry; `.untrustworthy`
-            // (and a failed trim, handled above) drop it instead. One shared
+            // `trimCacheIfValid` succeeds) persist the same entry;
+            // `.untrustworthy` and a failed trim drop it instead. One shared
             // store call keeps that single behavior in one place.
             guard shouldStore else {
                 await MLXLanguageModel.removePromptCache(modelID: modelID)
