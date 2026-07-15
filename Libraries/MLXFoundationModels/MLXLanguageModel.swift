@@ -19,6 +19,10 @@ import os.log
 import MLXGuidedGeneration
 
 /// Shared `os.log` subsystem for every logger in this adapter.
+///
+/// Deliberately `internal`, not `private`: it is referenced from other files
+/// in this module (e.g. `TranscriptConverter`'s logger), so file-private
+/// access would not compile.
 let mlxFoundationModelsLoggingSubsystem = "com.apple.FoundationModels-MLX"
 
 // MARK: - Constraint Cache Kind
@@ -26,7 +30,7 @@ let mlxFoundationModelsLoggingSubsystem = "com.apple.FoundationModels-MLX"
 /// Selects which xgrammar constructor a cached template was compiled
 /// with. Used by the constraint cache so a JSON-schema source and a
 /// structural-tag source can never alias even if their text collides.
-enum ConstraintKind {
+private enum ConstraintKind {
     case json
     case structuralTag
 }
@@ -684,7 +688,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///   - fastForward: Whether to enable xgrammar's fast-forward optimization.
     /// - Returns: A fresh (cloned or newly compiled) `GrammarConstraint`.
     /// - Throws: Whatever `ModelCache.makeConstraint` throws.
-    static func makeConstraint(
+    private static func makeConstraint(
         modelID: String,
         kind: ConstraintKind,
         source: String,

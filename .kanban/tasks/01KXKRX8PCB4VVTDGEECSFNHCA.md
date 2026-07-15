@@ -34,6 +34,22 @@ comments:
 
     Note for follow-up: Devstral-Small-2 (mistral3) leak+runaway is NOT fixed by (or caused by) this change — its grammar was byte-identical before and after cf4fa81 (.mistral already fell back to the Qwen tag). If the gated suite still shows it, the candidate fix is dropping the wrapped `<tool_call>` arm entirely (bare-JSON-only grammar) for families whose native content is non-JSON; that needs GPU evidence before wiring.
   timestamp: 2026-07-15T22:33:08.015751+00:00
+- actor: claude-code
+  id: 01kxkz9j52ypv3h316xjrky7qg
+  text: 'Iteration 1: implement landed green in doing. Root cause verified: cf4fa81''s bespoke GLM4 structural tag used GLM''s native `<tool_call>` prefix but kept Qwen-style JSON envelope content — the constraint lured GLM-4.7-Flash into its native arg_key/arg_value format then forced `{`, causing off-distribution decode → repeated-token runaway → loud-failure fallback dumping raw wrapper text as reply. Fix: deleted ToolCallStructuralTag.glm4; forFormat() resolves every format to .qwen (byte-identical to pre-regression baseline). Regression tests pin exact wrapper bytes across ToolCallFormat.allCases. Full suite green: 224 passed, 0 failed, 0 warnings. Note: Devstral-Small-2 (mistral3) leak/runaway signature is independent of cf4fa81 (grammar byte-identical before/after) and NOT fixed here; candidate fix needs GPU evidence first. Checkpoint commit: 44a96cf. Moving to review.'
+  timestamp: 2026-07-15T22:45:23.234406+00:00
+- actor: claude-code
+  id: 01kxm0ahzybrqwzvjtbjgrkpk7
+  text: |-
+    Review-finding rework (pulled review -> doing): investigated the 2026-07-15 17:45 finding asking to mark `mlxFoundationModelsLoggingSubsystem` as `private let`. The finding's premise ("used only within that file") is factually wrong: the constant is referenced from TranscriptConverter.swift (same target, Package.swift path Libraries/MLXFoundationModels), so file-scoped `private` would not compile. `internal` is already the minimal access. Resolution: extended the constant's doc comment to state explicitly that it is deliberately internal because of the cross-file use, so it cannot be re-flagged.
+
+    Root-cause sweep of all file-scope declarations in MLXLanguageModel.swift per the finish-loop rules:
+    - `enum ConstraintKind` — genuinely file-local (all uses in this file; no test/lib references elsewhere) -> now `private enum`. Required consequence: `static func makeConstraint` on MLXLanguageModel (signature uses ConstraintKind, only caller is prepareConstraintSetup in the nested Executor, same declaration) -> `private static func`.
+    - `TokenizerBias` / `ConstraintSetup` — must stay internal: ToolEnvelopeReserveZoneTests constructs ConstraintSetup directly, and TokenizerBiasCacheTests drives the internal seam makeTokenizerBias whose signature exposes TokenizerBias (@testable).
+    - `ModelCache` already private; `MLXLanguageModel` is public API.
+
+    Verification: `swift build` green (one pre-existing deprecation warning at MLXLanguageModel.swift:950, untouched by this diff, present before the change). Full `swift test` exit 0: 254+0+65+217+7 = 543 tests passed, zero failures. Adversarial double-check in flight; task stays in doing per the finish-loop contract.
+  timestamp: 2026-07-15T23:03:24.414063+00:00
 position_column: doing
 position_ordinal: '8180'
 title: 'GLM4 structural-tag wiring regresses GLM-4.7-Flash: <tool_call> text leaks and grammar runaways'
@@ -55,3 +71,8 @@ Hypothesis to check: the generation-side structural tag and the parse-side `GLM4
 - [ ] GLM-4.7-Flash-4bit completes the four gated scenarios with zero un-parsed tool-call text in final replies and zero repeated-token runaways.
 - [ ] Whatever wrapper the structural tag constrains generation to is the same one the parser extracts, per model family, verified against what the model's own chat template declares.
 - [ ] Qwen-family behavior unchanged (Qwen3-30B-A3B-Instruct-2507 still passes its scenarios).
+
+## Review Findings (2026-07-15 17:45)
+
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:14` — File-level constant `mlxFoundationModelsLoggingSubsystem` has implicit `internal` access but is used only within this file. Should be explicitly marked `private let` to indicate it is not part of the module's shared API and follow the principle of least privilege. Change line 14 to `private let mlxFoundationModelsLoggingSubsystem = "com.apple.FoundationModels-MLX"`.
+  - Resolution (2026-07-15): the finding's premise is stale — the constant is referenced from `TranscriptConverter.swift` (same target), so file-scoped `private` does not compile; `internal` is already the minimal access. Documented the deliberate cross-file use in the constant's doc comment so it cannot be re-flagged. Root-cause sweep of the file's other file-scope declarations: `ConstraintKind` was genuinely file-local and is now `private` (with `static func makeConstraint`, whose signature uses it and whose only caller is in-file, tightened to `private`); `TokenizerBias`/`ConstraintSetup` must remain internal (used from the test target via `@testable`); `ModelCache` was already private. Full `swift test` green (543 tests, 0 failures).
