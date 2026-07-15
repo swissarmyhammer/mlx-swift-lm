@@ -235,23 +235,24 @@ struct ToolCallingSchemaTests {
 
     // MARK: - Format-Driven Structural Tag
 
-    /// The seam: each `ToolCallFormat` maps to its own wrapper spec, and
-    /// every format without a bespoke wrapper falls back to Qwen's so
-    /// nothing regresses.
+    /// The seam invariant: the wrapped arm's *content* is always the
+    /// Qwen-style JSON envelope, so a family may only receive a bespoke
+    /// wrapper when its chat template wraps that same envelope in it. No
+    /// current family qualifies except the Qwen default, so *every*
+    /// format — including `nil` (no inference) — must select the Qwen
+    /// framing. Pairing a family's native wrapper prefix with foreign JSON
+    /// content lures the model into its native format and then forces it
+    /// off-distribution (the GLM-4.7-Flash leak/runaway regression).
     @Test
-    func structuralTagSeamSelectsWrapperPerFormat() {
+    func structuralTagSeamSelectsQwenWrapperForEveryFormat() {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        // No inference and the explicit Qwen/Llama JSON format both take the
-        // default wrapper.
         #expect(SchemaConverter.ToolCallStructuralTag.forFormat(nil) == .qwen)
-        #expect(SchemaConverter.ToolCallStructuralTag.forFormat(.json) == .qwen)
-        // Unmapped families fall back to the Qwen wrapper.
-        #expect(SchemaConverter.ToolCallStructuralTag.forFormat(.lfm2) == .qwen)
-        #expect(SchemaConverter.ToolCallStructuralTag.forFormat(.gemma4) == .qwen)
-        // GLM-4.5/4.6/4.7 (glm4_moe) gets its own bespoke wrapper.
-        #expect(SchemaConverter.ToolCallStructuralTag.forFormat(.glm4) == .glm4)
-        // The two specs are genuinely distinct.
-        #expect(SchemaConverter.ToolCallStructuralTag.glm4 != .qwen)
+        for format in ToolCallFormat.allCases {
+            #expect(
+                SchemaConverter.ToolCallStructuralTag.forFormat(format) == .qwen,
+                "\(format) must keep the Qwen framing: its template does not wrap the JSON envelope"
+            )
+        }
     }
 
     /// Regression guard: a `nil` format (no inference) must produce exactly
@@ -293,12 +294,17 @@ struct ToolCallingSchemaTests {
         #expect(byJSON.end == byDefault.end)
     }
 
-    /// AC3: the GLM4 (`glm4_moe`) format wires its native wrapper —
-    /// `<tool_call>`/`</tool_call>` with no inner newlines (see
-    /// `GLM4ToolCallParser` fixtures) — distinct from Qwen's newline-padded
-    /// wrapper.
+    /// Regression guard (task ^csfnhca): the GLM4 (`glm4_moe`) format must
+    /// NOT wire GLM's native `<tool_call>` wrapper. GLM-4.7-Flash's chat
+    /// template puts arg_key/arg_value XML — not a JSON envelope — inside
+    /// `<tool_call>`, so a GLM4-tagged arm whose content is the JSON
+    /// envelope lured the model into its native prefix and then forced JSON
+    /// on it, producing repeated-token runaways and un-parsed
+    /// `<tool_call>` text leaking into replies. GLM4 keeps the Qwen
+    /// framing (the only configuration with clean empirical GPU evidence),
+    /// which the parse side's `unwrapToolCallMarkers` extracts.
     @Test
-    func glm4FormatProducesGLM4Wrapper() throws {
+    func glm4FormatKeepsQwenWrapper() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let weather = Transcript.ToolDefinition(
             name: "get_weather",
@@ -314,11 +320,11 @@ struct ToolCallingSchemaTests {
         let elements = try #require(format["elements"] as? [[String: Any]])
         #expect(elements.count == 2)
 
-        // Wrapped arm carries GLM's newline-free wrapper.
+        // Wrapped arm carries the Qwen newline-padded wrapper, byte-for-byte.
         let wrapped = elements[0]
         #expect(wrapped["type"] as? String == "tag")
-        #expect(wrapped["begin"] as? String == "<tool_call>")
-        #expect(wrapped["end"] as? [String] == ["</tool_call>"])
+        #expect(wrapped["begin"] as? String == "<tool_call>\n")
+        #expect(wrapped["end"] as? [String] == ["\n</tool_call>"])
 
         // The embedded envelope is unchanged from the default path.
         let wrappedContent = try #require(wrapped["content"] as? [String: Any])

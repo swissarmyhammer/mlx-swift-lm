@@ -3119,13 +3119,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             try Self.validateContextSize(
                 tokenCount: toolAwareInput.text.tokens.size, contextLength: contextLength)
 
-            // Frame the constrained envelope in the model family's native
-            // tool-call wrapper (derived from the same inferred
-            // `ToolCallFormat` the parse side reads from
-            // `container.configuration.toolCallFormat`), so the generation
-            // constraint and the model's training agree. `nil` and any
-            // family without a bespoke wrapper fall back to Qwen's,
-            // unchanged.
+            // Frame the constrained envelope in the Qwen tool-call
+            // wrapper (with a bare-JSON escape hatch). The inferred
+            // `ToolCallFormat` is passed through, but every format
+            // currently resolves to the Qwen framing: the envelope
+            // content is Qwen-shaped JSON, and constraining a family
+            // to its native wrapper around foreign JSON content sent
+            // GLM-4.7-Flash off-distribution (leaks + runaways; see
+            // `SchemaConverter.ToolCallStructuralTag`).
             let toolCallingGrammar =
                 try SchemaConverter.encodeToolCallingGrammar(
                     tools: allTools,
