@@ -324,7 +324,7 @@ try configData.write(to: configURL)
 
 No major deprecations in LoRA system. However, note:
 
-### Old LORATrain.convert() pattern
+### Old LoRATrain.convert() pattern
 
 The newer `LoRAContainer.from(model:configuration:)` is preferred over the older training flow that directly converted layers. The container approach:
 - Provides cleaner state management

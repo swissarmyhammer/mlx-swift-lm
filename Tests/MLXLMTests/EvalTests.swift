@@ -41,9 +41,9 @@ public class EvalTests: XCTestCase {
         let valid = ["x", "y", "z"]
 
         let tokenizer = TestTokenizer()
-        let parameters = LORATrain.Parameters(iterations: 5)
+        let parameters = LoRATrain.Parameters(iterations: 5)
 
-        try LORATrain.train(
+        try LoRATrain.train(
             model: model, train: train, validate: valid, optimizer: optimizer,
             tokenizer: tokenizer,
             parameters: parameters

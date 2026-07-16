@@ -389,7 +389,7 @@ await session.clear()
 | [references/tokenizer-chat.md](references/tokenizer-chat.md) | Tokenizer, Chat.Message, EOS tokens |
 | [references/supported-models.md](references/supported-models.md) | Model families, registries, model-specific config |
 | [references/lora-adapters.md](references/lora-adapters.md) | LoRA/DoRA/QLoRA, loading adapters |
-| [references/training.md](references/training.md) | LORATrain API, fine-tuning |
+| [references/training.md](references/training.md) | LoRATrain API, fine-tuning |
 | [references/embeddings.md](references/embeddings.md) | EmbeddingModel, pooling, use cases |
 | [references/model-porting.md](references/model-porting.md) | Porting models from Python MLX-LM to Swift |
 

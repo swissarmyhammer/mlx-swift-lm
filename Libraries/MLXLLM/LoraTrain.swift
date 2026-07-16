@@ -10,7 +10,7 @@ import MLXOptimizers
 /// without warning that the data should be pre-split to save memory.
 private let maxSequenceLength = 2048
 
-/// Equivalent to `lora.py/iterate_batches()`. Used internally by ``LORATrain``.
+/// Equivalent to `lora.py/iterate_batches()`. Used internally by ``LoRATrain``.
 struct LoRABatchIterator: Sequence, IteratorProtocol {
 
     let dataset: [String]
@@ -87,10 +87,10 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
 /// let (model, tokenizer) = try await LLM.load(configuration: ModelConfiguration.mistral7b4bit)
 ///
 /// // add LoRALinear adapter layers
-/// LORATrain.convert(model: model, layers: Array(model.loraLinearLayers().suffix(4)))
+/// LoRATrain.convert(model: model, layers: Array(model.loraLinearLayers().suffix(4)))
 ///
 /// // optionally load LoRA weights
-/// try LORATrain.loadLoRAWeights(model: model, url: ...)
+/// try LoRATrain.loadLoRAWeights(model: model, url: ...)
 ///
 /// // load the train/validation data
 /// let train = try loadLoRAData(directory: data, name: "train")
@@ -98,9 +98,9 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
 ///
 /// // train
 /// let optimizer = Adam(learningRate: 1e-5)
-/// try await LORATrain.train(
+/// try await LoRATrain.train(
 ///     model: model, train: train, validate: valid, optimizer: optimizer, tokenizer: tokenizer,
-///     parameters: LORATrain.Parameters()
+///     parameters: LoRATrain.Parameters()
 /// ) { progress in
 ///     print(progress)
 ///     return .more
@@ -116,7 +116,7 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
 ///     againts a test dataset
 /// - use the in memory model as a normal `LLMModel` and evaluate a prompt
 ///
-public enum LORATrain {
+public enum LoRATrain {
 
     /// Type of a loss function used in LoRA training.
     ///
@@ -199,7 +199,7 @@ public enum LORATrain {
         // an LLMModel is a programmer error
         guard let model = model as? any LLMModel else {
             fatalError(
-                "LORATrain.loss requires a model conforming to LLMModel, got \(type(of: model))")
+                "LoRATrain.loss requires a model conforming to LLMModel, got \(type(of: model))")
         }
         let logits = model(inputs, cache: nil).asType(.float32)
 
@@ -251,7 +251,7 @@ public enum LORATrain {
     ///
     /// - Parameters:
     ///   - model: the model whose trainable (adapter) parameters will be written
-    ///   - url: destination of the `.safetensors` file
+    ///   - to: destination of the `.safetensors` file
     /// - Throws: When writing the weights to the `.safetensors` file fails.
     ///
     /// ### See Also
