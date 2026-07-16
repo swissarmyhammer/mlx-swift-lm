@@ -10,7 +10,7 @@ import MLXOptimizers
 /// without warning that the data should be pre-split to save memory.
 private let maxSequenceLength = 2048
 
-/// Equivalent to `lora.py/iterate_batches()`. Used internally by ``LoRATrain``.
+/// Equivalent to `lora.py/iterate_batches()`. Used internally by ``LORATrain``.
 struct LoRABatchIterator: Sequence, IteratorProtocol {
 
     let dataset: [String]
@@ -41,7 +41,7 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
     ///   token count of each sequence, or `nil` when a non-training iterator has
     ///   consumed the entire dataset. Training iterators reshuffle and iterate
     ///   indefinitely, never returning `nil`.
-    public mutating func next() -> (MLXArray, MLXArray, MLXArray)? {
+    mutating func next() -> (MLXArray, MLXArray, MLXArray)? {
         if index >= indices.count {
             if !train {
                 return nil
@@ -87,10 +87,10 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
 /// let (model, tokenizer) = try await LLM.load(configuration: ModelConfiguration.mistral7b4bit)
 ///
 /// // add LoRALinear adapter layers
-/// LoRATrain.convert(model: model, layers: Array(model.loraLinearLayers().suffix(4)))
+/// LORATrain.convert(model: model, layers: Array(model.loraLinearLayers().suffix(4)))
 ///
 /// // optionally load LoRA weights
-/// try LoRATrain.loadLoRAWeights(model: model, url: ...)
+/// try LORATrain.loadLoRAWeights(model: model, url: ...)
 ///
 /// // load the train/validation data
 /// let train = try loadLoRAData(directory: data, name: "train")
@@ -98,9 +98,9 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
 ///
 /// // train
 /// let optimizer = Adam(learningRate: 1e-5)
-/// try await LoRATrain.train(
+/// try await LORATrain.train(
 ///     model: model, train: train, validate: valid, optimizer: optimizer, tokenizer: tokenizer,
-///     parameters: LoRATrain.Parameters()
+///     parameters: LORATrain.Parameters()
 /// ) { progress in
 ///     print(progress)
 ///     return .more
@@ -109,14 +109,14 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
 ///
 /// At this point the model will be trained and you could do one of the following:
 ///
-/// - ``saveLoRAWeights(model:url:)``: write the LoRA weights to a file
+/// - ``saveLoRAWeights(model:to:)``: write the LoRA weights to a file
 /// - fuse the LoRA weights and convert back into the original model
 ///     architecture using the LoRA adapter APIs in `MLXLMCommon`
 /// - ``evaluate(model:dataset:loss:tokenizer:batchSize:batchCount:)``-- compute the test loss
 ///     againts a test dataset
 /// - use the in memory model as a normal `LLMModel` and evaluate a prompt
 ///
-public enum LoRATrain {
+public enum LORATrain {
 
     /// Type of a loss function used in LoRA training.
     ///
@@ -199,7 +199,7 @@ public enum LoRATrain {
         // an LLMModel is a programmer error
         guard let model = model as? any LLMModel else {
             fatalError(
-                "LoRATrain.loss requires a model conforming to LLMModel, got \(type(of: model))")
+                "LORATrain.loss requires a model conforming to LLMModel, got \(type(of: model))")
         }
         let logits = model(inputs, cache: nil).asType(.float32)
 
@@ -229,7 +229,7 @@ public enum LoRATrain {
         model: Module, dataset: [String], loss: LoRALossFunction = loss, tokenizer: Tokenizer,
         batchSize: Int, batchCount: Int
     ) -> Float {
-        var allLosses = [Float]()
+        var allLosses: [Float] = []
         var tokenCount = 0
 
         for (iteration, (inputs, targets, lengths)) in LoRABatchIterator(
@@ -249,18 +249,23 @@ public enum LoRATrain {
 
     /// Given a model with LoRA adaptors applied, write adapter weights to a `.safetensors` file.
     ///
+    /// - Parameters:
+    ///   - model: the model whose trainable (adapter) parameters will be written
+    ///   - url: destination of the `.safetensors` file
     /// - Throws: When writing the weights to the `.safetensors` file fails.
     ///
     /// ### See Also
     /// - ``evaluate(model:dataset:loss:tokenizer:batchSize:batchCount:)``
     /// - ``train(model:train:validate:optimizer:loss:tokenizer:parameters:progress:)``
-    public static func saveLoRAWeights(model: Module, url: URL) throws {
+    public static func saveLoRAWeights(model: Module, to url: URL) throws {
         let parameters = Dictionary(
             uniqueKeysWithValues: model.trainableParameters().flattened())
         try save(arrays: parameters, url: url)
     }
 
-    /// Progress event reported to the callback passed to
+    /// Progress event reported to the training callback.
+    ///
+    /// Passed to the callback given to
     /// ``train(model:train:validate:optimizer:loss:tokenizer:parameters:progress:)``,
     /// covering training loss updates, validation loss updates and adapter weight saves.
     public enum Progress: CustomStringConvertible, Sendable {
@@ -291,8 +296,7 @@ public enum LoRATrain {
         }
     }
 
-    /// Value returned from the ``Progress`` callback indicating whether training
-    /// should continue or stop.
+    /// Value returned from the ``Progress`` callback indicating whether training should continue or stop.
     public enum ProgressDisposition: Sendable {
         /// stop training.
         case stop
@@ -311,7 +315,7 @@ public enum LoRATrain {
     ///   - tokenizer: tokenizer
     ///   - parameters: training parameters
     ///   - progress: progress callback
-    /// - Throws: When saving the adapter weights fails -- see ``saveLoRAWeights(model:url:)``.
+    /// - Throws: When saving the adapter weights fails -- see ``saveLoRAWeights(model:to:)``.
     public static func train(
         model: Module, train: [String], validate: [String], optimizer: Optimizer,
         loss: @escaping LoRALossFunction = loss, tokenizer: Tokenizer, parameters: Parameters,
@@ -330,10 +334,88 @@ public enum LoRATrain {
             return [ce, ntoks]
         }
 
-        var losses = [Float]()
+        var losses: [Float] = []
         var tokenCount = 0
 
         var start = Date.timeIntervalSinceReferenceDate
+
+        /// Report the mean training loss and throughput every `stepsPerReport`
+        /// iterations, resetting the accumulated statistics afterwards.
+        ///
+        /// - Returns: `true` when the progress callback asks training to stop.
+        func reportTrainingProgress(iteration: Int) -> Bool {
+            guard (iteration + 1) % parameters.stepsPerReport == 0 else {
+                return false
+            }
+
+            let trainingLoss = MLXArray(losses).mean(stream: .cpu).item(Float.self)
+            let now = Date.timeIntervalSinceReferenceDate
+
+            let iterationsPerSecond = Double(parameters.stepsPerReport) / (now - start)
+            let tokensPerSecond = Double(tokenCount) / (now - start)
+
+            if checkProgress(
+                .train(
+                    iteration: iteration, trainingLoss: trainingLoss,
+                    iterationsPerSecond: iterationsPerSecond, tokensPerSecond: tokensPerSecond))
+            {
+                return true
+            }
+
+            losses.removeAll()
+            tokenCount = 0
+            start = Date.timeIntervalSinceReferenceDate
+            return false
+        }
+
+        /// Compute and report the validation loss on the first iteration and every
+        /// `stepsPerEval` iterations thereafter.
+        ///
+        /// - Returns: `true` when the progress callback asks training to stop.
+        func reportValidationLoss(iteration: Int) -> Bool {
+            guard iteration == 0 || (iteration + 1) % parameters.stepsPerEval == 0 else {
+                return false
+            }
+
+            let validationStart = Date.timeIntervalSinceReferenceDate
+            let validationLoss = evaluate(
+                model: model, dataset: validate, loss: loss, tokenizer: tokenizer,
+                batchSize: parameters.batchSize, batchCount: parameters.validationBatches)
+            let now = Date.timeIntervalSinceReferenceDate
+
+            if checkProgress(
+                .validation(
+                    iteration: iteration, validationLoss: validationLoss,
+                    validationTime: now - validationStart))
+            {
+                return true
+            }
+
+            start = Date.timeIntervalSinceReferenceDate
+            return false
+        }
+
+        /// Save the adapter weights every `saveEvery` iterations when
+        /// ``Parameters/adapterURL`` is configured.
+        ///
+        /// - Returns: `true` when the progress callback asks training to stop.
+        /// - Throws: When saving the adapter weights fails.
+        func saveAdapterIfNeeded(iteration: Int) throws -> Bool {
+            guard let adapterURL = parameters.adapterURL,
+                (iteration + 1) % parameters.saveEvery == 0
+            else {
+                return false
+            }
+
+            try saveLoRAWeights(model: model, to: adapterURL)
+
+            if checkProgress(.save(iteration: iteration, url: adapterURL)) {
+                return true
+            }
+
+            start = Date.timeIntervalSinceReferenceDate
+            return false
+        }
 
         for (iteration, (inputs, targets, lengths)) in LoRABatchIterator(
             dataset: train, tokenizer: tokenizer, batchSize: parameters.batchSize, train: true
@@ -351,55 +433,16 @@ public enum LoRATrain {
             losses.append(lvalue.item(Float.self))
             tokenCount += tokens.item(Int.self)
 
-            // report training loss
-            if (iteration + 1) % parameters.stepsPerReport == 0 {
-                let trainingLoss = MLXArray(losses).mean(stream: .cpu).item(Float.self)
-                let now = Date.timeIntervalSinceReferenceDate
-
-                let iterationsPerSecond = Double(parameters.stepsPerReport) / (now - start)
-                let tokensPerSecond = Double(tokenCount) / (now - start)
-
-                if checkProgress(
-                    .train(
-                        iteration: iteration, trainingLoss: trainingLoss,
-                        iterationsPerSecond: iterationsPerSecond, tokensPerSecond: tokensPerSecond))
-                {
-                    break
-                }
-
-                losses.removeAll()
-                tokenCount = 0
-                start = Date.timeIntervalSinceReferenceDate
+            if reportTrainingProgress(iteration: iteration) {
+                break
             }
 
-            // report validation loss
-            if iteration == 0 || (iteration + 1) % parameters.stepsPerEval == 0 {
-                let validationStart = Date.timeIntervalSinceReferenceDate
-                let validationLoss = evaluate(
-                    model: model, dataset: validate, loss: loss, tokenizer: tokenizer,
-                    batchSize: parameters.batchSize, batchCount: parameters.validationBatches)
-                let now = Date.timeIntervalSinceReferenceDate
-
-                if checkProgress(
-                    .validation(
-                        iteration: iteration, validationLoss: validationLoss,
-                        validationTime: now - validationStart))
-                {
-                    break
-                }
-
-                start = Date.timeIntervalSinceReferenceDate
+            if reportValidationLoss(iteration: iteration) {
+                break
             }
 
-            // save adapter weights if needed
-            if let adapterURL = parameters.adapterURL, (iteration + 1) % parameters.saveEvery == 0 {
-                try saveLoRAWeights(model: model, url: adapterURL)
-
-                if checkProgress(.save(iteration: iteration, url: adapterURL)) {
-                    break
-                }
-
-                start = Date.timeIntervalSinceReferenceDate
+            if try saveAdapterIfNeeded(iteration: iteration) {
+                break
             }
 
             if iteration + 1 >= parameters.iterations {

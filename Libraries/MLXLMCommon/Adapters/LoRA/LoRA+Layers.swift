@@ -15,7 +15,7 @@ import MLXOptimizers
 ///
 /// ``QLoRALinear`` is the equivalent class for `QuantizedLinear`.
 ///
-/// This is not typically used directly -- `LoRATrain.convert(model:layers:)` is used to
+/// This is not typically used directly -- `LORATrain.convert(model:layers:)` is used to
 /// add the adapter layers to a given model.
 ///
 /// ### See Also
@@ -64,7 +64,7 @@ public class LoRALinear: Linear, LoRALayer {
     /// Convert a `Linear` or `QuantizedLinear` layer into a new `Linear` layer
     /// that implements the `LoRA` adapter.
     ///
-    /// This is typically called via `LoRATrain.convert(model:layers:)`.
+    /// This is typically called via `LORATrain.convert(model:layers:)`.
     ///
     /// ### See Also
     /// - ``QLoRALinear/from(linear:rank:scale:)``
@@ -145,7 +145,7 @@ public class QLoRALinear: QuantizedLinear, LoRALayer {
     /// Convert a `QuantizedLinear` layer into a new `Linear` layer
     /// that implements the `LoRA` adapter.
     ///
-    /// This is typically called via `LoRATrain.convert(model:layers:)`.
+    /// This is typically called via `LORATrain.convert(model:layers:)`.
     ///
     /// ### See Also
     /// - ``LoRALinear/from(linear:rank:scale:)``

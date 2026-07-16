@@ -2,7 +2,7 @@
 
 ## Overview
 
-mlx-swift-lm supports fine-tuning language models using LoRA (Low-Rank Adaptation) through the `LoRATrain` API. Training adapts only a small number of parameters while keeping the base model frozen.
+mlx-swift-lm supports fine-tuning language models using LoRA (Low-Rank Adaptation) through the `LORATrain` API. Training adapts only a small number of parameters while keeping the base model frozen.
 
 **File:** `Libraries/MLXLLM/LoraTrain.swift`
 
@@ -10,10 +10,10 @@ mlx-swift-lm supports fine-tuning language models using LoRA (Low-Rank Adaptatio
 
 | Type | Purpose |
 |------|---------|
-| `LoRATrain` | Namespace for training functions |
-| `LoRATrain.Parameters` | Training hyperparameters |
-| `LoRATrain.Progress` | Progress reporting enum |
-| `LoRATrain.ProgressDisposition` | Continue/stop training |
+| `LORATrain` | Namespace for training functions |
+| `LORATrain.Parameters` | Training hyperparameters |
+| `LORATrain.Progress` | Progress reporting enum |
+| `LORATrain.ProgressDisposition` | Continue/stop training |
 | `LoRABatchIterator` | Internal batch iteration |
 
 ## Training Parameters
@@ -112,7 +112,7 @@ let optimizer = Adam(learningRate: schedule)
 ### 5. Train
 
 ```swift
-let parameters = LoRATrain.Parameters(
+let parameters = LORATrain.Parameters(
     batchSize: 4,
     iterations: 1000,
     stepsPerReport: 10,
@@ -120,7 +120,7 @@ let parameters = LoRATrain.Parameters(
     adapterURL: saveURL
 )
 
-try LoRATrain.train(
+try LORATrain.train(
     model: model,
     train: trainData,
     validate: validData,
@@ -256,7 +256,7 @@ func customLoss(
     // Return (loss, tokenCount)
 }
 
-try LoRATrain.train(
+try LORATrain.train(
     model: model,
     train: trainData,
     validate: validData,
@@ -274,7 +274,7 @@ try LoRATrain.train(
 Evaluate model on test data:
 
 ```swift
-let testLoss = LoRATrain.evaluate(
+let testLoss = LORATrain.evaluate(
     model: model,
     dataset: testData,
     tokenizer: tokenizer,
@@ -291,7 +291,7 @@ print("Test loss: \(testLoss)")
 Set `adapterURL` in parameters for automatic saves:
 
 ```swift
-let parameters = LoRATrain.Parameters(
+let parameters = LORATrain.Parameters(
     saveEvery: 100,
     adapterURL: URL(filePath: "adapter.safetensors")
 )
@@ -300,7 +300,7 @@ let parameters = LoRATrain.Parameters(
 ### Manual Saving
 
 ```swift
-try LoRATrain.saveLoRAWeights(model: model, url: weightsURL)
+try LORATrain.saveLoRAWeights(model: model, to: weightsURL)
 ```
 
 ### Loading Saved Weights
@@ -327,7 +327,7 @@ Long sequences increase memory usage:
 Reduce batch size if running out of memory:
 
 ```swift
-let parameters = LoRATrain.Parameters(
+let parameters = LORATrain.Parameters(
     batchSize: 1  // Minimum batch size
 )
 ```
@@ -370,13 +370,13 @@ func trainAdapter() async throws {
 
     // Train
     let optimizer = Adam(learningRate: 1e-5)
-    let params = LoRATrain.Parameters(
+    let params = LORATrain.Parameters(
         batchSize: 2,
         iterations: 500,
         adapterURL: URL(filePath: "adapter.safetensors")
     )
 
-    try LoRATrain.train(
+    try LORATrain.train(
         model: model,
         train: trainData,
         validate: validData,
@@ -394,4 +394,4 @@ func trainAdapter() async throws {
 
 ## Deprecated Patterns
 
-No major deprecations in training API. The `LoRATrain` namespace provides a stable interface for training workflows.
+No major deprecations in training API. The `LORATrain` namespace provides a stable interface for training workflows.
