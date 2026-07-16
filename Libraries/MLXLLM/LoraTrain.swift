@@ -128,27 +128,27 @@ public enum LoRATrain {
         MLXArray, MLXArray
     )
 
-    /// LoRA training parameters
+    /// LoRA training parameters.
     public struct Parameters: Sendable {
-        /// number of prompts to evaluate per iteration
+        /// number of prompts to evaluate per iteration.
         public var batchSize = 4
 
-        /// number of iterations to train for
+        /// number of iterations to train for.
         public var iterations = 1000
 
-        /// number of training steps between loss reporting
+        /// number of training steps between loss reporting.
         public var stepsPerReport = 10
 
-        /// number of steps between validations
+        /// number of steps between validations.
         public var stepsPerEval = 100
 
-        /// number of validations batches, `0` uses the entire validation set
+        /// number of validations batches, `0` uses the entire validation set.
         public var validationBatches = 10
 
-        /// save the model every N iterations
+        /// save the model every N iterations.
         public var saveEvery = 100
 
-        /// save path for the adapter `.safetensors`
+        /// save path for the adapter `.safetensors`.
         public var adapterURL: URL?
 
         /// Create LoRA training parameters.
@@ -264,16 +264,16 @@ public enum LoRATrain {
     /// ``train(model:train:validate:optimizer:loss:tokenizer:parameters:progress:)``,
     /// covering training loss updates, validation loss updates and adapter weight saves.
     public enum Progress: CustomStringConvertible, Sendable {
-        /// a training loss report with throughput statistics
+        /// a training loss report with throughput statistics.
         case train(
             iteration: Int, trainingLoss: Float, iterationsPerSecond: Double,
             tokensPerSecond: Double)
-        /// a validation loss report with the time the validation pass took
+        /// a validation loss report with the time the validation pass took.
         case validation(iteration: Int, validationLoss: Float, validationTime: Double)
-        /// adapter weights were saved to the given url
+        /// adapter weights were saved to the given url.
         case save(iteration: Int, url: URL)
 
-        /// human readable description of the progress event
+        /// human readable description of the progress event.
         public var description: String {
             switch self {
             case .train(
@@ -294,9 +294,9 @@ public enum LoRATrain {
     /// Value returned from the ``Progress`` callback indicating whether training
     /// should continue or stop.
     public enum ProgressDisposition: Sendable {
-        /// stop training
+        /// stop training.
         case stop
-        /// continue training
+        /// continue training.
         case more
     }
 

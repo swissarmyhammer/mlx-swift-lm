@@ -130,6 +130,33 @@ comments:
   id: 01kxnmh2t7btm51vtgf98n6e09
   text: 'Iteration 4: implement landed green in doing — all 4 findings fixed (next() doc with tuple/nil semantics, - Throws: on both throws functions [file-wide sweep confirmed only two], checkProgress helper nested in train() deduplicating all three progress sites — nested because LoRATrain is a caseless namespace enum and the helper captures the non-escaping progress callback). Independent /test verified from scratch: 741 tests, 0 failures, 0 skips. Dispatching /commit for the checkpoint.'
   timestamp: 2026-07-16T14:15:44.199470+00:00
+- actor: claude-code
+  id: 01kxnn3v1954ntfrg138xcty27
+  text: 'Iteration 5: /review bxndpt6 HEAD~1..HEAD (3ce20f1) — prior sections verified checked; 10 NEW findings (2026-07-16 09:17 section), all one root cause in LoraTrain.swift: /// doc summaries missing terminal periods (Parameters fields, Progress cases, description). Fix is a file-wide sweep so zero period-less summaries remain. Dispatching /implement.'
+  timestamp: 2026-07-16T14:25:58.825765+00:00
+- actor: claude-code
+  id: 01kxnn6t5z2w8mp5y24yq7esg0
+  text: 'Iteration 5 implement picked up: pulled task review→doing to work the 10 findings in the 2026-07-16 09:17 section (all one root cause in Libraries/MLXLLM/LoraTrain.swift: /// doc summaries missing terminal periods). File-wide sweep identified 14 period-less summary lines: the 10 cited (6 Parameters fields, 3 Progress cases, description) plus 4 uncited siblings the same rule covers — the Parameters struct summary ("LoRA training parameters"), the iterations field, and both ProgressDisposition case docs ("stop training"/"continue training"). All other /// summaries in the file already terminate with a period.'
+  timestamp: 2026-07-16T14:27:36.255048+00:00
+- actor: claude-code
+  id: 01kxnnvap0p6pwsb15gpgnygnj
+  text: |-
+    Iteration 5 implement: all 10 review findings (2026-07-16 09:17) fixed in Libraries/MLXLLM/LoraTrain.swift, checklist flipped to [x]. File-wide sweep per root cause: terminal periods added to 14 /// summary lines — the 10 cited (batchSize/stepsPerReport/stepsPerEval/validationBatches/saveEvery/adapterURL field docs, the three Progress case docs, description) plus 4 uncited siblings the same rule covers (the Parameters struct summary "LoRA training parameters", the iterations field doc, and both ProgressDisposition case docs "stop training"/"continue training"). Deliberately untouched: - Parameters:/- Returns:/- Throws: bullet items and multi-line continuation lines — not summaries, never flagged across 4 prior review iterations of this file. Every /// summary in the file now terminates with a period.
+
+    Docs-only change, no behavior — TDD refactor/docs exemption (same as iterations 3-4); existing suite guards compilation. Full `swift test` fresh run: EXIT=0, Swift Testing 256+65+217+7 = 545 passed, XCTest 191+5 = 196 executed 0 failures — 741 total, 0 failures. Pre-existing SwiftPM noise only (3 Documentation.docc warnings + .build node note), out of scope.
+
+    Flake note for the next agent: one earlier full-suite run this session exited 1 with "Some test targets reported failures: MLXLMTests (Swift Testing)" but the failing test's identity was lost to output truncation; two subsequent complete runs (including the evidence run above) were green with identical counts, and a docs-only comment diff cannot affect codegen — suspected flaky concurrency test in MLXLMTests (the cache-churn suite runs there). Worth watching in future runs.
+
+    Older sections (06:14, 07:29, 08:46) untouched — already all [x]. AC3 (123B GPU round trip) remains the deliberate deferral. Adversarial double-check dispatched; task stays in doing.
+  timestamp: 2026-07-16T14:38:48.512910+00:00
+- actor: claude-code
+  id: 01kxnnz54nzvaa32wyg3sezbmn
+  text: 'really-done complete for iteration 5: verification command green (`swift test` EXIT=0, 741 tests: 545 Swift Testing [256+65+217+7] + 196 XCTest [191+5], 0 failures) and adversarial double-check returned PASS with zero findings — diff verified as exactly 14 period-only additions to /// lines in LoraTrain.swift (three hunks, no code changes, nothing else touched outside .kanban bookkeeping); file-wide sweep of all 128 /// lines confirmed every doc-block summary now terminates with a period (zero recurrences); all 10 prescribed finding texts present verbatim; no wrong periods (code-fence example and - Parameters:/- Returns:/- Throws: bullets untouched, backtick-adjacent periods placed correctly). Double-check also confirmed "number of validations batches" is a pre-existing typo carried verbatim by the finding''s own prescribed text — preserving it is correct scope discipline. All ten 09:17 checklist items flipped to [x]. Task left in doing for /review. AC3 (123B GPU round trip) remains the deliberate deferral.'
+  timestamp: 2026-07-16T14:40:53.909032+00:00
+- actor: claude-code
+  id: 01kxnp9pkb9dt9e4hgsrwens3c
+  text: 'Iteration 5: implement landed green in doing — periods added to all 10 cited /// summaries plus 4 uncited siblings; double-check enumerated all 128 /// lines, zero period-less summaries remain; diff is period-only. Independent /test: 741 tests, 0 failures; the earlier one-off MLXLMTests flake did NOT reproduce (4 consecutive green runs; logs preserved at /tmp/swift-test-run1.log and /tmp/swift-test-run2-mlxlmtests.log if it recurs). Dispatching /commit for the checkpoint.'
+  timestamp: 2026-07-16T14:46:39.467365+00:00
 position_column: doing
 position_ordinal: '8180'
 title: Support model_type "ministral3" (Devstral-2-123B) in LLMModelFactory
@@ -262,3 +289,16 @@ Also check `ToolCallFormat.infer` — it matches the `mistral3` prefix; `ministr
 - [x] `Libraries/MLXLLM/LoraTrain.swift:243` — Function marked `throws` but documentation lacks a `- Throws:` section; documentation must cover all throwing behavior. Add a `- Throws:` section to the doc comment, e.g., `/// - Throws: When saving the weights fails`.
 - [x] `Libraries/MLXLLM/LoraTrain.swift:300` — Function marked `throws` but documentation lacks a `- Throws:` section; documentation must cover all throwing behavior. Add a `- Throws:` section to the doc comment, e.g., `/// - Throws: When training fails (e.g., while saving weights)`. *(File-wide sweep confirmed `saveLoRAWeights` and `train` are the only `throws` functions in LoraTrain.swift — both now carry `- Throws:` sections.)*
 - [x] `Libraries/MLXLLM/LoraTrain.swift:347` — Three near-verbatim duplications of the progress callback pattern: call progress() with different Progress cases, check if result is .stop, and break. These differ only in the Progress case being passed; extract into a helper function parameterized by the progress case. Extract a helper function `private func checkProgress(_ progress: Progress) -> Bool` that returns true if the result is .stop, then call `if checkProgress(.train(...)) { break }` etc., eliminating the three-way duplication. *(Extracted `checkProgress(_ event: Progress) -> Bool` as a documented function nested inside `train` — `LoRATrain` is a caseless namespace enum, so a `private func` instance method would be uncallable, and nesting captures the non-escaping `progress` callback, giving exactly the prescribed `if checkProgress(.train(...)) { break }` shape at all three sites.)*
+
+## Review Findings (2026-07-16 09:17)
+
+- [x] `Libraries/MLXLLM/LoraTrain.swift:225` — Doc comment summary must end with a period; currently missing. Add period: `/// number of prompts to evaluate per iteration.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:231` — Doc comment summary must end with a period; currently missing. Add period: `/// number of training steps between loss reporting.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:234` — Doc comment summary must end with a period; currently missing. Add period: `/// number of steps between validations.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:237` — Doc comment summary must end with a period; currently missing. Add period: `/// number of validations batches, `0` uses the entire validation set.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:240` — Doc comment summary must end with a period; currently missing. Add period: `/// save the model every N iterations.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:243` — Doc comment summary must end with a period; currently missing. Add period: `/// save path for the adapter `.safetensors`.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:310` — Doc comment summary must end with a period; currently missing. Add period: `/// a training loss report with throughput statistics.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:312` — Doc comment summary must end with a period; currently missing. Add period: `/// a validation loss report with the time the validation pass took.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:314` — Doc comment summary must end with a period; currently missing. Add period: `/// adapter weights were saved to the given url.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:336` — Doc comment summary must end with a period; currently missing. Add period: `/// human readable description of the progress event.`.
