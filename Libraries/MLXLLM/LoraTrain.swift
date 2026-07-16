@@ -6,6 +6,10 @@ import MLXLMCommon
 import MLXNN
 import MLXOptimizers
 
+/// Maximum sequence length, in tokens, that ``LoRABatchIterator`` will batch
+/// without warning that the data should be pre-split to save memory.
+private let maxSequenceLength = 2048
+
 /// Equivalent to `lora.py/iterate_batches()`. Used internally by ``LoRATrain``.
 struct LoRABatchIterator: Sequence, IteratorProtocol {
 
@@ -18,7 +22,7 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
     var indices: [Int]
     var index = 0
 
-    public init(dataset: [String], tokenizer: Tokenizer, batchSize: Int, train: Bool) {
+    init(dataset: [String], tokenizer: Tokenizer, batchSize: Int, train: Bool) {
         self.dataset = dataset
         self.batchSize = batchSize
         self.tokenizer = tokenizer
@@ -30,7 +34,7 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
         }
     }
 
-    mutating public func next() -> (MLXArray, MLXArray, MLXArray)? {
+    public mutating func next() -> (MLXArray, MLXArray, MLXArray)? {
         if index >= indices.count {
             if !train {
                 return nil
@@ -47,10 +51,10 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
         let lengths = batch.map { $0.count }
         let maxLength = lengths.max() ?? 0
 
-        if maxLength > 2048 {
+        if maxLength > maxSequenceLength {
             print(
                 """
-                [WARNING] Some sequences are longer than 2048 tokens.
+                [WARNING] Some sequences are longer than \(maxSequenceLength) tokens.
                 Consider pre-splitting your data to save memory.
                 """)
         }
@@ -107,7 +111,13 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
 ///
 public enum LoRATrain {
 
-    public typealias LoraLossFunction = (Module, MLXArray, MLXArray, MLXArray) -> (
+    /// Type of a loss function used in LoRA training.
+    ///
+    /// Given the model, a batch of input tokens, the matching target tokens and the
+    /// unpadded length of each sequence, it returns the scalar loss and the number
+    /// of tokens that contributed to that loss. See ``loss(model:inputs:targets:lengths:)``
+    /// for the default implementation.
+    public typealias LoRALossFunction = (Module, MLXArray, MLXArray, MLXArray) -> (
         MLXArray, MLXArray
     )
 
@@ -134,6 +144,16 @@ public enum LoRATrain {
         /// save path for the adapter `.safetensors`
         public var adapterURL: URL?
 
+        /// Create LoRA training parameters.
+        ///
+        /// - Parameters:
+        ///   - batchSize: number of prompts to evaluate per iteration
+        ///   - iterations: number of iterations to train for
+        ///   - stepsPerReport: number of training steps between loss reporting
+        ///   - stepsPerEval: number of steps between validations
+        ///   - validationBatches: number of validation batches, `0` uses the entire validation set
+        ///   - saveEvery: save the model every N iterations
+        ///   - adapterURL: save path for the adapter `.safetensors`
         public init(
             batchSize: Int = 4, iterations: Int = 1000, stepsPerReport: Int = 10,
             stepsPerEval: Int = 100, validationBatches: Int = 10, saveEvery: Int = 100,
@@ -149,6 +169,17 @@ public enum LoRATrain {
         }
     }
 
+    /// Default loss function for LoRA training -- see ``LoRALossFunction``.
+    ///
+    /// Runs the model on `inputs` and computes the cross entropy of the logits against
+    /// `targets`, masking out any padding beyond each sequence's length.
+    ///
+    /// - Parameters:
+    ///   - model: the model to evaluate -- must conform to `LLMModel`
+    ///   - inputs: batch of input token ids
+    ///   - targets: batch of target token ids
+    ///   - lengths: unpadded length of each sequence in the batch
+    /// - Returns: the scalar loss and the number of tokens that contributed to it
     public static func loss(model: Module, inputs: MLXArray, targets: MLXArray, lengths: MLXArray)
         -> (
             MLXArray, MLXArray
@@ -156,8 +187,13 @@ public enum LoRATrain {
     {
         // def loss(model, inputs, targets, lengths):
 
-        // run model on inputs
-        let model = model as! any LLMModel
+        // run model on inputs -- this function cannot throw (it is used inside the
+        // non-throwing `valueAndGrad` closure in `train`), so a model that is not
+        // an LLMModel is a programmer error
+        guard let model = model as? any LLMModel else {
+            fatalError(
+                "LoRATrain.loss requires a model conforming to LLMModel, got \(type(of: model))")
+        }
         let logits = model(inputs, cache: nil).asType(.float32)
 
         // mask padding tokens
@@ -183,7 +219,7 @@ public enum LoRATrain {
     /// ### See Also
     /// - ``loadLoRAData(directory:name:)``
     public static func evaluate(
-        model: Module, dataset: [String], loss: LoraLossFunction = loss, tokenizer: Tokenizer,
+        model: Module, dataset: [String], loss: LoRALossFunction = loss, tokenizer: Tokenizer,
         batchSize: Int, batchCount: Int
     ) -> Float {
         var allLosses = [Float]()
@@ -215,13 +251,20 @@ public enum LoRATrain {
         try save(arrays: parameters, url: url)
     }
 
+    /// Progress event reported to the callback passed to
+    /// ``train(model:train:validate:optimizer:loss:tokenizer:parameters:progress:)``,
+    /// covering training loss updates, validation loss updates and adapter weight saves.
     public enum Progress: CustomStringConvertible, Sendable {
+        /// a training loss report with throughput statistics
         case train(
             iteration: Int, trainingLoss: Float, iterationsPerSecond: Double,
             tokensPerSecond: Double)
+        /// a validation loss report with the time the validation pass took
         case validation(iteration: Int, validationLoss: Float, validationTime: Double)
+        /// adapter weights were saved to the given url
         case save(iteration: Int, url: URL)
 
+        /// human readable description of the progress event
         public var description: String {
             switch self {
             case .train(
@@ -239,8 +282,12 @@ public enum LoRATrain {
         }
     }
 
+    /// Value returned from the ``Progress`` callback indicating whether training
+    /// should continue or stop.
     public enum ProgressDisposition: Sendable {
+        /// stop training
         case stop
+        /// continue training
         case more
     }
 
@@ -257,7 +304,7 @@ public enum LoRATrain {
     ///   - progress: progress callback
     public static func train(
         model: Module, train: [String], validate: [String], optimizer: Optimizer,
-        loss: @escaping LoraLossFunction = loss, tokenizer: Tokenizer, parameters: Parameters,
+        loss: @escaping LoRALossFunction = loss, tokenizer: Tokenizer, parameters: Parameters,
         progress: (Progress) -> ProgressDisposition
     ) throws {
         // def train(model, train_set, val_set, optimizer, loss, tokenizer, args)

@@ -70,6 +70,35 @@ comments:
   id: 01kxnebqjbed6gmazggpxgptac
   text: 'Iteration 2: implement landed green in doing — all 90 review findings fixed file-wide (doc comments on every public API in LLMModelFactory.swift, 39 cited + 12 sibling lowerCamelCase renames with all references updated across 17 files, @unchecked Sendable invariant documented). Independent /test verified from scratch: 741 tests, 0 failures, 3 identical runs, no skips. Dispatching /commit for the checkpoint.'
   timestamp: 2026-07-16T12:27:57.387409+00:00
+- actor: claude-code
+  id: 01kxnfzne8smfcpjzy12ew04re
+  text: 'Iteration 3: /review bxndpt6 HEAD~1..HEAD (e054567) — all 90 prior findings verified fixed; 12 NEW findings recorded (2026-07-16 07:29 section), all in Libraries/MLXLLM/LoraTrain.swift, which entered review scope because the rename sweep touched it. Root causes: missing /// docs on public API file-wide, LoRA acronym casing (LoraLossFunction → LoRALossFunction), unneeded public on internal init, modifier ordering (public mutating func), hardcoded 2048 max-seq-len needs a named constant, as! force-cast needs as? + error handling. 19 engine findings about restyling existing test code were dropped under the skill''s blanket exception. Dispatching /implement.'
+  timestamp: 2026-07-16T12:56:19.144520+00:00
+- actor: claude-code
+  id: 01kxngnb6v8pevf0n7xv5kejds
+  text: |-
+    Iteration 3 implement: all 12 review findings (2026-07-16 07:29) fixed in Libraries/MLXLLM/LoraTrain.swift, checklist flipped to [x]. Root causes addressed file-wide:
+
+    (1) Doc comments: every public declaration now carries ///: LoRALossFunction typealias, Parameters.init (full parameter list), loss (params/returns), Progress enum + its three cases + description, ProgressDisposition + its two cases. Already-documented API (LoRATrain, Parameters vars, evaluate, saveLoRAWeights, train) untouched.
+
+    (2) Acronym casing: LoraLossFunction → LoRALossFunction. Repo-wide grep before and after confirmed the only references were the 3 in LoraTrain.swift itself (declaration + evaluate + train params) — no Tools/Applications/Tests/docs references existed, so no external updates needed. No other Lora-cased identifiers in the file (LoRABatchIterator/saveLoRAWeights/loadLoRAData already correct).
+
+    (3) Removed `public` from LoRABatchIterator.init (internal struct). Kept `public` on next() because the finding's own prescribed rewrite is `public mutating func next()` — only the modifier order was flagged there.
+
+    (4) `mutating public func next()` → `public mutating func next()`.
+
+    (5) 2048 extracted to file-private top-level `maxSequenceLength`, used in both the condition and the interpolated warning message.
+
+    (6) `as!` in loss replaced with `guard let model = model as? any LLMModel else { fatalError(...) }` plus a why-comment. NOT a throw: loss is the default LoRALossFunction and must stay non-throwing because train feeds it into MLXNN valueAndGrad, whose closure is non-throwing; making the typealias throwing would force try!/trap inside that closure anyway and ripple `throws` through evaluate's public signature. guard+fatalError-with-message is the module's prevailing idiom for contract violations in non-throwing contexts (GLM4MOELite, Gemma4Text, SSM.swift precedents).
+
+    Pure behavior-preserving refactor — no new tests warranted (TDD skill exemption for refactors that add no behavior); existing suite guards it. Full `swift test` green, exit 0: Swift Testing 256+65+217+7 = 545 passed, XCTest 191+5 = 196 executed 0 failures — 741 total, no test warnings. Pre-existing SwiftPM Documentation.docc "unhandled file" warnings + .build node note remain, as expected/out of scope.
+
+    The unchecked AC3 (123B GPU round trip) remains a deliberate deferral per the card. Older 06:14 findings section untouched (already all [x]).
+  timestamp: 2026-07-16T13:08:09.563163+00:00
+- actor: claude-code
+  id: 01kxnjr251xggt76xfttgcc531
+  text: 'Iteration 3: implement landed green in doing — all 12 LoraTrain.swift findings fixed file-wide (docs on every public decl, LoraLossFunction → LoRALossFunction with zero stale refs repo-wide, internal init, public mutating func ordering, maxSequenceLength constant, as! → guard-let + fatalError with rationale — non-throwing valueAndGrad context, module''s prevailing idiom). Independent /test verified from scratch twice: 741 tests, 0 failures, 0 skips. Dispatching /commit for the checkpoint.'
+  timestamp: 2026-07-16T13:44:35.745906+00:00
 position_column: doing
 position_ordinal: '8180'
 title: Support model_type "ministral3" (Devstral-2-123B) in LLMModelFactory
@@ -180,3 +209,18 @@ Also check `ToolCallFormat.infer` — it matches the `mistral3` prefix; `ministr
 - [x] `Libraries/MLXLLM/LLMModelFactory.swift:691` — Public method _load lacks documentation. This is a key loading method that clients might override or call, and needs documentation explaining what it does and what parameters mean. Add a doc comment explaining this method's purpose, parameters, and return value, e.g. `/// Load model configuration and weights, then assemble a ModelContext. - Parameters: \n  - configuration: The resolved model configuration \n  - tokenizerLoader: Loader for the tokenizer - Returns: A ready-to-use ModelContext`.
 - [x] `Libraries/MLXLLM/LLMModelFactory.swift:768` — Public class TrampolineModelFactory lacks documentation. This is a public API class and needs explanation of its purpose. Add a doc comment explaining what this class does and why it exists, e.g. `/// Trampoline class that bridges to LLMModelFactory. Used for dynamic discovery of the factory instance.`.
 - [x] `Libraries/MLXLLM/LLMModelFactory.swift:769` — Public static function modelFactory lacks documentation. Callers need to understand what this returns and its purpose. Add a doc comment explaining this method, e.g. `/// Return the shared LLMModelFactory instance for use as MLXLMCommon's primary factory.`.
+
+## Review Findings (2026-07-16 07:29)
+
+- [x] `Libraries/MLXLLM/LoraTrain.swift:20` — The `public init` is unnecessary — `LoRABatchIterator` is an internal struct used only within this file for the `LoRATrain` enum. Exposing a public initializer on an internal struct violates the principle of adding `public` only for intended cross-module API. The rule flags `public` sprayed on helpers no other module consumes. Remove the `public` modifier from the init: `init(dataset: [String], tokenizer: Tokenizer, batchSize: Int, train: Bool)`. The struct's default internal access applies to all members.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:36` — Access modifiers must come before other modifiers like `mutating`. The syntax `mutating public func` violates Swift modifier ordering — it should be `public mutating func`. Rewrite as `public mutating func next() -> (MLXArray, MLXArray, MLXArray)?`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:47` — The hardcoded value 2048 (maximum sequence length threshold) is repeated across multiple places: the condition check on line 47 and the warning message on line 50. This should be extracted to a named constant to avoid duplication and make the value easier to maintain. Extract to a named constant: `private let maxSequenceLength = 2048` at the module level or top of the function, then use it in both the condition and the warning message string.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:66` — Acronyms must be uniformly cased — `LoRA` should stay as `LoRA` (all-upper interior to lowerCamelCase), not downcase to `Lora`. `LoraLossFunction` violates the uniform-acronym rule. Rename to `LoRALossFunction`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:75` — Public type alias LoraLossFunction lacks documentation; it defines a complex closure signature used for training loss functions and callers need to understand its purpose and parameters. Add a doc comment explaining the type signature, e.g.: `/// Type signature for a loss function used in LoRA training. Takes model, input tokens, target tokens, and sequence lengths; returns loss and token count.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:78` — Every `public` declaration must carry a `///` doc comment; this public initializer lacks one. Add a doc comment above the initializer documenting its parameters and purpose.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:88` — Every `public` declaration must carry a `///` doc comment; this public static function lacks one. Add a doc comment above the function documenting its parameters, return value, and purpose.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:93` — Force-cast (`as!`) is forbidden in non-test code; it crashes rather than propagating an error. Replace with a safe `as?` cast and either throw or handle the failure explicitly. Use safe casting: `guard let model = model as? any LLMModel else { throw SomeError.invalidModel }` or similar. *(Fixed with `guard let model = model as? any LLMModel else { fatalError("...descriptive message...") }` rather than `throw`: `loss` is the default `LoRALossFunction`, which must stay non-throwing because it is invoked inside MLXNN's `valueAndGrad` closure (non-throwing signature). `guard ... else { fatalError("message") }` is the module's prevailing idiom for contract violations in non-throwing contexts — e.g. GLM4MOELite "Module must be MultiLinear or QuantizedMultiLinear", Gemma4Text, SSM.swift. A code comment above the guard documents this constraint.)*
+- [x] `Libraries/MLXLLM/LoraTrain.swift:107` — Public static function loss lacks documentation; it is a core training API and callers need to understand its parameters and return values. Add a doc comment documenting the function purpose, parameters, and returns, e.g.: `/// Computes loss for LoRA training. Returns a tuple of (loss, token_count).`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:142` — Public enum Progress lacks documentation; it represents progress events during training and callers need to understand the available event types. Add a doc comment, e.g.: `/// Represents progress events during LoRA training, including training/validation loss updates and checkpoint saves.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:143` — Every `public` declaration must carry a `///` doc comment; this public enum lacks one. Add a doc comment above the enum, e.g., `/// Signal from a progress callback indicating whether training should continue.`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:164` — Public enum ProgressDisposition lacks documentation; it controls training flow and callers need to understand the meaning of each case. Add a doc comment, e.g.: `/// Indicates whether to continue training or stop in response to a progress event.`.
