@@ -98,7 +98,7 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
 ///
 /// // train
 /// let optimizer = Adam(learningRate: 1e-5)
-/// try await LoRATrain.train(
+/// try LoRATrain.train(
 ///     model: model, train: train, validate: valid, optimizer: optimizer, tokenizer: tokenizer,
 ///     parameters: LoRATrain.Parameters()
 /// ) { progress in
