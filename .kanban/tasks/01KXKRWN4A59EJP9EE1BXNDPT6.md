@@ -99,6 +99,37 @@ comments:
   id: 01kxnjr251xggt76xfttgcc531
   text: 'Iteration 3: implement landed green in doing — all 12 LoraTrain.swift findings fixed file-wide (docs on every public decl, LoraLossFunction → LoRALossFunction with zero stale refs repo-wide, internal init, public mutating func ordering, maxSequenceLength constant, as! → guard-let + fatalError with rationale — non-throwing valueAndGrad context, module''s prevailing idiom). Independent /test verified from scratch twice: 741 tests, 0 failures, 0 skips. Dispatching /commit for the checkpoint.'
   timestamp: 2026-07-16T13:44:35.745906+00:00
+- actor: claude-code
+  id: 01kxnkcfvthyx3n822tmp3xdny
+  text: 'Iteration 4: /review bxndpt6 HEAD~1..HEAD (2fed7de) — prior sections all verified checked; 4 NEW findings (2026-07-16 08:46 section), all LoraTrain.swift follow-ons: (1) public next() needs /// doc covering the tuple return and nil condition, (2)+(3) two throws functions have docs missing - Throws: sections, (4) progress-callback pattern (call progress(), check .stop, break) triplicated — extract a private helper used at all three sites. Dispatching /implement.'
+  timestamp: 2026-07-16T13:55:45.146029+00:00
+- actor: claude-code
+  id: 01kxnke03rajc7eg3sss6ter0s
+  text: 'Iteration 4 implement picked up: pulled task review→doing to work the 4 findings in the 2026-07-16 08:46 section (all Libraries/MLXLLM/LoraTrain.swift): next() doc, two missing - Throws: sections (plus file-wide sweep for other documented throws functions), and extraction of the triplicated progress-callback pattern into a private helper.'
+  timestamp: 2026-07-16T13:56:34.552204+00:00
+- actor: claude-code
+  id: 01kxnm1qb0hmdn6q3s44d3cbwe
+  text: |-
+    Iteration 4 implement: all 4 review findings (2026-07-16 08:46) fixed in Libraries/MLXLLM/LoraTrain.swift, checklist flipped to [x].
+
+    (1) next() now carries a /// doc: - Returns documents the (inputs batch, targets batch, sequence lengths) tuple — targets are inputs shifted by one token, lengths are the unpadded token counts — and the nil condition (only a non-training iterator returns nil, once the dataset is exhausted; training iterators reshuffle and iterate indefinitely).
+
+    (2)+(3) - Throws: sections added to saveLoRAWeights ("When writing the weights to the .safetensors file fails.") and train ("When saving the adapter weights fails -- see saveLoRAWeights(model:url:)."). File-wide sweep confirmed those are the ONLY two throws functions in LoraTrain.swift, so nothing else needed.
+
+    (4) Triplicated progress pattern extracted: documented `checkProgress(_ event: Progress) -> Bool` nested inside train (returns progress(event) == .stop), used at all three sites (.train/.validation/.save) as `if checkProgress(...) { break }`. Nested rather than `private static func` because LoRATrain is a caseless namespace enum (a `private func` instance method as literally suggested would be uncallable) and nesting captures the non-escaping progress callback — giving exactly the review's prescribed call shape without threading the closure. Behavior-preserving; no `== .stop` comparisons remain.
+
+    Pure docs + refactor, no new behavior — existing suite guards it (TDD refactor exemption, same as iteration 3). Full `swift test` green with pipefail, exit 0: Swift Testing 256+65+217+7 = 545 passed, XCTest 191+5 = 196 executed 0 failures — 741 total, 0 test failures/warnings. Only pre-existing SwiftPM noise remains (3 Documentation.docc unhandled-file warnings + .build mutated-node note), out of scope as before.
+
+    Older findings sections (06:14, 07:29) untouched — already all [x]. AC3 (123B GPU round trip) remains the deliberate deferral. Adversarial double-check dispatched; task stays in doing.
+  timestamp: 2026-07-16T14:07:20.928651+00:00
+- actor: claude-code
+  id: 01kxnm5k0s9pfkd518rdyt1ywq
+  text: 'really-done complete for iteration 4: verification command green (`swift test` exit 0, 741 tests: 545 Swift Testing + 196 XCTest, 0 failures) and adversarial double-check returned PASS with zero findings — next() doc verified factually accurate against the implementation (shift-by-one targets, unpadded lengths, nil only for exhausted non-training iterators), both - Throws: sections accurate with the file''s only two throws declarations covered, checkProgress used at all three sites with the single remaining `== .stop` inside the helper itself and behavior provably preserved, diff scoped to LoraTrain.swift only (zero external references to LoRABatchIterator/checkProgress), `swift format lint` clean, `swift build --target MLXLLM` exit 0. All four 08:46 checklist items flipped to [x]. Task left in doing for /review. AC3 (123B GPU round trip) remains the deliberate deferral.'
+  timestamp: 2026-07-16T14:09:27.577690+00:00
+- actor: claude-code
+  id: 01kxnmh2t7btm51vtgf98n6e09
+  text: 'Iteration 4: implement landed green in doing — all 4 findings fixed (next() doc with tuple/nil semantics, - Throws: on both throws functions [file-wide sweep confirmed only two], checkProgress helper nested in train() deduplicating all three progress sites — nested because LoRATrain is a caseless namespace enum and the helper captures the non-escaping progress callback). Independent /test verified from scratch: 741 tests, 0 failures, 0 skips. Dispatching /commit for the checkpoint.'
+  timestamp: 2026-07-16T14:15:44.199470+00:00
 position_column: doing
 position_ordinal: '8180'
 title: Support model_type "ministral3" (Devstral-2-123B) in LLMModelFactory
@@ -130,7 +161,7 @@ Also check `ToolCallFormat.infer` — it matches the `mistral3` prefix; `ministr
 - [x] `Libraries/MLXLLM/LLMModelFactory.swift:137` — Public property `falconH1R7B` lacks required `///` documentation comment. Add a `///` doc comment above the property describing the model configuration.
 - [x] `Libraries/MLXLLM/LLMModelFactory.swift:137` — Property name `falconH1R7B` has uppercase letters 'R' and 'B' that should be lowercase in `lowerCamelCase`. Rename to `falconH1r7b`.
 - [x] `Libraries/MLXLLM/LLMModelFactory.swift:141` — Public property `phi4bit` lacks required `///` documentation comment. Add a `///` doc comment above the property describing the model configuration.
-- [x] `Libraries/MLXLLM/LLMModelFactory.swift:145` — Property name `gemma_2_9b_it_4bit` violates `lowerCamelCase` — contains underscores. Rename to `gemma29bIt4bit`.
+- [x] `Libraries/MLXLLM/LLMModelFactory.swift:145` — Public property `gemma_2_9b_it_4bit` violates `lowerCamelCase` — contains underscores. Rename to `gemma29bIt4bit`.
 - [x] `Libraries/MLXLLM/LLMModelFactory.swift:145` — Public property `phi3_5_4bit` lacks required `///` documentation comment. Add a `///` doc comment above the property describing the model configuration.
 - [x] `Libraries/MLXLLM/LLMModelFactory.swift:145` — Property name `phi3_5_4bit` violates `lowerCamelCase` — contains underscore. Rename to `phi35_4bit` or `phi354bit`.
 - [x] `Libraries/MLXLLM/LLMModelFactory.swift:149` — Property name `gemma_2_2b_it_4bit` violates `lowerCamelCase` — contains underscores. Rename to `gemma22bIt4bit`.
@@ -224,3 +255,10 @@ Also check `ToolCallFormat.infer` — it matches the `mistral3` prefix; `ministr
 - [x] `Libraries/MLXLLM/LoraTrain.swift:142` — Public enum Progress lacks documentation; it represents progress events during training and callers need to understand the available event types. Add a doc comment, e.g.: `/// Represents progress events during LoRA training, including training/validation loss updates and checkpoint saves.`.
 - [x] `Libraries/MLXLLM/LoraTrain.swift:143` — Every `public` declaration must carry a `///` doc comment; this public enum lacks one. Add a doc comment above the enum, e.g., `/// Signal from a progress callback indicating whether training should continue.`.
 - [x] `Libraries/MLXLLM/LoraTrain.swift:164` — Public enum ProgressDisposition lacks documentation; it controls training flow and callers need to understand the meaning of each case. Add a doc comment, e.g.: `/// Indicates whether to continue training or stop in response to a progress event.`.
+
+## Review Findings (2026-07-16 08:46)
+
+- [x] `Libraries/MLXLLM/LoraTrain.swift:34` — Public method `next()` has no documentation comment, making it unclear what this iterator-protocol method returns and when to use it. Add a doc comment above line 34 explaining what the tuple return contains (inputs batch, targets batch, sequence lengths) and when it returns nil.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:243` — Function marked `throws` but documentation lacks a `- Throws:` section; documentation must cover all throwing behavior. Add a `- Throws:` section to the doc comment, e.g., `/// - Throws: When saving the weights fails`.
+- [x] `Libraries/MLXLLM/LoraTrain.swift:300` — Function marked `throws` but documentation lacks a `- Throws:` section; documentation must cover all throwing behavior. Add a `- Throws:` section to the doc comment, e.g., `/// - Throws: When training fails (e.g., while saving weights)`. *(File-wide sweep confirmed `saveLoRAWeights` and `train` are the only `throws` functions in LoraTrain.swift — both now carry `- Throws:` sections.)*
+- [x] `Libraries/MLXLLM/LoraTrain.swift:347` — Three near-verbatim duplications of the progress callback pattern: call progress() with different Progress cases, check if result is .stop, and break. These differ only in the Progress case being passed; extract into a helper function parameterized by the progress case. Extract a helper function `private func checkProgress(_ progress: Progress) -> Bool` that returns true if the result is .stop, then call `if checkProgress(.train(...)) { break }` etc., eliminating the three-way duplication. *(Extracted `checkProgress(_ event: Progress) -> Bool` as a documented function nested inside `train` — `LoRATrain` is a caseless namespace enum, so a `private func` instance method would be uncallable, and nesting captures the non-escaping `progress` callback, giving exactly the prescribed `if checkProgress(.train(...)) { break }` shape at all three sites.)*

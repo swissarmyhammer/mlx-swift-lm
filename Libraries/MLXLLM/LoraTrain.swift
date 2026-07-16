@@ -34,6 +34,13 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
         }
     }
 
+    /// Produce the next batch of tokenized, padded sequences.
+    ///
+    /// - Returns: a tuple of (inputs batch, targets batch, sequence lengths) where the
+    ///   targets are the inputs shifted by one token and the lengths are the unpadded
+    ///   token count of each sequence, or `nil` when a non-training iterator has
+    ///   consumed the entire dataset. Training iterators reshuffle and iterate
+    ///   indefinitely, never returning `nil`.
     public mutating func next() -> (MLXArray, MLXArray, MLXArray)? {
         if index >= indices.count {
             if !train {
@@ -242,6 +249,8 @@ public enum LoRATrain {
 
     /// Given a model with LoRA adaptors applied, write adapter weights to a `.safetensors` file.
     ///
+    /// - Throws: When writing the weights to the `.safetensors` file fails.
+    ///
     /// ### See Also
     /// - ``evaluate(model:dataset:loss:tokenizer:batchSize:batchCount:)``
     /// - ``train(model:train:validate:optimizer:loss:tokenizer:parameters:progress:)``
@@ -302,12 +311,19 @@ public enum LoRATrain {
     ///   - tokenizer: tokenizer
     ///   - parameters: training parameters
     ///   - progress: progress callback
+    /// - Throws: When saving the adapter weights fails -- see ``saveLoRAWeights(model:url:)``.
     public static func train(
         model: Module, train: [String], validate: [String], optimizer: Optimizer,
         loss: @escaping LoRALossFunction = loss, tokenizer: Tokenizer, parameters: Parameters,
         progress: (Progress) -> ProgressDisposition
     ) throws {
         // def train(model, train_set, val_set, optimizer, loss, tokenizer, args)
+
+        /// Report `event` to the caller's `progress` callback and return `true`
+        /// when the callback asks training to stop.
+        func checkProgress(_ event: Progress) -> Bool {
+            progress(event) == .stop
+        }
 
         let lossValueGrad = valueAndGrad(model: model) { model, arrays in
             let (ce, ntoks) = loss(model, arrays[0], arrays[1], arrays[2])
@@ -343,11 +359,10 @@ public enum LoRATrain {
                 let iterationsPerSecond = Double(parameters.stepsPerReport) / (now - start)
                 let tokensPerSecond = Double(tokenCount) / (now - start)
 
-                if progress(
+                if checkProgress(
                     .train(
                         iteration: iteration, trainingLoss: trainingLoss,
                         iterationsPerSecond: iterationsPerSecond, tokensPerSecond: tokensPerSecond))
-                    == .stop
                 {
                     break
                 }
@@ -365,10 +380,10 @@ public enum LoRATrain {
                     batchSize: parameters.batchSize, batchCount: parameters.validationBatches)
                 let now = Date.timeIntervalSinceReferenceDate
 
-                if progress(
+                if checkProgress(
                     .validation(
                         iteration: iteration, validationLoss: validationLoss,
-                        validationTime: now - validationStart)) == .stop
+                        validationTime: now - validationStart))
                 {
                     break
                 }
@@ -380,7 +395,7 @@ public enum LoRATrain {
             if let adapterURL = parameters.adapterURL, (iteration + 1) % parameters.saveEvery == 0 {
                 try saveLoRAWeights(model: model, url: adapterURL)
 
-                if progress(.save(iteration: iteration, url: adapterURL)) == .stop {
+                if checkProgress(.save(iteration: iteration, url: adapterURL)) {
                     break
                 }
 
