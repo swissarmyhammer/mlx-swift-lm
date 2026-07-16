@@ -67,7 +67,7 @@ struct ConstraintSetup {
 
     /// Multiplier applied to `structuralReserve` to size the "free" normal
     /// zone -- the unbiased run of tokens before `GuidedGenerationLoop`'s
-    /// soft-zone completion bias (+200 EOS / +100 closing-tier, see
+    /// soft-zone EOS boost (+200 at stop positions only, see
     /// `applyBiasAndSample`) engages. Reuses the 3x coefficient the old
     /// formula already had (the term its `maxTokens / 4` floor always
     /// overrode) as a numerically-familiar starting point -- NOT because
@@ -129,12 +129,12 @@ struct ConstraintSetup {
     /// `GuidedGenerationLoop.applyBiasAndSample`'s hard-zone check
     /// (`tokenCount >= maxTokens - hardReserve`) is true from token 0,
     /// forcing the *entire* budget through the hard-closing bias instead of
-    /// just its trailing reserve. That bias still permits single-digit
-    /// tokens (`ClosingTokenBias` treats `0`-`9` as closing-tier, needed to
-    /// let a numeric field's own digits through) -- so a schema with an
-    /// open-ended string field can ramble in digits for the whole budget
-    /// without ever selecting the actual closing quote, since digits are
-    /// never suppressed.
+    /// just its trailing reserve -- crushing legitimate content for the
+    /// whole generation. (Historically this was even worse: `0`-`9` were
+    /// closing-tier then, so an open-ended string field could ramble in
+    /// never-suppressed digits for the whole budget; kanban y4s0w2j removed
+    /// digits from the tier and added the repetition-cycle breaker, but an
+    /// all-hard-zone budget remains wrong on its own.)
     ///
     /// The quarter-vs-half asymmetry matters, not just "some cap": capping
     /// both `hardReserve` and `normalZoneLength` at the SAME `maxTokens / 2`
@@ -341,21 +341,40 @@ private actor ModelCache {
 
     /// Gets or creates a cached GrammarTokenizer for the given model.
     ///
+    /// Registers the model's FULL stop-token set with xgrammar — the same
+    /// set `GuidedGenerationLoop.buildStopTokenIDs` stops generation on —
+    /// not just `tokenizer.eosTokenId`. An unregistered stop token (e.g.
+    /// GLM's secondary `eos_token_id` entries `<|user|>`/`<|observation|>`)
+    /// is an ordinary vocab entry the grammar can admit as string
+    /// *content*, and constrained decode then samples it mid-envelope and
+    /// truncates the output (kanban y4s0w2j).
+    ///
     /// - Parameters:
     ///   - modelID: The model identifier to cache the tokenizer under.
     ///   - tokenizer: The host tokenizer to derive the vocabulary from.
+    ///   - configuration: The model configuration whose `eosTokenIds`/
+    ///     `extraEOSTokens` contribute stop tokens.
     /// - Returns: The cached or newly created `GrammarTokenizer`.
     /// - Throws: Whatever `GrammarTokenizer`'s initializer throws.
     func makeXgTokenizer(
         modelID: String,
-        tokenizer: any Tokenizer
+        tokenizer: any Tokenizer,
+        configuration: ModelConfiguration
     ) throws -> GrammarTokenizer {
         try getOrCreateCached(modelID: modelID, cache: &xgTokenizers) {
             let vocab = TokenizerVocabExtractor.extractForGrammar(from: tokenizer)
+            let stopTokenIDs = GuidedGenerationLoop.buildStopTokenIDs(
+                tokenizer: tokenizer, configuration: configuration)
+            // Preserve the historical `eosTokenId ?? 0` fallback for the
+            // (degenerate) no-stop-tokens-at-all case.
+            let stops =
+                stopTokenIDs.isEmpty
+                ? [Int32(tokenizer.eosTokenId ?? 0)]
+                : stopTokenIDs.sorted().map(Int32.init)
             return try GrammarTokenizer(
                 vocab: vocab.vocab,
                 vocabType: vocab.vocabType,
-                eosTokenId: Int32(tokenizer.eosTokenId ?? 0)
+                stopTokenIds: stops
             )
         }
     }
@@ -658,9 +677,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// - Throws: Whatever `ModelCache.makeXgTokenizer` throws.
     static func makeXgTokenizer(
         modelID: String,
-        tokenizer: any Tokenizer
+        tokenizer: any Tokenizer,
+        configuration: ModelConfiguration
     ) async throws -> GrammarTokenizer {
-        try await cache.makeXgTokenizer(modelID: modelID, tokenizer: tokenizer)
+        try await cache.makeXgTokenizer(
+            modelID: modelID, tokenizer: tokenizer, configuration: configuration)
     }
 
     /// Gets the cached per-model tokenizer-derived logit biases (closing +
@@ -1028,7 +1049,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         // pre-built constraint would land under a key no real respond() reads.
         let tokenizer = await container.tokenizer
         _ = try await Self.makeXgTokenizer(
-            modelID: modelID, tokenizer: tokenizer)
+            modelID: modelID, tokenizer: tokenizer,
+            configuration: container.configuration)
 
         // Force Metal shader JIT with a minimal 1-token generate, run inside
         // `perform` so the forward pass + synchronize serialize against any
@@ -2209,7 +2231,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) async throws -> ConstraintSetup {
             let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: modelID,
-                tokenizer: context.tokenizer
+                tokenizer: context.tokenizer,
+                configuration: context.configuration
             )
             let constraint = try await MLXLanguageModel.makeConstraint(
                 modelID: modelID,
@@ -3978,8 +4001,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 let name = obj[ToolCallEnvelopeKey.name] as? String
             else {
                 // Malformed output. The grammar should have prevented this;
-                // emit the raw buffer as text so failures surface loudly.
-                await Self.sendDelta(outputBuffer, entryID: entryID, channel: channel, isReasoning: false)
+                // surface the failure content loudly as text, but with the
+                // wrapper markers stripped -- `<tool_call>` marker text
+                // must never leak into a final reply (kanban y4s0w2j).
+                Logger(
+                    subsystem: mlxFoundationModelsLoggingSubsystem, category: "ToolCalling"
+                ).error(
+                    "Tool-call envelope failed to parse; falling back to text (\(outputBuffer.count) chars). buffer=\(outputBuffer)"
+                )
+                await Self.sendDelta(
+                    Self.malformedToolCallFallbackText(outputBuffer),
+                    entryID: entryID, channel: channel, isReasoning: false)
                 return
             }
 
@@ -4089,10 +4121,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///
         /// - Parameter buffer: The full buffered generation output.
         /// - Returns: The inner JSON text, or `buffer` unchanged if it isn't wrapped.
-        private static func unwrapToolCallMarkers(_ buffer: String) -> String {
+        static func unwrapToolCallMarkers(_ buffer: String) -> String {
             let trimmed = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
-            let openMarker = "<tool_call>"
-            let closeMarker = "</tool_call>"
+            // Derived from the SAME structural tag the constrain side
+            // frames the envelope with (`SchemaConverter
+            // .encodeToolCallingGrammar` via `ToolCallStructuralTag
+            // .forFormat`, which resolves every format to `.qwen`), so the
+            // parse and constrain sides can never silently disagree about
+            // the wrapper again (kanban y4s0w2j acceptance criterion).
+            let tag = SchemaConverter.ToolCallStructuralTag.qwen
+            let openMarker = tag.begin.trimmingCharacters(in: .whitespacesAndNewlines)
+            let closeMarker = tag.end.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmed.hasPrefix(openMarker) else { return buffer }
             let afterOpen = trimmed.dropFirst(openMarker.count)
             let inner: Substring
@@ -4102,6 +4141,24 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 inner = afterOpen
             }
             return inner.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        /// The reply text to stream when a tool-calling round's buffered
+        /// output fails to parse as an envelope.
+        ///
+        /// Strips the structural-tag wrapper markers before surfacing the
+        /// buffer: the failure content should still surface loudly, but
+        /// `<tool_call>` marker text must never leak into a final reply.
+        /// On real hardware this is exactly what a budget-truncated
+        /// runaway round produced — the raw wrapped buffer streamed as
+        /// the reply, `"<tool_call>{\"name\": \"runCode\", …"` verbatim
+        /// (kanban y4s0w2j).
+        ///
+        /// - Parameter outputBuffer: The full buffered generation output
+        ///   that failed envelope parsing.
+        /// - Returns: The buffer with any wrapper markers stripped.
+        static func malformedToolCallFallbackText(_ outputBuffer: String) -> String {
+            unwrapToolCallMarkers(outputBuffer)
         }
     }
 }

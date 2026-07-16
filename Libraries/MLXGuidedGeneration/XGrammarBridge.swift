@@ -66,6 +66,10 @@ public enum GrammarError: Error {
 public final class GrammarTokenizer: @unchecked Sendable {
     let pointer: OpaquePointer
     public let vocabSize: Int
+    /// The stop-token ids registered on the xgrammar TokenizerInfo —
+    /// the ids the grammar gates to accept states (see
+    /// ``init(vocab:vocabType:stopTokenIds:)``).
+    public let stopTokenIds: [Int32]
 
     /// Construct a tokenizer from a pre-decoded vocab.
     ///
@@ -80,11 +84,34 @@ public final class GrammarTokenizer: @unchecked Sendable {
     ///     decoding.
     ///   - eosTokenId: End-of-sequence token ID, registered as a stop
     ///     token on the xgrammar TokenizerInfo.
-    public init(vocab: [String], vocabType: VocabType, eosTokenId: Int32) throws {
+    public convenience init(vocab: [String], vocabType: VocabType, eosTokenId: Int32) throws {
+        try self.init(vocab: vocab, vocabType: vocabType, stopTokenIds: [eosTokenId])
+    }
+
+    /// Construct a tokenizer from a pre-decoded vocab, registering the
+    /// full stop-token set.
+    ///
+    /// Every token id a model may legitimately end its turn with (primary
+    /// EOS *and* secondary turn-enders like GLM's `<|user|>`/
+    /// `<|observation|>`) must be registered here: xgrammar masks
+    /// registered stop tokens out of ordinary content matching and only
+    /// permits them at grammar-accept states. An unregistered turn-ender
+    /// whose literal bytes are valid JSON string content is otherwise a
+    /// perfectly legal *content* continuation, and constrained decode can
+    /// sample it mid-string — the live GLM-4.7-Flash truncated-envelope
+    /// failure (kanban y4s0w2j).
+    ///
+    /// - Parameters:
+    ///   - vocab: Per-token strings, as in `init(vocab:vocabType:eosTokenId:)`.
+    ///   - vocabType: Selects xgrammar's token-decoding path.
+    ///   - stopTokenIds: All stop-token ids to register on the xgrammar
+    ///     TokenizerInfo.
+    public init(vocab: [String], vocabType: VocabType, stopTokenIds: [Int32]) throws {
         self.vocabSize = vocab.count
+        self.stopTokenIds = stopTokenIds
 
         var info: OpaquePointer?
-        let stopTokens: [Int32] = [eosTokenId]
+        let stopTokens: [Int32] = stopTokenIds
 
         let status: XGStatus = vocab.withCStringPointers { ptrs in
             stopTokens.withUnsafeBufferPointer { stopBuf in

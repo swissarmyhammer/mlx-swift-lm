@@ -1,0 +1,1 @@
+{"id":"01KXNT9RHQT500QHPNHGGVK92J","timestamp":"2026-07-16T15:56:35.767435Z","op":"create","item_id":"01KXNT9RHPZZC0CWB2GB9ETAWQ","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: '008672'\n+tag_name: stuck\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: '008672'\n-tag_name: stuck\n","transaction_id":null}

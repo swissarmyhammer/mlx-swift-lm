@@ -83,6 +83,9 @@ public enum GuidedGenerationLoop {
     ///     Only used when `kvBits` is non-nil.
     ///   - closingBias: Pre-computed logit bias array favoring closing tokens
     ///     (from `ClosingTokenBias.compute`). Nil disables forced completion.
+    ///     Applied as-is only in the hard zone; the soft zone derives an
+    ///     EOS-only boost from the stop-token set instead (see
+    ///     `applyBiasAndSample`'s zone policy).
     ///   - whitespaceBias: Pre-computed negative logit bias array penalizing
     ///     whitespace-only tokens (from `WhitespaceTokenBias.compute`). Nil
     ///     disables whitespace suppression.
@@ -195,6 +198,21 @@ public enum GuidedGenerationLoop {
                 nil
             }
 
+        // eosBoost: the soft zone's entire bias — +200 at each EOS/stop
+        // position, 0 elsewhere. Deliberately NOT the closing-token array:
+        // a stop-token boost the grammar mask holds at -inf is a no-op, so
+        // string/number *content* decodes exactly as in the normal zone,
+        // while any grammar-legal stop point flips to EOS immediately.
+        // Applying `closingBias` itself here (+100 on closers) is what
+        // corrupted long tool-call arguments into `}7}7…`/digit runaways
+        // on GLM-4.7-Flash and Devstral (kanban y4s0w2j).
+        let eosBoost: MLXArray? =
+            if let bias = closingBias {
+                ClosingTokenBias.eosOnlyBoost(stopTokenIDs: stopTokenIDs, count: bias.shape[0])
+            } else {
+                nil
+            }
+
         let clock = ContinuousClock()
         let startInstant = clock.now
 
@@ -240,6 +258,7 @@ public enum GuidedGenerationLoop {
             let tokenID = applyBiasAndSample(
                 state: &state,
                 closingBias: closingBias,
+                eosBoost: eosBoost,
                 whitespaceBias: whitespaceBias,
                 eosPenalty: eosPenalty,
                 maxTokens: maxTokens,
@@ -368,6 +387,13 @@ public enum GuidedGenerationLoop {
         var tokenCount: Int
         var accumulatedText: String
         var whitespaceTracker: WhitespaceRunTracker
+        /// Detects degenerate sampled-token cycles (see
+        /// ``RepetitionCycleTracker``); always active, in every zone.
+        var cycleTracker = RepetitionCycleTracker()
+        /// Additive penalty (length == logit dim) over the tracker's
+        /// suppressed ids; `nil` until the first cycle is detected,
+        /// rebuilt whenever the suppression set grows.
+        var cycleSuppression: MLXArray?
     }
 
     /// Prepares the cache for `input` and runs the initial forward pass,
@@ -411,9 +437,14 @@ public enum GuidedGenerationLoop {
     ///
     /// - Parameters:
     ///   - state: Loop state; reads `logits`/`maskArray`/`mask` and updates
-    ///     `whitespaceTracker` with the sampled token.
+    ///     `whitespaceTracker`/`cycleTracker` (and, on a new cycle
+    ///     detection, `cycleSuppression`) with the sampled token.
     ///   - closingBias: Pre-computed logit bias array favoring closing
-    ///     tokens; `nil` disables soft/hard zone biasing entirely.
+    ///     tokens; `nil` disables soft/hard zone biasing entirely. Applied
+    ///     only in the hard zone.
+    ///   - eosBoost: Pre-computed EOS-only boost array (see
+    ///     `ClosingTokenBias.eosOnlyBoost`); the soft zone's entire bias.
+    ///     `nil` exactly when `closingBias` is `nil`.
     ///   - whitespaceBias: Pre-computed negative logit bias array penalizing
     ///     whitespace-only tokens; `nil` disables whitespace suppression.
     ///   - eosPenalty: Precomputed EOS-position penalty applied on top of
@@ -429,6 +460,7 @@ public enum GuidedGenerationLoop {
     private static func applyBiasAndSample(
         state: inout LoopState,
         closingBias: MLXArray?,
+        eosBoost: MLXArray?,
         whitespaceBias: MLXArray?,
         eosPenalty: MLXArray?,
         maxTokens: Int,
@@ -445,19 +477,24 @@ public enum GuidedGenerationLoop {
         //     without a bias layer on top.
         //
         //   Soft zone (completionReserve .. hardReserve tokens left):
-        //     Closing bias only (+200 EOS, +100 closing tokens). No EOS
-        //     penalty. The grammar mask ensures EOS only appears when JSON
-        //     is structurally valid, so removing the penalty lets the model
-        //     stop naturally. May produce shorter output for unbounded
-        //     schemas, which is acceptable this close to the budget.
+        //     EOS boost ONLY (+200 at stop positions). No EOS penalty, no
+        //     closing-token boost. The grammar mask ensures EOS only
+        //     appears when the output is structurally valid, so the boost
+        //     ends generation at the first legal stop point while leaving
+        //     string/number *content* completely unbiased — boosting
+        //     closing characters here corrupted content into `}7}7…`/digit
+        //     runaways on live hardware (kanban y4s0w2j).
         //
         //   Hard zone (hardReserve tokens left):
         //     Penalize all non-closing tokens (-10000) AND EOS (-10000).
-        //     Forces the model to select closing tokens (}, ], ", digits)
-        //     that build up JSON structure. The grammar reaches a natural
-        //     stop state when JSON is complete. EOS is penalized because
-        //     the grammar may allow it at intermediate valid states before
-        //     all required fields are present.
+        //     Forces the model to select structural closers (}, ], ") that
+        //     wind the JSON down. The grammar reaches a natural stop state
+        //     when JSON is complete. EOS is penalized because the grammar
+        //     may allow it at intermediate valid states before all required
+        //     fields are present.
+        //
+        //   All zones additionally apply `cycleSuppression` (below) once a
+        //   degenerate sampled-token cycle has been detected.
         //
         // Only applied when the grammar's mask carries exclusions
         // (`needsApply == true`). When false, the grammar is in an
@@ -471,8 +508,8 @@ public enum GuidedGenerationLoop {
                     // Hard zone: force closing tokens, suppress everything else.
                     activeBias = hardZoneBias(bias: bias, eosPenalty: eosPenalty)
                 } else if state.tokenCount >= maxTokens - completionReserve {
-                    // Soft zone: nudge toward closing tokens, no EOS penalty.
-                    activeBias = bias
+                    // Soft zone: nudge toward the first legal stop point.
+                    activeBias = eosBoost
                 }
                 // Normal zone: no bias. Grammar mask + natural EOS handle
                 // termination. Intentionally leaves `activeBias == nil`.
@@ -485,7 +522,8 @@ public enum GuidedGenerationLoop {
         let token = applyMaskAndSample(
             logits: state.logits,
             maskArray: state.maskArray,
-            closingBias: activeBias
+            closingBias: activeBias,
+            cycleSuppression: state.mask.needsApply ? state.cycleSuppression : nil
         )
         let tokenID = Int(token)
 
@@ -495,7 +533,55 @@ public enum GuidedGenerationLoop {
             _ = state.whitespaceTracker.record(tokenID: tokenID)
         }
 
+        // Track the sampled token for degenerate-cycle detection; rebuild
+        // the suppression array whenever a new cycle grows the set.
+        if state.cycleTracker.record(tokenID: tokenID) {
+            let logitDim = state.logits.shape[state.logits.ndim - 1]
+            let suppressedTokenIDs = state.cycleTracker.suppressedTokenIDs
+            let detectedAtToken = state.tokenCount
+            state.cycleSuppression = cycleSuppressionBias(
+                for: suppressedTokenIDs, logitDim: logitDim)
+            logger.warning(
+                "\(logPrefix) repetition cycle detected at token \(detectedAtToken); suppressing \(suppressedTokenIDs.count) token id(s)"
+            )
+        }
+
         return tokenID
+    }
+
+    /// The additive penalty for a cycle-suppressed token id. Sized to sit
+    /// strictly between raw logit magnitudes and `logitRejectionPenalty`:
+    ///
+    /// - Large enough to dominate any raw logit gap (tens at most), so a
+    ///   latched cycle is decisively broken in every zone.
+    /// - Small enough that it never cancels the hard zone's forcing: a
+    ///   suppressed *closer* (`0 + cycleSuppressionPenalty`) still outranks
+    ///   every rejected non-closer (`logitRejectionPenalty`), so the hard
+    ///   zone keeps preferring structural closers even when the cycle that
+    ///   latched was itself a closer (the live `}7}7` case).
+    /// - Finite (not `-inf`): a suppressed id that is the only
+    ///   grammar-legal token still wins over `-inf`-masked ids, so
+    ///   suppression can never make the grammar unsatisfiable.
+    private static let cycleSuppressionPenalty: Float32 = -1000.0
+
+    /// Builds the additive cycle-suppression bias:
+    /// `cycleSuppressionPenalty` at every suppressed id, 0 elsewhere.
+    /// Length == the model's logit dimension so `applyMaskAndSample` can
+    /// add it without the pad/truncate dance the (vocab-scan-sized)
+    /// closing bias needs.
+    ///
+    /// - Parameters:
+    ///   - suppressedTokenIDs: The cycle tracker's accumulated ids.
+    ///   - logitDim: The model's logit dimension; the returned array's length.
+    /// - Returns: The additive suppression array.
+    private static func cycleSuppressionBias(
+        for suppressedTokenIDs: Set<Int>, logitDim: Int
+    ) -> MLXArray {
+        var penalty = [Float32](repeating: 0.0, count: logitDim)
+        for id in suppressedTokenIDs where id >= 0 && id < logitDim {
+            penalty[id] = cycleSuppressionPenalty
+        }
+        return MLXArray(penalty)
     }
 
     /// Computes the hard-zone logit bias: forces closing tokens (zeroing
@@ -631,6 +717,11 @@ public enum GuidedGenerationLoop {
                 return true
             }
         }
+
+        // Grammar-forced tokens break any in-flight sampled-token run;
+        // clear the cycle tracker's window so the sampled tokens on either
+        // side of this splice are never joined into a fabricated run.
+        state.cycleTracker.interrupt()
 
         // Feed the sampled token through the model FIRST, before any FF
         // token. It occupies the KV-cache position immediately after the
@@ -807,7 +898,11 @@ public enum GuidedGenerationLoop {
     ///   - tokenCount: The token count at which the loop stopped.
     private static func logStopReason(diagnosticLog: Bool, _ reason: String, tokenCount: Int) {
         guard diagnosticLog else { return }
-        logger.info("\(logPrefix)\(stopReasonFragment)\(reason) at token \(tokenCount)")
+        // `reason` is a call-site literal (never model output), so marking
+        // it public keeps the diagnostic readable in `log show` instead of
+        // redacting it to `<private>`.
+        logger.info(
+            "\(logPrefix)\(stopReasonFragment)\(reason, privacy: .public) at token \(tokenCount)")
     }
 
     /// Logs periodic generation progress (once per main loop iteration,
@@ -998,7 +1093,7 @@ public enum GuidedGenerationLoop {
     ///   - configuration: The model configuration whose `eosTokenIds` and
     ///     `extraEOSTokens` contribute to the result.
     /// - Returns: The set of token ids that terminate generation.
-    static func buildStopTokenIDs(
+    public static func buildStopTokenIDs(
         tokenizer: any Tokenizer,
         configuration: ModelConfiguration
     ) -> Set<Int> {
@@ -1027,17 +1122,26 @@ public enum GuidedGenerationLoop {
     ///     tokens (no mask to apply).
     ///   - closingBias: Optional logit bias favoring closing tokens. Applied
     ///     after the grammar mask so masked-out tokens remain at -inf.
+    ///   - cycleSuppression: Optional additive degenerate-cycle penalty
+    ///     (length == logit dim, from `cycleSuppressionBias`). Applied
+    ///     after the grammar mask, like `closingBias`, so masked-out
+    ///     tokens remain at -inf.
     /// - Returns: The sampled token ID.
     static func applyMaskAndSample(
         logits rawLogits: MLXArray,
         maskArray: MLXArray?,
-        closingBias: MLXArray? = nil
+        closingBias: MLXArray? = nil,
+        cycleSuppression: MLXArray? = nil
     ) -> UInt32 {
         // Extract last-position logits: [batch, seq, vocab] -> [vocab]
         var logits = rawLogits[0..., -1, 0...]
 
         if let maskArray {
             logits = logits + maskArray
+        }
+
+        if let cycleSuppression {
+            logits = logits + cycleSuppression
         }
 
         if let bias = closingBias {

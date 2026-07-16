@@ -12,9 +12,16 @@ public enum ClosingTokenBias {
     private static let tier1Bias: Float = 200.0
     private static let tier2Bias: Float = 100.0
 
+    /// Structural JSON closers only. Digits are deliberately NOT here:
+    /// they close nothing, and boosting them turned budget-pressure zones
+    /// into digit runaways inside string/number content (kanban y4s0w2j —
+    /// the `tripCities20250604123…`/`10101010…` live failures). A numeric
+    /// value that still *needs* a digit doesn't need the boost either:
+    /// when digits are the only grammar-legal class, the hard zone's
+    /// uniform non-closing penalty preserves their relative order, so the
+    /// model's preferred digit is still selected.
     private static let tier2Characters: Set<String> = [
         "\"", "}", "]",
-        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
     ]
 
     // MARK: - Public API
@@ -23,7 +30,7 @@ public enum ClosingTokenBias {
     /// positive value (tiered by priority), all others get 0.0.
     ///
     /// Tier 1 (+200): EOS token
-    /// Tier 2 (+100): `"`, `}`, `]`, single digits `0`-`9`
+    /// Tier 2 (+100): `"`, `}`, `]`
     public static func compute(tokenizer: any Tokenizer, eosTokenID: Int?) -> MLXArray {
         // Discover vocab size by scanning token IDs
         var vocabSize = 0
@@ -48,5 +55,32 @@ public enum ClosingTokenBias {
         }
 
         return MLXArray(biases)
+    }
+
+    /// Returns an MLXArray of shape [count] with the tier-1 (+200) boost at
+    /// each stop-token position and 0.0 everywhere else.
+    ///
+    /// This is the *soft-zone* bias: near the token budget the model should
+    /// be nudged to stop as soon as the grammar makes stopping legal, but
+    /// its content must never be distorted — a boost on a stop token that
+    /// the grammar mask holds at `-inf` is a no-op, so mid-string/mid-value
+    /// content decodes exactly as in the normal zone. Boosting content
+    /// characters instead (the old soft-zone behavior of applying the full
+    /// ``compute(tokenizer:eosTokenID:)`` array) is what corrupted long
+    /// tool-call arguments into `}7}7…`/digit runaways (kanban y4s0w2j).
+    ///
+    /// - Parameters:
+    ///   - stopTokenIDs: Token ids that terminate generation (see
+    ///     `GuidedGenerationLoop.buildStopTokenIDs`). Out-of-range ids are
+    ///     ignored.
+    ///   - count: The returned array's length (the closing-bias length, so
+    ///     the two zone arrays stay interchangeable downstream).
+    /// - Returns: The additive soft-zone bias array.
+    public static func eosOnlyBoost(stopTokenIDs: Set<Int>, count: Int) -> MLXArray {
+        var boost = [Float](repeating: 0.0, count: count)
+        for id in stopTokenIDs where id >= 0 && id < count {
+            boost[id] = tier1Bias
+        }
+        return MLXArray(boost)
     }
 }

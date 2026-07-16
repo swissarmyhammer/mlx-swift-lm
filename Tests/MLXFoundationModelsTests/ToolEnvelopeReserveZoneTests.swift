@@ -103,10 +103,13 @@ struct ToolEnvelopeReserveZoneTests {
         // `GuidedGenerationLoop.applyBiasAndSample`'s hard-zone check
         // (`tokenCount >= maxTokens - hardReserve`) was then true from token
         // 0, forcing the ENTIRE 256-token budget through the hard-closing
-        // bias -- which still permits single-digit tokens (`ClosingTokenBias`
-        // treats `0`-`9` as closing-tier), so a rambling digit string inside
-        // an open-ended field (`mlx_final_answer`'s `response`) could run to
-        // the full budget instead of ever selecting the closing quote.
+        // bias -- crushing legitimate content for the whole generation. (At
+        // the time `ClosingTokenBias` also treated `0`-`9` as closing-tier,
+        // so a rambling digit string inside an open-ended field
+        // (`mlx_final_answer`'s `response`) could run to the full budget
+        // instead of ever selecting the closing quote; kanban y4s0w2j
+        // removed digits from the tier, but an all-hard-zone budget remains
+        // wrong on its own.)
         #expect(
             hardReserve < 256,
             "hard zone must leave real runway, not consume the entire budget")
