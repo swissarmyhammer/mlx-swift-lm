@@ -274,6 +274,26 @@ comments:
   id: 01kxpjbg7p8dsg299s2p9w7wre
   text: 'Iteration 8: implement landed green in doing — doc example try-await fix; LoRALinear/QLoRALinear parallel structure collapsed into LoRAAdapterLayer (associatedtype Base, inputDType hook, shared adapting/initializeLoRA/adapted/fusedWeight; only Swift-forced members remain per class); 4 new characterization tests (LoRAAdapterTests) written pre-refactor and kept green, closing a real coverage gap on fused()/LoRALinear. Independent /test from scratch: 764 tests, 0 failures, 0 skips, no new warnings. Dispatching /commit.'
   timestamp: 2026-07-16T22:56:58.614730+00:00
+- actor: claude-code
+  id: 01kxpk4j83rkpp7vrhfz7nj02d
+  text: 'Iteration 9: /review of cfc834c — 1 NEW finding (17:58 section): mark LoRALinear final (concrete implementation; from()/protocol composition are the extension points). Fix-at-root: apply final to QLoRALinear and any other concrete adapter class in the file too, after verifying nothing subclasses them. Dispatching /implement.'
+  timestamp: 2026-07-16T23:10:39.875291+00:00
+- actor: claude-code
+  id: 01kxpk6w82v298p1m2807ez90f
+  text: 'Pulled back to doing for the 2026-07-16 17:58 review finding (LoRALinear not final). Verified via grep: no subclasses of LoRALinear/QLoRALinear anywhere in the repo (only parameter references like LoRALinear.defaultRank in tests). Plan: mark both concrete adapter classes in LoRA+Layers.swift final and drop the now-redundant `required` from their inits (final classes satisfy the LoRAAdapterLayer protocol init requirement without it; Self(...) in adapting() still resolves). Pure declaration tightening, no behavior change — verifying with full swift test.'
+  timestamp: 2026-07-16T23:11:55.650840+00:00
+- actor: claude-code
+  id: 01kxpkqj894gs15xnekkcq1v0y
+  text: 'Review finding (2026-07-16 17:58) fixed file-wide in Libraries/MLXLMCommon/Adapters/LoRA/LoRA+Layers.swift: both concrete adapter classes are now final — `public final class LoRALinear: Linear, LoRAAdapterLayer` and `public final class QLoRALinear: QuantizedLinear, LoRAAdapterLayer` — so a re-review finds zero non-final concrete classes in the file. Also dropped the now-redundant `required` from both inits (a final class satisfies the LoRAAdapterLayer protocol init requirement, used via Self(...) in adapting(), without it). Diff is exactly those 4 hunks. Full swift test green: 564 Swift Testing + 200 XCTest = 764 tests, 0 failures (matches baseline). Checklist item flipped to [x]; only the deferred 123B GPU round-trip criterion remains unchecked as intended. Awaiting double-check verdict.'
+  timestamp: 2026-07-16T23:21:02.473627+00:00
+- actor: claude-code
+  id: 01kxpmh2n9yjqecvfw7fate7de
+  text: 'really-done complete: verification green (full swift test, 764 tests = 564 Swift Testing + 200 XCTest, 0 failures, matches baseline) and adversarial double-check verdict PASS. Double-check independently confirmed: only two classes in LoRA+Layers.swift, both now final; zero subclasses repo-wide; LoRAAdapterLayer is internal so dropping `required` is legal and has no external-conformance impact; no metatype-driven instantiation exists; diff is exactly the four hunks; file docs remain accurate; swift build exit 0 on the edited tree. Task left in doing, ready for /review.'
+  timestamp: 2026-07-16T23:34:58.473881+00:00
+- actor: claude-code
+  id: 01kxpmx8yq9r7137sz8kwx4r3c
+  text: 'Iteration 9: implement landed green in doing — LoRALinear and QLoRALinear marked final (repo-wide grep + double-check confirmed zero subclasses), required dropped from both inits (final classes satisfy the internal protocol''s init requirement without it). Independent /test from scratch: 764 tests, 0 failures, 0 skips, no new warnings. Dispatching /commit.'
+  timestamp: 2026-07-16T23:41:38.135465+00:00
 position_column: doing
 position_ordinal: '8280'
 title: Support model_type "ministral3" (Devstral-2-123B) in LLMModelFactory
@@ -497,3 +517,7 @@ Also check `ToolCallFormat.infer` — it matches the `mistral3` prefix; `ministr
 - [x] `Libraries/MLXLMCommon/Adapters/LoRA/LoRA+Layers.swift:264` — The LoRA matrix transformation computation is verbatim duplicated: lines 264–265 in QLoRALinear.fused() are byte-identical to lines 182–183 in LoRALinear.fused(): `let loraB = (scale * loraB.T).asType(dtype); let loraA = loraA.T.asType(dtype)`. Future changes to the LoRA transformation algorithm must be applied to both methods in lockstep. Extract the transformation into a shared private helper: `func transformedLoRA(loraA: MLXArray, loraB: MLXArray, scale: Float, dtype: DType) -> (MLXArray, MLXArray)`. Both fused() methods obtain dtype as needed (weight.dtype vs dequantizedWeight.dtype), then call this helper to perform the identical transformation.
 
 *(Reviewer note, 2026-07-16 17:02: engine scope `review sha 6f804a4~1..6f804a4` — pinned to this task's iteration-7 checkpoint, not HEAD. The engine returned 7 findings; 2 against pre-existing test code in `Tests/MLXLMTests/EvalTests.swift` (:7 make the test class internal, :146 extract the nested inner loop into a helper) were dropped per the review skill's blanket exception against refactoring pre-existing tests — that file's only change in this commit is the compile-required `LORATrain` → `LoRATrain` rename.)*
+
+## Review Findings (2026-07-16 17:58)
+
+- [x] `Libraries/MLXLMCommon/Adapters/LoRA/LoRA+Layers.swift:161` — `LoRALinear` is a concrete implementation not designed for subclassing — factory methods (`from()`) and protocol-based composition are the extension points, not inheritance. Non-final classes signal an open extension point, which is not the intent here. Mark the class `final`: `public final class LoRALinear: Linear, LoRAAdapterLayer {`.

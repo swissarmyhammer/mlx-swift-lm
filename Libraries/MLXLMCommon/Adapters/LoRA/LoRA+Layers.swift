@@ -149,7 +149,7 @@ extension LoRAAdapterLayer {
 /// - [LoRA: Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685)
 /// - [QLoRA: Efficient Finetuning of Quantized LLMs](https://arxiv.org/abs/2305.14314)
 /// - ``QLoRALinear``
-public class LoRALinear: Linear, LoRAAdapterLayer {
+public final class LoRALinear: Linear, LoRAAdapterLayer {
 
     // These are `public` (rather than the private constants above) because
     // Swift only allows public declarations in the default argument values of
@@ -191,7 +191,7 @@ public class LoRALinear: Linear, LoRAAdapterLayer {
     ///   - bias: ignored -- the bias is taken from `linear`
     ///   - scale: scale applied to the low-rank update
     ///   - linear: the `Linear` layer to adapt
-    required public init(
+    public init(
         _ inputDimensions: Int, _ outputDimensions: Int, rank: Int = LoRALinear.defaultRank,
         bias: Bool = false, scale: Float = LoRALinear.defaultScale, linear: Linear
     ) {
@@ -248,7 +248,7 @@ public class LoRALinear: Linear, LoRAAdapterLayer {
 /// Implementation of LoRA `QuantizedLinear` replacement layer.
 ///
 /// See ``LoRALinear`` (equivalent class for `Linear` layers) for more information.
-public class QLoRALinear: QuantizedLinear, LoRAAdapterLayer {
+public final class QLoRALinear: QuantizedLinear, LoRAAdapterLayer {
 
     /// Scale applied to the low-rank update.
     let scale: Float
@@ -281,7 +281,7 @@ public class QLoRALinear: QuantizedLinear, LoRAAdapterLayer {
     ///   - bias: ignored -- the bias is taken from `linear`
     ///   - scale: scale applied to the low-rank update
     ///   - linear: the `QuantizedLinear` layer to adapt
-    required public init(
+    public init(
         _ inputDimensions: Int, _ outputDimensions: Int, rank: Int = LoRALinear.defaultRank,
         bias: Bool = false, scale: Float = LoRALinear.defaultScale, linear: QuantizedLinear
     ) {
