@@ -91,7 +91,7 @@ import HuggingFace
 import Tokenizers
 
 let model = try await #huggingFaceLoadModelContainer(
-    configuration: LLMRegistry.gemma3_1B_qat_4bit
+    configuration: LLMRegistry.gemma31bQat4bit
 )
 
 let session = ChatSession(model)
@@ -125,7 +125,7 @@ struct Recommendation {
 
 if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
     let model = #huggingFaceLanguageModel(
-        configuration: LLMRegistry.gemma3_1B_qat_4bit,
+        configuration: LLMRegistry.gemma31bQat4bit,
         capabilities: [.guidedGeneration])
     let session = LanguageModelSession(model: model)
 

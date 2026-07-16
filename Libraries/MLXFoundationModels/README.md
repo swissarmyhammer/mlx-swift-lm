@@ -18,7 +18,7 @@ import Tokenizers
 
 if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
     let model = #huggingFaceLanguageModel(
-        configuration: LLMRegistry.qwen3_0_6b_4bit,
+        configuration: LLMRegistry.qwen306b4bit,
         capabilities: [.reasoning])
     let session = LanguageModelSession(model: model)
 
@@ -46,7 +46,7 @@ import Tokenizers
 
 if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
     let model = MLXLanguageModel(
-        configuration: LLMRegistry.qwen3_0_6b_4bit,
+        configuration: LLMRegistry.qwen306b4bit,
         capabilities: [.reasoning],
         weightsLocation: { id in
             let cache = HubCache.default

@@ -73,7 +73,7 @@ struct LoRABatchIterator: Sequence, IteratorProtocol {
 ///
 /// ```swift
 /// // load the base model and tokenizer
-/// let (model, tokenizer) = try await LLM.load(configuration: ModelConfiguration.mistral7B4bit)
+/// let (model, tokenizer) = try await LLM.load(configuration: ModelConfiguration.mistral7b4bit)
 ///
 /// // add LoRALinear adapter layers
 /// LoRATrain.convert(model: model, layers: Array(model.loraLinearLayers().suffix(4)))

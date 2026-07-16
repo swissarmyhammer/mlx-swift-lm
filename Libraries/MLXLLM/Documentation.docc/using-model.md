@@ -13,7 +13,7 @@ A model is typically loaded by using a `ModelFactory` and a `ModelConfiguration`
 // e.g. LLMModelFactory.shared
 let modelFactory: ModelFactory
 
-// e.g. LLMRegistry.llama3_8B_4bit
+// e.g. LLMRegistry.llama38b4bit
 let modelConfiguration: ModelConfiguration
 
 // e.g. TokenizersLoader() from MLXLMTokenizers
@@ -31,7 +31,7 @@ Predefined `ModelConfiguration` instances are provided as static variables
 on the `ModelRegistry` types or they can be created:
 
 ```swift
-let modelConfiguration = ModelConfiguration(id: "mlx-community/llama3_8B_4bit")
+let modelConfiguration = ModelConfiguration(id: "mlx-community/Meta-Llama-3-8B-Instruct-4bit")
 ```
 
 The flow inside the `ModelFactory` goes like this:

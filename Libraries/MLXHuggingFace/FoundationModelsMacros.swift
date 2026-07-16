@@ -25,7 +25,7 @@ import MLXLMCommon
 /// ```
 ///
 /// ```swift
-/// let model = #huggingFaceLanguageModel(configuration: LLMRegistry.gemma3_1B_qat_4bit)
+/// let model = #huggingFaceLanguageModel(configuration: LLMRegistry.gemma31bQat4bit)
 /// let session = LanguageModelSession(model: model)
 /// ```
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)

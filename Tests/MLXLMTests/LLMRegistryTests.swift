@@ -8,7 +8,7 @@ final class LLMRegistryTests: XCTestCase {
     func testFalconH1RModelConfigurationIsRegistered() {
         XCTAssertTrue(LLMRegistry.shared.contains(id: "tiiuae/Falcon-H1R-7B"))
 
-        let configuration = LLMRegistry.falconH1R7B
+        let configuration = LLMRegistry.falconH1r7b
         XCTAssertEqual(configuration.name, "tiiuae/Falcon-H1R-7B")
     }
 }

@@ -31,7 +31,7 @@ struct Neighborhood {
 
 if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
     let model = #huggingFaceLanguageModel(
-        configuration: LLMRegistry.gemma3_1B_qat_4bit,
+        configuration: LLMRegistry.gemma31bQat4bit,
         capabilities: [.guidedGeneration])
     let session = LanguageModelSession(model: model)
     let response = try await session.respond(
@@ -57,7 +57,7 @@ import Tokenizers
 
 // Load any MLX model yourself; here the same gemma model as above.
 let container = try await #huggingFaceLoadModelContainer(
-    configuration: LLMRegistry.gemma3_1B_qat_4bit)
+    configuration: LLMRegistry.gemma31bQat4bit)
 
 let output = try await container.perform { context in
     let tokenizer = context.tokenizer
