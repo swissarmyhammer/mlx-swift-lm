@@ -81,6 +81,9 @@ public enum LLMTypeRegistry {
         "jamba": create(JambaConfiguration.self, JambaModel.init),
         "mamba2": create(Mamba2Configuration.self, Mamba2Model.init),
         "mistral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
+        // Ministral3 (e.g. Devstral-2-123B) shares the Mistral3 text architecture:
+        // Mistral3Text.swift is the port of mlx-lm's ministral3.py.
+        "ministral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
         "apertus": create(ApertusConfiguration.self, ApertusModel.init),
         "nemotron_labs_diffusion": create(
             NemotronLabsDiffusionConfiguration.self, NemotronLabsDiffusionModel.init),

@@ -249,8 +249,10 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .xmlFunction
         }
 
-        // Mistral3 family (mistral3, mistral3_text, etc.)
-        if type.hasPrefix("mistral3") {
+        // Mistral3 family (mistral3, mistral3_text, etc.) and Ministral3
+        // (ministral3, e.g. Devstral-2-123B) — "ministral3" does not share
+        // the "mistral3" prefix, so it needs its own match.
+        if type.hasPrefix("mistral3") || type.hasPrefix("ministral3") {
             return .mistral
         }
 

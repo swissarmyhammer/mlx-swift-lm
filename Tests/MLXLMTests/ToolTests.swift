@@ -1128,6 +1128,12 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "Mistral3") == .mistral)
         #expect(ToolCallFormat.infer(from: "mistral3_text") == .mistral)
 
+        // Ministral3 models (Devstral 2 family, e.g. Devstral-2-123B): a
+        // distinct model_type that does NOT share the "mistral3" prefix —
+        // the extra "ni" means it needs its own match.
+        #expect(ToolCallFormat.infer(from: "ministral3") == .mistral)
+        #expect(ToolCallFormat.infer(from: "Ministral3") == .mistral)
+
         // Llama models - require secondary signals from configData
         #expect(ToolCallFormat.infer(from: "llama") == nil)  // Should be nil without configData
 

@@ -58,8 +58,12 @@ comments:
   id: 01kxm1z7bgpn1xsj15e8sa873q
   text: 'Review-finding rework (pulled review -> doing): worked the 2026-07-15 18:17 nesting finding. The cited line (2084) was stale — the actual site is `commitPromptCache(modelID:slot:generatedTokenIDs:)` in the Executor (the `.trimCacheByOne` arm''s 4-deep guard, now near line 2680). Extracted `private static func trimCacheIfValid(_ cache:slot:cacheAdvance:generatedTokenCount:) -> Bool` (canTrimPromptCache && PromptCache.trimAndVerify, same short-circuit order and identical from:/to: arguments); the switch arm now just sets `shouldStore` from its result, so a failed trim exits through the single shared `guard shouldStore` drop path — behavior identical (same removePromptCache + return), nesting flattened 4 -> 2. Trim rationale moved into the helper''s doc comment; the shared-store comment updated to match. Root-cause sweep: sibling overload `commitPromptCache(emittedText:tokenizer:)` and the rest of the surrounding function are straight-line with single-level guards — no other >2-level nesting in that area. Pure refactor, no new tests per TDD scope rule; existing suite is the gate. Fresh full `swift test`: exit 0, 543 swift-testing tests (217+254+65+7) + all XCTest executions 0 failures; only pre-existing warnings (package resource declarations, deprecation at MLXLanguageModel.swift:950). Finding flipped to [x] with resolution in the description. Adversarial double-check in flight; task stays in doing per the finish-loop contract.'
   timestamp: 2026-07-15T23:32:10.224029+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01kxm2ep2c5yrfyvxq88wah8ez
+  text: 'Iteration 3: nesting finding worked. Extracted private static trimCacheIfValid helper; the .trimCacheByOne arm of commitPromptCache now sets shouldStore from the helper result — 4-level nesting flattened to 2, behavior identical (same short-circuit order, same drop path). Note: the finding''s cited line 2084 was stale; actual site was ~line 2680. Suite green: 543 swift-testing + all XCTest, 0 failures. Checkpoint: 1c1f784. Re-reviewing HEAD~1..HEAD.'
+  timestamp: 2026-07-15T23:40:36.812700+00:00
+position_column: done
+position_ordinal: bb80
 title: 'GLM4 structural-tag wiring regresses GLM-4.7-Flash: <tool_call> text leaks and grammar runaways'
 ---
 ## What
