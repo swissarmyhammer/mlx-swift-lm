@@ -57,6 +57,28 @@ public enum GrammarError: Error {
     case forkFailed(String)
 }
 
+// MARK: - Shim error capture
+
+/// Compose a human-readable error detail for shim failures.
+///
+/// xgrammar's `what()` arrives via the thread-local
+/// `xg_last_error_message()` buffer. When the buffer is empty
+/// (e.g. when the status was synthesized by a shim-level fast-fail
+/// path like a NULL argument check), fall back to naming the
+/// primitive that failed plus the numeric status so the error
+/// surfaces something actionable.
+///
+/// File-scope (rather than a member of one wrapper type) because the
+/// thread-local buffer is shared by every shim call in this file —
+/// `GrammarTokenizer` and `GrammarConstraint` both route their
+/// failure details through it.
+private func captureShimError(status: XGStatus, fallback: String) -> String {
+    if let cstr = xg_last_error_message() {
+        return String(cString: cstr)
+    }
+    return "\(fallback) returned status \(status)"
+}
+
 // MARK: - GrammarTokenizer
 
 /// Swift wrapper around `XGTokenizerInfo*`. Manages C pointer lifetime
@@ -91,10 +113,10 @@ public final class GrammarTokenizer: @unchecked Sendable {
     ///     `.byteFallback` applies SentencePiece `<0xNN>` + `▁`
     ///     decoding; `.byteLevel` applies GPT-2 `bytes_to_unicode`
     ///     decoding.
-    ///   - eosTokenId: End-of-sequence token ID, registered as a stop
+    ///   - eosTokenID: End-of-sequence token ID, registered as a stop
     ///     token on the xgrammar TokenizerInfo.
-    public convenience init(vocab: [String], vocabType: VocabType, eosTokenId: Int32) throws {
-        try self.init(vocab: vocab, vocabType: vocabType, stopTokenIDs: [eosTokenId])
+    public convenience init(vocab: [String], vocabType: VocabType, eosTokenID: Int32) throws {
+        try self.init(vocab: vocab, vocabType: vocabType, stopTokenIDs: [eosTokenID])
     }
 
     /// Construct a tokenizer from a pre-decoded vocab, registering the
@@ -111,7 +133,7 @@ public final class GrammarTokenizer: @unchecked Sendable {
     /// failure (kanban y4s0w2j).
     ///
     /// - Parameters:
-    ///   - vocab: Per-token strings, as in `init(vocab:vocabType:eosTokenId:)`.
+    ///   - vocab: Per-token strings, as in `init(vocab:vocabType:eosTokenID:)`.
     ///   - vocabType: Selects xgrammar's token-decoding path.
     ///   - stopTokenIDs: All stop-token ids to register on the xgrammar
     ///     TokenizerInfo.
@@ -136,10 +158,9 @@ public final class GrammarTokenizer: @unchecked Sendable {
         }
 
         guard status == XG_OK, let ptr = info else {
-            let detail =
-                xg_last_error_message().map { String(cString: $0) }
-                ?? "xg_tokenizer_info_new returned status \(status)"
-            throw GrammarError.tokenizerCreationFailed(detail)
+            throw GrammarError.tokenizerCreationFailed(
+                captureShimError(status: status, fallback: "xg_tokenizer_info_new")
+            )
         }
         self.pointer = ptr
     }
@@ -357,7 +378,7 @@ public final class GrammarConstraint: @unchecked Sendable {
                 // path skips `compilationError`'s discrimination and
                 // always surfaces the generic compilation case.
                 throw GrammarError.constraintCompilationFailed(
-                    GrammarConstraint.captureShimError(
+                    captureShimError(
                         status: status, fallback: "xg_compile_grammar_from_ebnf")
                 )
             }
@@ -449,7 +470,7 @@ public final class GrammarConstraint: @unchecked Sendable {
         let compilerStatus = xg_grammar_compiler_new(tokenizer.pointer, &compilerPtr)
         guard compilerStatus == XG_OK, let compilerHandle = compilerPtr else {
             throw GrammarError.constraintCompilationFailed(
-                Self.captureShimError(
+                captureShimError(
                     status: compilerStatus, fallback: "xg_grammar_compiler_new")
             )
         }
@@ -468,7 +489,7 @@ public final class GrammarConstraint: @unchecked Sendable {
             xg_compiled_grammar_free(compiledHandle)
             xg_grammar_compiler_free(compilerHandle)
             throw GrammarError.constraintCompilationFailed(
-                Self.captureShimError(status: matcherStatus, fallback: "xg_matcher_new")
+                captureShimError(status: matcherStatus, fallback: "xg_matcher_new")
             )
         }
 
@@ -586,7 +607,7 @@ public final class GrammarConstraint: @unchecked Sendable {
         }
         guard status == XG_OK else {
             throw GrammarError.maskComputationFailed(
-                Self.captureShimError(
+                captureShimError(
                     status: status, fallback: "xg_matcher_fill_next_token_bitmask")
             )
         }
@@ -615,14 +636,14 @@ public final class GrammarConstraint: @unchecked Sendable {
     /// cross the FF-valid boundary), emission stops at that point
     /// and the already-accepted prefix is returned; the matcher's
     /// state reflects exactly those accepts.
-    public func commitToken(_ tokenId: Int32) throws -> CommitResult {
+    public func commitToken(_ tokenID: Int32) throws -> CommitResult {
         lock.lock()
         defer { lock.unlock() }
-        let status = xg_matcher_accept_token(matcher, tokenId)
+        let status = xg_matcher_accept_token(matcher, tokenID)
         guard status == XG_OK else {
             throw GrammarError.commitFailed(
-                Self.captureShimError(
-                    status: status, fallback: "xg_matcher_accept_token token=\(tokenId)")
+                captureShimError(
+                    status: status, fallback: "xg_matcher_accept_token token=\(tokenID)")
             )
         }
 
@@ -660,7 +681,7 @@ public final class GrammarConstraint: @unchecked Sendable {
         let status = xg_matcher_find_jump_forward_string(matcher, &ptr, &length)
         guard status == XG_OK else {
             throw GrammarError.commitFailed(
-                Self.captureShimError(
+                captureShimError(
                     status: status, fallback: "xg_matcher_find_jump_forward_string")
             )
         }
@@ -702,8 +723,8 @@ public final class GrammarConstraint: @unchecked Sendable {
         var accepted: [Int32] = []
         accepted.reserveCapacity(safeCount)
         for id in encoded.prefix(safeCount) {
-            let tokenId = Int32(id)
-            let acceptStatus = xg_matcher_accept_token(matcher, tokenId)
+            let tokenID = Int32(id)
+            let acceptStatus = xg_matcher_accept_token(matcher, tokenID)
             if acceptStatus != XG_OK {
                 // Mid-FF rejection: the host tokenizer re-encoded the
                 // FF bytes into a token whose boundaries don't line up
@@ -716,7 +737,7 @@ public final class GrammarConstraint: @unchecked Sendable {
                 _fastForwardDisagreementCount += 1
                 break
             }
-            accepted.append(tokenId)
+            accepted.append(tokenID)
             if isMatcherTerminatedLocked() { break }
         }
         return accepted
@@ -759,7 +780,7 @@ public final class GrammarConstraint: @unchecked Sendable {
         let status = xg_matcher_rollback(matcher, n)
         guard status == XG_OK else {
             throw GrammarError.rollbackFailed(
-                Self.captureShimError(status: status, fallback: "xg_matcher_rollback n=\(n)")
+                captureShimError(status: status, fallback: "xg_matcher_rollback n=\(n)")
             )
         }
     }
@@ -785,7 +806,7 @@ public final class GrammarConstraint: @unchecked Sendable {
         let status = xg_matcher_fork(matcher, &forkedMatcher)
         guard status == XG_OK, let forkedHandle = forkedMatcher else {
             throw GrammarError.forkFailed(
-                Self.captureShimError(status: status, fallback: "xg_matcher_fork")
+                captureShimError(status: status, fallback: "xg_matcher_fork")
             )
         }
         return GrammarConstraint(fromFork: forkedHandle, parent: self)
@@ -798,21 +819,6 @@ public final class GrammarConstraint: @unchecked Sendable {
         var result: Int32 = 0
         let status = xg_matcher_is_terminated(matcher, &result)
         return status == XG_OK && result != 0
-    }
-
-    /// Compose a human-readable error detail for shim failures.
-    ///
-    /// xgrammar's `what()` arrives via the thread-local
-    /// `xg_last_error_message()` buffer. When the buffer is empty
-    /// (e.g. when the status was synthesized by a shim-level fast-fail
-    /// path like a NULL argument check), fall back to naming the
-    /// primitive that failed plus the numeric status so the error
-    /// surfaces something actionable.
-    private static func captureShimError(status: XGStatus, fallback: String) -> String {
-        if let cstr = xg_last_error_message() {
-            return String(cString: cstr)
-        }
-        return "\(fallback) returned status \(status)"
     }
 }
 

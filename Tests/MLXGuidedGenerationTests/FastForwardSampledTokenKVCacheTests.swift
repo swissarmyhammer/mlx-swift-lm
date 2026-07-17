@@ -123,7 +123,7 @@ struct FastForwardSampledTokenKVCacheTests {
         return try GrammarTokenizer(
             vocab: vocab,
             vocabType: .byteFallback,
-            eosTokenId: Int32(ByteTokenizer.eosTokenID)
+            eosTokenID: Int32(ByteTokenizer.eosTokenID)
         )
     }
 

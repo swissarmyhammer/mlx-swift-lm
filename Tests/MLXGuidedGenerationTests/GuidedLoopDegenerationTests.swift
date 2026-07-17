@@ -128,7 +128,7 @@ struct GuidedLoopDegenerationTests {
         return try GrammarTokenizer(
             vocab: vocab,
             vocabType: .byteFallback,
-            eosTokenId: Int32(DegenerationByteTokenizer.eosTokenID)
+            eosTokenID: Int32(DegenerationByteTokenizer.eosTokenID)
         )
     }
 

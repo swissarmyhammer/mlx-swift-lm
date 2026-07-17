@@ -59,7 +59,7 @@ struct LoopInvariantsOnXGrammarTests {
             let tokenizer = try GrammarTokenizer(
                 vocab: vocab.vocab,
                 vocabType: vocab.vocabType,
-                eosTokenId: Int32(context.tokenizer.eosTokenId ?? 0)
+                eosTokenID: Int32(context.tokenizer.eosTokenId ?? 0)
             )
             let constraint = try GrammarConstraint(
                 tokenizer: tokenizer,

@@ -368,7 +368,7 @@ struct ToolCallingSchemaTests {
         return try GrammarTokenizer(
             vocab: vocab,
             vocabType: .byteFallback,
-            eosTokenId: Int32(vocabSize - 1)
+            eosTokenID: Int32(vocabSize - 1)
         )
     }
 }

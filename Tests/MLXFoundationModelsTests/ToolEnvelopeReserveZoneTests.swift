@@ -73,7 +73,7 @@ struct ToolEnvelopeReserveZoneTests {
             String(format: "<0x%02X>", byte)
         }
         let tokenizer = try GrammarTokenizer(
-            vocab: vocab, vocabType: .byteFallback, eosTokenId: Int32(vocabSize - 1))
+            vocab: vocab, vocabType: .byteFallback, eosTokenID: Int32(vocabSize - 1))
         let constraint = try GrammarConstraint(
             tokenizer: tokenizer, jsonSchema: #"{"type":"integer"}"#, fastForward: false)
         return (tokenizer, constraint)

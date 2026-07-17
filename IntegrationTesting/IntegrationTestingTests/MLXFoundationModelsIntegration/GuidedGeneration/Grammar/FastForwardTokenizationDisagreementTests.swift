@@ -165,7 +165,7 @@ struct FastForwardTokenizationDisagreementTests {
             let xgTokenizer = try GrammarTokenizer(
                 vocab: seeds.vocab,
                 vocabType: seeds.vocabType,
-                eosTokenId: seeds.eosTokenId
+                eosTokenID: seeds.eosTokenId
             )
 
             // Cross-wire: GrammarTokenizer is Gemma, hostTokenizer is Qwen.

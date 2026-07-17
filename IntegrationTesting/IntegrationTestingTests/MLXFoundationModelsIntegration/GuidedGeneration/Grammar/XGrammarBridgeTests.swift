@@ -76,7 +76,7 @@ struct XGrammarBridgeTests {
             let tokenizer = try GrammarTokenizer(
                 vocab: vocab.vocab,
                 vocabType: vocab.vocabType,
-                eosTokenId: Int32(fixture.eosTokenId)
+                eosTokenID: Int32(fixture.eosTokenId)
             )
 
             #expect(
@@ -107,7 +107,7 @@ struct XGrammarBridgeTests {
             let tokenizer = try GrammarTokenizer(
                 vocab: vocab.vocab,
                 vocabType: vocab.vocabType,
-                eosTokenId: Int32(fixture.eosTokenId)
+                eosTokenID: Int32(fixture.eosTokenId)
             )
 
             #expect(
@@ -151,7 +151,7 @@ struct XGrammarBridgeTests {
             let tokenizer = try GrammarTokenizer(
                 vocab: vocab.vocab,
                 vocabType: vocab.vocabType,
-                eosTokenId: Int32(fixture.eosTokenId)
+                eosTokenID: Int32(fixture.eosTokenId)
             )
             let constraint = try GrammarConstraint(
                 tokenizer: tokenizer,
@@ -248,7 +248,7 @@ struct XGrammarBridgeTests {
             let tokenizer = try GrammarTokenizer(
                 vocab: vocab.vocab,
                 vocabType: vocab.vocabType,
-                eosTokenId: Int32(fixture.eosTokenId)
+                eosTokenID: Int32(fixture.eosTokenId)
             )
             return try GrammarConstraint(
                 tokenizer: tokenizer,
@@ -342,7 +342,7 @@ struct XGrammarBridgeTests {
             return try GrammarTokenizer(
                 vocab: vocab.vocab,
                 vocabType: vocab.vocabType,
-                eosTokenId: Int32(fixture.eosTokenId)
+                eosTokenID: Int32(fixture.eosTokenId)
             )
         }
 

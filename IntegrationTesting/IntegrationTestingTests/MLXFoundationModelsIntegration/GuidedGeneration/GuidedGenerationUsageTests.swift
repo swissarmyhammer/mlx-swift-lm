@@ -135,7 +135,7 @@ struct GuidedGenerationUsageTests {
             let grammarTokenizer = try GrammarTokenizer(
                 vocab: grammarVocab.vocab,
                 vocabType: grammarVocab.vocabType,
-                eosTokenId: Int32(tokenizer.eosTokenId ?? 0)
+                eosTokenID: Int32(tokenizer.eosTokenId ?? 0)
             )
 
             // 3. Compile a JSON Schema into a constraint.
