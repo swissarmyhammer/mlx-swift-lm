@@ -48,8 +48,16 @@ public protocol ToolCallParser: Sendable {
 }
 
 extension ToolCallParser {
+    /// Default implementation: `false`, because most formats carry a literal
+    /// marker (a start tag or a JSON envelope) that lets tool calls be
+    /// detected incrementally as text streams in. Only markerless formats
+    /// (e.g. ``GLM4BareToolCallParser``) override this to `true`.
     public var buffersEntireResponse: Bool { false }
 
+    /// Default implementation: for tagged formats, splits the buffer on
+    /// `startTag` and parses each non-empty segment individually (recovering
+    /// multiple calls left in the buffer); for untagged formats, parses the
+    /// whole buffer as a single call.
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         if let startTag {
             return

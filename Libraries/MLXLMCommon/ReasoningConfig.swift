@@ -120,6 +120,21 @@ public struct ReasoningConfig: Sendable, Equatable {
 
     // MARK: - Inference
 
+    /// The delimiter that opens a `<think>`-style reasoning span, shared by
+    /// every reasoning family ``infer(from:modelId:configData:)`` recognizes.
+    private static let thinkStartDelimiter = "<think>"
+
+    /// The delimiter that closes a `<think>`-style reasoning span, shared by
+    /// every reasoning family ``infer(from:modelId:configData:)`` recognizes.
+    private static let thinkEndDelimiter = "</think>"
+
+    /// The configuration shared by the always-on `<think>` families below
+    /// (DeepSeek-R1 and MiniMax-M2): identical delimiters, thinking cannot
+    /// be turned off.
+    private static let alwaysOnThinkConfig = ReasoningConfig(
+        startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
+        promptStrategy: .alwaysOn)
+
     /// Infer a reasoning configuration from a model's `model_type` and repo id.
     ///
     /// Unlike ``ToolCallFormat/infer(from:configData:)``, `modelId` is
@@ -147,7 +162,7 @@ public struct ReasoningConfig: Sendable, Equatable {
         // verification and registry overrides refine specific models.
         if type.hasPrefix("qwen3") {
             return ReasoningConfig(
-                startDelimiter: "<think>", endDelimiter: "</think>",
+                startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
                 promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
                 isSpecialToken: true)
         }
@@ -160,9 +175,7 @@ public struct ReasoningConfig: Sendable, Equatable {
         if type == "deepseek_v3" || type == "deepseek_r1"
             || id.contains("deepseek-r1") || id.contains("r1-distill")
         {
-            return ReasoningConfig(
-                startDelimiter: "<think>", endDelimiter: "</think>",
-                promptStrategy: .alwaysOn)
+            return alwaysOnThinkConfig
         }
 
         // MiniMax-M2 (model_type "minimax", e.g. mlx-community/MiniMax-M2-4bit):
@@ -171,9 +184,7 @@ public struct ReasoningConfig: Sendable, Equatable {
         // decoded stream begins inside an open reasoning span (detected by
         // the prompt-tail primed-inside check, exactly like R1 above).
         if type == "minimax" {
-            return ReasoningConfig(
-                startDelimiter: "<think>", endDelimiter: "</think>",
-                promptStrategy: .alwaysOn)
+            return alwaysOnThinkConfig
         }
 
         return nil
