@@ -160,7 +160,9 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     }
 
     /// Generate an ID compatible with this tool-call syntax.
-    func generateToolCallID() -> String {
+    /// - Returns: A fresh unique ID (9 characters for ``mistral``, OpenAI-style
+    ///   `call_`-prefixed for all other formats)
+    public func generateToolCallID() -> String {
         let uuid = UUID().uuidString.replacingOccurrences(of: "-", with: "")
 
         switch self {

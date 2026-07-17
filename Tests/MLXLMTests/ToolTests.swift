@@ -1080,6 +1080,27 @@ struct ToolTests {
         }
     }
 
+    // MARK: - Tool Call ID Generation Tests
+
+    // Plain (non-@testable) import: this test also pins `generateToolCallID()`
+    // as public API — it fails to compile if the method regresses to internal.
+    @Test("Test ToolCallFormat Tool Call ID Generation")
+    func testToolCallFormatGenerateToolCallID() throws {
+        // Mistral's [TOOL_CALLS] syntax carries short 9-character ids.
+        let mistralID = ToolCallFormat.mistral.generateToolCallID()
+        #expect(mistralID.count == 9)
+
+        // Every other syntax uses OpenAI-style lowercase "call_" ids.
+        let jsonID = ToolCallFormat.json.generateToolCallID()
+        #expect(jsonID.hasPrefix("call_"))
+        #expect(jsonID == jsonID.lowercased())
+
+        // IDs are freshly generated per call.
+        #expect(
+            ToolCallFormat.json.generateToolCallID()
+                != ToolCallFormat.json.generateToolCallID())
+    }
+
     // MARK: - Format Inference Tests
 
     @Test("Test ToolCallFormat Inference from Model Type")

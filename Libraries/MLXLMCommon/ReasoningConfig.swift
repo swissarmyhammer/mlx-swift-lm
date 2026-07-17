@@ -96,6 +96,16 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// optimization.
     public var isSpecialToken: Bool
 
+    /// Creates a reasoning configuration with the given delimiters and prompt
+    /// strategy.
+    ///
+    /// - Parameters:
+    ///   - startDelimiter: the marker that opens a reasoning span (e.g. `<think>`).
+    ///   - endDelimiter: the marker that closes a reasoning span (e.g. `</think>`).
+    ///   - promptStrategy: how a thinking on / off preference is expressed to
+    ///     the chat template.
+    ///   - isSpecialToken: whether ``startDelimiter`` is a registered special
+    ///     token for this model's tokenizer (diagnostic only; defaults to `false`).
     public init(
         startDelimiter: String,
         endDelimiter: String,
