@@ -186,14 +186,8 @@ public enum GuidedGenerationLoop {
         // is acceptable near the budget limit.
         let eosPenalty: MLXArray? =
             if let bias = closingBias {
-                {
-                    let biasLen = bias.shape[0]
-                    var penalty = [Float32](repeating: 0.0, count: biasLen)
-                    for eos in stopTokenIDs where eos >= 0 && eos < biasLen {
-                        penalty[eos] = logitRejectionPenalty
-                    }
-                    return MLXArray(penalty)
-                }()
+                tokenPenaltyBias(
+                    for: stopTokenIDs, penalty: logitRejectionPenalty, length: bias.shape[0])
             } else {
                 nil
             }
@@ -539,8 +533,8 @@ public enum GuidedGenerationLoop {
             let logitDim = state.logits.shape[state.logits.ndim - 1]
             let suppressedTokenIDs = state.cycleTracker.suppressedTokenIDs
             let detectedAtToken = state.tokenCount
-            state.cycleSuppression = cycleSuppressionBias(
-                for: suppressedTokenIDs, logitDim: logitDim)
+            state.cycleSuppression = tokenPenaltyBias(
+                for: suppressedTokenIDs, penalty: cycleSuppressionPenalty, length: logitDim)
             logger.warning(
                 "\(logPrefix) repetition cycle detected at token \(detectedAtToken); suppressing \(suppressedTokenIDs.count) token id(s)"
             )
@@ -564,24 +558,29 @@ public enum GuidedGenerationLoop {
     ///   suppression can never make the grammar unsatisfiable.
     private static let cycleSuppressionPenalty: Float32 = -1000.0
 
-    /// Builds the additive cycle-suppression bias:
-    /// `cycleSuppressionPenalty` at every suppressed id, 0 elsewhere.
-    /// Length == the model's logit dimension so `applyMaskAndSample` can
-    /// add it without the pad/truncate dance the (vocab-scan-sized)
-    /// closing bias needs.
+    /// Builds an additive token-penalty bias array: `penalty` at every id
+    /// in `tokenIDs`, 0 elsewhere. Out-of-range ids are ignored. Shared by
+    /// `run()`'s EOS penalty (`logitRejectionPenalty` at the stop-token
+    /// positions) and the degenerate-cycle suppression
+    /// (`cycleSuppressionPenalty` at the cycle tracker's accumulated ids).
     ///
     /// - Parameters:
-    ///   - suppressedTokenIDs: The cycle tracker's accumulated ids.
-    ///   - logitDim: The model's logit dimension; the returned array's length.
-    /// - Returns: The additive suppression array.
-    private static func cycleSuppressionBias(
-        for suppressedTokenIDs: Set<Int>, logitDim: Int
+    ///   - tokenIDs: The token ids to penalize.
+    ///   - penalty: The additive penalty written at each in-range id.
+    ///   - length: The returned array's length — the closing-bias length
+    ///     for the EOS penalty (so the zone arrays stay interchangeable
+    ///     downstream) or the model's logit dimension for cycle
+    ///     suppression (so `applyMaskAndSample` can add it without the
+    ///     pad/truncate dance the vocab-scan-sized closing bias needs).
+    /// - Returns: The additive penalty-bias array.
+    private static func tokenPenaltyBias(
+        for tokenIDs: Set<Int>, penalty: Float32, length: Int
     ) -> MLXArray {
-        var penalty = [Float32](repeating: 0.0, count: logitDim)
-        for id in suppressedTokenIDs where id >= 0 && id < logitDim {
-            penalty[id] = cycleSuppressionPenalty
+        var bias = [Float32](repeating: 0.0, count: length)
+        for id in tokenIDs where id >= 0 && id < length {
+            bias[id] = penalty
         }
-        return MLXArray(penalty)
+        return MLXArray(bias)
     }
 
     /// Computes the hard-zone logit bias: forces closing tokens (zeroing
@@ -1123,7 +1122,7 @@ public enum GuidedGenerationLoop {
     ///   - closingBias: Optional logit bias favoring closing tokens. Applied
     ///     after the grammar mask so masked-out tokens remain at -inf.
     ///   - cycleSuppression: Optional additive degenerate-cycle penalty
-    ///     (length == logit dim, from `cycleSuppressionBias`). Applied
+    ///     (length == logit dim, from `tokenPenaltyBias`). Applied
     ///     after the grammar mask, like `closingBias`, so masked-out
     ///     tokens remain at -inf.
     /// - Returns: The sampled token ID.

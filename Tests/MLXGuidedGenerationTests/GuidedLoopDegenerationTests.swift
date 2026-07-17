@@ -374,7 +374,7 @@ struct GuidedLoopDegenerationTests {
         let grammarTokenizer = try GrammarTokenizer(
             vocab: vocab,
             vocabType: .byteFallback,
-            stopTokenIds: [Int32(DegenerationByteTokenizer.eosTokenID), Int32(turnEnder)]
+            stopTokenIDs: [Int32(DegenerationByteTokenizer.eosTokenID), Int32(turnEnder)]
         )
         let constraint = try GrammarConstraint(
             tokenizer: grammarTokenizer,

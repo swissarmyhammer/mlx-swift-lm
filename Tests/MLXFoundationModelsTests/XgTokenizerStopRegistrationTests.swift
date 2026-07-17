@@ -74,7 +74,7 @@ struct XgTokenizerStopRegistrationTests {
         let xg = try await MLXLanguageModel.makeXgTokenizer(
             modelID: configuration.name, tokenizer: tokenizer, configuration: configuration)
 
-        let registered = Set(xg.stopTokenIds.map(Int.init))
+        let registered = Set(xg.stopTokenIDs.map(Int.init))
         #expect(registered.isSuperset(of: [200, 201]), "configuration.eosTokenIds must register")
         #expect(registered.contains(255), "the tokenizer's own EOS must register")
         #expect(registered.contains(254), "extraEOSTokens must register")

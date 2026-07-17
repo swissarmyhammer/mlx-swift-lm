@@ -374,7 +374,7 @@ private actor ModelCache {
             return try GrammarTokenizer(
                 vocab: vocab.vocab,
                 vocabType: vocab.vocabType,
-                stopTokenIds: stops
+                stopTokenIDs: stops
             )
         }
     }

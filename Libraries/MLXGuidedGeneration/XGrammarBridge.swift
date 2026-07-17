@@ -68,8 +68,8 @@ public final class GrammarTokenizer: @unchecked Sendable {
     public let vocabSize: Int
     /// The stop-token ids registered on the xgrammar TokenizerInfo —
     /// the ids the grammar gates to accept states (see
-    /// ``init(vocab:vocabType:stopTokenIds:)``).
-    public let stopTokenIds: [Int32]
+    /// ``init(vocab:vocabType:stopTokenIDs:)``).
+    public let stopTokenIDs: [Int32]
 
     /// Construct a tokenizer from a pre-decoded vocab.
     ///
@@ -85,7 +85,7 @@ public final class GrammarTokenizer: @unchecked Sendable {
     ///   - eosTokenId: End-of-sequence token ID, registered as a stop
     ///     token on the xgrammar TokenizerInfo.
     public convenience init(vocab: [String], vocabType: VocabType, eosTokenId: Int32) throws {
-        try self.init(vocab: vocab, vocabType: vocabType, stopTokenIds: [eosTokenId])
+        try self.init(vocab: vocab, vocabType: vocabType, stopTokenIDs: [eosTokenId])
     }
 
     /// Construct a tokenizer from a pre-decoded vocab, registering the
@@ -104,14 +104,14 @@ public final class GrammarTokenizer: @unchecked Sendable {
     /// - Parameters:
     ///   - vocab: Per-token strings, as in `init(vocab:vocabType:eosTokenId:)`.
     ///   - vocabType: Selects xgrammar's token-decoding path.
-    ///   - stopTokenIds: All stop-token ids to register on the xgrammar
+    ///   - stopTokenIDs: All stop-token ids to register on the xgrammar
     ///     TokenizerInfo.
-    public init(vocab: [String], vocabType: VocabType, stopTokenIds: [Int32]) throws {
+    public init(vocab: [String], vocabType: VocabType, stopTokenIDs: [Int32]) throws {
         self.vocabSize = vocab.count
-        self.stopTokenIds = stopTokenIds
+        self.stopTokenIDs = stopTokenIDs
 
         var info: OpaquePointer?
-        let stopTokens: [Int32] = stopTokenIds
+        let stopTokens: [Int32] = stopTokenIDs
 
         let status: XGStatus = vocab.withCStringPointers { ptrs in
             stopTokens.withUnsafeBufferPointer { stopBuf in
@@ -275,65 +275,25 @@ public final class GrammarConstraint: @unchecked Sendable {
     ///     FF strings back into token ids. Must be the same tokenizer
     ///     whose vocab built `tokenizer`. Ignored when `fastForward`
     ///     is `false`.
-    public init(
+    public convenience init(
         tokenizer: GrammarTokenizer,
         jsonSchema: String,
         fastForward: Bool = false,
         hostTokenizer: (any Tokenizer)? = nil
     ) throws {
-        self.tokenizer = tokenizer
-        self.vocabSize = Int32(tokenizer.vocabSize)
-        let words = Int(xg_bitmask_size(self.vocabSize))
-        self.bitmaskWords = max(0, words)
-        self.fastForward = fastForward
-        self.hostTokenizer = hostTokenizer
-
-        var compilerPtr: OpaquePointer?
-        let compilerStatus = xg_grammar_compiler_new(tokenizer.pointer, &compilerPtr)
-        guard compilerStatus == XG_OK, let compilerHandle = compilerPtr else {
-            throw GrammarError.constraintCompilationFailed(
-                Self.captureShimError(
-                    status: compilerStatus, fallback: "xg_grammar_compiler_new")
-            )
-        }
-
-        var compiledPtr: OpaquePointer?
-        let compileStatus = jsonSchema.withCString { schemaPtr in
-            xg_compile_json_schema(compilerHandle, schemaPtr, &compiledPtr)
-        }
-        guard compileStatus == XG_OK, let compiledHandle = compiledPtr else {
-            xg_grammar_compiler_free(compilerHandle)
-            let message = Self.captureShimError(
-                status: compileStatus, fallback: "xg_compile_json_schema"
-            )
-            // Discriminate user-schema errors from generic compile
-            // failures. xgrammar's typed exceptions map 1:1 to
-            // XG_ERR_INVALID_JSON{,_SCHEMA}; both indicate bad input
-            // rather than an internal shim problem, and callers
-            // pattern-match on the discriminated case.
-            if compileStatus == XG_ERR_INVALID_JSON_SCHEMA
-                || compileStatus == XG_ERR_INVALID_JSON
-            {
-                throw GrammarError.invalidJSONSchema(message)
+        try self.init(
+            tokenizer: tokenizer, fastForward: fastForward, hostTokenizer: hostTokenizer
+        ) { compilerHandle in
+            var compiledPtr: OpaquePointer?
+            let status = jsonSchema.withCString { schemaPtr in
+                xg_compile_json_schema(compilerHandle, schemaPtr, &compiledPtr)
             }
-            throw GrammarError.constraintCompilationFailed(message)
+            guard status == XG_OK, let compiledHandle = compiledPtr else {
+                throw GrammarConstraint.compilationError(
+                    status: status, fallback: "xg_compile_json_schema")
+            }
+            return compiledHandle
         }
-
-        var matcherPtr: OpaquePointer?
-        let matcherStatus = xg_matcher_new(compiledHandle, &matcherPtr)
-        guard matcherStatus == XG_OK, let matcherHandle = matcherPtr else {
-            xg_compiled_grammar_free(compiledHandle)
-            xg_grammar_compiler_free(compilerHandle)
-            throw GrammarError.constraintCompilationFailed(
-                Self.captureShimError(status: matcherStatus, fallback: "xg_matcher_new")
-            )
-        }
-
-        self.compiler = compilerHandle
-        self.compiled = compiledHandle
-        self.matcher = matcherHandle
-        self.ownsCompiledResources = true
-        self.forkParent = nil
     }
 
     /// Compile an EBNF (GBNF) grammar source string into a matcher.
@@ -358,62 +318,38 @@ public final class GrammarConstraint: @unchecked Sendable {
     ///     grammar uses `"start"`, matching the existing Lark shape.
     ///   - fastForward: Same semantics as the `jsonSchema:` init.
     ///   - hostTokenizer: Same semantics as the `jsonSchema:` init.
-    public init(
+    public convenience init(
         tokenizer: GrammarTokenizer,
         grammar: String,
         rootRule: String? = nil,
         fastForward: Bool = false,
         hostTokenizer: (any Tokenizer)? = nil
     ) throws {
-        self.tokenizer = tokenizer
-        self.vocabSize = Int32(tokenizer.vocabSize)
-        let words = Int(xg_bitmask_size(self.vocabSize))
-        self.bitmaskWords = max(0, words)
-        self.fastForward = fastForward
-        self.hostTokenizer = hostTokenizer
-
-        var compilerPtr: OpaquePointer?
-        let compilerStatus = xg_grammar_compiler_new(tokenizer.pointer, &compilerPtr)
-        guard compilerStatus == XG_OK, let compilerHandle = compilerPtr else {
-            throw GrammarError.constraintCompilationFailed(
-                Self.captureShimError(
-                    status: compilerStatus, fallback: "xg_grammar_compiler_new")
-            )
-        }
-
-        var compiledPtr: OpaquePointer?
-        let compileStatus: XGStatus = grammar.withCString { grammarPtr in
-            if let rootRule {
-                return rootRule.withCString { rootPtr in
-                    xg_compile_grammar_from_ebnf(
-                        compilerHandle, grammarPtr, rootPtr, &compiledPtr)
+        try self.init(
+            tokenizer: tokenizer, fastForward: fastForward, hostTokenizer: hostTokenizer
+        ) { compilerHandle in
+            var compiledPtr: OpaquePointer?
+            let status: XGStatus = grammar.withCString { grammarPtr in
+                if let rootRule {
+                    return rootRule.withCString { rootPtr in
+                        xg_compile_grammar_from_ebnf(
+                            compilerHandle, grammarPtr, rootPtr, &compiledPtr)
+                    }
                 }
+                return xg_compile_grammar_from_ebnf(
+                    compilerHandle, grammarPtr, nil, &compiledPtr)
             }
-            return xg_compile_grammar_from_ebnf(compilerHandle, grammarPtr, nil, &compiledPtr)
+            guard status == XG_OK, let compiledHandle = compiledPtr else {
+                // EBNF rejections are never JSON-input errors, so this
+                // path skips `compilationError`'s discrimination and
+                // always surfaces the generic compilation case.
+                throw GrammarError.constraintCompilationFailed(
+                    GrammarConstraint.captureShimError(
+                        status: status, fallback: "xg_compile_grammar_from_ebnf")
+                )
+            }
+            return compiledHandle
         }
-        guard compileStatus == XG_OK, let compiledHandle = compiledPtr else {
-            xg_grammar_compiler_free(compilerHandle)
-            throw GrammarError.constraintCompilationFailed(
-                Self.captureShimError(
-                    status: compileStatus, fallback: "xg_compile_grammar_from_ebnf")
-            )
-        }
-
-        var matcherPtr: OpaquePointer?
-        let matcherStatus = xg_matcher_new(compiledHandle, &matcherPtr)
-        guard matcherStatus == XG_OK, let matcherHandle = matcherPtr else {
-            xg_compiled_grammar_free(compiledHandle)
-            xg_grammar_compiler_free(compilerHandle)
-            throw GrammarError.constraintCompilationFailed(
-                Self.captureShimError(status: matcherStatus, fallback: "xg_matcher_new")
-            )
-        }
-
-        self.compiler = compilerHandle
-        self.compiled = compiledHandle
-        self.matcher = matcherHandle
-        self.ownsCompiledResources = true
-        self.forkParent = nil
     }
 
     /// Compile a structural-tag JSON source into a matcher.
@@ -447,11 +383,58 @@ public final class GrammarConstraint: @unchecked Sendable {
     ///     `what()` text in the payload.
     ///   - fastForward: Same semantics as the `jsonSchema:` init.
     ///   - hostTokenizer: Same semantics as the `jsonSchema:` init.
-    public init(
+    public convenience init(
         tokenizer: GrammarTokenizer,
         structuralTag: String,
         fastForward: Bool = false,
         hostTokenizer: (any Tokenizer)? = nil
+    ) throws {
+        try self.init(
+            tokenizer: tokenizer, fastForward: fastForward, hostTokenizer: hostTokenizer
+        ) { compilerHandle in
+            var compiledPtr: OpaquePointer?
+            let status = structuralTag.withCString { jsonPtr in
+                xg_compile_structural_tag(compilerHandle, jsonPtr, &compiledPtr)
+            }
+            guard status == XG_OK, let compiledHandle = compiledPtr else {
+                // Same category collapse as `jsonSchema:` — embedded JSON
+                // or schema errors inside a structural-tag body map to
+                // `invalidJSONSchema`, while structural-tag-level
+                // rejections (malformed top-level shape, unknown format
+                // types) and any other shim failure stay on
+                // `constraintCompilationFailed`.
+                throw GrammarConstraint.compilationError(
+                    status: status, fallback: "xg_compile_structural_tag")
+            }
+            return compiledHandle
+        }
+    }
+
+    /// Designated initializer shared by the three public compile paths
+    /// (`jsonSchema:`, `grammar:`, `structuralTag:`). Owns everything they
+    /// have in common — property setup, compiler creation, matcher
+    /// construction, and handle cleanup on every failure path — while
+    /// `compile` encodes the one step that differs: the `xg_compile_*`
+    /// call and its error mapping.
+    ///
+    /// - Parameters:
+    ///   - tokenizer: The tokenizer the grammar binds to. Must outlive
+    ///     this constraint; a Swift reference is retained here.
+    ///   - fastForward: See the public initializers.
+    ///   - hostTokenizer: See the public initializers.
+    ///   - compile: Compiles the grammar source against the freshly
+    ///     created compiler handle and returns the compiled-grammar
+    ///     handle, throwing a `GrammarError` on failure. On a throw, this
+    ///     initializer frees the compiler handle — the closure must not
+    ///     free it itself.
+    /// - Throws: Whatever `compile` throws, or
+    ///   `GrammarError.constraintCompilationFailed` when compiler or
+    ///   matcher creation fails.
+    private init(
+        tokenizer: GrammarTokenizer,
+        fastForward: Bool,
+        hostTokenizer: (any Tokenizer)?,
+        compile: (OpaquePointer) throws -> OpaquePointer
     ) throws {
         self.tokenizer = tokenizer
         self.vocabSize = Int32(tokenizer.vocabSize)
@@ -469,26 +452,12 @@ public final class GrammarConstraint: @unchecked Sendable {
             )
         }
 
-        var compiledPtr: OpaquePointer?
-        let compileStatus = structuralTag.withCString { jsonPtr in
-            xg_compile_structural_tag(compilerHandle, jsonPtr, &compiledPtr)
-        }
-        guard compileStatus == XG_OK, let compiledHandle = compiledPtr else {
+        let compiledHandle: OpaquePointer
+        do {
+            compiledHandle = try compile(compilerHandle)
+        } catch {
             xg_grammar_compiler_free(compilerHandle)
-            let message = Self.captureShimError(
-                status: compileStatus, fallback: "xg_compile_structural_tag"
-            )
-            // Same category collapse as `jsonSchema:` — embedded JSON
-            // or schema errors inside a structural-tag body map to
-            // `invalidJSONSchema`, while structural-tag-level rejections
-            // (malformed top-level shape, unknown format types) and any
-            // other shim failure stay on `constraintCompilationFailed`.
-            if compileStatus == XG_ERR_INVALID_JSON_SCHEMA
-                || compileStatus == XG_ERR_INVALID_JSON
-            {
-                throw GrammarError.invalidJSONSchema(message)
-            }
-            throw GrammarError.constraintCompilationFailed(message)
+            throw error
         }
 
         var matcherPtr: OpaquePointer?
@@ -506,6 +475,27 @@ public final class GrammarConstraint: @unchecked Sendable {
         self.matcher = matcherHandle
         self.ownsCompiledResources = true
         self.forkParent = nil
+    }
+
+    /// Maps a failed `xg_compile_*` status to the matching `GrammarError`,
+    /// discriminating user-input errors from generic compile failures:
+    /// xgrammar's typed exceptions map 1:1 to `XG_ERR_INVALID_JSON` /
+    /// `XG_ERR_INVALID_JSON_SCHEMA`, and both indicate bad input rather
+    /// than an internal shim problem, so callers can pattern-match on the
+    /// discriminated `invalidJSONSchema` case. Everything else stays on
+    /// `constraintCompilationFailed`.
+    ///
+    /// - Parameters:
+    ///   - status: The non-OK status the compile primitive returned.
+    ///   - fallback: The failing primitive's name, used when no shim
+    ///     error message is available (see `captureShimError`).
+    /// - Returns: The error for the compile closure to throw.
+    private static func compilationError(status: XGStatus, fallback: String) -> GrammarError {
+        let message = captureShimError(status: status, fallback: fallback)
+        if status == XG_ERR_INVALID_JSON_SCHEMA || status == XG_ERR_INVALID_JSON {
+            return .invalidJSONSchema(message)
+        }
+        return .constraintCompilationFailed(message)
     }
 
     /// Private initializer used by `clone()`. Adopts the already-forked
