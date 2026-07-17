@@ -305,13 +305,13 @@ public enum GuidedGenerationLoop {
             // Handle fast-forward tokens. CommitResult.tokens carries
             // ONLY the jump-forward ids (the sampled token is not echoed
             // back by xgrammar), so use the array directly.
-            let ffTokens: [Int32] = commitResult.tokens
+            let fastForwardTokens: [Int32] = commitResult.tokens
 
             let shouldStop: Bool
-            if !ffTokens.isEmpty {
+            if !fastForwardTokens.isEmpty {
                 shouldStop = try processFastForwardTokens(
                     tokenID,
-                    ffTokens,
+                    fastForwardTokens,
                     state: &state,
                     maxTokens: maxTokens,
                     model: model,
@@ -643,26 +643,26 @@ public enum GuidedGenerationLoop {
     ///
     /// - Parameters:
     ///   - tokenID: The token just sampled and committed to the grammar
-    ///     this iteration (the one whose commit produced `ffTokens`).
+    ///     this iteration (the one whose commit produced `fastForwardTokens`).
     ///     `CommitResult.tokens` never echoes this id back (see
     ///     `GrammarConstraint.commitToken`'s doc comment), so unlike the
     ///     non-FF path (`advanceSingleSampledToken`), nothing upstream of
     ///     this call has fed it through the model yet. It must get its own
-    ///     forward pass here -- feeding `ffTokens` directly without it
+    ///     forward pass here -- feeding `fastForwardTokens` directly without it
     ///     would silently skip `tokenID`'s KV-cache entry, leaving every
     ///     later position's attention unable to see a token that was
     ///     nonetheless emitted and accepted by the grammar.
-    ///   - ffTokens: The jump-forward token ids from `CommitResult.tokens`
+    ///   - fastForwardTokens: The jump-forward token ids from `CommitResult.tokens`
     ///     (never includes the sampled token that triggered them).
     ///   - state: Loop state; mutates `detokenizer`/`accumulatedText`/
     ///     `tokenCount` (via `emitToken`) and `cache`/`modelState`/`logits`/
     ///     `mask`/`maskArray`.
     ///   - maxTokens: Generation budget; FF emission stops (without
     ///     feeding `tokenID` or the FF tokens to the model) once reached.
-    ///   - model: The language model to feed `tokenID` and `ffTokens`
+    ///   - model: The language model to feed `tokenID` and `fastForwardTokens`
     ///     through, one token at a time, to advance the KV cache.
     ///   - onTokenCommitted: Invoked, in order, with each token id actually
-    ///     fed through `model` this call (`tokenID` then every `ffTokens`
+    ///     fed through `model` this call (`tokenID` then every `fastForwardTokens`
     ///     entry); `nil` is a no-op.
     ///   - kvBits: Bit width for KV-cache quantization, or `nil` to disable
     ///     it for this call.
@@ -686,7 +686,7 @@ public enum GuidedGenerationLoop {
     ///   the FF batch.
     private static func processFastForwardTokens(
         _ tokenID: Int,
-        _ ffTokens: [Int32],
+        _ fastForwardTokens: [Int32],
         state: inout LoopState,
         maxTokens: Int,
         model: any LanguageModel,
@@ -707,12 +707,12 @@ public enum GuidedGenerationLoop {
         // the caller's stop contract. Propagate through the `Bool`
         // return and let the caller break its own `while`. (`tokenID`
         // itself was already emitted by `run()`'s main loop before this
-        // function was called, so only `ffTokens` need emitting here.)
-        for ffToken in ffTokens {
+        // function was called, so only `fastForwardTokens` need emitting here.)
+        for fastForwardToken in fastForwardTokens {
             if state.tokenCount >= maxTokens {
                 return true
             }
-            if emitToken(Int(ffToken), state: &state, emit: emit) {
+            if emitToken(Int(fastForwardToken), state: &state, emit: emit) {
                 return true
             }
         }
@@ -724,10 +724,10 @@ public enum GuidedGenerationLoop {
 
         // Feed the sampled token through the model FIRST, before any FF
         // token. It occupies the KV-cache position immediately after the
-        // prior forward pass and immediately before `ffTokens[0]`'s -- the
+        // prior forward pass and immediately before `fastForwardTokens[0]`'s -- the
         // same single-token forward pass `advanceSingleSampledToken` does
         // on the non-FF path. Its logits are irrelevant here (the grammar,
-        // not a sample from these logits, forces every `ffToken` that
+        // not a sample from these logits, forces every `fastForwardToken` that
         // follows), so only the last FF token's logits are kept below,
         // exactly as before this token was added to the batch.
         _ = feedTokenThroughModel(
@@ -740,11 +740,11 @@ public enum GuidedGenerationLoop {
         // a broadcast failure on models with global attention layers
         // (e.g., Gemma 3). Single-token passes (T_q=1) use the
         // optimized Metal kernel and skip the mask entirely.
-        for (i, ffToken) in ffTokens.enumerated() {
+        for (i, fastForwardToken) in fastForwardTokens.enumerated() {
             let logits = feedTokenThroughModel(
-                Int(ffToken), state: &state, model: model, onTokenCommitted: onTokenCommitted)
+                Int(fastForwardToken), state: &state, model: model, onTokenCommitted: onTokenCommitted)
             // Only need logits from the last FF token
-            if i == ffTokens.count - 1 {
+            if i == fastForwardTokens.count - 1 {
                 state.logits = logits
             }
         }

@@ -7,7 +7,7 @@
 //
 // The subtle path: when `emit` returns `false` during fast-forward
 // yielding, the loop must still stop promptly. The inner `for` over
-// `ffTokens` must propagate the stop signal to the outer `while` so it
+// `fastForwardTokens` must propagate the stop signal to the outer `while` so it
 // does not sample another token and call `emit` again -- which would
 // violate the "emit=false stops generation" contract.
 //
