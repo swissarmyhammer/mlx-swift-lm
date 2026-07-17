@@ -35,6 +35,17 @@ struct ReasoningConfigTests {
         #expect(config?.startDelimiter == "<think>")
     }
 
+    /// MiniMax-M2 (model_type "minimax") is an interleaved-thinking model:
+    /// its chat template pre-opens `<think>\n` in every generation prompt
+    /// (there is no thinking-toggle kwarg), so reasoning is always on.
+    @Test func inferMiniMaxM2IsAlwaysOn() {
+        let config = ReasoningConfig.infer(
+            from: "minimax", modelId: "mlx-community/MiniMax-M2-4bit")
+        #expect(config?.startDelimiter == "<think>")
+        #expect(config?.endDelimiter == "</think>")
+        #expect(config?.promptStrategy == .alwaysOn)
+    }
+
     @Test func inferPlainQwen2IsNil() {
         #expect(
             ReasoningConfig.infer(

@@ -1134,6 +1134,13 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "ministral3") == .mistral)
         #expect(ToolCallFormat.infer(from: "Ministral3") == .mistral)
 
+        // MiniMax-M2 (model_type "minimax", e.g. mlx-community/MiniMax-M2-4bit):
+        // exact match, mirroring the dense-GLM4 style — the only registered
+        // minimax architecture is MiniMaxM2ForCausalLM, whose template
+        // consumes the `<minimax:tool_call>` invoke/parameter format.
+        #expect(ToolCallFormat.infer(from: "minimax") == .minimaxM2)
+        #expect(ToolCallFormat.infer(from: "MiniMax") == .minimaxM2)
+
         // Llama models - require secondary signals from configData
         #expect(ToolCallFormat.infer(from: "llama") == nil)  // Should be nil without configData
 

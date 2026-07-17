@@ -160,6 +160,17 @@ public struct ReasoningConfig: Sendable, Equatable {
                 promptStrategy: .alwaysOn)
         }
 
+        // MiniMax-M2 (model_type "minimax", e.g. mlx-community/MiniMax-M2-4bit):
+        // interleaved thinking, always on. Its chat template has no thinking
+        // kwarg and pre-opens `<think>\n` in every generation prompt, so the
+        // decoded stream begins inside an open reasoning span (detected by
+        // the prompt-tail primed-inside check, exactly like R1 above).
+        if type == "minimax" {
+            return ReasoningConfig(
+                startDelimiter: "<think>", endDelimiter: "</think>",
+                promptStrategy: .alwaysOn)
+        }
+
         return nil
     }
 }

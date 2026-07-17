@@ -707,6 +707,140 @@ struct TranscriptConverterTests {
         #expect(names == ["get_weather", "get_time"])
     }
 
+    /// Mirrors the tool-role validator in MiniMax-M2's `chat_template.jinja`.
+    ///
+    /// This is the check that raises the reported `TemplateException`,
+    /// reproduced from mlx-community/MiniMax-M2-4bit's `chat_template.jinja`,
+    /// whose message loop tracks the last assistant turn's tool calls:
+    ///
+    /// ```jinja
+    /// {%- if message.tool_calls -%}
+    ///     ...
+    ///     {%- set last_tool_call.name = message.tool_calls[-1].name -%}
+    /// {%- else -%}
+    ///     {%- set last_tool_call.name = none -%}
+    /// {%- endif -%}
+    /// ...
+    /// {%- elif message.role == 'tool' -%}
+    ///     {%- if last_tool_call.name is none -%}
+    ///         {{- raise_exception("Message has tool role, but there was no
+    ///             previous assistant message with a tool call!") }}
+    ///     {%- endif -%}
+    /// ```
+    ///
+    /// i.e. every `tool` message must be preceded by an assistant message
+    /// carrying non-empty `tool_calls`, with any *plain* assistant message in
+    /// between resetting the tracker. Returns the offset of the first tool
+    /// message that violates this, or `nil` when the sequence is
+    /// template-acceptable.
+    ///
+    /// This mirror is validated against the real template out-of-band:
+    /// running the actual `chat_template.jinja` (jinja2) over the old
+    /// (verbatim-content) shape raises exactly this exception, while the
+    /// structured-`tool_calls` shape renders cleanly as the native
+    /// `<minimax:tool_call><invoke …>` replay. The full end-to-end leg is the
+    /// gated integration run, which needs the ~119GB model + GPU.
+    private func firstMiniMaxToolValidatorViolation(in rawMessages: [Message]) -> Int? {
+        var loop = rawMessages
+        if loop.first?["role"] as? String == "system" { loop.removeFirst() }
+        var lastToolCallName: String?
+        for (offset, message) in loop.enumerated() {
+            switch message["role"] as? String ?? "" {
+            case "assistant":
+                let calls = message["tool_calls"] as? [[String: any Sendable]]
+                if let calls, !calls.isEmpty {
+                    lastToolCallName =
+                        (calls.last?["function"] as? [String: any Sendable])?["name"] as? String
+                } else {
+                    lastToolCallName = nil
+                }
+            case "tool":
+                if lastToolCallName == nil { return offset }
+            default:
+                break
+            }
+        }
+        return nil
+    }
+
+    @Test
+    func testMiniMaxToolRoundRendersTemplateAcceptableSequence() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let entries = try completedToolRoundEntries()
+        let messages = TranscriptConverter.mlxMessages(for: entries, toolCallFormat: .minimaxM2)
+        let raw = DefaultMessageGenerator().generate(messages: messages)
+
+        // Every tool-role message must follow an assistant message carrying
+        // structured `tool_calls`, or MiniMax's template raises
+        // `TemplateException`.
+        #expect(firstMiniMaxToolValidatorViolation(in: raw) == nil)
+
+        // Role sequence: system, user, assistant(tool call), tool, assistant.
+        #expect(messages.map(\.role) == [.system, .user, .assistant, .tool, .assistant])
+
+        // The assistant tool-call turn is carried as structured `tool_calls`
+        // (not verbatim text content) so MiniMax's template renders the
+        // native `<minimax:tool_call><invoke …>` replay and sets its
+        // `last_tool_call` tracker before the tool result arrives.
+        let toolCallMessage = raw[2]
+        #expect(toolCallMessage["role"] as? String == "assistant")
+        let calls = try #require(toolCallMessage["tool_calls"] as? [[String: any Sendable]])
+        #expect(calls.count == 1)
+        let function = try #require(calls[0]["function"] as? [String: any Sendable])
+        #expect(function["name"] as? String == "get_weather")
+        // The template iterates `arguments.items()`, so the arguments must be
+        // a structured object, not a JSON string.
+        let arguments = try #require(function["arguments"] as? [String: any Sendable])
+        #expect(arguments["location"] as? String == "Tokyo")
+    }
+
+    @Test
+    func testVerbatimToolCallRenderingViolatesMiniMaxToolValidator() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // Guards the fix's motivation: the default (verbatim-content) tool-call
+        // rendering — correct for Qwen/GLM — carries no `tool_calls` metadata,
+        // so MiniMax's template resets `last_tool_call` and raises on the tool
+        // result, which is exactly why `.minimaxM2` must render structured
+        // `tool_calls` instead.
+        let entries = try completedToolRoundEntries()
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+        let raw = DefaultMessageGenerator().generate(messages: messages)
+
+        #expect(firstMiniMaxToolValidatorViolation(in: raw) != nil)
+    }
+
+    @Test
+    func testMiniMaxMultipleToolCallsFoldIntoOneAssistantMessage() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let first = Transcript.ToolCall(
+            id: "call-1", toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location": "Tokyo"}"#))
+        let second = Transcript.ToolCall(
+            id: "call-2", toolName: "get_time",
+            arguments: try GeneratedContent(json: #"{"timezone": "JST"}"#))
+        let entries: [Transcript.Entry] = [
+            .toolCalls(Transcript.ToolCalls(id: "tc-1", [first, second]))
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, toolCallFormat: .minimaxM2)
+
+        // Parallel calls in one round fold into a single assistant turn, so
+        // MiniMax's template renders one `<minimax:tool_call>` block with one
+        // `<invoke>` per call (its `tool_calls` loop), matching how the model
+        // itself emits a parallel round.
+        #expect(messages.count == 1)
+        let raw = DefaultMessageGenerator().generate(message: messages[0])
+        let calls = try #require(raw["tool_calls"] as? [[String: any Sendable]])
+        #expect(calls.count == 2)
+        let names = calls.compactMap {
+            ($0["function"] as? [String: any Sendable])?["name"] as? String
+        }
+        #expect(names == ["get_weather", "get_time"])
+    }
+
     @Test
     func testNonMistralToolCallRenderingUnchanged() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
@@ -729,9 +863,10 @@ struct TranscriptConverterTests {
         // `.glm4` (GLM) must all keep the historical rendering — one assistant
         // message per call carrying the verbatim envelope as text content,
         // with no structured tool metadata that would let a template re-render
-        // it. Unlike `.mistral`, which folds parallel calls into a single
-        // assistant turn, these formats never collapse multiple calls: two
-        // calls yield two messages, one per call. Only `.mistral` deviates.
+        // it. Unlike `.mistral`/`.minimaxM2`, which fold parallel calls into a
+        // single assistant turn, these formats never collapse multiple calls:
+        // two calls yield two messages, one per call. Only the
+        // structured-rendering formats deviate.
         let defaultMessages = TranscriptConverter.mlxMessages(for: entries)
         #expect(defaultMessages.count == 2)
         for format in [ToolCallFormat.json, .glm4] {

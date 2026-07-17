@@ -2801,6 +2801,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Parameters:
         ///   - reasoningConfig: The think-then-call reasoning config (already gated by the caller).
         ///   - toolAwareInput: The tool-aware-template-rendered prompt.
+        ///   - primedInside: Whether the rendered prompt already ends inside
+        ///     an open reasoning span (computed once by the caller, which
+        ///     also gates on it via `thinkThenCallPhase1Engages`).
         ///   - maxTokens: The resolved token budget for this request.
         ///   - request: The generation request (temperature/reasoning options).
         ///   - requestedSamplingMode: The caller's sampling mode override, if any.
@@ -2814,6 +2817,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private func executeThinkThenCallPhase1(
             reasoningConfig: ReasoningConfig,
             toolAwareInput: LMInput,
+            primedInside: Bool,
             maxTokens: Int,
             request: LanguageModelExecutorGenerationRequest,
             requestedSamplingMode: MLXSamplingMode?,
@@ -2822,8 +2826,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> (tokenIDs: [Int], cutOff: Bool) {
-            let primedInside = Self.reasoningPrimedInside(
-                input: toolAwareInput, reasoningConfig: reasoningConfig, tokenizer: context.tokenizer)
             let phase1 = try await runToolCallReasoningPhase(
                 input: toolAwareInput, reasoningConfig: reasoningConfig,
                 primedInside: primedInside, maxTokens: maxTokens,
@@ -3004,12 +3006,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         }
 
         /// Derives the think-then-call reasoning config for the tool-calling
-        /// path. Think-then-call is gated to the `enable_thinking` family
-        /// (Qwen3/QwQ): their template both renders the tool block AND
-        /// honors `enable_thinking`. R1-style `.alwaysOn` models are
-        /// tool-blind (template ignores `tools:`), so they fall through to
-        /// the single-phase path unchanged; thinking-disabled requests stay
-        /// single-phase too.
+        /// path — the static, pre-render gate. Two strategy families qualify:
+        ///
+        /// - `.templateFlag` (Qwen3/QwQ): their template both renders the
+        ///   tool block AND honors `enable_thinking`.
+        /// - `.alwaysOn` (MiniMax-M2, R1-style): whether Phase 1 actually
+        ///   runs is decided post-render by `thinkThenCallPhase1Engages`,
+        ///   which requires the rendered prompt to end inside an open
+        ///   reasoning span (MiniMax-M2's template pre-opens `<think>\n`).
+        ///   A non-primed alwaysOn prompt (e.g. a tool-blind R1-style
+        ///   template that ignores `tools:` and doesn't prefill `<think>`)
+        ///   falls through to the single-phase path unchanged.
+        ///
+        /// Thinking-disabled requests stay single-phase for both.
         ///
         /// - Parameters:
         ///   - declaresReasoning: Whether `.reasoning` was declared at init.
@@ -3017,17 +3026,58 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - reasoningLevel: The caller's requested reasoning level, if any.
         /// - Returns: The reasoning config to run think-then-call with, or
         ///   `nil` when the model/request doesn't qualify.
-        private static func makeThinkThenCallConfig(
+        static func makeThinkThenCallConfig(
             declaresReasoning: Bool,
             resolved: ModelConfiguration,
             reasoningLevel: ContextOptions.ReasoningLevel?
         ) -> ReasoningConfig? {
             guard declaresReasoning,
                 let reasoningConfig = resolved.reasoningConfig,
-                case .templateFlag = reasoningConfig.promptStrategy,
                 thinkingEnabled(for: reasoningLevel) != false
             else { return nil }
-            return reasoningConfig
+            switch reasoningConfig.promptStrategy {
+            case .templateFlag, .alwaysOn:
+                return reasoningConfig
+            case .none:
+                // No prompt-level thinking protocol to run Phase 1 against.
+                return nil
+            }
+        }
+
+        /// Whether think-then-call Phase 1 (unconstrained reasoning until the
+        /// closing delimiter) should run for this round's rendered prompt —
+        /// the post-render gate, complementing `makeThinkThenCallConfig`.
+        ///
+        /// - `.templateFlag`: always engages — the kwarg primed the template,
+        ///   and the model emits its own `<think>` opener (Qwen3-style), so
+        ///   prompt priming is irrelevant.
+        /// - `.alwaysOn`: engages only when the rendered prompt ends inside
+        ///   an open reasoning span (MiniMax-M2's template pre-opens
+        ///   `<think>\n`, so its constrained tool round would otherwise mix
+        ///   free-form thinking into the envelope buffer). A non-primed
+        ///   prompt stays single-phase: its model may never emit `</think>`,
+        ///   and Phase 1 would burn the whole budget waiting for it.
+        /// - `.none`: never reaches here (`makeThinkThenCallConfig` filters
+        ///   it), but answers `false` for completeness.
+        ///
+        /// - Parameters:
+        ///   - reasoningConfig: The config from `makeThinkThenCallConfig`.
+        ///   - primedInside: Whether the rendered prompt ends inside an open
+        ///     reasoning span (see `reasoningPrimedInside`).
+        /// - Returns: `true` when Phase 1 should run before the constrained
+        ///   Phase 2.
+        static func thinkThenCallPhase1Engages(
+            reasoningConfig: ReasoningConfig,
+            primedInside: Bool
+        ) -> Bool {
+            switch reasoningConfig.promptStrategy {
+            case .templateFlag:
+                return true
+            case .alwaysOn:
+                return primedInside
+            case .none:
+                return false
+            }
         }
 
         /// Resolves Phase 2's token budget for think-then-call tool-calling.
@@ -3120,12 +3170,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let toolSpecs = try ToolCallingConversions.makeToolSpecs(
                 from: allTools)
 
-            // Think-then-call is gated to the enable_thinking
-            // family (Qwen3/QwQ): their template both renders the tool
-            // block AND honors `enable_thinking`. R1-style `.alwaysOn`
-            // models are tool-blind (template ignores `tools:`), so
-            // they fall through to the single-phase path unchanged;
-            // thinking-disabled requests stay single-phase too.
+            // Think-then-call qualifies two strategy families: the
+            // `enable_thinking` templates (Qwen3/QwQ, which render the
+            // tool block AND honor the kwarg) and `.alwaysOn` templates
+            // (MiniMax-M2), the latter confirmed post-render by the
+            // primed-inside gate at the Phase 1 call below — a
+            // non-primed alwaysOn prompt (tool-blind R1-style) stays
+            // single-phase unchanged. Thinking-disabled requests stay
+            // single-phase too.
             let thinkThenCallConfig = Self.makeThinkThenCallConfig(
                 declaresReasoning: declaresReasoning,
                 resolved: resolved,
@@ -3197,16 +3249,29 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // PHASE 1 (think-then-call): reason unconstrained until
             // `</think>`, retaining the token IDs to prefill into the
             // constrained phase below. Empty on the single-phase path.
+            // `.alwaysOn` configs additionally require the rendered prompt
+            // to end inside an open reasoning span (see
+            // `thinkThenCallPhase1Engages`) — MiniMax-M2's template
+            // pre-opens `<think>\n`; a non-primed alwaysOn prompt stays
+            // single-phase.
             var reasoningTokenIDs: [Int] = []
             if let reasoningConfig = thinkThenCallConfig {
-                let phase1 = try await executeThinkThenCallPhase1(
-                    reasoningConfig: reasoningConfig, toolAwareInput: toolAwareInput,
-                    maxTokens: setup.maxTokens,
-                    request: request, requestedSamplingMode: requestedSamplingMode,
-                    reasoningEntryID: reasoningEntryID, entryID: entryID,
-                    context: context, channel: channel)
-                reasoningTokenIDs = phase1.tokenIDs
-                guard !phase1.cutOff else { return false }
+                let primedInside = Self.reasoningPrimedInside(
+                    input: toolAwareInput, reasoningConfig: reasoningConfig,
+                    tokenizer: context.tokenizer)
+                if Self.thinkThenCallPhase1Engages(
+                    reasoningConfig: reasoningConfig, primedInside: primedInside)
+                {
+                    let phase1 = try await executeThinkThenCallPhase1(
+                        reasoningConfig: reasoningConfig, toolAwareInput: toolAwareInput,
+                        primedInside: primedInside,
+                        maxTokens: setup.maxTokens,
+                        request: request, requestedSamplingMode: requestedSamplingMode,
+                        reasoningEntryID: reasoningEntryID, entryID: entryID,
+                        context: context, channel: channel)
+                    reasoningTokenIDs = phase1.tokenIDs
+                    guard !phase1.cutOff else { return false }
+                }
             }
 
             // Phase 2 continues from the model's completed reasoning;

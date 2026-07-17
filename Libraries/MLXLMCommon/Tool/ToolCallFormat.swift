@@ -256,6 +256,15 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return .mistral
         }
 
+        // MiniMax-M2 (model_type "minimax", arch MiniMaxM2ForCausalLM, e.g.
+        // mlx-community/MiniMax-M2-4bit). Exact match, mirroring the dense
+        // GLM4 style above: the only registered minimax architecture is M2,
+        // and earlier MiniMax families (minimax_text_01, minimax_m1) neither
+        // load here nor share M2's `<minimax:tool_call>` invoke format.
+        if type == "minimax" {
+            return .minimaxM2
+        }
+
         return nil
     }
 }
