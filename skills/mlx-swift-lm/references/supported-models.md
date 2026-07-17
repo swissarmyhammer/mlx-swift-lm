@@ -64,7 +64,7 @@ LLMRegistry.phi35MoE   // mlx-community/Phi-3.5-MoE-instruct-4bit
 
 ```swift
 // model_type: "deepseek_v3"
-LLMRegistry.deepSeekR17b4bit  // mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit
+LLMRegistry.deepseekR17b4bit  // mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit
 LLMRegistry.deepseekR14bit    // mlx-community/DeepSeek-R1-4bit
 ```
 

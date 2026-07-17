@@ -382,7 +382,7 @@ public func loadParoQuantModel<T: LanguageModel>(
         .createModel(configuration: configData, modelType: baseConfig.modelType)
 
     // 4. EOS token override from generation_config.json
-    var eosTokenIds = Set(baseConfig.eosTokenIds?.values ?? [])
+    var eosTokenIDs = Set(baseConfig.eosTokenIds?.values ?? [])
     let genConfigURL = directory.appendingPathComponent("generation_config.json")
     let genConfig: GenerationConfigFile? =
         if let genData = try? Data(contentsOf: genConfigURL) {
@@ -390,14 +390,14 @@ public func loadParoQuantModel<T: LanguageModel>(
         } else {
             nil
         }
-    if let genEos = genConfig?.eosTokenIds?.values {
-        eosTokenIds = Set(genEos)
+    if let genEOS = genConfig?.eosTokenIds?.values {
+        eosTokenIDs = Set(genEOS)
     }
 
     var config = ModelConfiguration(
         directory: directory, stopStrings: genConfig?.stopStrings,
         toolCallFormat: toolCallFormat)
-    config.eosTokenIds = eosTokenIds
+    config.eosTokenIds = eosTokenIDs
 
     // 5. Load raw safetensors (top-level only; do not recurse into
     //    subdirectories, otherwise nested artefacts like an HF snapshot

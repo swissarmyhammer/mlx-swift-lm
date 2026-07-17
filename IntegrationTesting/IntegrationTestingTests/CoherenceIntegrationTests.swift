@@ -112,7 +112,7 @@ struct CoherenceIntegrationTests {
     )
     func olmoe_1B_7B() async throws {
         let container = try await models.llmContainer(
-            for: LLMRegistry.olmoe1b7b0125Instruct4bit)
+            for: LLMRegistry.olMoE1b7b0125Instruct4bit)
         try await ChatSessionTests.planetsCoherence(container: container)
     }
 

@@ -170,7 +170,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit`.
-    static public let deepSeekR17b4bit = ModelConfiguration(
+    static public let deepseekR17b4bit = ModelConfiguration(
         id: "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit",
         defaultPrompt: "Is 9.9 greater or 9.11?"
     )
@@ -456,7 +456,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/OLMoE-1B-7B-0125-Instruct-4bit`.
-    static public let olmoe1b7b0125Instruct4bit = ModelConfiguration(
+    static public let olMoE1b7b0125Instruct4bit = ModelConfiguration(
         id: "mlx-community/OLMoE-1B-7B-0125-Instruct-4bit",
         defaultPrompt: defaultPromptSkyBlue
     )
@@ -513,7 +513,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     private static func all() -> [ModelConfiguration] {
         [
             codeLlama13b4bit,
-            deepSeekR17b4bit,
+            deepseekR17b4bit,
             falconH1r7b,
             gemma2bQuantized,
             gemma22bIT4bit,
@@ -559,7 +559,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             baichuanM114bInstruct4bit,
             exaone4012b4bit,
             lille130mBF16,
-            olmoe1b7b0125Instruct4bit,
+            olMoE1b7b0125Instruct4bit,
             olmo211247bInstruct4bit,
             lingMini2bit,
             lfm28bA1b3bitMLX,
@@ -701,7 +701,7 @@ public final class LLMModelFactory: GenericModelFactory {
         }
 
         // Load EOS token IDs from config.json, with optional override from generation_config.json
-        var eosTokenIds = Set(baseConfig.eosTokenIds?.values ?? [])
+        var eosTokenIDs = Set(baseConfig.eosTokenIds?.values ?? [])
         let generationConfigURL = modelDirectory.appending(component: "generation_config.json")
         let generationConfig: GenerationConfigFile? =
             if let generationData = try? Data(contentsOf: generationConfigURL) {
@@ -709,13 +709,13 @@ public final class LLMModelFactory: GenericModelFactory {
             } else {
                 nil
             }
-        if let genEosIds = generationConfig?.eosTokenIds?.values {
-            eosTokenIds = Set(genEosIds)  // Override per Python mlx-lm behavior
+        if let genEOSIDs = generationConfig?.eosTokenIds?.values {
+            eosTokenIDs = Set(genEOSIDs)  // Override per Python mlx-lm behavior
         }
 
         // Build a ModelConfiguration with loaded EOS token IDs and tool call format
         var mutableConfiguration = configuration
-        mutableConfiguration.eosTokenIds = eosTokenIds
+        mutableConfiguration.eosTokenIds = eosTokenIDs
         mutableConfiguration.stopStrings.formUnion(generationConfig?.stopStrings ?? [])
         if mutableConfiguration.toolCallFormat == nil {
             mutableConfiguration.toolCallFormat = ToolCallFormat.infer(
