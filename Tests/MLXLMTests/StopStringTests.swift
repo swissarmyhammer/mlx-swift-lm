@@ -157,13 +157,13 @@ final class StopStringTests: XCTestCase {
     }
 
     func testKnownRegistryEntriesExposeFamilyStopDefaults() {
-        assertStops(LLMRegistry.gemma31bQat4bit, "<end_of_turn>")
-        assertStops(LLMRegistry.gemma3nE4bItLm4bit, "<end_of_turn>")
-        assertStops(LLMRegistry.gemma4E2bIt4bit, "<turn|>")
+        assertStops(LLMRegistry.gemma31bQAT4bit, "<end_of_turn>")
+        assertStops(LLMRegistry.gemma3nE4bITLM4bit, "<end_of_turn>")
+        assertStops(LLMRegistry.gemma4E2bIT4bit, "<turn|>")
         assertStops(LLMRegistry.qwen306b4bit, "<|im_end|>")
         assertStops(LLMRegistry.qwen352b4bit, "<|im_end|>")
         assertStops(LLMRegistry.phi354bit, "<|end|>")
-        assertStops(LLMRegistry.phi35Moe, "<|end|>")
+        assertStops(LLMRegistry.phi35MoE, "<|end|>")
         assertStops(LLMRegistry.llama38b4bit, "<|eot_id|>")
         assertStops(LLMRegistry.llama323b4bit, "<|eot_id|>")
 

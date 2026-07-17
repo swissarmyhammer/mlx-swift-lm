@@ -37,7 +37,7 @@ LLMRegistry.qwen257b            // mlx-community/Qwen2.5-7B-Instruct-4bit
 LLMRegistry.qwen2515b           // mlx-community/Qwen2.5-1.5B-Instruct-4bit
 LLMRegistry.qwen34b4bit         // mlx-community/Qwen3-4B-4bit
 LLMRegistry.qwen38b4bit         // mlx-community/Qwen3-8B-4bit
-LLMRegistry.qwen3Moe30bA3b4bit  // mlx-community/Qwen3-30B-A3B-4bit
+LLMRegistry.qwen3MoE30bA3b4bit  // mlx-community/Qwen3-30B-A3B-4bit
 ```
 
 ### Gemma
@@ -45,10 +45,10 @@ LLMRegistry.qwen3Moe30bA3b4bit  // mlx-community/Qwen3-30B-A3B-4bit
 ```swift
 // model_type: "gemma", "gemma2", "gemma3", "gemma3_text", "gemma3n"
 LLMRegistry.gemma2bQuantized    // mlx-community/quantized-gemma-2b-it
-LLMRegistry.gemma22bIt4bit      // mlx-community/gemma-2-2b-it-4bit
-LLMRegistry.gemma29bIt4bit      // mlx-community/gemma-2-9b-it-4bit
-LLMRegistry.gemma31bQat4bit     // mlx-community/gemma-3-1b-it-qat-4bit
-LLMRegistry.gemma3nE4bItLm4bit  // mlx-community/gemma-3n-E4B-it-lm-4bit
+LLMRegistry.gemma22bIT4bit      // mlx-community/gemma-2-2b-it-4bit
+LLMRegistry.gemma29bIT4bit      // mlx-community/gemma-2-9b-it-4bit
+LLMRegistry.gemma31bQAT4bit     // mlx-community/gemma-3-1b-it-qat-4bit
+LLMRegistry.gemma3nE4bITLM4bit  // mlx-community/gemma-3n-E4B-it-lm-4bit
 ```
 
 ### Phi
@@ -57,7 +57,7 @@ LLMRegistry.gemma3nE4bItLm4bit  // mlx-community/gemma-3n-E4B-it-lm-4bit
 // model_type: "phi", "phi3", "phimoe"
 LLMRegistry.phi4bit    // mlx-community/phi-2-hf-4bit-mlx
 LLMRegistry.phi354bit  // mlx-community/Phi-3.5-mini-instruct-4bit
-LLMRegistry.phi35Moe   // mlx-community/Phi-3.5-MoE-instruct-4bit
+LLMRegistry.phi35MoE   // mlx-community/Phi-3.5-MoE-instruct-4bit
 ```
 
 ### DeepSeek

@@ -211,7 +211,7 @@ Pre-configured models for quick loading:
 // LLM examples
 LLMRegistry.llama323b4bit
 LLMRegistry.qwen34b4bit
-LLMRegistry.gemma31bQat4bit
+LLMRegistry.gemma31bQAT4bit
 LLMRegistry.phi354bit
 LLMRegistry.mistral7b4bit
 

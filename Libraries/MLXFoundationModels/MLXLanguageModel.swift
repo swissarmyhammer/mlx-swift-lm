@@ -942,7 +942,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///
     /// - Parameters:
     ///   - configuration: Identifies and parameterizes the model (e.g.
-    ///     `LLMRegistry.gemma31bQat4bit` or `ModelConfiguration(id:)`).
+    ///     `LLMRegistry.gemma31bQAT4bit` or `ModelConfiguration(id:)`).
     ///   - capabilities: The capabilities this model supports
     ///     (`.guidedGeneration`, `.toolCalling`, `.reasoning`, `.vision`).
     ///     Stored verbatim; the adapter never infers or expands the set.

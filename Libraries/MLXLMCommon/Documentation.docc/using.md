@@ -146,7 +146,7 @@ import MLXHuggingFace
 import HuggingFace
 import Tokenizers
 
-let modelConfiguration = LLMRegistry.gemma31bQat4bit
+let modelConfiguration = LLMRegistry.gemma31bQAT4bit
 
 let model = try await #huggingFaceLoadModelContainer(
     configuration: modelConfiguration
@@ -168,7 +168,7 @@ import MLXLLM
 import MLXLMCommon
 import MLXHuggingFace
 
-let modelConfiguration = LLMRegistry.gemma31bQat4bit
+let modelConfiguration = LLMRegistry.gemma31bQAT4bit
 
 let model = try await LLMModelFactory.shared.loadContainer(
     from: #hubDownloader(),

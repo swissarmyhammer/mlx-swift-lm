@@ -28,17 +28,17 @@ struct CoherenceIntegrationTests {
     }
 
     @Test func gemma3_1B_qat() async throws {
-        let container = try await models.llmContainer(for: LLMRegistry.gemma31bQat4bit)
+        let container = try await models.llmContainer(for: LLMRegistry.gemma31bQAT4bit)
         try await ChatSessionTests.planetsCoherence(container: container)
     }
 
     @Test func gemma3n_E2B() async throws {
-        let container = try await models.llmContainer(for: LLMRegistry.gemma3nE2bItLm4bit)
+        let container = try await models.llmContainer(for: LLMRegistry.gemma3nE2bITLM4bit)
         try await ChatSessionTests.planetsCoherence(container: container)
     }
 
     @Test func gemma4_e2b() async throws {
-        let container = try await models.llmContainer(for: LLMRegistry.gemma4E2bIt4bit)
+        let container = try await models.llmContainer(for: LLMRegistry.gemma4E2bIT4bit)
         try await ChatSessionTests.planetsCoherence(container: container)
     }
 
@@ -54,7 +54,7 @@ struct CoherenceIntegrationTests {
 
     @Test func granite4_0_H_tiny() async throws {
         let container = try await models.llmContainer(
-            for: LLMRegistry.granite40hTiny4bitDwq)
+            for: LLMRegistry.granite40hTiny4bitDWQ)
         try await ChatSessionTests.planetsCoherence(container: container)
     }
 
@@ -132,7 +132,7 @@ struct CoherenceIntegrationTests {
     }
 
     @Test func smollm3_3B() async throws {
-        let container = try await models.llmContainer(for: LLMRegistry.smolLm33b4bit)
+        let container = try await models.llmContainer(for: LLMRegistry.smollm33b4bit)
         try await ChatSessionTests.planetsCoherence(container: container)
     }
 }

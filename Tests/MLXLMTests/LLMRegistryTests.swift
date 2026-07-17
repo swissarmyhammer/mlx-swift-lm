@@ -17,7 +17,7 @@ final class LLMRegistryTests: XCTestCase {
     /// any serialized prompt value.
     func testRegistryDefaultPromptsRemainStable() {
         XCTAssertEqual(
-            LLMRegistry.smolLm135m4bit.defaultPrompt, "Tell me about the history of Spain.")
+            LLMRegistry.smollm135m4bit.defaultPrompt, "Tell me about the history of Spain.")
         XCTAssertEqual(
             LLMRegistry.deepseekR14bit.defaultPrompt, "Tell me about the history of Spain.")
         XCTAssertEqual(LLMRegistry.mistralNemo4bit.defaultPrompt, "Explain quaternions.")
@@ -26,17 +26,17 @@ final class LLMRegistryTests: XCTestCase {
         XCTAssertEqual(
             LLMRegistry.phi354bit.defaultPrompt, "What is the gravity on Mars and the moon?")
         XCTAssertEqual(
-            LLMRegistry.phi35Moe.defaultPrompt, "What is the gravity on Mars and the moon?")
+            LLMRegistry.phi35MoE.defaultPrompt, "What is the gravity on Mars and the moon?")
         XCTAssertEqual(LLMRegistry.phi4bit.defaultPrompt, "Why is the sky blue?")
         XCTAssertEqual(LLMRegistry.qwen257b.defaultPrompt, "Why is the sky blue?")
-        XCTAssertEqual(LLMRegistry.gptOss20bMxfp4Q8.defaultPrompt, "Why is the sky blue?")
+        XCTAssertEqual(LLMRegistry.gptOSS20bMXFP4Q8.defaultPrompt, "Why is the sky blue?")
         // Pre-existing lowercase variant — deliberately preserved verbatim.
         XCTAssertEqual(LLMRegistry.qwen205b4bit.defaultPrompt, "why is the sky blue?")
         XCTAssertEqual(
-            LLMRegistry.gemma31bQat4bit.defaultPrompt,
+            LLMRegistry.gemma31bQAT4bit.defaultPrompt,
             "What is the difference between a fruit and a vegetable?")
         XCTAssertEqual(
-            LLMRegistry.gemma4E4bIt4bit.defaultPrompt,
+            LLMRegistry.gemma4E4bIT4bit.defaultPrompt,
             "What is the difference between a fruit and a vegetable?")
         XCTAssertEqual(
             LLMRegistry.llama318b4bit.defaultPrompt,
@@ -51,8 +51,8 @@ final class LLMRegistryTests: XCTestCase {
     func testGemma2ConfigurationsShareCapitalizedLettucePrompt() {
         for configuration in [
             LLMRegistry.gemma2bQuantized,
-            LLMRegistry.gemma29bIt4bit,
-            LLMRegistry.gemma22bIt4bit,
+            LLMRegistry.gemma29bIT4bit,
+            LLMRegistry.gemma22bIT4bit,
         ] {
             XCTAssertEqual(
                 configuration.defaultPrompt,

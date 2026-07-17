@@ -146,7 +146,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     private static let llamaEOSToken = "<|eot_id|>"
 
     /// Model configuration for `mlx-community/SmolLM-135M-Instruct-4bit`.
-    static public let smolLm135m4bit = ModelConfiguration(
+    static public let smollm135m4bit = ModelConfiguration(
         id: "mlx-community/SmolLM-135M-Instruct-4bit",
         defaultPrompt: defaultPromptHistoryOfSpain
     )
@@ -196,7 +196,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/Phi-3.5-MoE-instruct-4bit`.
-    static public let phi35Moe = ModelConfiguration(
+    static public let phi35MoE = ModelConfiguration(
         id: "mlx-community/Phi-3.5-MoE-instruct-4bit",
         defaultPrompt: defaultPromptGravityMarsMoon,
         extraEOSTokens: [phiEOSToken]
@@ -210,28 +210,28 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/gemma-2-9b-it-4bit`.
-    static public let gemma29bIt4bit = ModelConfiguration(
+    static public let gemma29bIT4bit = ModelConfiguration(
         id: "mlx-community/gemma-2-9b-it-4bit",
         // https://www.promptingguide.ai/models/gemma
         defaultPrompt: defaultPromptLettuceVsCabbage
     )
 
     /// Model configuration for `mlx-community/gemma-2-2b-it-4bit`.
-    static public let gemma22bIt4bit = ModelConfiguration(
+    static public let gemma22bIT4bit = ModelConfiguration(
         id: "mlx-community/gemma-2-2b-it-4bit",
         // https://www.promptingguide.ai/models/gemma
         defaultPrompt: defaultPromptLettuceVsCabbage
     )
 
     /// Model configuration for `mlx-community/gemma-3-1b-it-qat-4bit`.
-    static public let gemma31bQat4bit = ModelConfiguration(
+    static public let gemma31bQAT4bit = ModelConfiguration(
         id: "mlx-community/gemma-3-1b-it-qat-4bit",
         defaultPrompt: defaultPromptFruitVegetable,
         extraEOSTokens: [gemma3EOSToken]
     )
 
     /// Model configuration for `mlx-community/gemma-3n-E4B-it-lm-bf16`.
-    static public let gemma3nE4bItLmBf16 = ModelConfiguration(
+    static public let gemma3nE4bITLMBF16 = ModelConfiguration(
         id: "mlx-community/gemma-3n-E4B-it-lm-bf16",
         defaultPrompt: defaultPromptFruitVegetable,
         // https://ai.google.dev/gemma/docs/core/prompt-structure
@@ -239,7 +239,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/gemma-3n-E2B-it-lm-bf16`.
-    static public let gemma3nE2bItLmBf16 = ModelConfiguration(
+    static public let gemma3nE2bITLMBF16 = ModelConfiguration(
         id: "mlx-community/gemma-3n-E2B-it-lm-bf16",
         defaultPrompt: defaultPromptFruitVegetable,
         // https://ai.google.dev/gemma/docs/core/prompt-structure
@@ -247,7 +247,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/gemma-3n-E4B-it-lm-4bit`.
-    static public let gemma3nE4bItLm4bit = ModelConfiguration(
+    static public let gemma3nE4bITLM4bit = ModelConfiguration(
         id: "mlx-community/gemma-3n-E4B-it-lm-4bit",
         defaultPrompt: defaultPromptFruitVegetable,
         // https://ai.google.dev/gemma/docs/core/prompt-structure
@@ -255,7 +255,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/gemma-3n-E2B-it-lm-4bit`.
-    static public let gemma3nE2bItLm4bit = ModelConfiguration(
+    static public let gemma3nE2bITLM4bit = ModelConfiguration(
         id: "mlx-community/gemma-3n-E2B-it-lm-4bit",
         defaultPrompt: defaultPromptFruitVegetable,
         // https://ai.google.dev/gemma/docs/core/prompt-structure
@@ -263,14 +263,14 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/gemma-4-e4b-it-4bit`.
-    static public let gemma4E4bIt4bit = ModelConfiguration(
+    static public let gemma4E4bIT4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e4b-it-4bit",
         defaultPrompt: defaultPromptFruitVegetable,
         extraEOSTokens: [gemma4EOSToken]
     )
 
     /// Model configuration for `mlx-community/gemma-4-e2b-it-4bit`.
-    static public let gemma4E2bIt4bit = ModelConfiguration(
+    static public let gemma4E2bIT4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e2b-it-4bit",
         defaultPrompt: defaultPromptFruitVegetable,
         extraEOSTokens: [gemma4EOSToken]
@@ -326,7 +326,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/Qwen3-30B-A3B-4bit`.
-    static public let qwen3Moe30bA3b4bit = ModelConfiguration(
+    static public let qwen3MoE30bA3b4bit = ModelConfiguration(
         id: "mlx-community/Qwen3-30B-A3B-4bit",
         defaultPrompt: defaultPromptSkyBlue,
         extraEOSTokens: [qwenEOSToken]
@@ -394,7 +394,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/MiMo-7B-SFT-4bit`.
-    static public let mimo7bSft4bit = ModelConfiguration(
+    static public let mimo7bSFT4bit = ModelConfiguration(
         id: "mlx-community/MiMo-7B-SFT-4bit",
         defaultPrompt: defaultPromptSkyBlue
     )
@@ -425,13 +425,13 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/SmolLM3-3B-4bit`.
-    static public let smolLm33b4bit = ModelConfiguration(
+    static public let smollm33b4bit = ModelConfiguration(
         id: "mlx-community/SmolLM3-3B-4bit",
         defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/ERNIE-4.5-0.3B-PT-bf16-ft`.
-    static public let ernie4503bPtBf16Ft = ModelConfiguration(
+    static public let ernie4503bPtBF16Ft = ModelConfiguration(
         id: "mlx-community/ERNIE-4.5-0.3B-PT-bf16-ft",
         defaultPrompt: defaultPromptSkyBlue
     )
@@ -450,7 +450,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/lille-130m-instruct-bf16`.
-    static public let lille130mBf16 = ModelConfiguration(
+    static public let lille130mBF16 = ModelConfiguration(
         id: "mlx-community/lille-130m-instruct-bf16",
         defaultPrompt: defaultPromptSkyBlue
     )
@@ -474,26 +474,26 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     )
 
     /// Model configuration for `mlx-community/Granite-4.0-H-Tiny-4bit-DWQ`.
-    static public let granite40hTiny4bitDwq = ModelConfiguration(
+    static public let granite40hTiny4bitDWQ = ModelConfiguration(
         id: "mlx-community/Granite-4.0-H-Tiny-4bit-DWQ",
         defaultPrompt: defaultPromptEmpty
     )
 
     /// Model configuration for `mlx-community/LFM2-8B-A1B-3bit-MLX`.
-    static public let lfm28bA1b3bitMlx = ModelConfiguration(
+    static public let lfm28bA1b3bitMLX = ModelConfiguration(
         id: "mlx-community/LFM2-8B-A1B-3bit-MLX",
         defaultPrompt: defaultPromptEmpty,
         toolCallFormat: .lfm2
     )
 
     /// Model configuration for `dnakov/nanochat-d20-mlx`.
-    static public let nanochatD20Mlx = ModelConfiguration(
+    static public let nanochatD20MLX = ModelConfiguration(
         id: "dnakov/nanochat-d20-mlx",
         defaultPrompt: defaultPromptEmpty
     )
 
     /// Model configuration for `mlx-community/gpt-oss-20b-MXFP4-Q8`.
-    static public let gptOss20bMxfp4Q8 = ModelConfiguration(
+    static public let gptOSS20bMXFP4Q8 = ModelConfiguration(
         id: "mlx-community/gpt-oss-20b-MXFP4-Q8",
         defaultPrompt: defaultPromptSkyBlue
     )
@@ -516,17 +516,17 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             deepSeekR17b4bit,
             falconH1r7b,
             gemma2bQuantized,
-            gemma22bIt4bit,
-            gemma29bIt4bit,
-            gemma31bQat4bit,
-            gemma3nE4bItLmBf16,
-            gemma3nE2bItLmBf16,
-            gemma3nE4bItLm4bit,
-            gemma3nE2bItLm4bit,
-            gemma4E4bIt4bit,
-            gemma4E2bIt4bit,
+            gemma22bIT4bit,
+            gemma29bIT4bit,
+            gemma31bQAT4bit,
+            gemma3nE4bITLMBF16,
+            gemma3nE2bITLMBF16,
+            gemma3nE4bITLM4bit,
+            gemma3nE2bITLM4bit,
+            gemma4E4bIT4bit,
+            gemma4E2bIT4bit,
             granite332b4bit,
-            granite40hTiny4bitDwq,
+            granite40hTiny4bitDWQ,
             llama318b4bit,
             llama321b4bit,
             llama323b4bit,
@@ -534,7 +534,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             mistral7b4bit,
             mistralNemo4bit,
             openelm270m4bit,
-            phi35Moe,
+            phi35MoE,
             phi354bit,
             phi4bit,
             qwen205b4bit,
@@ -544,27 +544,27 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             qwen317b4bit,
             qwen34b4bit,
             qwen38b4bit,
-            qwen3Moe30bA3b4bit,
+            qwen3MoE30bA3b4bit,
             qwen352b4bit,
             qwen3627b4bit,
-            smolLm135m4bit,
+            smollm135m4bit,
             deepseekR14bit,
-            mimo7bSft4bit,
+            mimo7bSFT4bit,
             glm49b4bit,
             acereason7b4bit,
             bitnetB1582b4t4bit,
-            smolLm33b4bit,
-            ernie4503bPtBf16Ft,
+            smollm33b4bit,
+            ernie4503bPtBF16Ft,
             lfm212b4bit,
             baichuanM114bInstruct4bit,
             exaone4012b4bit,
-            lille130mBf16,
+            lille130mBF16,
             olmoe1b7b0125Instruct4bit,
             olmo211247bInstruct4bit,
             lingMini2bit,
-            lfm28bA1b3bitMlx,
-            nanochatD20Mlx,
-            gptOss20bMxfp4Q8,
+            lfm28bA1b3bitMLX,
+            nanochatD20MLX,
+            gptOSS20bMXFP4Q8,
             jamba3b4bit,
             nemotronLabsDiffusion3b4bit,
         ]
