@@ -171,6 +171,73 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
         }
     }
 
+    /// How an ``inferenceTable`` entry's `value` is compared against the
+    /// lowercased `model_type`.
+    private enum ModelTypeMatch {
+        case exact
+        case prefix
+
+        /// Whether `type` satisfies this match kind for `value`.
+        func matches(_ type: String, against value: String) -> Bool {
+            switch self {
+            case .exact:
+                return type == value
+            case .prefix:
+                return type.hasPrefix(value)
+            }
+        }
+    }
+
+    /// First-match `model_type` → format lookup consumed by
+    /// ``infer(from:configData:)``.
+    ///
+    /// Order matters: the first matching entry wins, so an exact dense-family
+    /// match must precede the prefix match that would otherwise swallow it
+    /// (e.g. "glm4" exact → `.glm4Bare` before "glm4" prefix → `.glm4`).
+    private static let inferenceTable:
+        [(match: ModelTypeMatch, value: String, format: ToolCallFormat)] = [
+            // LFM2 family (lfm2, lfm2_moe, lfm2_5, lfm25, etc.)
+            (.prefix, "lfm2", .lfm2),
+
+            // GLM4 dense/non-MoE model (exact match): the original, pre-4.7
+            // architecture (e.g. GLM-4-9B-0414). Its chat template never taught
+            // the GLM-4.7 `<tool_call>`/`<arg_key>` envelope -- it emits a bare
+            // function-name line followed by a bare JSON object of arguments.
+            (.exact, "glm4", .glm4Bare),
+
+            // GLM4 MoE family (glm4_moe, glm4_moe_lite, etc.): GLM-4.5/4.6/4.7
+            // descend from this architecture and DO use the envelope above.
+            (.prefix, "glm4", .glm4),
+
+            // Gemma4
+            (.prefix, "gemma4", .gemma4),
+
+            // Gemma
+            (.exact, "gemma", .gemma),
+
+            // Nemotron family (nemotron_h, etc.)
+            (.prefix, "nemotron", .xmlFunction),
+
+            // Qwen3.5 family (qwen3_5, qwen3_5_moe, etc.)
+            (.prefix, "qwen3_5", .xmlFunction),
+
+            // Qwen3-Next family (qwen3_next, etc.)
+            (.prefix, "qwen3_next", .xmlFunction),
+
+            // Mistral3 family (mistral3, mistral3_text, etc.) and Ministral3
+            // (ministral3, e.g. Devstral-2-123B) — "ministral3" does not share
+            // the "mistral3" prefix, so it needs its own entry.
+            (.prefix, "mistral3", .mistral),
+            (.prefix, "ministral3", .mistral),
+
+            // MiniMax-M2 (model_type "minimax", arch MiniMaxM2ForCausalLM, e.g.
+            // mlx-community/MiniMax-M2-4bit). Exact match, mirroring the dense
+            // GLM4 style above: the only registered minimax architecture is M2,
+            // and earlier MiniMax families (minimax_text_01, minimax_m1) neither
+            // load here nor share M2's `<minimax:tool_call>` invoke format.
+            (.exact, "minimax", .minimaxM2),
+        ]
+
     /// Infer the tool call format based on model type from config.json.
     ///
     /// This method maps known model types to their corresponding tool call formats,
@@ -183,86 +250,40 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     public static func infer(from modelType: String, configData: Data? = nil) -> ToolCallFormat? {
         let type = modelType.lowercased()
 
-        // Llama family (need secondary signal for Llama 3 vs 1/2)
+        // Llama family: the one case the table cannot express — "llama"
+        // alone is ambiguous between Llama 1/2 (no inferable format) and
+        // Llama 3, so secondary config.json signals decide.
         if type == "llama" {
-            guard let data = configData,
-                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return nil }
-
-            // Secondary signal 1: vocab_size >= 128000 (Llama 3 uses 128256, Llama 2 uses 32000)
-            if let vocabSize = json["vocab_size"] as? Int, vocabSize >= 128000 {
-                return .llama3
-            }
-
-            // Secondary signal 2: rope_scaling with rope_type == "llama3"
-            if let ropeScaling = json["rope_scaling"] as? [String: Any],
-                let ropeType = ropeScaling["rope_type"] as? String,
-                ropeType == "llama3"
-            {
-                return .llama3
-            }
-
-            return nil
+            return inferLlamaFormat(configData: configData)
         }
 
-        // LFM2 family (lfm2, lfm2_moe, lfm2_5, lfm25, etc.)
-        if type.hasPrefix("lfm2") {
-            return .lfm2
+        return inferenceTable.first { $0.match.matches(type, against: $0.value) }?.format
+    }
+
+    /// Resolves the Llama-family ambiguity via secondary config.json signals.
+    ///
+    /// `model_type == "llama"` covers both Llama 1/2 (no inferable tool
+    /// format) and Llama 3 (`.llama3` inline JSON), so the format is decided
+    /// by signals only Llama 3 carries.
+    ///
+    /// - Parameter configData: The raw config.json data.
+    /// - Returns: `.llama3` when a Llama 3 signal is present, otherwise `nil`.
+    private static func inferLlamaFormat(configData: Data?) -> ToolCallFormat? {
+        guard let data = configData,
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        // Secondary signal 1: vocab_size >= 128000 (Llama 3 uses 128256, Llama 2 uses 32000)
+        if let vocabSize = json["vocab_size"] as? Int, vocabSize >= 128000 {
+            return .llama3
         }
 
-        // GLM4 dense/non-MoE model (exact match): the original, pre-4.7
-        // architecture (e.g. GLM-4-9B-0414). Its chat template never taught
-        // the GLM-4.7 `<tool_call>`/`<arg_key>` envelope -- it emits a bare
-        // function-name line followed by a bare JSON object of arguments.
-        if type == "glm4" {
-            return .glm4Bare
-        }
-
-        // GLM4 MoE family (glm4_moe, glm4_moe_lite, etc.): GLM-4.5/4.6/4.7
-        // descend from this architecture and DO use the envelope above.
-        if type.hasPrefix("glm4") {
-            return .glm4
-        }
-
-        // Gemma4
-        if type.hasPrefix("gemma4") {
-            return .gemma4
-        }
-
-        // Gemma
-        if type == "gemma" {
-            return .gemma
-        }
-
-        // Nemotron family (nemotron_h, etc.)
-        if type.hasPrefix("nemotron") {
-            return .xmlFunction
-        }
-
-        // Qwen3.5 family (qwen3_5, qwen3_5_moe, etc.)
-        if type.hasPrefix("qwen3_5") {
-            return .xmlFunction
-        }
-
-        // Qwen3-Next family (qwen3_next, etc.)
-        if type.hasPrefix("qwen3_next") {
-            return .xmlFunction
-        }
-
-        // Mistral3 family (mistral3, mistral3_text, etc.) and Ministral3
-        // (ministral3, e.g. Devstral-2-123B) — "ministral3" does not share
-        // the "mistral3" prefix, so it needs its own match.
-        if type.hasPrefix("mistral3") || type.hasPrefix("ministral3") {
-            return .mistral
-        }
-
-        // MiniMax-M2 (model_type "minimax", arch MiniMaxM2ForCausalLM, e.g.
-        // mlx-community/MiniMax-M2-4bit). Exact match, mirroring the dense
-        // GLM4 style above: the only registered minimax architecture is M2,
-        // and earlier MiniMax families (minimax_text_01, minimax_m1) neither
-        // load here nor share M2's `<minimax:tool_call>` invoke format.
-        if type == "minimax" {
-            return .minimaxM2
+        // Secondary signal 2: rope_scaling with rope_type == "llama3"
+        if let ropeScaling = json["rope_scaling"] as? [String: Any],
+            let ropeType = ropeScaling["rope_type"] as? String,
+            ropeType == "llama3"
+        {
+            return .llama3
         }
 
         return nil

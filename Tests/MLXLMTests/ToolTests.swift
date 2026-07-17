@@ -1109,6 +1109,12 @@ struct ToolTests {
         #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
         #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
 
+        // Gemma4 models (prefix matching): must win over the plain-gemma
+        // match despite sharing its leading characters.
+        #expect(ToolCallFormat.infer(from: "gemma4") == .gemma4)
+        #expect(ToolCallFormat.infer(from: "gemma4_text") == .gemma4)
+        #expect(ToolCallFormat.infer(from: "GEMMA4") == .gemma4)
+
         // Nemotron models (prefix matching)
         #expect(ToolCallFormat.infer(from: "nemotron_h") == .xmlFunction)
         #expect(ToolCallFormat.infer(from: "NEMOTRON_H") == .xmlFunction)

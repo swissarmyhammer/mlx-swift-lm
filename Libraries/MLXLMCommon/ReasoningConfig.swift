@@ -52,17 +52,12 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
         switch self {
         case .templateFlag(let key, let defaultOn):
             return [key: thinkingEnabled ?? defaultOn]
-        case .alwaysOn:
-            if thinkingEnabled == false {
-                throw ReasoningError.cannotDisableReasoning
-            }
-            return nil
-        case .none:
-            // .none is non-suppressible: there is no prompt-level knob to
-            // turn thinking off. Asking to disable it is identical in
-            // outcome to asking .alwaysOn to disable, so it raises the
-            // same typed error. The capability gate at MLXLanguageModel
-            // routes this to LanguageModelError.unsupportedCapability.
+        // .none is non-suppressible just like .alwaysOn: there is no
+        // prompt-level knob to turn thinking off, so asking to disable it
+        // raises the same typed error. The capability gate at
+        // MLXLanguageModel routes this to
+        // LanguageModelError.unsupportedCapability.
+        case .alwaysOn, .none:
             if thinkingEnabled == false {
                 throw ReasoningError.cannotDisableReasoning
             }

@@ -890,11 +890,14 @@ struct TranscriptConverterTests {
             #expect(toolNames == ["get_weather", "get_time"])
         }
 
-        // Contrast: `.mistral` folds the same two calls into a single assistant
-        // turn — the very behavior these formats must not adopt.
+        // Contrast: `.mistral` and `.minimaxM2` fold the same two calls into a
+        // single assistant turn — the very behavior these formats must not adopt.
         let mistralMessages = TranscriptConverter.mlxMessages(
             for: entries, toolCallFormat: .mistral)
         #expect(mistralMessages.count == 1)
+        let miniMaxMessages = TranscriptConverter.mlxMessages(
+            for: entries, toolCallFormat: .minimaxM2)
+        #expect(miniMaxMessages.count == 1)
     }
 
 }
