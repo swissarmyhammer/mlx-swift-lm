@@ -209,8 +209,8 @@ comments:
   id: 01kxq3ysf7v6g56nef75czw24z
   text: 'Iteration 5: implement landed green in doing — docs-only restructure of 35/44 /// blocks in XGrammarBridge.swift so every first line is a complete period-terminated summary sentence (git diff -U0 verified zero code lines touched; independent awk sweep found zero remaining violations). Independent /test from scratch: 764 tests, 0 failures. Dispatching /commit.'
   timestamp: 2026-07-17T04:04:36.455453+00:00
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: bc80
 title: Repeated-token runaway + tool-call text leak under constrained tool-calling decode for all non-Qwen families (GLM, mistral3, ministral3)
 ---
 ## What
