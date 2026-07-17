@@ -121,72 +121,113 @@ public struct ReasoningConfig: Sendable, Equatable {
     // MARK: - Inference
 
     /// The delimiter that opens a `<think>`-style reasoning span, shared by
-    /// every reasoning family ``infer(from:modelId:configData:)`` recognizes.
+    /// every reasoning family ``infer(from:modelID:configData:)`` recognizes.
     private static let thinkStartDelimiter = "<think>"
 
     /// The delimiter that closes a `<think>`-style reasoning span, shared by
-    /// every reasoning family ``infer(from:modelId:configData:)`` recognizes.
+    /// every reasoning family ``infer(from:modelID:configData:)`` recognizes.
     private static let thinkEndDelimiter = "</think>"
 
-    /// The configuration shared by the always-on `<think>` families below
-    /// (DeepSeek-R1 and MiniMax-M2): identical delimiters, thinking cannot
-    /// be turned off.
+    /// The configuration shared by the always-on `<think>` families in
+    /// ``inferenceTable`` (DeepSeek-R1 and MiniMax-M2): identical delimiters,
+    /// thinking cannot be turned off.
     private static let alwaysOnThinkConfig = ReasoningConfig(
         startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
         promptStrategy: .alwaysOn)
 
+    /// The Qwen3-family configuration: `<think>` delimiters, thinking toggled
+    /// via the `enable_thinking` template kwarg (the start delimiter is a
+    /// registered special token for Qwen3 tokenizers).
+    private static let qwen3ThinkConfig = ReasoningConfig(
+        startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
+        promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
+        isSpecialToken: true)
+
+    /// How an ``inferenceTable`` entry's `value` is compared against the
+    /// model's lowercased `model_type` or repo id.
+    private enum ReasoningMatch {
+        /// The lowercased `model_type` equals `value`.
+        case exact
+
+        /// The lowercased `model_type` starts with `value`.
+        case prefix
+
+        /// The lowercased repo id contains `value`. Used for families whose
+        /// `model_type` is indistinguishable from their base model (e.g.
+        /// R1-Distill reporting "qwen2"/"llama") and that must therefore be
+        /// recognized by repo id.
+        case idContains
+
+        /// Whether the model described by `type` / `id` satisfies this match
+        /// kind for `value`.
+        func matches(type: String, id: String, against value: String) -> Bool {
+            switch self {
+            case .exact:
+                return type == value
+            case .prefix:
+                return type.hasPrefix(value)
+            case .idContains:
+                return id.contains(value)
+            }
+        }
+    }
+
+    /// First-match model-signal → configuration lookup consumed by
+    /// ``infer(from:modelID:configData:)``, mirroring
+    /// ``ToolCallFormat/inferenceTable``.
+    ///
+    /// Entries are tried in order and the first matching entry wins, so a
+    /// family's `model_type` entries precede the repo-id fallbacks that
+    /// would otherwise also match it.
+    private static let inferenceTable:
+        [(match: ReasoningMatch, value: String, config: ReasoningConfig)] = [
+            // Qwen3 family: <think>/</think>, thinking toggled via `enable_thinking`.
+            //
+            // Keyed on the model_type prefix, so a non-thinking Qwen3 variant (e.g.
+            // a future Qwen3-Coder) could match. This is accepted today; on-device
+            // verification and registry overrides refine specific models.
+            (.prefix, "qwen3", qwen3ThinkConfig),
+
+            // DeepSeek-R1 (and R1-Distill): always-on <think>/</think>.
+            //
+            // R1-Distill reports its *base* model_type ("qwen2"/"llama"), so it must
+            // be recognized by repo id. (Plain DeepSeek-V3 shares R1's "deepseek_v3"
+            // model_type; this type is treated as reasoning, refined by registry overrides.)
+            (.exact, "deepseek_v3", alwaysOnThinkConfig),
+            (.exact, "deepseek_r1", alwaysOnThinkConfig),
+            (.idContains, "deepseek-r1", alwaysOnThinkConfig),
+            (.idContains, "r1-distill", alwaysOnThinkConfig),
+
+            // MiniMax-M2 (model_type "minimax", e.g. mlx-community/MiniMax-M2-4bit):
+            // interleaved thinking, always on. Its chat template has no thinking
+            // kwarg and pre-opens `<think>\n` in every generation prompt, so the
+            // decoded stream begins inside an open reasoning span (detected by
+            // the prompt-tail primed-inside check, exactly like R1 above).
+            // Exact match: earlier MiniMax families (minimax_text_01,
+            // minimax_m1) do not share M2's protocol.
+            (.exact, "minimax", alwaysOnThinkConfig),
+        ]
+
     /// Infer a reasoning configuration from a model's `model_type` and repo id.
     ///
-    /// Unlike ``ToolCallFormat/infer(from:configData:)``, `modelId` is
+    /// Unlike ``ToolCallFormat/infer(from:configData:)``, `modelID` is
     /// load-bearing: DeepSeek-R1-Distill models report `model_type == "qwen2"`
     /// (or `"llama"`), indistinguishable from plain Qwen2.5/Llama by type alone,
     /// and must be recognized by their repo id.
     ///
     /// - Parameters:
     ///   - modelType: the `model_type` value from config.json.
-    ///   - modelId: the Hugging Face repo id (e.g. `mlx-community/Qwen3-4B-4bit`).
+    ///   - modelID: the Hugging Face repo id (e.g. `mlx-community/Qwen3-4B-4bit`).
     ///   - configData: raw config.json data for secondary signals (reserved; unused in v1).
     /// - Returns: the inferred ``ReasoningConfig``, or `nil` for non-reasoning models.
     public static func infer(
         from modelType: String,
-        modelId: String? = nil,
+        modelID: String? = nil,
         configData: Data? = nil
     ) -> ReasoningConfig? {
         let type = modelType.lowercased()
-        let id = (modelId ?? "").lowercased()
-
-        // Qwen3 family: <think>/</think>, thinking toggled via `enable_thinking`.
-        //
-        // Keyed on the model_type prefix, so a non-thinking Qwen3 variant (e.g.
-        // a future Qwen3-Coder) could match. This is accepted today; on-device
-        // verification and registry overrides refine specific models.
-        if type.hasPrefix("qwen3") {
-            return ReasoningConfig(
-                startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
-                promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
-                isSpecialToken: true)
-        }
-
-        // DeepSeek-R1 (and R1-Distill): always-on <think>/</think>.
-        //
-        // R1-Distill reports its *base* model_type ("qwen2"/"llama"), so it must
-        // be recognized by repo id. (Plain DeepSeek-V3 shares R1's "deepseek_v3"
-        // model_type; this type is treated as reasoning, refined by registry overrides.)
-        if type == "deepseek_v3" || type == "deepseek_r1"
-            || id.contains("deepseek-r1") || id.contains("r1-distill")
-        {
-            return alwaysOnThinkConfig
-        }
-
-        // MiniMax-M2 (model_type "minimax", e.g. mlx-community/MiniMax-M2-4bit):
-        // interleaved thinking, always on. Its chat template has no thinking
-        // kwarg and pre-opens `<think>\n` in every generation prompt, so the
-        // decoded stream begins inside an open reasoning span (detected by
-        // the prompt-tail primed-inside check, exactly like R1 above).
-        if type == "minimax" {
-            return alwaysOnThinkConfig
-        }
-
-        return nil
+        let id = (modelID ?? "").lowercased()
+        return inferenceTable.first { $0.match.matches(type: type, id: id, against: $0.value) }?
+            .config
     }
 }

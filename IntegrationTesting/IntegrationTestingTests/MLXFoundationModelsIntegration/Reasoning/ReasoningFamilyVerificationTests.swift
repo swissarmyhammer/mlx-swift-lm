@@ -29,9 +29,9 @@ struct ReasoningFamilyVerificationTests {
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func renderedTail(
-        modelId: String, additionalContext: [String: any Sendable]?, label: String
+        modelID: String, additionalContext: [String: any Sendable]?, label: String
     ) async throws -> String {
-        let container = try await loadTestModelContainer(id: modelId)
+        let container = try await loadTestModelContainer(id: modelID)
         return try await container.perform { context in
             let input = try await context.processor.prepare(
                 input: UserInput(
@@ -58,10 +58,10 @@ struct ReasoningFamilyVerificationTests {
     @Test func qwen3DoesNotPrefillThinkBlock() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let onTail = try await renderedTail(
-            modelId: Self.qwen3, additionalContext: ["enable_thinking": true],
+            modelID: Self.qwen3, additionalContext: ["enable_thinking": true],
             label: "qwen3-thinking-on")
         let offTail = try await renderedTail(
-            modelId: Self.qwen3, additionalContext: ["enable_thinking": false],
+            modelID: Self.qwen3, additionalContext: ["enable_thinking": false],
             label: "qwen3-thinking-off")
         #expect(
             !ReasoningEventEmitter.promptEndsInsideReasoning(
@@ -78,7 +78,7 @@ struct ReasoningFamilyVerificationTests {
     @Test func r1DistillPromptTail() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let tail = try await renderedTail(
-            modelId: Self.r1Distill, additionalContext: nil, label: "r1-distill")
+            modelID: Self.r1Distill, additionalContext: nil, label: "r1-distill")
         let primed = ReasoningEventEmitter.promptEndsInsideReasoning(
             renderedPromptTail: tail, config: Self.thinkConfig)
         print("REASONING-DUMP [r1-distill primedInside]=\(primed)")
@@ -88,7 +88,7 @@ struct ReasoningFamilyVerificationTests {
     // MARK: - Factory-config parity (factory inference == ReasoningConfig.infer)
 
     /// `LLMModelFactory._load` fully infers reasoning before any resolver runs,
-    /// calling the same `ReasoningConfig.infer(from:modelId:configData:)` the
+    /// calling the same `ReasoningConfig.infer(from:modelID:configData:)` the
     /// registry resolves through. With pass-through resolution the meaningful
     /// pin is that `context.configuration.reasoningConfig` already equals the
     /// inferred value — we read the configuration directly here.
@@ -105,7 +105,7 @@ struct ReasoningFamilyVerificationTests {
                     try? JSONDecoder.json5().decode(BaseConfiguration.self, from: $0).modelType
                 } ?? ""
             let inferred = ReasoningConfig.infer(
-                from: modelType, modelId: Self.qwen3, configData: configData)
+                from: modelType, modelID: Self.qwen3, configData: configData)
             #expect(context.configuration.reasoningConfig == inferred)
             #expect(context.configuration.reasoningConfig?.startDelimiter == "<think>")
             #expect(

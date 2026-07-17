@@ -22,7 +22,7 @@ struct ReasoningHeuristicsTests {
     /// is deliberately NOT detected in v1.
     @Test func qwqNotDeclaredUntilInferSupportsIt() {
         #expect(!ReasoningHeuristics.isLikelyReasoningModel("mlx-community/QwQ-32B-4bit"))
-        #expect(ReasoningConfig.infer(from: "qwen2", modelId: "mlx-community/QwQ-32B-4bit") == nil)
+        #expect(ReasoningConfig.infer(from: "qwen2", modelID: "mlx-community/QwQ-32B-4bit") == nil)
     }
 
     @Test func nonReasoningIdsAreNotDetected() {
@@ -34,7 +34,7 @@ struct ReasoningHeuristicsTests {
     }
 
     /// Consistency check (not a proof): for curated `(modelType,
-    /// modelId)` pairs where `infer` resolves a config, the heuristic must also
+    /// modelID)` pairs where `infer` resolves a config, the heuristic must also
     /// fire — keeping the two hand-maintained lists aligned for known families.
     /// It does not (and cannot) cover arbitrary re-uploads; that's what the
     /// runtime emit-only-when-declared gate + drift log handle.
@@ -46,7 +46,7 @@ struct ReasoningHeuristicsTests {
         ]
         for pair in reasoningPairs {
             #expect(
-                ReasoningConfig.infer(from: pair.type, modelId: pair.id) != nil,
+                ReasoningConfig.infer(from: pair.type, modelID: pair.id) != nil,
                 "infer should resolve \(pair.id)")
             #expect(
                 ReasoningHeuristics.isLikelyReasoningModel(pair.id),
@@ -61,7 +61,7 @@ struct ReasoningHeuristicsTests {
             ("llama", "mlx-community/Llama-3.2-3B-Instruct-4bit"),
         ]
         for pair in nonReasoningPairs {
-            #expect(ReasoningConfig.infer(from: pair.type, modelId: pair.id) == nil)
+            #expect(ReasoningConfig.infer(from: pair.type, modelID: pair.id) == nil)
             #expect(!ReasoningHeuristics.isLikelyReasoningModel(pair.id))
         }
     }

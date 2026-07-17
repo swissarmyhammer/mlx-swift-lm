@@ -10,7 +10,7 @@
 /// their capabilities explicitly, should not use it.
 ///
 /// It is intentionally NOT a provable superset of
-/// ``ReasoningConfig/infer(from:modelId:configData:)``: `infer` also keys on
+/// ``ReasoningConfig/infer(from:modelID:configData:)``: `infer` also keys on
 /// `model_type`, which this heuristic never sees. A community re-upload with a
 /// non-matching repo name but a reasoning `model_type` resolves a
 /// `ReasoningConfig` yet may not match here. Callers who need a stricter

@@ -134,17 +134,27 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
 
     // MARK: - Factory Methods
 
+    /// The opening wrapper tag shared by the ``json`` and ``xmlFunction``
+    /// tool-call envelopes.
+    private static let toolCallStartTag = "<tool_call>"
+
+    /// The closing wrapper tag shared by the ``json`` and ``xmlFunction``
+    /// tool-call envelopes.
+    private static let toolCallEndTag = "</tool_call>"
+
     /// Create the appropriate parser for this format.
     /// - Returns: A parser instance configured for this format
     public func createParser() -> any ToolCallParser {
         switch self {
         case .json:
-            return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+            return JSONToolCallParser(
+                startTag: Self.toolCallStartTag, endTag: Self.toolCallEndTag)
         case .lfm2:
             return PythonicToolCallParser(
                 startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
         case .xmlFunction:
-            return XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+            return XMLFunctionParser(
+                startTag: Self.toolCallStartTag, endTag: Self.toolCallEndTag)
         case .glm4:
             return GLM4ToolCallParser()
         case .glm4Bare:

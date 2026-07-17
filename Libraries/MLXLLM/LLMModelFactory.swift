@@ -683,11 +683,11 @@ public final class LLMModelFactory: GenericModelFactory {
                 from: baseConfig.modelType, configData: configData)
         }
         // Reasoning protocol: registry override wins; otherwise infer from
-        // model_type + repo id. `modelId` is load-bearing — R1-Distill reports a
+        // model_type + repo id. `modelID` is load-bearing — R1-Distill reports a
         // base model_type (qwen2/llama) and is only recognizable by id.
         if mutableConfiguration.reasoningConfig == nil {
             mutableConfiguration.reasoningConfig = ReasoningConfig.infer(
-                from: baseConfig.modelType, modelId: configuration.name, configData: configData)
+                from: baseConfig.modelType, modelID: configuration.name, configData: configData)
         }
 
         // Load tokenizer and weights in parallel
