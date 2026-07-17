@@ -106,16 +106,55 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     /// Shared instance with default model configurations.
     public static let shared = LLMRegistry(modelConfigurations: all())
 
+    /// Default prompt shared by the Gemma 2 configurations.
+    private static let defaultPromptLettuceVsCabbage =
+        "What is the difference between lettuce and cabbage?"
+
+    /// Default prompt shared by the Gemma 3, Gemma 4, and Llama 3 configurations.
+    private static let defaultPromptFruitVegetable =
+        "What is the difference between a fruit and a vegetable?"
+
+    /// Default prompt shared by many general-purpose configurations.
+    private static let defaultPromptSkyBlue = "Why is the sky blue?"
+
+    /// Default prompt shared by the SmolLM and DeepSeek-R1 configurations.
+    private static let defaultPromptHistoryOfSpain = "Tell me about the history of Spain."
+
+    /// Default prompt shared by the Mistral NeMo and Nemotron Diffusion configurations.
+    private static let defaultPromptExplainQuaternions = "Explain quaternions."
+
+    /// Default prompt shared by the Phi 3.5 configurations.
+    private static let defaultPromptGravityMarsMoon =
+        "What is the gravity on Mars and the moon?"
+
+    /// Empty default prompt shared by configurations without a curated sample prompt.
+    private static let defaultPromptEmpty = ""
+
+    /// Extra end-of-sequence token shared by the Phi 3.5 configurations.
+    private static let phiEOSToken = "<|end|>"
+
+    /// Extra end-of-sequence token shared by the Gemma 3 configurations.
+    private static let gemma3EOSToken = "<end_of_turn>"
+
+    /// Extra end-of-sequence token shared by the Gemma 4 configurations.
+    private static let gemma4EOSToken = "<turn|>"
+
+    /// Extra end-of-sequence token shared by the Qwen configurations.
+    private static let qwenEOSToken = "<|im_end|>"
+
+    /// Extra end-of-sequence token shared by the Llama 3 configurations.
+    private static let llamaEOSToken = "<|eot_id|>"
+
     /// Model configuration for `mlx-community/SmolLM-135M-Instruct-4bit`.
     static public let smolLm135m4bit = ModelConfiguration(
         id: "mlx-community/SmolLM-135M-Instruct-4bit",
-        defaultPrompt: "Tell me about the history of Spain."
+        defaultPrompt: defaultPromptHistoryOfSpain
     )
 
     /// Model configuration for `mlx-community/Mistral-Nemo-Instruct-2407-4bit`.
     static public let mistralNemo4bit = ModelConfiguration(
         id: "mlx-community/Mistral-Nemo-Instruct-2407-4bit",
-        defaultPrompt: "Explain quaternions."
+        defaultPrompt: defaultPromptExplainQuaternions
     )
 
     /// Model configuration for `mlx-community/Mistral-7B-Instruct-v0.3-4bit`.
@@ -146,165 +185,165 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let phi4bit = ModelConfiguration(
         id: "mlx-community/phi-2-hf-4bit-mlx",
         // https://www.promptingguide.ai/models/phi-2
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/Phi-3.5-mini-instruct-4bit`.
     static public let phi354bit = ModelConfiguration(
         id: "mlx-community/Phi-3.5-mini-instruct-4bit",
-        defaultPrompt: "What is the gravity on Mars and the moon?",
-        extraEOSTokens: ["<|end|>"]
+        defaultPrompt: defaultPromptGravityMarsMoon,
+        extraEOSTokens: [phiEOSToken]
     )
 
     /// Model configuration for `mlx-community/Phi-3.5-MoE-instruct-4bit`.
     static public let phi35Moe = ModelConfiguration(
         id: "mlx-community/Phi-3.5-MoE-instruct-4bit",
-        defaultPrompt: "What is the gravity on Mars and the moon?",
-        extraEOSTokens: ["<|end|>"]
+        defaultPrompt: defaultPromptGravityMarsMoon,
+        extraEOSTokens: [phiEOSToken]
     )
 
     /// Model configuration for `mlx-community/quantized-gemma-2b-it`.
     static public let gemma2bQuantized = ModelConfiguration(
         id: "mlx-community/quantized-gemma-2b-it",
         // https://www.promptingguide.ai/models/gemma
-        defaultPrompt: "what is the difference between lettuce and cabbage?"
+        defaultPrompt: defaultPromptLettuceVsCabbage
     )
 
     /// Model configuration for `mlx-community/gemma-2-9b-it-4bit`.
     static public let gemma29bIt4bit = ModelConfiguration(
         id: "mlx-community/gemma-2-9b-it-4bit",
         // https://www.promptingguide.ai/models/gemma
-        defaultPrompt: "What is the difference between lettuce and cabbage?"
+        defaultPrompt: defaultPromptLettuceVsCabbage
     )
 
     /// Model configuration for `mlx-community/gemma-2-2b-it-4bit`.
     static public let gemma22bIt4bit = ModelConfiguration(
         id: "mlx-community/gemma-2-2b-it-4bit",
         // https://www.promptingguide.ai/models/gemma
-        defaultPrompt: "What is the difference between lettuce and cabbage?"
+        defaultPrompt: defaultPromptLettuceVsCabbage
     )
 
     /// Model configuration for `mlx-community/gemma-3-1b-it-qat-4bit`.
     static public let gemma31bQat4bit = ModelConfiguration(
         id: "mlx-community/gemma-3-1b-it-qat-4bit",
-        defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<end_of_turn>"]
+        defaultPrompt: defaultPromptFruitVegetable,
+        extraEOSTokens: [gemma3EOSToken]
     )
 
     /// Model configuration for `mlx-community/gemma-3n-E4B-it-lm-bf16`.
     static public let gemma3nE4bItLmBf16 = ModelConfiguration(
         id: "mlx-community/gemma-3n-E4B-it-lm-bf16",
-        defaultPrompt: "What is the difference between a fruit and a vegetable?",
+        defaultPrompt: defaultPromptFruitVegetable,
         // https://ai.google.dev/gemma/docs/core/prompt-structure
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: [gemma3EOSToken]
     )
 
     /// Model configuration for `mlx-community/gemma-3n-E2B-it-lm-bf16`.
     static public let gemma3nE2bItLmBf16 = ModelConfiguration(
         id: "mlx-community/gemma-3n-E2B-it-lm-bf16",
-        defaultPrompt: "What is the difference between a fruit and a vegetable?",
+        defaultPrompt: defaultPromptFruitVegetable,
         // https://ai.google.dev/gemma/docs/core/prompt-structure
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: [gemma3EOSToken]
     )
 
     /// Model configuration for `mlx-community/gemma-3n-E4B-it-lm-4bit`.
     static public let gemma3nE4bItLm4bit = ModelConfiguration(
         id: "mlx-community/gemma-3n-E4B-it-lm-4bit",
-        defaultPrompt: "What is the difference between a fruit and a vegetable?",
+        defaultPrompt: defaultPromptFruitVegetable,
         // https://ai.google.dev/gemma/docs/core/prompt-structure
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: [gemma3EOSToken]
     )
 
     /// Model configuration for `mlx-community/gemma-3n-E2B-it-lm-4bit`.
     static public let gemma3nE2bItLm4bit = ModelConfiguration(
         id: "mlx-community/gemma-3n-E2B-it-lm-4bit",
-        defaultPrompt: "What is the difference between a fruit and a vegetable?",
+        defaultPrompt: defaultPromptFruitVegetable,
         // https://ai.google.dev/gemma/docs/core/prompt-structure
-        extraEOSTokens: ["<end_of_turn>"]
+        extraEOSTokens: [gemma3EOSToken]
     )
 
     /// Model configuration for `mlx-community/gemma-4-e4b-it-4bit`.
     static public let gemma4E4bIt4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e4b-it-4bit",
-        defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<turn|>"]
+        defaultPrompt: defaultPromptFruitVegetable,
+        extraEOSTokens: [gemma4EOSToken]
     )
 
     /// Model configuration for `mlx-community/gemma-4-e2b-it-4bit`.
     static public let gemma4E2bIt4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e2b-it-4bit",
-        defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<turn|>"]
+        defaultPrompt: defaultPromptFruitVegetable,
+        extraEOSTokens: [gemma4EOSToken]
     )
 
     /// Model configuration for `mlx-community/Qwen1.5-0.5B-Chat-4bit`.
     static public let qwen205b4bit = ModelConfiguration(
         id: "mlx-community/Qwen1.5-0.5B-Chat-4bit",
         defaultPrompt: "why is the sky blue?",
-        extraEOSTokens: ["<|im_end|>"]
+        extraEOSTokens: [qwenEOSToken]
     )
 
     /// Model configuration for `mlx-community/Qwen2.5-7B-Instruct-4bit`.
     static public let qwen257b = ModelConfiguration(
         id: "mlx-community/Qwen2.5-7B-Instruct-4bit",
-        defaultPrompt: "Why is the sky blue?",
-        extraEOSTokens: ["<|im_end|>"]
+        defaultPrompt: defaultPromptSkyBlue,
+        extraEOSTokens: [qwenEOSToken]
     )
 
     /// Model configuration for `mlx-community/Qwen2.5-1.5B-Instruct-4bit`.
     static public let qwen2515b = ModelConfiguration(
         id: "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
-        defaultPrompt: "Why is the sky blue?",
-        extraEOSTokens: ["<|im_end|>"]
+        defaultPrompt: defaultPromptSkyBlue,
+        extraEOSTokens: [qwenEOSToken]
     )
 
     /// Model configuration for `mlx-community/Qwen3-0.6B-4bit`.
     static public let qwen306b4bit = ModelConfiguration(
         id: "mlx-community/Qwen3-0.6B-4bit",
-        defaultPrompt: "Why is the sky blue?",
-        extraEOSTokens: ["<|im_end|>"]
+        defaultPrompt: defaultPromptSkyBlue,
+        extraEOSTokens: [qwenEOSToken]
     )
 
     /// Model configuration for `mlx-community/Qwen3-1.7B-4bit`.
     static public let qwen317b4bit = ModelConfiguration(
         id: "mlx-community/Qwen3-1.7B-4bit",
-        defaultPrompt: "Why is the sky blue?",
-        extraEOSTokens: ["<|im_end|>"]
+        defaultPrompt: defaultPromptSkyBlue,
+        extraEOSTokens: [qwenEOSToken]
     )
 
     /// Model configuration for `mlx-community/Qwen3-4B-4bit`.
     static public let qwen34b4bit = ModelConfiguration(
         id: "mlx-community/Qwen3-4B-4bit",
-        defaultPrompt: "Why is the sky blue?",
-        extraEOSTokens: ["<|im_end|>"]
+        defaultPrompt: defaultPromptSkyBlue,
+        extraEOSTokens: [qwenEOSToken]
     )
 
     /// Model configuration for `mlx-community/Qwen3-8B-4bit`.
     static public let qwen38b4bit = ModelConfiguration(
         id: "mlx-community/Qwen3-8B-4bit",
-        defaultPrompt: "Why is the sky blue?",
-        extraEOSTokens: ["<|im_end|>"]
+        defaultPrompt: defaultPromptSkyBlue,
+        extraEOSTokens: [qwenEOSToken]
     )
 
     /// Model configuration for `mlx-community/Qwen3-30B-A3B-4bit`.
     static public let qwen3Moe30bA3b4bit = ModelConfiguration(
         id: "mlx-community/Qwen3-30B-A3B-4bit",
-        defaultPrompt: "Why is the sky blue?",
-        extraEOSTokens: ["<|im_end|>"]
+        defaultPrompt: defaultPromptSkyBlue,
+        extraEOSTokens: [qwenEOSToken]
     )
 
     /// Model configuration for `mlx-community/Qwen3.5-2B-4bit`.
     static public let qwen352b4bit = ModelConfiguration(
         id: "mlx-community/Qwen3.5-2B-4bit",
-        defaultPrompt: "Why is the sky blue?",
-        extraEOSTokens: ["<|im_end|>"]
+        defaultPrompt: defaultPromptSkyBlue,
+        extraEOSTokens: [qwenEOSToken]
     )
 
     /// Model configuration for `mlx-community/Qwen3.6-27B-4bit`.
     static public let qwen3627b4bit = ModelConfiguration(
         id: "mlx-community/Qwen3.6-27B-4bit",
-        defaultPrompt: "Why is the sky blue?",
-        extraEOSTokens: ["<|im_end|>"]
+        defaultPrompt: defaultPromptSkyBlue,
+        extraEOSTokens: [qwenEOSToken]
     )
 
     /// Model configuration for `mlx-community/OpenELM-270M-Instruct`.
@@ -317,158 +356,158 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     /// Model configuration for `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit`.
     static public let llama318b4bit = ModelConfiguration(
         id: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
-        defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<|eot_id|>"]
+        defaultPrompt: defaultPromptFruitVegetable,
+        extraEOSTokens: [llamaEOSToken]
     )
 
     /// Model configuration for `mlx-community/Meta-Llama-3-8B-Instruct-4bit`.
     static public let llama38b4bit = ModelConfiguration(
         id: "mlx-community/Meta-Llama-3-8B-Instruct-4bit",
-        defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<|eot_id|>"]
+        defaultPrompt: defaultPromptFruitVegetable,
+        extraEOSTokens: [llamaEOSToken]
     )
 
     /// Model configuration for `mlx-community/Llama-3.2-1B-Instruct-4bit`.
     static public let llama321b4bit = ModelConfiguration(
         id: "mlx-community/Llama-3.2-1B-Instruct-4bit",
-        defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<|eot_id|>"]
+        defaultPrompt: defaultPromptFruitVegetable,
+        extraEOSTokens: [llamaEOSToken]
     )
 
     /// Model configuration for `mlx-community/Llama-3.2-3B-Instruct-4bit`.
     static public let llama323b4bit = ModelConfiguration(
         id: "mlx-community/Llama-3.2-3B-Instruct-4bit",
-        defaultPrompt: "What is the difference between a fruit and a vegetable?",
-        extraEOSTokens: ["<|eot_id|>"]
+        defaultPrompt: defaultPromptFruitVegetable,
+        extraEOSTokens: [llamaEOSToken]
     )
 
     /// Model configuration for `mlx-community/DeepSeek-R1-4bit`.
     static public let deepseekR14bit = ModelConfiguration(
         id: "mlx-community/DeepSeek-R1-4bit",
-        defaultPrompt: "Tell me about the history of Spain."
+        defaultPrompt: defaultPromptHistoryOfSpain
     )
 
     /// Model configuration for `mlx-community/granite-3.3-2b-instruct-4bit`.
     static public let granite332b4bit = ModelConfiguration(
         id: "mlx-community/granite-3.3-2b-instruct-4bit",
-        defaultPrompt: ""
+        defaultPrompt: defaultPromptEmpty
     )
 
     /// Model configuration for `mlx-community/MiMo-7B-SFT-4bit`.
     static public let mimo7bSft4bit = ModelConfiguration(
         id: "mlx-community/MiMo-7B-SFT-4bit",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/GLM-4-9B-0414-4bit`.
     static public let glm49b4bit = ModelConfiguration(
         id: "mlx-community/GLM-4-9B-0414-4bit",
-        defaultPrompt: "Why is the sky blue?",
+        defaultPrompt: defaultPromptSkyBlue,
         toolCallFormat: .glm4Bare
     )
 
     /// Model configuration for `mlx-community/AceReason-Nemotron-7B-4bit`.
     static public let acereason7b4bit = ModelConfiguration(
         id: "mlx-community/AceReason-Nemotron-7B-4bit",
-        defaultPrompt: ""
+        defaultPrompt: defaultPromptEmpty
     )
 
     /// Model configuration for `mlx-community/bitnet-b1.58-2B-4T-4bit`.
     static public let bitnetB1582b4t4bit = ModelConfiguration(
         id: "mlx-community/bitnet-b1.58-2B-4T-4bit",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/Baichuan-M1-14B-Instruct-4bit-ft`.
     static public let baichuanM114bInstruct4bit = ModelConfiguration(
         id: "mlx-community/Baichuan-M1-14B-Instruct-4bit-ft",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/SmolLM3-3B-4bit`.
     static public let smolLm33b4bit = ModelConfiguration(
         id: "mlx-community/SmolLM3-3B-4bit",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/ERNIE-4.5-0.3B-PT-bf16-ft`.
     static public let ernie4503bPtBf16Ft = ModelConfiguration(
         id: "mlx-community/ERNIE-4.5-0.3B-PT-bf16-ft",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/LFM2-1.2B-4bit`.
     static public let lfm212b4bit = ModelConfiguration(
         id: "mlx-community/LFM2-1.2B-4bit",
-        defaultPrompt: "Why is the sky blue?",
+        defaultPrompt: defaultPromptSkyBlue,
         toolCallFormat: .lfm2
     )
 
     /// Model configuration for `mlx-community/exaone-4.0-1.2b-4bit`.
     static public let exaone4012b4bit = ModelConfiguration(
         id: "mlx-community/exaone-4.0-1.2b-4bit",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/lille-130m-instruct-bf16`.
     static public let lille130mBf16 = ModelConfiguration(
         id: "mlx-community/lille-130m-instruct-bf16",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/OLMoE-1B-7B-0125-Instruct-4bit`.
     static public let olmoe1b7b0125Instruct4bit = ModelConfiguration(
         id: "mlx-community/OLMoE-1B-7B-0125-Instruct-4bit",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/OLMo-2-1124-7B-Instruct-4bit`.
     static public let olmo211247bInstruct4bit = ModelConfiguration(
         id: "mlx-community/OLMo-2-1124-7B-Instruct-4bit",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/Ling-mini-2.0-2bit-DWQ`.
     static public let lingMini2bit = ModelConfiguration(
         id: "mlx-community/Ling-mini-2.0-2bit-DWQ",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/Granite-4.0-H-Tiny-4bit-DWQ`.
     static public let granite40hTiny4bitDwq = ModelConfiguration(
         id: "mlx-community/Granite-4.0-H-Tiny-4bit-DWQ",
-        defaultPrompt: ""
+        defaultPrompt: defaultPromptEmpty
     )
 
     /// Model configuration for `mlx-community/LFM2-8B-A1B-3bit-MLX`.
     static public let lfm28bA1b3bitMlx = ModelConfiguration(
         id: "mlx-community/LFM2-8B-A1B-3bit-MLX",
-        defaultPrompt: "",
+        defaultPrompt: defaultPromptEmpty,
         toolCallFormat: .lfm2
     )
 
     /// Model configuration for `dnakov/nanochat-d20-mlx`.
     static public let nanochatD20Mlx = ModelConfiguration(
         id: "dnakov/nanochat-d20-mlx",
-        defaultPrompt: ""
+        defaultPrompt: defaultPromptEmpty
     )
 
     /// Model configuration for `mlx-community/gpt-oss-20b-MXFP4-Q8`.
     static public let gptOss20bMxfp4Q8 = ModelConfiguration(
         id: "mlx-community/gpt-oss-20b-MXFP4-Q8",
-        defaultPrompt: "Why is the sky blue?"
+        defaultPrompt: defaultPromptSkyBlue
     )
 
     /// Model configuration for `mlx-community/AI21-Jamba-Reasoning-3B-4bit`.
     static public let jamba3b4bit = ModelConfiguration(
         id: "mlx-community/AI21-Jamba-Reasoning-3B-4bit",
-        defaultPrompt: ""
+        defaultPrompt: defaultPromptEmpty
     )
 
     /// Model configuration for `mlx-community/Nemotron-Labs-Diffusion-3B-4bit`.
     static public let nemotronLabsDiffusion3b4bit = ModelConfiguration(
         id: "mlx-community/Nemotron-Labs-Diffusion-3B-4bit",
-        defaultPrompt: "Explain quaternions."
+        defaultPrompt: defaultPromptExplainQuaternions
     )
 
     private static func all() -> [ModelConfiguration] {
