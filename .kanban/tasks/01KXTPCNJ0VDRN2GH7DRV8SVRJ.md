@@ -42,8 +42,8 @@ comments:
 
     Full suite verified green twice (fresh runs): swift build clean except the one upstream Cmlx warning; swift test → 795 tests, 0 failures. Proceeding to commit checkpoint and review.
   timestamp: 2026-07-18T13:59:50.670672+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: c080
 title: 'Pre-existing SwiftPM build warnings: unhandled Documentation.docc + mutated node'
 ---
 Full `swift test` run (2026-07-18, branch foundationmodels-fixes) is 100% green (0 test failures across MLXLMTests, MLXHuggingFaceMacrosTests, MLXFoundationModelsTests (241/42), MLXGuidedGenerationTests, and swift-testing suites — ~795 total tests), but the build emits 4 warnings unrelated to the tests under review:
