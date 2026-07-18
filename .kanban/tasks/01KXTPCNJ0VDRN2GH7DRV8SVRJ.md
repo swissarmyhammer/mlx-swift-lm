@@ -1,7 +1,48 @@
 ---
 assignees:
 - claude-code
-position_column: todo
+comments:
+- actor: claude-code
+  id: 01kxtr2acvz8g3zje96acpdm1n
+  text: |-
+    Implementation complete. Summary of findings and changes:
+
+    **1-3. Documentation.docc "unhandled file" warnings (MLXLLM, MLXLMCommon, MLXHuggingFace)**
+
+    Investigated the naive `exclude: ["Documentation.docc"]` fix the description suggested (mirroring the `README.md` pattern). It DOES silence the warning, but it BREAKS `swift package generate-documentation`: verified by diffing the generated `.doccarchive` before/after — `exclude` removes the catalog from SwiftPM's declared `sourceFiles` list entirely, and `swift-docc-plugin` locates the docc catalog specifically via `target.sourceFiles.first { $0.path.extension == "docc" }` (confirmed by reading `SourceModuleTarget+doccCatalogPath.swift` in the vendored swift-docc-plugin checkout). With `exclude`, the plugin silently falls back to a generic auto-generated symbol-only landing page — no error, no warning, just silently dropped curated articles (adding-model.md, using-model.md, evaluation.md, developing.md, porting.md, upgrade.md, using.md, wired-memory.md, and each target's Documentation.md landing page). Since `scripts/verify-docs.sh` / CI's "Verify documentation" step only checks exit code + `--warnings-as-errors`, this silent content loss would NOT have been caught by CI.
+
+    Fix used instead: `resources: [.copy("Documentation.docc")]` on MLXLLM, MLXLMCommon, and MLXHuggingFace (the other SwiftPM-suggested remedy from the warning text itself: "explicitly declare them as resources or exclude"). Verified this silences the same warning AND fully preserves doc catalog generation (re-checked article presence in the archive after the change, for both MLXLLM and MLXLMCommon).
+
+    Known accepted tradeoff: `.copy` resources cause SwiftPM to produce a runtime resource bundle (e.g. `mlx-swift-lm_MLXLLM.bundle` containing `Contents/Resources/Documentation.docc/*.md`) for these three targets, which previously had none. Double-checked (adversarial agent) that this is inert — verified in both Debug and Release configs, bundle is normally code-signed, no `Bundle.module`/`Bundle.main` usage collision in these targets' sources.
+
+    `swift build` confirmed clean of all 3 docc warnings after the fix (only the Cmlx warning remains).
+
+    **MLXHuggingFace docc generation - separate pre-existing issue found**
+
+    `generate-documentation --target MLXHuggingFace` fails with `fatal error: 'memory' file not found` during clang `-extract-api` on vendored xgrammar C++ headers (reached via MLXHuggingFace -> MLXFoundationModels -> MLXGuidedGeneration -> MLXCXGrammar). Confirmed via `git stash` that this reproduces identically with or without this task's Package.swift change — it predates and is unrelated to this task. Left out of scope; may warrant its own kanban task if doc generation for MLXHuggingFace is desired in CI (currently scripts/verify-docs.sh does not exclude MLXHuggingFace from its target list, so this would already be failing `--warnings-as-errors` doc generation in CI independent of this fix — worth flagging separately).
+
+    **4. "missing creator for mutated node" Cmlx bundle warning**
+
+    Confirmed via `.build/checkouts/mlx-swift/Package.swift` that the `Cmlx` target (with `.define("SWIFTPM_BUNDLE", to: "\"mlx-swift_Cmlx\"")`) is defined entirely in the upstream mlx-swift dependency, not in mlx-swift-lm's own manifest or any file in this repo. Nothing in this repo's Package.swift/target config can address it. Left out of scope as an upstream/toolchain artifact, matching the original investigation's suspicion.
+
+    **Verification**
+
+    - `swift build`: exit 0, only the Cmlx warning remains (3 docc warnings gone).
+    - `swift test` (full suite, unfiltered): 0 failures across ~795 tests (265+80+241+7 swift-testing tests across suites incl. MLXFoundationModelsTests/MLXGuidedGenerationTests/CXGrammarTests, 197 MLXLMTests XCTest tests, 5 MLXHuggingFaceMacrosTests XCTest tests).
+    - Adversarial double-check agent: PASS, no findings, independently reproduced the docc-catalog-loss regression from `exclude`, the inertness of `.copy` resources in Debug+Release, and the pre-existing MLXHuggingFace/xgrammar and Cmlx-bundle findings.
+
+    Toolchain used throughout: Xcode-beta.app (Swift 6.4, swiftlang-6.4.0.25.4, target arm64-apple-macosx27.0.0) — no stable/non-beta Xcode was available on this machine to cross-check whether the original "unhandled file" warnings are beta-specific; not verified either way, but moot since the fix works correctly on the toolchain actually in use here.
+
+    Leaving task in `doing` per process — ready for /review.
+  timestamp: 2026-07-18T13:53:46.907496+00:00
+- actor: claude-code
+  id: 01kxtrddmerbsa3ysyc6wbpgr2
+  text: |-
+    Implementation landed (iteration 1). Fixed via `resources: [.copy("Documentation.docc")]` on MLXLLM/MLXLMCommon/MLXHuggingFace targets in Package.swift (not `exclude`, which was confirmed to silently break `swift package generate-documentation` by dropping the docc plugin's catalog discovery — verified against swift-docc-plugin's own SourceModuleTarget+doccCatalogPath.swift). MLXHuggingFace's generate-documentation separately fails on a pre-existing, unrelated clang -extract-api error in vendored xgrammar headers (reproduced via git stash on main, out of scope). The "missing creator for mutated node" Cmlx bundle warning originates in the upstream mlx-swift dependency's own Package.swift, not fixable from this repo.
+
+    Full suite verified green twice (fresh runs): swift build clean except the one upstream Cmlx warning; swift test → 795 tests, 0 failures. Proceeding to commit checkpoint and review.
+  timestamp: 2026-07-18T13:59:50.670672+00:00
+position_column: doing
 position_ordinal: '80'
 title: 'Pre-existing SwiftPM build warnings: unhandled Documentation.docc + mutated node'
 ---

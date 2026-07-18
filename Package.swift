@@ -79,6 +79,9 @@ let package = Package(
             path: "Libraries/MLXLLM",
             exclude: [
                 "README.md"
+            ],
+            resources: [
+                .copy("Documentation.docc")
             ]
         ),
         .target(
@@ -104,6 +107,9 @@ let package = Package(
             path: "Libraries/MLXLMCommon",
             exclude: [
                 "README.md"
+            ],
+            resources: [
+                .copy("Documentation.docc")
             ]
         ),
         .target(
@@ -176,7 +182,10 @@ let package = Package(
                     condition: .when(traits: ["FoundationModelsIntegration"])
                 ),
             ],
-            path: "Libraries/MLXHuggingFace"
+            path: "Libraries/MLXHuggingFace",
+            resources: [
+                .copy("Documentation.docc")
+            ]
         ),
         .testTarget(
             name: "MLXHuggingFaceMacrosTests",
