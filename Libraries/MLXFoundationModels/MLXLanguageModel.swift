@@ -56,6 +56,19 @@ struct TokenizerBias: @unchecked Sendable {
 /// tokenizer, a compiled constraint, and the token-budget/logit-bias values
 /// `GuidedGenerationLoop.run` needs to steer generation toward a structural
 /// close.
+///
+/// Deliberately `internal`, not `private`: this type is `Executor`-only
+/// implementation detail, not part of `MLXFoundationModels`' public API
+/// surface, so `internal` already achieves the intended encapsulation for
+/// real consumers of the library. It cannot be narrowed to `private`/
+/// `fileprivate`, though -- `Tests/MLXFoundationModelsTests/ToolEnvelopeReserveZoneTests.swift`
+/// constructs `ConstraintSetup` directly (via `@testable import
+/// MLXFoundationModels`) to unit-test `reserves(forMaxTokens:)` in
+/// isolation from `prepareConstraintSetup`'s full request plumbing --
+/// `@testable import` only elevates `internal`/`public` access to a
+/// separate module, never `private`/`fileprivate` (which stay scoped to
+/// the declaring file no matter the importer), so a `private` modifier
+/// here would make that test target fail to compile.
 struct ConstraintSetup {
     let xgTokenizer: GrammarTokenizer
     let constraint: GrammarConstraint
@@ -1903,6 +1916,56 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Returns: The `PromptVariants` bundling every gate's render.
         /// - Throws: Whatever `UserInputProcessor.prepare` or reasoning-prompt
         ///   preparation throw.
+        /// Whether the unconstrained path should render a reasoning-
+        /// SUPPRESSED prompt this round: reasoning is declared OFF, the
+        /// round is on the unconstrained path (no tools/schema --
+        /// reasoning is only consumed there), and the resolved
+        /// configuration actually has a reasoning config to suppress
+        /// against.
+        ///
+        /// - Parameters:
+        ///   - mayRunReasoningPath: Whether this round is on the unconstrained path.
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - resolved: The resolved model configuration.
+        /// - Returns: `true` when a suppressed prompt should be rendered.
+        private static func shouldSuppressReasoning(
+            mayRunReasoningPath: Bool, declaresReasoning: Bool, resolved: ModelConfiguration
+        ) -> Bool {
+            mayRunReasoningPath && !declaresReasoning && resolved.reasoningConfig != nil
+        }
+
+        /// Whether the unconstrained path should render a reasoning-PRIMED
+        /// prompt this round and prepare `reasoningSetup`: reasoning is
+        /// declared ON, the round is on the unconstrained path, and the
+        /// resolved configuration actually has a reasoning config to prime.
+        ///
+        /// - Parameters:
+        ///   - mayRunReasoningPath: Whether this round is on the unconstrained path.
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - resolved: The resolved model configuration.
+        /// - Returns: `true` when `reasoningSetup` should be prepared.
+        private static func shouldSetupReasoning(
+            mayRunReasoningPath: Bool, declaresReasoning: Bool, resolved: ModelConfiguration
+        ) -> Bool {
+            mayRunReasoningPath && declaresReasoning && resolved.reasoningConfig != nil
+        }
+
+        /// Whether a guided-generation-specific prompt render is needed
+        /// this round: tools are disabled (so the eager render is
+        /// meaningful), a developer-supplied schema is present, and the
+        /// eager render itself succeeded.
+        ///
+        /// - Parameters:
+        ///   - needsEagerInput: Whether tools are disabled.
+        ///   - schemaJSON: The developer-supplied JSON schema, if any.
+        ///   - input: The eager render, if any.
+        /// - Returns: `true` when `guidedInput` should be built.
+        private static func shouldBuildGuidedInput(
+            needsEagerInput: Bool, schemaJSON: String?, input: LMInput?
+        ) -> Bool {
+            needsEagerInput && schemaJSON != nil && input != nil
+        }
+
         private func preparePromptVariants(
             request: LanguageModelExecutorGenerationRequest,
             messages: [Chat.Message],
@@ -1925,7 +1988,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // doesn't emit `<think>`. Toggleable-only;
             // .alwaysOn was already rejected by `resolveRespondConfiguration`.
             let suppressedInput: LMInput?
-            if mayRunReasoningPath, !declaresReasoning,
+            if Self.shouldSuppressReasoning(
+                mayRunReasoningPath: mayRunReasoningPath, declaresReasoning: declaresReasoning,
+                resolved: resolved),
                 let suppressionConfig = resolved.reasoningConfig
             {
                 suppressedInput = try await Self.preparedInput(
@@ -1940,7 +2005,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             let reasoningSetup:
                 (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?
-            if mayRunReasoningPath, declaresReasoning,
+            if Self.shouldSetupReasoning(
+                mayRunReasoningPath: mayRunReasoningPath, declaresReasoning: declaresReasoning,
+                resolved: resolved),
                 let reasoningConfig = resolved.reasoningConfig
             {
                 let thinkingEnabled = Self.thinkingEnabled(
@@ -1971,7 +2038,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // `input` unchanged otherwise avoids a second, wasted
             // `UserInputProcessor.prepare` call for byte-identical messages.
             let guidedInput: LMInput?
-            if needsEagerInput, let schemaJSON, let input {
+            if Self.shouldBuildGuidedInput(
+                needsEagerInput: needsEagerInput, schemaJSON: schemaJSON, input: input),
+                let schemaJSON, let input
+            {
                 let guidedMessages = Self.guidedGenerationMessages(
                     from: messages, schemaJSON: schemaJSON,
                     includeSchemaInPrompt: request.contextOptions.includeSchemaInPrompt)
@@ -3071,6 +3141,33 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             return (generatedTokenCount, slot.cachedTokenCount, incomplete)
         }
 
+        /// Whether think-then-call should even be considered for this round
+        /// -- the multi-condition pre-render check `makeThinkThenCallConfig`
+        /// guards its lookup on, named so the AND of these three
+        /// independent conditions (declared reasoning capability, a
+        /// resolved reasoning config to run against, and reasoning not
+        /// explicitly turned off for this request) reads as one semantic
+        /// precondition rather than an anonymous boolean chain. This
+        /// predicate says nothing about WHICH strategy family qualifies
+        /// once it's `true` -- that dispatch (`.templateFlag`/`.alwaysOn`
+        /// vs. `.none`) happens entirely in `makeThinkThenCallConfig`'s own
+        /// `switch`, below.
+        ///
+        /// - Parameters:
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - resolved: The resolved model configuration.
+        ///   - reasoningLevel: The caller's requested reasoning level, if any.
+        /// - Returns: `true` when a reasoning config exists to gate
+        ///   think-then-call's strategy dispatch on.
+        private static func shouldRunThinkThenCall(
+            declaresReasoning: Bool,
+            resolved: ModelConfiguration,
+            reasoningLevel: ContextOptions.ReasoningLevel?
+        ) -> Bool {
+            declaresReasoning && resolved.reasoningConfig != nil
+                && thinkingEnabled(for: reasoningLevel) != false
+        }
+
         /// Derives the think-then-call reasoning config for the tool-calling
         /// path — the static, pre-render gate. Two strategy families qualify:
         ///
@@ -3097,9 +3194,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             resolved: ModelConfiguration,
             reasoningLevel: ContextOptions.ReasoningLevel?
         ) -> ReasoningConfig? {
-            guard declaresReasoning,
-                let reasoningConfig = resolved.reasoningConfig,
-                thinkingEnabled(for: reasoningLevel) != false
+            guard shouldRunThinkThenCall(
+                declaresReasoning: declaresReasoning, resolved: resolved,
+                reasoningLevel: reasoningLevel),
+                let reasoningConfig = resolved.reasoningConfig
             else { return nil }
             switch reasoningConfig.promptStrategy {
             case .templateFlag, .alwaysOn:

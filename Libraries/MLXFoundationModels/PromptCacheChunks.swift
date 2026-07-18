@@ -312,15 +312,21 @@ extension PromptCache {
     /// Refuses to snapshot a `KVCacheSimple` layer whose `state` isn't
     /// exactly `[keys, values]` (an untouched, never-updated layer, whose
     /// `state` getter returns `[]` -- see `KVCacheSimple.state` in
-    /// `KVCache.swift`) -- mirroring ``verifiedSimpleLayers(cache:tokenCount:)``'s
-    /// own `state.count == 2` requirement, so a corrupt or degenerate
-    /// checkpoint is never stored in the first place. A `MambaCache`
-    /// layer's `state` has no such requirement here: an untouched layer's
-    /// `[]` is captured as-is (`store()` only calls this after a real round
-    /// of generation, so in practice every layer has already been touched
-    /// at least once). `[]` is NOT, however, a state `restoreHybridCheckpoint(_:)`
-    /// can hand to `MambaCache.state`'s setter directly -- see that
-    /// function's doc comment for why it special-cases this.
+    /// `KVCache.swift`) OR whose `offset` doesn't exactly match
+    /// `tokens.count` -- mirroring ``verifiedSimpleLayers(cache:tokenCount:)``'s
+    /// own `state.count == 2 && offset == tokenCount` requirement, so a
+    /// corrupted or inconsistent cache (e.g. one whose layers have silently
+    /// drifted out of sync with `tokens`) can never silently produce a
+    /// checkpoint that doesn't actually correspond to `tokens` -- restoring
+    /// such a checkpoint later and feeding it a suffix computed against the
+    /// WRONG prefix length would corrupt every subsequent token's
+    /// generation. A `MambaCache` layer's `state` has no such requirement
+    /// here: an untouched layer's `[]` is captured as-is (`store()` only
+    /// calls this after a real round of generation, so in practice every
+    /// layer has already been touched at least once). `[]` is NOT, however,
+    /// a state `restoreHybridCheckpoint(_:)` can hand to `MambaCache.state`'s
+    /// setter directly -- see that function's doc comment for why it
+    /// special-cases this.
     ///
     /// - Parameters:
     ///   - tokens: The full token sequence `cache` currently reflects.
@@ -328,7 +334,7 @@ extension PromptCache {
     /// - Returns: The captured ``HybridCheckpoint``, or `nil` when `cache`
     ///   isn't a genuine hybrid stack (``isHybridMambaAttention(_:)``) or
     ///   any `KVCacheSimple` layer's `state` isn't a verified `[keys,
-    ///   values]` pair.
+    ///   values]` pair whose `offset` matches `tokens.count`.
     nonisolated static func snapshotHybridCheckpoint(
         tokens: [Int], cache: [KVCache]
     ) -> HybridCheckpoint? {
@@ -340,7 +346,21 @@ extension PromptCache {
         layers.reserveCapacity(cache.count)
         var byteSize = 0
         for (layer, kind) in zip(cache, kinds) {
-            if kind == .simple, layer.state.count != 2 { return nil }
+            if kind == .simple {
+                // Mirrors `verifiedSimpleLayers(cache:tokenCount:)`'s own
+                // `state.count == 2 && offset == tokenCount` requirements: a
+                // `KVCacheSimple` layer whose `offset` doesn't match
+                // `tokens.count` reflects a DIFFERENT token position than
+                // what this snapshot claims to cover -- e.g. a corrupted or
+                // inconsistent cache passed in by a caller bug -- and
+                // capturing it anyway would produce a checkpoint that
+                // silently does not correspond to `tokens`, restorable only
+                // into a wrong future round. Refuse rather than guess.
+                guard layer.state.count == 2,
+                    let simple = layer as? KVCacheSimple,
+                    simple.offset == tokens.count
+                else { return nil }
+            }
             let owned = layer.state.map { ownedCopy(of: $0) }
             byteSize += owned.reduce(0) { $0 + $1.nbytes }
             layers.append((kind: kind, state: owned))
@@ -518,6 +538,32 @@ extension PromptCache {
         return (layers, byteSize)
     }
 
+    /// Builds a freshly sliced ``StoredChunk``, stamped with `lastUsed: 0`
+    /// (see ``StoredChunk/lastUsed``'s doc comment for why a pure slicing
+    /// function never stamps a real recency value) -- the identical field
+    /// wiring ``sliceChunks(tokens:cache:chunkSize:)`` and
+    /// ``sliceTailChunk(tokens:cache:chunkSize:parentKey:)`` both need,
+    /// differing only in which tokens/parent-key/sliced-layers they pass.
+    ///
+    /// - Parameters:
+    ///   - tokens: This chunk's token ids (a full `chunkSize`-token span for
+    ///     `sliceChunks`, or the trailing partial span for `sliceTailChunk`).
+    ///   - sliced: The layers/byte-footprint ``sliceLayers(simpleLayers:start:end:)``
+    ///     already computed for this span.
+    ///   - parentKey: This chunk's hash-chain attachment point.
+    /// - Returns: The freshly built `StoredChunk`, keyed via
+    ///   ``chunkKey(parentKey:tokens:)``.
+    private static func makeStoredChunk(
+        tokens: [Int],
+        sliced: (layers: [(keys: MLXArray, values: MLXArray)], byteSize: Int),
+        parentKey: Int
+    ) -> StoredChunk {
+        let key = chunkKey(parentKey: parentKey, tokens: tokens)
+        return StoredChunk(
+            tokens: tokens, layers: sliced.layers, parentKey: parentKey, chunkKey: key,
+            byteSize: sliced.byteSize, lastUsed: 0)
+    }
+
     /// Cuts `tokens`/`cache` into fixed-size, non-overlapping token-range
     /// chunks, one covering each full `chunkSize`-token span; any trailing
     /// partial span (fewer than `chunkSize` tokens) is left uncovered here --
@@ -558,12 +604,9 @@ extension PromptCache {
             let chunkTokens = Array(tokens[start ..< end])
 
             let sliced = sliceLayers(simpleLayers: simpleLayers, start: start, end: end)
-            let key = chunkKey(parentKey: parentKey, tokens: chunkTokens)
-            chunks.append(
-                StoredChunk(
-                    tokens: chunkTokens, layers: sliced.layers, parentKey: parentKey,
-                    chunkKey: key, byteSize: sliced.byteSize, lastUsed: 0))
-            parentKey = key
+            let chunk = makeStoredChunk(tokens: chunkTokens, sliced: sliced, parentKey: parentKey)
+            chunks.append(chunk)
+            parentKey = chunk.chunkKey
         }
 
         return chunks
@@ -612,10 +655,7 @@ extension PromptCache {
 
         let tailTokens = Array(tokens[start...])
         let sliced = sliceLayers(simpleLayers: simpleLayers, start: start, end: tokens.count)
-        let key = chunkKey(parentKey: parentKey, tokens: tailTokens)
-        return StoredChunk(
-            tokens: tailTokens, layers: sliced.layers, parentKey: parentKey, chunkKey: key,
-            byteSize: sliced.byteSize, lastUsed: 0)
+        return makeStoredChunk(tokens: tailTokens, sliced: sliced, parentKey: parentKey)
     }
 }
 

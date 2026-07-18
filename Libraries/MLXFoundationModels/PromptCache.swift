@@ -7,6 +7,22 @@ import Foundation
 import MLX
 import MLXLMCommon
 
+/// Common shape shared by ``PromptCache/StoredChunk`` and
+/// ``PromptCache/HybridCheckpoint``: both carry a recency stamp for LRU
+/// eviction and a real byte footprint for budget accounting. Lets
+/// `PromptCache`'s generic `insertOrUpdateEntry(_:key:modelID:into:)`/
+/// `updateBest(_:scanning:victimCase:)` helpers operate identically over
+/// either store, instead of duplicating the same dedup/recency/byte-
+/// accounting pattern across `insert`/`insertTail`/`insertHybridCheckpoint`,
+/// or the same scanning loop across `globalLRUVictim()`'s two stores.
+private protocol CacheStoreEntry {
+    var lastUsed: Int { get set }
+    var byteSize: Int { get }
+}
+
+extension PromptCache.StoredChunk: CacheStoreEntry {}
+extension PromptCache.HybridCheckpoint: CacheStoreEntry {}
+
 /// Per-model, chunked shared KV-cache store for `MLXLanguageModel.Executor`.
 ///
 /// FoundationModels' `LanguageModelExecutor` protocol has no session
@@ -555,22 +571,56 @@ actor PromptCache {
     /// Drops every model's remembered chunk store AND hybrid checkpoint
     /// store. Mirrors `ModelCache.evictAll`.
     func evictAll() {
+        evictChunkStoreOnly()
+        totalStoredBytes -= hybridCheckpoints.values.reduce(0) {
+            $0 + $1.values.reduce(0) { $0 + $1.byteSize }
+        }
+        hybridCheckpoints.removeAll()
+    }
+
+    /// Drops every model's remembered CHUNK store -- ``chunkStore`` and
+    /// ``activeTailKey`` -- reclaiming their bytes, while leaving
+    /// ``hybridCheckpoints`` untouched. Extracted from ``evictAll()`` so
+    /// ``setChunkSize(_:)`` (a genuine chunk-size change) can evict only the
+    /// chunk-size-DEPENDENT store: hybrid checkpoints are keyed by the FULL
+    /// token prefix they cover, not by `chunkSize`-aligned windows, so a
+    /// `chunkSize` change never invalidates them -- see `setChunkSize(_:)`'s
+    /// doc comment for the full invariant.
+    private func evictChunkStoreOnly() {
+        let chunkBytes = chunkStore.values.reduce(0) { total, entries in
+            total + entries.values.reduce(0) { $0 + $1.byteSize }
+        }
+        totalStoredBytes -= chunkBytes
         chunkStore.removeAll()
         activeTailKey.removeAll()
-        hybridCheckpoints.removeAll()
-        totalStoredBytes = 0
     }
 
     /// Drops one model's remembered chunk store AND hybrid checkpoint
     /// store. Mirrors `ModelCache.remove`.
     func remove(modelID: String) {
-        if let removed = chunkStore.removeValue(forKey: modelID) {
-            totalStoredBytes -= removed.values.reduce(0) { $0 + $1.byteSize }
+        if removeAndReclaimBytes(modelID: modelID, from: &chunkStore) != nil {
             activeTailKey.removeValue(forKey: modelID)
         }
-        if let removed = hybridCheckpoints.removeValue(forKey: modelID) {
-            totalStoredBytes -= removed.values.reduce(0) { $0 + $1.byteSize }
-        }
+        removeAndReclaimBytes(modelID: modelID, from: &hybridCheckpoints)
+    }
+
+    /// Removes `modelID`'s entries from `store` (if any), reclaiming their
+    /// combined ``StoredChunk/byteSize``/``HybridCheckpoint/byteSize`` from
+    /// ``totalStoredBytes``. Shared by ``remove(modelID:)``'s two otherwise
+    /// nearly-identical blocks (one per store), which previously each
+    /// inlined the same remove-then-reduce-bytes pattern.
+    ///
+    /// - Parameters:
+    ///   - modelID: The model whose entries to remove.
+    ///   - store: The store to remove from (``chunkStore`` or ``hybridCheckpoints``).
+    /// - Returns: The removed entries, or `nil` if nothing was stored for `modelID`.
+    @discardableResult
+    private func removeAndReclaimBytes<Entry: CacheStoreEntry>(
+        modelID: String, from store: inout [String: [ChunkKey: Entry]]
+    ) -> [ChunkKey: Entry]? {
+        guard let removed = store.removeValue(forKey: modelID) else { return nil }
+        totalStoredBytes -= removed.values.reduce(0) { $0 + $1.byteSize }
+        return removed
     }
 
     /// Reconfigures this actor's total byte budget across EVERY model's
@@ -608,9 +658,18 @@ actor PromptCache {
     /// coincidence, serving the wrong KV state entirely (worst case, the
     /// same collision hazard `lookupLongestPrefix`'s own token compare
     /// guards against). Rather than risk either, a genuine change
-    /// unconditionally calls ``evictAll()``, discarding every model's
-    /// stored chunks so the next `resolve()`/`store()` rebuilds from
-    /// scratch under the new span.
+    /// unconditionally calls ``evictChunkStoreOnly()``, discarding every
+    /// model's stored CHUNKS so the next `resolve()`/`store()` rebuilds
+    /// from scratch under the new span.
+    ///
+    /// Deliberately does NOT evict ``hybridCheckpoints``: unlike
+    /// ``chunkStore``, hybrid checkpoints are keyed by the FULL token
+    /// prefix a round covers (`chunkKey(parentKey: rootChunkKey, tokens:)`),
+    /// not by `chunkSize`-aligned windows -- see
+    /// ``PromptCache/HybridCheckpoint``'s doc comment. A `chunkSize` change
+    /// doesn't change what a stored checkpoint's `tokens` prefix means, so
+    /// evicting them here would needlessly discard reusable state that
+    /// remains perfectly valid under the new span.
     ///
     /// Setting the SAME (already-clamped) value is a deliberate no-op past
     /// the clamp: comparing `clamped` against the CURRENT `chunkSize`
@@ -626,21 +685,57 @@ actor PromptCache {
         let clamped = max(1, size)
         guard clamped != chunkSize else { return }
         chunkSize = clamped
-        evictAll()
+        evictChunkStoreOnly()
     }
 
     // MARK: - Chunk store
 
-    /// Checks freshly sliced chunks (see `PromptCache.sliceChunks`) into
-    /// `modelID`'s chunk store, deduplicating by ``ChunkKey``.
+    /// Checks `entry` into `store[modelID]` at `key`, deduplicating: an
+    /// existing entry at `key` only has its `lastUsed` refreshed -- its
+    /// captured content is NEVER replaced, since an existing entry's
+    /// content is already a byte-for-byte-equivalent owned copy for the
+    /// same key (dedup existing is the entire point: two conversations/
+    /// rounds sharing that key must retain its state exactly once). A
+    /// genuinely new key is stored fresh, stamped with the current
+    /// recency, and its bytes newly accounted into ``totalStoredBytes``.
     ///
-    /// A key already present is dedup'd: only its `lastUsed` is refreshed --
-    /// its tensors are NEVER replaced, since an existing entry's tensors are
-    /// already a byte-for-byte-equivalent owned copy for the same
-    /// `(parentKey, tokens)` chain position (dedup existing is the entire
-    /// point: two conversations sharing a prefix must retain that prefix's KV
-    /// state exactly once). A new key is stored fresh, stamped with the
-    /// current recency.
+    /// Shared by ``insert(modelID:chunks:)``, ``insertTail(modelID:tail:)``,
+    /// and ``insertHybridCheckpoint(modelID:checkpoint:)`` -- all three
+    /// previously duplicated exactly this dedup/recency/byte-accounting
+    /// pattern, differing only in which store and entry type they operate
+    /// over.
+    ///
+    /// - Parameters:
+    ///   - entry: The freshly captured entry to check in.
+    ///   - key: The key to check `entry` in under.
+    ///   - modelID: The model identifier this store is scoped to.
+    ///   - store: The store to check `entry` into (``chunkStore`` or
+    ///     ``hybridCheckpoints``).
+    private func insertOrUpdateEntry<Entry: CacheStoreEntry>(
+        _ entry: Entry, key: ChunkKey, modelID: String,
+        into store: inout [String: [ChunkKey: Entry]]
+    ) {
+        var models = store[modelID] ?? [:]
+        if var existing = models[key] {
+            // Dedup hit: only `lastUsed` changes, content untouched --
+            // `totalStoredBytes` is unaffected, since this key's bytes are
+            // already accounted.
+            existing.lastUsed = nextRecency()
+            models[key] = existing
+        } else {
+            // Genuinely new key: store it fresh, stamped with the current
+            // recency, and account its bytes.
+            var fresh = entry
+            fresh.lastUsed = nextRecency()
+            models[key] = fresh
+            totalStoredBytes += fresh.byteSize
+        }
+        store[modelID] = models
+    }
+
+    /// Checks freshly sliced chunks (see `PromptCache.sliceChunks`) into
+    /// `modelID`'s chunk store, deduplicating by ``ChunkKey`` (see
+    /// ``insertOrUpdateEntry(_:key:modelID:into:)``).
     ///
     /// - Parameters:
     ///   - modelID: The model identifier this chunk store is scoped to.
@@ -648,24 +743,9 @@ actor PromptCache {
     ///     `sliceChunks` returns them, though this method doesn't require
     ///     that order itself).
     func insert(modelID: String, chunks: [StoredChunk]) {
-        var models = chunkStore[modelID] ?? [:]
         for chunk in chunks {
-            if var entry = models[chunk.chunkKey] {
-                // Dedup hit: only `lastUsed` changes, tensors untouched --
-                // and `totalStoredBytes` is unaffected, since this key's
-                // bytes are already accounted.
-                entry.lastUsed = nextRecency()
-                models[chunk.chunkKey] = entry
-            } else {
-                // Genuinely new key: store it fresh, stamped with the
-                // current recency, and account its bytes.
-                var entry = chunk
-                entry.lastUsed = nextRecency()
-                models[chunk.chunkKey] = entry
-                totalStoredBytes += entry.byteSize
-            }
+            insertOrUpdateEntry(chunk, key: chunk.chunkKey, modelID: modelID, into: &chunkStore)
         }
-        chunkStore[modelID] = models
         evictToBudget()
     }
 
@@ -676,49 +756,37 @@ actor PromptCache {
     /// SAME position (see ``activeTailKey``'s doc comment for why only one
     /// tail is ever retained per attachment point).
     ///
-    /// A tail whose key EXACTLY matches the position's current occupant is a
-    /// true dedup hit (identical content stored again): only `lastUsed` is
-    /// refreshed, no bytes double-counted -- mirrors
-    /// ``insert(modelID:chunks:)``'s own dedup semantics for full chunks. A
-    /// tail with a DIFFERENT key (or the same key but already evicted by
-    /// budget pressure, in which case removal is a harmless no-op) is
-    /// installed fresh after reclaiming whatever it replaces.
+    /// The dedup/recency/byte-accounting for the check-in itself is
+    /// ``insertOrUpdateEntry(_:key:modelID:into:)`` (a tail whose key
+    /// EXACTLY matches the position's current occupant is a true dedup hit
+    /// there, mirroring ``insert(modelID:chunks:)``'s own full-chunk
+    /// semantics); this method's own job is the STALE-occupant bookkeeping
+    /// `insertOrUpdateEntry` doesn't know about: a tail with a DIFFERENT
+    /// key (or the same key but already evicted by budget pressure, in
+    /// which case removal is a harmless no-op) must have whatever it
+    /// replaces reclaimed FIRST, since only one tail is ever retained per
+    /// attachment point.
     ///
     /// - Parameters:
     ///   - modelID: The model identifier this chunk store is scoped to.
     ///   - tail: The freshly sliced tail chunk to check in.
     func insertTail(modelID: String, tail: StoredChunk) {
-        var models = chunkStore[modelID] ?? [:]
         var tailIndex = activeTailKey[modelID] ?? [:]
 
-        if let existingKey = tailIndex[tail.parentKey], existingKey == tail.chunkKey,
-            var entry = models[existingKey]
+        if let existingKey = tailIndex[tail.parentKey], existingKey != tail.chunkKey,
+            var models = chunkStore[modelID], let evicted = models.removeValue(forKey: existingKey)
         {
-            // Identical tail already active at this position: dedup, refresh
-            // recency only -- the tensors are already a byte-for-byte match.
-            entry.lastUsed = nextRecency()
-            models[existingKey] = entry
-            chunkStore[modelID] = models
-            return
-        }
-
-        if let existingKey = tailIndex[tail.parentKey],
-            let evicted = models.removeValue(forKey: existingKey)
-        {
-            // A stale tail (different content, since it didn't dedup above --
-            // or the same key but already evicted by budget pressure, in
-            // which case this is a harmless no-op) previously occupied this
+            // A stale tail (a different key than `tail.chunkKey` -- or the
+            // same key but already evicted by budget pressure, in which
+            // case this is a harmless no-op) previously occupied this
             // attachment point; only one tail is ever retained per position.
             totalStoredBytes -= evicted.byteSize
+            chunkStore[modelID] = models
         }
 
-        var entry = tail
-        entry.lastUsed = nextRecency()
-        models[tail.chunkKey] = entry
-        totalStoredBytes += entry.byteSize
         tailIndex[tail.parentKey] = tail.chunkKey
-        chunkStore[modelID] = models
         activeTailKey[modelID] = tailIndex
+        insertOrUpdateEntry(tail, key: tail.chunkKey, modelID: modelID, into: &chunkStore)
         evictToBudget()
     }
 
@@ -851,29 +919,16 @@ actor PromptCache {
     /// Checks a freshly captured whole-stack hybrid checkpoint (see
     /// `PromptCache.snapshotHybridCheckpoint(tokens:cache:)`) into
     /// `modelID`'s ``hybridCheckpoints`` store, deduplicating by content-hash
-    /// key exactly like ``insert(modelID:chunks:)`` does for ordinary
-    /// chunks: a key already present only has its `lastUsed` refreshed
-    /// (its captured state is never replaced -- two rounds landing on the
-    /// same full token prefix produce byte-for-byte equivalent state); a
-    /// genuinely new key is stored fresh and its bytes accounted.
+    /// key via ``insertOrUpdateEntry(_:key:modelID:into:)`` -- exactly the
+    /// same dedup/recency/byte-accounting semantics
+    /// ``insert(modelID:chunks:)`` uses for ordinary chunks.
     ///
     /// - Parameters:
     ///   - modelID: The model identifier this checkpoint store is scoped to.
     ///   - checkpoint: The freshly captured checkpoint to check in.
     func insertHybridCheckpoint(modelID: String, checkpoint: HybridCheckpoint) {
-        var checkpoints = hybridCheckpoints[modelID] ?? [:]
         let key = Self.chunkKey(parentKey: Self.rootChunkKey, tokens: checkpoint.tokens)
-
-        if var entry = checkpoints[key] {
-            entry.lastUsed = nextRecency()
-            checkpoints[key] = entry
-        } else {
-            var entry = checkpoint
-            entry.lastUsed = nextRecency()
-            checkpoints[key] = entry
-            totalStoredBytes += entry.byteSize
-        }
-        hybridCheckpoints[modelID] = checkpoints
+        insertOrUpdateEntry(checkpoint, key: key, modelID: modelID, into: &hybridCheckpoints)
         evictToBudget()
     }
 
@@ -985,21 +1040,35 @@ actor PromptCache {
     ///   store it belongs to, or `nil` when both stores are empty.
     private func globalLRUVictim() -> LRUVictim? {
         var best: (victim: LRUVictim, lastUsed: Int)?
-        for (modelID, chunks) in chunkStore {
-            for (key, chunk) in chunks {
-                if best == nil || chunk.lastUsed < best!.lastUsed {
-                    best = (.chunk(modelID: modelID, key: key), chunk.lastUsed)
-                }
-            }
-        }
-        for (modelID, checkpoints) in hybridCheckpoints {
-            for (key, checkpoint) in checkpoints {
-                if best == nil || checkpoint.lastUsed < best!.lastUsed {
-                    best = (.hybridCheckpoint(modelID: modelID, key: key), checkpoint.lastUsed)
-                }
-            }
-        }
+        updateBest(&best, scanning: chunkStore) { .chunk(modelID: $0, key: $1) }
+        updateBest(&best, scanning: hybridCheckpoints) { .hybridCheckpoint(modelID: $0, key: $1) }
         return best?.victim
+    }
+
+    /// Scans `store` for its least-recently-used entry and folds it into
+    /// `best` if it beats the current candidate (or if `best` is still
+    /// `nil`) -- the identical nested-loop shape ``globalLRUVictim()``
+    /// previously repeated once per store (``chunkStore``,
+    /// ``hybridCheckpoints``), differing only in which ``LRUVictim`` case
+    /// wraps the winning `(modelID, key)` pair.
+    ///
+    /// - Parameters:
+    ///   - best: The best candidate found so far, updated in place.
+    ///   - store: The store to scan.
+    ///   - victimCase: Wraps a winning `(modelID, key)` pair into the
+    ///     ``LRUVictim`` case matching `store`.
+    private func updateBest<Entry: CacheStoreEntry>(
+        _ best: inout (victim: LRUVictim, lastUsed: Int)?,
+        scanning store: [String: [ChunkKey: Entry]],
+        victimCase: (String, ChunkKey) -> LRUVictim
+    ) {
+        for (modelID, entries) in store {
+            for (key, entry) in entries {
+                if best == nil || entry.lastUsed < best!.lastUsed {
+                    best = (victimCase(modelID, key), entry.lastUsed)
+                }
+            }
+        }
     }
 
     /// Removes `key` from `modelID`'s store, reclaiming its bytes, then
