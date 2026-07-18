@@ -151,6 +151,74 @@ extension PromptCache {
         return (keys: keys, values: values, byteSize: keys.nbytes + values.nbytes)
     }
 
+    /// Whether `cache`'s layer composition can EVER participate in this
+    /// store's chunk-based reuse -- a structural, round-independent
+    /// capability check, unlike ``verifiedSimpleLayers(cache:tokenCount:)``
+    /// (which additionally requires every layer's `offset` to match a
+    /// SPECIFIC round's `tokenCount`). `true` only when every layer is
+    /// exactly `KVCacheSimple` (mirroring `verifiedSimpleLayers`'s own
+    /// exact-type rule -- see that function's doc comment for why a plain
+    /// `as? KVCacheSimple` isn't enough).
+    ///
+    /// DECISION (kanban `r9rf5g7`): hybrid Mamba/attention architectures
+    /// (Qwen3.6/Qwen3-Next family: `Qwen35Model`/`Qwen35MoEModel` in
+    /// `Libraries/MLXLLM/Models/Qwen35.swift`, via
+    /// `Qwen35DecoderLayer.isLinear`) build a `[KVCache]` mixing
+    /// `KVCacheSimple` (full-attention layers) with `MambaCache`
+    /// (Gated-DeltaNet linear-attention layers), so this always returns
+    /// `false` for them. That is a PERMANENT architectural fact about the
+    /// current chunk-store design, not a temporary gap:
+    ///
+    /// - Genuine PARTIAL reuse (chunk/cache only the attention layers,
+    ///   leave Mamba layers to reprocess fresh every turn) is not simply
+    ///   an optimization this store hasn't implemented yet -- it isn't
+    ///   expressible in this model family's forward pass at all.
+    ///   `Qwen35TextModelInner.callAsFunction`/`Qwen3NextModelInner.callAsFunction`
+    ///   thread ONE shared `hiddenStates` tensor through every layer in
+    ///   strict sequence, attention and Mamba layers alike, all at the
+    ///   SAME sequence length. There is no way to feed a short suffix to
+    ///   the attention layers while feeding the Mamba layers something
+    ///   else in the same forward call -- a Mamba layer fed only the
+    ///   suffix would compute its recurrent update as though those
+    ///   tokens were the START of the conversation, silently losing
+    ///   every earlier token's contribution to the shared residual
+    ///   stream (Mamba layers are interleaved IN that stream, not routed
+    ///   around it).
+    ///
+    /// - Genuine checkpointing of Mamba's recurrent state AT a chunk
+    ///   boundary (the way `sliceChunks` retroactively carves a
+    ///   FINISHED round's attention K/V tensor into `chunkSize`-aligned
+    ///   windows, by plain array indexing) doesn't work either.
+    ///   Attention's key/value tensors are append-only and addressable
+    ///   by absolute token position, so any earlier boundary can be
+    ///   recovered after the fact from the round's final tensor. A
+    ///   Mamba layer's `state` (conv buffer + Gated-DeltaNet recurrent
+    ///   state -- see `ArraysCache`/`MambaCache` in
+    ///   `MLXLMCommon/KVCache.swift`) is a running, COLLAPSED summary
+    ///   with no per-position history: the only way to obtain a valid
+    ///   checkpoint at a specific `chunkSize`-aligned boundary is for a
+    ///   REAL forward pass to actually halt there. That requires
+    ///   restructuring `MLXLMCommon`'s prefill loop to force every
+    ///   generation call -- not just hybrid models' -- to advance in
+    ///   fixed `chunkSize` increments, a change whose blast radius
+    ///   reaches far past `PromptCache`/`PromptCacheChunks`/`Qwen35.swift`
+    ///   and is disproportionate to this store's scope.
+    ///
+    /// So the chosen fix is not a change to how chunking works, but
+    /// making "this model will never report cache reuse" an explicit,
+    /// queryable fact (`MLXLanguageModel.supportsPromptCacheReuse(model:parameters:)`)
+    /// instead of leaving a caller to infer it from
+    /// `LanguageModelSession.Usage.input.cachedTokenCount` staying `0`
+    /// forever with no other signal.
+    ///
+    /// - Parameter cache: The cache stack to check, one entry per model layer.
+    /// - Returns: `true` when every layer is exactly `KVCacheSimple`;
+    ///   `false` for an empty stack or any non-`KVCacheSimple`/subclass/
+    ///   mixed-type layer.
+    nonisolated static func isChunkable(_ cache: [KVCache]) -> Bool {
+        !cache.isEmpty && cache.allSatisfy { type(of: $0) == KVCacheSimple.self }
+    }
+
     /// Verifies that every layer in `cache` is a chunkable, fully-offset
     /// `KVCacheSimple` layer -- shared by `sliceChunks` and `sliceTailChunk`,
     /// since both need the identical verification before slicing any span of

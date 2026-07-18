@@ -310,8 +310,8 @@ comments:
 
     NOT committed. Task left in `doing`.
   timestamp: 2026-07-17T21:39:28.380273+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: be80
 title: 'MiniMax-M2 tool-calling transcript rendering: tool-role message rendered without its preceding assistant tool-call turn'
 ---
 ## What

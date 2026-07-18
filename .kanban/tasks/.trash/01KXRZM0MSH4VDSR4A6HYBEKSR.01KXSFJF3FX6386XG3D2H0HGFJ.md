@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kxs1javmb2tqs2c71g53m5fd
+  text: 'Correction to the description: the closing net-diff review of 9mv1q33 (942d870..HEAD) confirmed LLMModelFactory.swift''s TrampolineModelFactory is ALSO still non-final (finding LLMModelFactory.swift:609 in the 9mv1q33 15:32 section) — it was NOT addressed under bxndpt6. So `final` should be applied to the trampoline in BOTH LLMModelFactory.swift and VLMModelFactory.swift. That LLMModelFactory item is out of scope for the completed 9mv1q33 (pre-existing, net-zero in its diff) and is captured here.'
+  timestamp: 2026-07-17T22:01:19.988595+00:00
 position_column: todo
 position_ordinal: '80'
 title: 'VLMModelFactory.swift hygiene: public-API docs, final trampoline, literal + cross-factory dedup'
