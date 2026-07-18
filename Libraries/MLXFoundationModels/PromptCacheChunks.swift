@@ -151,72 +151,294 @@ extension PromptCache {
         return (keys: keys, values: values, byteSize: keys.nbytes + values.nbytes)
     }
 
-    /// Whether `cache`'s layer composition can EVER participate in this
-    /// store's chunk-based reuse -- a structural, round-independent
-    /// capability check, unlike ``verifiedSimpleLayers(cache:tokenCount:)``
-    /// (which additionally requires every layer's `offset` to match a
-    /// SPECIFIC round's `tokenCount`). `true` only when every layer is
-    /// exactly `KVCacheSimple` (mirroring `verifiedSimpleLayers`'s own
-    /// exact-type rule -- see that function's doc comment for why a plain
+    /// Whether `cache`'s layer composition can participate in this store's
+    /// CHUNK-based reuse (fixed-size token-range slicing of a finished
+    /// round's K/V tensors) -- a structural, round-independent capability
+    /// check, unlike ``verifiedSimpleLayers(cache:tokenCount:)`` (which
+    /// additionally requires every layer's `offset` to match a SPECIFIC
+    /// round's `tokenCount`). `true` only when every layer is exactly
+    /// `KVCacheSimple` (mirroring `verifiedSimpleLayers`'s own exact-type
+    /// rule -- see that function's doc comment for why a plain
     /// `as? KVCacheSimple` isn't enough).
     ///
     /// DECISION (kanban `r9rf5g7`): hybrid Mamba/attention architectures
-    /// (Qwen3.6/Qwen3-Next family: `Qwen35Model`/`Qwen35MoEModel` in
-    /// `Libraries/MLXLLM/Models/Qwen35.swift`, via
-    /// `Qwen35DecoderLayer.isLinear`) build a `[KVCache]` mixing
+    /// (Qwen3.6/Qwen3-Next family: `Qwen35Model`/`Qwen35MoEModel`/
+    /// `Qwen3NextModel` in `Libraries/MLXLLM/Models/Qwen35.swift`/
+    /// `Qwen3Next.swift`, via `Qwen35DecoderLayer.isLinear`/
+    /// `Qwen3NextDecoderLayer.isLinear`) build a `[KVCache]` mixing
     /// `KVCacheSimple` (full-attention layers) with `MambaCache`
-    /// (Gated-DeltaNet linear-attention layers), so this always returns
-    /// `false` for them. That is a PERMANENT architectural fact about the
-    /// current chunk-store design, not a temporary gap:
+    /// (Gated-DeltaNet linear-attention layers), so `isChunkable` always
+    /// returns `false` for them: CHUNK slicing genuinely cannot apply to
+    /// Mamba's collapsed recurrent state. `sliceChunks` carves ANY
+    /// `chunkSize`-aligned window out of a FINISHED round's tensor by plain
+    /// array indexing -- that only works because attention's key/value
+    /// tensors are append-only and addressable by absolute token position.
+    /// A Mamba layer's `state` (conv buffer + Gated-DeltaNet recurrent
+    /// state -- see `ArraysCache`/`MambaCache` in `MLXLMCommon/KVCache.swift`)
+    /// is a running, COLLAPSED summary with no per-position history at
+    /// all -- there is no boundary inside it to slice.
     ///
-    /// - Genuine PARTIAL reuse (chunk/cache only the attention layers,
-    ///   leave Mamba layers to reprocess fresh every turn) is not simply
-    ///   an optimization this store hasn't implemented yet -- it isn't
-    ///   expressible in this model family's forward pass at all.
-    ///   `Qwen35TextModelInner.callAsFunction`/`Qwen3NextModelInner.callAsFunction`
-    ///   thread ONE shared `hiddenStates` tensor through every layer in
-    ///   strict sequence, attention and Mamba layers alike, all at the
-    ///   SAME sequence length. There is no way to feed a short suffix to
-    ///   the attention layers while feeding the Mamba layers something
-    ///   else in the same forward call -- a Mamba layer fed only the
-    ///   suffix would compute its recurrent update as though those
-    ///   tokens were the START of the conversation, silently losing
-    ///   every earlier token's contribution to the shared residual
-    ///   stream (Mamba layers are interleaved IN that stream, not routed
-    ///   around it).
-    ///
-    /// - Genuine checkpointing of Mamba's recurrent state AT a chunk
-    ///   boundary (the way `sliceChunks` retroactively carves a
-    ///   FINISHED round's attention K/V tensor into `chunkSize`-aligned
-    ///   windows, by plain array indexing) doesn't work either.
-    ///   Attention's key/value tensors are append-only and addressable
-    ///   by absolute token position, so any earlier boundary can be
-    ///   recovered after the fact from the round's final tensor. A
-    ///   Mamba layer's `state` (conv buffer + Gated-DeltaNet recurrent
-    ///   state -- see `ArraysCache`/`MambaCache` in
-    ///   `MLXLMCommon/KVCache.swift`) is a running, COLLAPSED summary
-    ///   with no per-position history: the only way to obtain a valid
-    ///   checkpoint at a specific `chunkSize`-aligned boundary is for a
-    ///   REAL forward pass to actually halt there. That requires
-    ///   restructuring `MLXLMCommon`'s prefill loop to force every
-    ///   generation call -- not just hybrid models' -- to advance in
-    ///   fixed `chunkSize` increments, a change whose blast radius
-    ///   reaches far past `PromptCache`/`PromptCacheChunks`/`Qwen35.swift`
-    ///   and is disproportionate to this store's scope.
-    ///
-    /// So the chosen fix is not a change to how chunking works, but
-    /// making "this model will never report cache reuse" an explicit,
-    /// queryable fact (`MLXLanguageModel.supportsPromptCacheReuse(model:parameters:)`)
-    /// instead of leaving a caller to infer it from
-    /// `LanguageModelSession.Usage.input.cachedTokenCount` staying `0`
-    /// forever with no other signal.
+    /// This does NOT mean hybrid architectures can never participate in
+    /// prompt-cache reuse at all -- an earlier revision of this comment
+    /// claimed exactly that, and the claim was wrong (a scope-limiting
+    /// decision, not an architectural impossibility). ``isHybridMambaAttention(_:)``/
+    /// ``snapshotHybridCheckpoint(tokens:cache:)``/``restoreHybridCheckpoint(_:)``
+    /// (below) implement a SEPARATE, parallel "hybrid checkpoint" mechanism:
+    /// rather than slicing a fixed window out of a layer's state, it
+    /// captures the ENTIRE, unsliced state of every layer (both
+    /// `KVCacheSimple`'s `[keys, values]` and `MambaCache`'s `[convState,
+    /// ssmState]`) at a round boundary, and restores all of it verbatim on
+    /// a later round whose prompt tokens start with an exact match of the
+    /// stored prefix. This works because `Qwen35GatedDeltaNet.callAsFunction`/
+    /// `Qwen3NextGatedDeltaNet.callAsFunction` (the Mamba layer's forward
+    /// pass) read ONLY `cache?[0]`/`cache?[1]` (the raw conv/SSM state
+    /// arrays) as VALUES -- never `cache.offset` or any other position
+    /// signal -- so the recurrence update is identical whether the prior
+    /// state came from one token earlier in the SAME forward call (ordinary
+    /// incremental generation) or from a checkpoint captured after an
+    /// entirely earlier round. See `PromptCache.resolveHybridCheckpoint(modelID:newTokens:)`/
+    /// `PromptCache.insertHybridCheckpoint(modelID:checkpoint:)` for how the
+    /// actor stores and matches checkpoints, and
+    /// `MLXLanguageModel.supportsPromptCacheReuse(model:parameters:)` for
+    /// the combined public capability signal (`isChunkable(_:) ||
+    /// isHybridMambaAttention(_:)`).
     ///
     /// - Parameter cache: The cache stack to check, one entry per model layer.
     /// - Returns: `true` when every layer is exactly `KVCacheSimple`;
     ///   `false` for an empty stack or any non-`KVCacheSimple`/subclass/
-    ///   mixed-type layer.
+    ///   mixed-type layer -- including a genuine hybrid stack, which
+    ///   instead participates in reuse via ``isHybridMambaAttention(_:)``'s
+    ///   checkpoint mechanism, never this one.
     nonisolated static func isChunkable(_ cache: [KVCache]) -> Bool {
         !cache.isEmpty && cache.allSatisfy { type(of: $0) == KVCacheSimple.self }
+    }
+
+    // MARK: - Hybrid Mamba/Attention Checkpoints
+
+    /// Tags which concrete `KVCache` subclass a hybrid checkpoint's captured
+    /// layer state came from, so ``restoreHybridCheckpoint(_:)`` knows which
+    /// concrete type to reconstruct -- ``HybridCheckpoint/layers`` stores
+    /// plain `[MLXArray]` state (the same shape both `KVCacheSimple.state`
+    /// and `MambaCache.state` expose), which alone doesn't say which setter
+    /// to feed it back into.
+    enum HybridLayerKind: Equatable {
+        /// Captured from an exactly-`KVCacheSimple` layer: `state` is
+        /// `[keys, values]`.
+        case simple
+        /// Captured from an exactly-`MambaCache` layer: `state` is
+        /// `[convState, ssmState]` (or `[]` for an untouched cache -- see
+        /// `MambaCache`/`ArraysCache.state` in `KVCache.swift`).
+        case mamba
+    }
+
+    /// One layer per entry, tagging `cache`'s concrete shape -- `nil` if any
+    /// layer is neither exactly `KVCacheSimple` nor exactly `MambaCache` (an
+    /// unknown shape this mechanism refuses to reason about, mirroring
+    /// ``isChunkable(_:)``'s own exact-type philosophy).
+    ///
+    /// - Parameter cache: The cache stack to classify, one entry per model layer.
+    /// - Returns: One ``HybridLayerKind`` per layer, in the same order as
+    ///   `cache`; `nil` for an empty stack or any layer of an unrecognized type.
+    nonisolated static func hybridLayerKinds(_ cache: [KVCache]) -> [HybridLayerKind]? {
+        guard !cache.isEmpty else { return nil }
+        var kinds: [HybridLayerKind] = []
+        kinds.reserveCapacity(cache.count)
+        for layer in cache {
+            if type(of: layer) == KVCacheSimple.self {
+                kinds.append(.simple)
+            } else if type(of: layer) == MambaCache.self {
+                kinds.append(.mamba)
+            } else {
+                return nil
+            }
+        }
+        return kinds
+    }
+
+    /// Whether `cache` is a genuine hybrid Mamba/attention stack -- every
+    /// layer exactly `KVCacheSimple` or `MambaCache` (see
+    /// ``hybridLayerKinds(_:)``), with AT LEAST ONE of each. A stack that's
+    /// entirely `KVCacheSimple` should keep using the ordinary chunk store
+    /// (``isChunkable(_:)``); an all-`MambaCache` or unrecognized-mixed
+    /// stack isn't handled by either mechanism.
+    ///
+    /// - Parameter cache: The cache stack to check, one entry per model layer.
+    /// - Returns: `true` when `cache` mixes at least one `KVCacheSimple` and
+    ///   at least one `MambaCache` layer.
+    nonisolated static func isHybridMambaAttention(_ cache: [KVCache]) -> Bool {
+        guard let kinds = hybridLayerKinds(cache) else { return false }
+        return kinds.contains(.simple) && kinds.contains(.mamba)
+    }
+
+    /// A whole-stack, UNSLICED snapshot of a hybrid cache's raw layer state
+    /// at a round boundary, keyed by the full token prefix it covers.
+    ///
+    /// Unlike ``StoredChunk``, which slices a fixed token-range WINDOW out
+    /// of a verified `KVCacheSimple` layer's finished tensor,
+    /// `HybridCheckpoint` captures each layer's ENTIRE `state` verbatim --
+    /// this is what makes Mamba's collapsed recurrent state (which has no
+    /// per-position history to slice) reusable at all: rather than carving
+    /// a window out of it after the fact, a checkpoint is captured whole
+    /// and restored whole.
+    struct HybridCheckpoint {
+        /// The FULL token prefix this checkpoint covers, from the start of
+        /// the sequence -- not a window; every layer's `state` here
+        /// reflects having processed exactly this many tokens.
+        var tokens: [Int]
+
+        /// Every layer's raw, unsliced, OWNED-copy `state` (see
+        /// ``PromptCache/ownedCopy(of:)``), tagged with the concrete type it
+        /// came from (see ``HybridLayerKind``) so
+        /// ``restoreHybridCheckpoint(_:)`` can reconstruct the right
+        /// concrete `KVCache` subclass per layer, in the same layer order
+        /// as the source `[KVCache]`.
+        var layers: [(kind: HybridLayerKind, state: [MLXArray])]
+
+        /// Real retained memory footprint of every layer's owned state
+        /// arrays, in bytes (`MLXArray.nbytes`, summed).
+        var byteSize: Int
+
+        /// Recency stamp for eviction bookkeeping -- see
+        /// ``StoredChunk/lastUsed``'s doc comment for the same convention
+        /// (fresh snapshots start at `0`; the storing actor stamps a real
+        /// value).
+        var lastUsed: Int
+    }
+
+    /// Captures a completed round's hybrid `[KVCache]` as a whole,
+    /// UNSLICED ``HybridCheckpoint``, for later exact-prefix-match restore
+    /// (see ``restoreHybridCheckpoint(_:)``/`PromptCache.resolveHybridCheckpoint(modelID:newTokens:)`).
+    ///
+    /// Refuses to snapshot a `KVCacheSimple` layer whose `state` isn't
+    /// exactly `[keys, values]` (an untouched, never-updated layer, whose
+    /// `state` getter returns `[]` -- see `KVCacheSimple.state` in
+    /// `KVCache.swift`) -- mirroring ``verifiedSimpleLayers(cache:tokenCount:)``'s
+    /// own `state.count == 2` requirement, so a corrupt or degenerate
+    /// checkpoint is never stored in the first place. A `MambaCache`
+    /// layer's `state` has no such requirement here: an untouched layer's
+    /// `[]` is captured as-is (`store()` only calls this after a real round
+    /// of generation, so in practice every layer has already been touched
+    /// at least once). `[]` is NOT, however, a state `restoreHybridCheckpoint(_:)`
+    /// can hand to `MambaCache.state`'s setter directly -- see that
+    /// function's doc comment for why it special-cases this.
+    ///
+    /// - Parameters:
+    ///   - tokens: The full token sequence `cache` currently reflects.
+    ///   - cache: The hybrid cache stack to snapshot, one entry per model layer.
+    /// - Returns: The captured ``HybridCheckpoint``, or `nil` when `cache`
+    ///   isn't a genuine hybrid stack (``isHybridMambaAttention(_:)``) or
+    ///   any `KVCacheSimple` layer's `state` isn't a verified `[keys,
+    ///   values]` pair.
+    nonisolated static func snapshotHybridCheckpoint(
+        tokens: [Int], cache: [KVCache]
+    ) -> HybridCheckpoint? {
+        guard isHybridMambaAttention(cache), let kinds = hybridLayerKinds(cache) else {
+            return nil
+        }
+
+        var layers: [(kind: HybridLayerKind, state: [MLXArray])] = []
+        layers.reserveCapacity(cache.count)
+        var byteSize = 0
+        for (layer, kind) in zip(cache, kinds) {
+            if kind == .simple, layer.state.count != 2 { return nil }
+            let owned = layer.state.map { ownedCopy(of: $0) }
+            byteSize += owned.reduce(0) { $0 + $1.nbytes }
+            layers.append((kind: kind, state: owned))
+        }
+        return HybridCheckpoint(tokens: tokens, layers: layers, byteSize: byteSize, lastUsed: 0)
+    }
+
+    /// Rebuilds a fresh, PRIVATE `[KVCache]` from a whole-stack
+    /// ``HybridCheckpoint``, one fresh `KVCacheSimple`/`MambaCache` instance
+    /// per layer (per ``HybridCheckpoint/layers``' `kind` tag), each seeded
+    /// with an owned COPY of the checkpoint's stored state.
+    ///
+    /// Re-copies (rather than handing the checkpoint's own arrays straight
+    /// to the restored cache) because generation mutates its cache in
+    /// place: a later round must not clobber an earlier stored checkpoint's
+    /// tensors -- exactly the same independence guarantee
+    /// `PromptCache.assemble(chunks:layerCount:)` provides for the ordinary
+    /// chunk-store path.
+    ///
+    /// An EMPTY `.mamba` entry (an untouched layer's snapshot -- see
+    /// `snapshotHybridCheckpoint(tokens:cache:)`'s doc comment) is special-
+    /// cased: a fresh `MambaCache` already starts in that same untouched
+    /// state (`ArraysCache.init(size:leftPadding:)` fills its backing array
+    /// with `nil`s), so this leaves it alone rather than assigning `.state
+    /// = []`. Assigning would actually be WORSE than a no-op: `MambaCache`
+    /// is fixed-size (`ArraysCache(size: 2, ...)`), and `ArraysCache.state`'s
+    /// setter does `cache = newValue.map { $0 as MLXArray? }` -- replacing
+    /// the fixed-size `[nil, nil]` backing array with an empty one entirely,
+    /// which would make the layer's next `cache?[0]`/`cache?[1]` subscript
+    /// access (in `Qwen35GatedDeltaNet`/`Qwen3NextGatedDeltaNet.callAsFunction`)
+    /// an out-of-bounds crash instead of a graceful "no tokens yet" read.
+    ///
+    /// - Parameter checkpoint: The checkpoint to restore.
+    /// - Returns: One freshly constructed `KVCacheSimple`/`MambaCache` per
+    ///   layer, in the same order as `checkpoint.layers`, each seeded with
+    ///   an owned copy of that layer's checkpointed state.
+    nonisolated static func restoreHybridCheckpoint(_ checkpoint: HybridCheckpoint) -> [KVCache] {
+        checkpoint.layers.map { entry in
+            let restoredState = entry.state.map { ownedCopy(of: $0) }
+            switch entry.kind {
+            case .simple:
+                let cache = KVCacheSimple()
+                cache.state = restoredState
+                return cache
+            case .mamba:
+                let cache = MambaCache()
+                if !restoredState.isEmpty {
+                    cache.state = restoredState
+                }
+                return cache
+            }
+        }
+    }
+
+    /// The ground-truth offset to compute a round's generated-token advance
+    /// from, for WHICHEVER cache shape `cache` actually is -- shared by both
+    /// `Executor.commitPromptCache` overloads (`MLXLanguageModel.swift`).
+    ///
+    /// For a pure-attention (``isChunkable(_:)``) stack, this is simply
+    /// `cache.first?.offset`, exactly as before. For a genuine hybrid stack
+    /// (``isHybridMambaAttention(_:)``), it is NOT `cache.first?.offset`:
+    /// layer 0 is a `MambaCache` whenever `fullAttentionInterval > 1` (the
+    /// default for both `Qwen35Model`/`Qwen3NextModel`), and neither
+    /// `Libraries/MLXLLM/Models/Qwen35.swift` nor `Qwen3Next.swift` ever
+    /// assigns to a Mamba layer's `offset` (unlike, e.g., `FalconH1.swift`'s
+    /// hybrid attention/recurrent layer, which DOES advance its cache's
+    /// `offset` -- this is a per-model-family fact about `Qwen35Model`/
+    /// `Qwen3NextModel` specifically, not a blanket guarantee of
+    /// `MambaCache`/`ArraysCache` itself). So this reads the offset of the
+    /// FIRST exactly-`KVCacheSimple` layer instead, which always exists (by
+    /// ``isHybridMambaAttention(_:)``'s own definition) and always advances
+    /// normally.
+    ///
+    /// KNOWN, ACCEPTABLE DEGRADATION: an EOS-terminated round that needs a
+    /// 1-token trim before storing (`Executor.trimCacheIfValid`) will fail
+    /// to store for a hybrid stack too, exactly like any other
+    /// non-trimmable cache shape today (e.g. `RotatingKVCache`) -- not a
+    /// new gap this mechanism introduces. `canTrimPromptCache(_:)` requires
+    /// EVERY layer's `isTrimmable`, and `MambaCache`/`ArraysCache.isTrimmable`
+    /// is `false` (the inherited `BaseKVCache` default, never overridden),
+    /// so a hybrid round needing that trim is simply not stored -- the next
+    /// round falls back to a full reprocess from wherever the last valid
+    /// checkpoint left off, same as any dropped round.
+    ///
+    /// - Parameter cache: The cache stack this round generated with.
+    /// - Returns: The offset to treat as ground truth, or `nil` when `cache`
+    ///   is neither a pure-attention nor a genuine hybrid stack (an unknown
+    ///   shape this function refuses to reason about -- the caller should
+    ///   drop the round rather than guess).
+    nonisolated static func cacheAdvanceOffset(_ cache: [KVCache]) -> Int? {
+        if isChunkable(cache) {
+            return cache.first?.offset
+        }
+        if isHybridMambaAttention(cache), let kinds = hybridLayerKinds(cache) {
+            guard let simpleIndex = kinds.firstIndex(of: .simple) else { return nil }
+            return cache[simpleIndex].offset
+        }
+        return nil
     }
 
     /// Verifies that every layer in `cache` is a chunkable, fully-offset

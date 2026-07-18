@@ -223,7 +223,7 @@ struct PromptCacheByteBudgetTests {
     // MARK: - 4. Multi-lineage eviction within a single insert() call
 
     /// `evictToBudget()` (`PromptCache.swift`) re-scans for a fresh
-    /// `globalLRUChunk()` victim after EVERY eviction via a `while` loop, not
+    /// `globalLRUVictim()` victim after EVERY eviction via a `while` loop, not
     /// just once via an `if` -- so a single `insert(modelID:chunks:)` call
     /// that pushes far enough past budget must evict MULTIPLE independent
     /// lineages before returning, not just one. The other byte-budget tests
@@ -271,7 +271,7 @@ struct PromptCacheByteBudgetTests {
 
     // MARK: - 5. Cross-model LRU eviction
 
-    /// `globalLRUChunk()` (`PromptCache.swift`) scans EVERY model's entries in
+    /// `globalLRUVictim()` (`PromptCache.swift`) scans EVERY model's entries in
     /// `chunkStore`, not just the model being inserted into -- the whole
     /// point of the store's single GLOBAL byte budget shared across models
     /// (see `byteBudget`'s doc comment). The other LRU-ordering test in this
@@ -320,7 +320,7 @@ struct PromptCacheByteBudgetTests {
 
         // Insert a SECOND chunk for model A -- the model that was just
         // touched. This pushes the GLOBAL total to 300 bytes, over the
-        // 250-byte budget, forcing exactly one eviction. If `globalLRUChunk()`
+        // 250-byte budget, forcing exactly one eviction. If `globalLRUVictim()`
         // incorrectly scanned only model A (the model this `insert()` call is
         // for), it would evict A's own just-touched chunk instead of B's
         // untouched one.

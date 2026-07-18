@@ -756,17 +756,29 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ).consume()
     }
 
-    /// Whether `model`'s cache-layer composition can ever participate in
-    /// prompt-cache chunk reuse (see `PromptCache.isChunkable`'s doc
-    /// comment for the full decision record) -- `false` for hybrid
-    /// Mamba/attention architectures (Qwen3.6/Qwen3-Next family:
-    /// `Qwen35Model`/`Qwen35MoEModel` in `Libraries/MLXLLM/Models/Qwen35.swift`),
-    /// whose `[KVCache]` mixes `KVCacheSimple` (full-attention layers)
-    /// with `MambaCache` (Gated-DeltaNet linear-attention layers) --
-    /// permanently, by architectural design, not a temporary gap this
-    /// store hasn't gotten to yet.
+    /// Whether `model`'s cache-layer composition can participate in
+    /// prompt-cache reuse -- via either of TWO mechanisms, either of which
+    /// makes this `true`:
     ///
-    /// A session against such a model reports
+    /// - Ordinary chunk reuse (`PromptCache.isChunkable`'s doc comment):
+    ///   `true` for a uniform `KVCacheSimple` stack. `false` for e.g. a
+    ///   `maxKVSize`-driven `RotatingKVCache` stack, which is neither
+    ///   chunkable nor a hybrid stack -- that combination genuinely never
+    ///   supports reuse today.
+    /// - Whole-stack hybrid checkpoint reuse (`PromptCache.isHybridMambaAttention`'s
+    ///   doc comment): `true` for hybrid Mamba/attention architectures
+    ///   (Qwen3.6/Qwen3-Next family: `Qwen35Model`/`Qwen35MoEModel`/
+    ///   `Qwen3NextModel` in `Libraries/MLXLLM/Models/Qwen35.swift`/
+    ///   `Qwen3Next.swift`), whose `[KVCache]` mixes `KVCacheSimple`
+    ///   (full-attention layers) with `MambaCache` (Gated-DeltaNet
+    ///   linear-attention layers) -- these DO now support cache reuse, just
+    ///   via a checkpoint-and-restore mechanism rather than chunk slicing
+    ///   (an earlier revision of this comment claimed hybrid architectures
+    ///   could never participate at all; that claim was a scope-limiting
+    ///   decision, not an architectural impossibility, and has been
+    ///   superseded).
+    ///
+    /// A session against a model where this is `false` reports
     /// `LanguageModelSession.Usage.input.cachedTokenCount == 0` on every
     /// round, forever. This lets a caller distinguish that expected,
     /// by-design `0` from "cache reuse mis-fired this round" on a model
@@ -778,14 +790,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///   - parameters: Generation parameters threaded into
     ///     `model.newCache(parameters:)`, matching whatever a real
     ///     generation call would build (e.g. `maxKVSize`-driven rotating
-    ///     caches, which are ALSO never chunkable -- see
+    ///     caches, which are never chunkable AND never hybrid -- see
     ///     `PromptCache.isChunkable`).
-    /// - Returns: `true` when `model`'s cache is a uniform `KVCacheSimple`
-    ///   stack and can participate in chunk reuse; `false` otherwise.
+    /// - Returns: `true` when `model`'s cache can participate in either
+    ///   chunk reuse or hybrid checkpoint reuse; `false` otherwise.
     public static func supportsPromptCacheReuse(
         model: any MLXLMCommon.LanguageModel, parameters: GenerateParameters? = nil
     ) -> Bool {
-        PromptCache.isChunkable(model.newCache(parameters: parameters))
+        let cache = model.newCache(parameters: parameters)
+        return PromptCache.isChunkable(cache) || PromptCache.isHybridMambaAttention(cache)
     }
 
     /// Persists this round's `(tokens, cache)` for the next round's
@@ -2729,27 +2742,23 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) async {
             guard let cache = slot.cache else { return }
             guard !generatedTokenIDs.isEmpty else { return }
-            // Hybrid Mamba/attention layer stacks (Qwen3.6/Qwen3-Next
-            // family) can never participate in chunk-store reuse -- see
-            // `PromptCache.isChunkable`'s doc comment for the full
-            // decision record. Bail out explicitly here rather than
-            // computing `cacheAdvance` from `cache.first`: for
-            // `Qwen35Model`/`Qwen3NextModel` specifically, layer 0 is a
-            // `MambaCache`, and neither `Libraries/MLXLLM/Models/Qwen35.swift`
-            // nor `Qwen3Next.swift` ever assigns to that layer's `offset`
-            // (unlike e.g. `FalconH1.swift`'s hybrid attention/recurrent
-            // layer, which DOES advance its cache's `offset` -- this is a
-            // per-model-family fact, not a blanket guarantee of
-            // `MambaCache`/`ArraysCache` itself), so the expression below
-            // would otherwise derive a bogus, wildly-negative "advance"
-            // that only happens to fall through to `.untrustworthy` by
-            // numeric coincidence, not by design.
-            guard PromptCache.isChunkable(cache) else {
+            // `PromptCache.cacheAdvanceOffset` picks the right ground-truth
+            // offset for whichever cache shape `cache` actually is -- for a
+            // genuine hybrid Mamba/attention stack (Qwen3.6/Qwen3-Next
+            // family) this is NOT `cache.first?.offset`: layer 0 is a
+            // `MambaCache` by default, and neither
+            // `Libraries/MLXLLM/Models/Qwen35.swift` nor `Qwen3Next.swift`
+            // ever assigns to that layer's `offset` (unlike e.g.
+            // `FalconH1.swift`'s hybrid attention/recurrent layer, which
+            // DOES advance its cache's `offset` -- a per-model-family fact,
+            // not a blanket guarantee of `MambaCache`/`ArraysCache` itself).
+            // See `cacheAdvanceOffset`'s doc comment for the full reasoning
+            // and the EOS-trim degradation this mechanism accepts.
+            guard let referenceOffset = PromptCache.cacheAdvanceOffset(cache) else {
                 await MLXLanguageModel.removePromptCache(modelID: modelID)
                 return
             }
-            let cacheAdvance = (cache.first?.offset ?? slot.promptTokens.count)
-                - slot.promptTokens.count
+            let cacheAdvance = referenceOffset - slot.promptTokens.count
             let shouldStore: Bool
             switch PromptCache.reconcileCacheAdvance(
                 observedTokenCount: generatedTokenIDs.count, cacheAdvance: cacheAdvance)
@@ -2829,12 +2838,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) async {
             guard let cache = slot.cache else { return }
             // See the `generatedTokenIDs` overload's identical guard for
-            // why this must come before any `cache.first?.offset` read.
-            guard PromptCache.isChunkable(cache) else {
+            // why this must use `PromptCache.cacheAdvanceOffset` rather than
+            // `cache.first?.offset` directly.
+            guard let finalOffset = PromptCache.cacheAdvanceOffset(cache) else {
                 await MLXLanguageModel.removePromptCache(modelID: modelID)
                 return
             }
-            let finalOffset = cache.first?.offset ?? slot.promptTokens.count
             let actualGeneratedCount = finalOffset - slot.promptTokens.count
             guard actualGeneratedCount > 0 else { return }
             let reencoded = tokenizer.encode(text: emittedText, addSpecialTokens: false)

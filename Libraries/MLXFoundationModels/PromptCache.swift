@@ -101,7 +101,7 @@ actor PromptCache {
     /// Tails are stored in ``chunkStore`` alongside full chunks (both are
     /// `StoredChunk`s, keyed by their own `ChunkKey`), so byte accounting and
     /// LRU/orphan eviction (``totalStoredBytes``, ``evictChunkAndDescendants(modelID:key:)``,
-    /// ``globalLRUChunk()``) already see and reclaim them without any change.
+    /// ``globalLRUVictim()``) already see and reclaim them without any change.
     /// This index exists only so ``insertTail(modelID:tail:)`` can find and
     /// replace the PREVIOUS tail at a given attachment point in O(1): unlike a
     /// full chunk's content (which never changes once written), a tail's
@@ -113,6 +113,23 @@ actor PromptCache {
     /// becoming garbage, so this actor keeps just ONE active tail per
     /// attachment point.
     private var activeTailKey: [String: [ChunkKey: ChunkKey]] = [:]
+
+    /// Per-model store of whole-stack hybrid Mamba/attention checkpoints
+    /// (see `PromptCacheChunks.swift`'s `HybridCheckpoint`), keyed by
+    /// `chunkKey(parentKey: rootChunkKey, tokens: checkpoint.tokens)` -- a
+    /// content hash over the FULL token prefix a checkpoint covers, not a
+    /// hash-chain position like ``chunkStore``'s keys. Unlike the ordinary
+    /// chunk store, entries here have no parent/child chain: each
+    /// checkpoint is a flat, independent whole-stack snapshot, matched by
+    /// ``resolveHybridCheckpoint(modelID:newTokens:)``'s longest-prefix scan
+    /// rather than a chained walk.
+    ///
+    /// Populated by ``insertHybridCheckpoint(modelID:checkpoint:)`` (called
+    /// from ``store(modelID:tokens:cache:)`` when
+    /// `PromptCache.isHybridMambaAttention(_:)` is `true`), and shares
+    /// ``totalStoredBytes``/``byteBudget`` accounting and LRU eviction with
+    /// ``chunkStore`` (see ``globalLRUVictim()``/``evictToBudget()``).
+    private var hybridCheckpoints: [String: [ChunkKey: HybridCheckpoint]] = [:]
 
     /// Total bytes currently accounted across EVERY model's chunk store
     /// (``StoredChunk/byteSize``, summed) -- a single, process-global count
@@ -315,6 +332,25 @@ actor PromptCache {
         parameters: GenerateParameters?
     ) -> SendableBox<(cache: [KVCache], tokensToFeed: [Int])> {
         let model = model.consume()
+        let freshCache = model.newCache(parameters: parameters)
+
+        // Hybrid Mamba/attention stacks never satisfy `verifiedSimpleLayers`
+        // (see `PromptCache.isChunkable`'s doc comment), so the chunk-store
+        // walk below would always miss for them anyway -- check the
+        // whole-stack checkpoint mechanism first and never fall through to
+        // chunk logic for a genuinely hybrid stack.
+        if PromptCache.isHybridMambaAttention(freshCache) {
+            guard
+                let checkpoint = resolveHybridCheckpoint(modelID: modelID, newTokens: newTokens)
+                    .consume()
+            else {
+                return SendableBox((freshCache, newTokens))
+            }
+            let restored = PromptCache.restoreHybridCheckpoint(checkpoint)
+            let suffix = Array(newTokens.suffix(newTokens.count - checkpoint.tokens.count))
+            return SendableBox((restored, suffix))
+        }
+
         let fullChunks = lookupLongestPrefix(
             modelID: modelID, newTokens: newTokens, chunkSize: chunkSize
         ).consume()
@@ -326,7 +362,7 @@ actor PromptCache {
             parentKey: tailParentKey, remainingBudget: remainingBudget)
 
         guard let layerCount = (fullChunks.first ?? tailMatch?.chunk)?.layers.count else {
-            return SendableBox((model.newCache(parameters: parameters), newTokens))
+            return SendableBox((freshCache, newTokens))
         }
 
         let assembleChunks = tailMatch.map { fullChunks + [$0.chunk] } ?? fullChunks
@@ -473,18 +509,36 @@ actor PromptCache {
     /// conversation prefix SHORTER than one full chunk reusable at all,
     /// rather than silently dropped.
     ///
-    /// Silently drops the round when `cache`'s layers aren't a chunkable
-    /// shape (see `sliceChunks`'s degradation for `RotatingKVCache`/
-    /// `ChunkedKVCache`/an offset mismatch) -- the same degradation the
-    /// old slot pool had for a non-trimmable cache: this round simply
-    /// contributes nothing reusable, and the next round for this model
-    /// rebuilds from scratch.
+    /// For a genuine hybrid Mamba/attention stack
+    /// (`PromptCache.isHybridMambaAttention(_:)`), skips the chunk-slicing
+    /// path entirely (it can never succeed against a `MambaCache` layer --
+    /// see `PromptCache.isChunkable`'s doc comment) and instead snapshots a
+    /// whole-stack ``PromptCache/HybridCheckpoint`` (`PromptCache.snapshotHybridCheckpoint(tokens:cache:)`)
+    /// and checks it into ``hybridCheckpoints`` via
+    /// ``insertHybridCheckpoint(modelID:checkpoint:)``.
+    ///
+    /// Silently drops the round when `cache`'s layers are neither a
+    /// chunkable NOR a hybrid shape (see `sliceChunks`'s degradation for
+    /// `RotatingKVCache`/`ChunkedKVCache`/an offset mismatch) -- the same
+    /// degradation the old slot pool had for a non-trimmable cache: this
+    /// round simply contributes nothing reusable, and the next round for
+    /// this model rebuilds from scratch.
     ///
     /// Called once a generation call completes and its actual token count
     /// has been verified against `cache`'s own `offset` (see
     /// `Executor.commitPromptCache`).
     func store(modelID: String, tokens: [Int], cache: SendableBox<[KVCache]>) {
         let cacheValue = cache.consume()
+
+        if PromptCache.isHybridMambaAttention(cacheValue) {
+            if let checkpoint = PromptCache.snapshotHybridCheckpoint(
+                tokens: tokens, cache: cacheValue)
+            {
+                insertHybridCheckpoint(modelID: modelID, checkpoint: checkpoint)
+            }
+            return
+        }
+
         guard
             let chunks = Self.sliceChunks(tokens: tokens, cache: cacheValue, chunkSize: chunkSize)
         else { return }
@@ -498,20 +552,25 @@ actor PromptCache {
         }
     }
 
-    /// Drops every model's remembered chunk store. Mirrors
-    /// `ModelCache.evictAll`.
+    /// Drops every model's remembered chunk store AND hybrid checkpoint
+    /// store. Mirrors `ModelCache.evictAll`.
     func evictAll() {
         chunkStore.removeAll()
         activeTailKey.removeAll()
+        hybridCheckpoints.removeAll()
         totalStoredBytes = 0
     }
 
-    /// Drops one model's remembered chunk store. Mirrors
-    /// `ModelCache.remove`.
+    /// Drops one model's remembered chunk store AND hybrid checkpoint
+    /// store. Mirrors `ModelCache.remove`.
     func remove(modelID: String) {
-        guard let removed = chunkStore.removeValue(forKey: modelID) else { return }
-        totalStoredBytes -= removed.values.reduce(0) { $0 + $1.byteSize }
-        activeTailKey.removeValue(forKey: modelID)
+        if let removed = chunkStore.removeValue(forKey: modelID) {
+            totalStoredBytes -= removed.values.reduce(0) { $0 + $1.byteSize }
+            activeTailKey.removeValue(forKey: modelID)
+        }
+        if let removed = hybridCheckpoints.removeValue(forKey: modelID) {
+            totalStoredBytes -= removed.values.reduce(0) { $0 + $1.byteSize }
+        }
     }
 
     /// Reconfigures this actor's total byte budget across EVERY model's
@@ -787,6 +846,98 @@ actor PromptCache {
         return (chunk: tail, matchedLength: matchedLength)
     }
 
+    // MARK: - Hybrid checkpoint store
+
+    /// Checks a freshly captured whole-stack hybrid checkpoint (see
+    /// `PromptCache.snapshotHybridCheckpoint(tokens:cache:)`) into
+    /// `modelID`'s ``hybridCheckpoints`` store, deduplicating by content-hash
+    /// key exactly like ``insert(modelID:chunks:)`` does for ordinary
+    /// chunks: a key already present only has its `lastUsed` refreshed
+    /// (its captured state is never replaced -- two rounds landing on the
+    /// same full token prefix produce byte-for-byte equivalent state); a
+    /// genuinely new key is stored fresh and its bytes accounted.
+    ///
+    /// - Parameters:
+    ///   - modelID: The model identifier this checkpoint store is scoped to.
+    ///   - checkpoint: The freshly captured checkpoint to check in.
+    func insertHybridCheckpoint(modelID: String, checkpoint: HybridCheckpoint) {
+        var checkpoints = hybridCheckpoints[modelID] ?? [:]
+        let key = Self.chunkKey(parentKey: Self.rootChunkKey, tokens: checkpoint.tokens)
+
+        if var entry = checkpoints[key] {
+            entry.lastUsed = nextRecency()
+            checkpoints[key] = entry
+        } else {
+            var entry = checkpoint
+            entry.lastUsed = nextRecency()
+            checkpoints[key] = entry
+            totalStoredBytes += entry.byteSize
+        }
+        hybridCheckpoints[modelID] = checkpoints
+        evictToBudget()
+    }
+
+    /// Finds `modelID`'s LONGEST stored hybrid checkpoint whose full token
+    /// prefix exactly matches a leading prefix of `newTokens`, leaving at
+    /// least one token of `newTokens` unmatched (mirroring
+    /// `lookupLongestPrefix`'s own "at least one token always remains to
+    /// feed" invariant -- generation always needs >=1 fresh token to
+    /// produce new logits).
+    ///
+    /// A flat linear scan, not a hash-chain walk: hybrid checkpoints have
+    /// no parent/child chain (see ``hybridCheckpoints``'s doc comment), so
+    /// every stored checkpoint for `modelID` is a candidate, and the winner
+    /// is whichever candidate's `tokens` is both a genuine prefix of
+    /// `newTokens` (COLLISION SAFETY: verified by actual element-by-element
+    /// array equality, never by trusting the hash key alone -- mirroring
+    /// `lookupLongestPrefix`'s own `chunk.tokens == window` check) and the
+    /// LONGEST such prefix among every candidate.
+    ///
+    /// - Parameters:
+    ///   - modelID: The model identifier this checkpoint store is scoped to.
+    ///   - newTokens: The freshly-tokenized full prompt for this round.
+    /// - Returns: The longest matching stored checkpoint, with its
+    ///   `lastUsed` bumped for LRU bookkeeping, boxed for the crossing back
+    ///   out of actor isolation (see `SendableBox`'s doc -- `HybridCheckpoint`
+    ///   carries non-`Sendable` `MLXArray` tensors, the same reason
+    ///   `lookupLongestPrefix`'s `[StoredChunk]` result is boxed); `nil`
+    ///   (inside the box) when nothing stored for `modelID` is a valid
+    ///   prefix of `newTokens`.
+    func resolveHybridCheckpoint(
+        modelID: String, newTokens: [Int]
+    ) -> SendableBox<HybridCheckpoint?> {
+        guard var checkpoints = hybridCheckpoints[modelID], !checkpoints.isEmpty else {
+            return SendableBox(nil)
+        }
+
+        var winnerKey: ChunkKey?
+        var winner: HybridCheckpoint?
+        for (key, checkpoint) in checkpoints {
+            let candidateLength = checkpoint.tokens.count
+            let newLength = newTokens.count
+            let currentBestLength = winner?.tokens.count ?? -1
+            guard candidateLength < newLength,
+                candidateLength > currentBestLength,
+                Array(newTokens.prefix(candidateLength)) == checkpoint.tokens
+            else { continue }
+            winner = checkpoint
+            winnerKey = key
+        }
+
+        guard var matched = winner, let key = winnerKey else { return SendableBox(nil) }
+        matched.lastUsed = nextRecency()
+        checkpoints[key] = matched
+        hybridCheckpoints[modelID] = checkpoints
+        return SendableBox(matched)
+    }
+
+    /// Number of distinct hybrid checkpoints currently stored for `modelID`
+    /// -- exposes checkpoint-store bookkeeping for tests, mirroring
+    /// ``chunkCount(modelID:)`` for the ordinary chunk store.
+    func hybridCheckpointCount(modelID: String) -> Int {
+        hybridCheckpoints[modelID]?.count ?? 0
+    }
+
     /// Number of distinct chunks currently stored for `modelID` -- exposes
     /// dedup/eviction bookkeeping for tests without leaking the actor's
     /// private storage shape.
@@ -809,29 +960,46 @@ actor PromptCache {
 
     // MARK: - Byte-budget LRU eviction
 
-    /// The globally least-recently-used chunk across EVERY model's store --
-    /// the eviction candidate ``evictToBudget()`` removes first -- or `nil`
-    /// when every model's store is empty.
+    /// Which store a globally-least-recently-used eviction candidate
+    /// (``globalLRUVictim()``) belongs to -- the ordinary chunk store's
+    /// hash-chained ``StoredChunk``s, or the flat, unchained
+    /// ``hybridCheckpoints`` store.
+    private enum LRUVictim {
+        case chunk(modelID: String, key: ChunkKey)
+        case hybridCheckpoint(modelID: String, key: ChunkKey)
+    }
+
+    /// The globally least-recently-used entry across EVERY model's chunk
+    /// store AND hybrid checkpoint store -- the eviction candidate
+    /// ``evictToBudget()`` removes first -- or `nil` when both stores are
+    /// empty for every model.
     ///
     /// Scans every model's `lastUsed` directly rather than maintaining a
     /// separate ordered LRU index: eviction only runs when an insert pushes
     /// ``totalStoredBytes`` over ``byteBudget``, and even a long-running
-    /// process's chunk store stays small relative to a linear scan's cost
-    /// (bounded by how many distinct token-prefix chunks are actually
-    /// resident, not by request volume).
+    /// process's combined store stays small relative to a linear scan's cost
+    /// (bounded by how many distinct token-prefix chunks/checkpoints are
+    /// actually resident, not by request volume).
     ///
-    /// - Returns: The model id and chunk key of the globally
-    ///   least-recently-used chunk, or `nil` when every model's store is empty.
-    private func globalLRUChunk() -> (modelID: String, key: ChunkKey)? {
-        var best: (modelID: String, key: ChunkKey, lastUsed: Int)?
+    /// - Returns: The globally least-recently-used entry, tagged by which
+    ///   store it belongs to, or `nil` when both stores are empty.
+    private func globalLRUVictim() -> LRUVictim? {
+        var best: (victim: LRUVictim, lastUsed: Int)?
         for (modelID, chunks) in chunkStore {
             for (key, chunk) in chunks {
                 if best == nil || chunk.lastUsed < best!.lastUsed {
-                    best = (modelID, key, chunk.lastUsed)
+                    best = (.chunk(modelID: modelID, key: key), chunk.lastUsed)
                 }
             }
         }
-        return best.map { (modelID: $0.modelID, key: $0.key) }
+        for (modelID, checkpoints) in hybridCheckpoints {
+            for (key, checkpoint) in checkpoints {
+                if best == nil || checkpoint.lastUsed < best!.lastUsed {
+                    best = (.hybridCheckpoint(modelID: modelID, key: key), checkpoint.lastUsed)
+                }
+            }
+        }
+        return best?.victim
     }
 
     /// Removes `key` from `modelID`'s store, reclaiming its bytes, then
@@ -874,17 +1042,44 @@ actor PromptCache {
         }
     }
 
-    /// Evicts the globally least-recently-used chunk -- and, transitively,
-    /// its whole lineage (``evictChunkAndDescendants(modelID:key:)``) --
-    /// repeatedly until ``totalStoredBytes`` is at or under ``byteBudget``,
-    /// or every model's store is empty.
+    /// Removes `key` from `modelID`'s hybrid checkpoint store, reclaiming
+    /// its bytes. Unlike ``evictChunkAndDescendants(modelID:key:)``, a
+    /// hybrid checkpoint has no chain descendants to reclaim transitively
+    /// (see ``hybridCheckpoints``'s doc comment) -- each entry is an
+    /// independent whole-stack snapshot, so removing one never orphans
+    /// another.
     ///
-    /// Called after every ``insert(modelID:chunks:)`` and from
+    /// - Parameters:
+    ///   - modelID: The model whose checkpoint store to evict from.
+    ///   - key: The checkpoint key to remove.
+    private func evictHybridCheckpoint(modelID: String, key: ChunkKey) {
+        guard var checkpoints = hybridCheckpoints[modelID],
+            let evicted = checkpoints.removeValue(forKey: key)
+        else { return }
+        totalStoredBytes -= evicted.byteSize
+        hybridCheckpoints[modelID] = checkpoints
+    }
+
+    /// Evicts the globally least-recently-used entry across BOTH the chunk
+    /// store and the hybrid checkpoint store -- transitively, its whole
+    /// lineage when it's a chunk (``evictChunkAndDescendants(modelID:key:)``),
+    /// or just itself when it's a hybrid checkpoint
+    /// (``evictHybridCheckpoint(modelID:key:)``) -- repeatedly until
+    /// ``totalStoredBytes`` is at or under ``byteBudget``, or both stores
+    /// are empty for every model.
+    ///
+    /// Called after every ``insert(modelID:chunks:)``/``insertTail(modelID:tail:)``/
+    /// ``insertHybridCheckpoint(modelID:checkpoint:)`` and from
     /// ``setByteBudget(_:)`` whenever the budget shrinks below what's
     /// currently stored.
     private func evictToBudget() {
-        while totalStoredBytes > byteBudget, let victim = globalLRUChunk() {
-            evictChunkAndDescendants(modelID: victim.modelID, key: victim.key)
+        while totalStoredBytes > byteBudget, let victim = globalLRUVictim() {
+            switch victim {
+            case .chunk(let modelID, let key):
+                evictChunkAndDescendants(modelID: modelID, key: key)
+            case .hybridCheckpoint(let modelID, let key):
+                evictHybridCheckpoint(modelID: modelID, key: key)
+            }
         }
     }
 
