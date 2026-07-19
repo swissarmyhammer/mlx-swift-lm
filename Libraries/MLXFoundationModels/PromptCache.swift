@@ -1223,24 +1223,49 @@ actor PromptCache {
         var result: [KVCache] = []
         result.reserveCapacity(layerCount)
         for layerIndex in 0 ..< layerCount {
-            let keyParts = chunks.enumerated().map { index, chunk in
-                slicedToMatchedLength(
-                    chunk.layers[layerIndex].keys,
-                    matchedLength: index == lastIndex ? lastChunkMatchedLength : nil)
-            }
-            let valueParts = chunks.enumerated().map { index, chunk in
-                slicedToMatchedLength(
-                    chunk.layers[layerIndex].values,
-                    matchedLength: index == lastIndex ? lastChunkMatchedLength : nil)
-            }
-            let keys = ownedCopy(of: concatenated(keyParts, axis: 2))
-            let values = ownedCopy(of: concatenated(valueParts, axis: 2))
+            let keys = assembleTensors(
+                chunks: chunks, lastIndex: lastIndex, lastChunkMatchedLength: lastChunkMatchedLength,
+                accessor: { $0.layers[layerIndex].keys })
+            let values = assembleTensors(
+                chunks: chunks, lastIndex: lastIndex, lastChunkMatchedLength: lastChunkMatchedLength,
+                accessor: { $0.layers[layerIndex].values })
 
             let layerCache = KVCacheSimple()
             layerCache.state = [keys, values]
             result.append(layerCache)
         }
         return result
+    }
+
+    /// Slices, concatenates, and owns one tensor (keys or values) across
+    /// `chunks` for a single layer.
+    ///
+    /// Shared by `assemble`'s key and value paths, which are otherwise
+    /// identical loops over `chunks` differing only in which tensor
+    /// `accessor` pulls off each chunk's (already layer-indexed) `layers`
+    /// entry.
+    ///
+    /// - Parameters:
+    ///   - chunks: The chunk prefix being assembled, in chain order (see
+    ///     `assemble`'s own `chunks` parameter).
+    ///   - lastIndex: `chunks`'s last valid index, i.e. `chunks.count - 1`.
+    ///   - lastChunkMatchedLength: How many of the chunk at `lastIndex`'s
+    ///     leading tokens actually matched; applied only there. `nil` when
+    ///     every chunk in `chunks` is a full, wholly-matched chunk.
+    ///   - accessor: Pulls the key or value tensor off one chunk's layer
+    ///     (the caller closes over the target `layerIndex`).
+    /// - Returns: The concatenated tensor for this layer, copied into a
+    ///   fresh, non-aliasing buffer via ``ownedCopy(of:)``.
+    private static func assembleTensors(
+        chunks: [StoredChunk], lastIndex: Int, lastChunkMatchedLength: Int?,
+        accessor: (StoredChunk) -> MLXArray
+    ) -> MLXArray {
+        let parts = chunks.enumerated().map { index, chunk in
+            slicedToMatchedLength(
+                accessor(chunk),
+                matchedLength: index == lastIndex ? lastChunkMatchedLength : nil)
+        }
+        return ownedCopy(of: concatenated(parts, axis: 2))
     }
 
     /// Slices `array` down to its first `matchedLength` sequence positions
