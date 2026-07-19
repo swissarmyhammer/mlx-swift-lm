@@ -14,7 +14,7 @@ extension PromptCache {
     /// process launches. Named distinctly from a bare `Int` for readability at
     /// the chunk-store call sites (``insert(modelID:chunks:)``,
     /// ``lookupLongestPrefix(modelID:newTokens:chunkSize:)``).
-    typealias ChunkKey = Int
+    internal typealias ChunkKey = Int
 
     /// One fixed-size token-range slice of a verified `KVCacheSimple` stack, with
     /// its own tensors materialized as OWNED, evaluated, contiguous copies (see
@@ -25,7 +25,7 @@ extension PromptCache {
     /// produce identical keys, and keys diverge from the first point two token
     /// sequences differ. `Hasher` is per-process seeded, so a `chunkKey` must
     /// never be persisted or compared across process launches.
-    struct StoredChunk {
+    internal struct StoredChunk {
         /// The token ids this chunk covers -- exactly `chunkSize` long for a
         /// FULL chunk (see `sliceChunks`), or a variable, shorter-than-
         /// `chunkSize` span for a TAIL chunk (see `sliceTailChunk`, which
@@ -88,7 +88,7 @@ extension PromptCache {
     ///     the first chunk in a sequence.
     ///   - tokens: This chunk's token ids.
     /// - Returns: This chunk's `chunkKey`.
-    nonisolated static func chunkKey(parentKey: Int, tokens: [Int]) -> Int {
+    internal nonisolated static func chunkKey(parentKey: Int, tokens: [Int]) -> Int {
         var hasher = Hasher()
         hasher.combine(parentKey)
         for token in tokens {
@@ -230,7 +230,7 @@ extension PromptCache {
     /// plain `[MLXArray]` state (the same shape both `KVCacheSimple.state`
     /// and `MambaCache.state` expose), which alone doesn't say which setter
     /// to feed it back into.
-    enum HybridLayerKind: Equatable {
+    internal enum HybridLayerKind: Equatable {
         /// Captured from an exactly-`KVCacheSimple` layer: `state` is
         /// `[keys, values]`.
         case simple
@@ -248,7 +248,7 @@ extension PromptCache {
     /// - Parameter cache: The cache stack to classify, one entry per model layer.
     /// - Returns: One ``HybridLayerKind`` per layer, in the same order as
     ///   `cache`; `nil` for an empty stack or any layer of an unrecognized type.
-    nonisolated static func hybridLayerKinds(_ cache: [KVCache]) -> [HybridLayerKind]? {
+    internal nonisolated static func hybridLayerKinds(_ cache: [KVCache]) -> [HybridLayerKind]? {
         guard !cache.isEmpty else { return nil }
         var kinds: [HybridLayerKind] = []
         kinds.reserveCapacity(cache.count)
@@ -289,7 +289,7 @@ extension PromptCache {
     /// per-position history to slice) reusable at all: rather than carving
     /// a window out of it after the fact, a checkpoint is captured whole
     /// and restored whole.
-    struct HybridCheckpoint {
+    internal struct HybridCheckpoint {
         /// The FULL token prefix this checkpoint covers, from the start of
         /// the sequence -- not a window; every layer's `state` here
         /// reflects having processed exactly this many tokens.
@@ -344,7 +344,7 @@ extension PromptCache {
     ///   isn't a genuine hybrid stack (``isHybridMambaAttention(_:)``) or
     ///   any `KVCacheSimple` layer's `state` isn't a verified `[keys,
     ///   values]` pair whose `offset` matches `tokens.count`.
-    nonisolated static func snapshotHybridCheckpoint(
+    internal nonisolated static func snapshotHybridCheckpoint(
         tokens: [Int], cache: [KVCache]
     ) -> HybridCheckpoint? {
         guard isHybridMambaAttention(cache), let kinds = hybridLayerKinds(cache) else {
@@ -457,7 +457,7 @@ extension PromptCache {
     ///   is neither a pure-attention nor a genuine hybrid stack (an unknown
     ///   shape this function refuses to reason about -- the caller should
     ///   drop the round rather than guess).
-    nonisolated static func cacheAdvanceOffset(_ cache: [KVCache]) -> Int? {
+    internal nonisolated static func cacheAdvanceOffset(_ cache: [KVCache]) -> Int? {
         if isChunkable(cache) {
             return cache.first?.offset
         }
