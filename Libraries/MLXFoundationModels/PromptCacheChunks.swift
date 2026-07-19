@@ -65,6 +65,13 @@ extension PromptCache {
     /// vanishingly unlikely).
     static let rootChunkKey = 0
 
+    /// The exact element count a touched `KVCacheSimple.state` must have:
+    /// `[keys, values]` (see `KVCacheSimple.state` in `KVCache.swift`). Named
+    /// so every verification site that checks this shape invariant
+    /// (``snapshotHybridCheckpoint(tokens:cache:)``, ``verifySimpleLayer(_:tokenCount:)``)
+    /// shares one point of change rather than repeating the literal `2`.
+    private static let kvCacheSimpleStateElementCount = 2
+
     /// Computes the next link in a chunk's hash chain from its parent's key and
     /// its own token ids.
     ///
@@ -314,7 +321,7 @@ extension PromptCache {
     /// `state` getter returns `[]` -- see `KVCacheSimple.state` in
     /// `KVCache.swift`) OR whose `offset` doesn't exactly match
     /// `tokens.count` -- mirroring ``verifiedSimpleLayers(cache:tokenCount:)``'s
-    /// own `state.count == 2 && offset == tokenCount` requirement, so a
+    /// own `state.count == kvCacheSimpleStateElementCount && offset == tokenCount` requirement, so a
     /// corrupted or inconsistent cache (e.g. one whose layers have silently
     /// drifted out of sync with `tokens`) can never silently produce a
     /// checkpoint that doesn't actually correspond to `tokens` -- restoring
@@ -348,7 +355,7 @@ extension PromptCache {
         for (layer, kind) in zip(cache, kinds) {
             if kind == .simple {
                 // Mirrors `verifiedSimpleLayers(cache:tokenCount:)`'s own
-                // `state.count == 2 && offset == tokenCount` requirements: a
+                // `state.count == kvCacheSimpleStateElementCount && offset == tokenCount` requirements: a
                 // `KVCacheSimple` layer whose `offset` doesn't match
                 // `tokens.count` reflects a DIFFERENT token position than
                 // what this snapshot claims to cover -- e.g. a corrupted or
@@ -356,7 +363,7 @@ extension PromptCache {
                 // capturing it anyway would produce a checkpoint that
                 // silently does not correspond to `tokens`, restorable only
                 // into a wrong future round. Refuse rather than guess.
-                guard layer.state.count == 2,
+                guard layer.state.count == kvCacheSimpleStateElementCount,
                     let simple = layer as? KVCacheSimple,
                     simple.offset == tokens.count
                 else { return nil }
@@ -524,7 +531,7 @@ extension PromptCache {
         guard type(of: layer) == KVCacheSimple.self,
             let simple = layer as? KVCacheSimple,
             simple.offset == tokenCount,
-            simple.state.count == 2
+            simple.state.count == kvCacheSimpleStateElementCount
         else { return nil }
         return simple
     }
