@@ -1064,7 +1064,7 @@ actor PromptCache {
     ) {
         for (modelID, entries) in store {
             for (key, entry) in entries {
-                if best == nil || entry.lastUsed < best!.lastUsed {
+                if best == nil || entry.lastUsed < (best?.lastUsed ?? Int.max) {
                     best = (victimCase(modelID, key), entry.lastUsed)
                 }
             }

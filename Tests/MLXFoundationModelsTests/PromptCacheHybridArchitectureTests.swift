@@ -174,9 +174,18 @@ struct PromptCacheHybridArchitectureTests {
 
     // MARK: - Capability signals
 
-    @Test("a real Qwen35TextModel's cache is not chunkable, but IS a hybrid checkpoint candidate")
-    func qwen35HybridModelIsNotChunkableButSupportsReuse() throws {
-        let model = try makeHybridQwen35Model()
+    /// Shared body for `qwen35HybridModelIsNotChunkableButSupportsReuse`/
+    /// `qwen3NextHybridModelIsNotChunkableButSupportsReuse`: builds
+    /// `modelFactory`'s model and asserts its cache is a genuine hybrid
+    /// stack (4 layers, at least one `MambaCache`) that's not chunkable but
+    /// IS a hybrid-checkpoint candidate reporting `supportsPromptCacheReuse
+    /// == true`.
+    ///
+    /// - Parameter modelFactory: Builds the real, tiny hybrid model under test.
+    private func assertHybridModelIsNotChunkableButSupportsReuse(
+        modelFactory: () throws -> any MLXLMCommon.LanguageModel
+    ) throws {
+        let model = try modelFactory()
         let cache = model.newCache(parameters: nil)
 
         #expect(cache.count == 4, "sanity: 4 layers, matching num_hidden_layers")
@@ -190,20 +199,14 @@ struct PromptCacheHybridArchitectureTests {
         #expect(MLXLanguageModel.supportsPromptCacheReuse(model: model) == true)
     }
 
+    @Test("a real Qwen35TextModel's cache is not chunkable, but IS a hybrid checkpoint candidate")
+    func qwen35HybridModelIsNotChunkableButSupportsReuse() throws {
+        try assertHybridModelIsNotChunkableButSupportsReuse(modelFactory: makeHybridQwen35Model)
+    }
+
     @Test("a real Qwen3NextModel's cache is not chunkable, but IS a hybrid checkpoint candidate")
     func qwen3NextHybridModelIsNotChunkableButSupportsReuse() throws {
-        let model = try makeHybridQwen3NextModel()
-        let cache = model.newCache(parameters: nil)
-
-        #expect(cache.count == 4, "sanity: 4 layers, matching num_hidden_layers")
-        #expect(
-            cache.contains { type(of: $0) == MambaCache.self },
-            "sanity: this shape must actually be hybrid, or the test proves nothing")
-        #expect(PromptCache.isChunkable(cache) == false)
-        #expect(PromptCache.isHybridMambaAttention(cache) == true)
-
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        #expect(MLXLanguageModel.supportsPromptCacheReuse(model: model) == true)
+        try assertHybridModelIsNotChunkableButSupportsReuse(modelFactory: makeHybridQwen3NextModel)
     }
 
     @Test("a pure-attention model's cache is still chunkable (regression guard)")
@@ -479,18 +482,34 @@ struct PromptCacheHybridArchitectureTests {
         return model.callAsFunction(round2Input, cache: round2.cache)
     }
 
-    @Test("checkpoint-restored generation matches a full fresh forward pass (Qwen35TextModel)")
-    func qwen35CheckpointRestoreMatchesFullForwardPass() async throws {
-        MLXRandom.seed(1001)
-        let model = try makeHybridQwen35Model()
-        let allTokens = (0 ..< 24).map { ($0 * 7 + 3) % 32 }
-        let prefixLen = 9
+    /// Shared body for `qwen35CheckpointRestoreMatchesFullForwardPass`/
+    /// `qwen3NextCheckpointRestoreMatchesFullForwardPass`: seeds `MLXRandom`,
+    /// builds `modelFactory`'s model, derives a 24-token sequence from
+    /// `tokenFormula`, and asserts that resolving/storing/restoring a
+    /// checkpoint for the first `prefixLen` tokens then feeding just the
+    /// suffix reproduces the SAME logits as one full, fresh forward pass.
+    ///
+    /// - Parameters:
+    ///   - seed: The `MLXRandom` seed for this model's (otherwise
+    ///     random-initialized) weights, so both the reference and
+    ///     checkpoint-restored paths see identical weights.
+    ///   - modelFactory: Builds the real, tiny hybrid model under test.
+    ///   - tokenFormula: Maps a position `0..<24` to a token ID.
+    ///   - prefixLen: How many leading tokens round 1 stores a checkpoint for.
+    ///   - modelIDPrefix: A human-readable prefix for this run's unique model ID.
+    private func assertCheckpointRestoreMatchesFullForwardPass(
+        seed: UInt64, modelFactory: () throws -> any MLXLMCommon.LanguageModel,
+        tokenFormula: (Int) -> Int, prefixLen: Int, modelIDPrefix: String
+    ) async throws {
+        MLXRandom.seed(seed)
+        let model = try modelFactory()
+        let allTokens = (0 ..< 24).map(tokenFormula)
 
         let reference = referenceSuffixLogits(
             model: model, tokens: allTokens, suffixStart: prefixLen)
 
         let promptCache = PromptCache()
-        let modelID = "qwen35-hybrid-correctness-\(UUID().uuidString)"
+        let modelID = "\(modelIDPrefix)-\(UUID().uuidString)"
         let restored = await checkpointRestoredSuffixLogits(
             promptCache: promptCache, modelID: modelID, model: model, allTokens: allTokens,
             prefixLen: prefixLen)
@@ -499,120 +518,98 @@ struct PromptCacheHybridArchitectureTests {
         #expect(
             diff <= 1e-3,
             "checkpoint-restored suffix generation diverged from a full forward pass (diff \(diff))")
+    }
+
+    @Test("checkpoint-restored generation matches a full fresh forward pass (Qwen35TextModel)")
+    func qwen35CheckpointRestoreMatchesFullForwardPass() async throws {
+        try await assertCheckpointRestoreMatchesFullForwardPass(
+            seed: 1001, modelFactory: { try self.makeHybridQwen35Model() },
+            tokenFormula: { ($0 * 7 + 3) % 32 }, prefixLen: 9,
+            modelIDPrefix: "qwen35-hybrid-correctness")
     }
 
     @Test("checkpoint-restored generation matches a full fresh forward pass (Qwen3NextModel)")
     func qwen3NextCheckpointRestoreMatchesFullForwardPass() async throws {
-        MLXRandom.seed(1002)
-        let model = try makeHybridQwen3NextModel()
-        let allTokens = (0 ..< 24).map { ($0 * 11 + 5) % 32 }
-        let prefixLen = 10
+        try await assertCheckpointRestoreMatchesFullForwardPass(
+            seed: 1002, modelFactory: { try self.makeHybridQwen3NextModel() },
+            tokenFormula: { ($0 * 11 + 5) % 32 }, prefixLen: 10,
+            modelIDPrefix: "qwen3next-hybrid-correctness")
+    }
+
+    /// Shared body for `qwen35SecondContinuationRoundAlsoMatches`/
+    /// `qwen3NextSecondContinuationRoundAlsoMatches`: seeds `MLXRandom`,
+    /// builds `modelFactory`'s model, derives a 30-token sequence from
+    /// `tokenFormula`, and chains THREE rounds of resolve/generate/store --
+    /// prefix-only, then extended to a longer prefix (restoring round 1's
+    /// checkpoint), then the full sequence (restoring round 2's checkpoint)
+    /// -- asserting each round's fed tokens are exactly the expected suffix
+    /// and that the final round's logits match one full, fresh forward pass.
+    ///
+    /// - Parameters:
+    ///   - seed: The `MLXRandom` seed for this model's weights.
+    ///   - modelFactory: Builds the real, tiny hybrid model under test.
+    ///   - tokenFormula: Maps a position `0..<30` to a token ID.
+    ///   - modelIDPrefix: A human-readable prefix for this run's unique model ID.
+    private func assertSecondContinuationRoundAlsoMatches(
+        seed: UInt64, modelFactory: () throws -> any MLXLMCommon.LanguageModel,
+        tokenFormula: (Int) -> Int, modelIDPrefix: String
+    ) async throws {
+        MLXRandom.seed(seed)
+        let model = try modelFactory()
+        let allTokens = (0 ..< 30).map(tokenFormula)
+        let firstPrefixLen = 8
+        let secondPrefixLen = 18
 
         let reference = referenceSuffixLogits(
-            model: model, tokens: allTokens, suffixStart: prefixLen)
+            model: model, tokens: allTokens, suffixStart: secondPrefixLen)
 
         let promptCache = PromptCache()
-        let modelID = "qwen3next-hybrid-correctness-\(UUID().uuidString)"
-        let restored = await checkpointRestoredSuffixLogits(
-            promptCache: promptCache, modelID: modelID, model: model, allTokens: allTokens,
-            prefixLen: prefixLen)
+        let modelID = "\(modelIDPrefix)-\(UUID().uuidString)"
 
-        let diff = maxAbsDiff(restored, reference)
+        // Round 1: prefix only.
+        let firstPrefix = Array(allTokens.prefix(firstPrefixLen))
+        let round1 = await resolveOnce(
+            cache: promptCache, modelID: modelID, newTokens: firstPrefix, model: model)
+        _ = model.callAsFunction(
+            MLXArray(round1.tokensToFeed).expandedDimensions(axis: 0), cache: round1.cache)
+        await promptCache.store(
+            modelID: modelID, tokens: firstPrefix, cache: SendableBox(round1.cache))
+
+        // Round 2: extend to the second prefix, restoring round 1's checkpoint.
+        let secondPrefix = Array(allTokens.prefix(secondPrefixLen))
+        let round2 = await resolveOnce(
+            cache: promptCache, modelID: modelID, newTokens: secondPrefix, model: model)
+        #expect(round2.tokensToFeed == Array(secondPrefix.suffix(secondPrefixLen - firstPrefixLen)))
+        _ = model.callAsFunction(
+            MLXArray(round2.tokensToFeed).expandedDimensions(axis: 0), cache: round2.cache)
+        await promptCache.store(
+            modelID: modelID, tokens: secondPrefix, cache: SendableBox(round2.cache))
+
+        // Round 3: the full sequence, restoring round 2's (longer) checkpoint.
+        let round3 = await resolveOnce(
+            cache: promptCache, modelID: modelID, newTokens: allTokens, model: model)
+        #expect(round3.tokensToFeed == Array(allTokens.suffix(allTokens.count - secondPrefixLen)))
+        let round3Logits = model.callAsFunction(
+            MLXArray(round3.tokensToFeed).expandedDimensions(axis: 0), cache: round3.cache)
+
+        let diff = maxAbsDiff(round3Logits, reference)
         #expect(
             diff <= 1e-3,
-            "checkpoint-restored suffix generation diverged from a full forward pass (diff \(diff))")
+            "chained checkpoint reuse across three rounds diverged from a full forward pass (diff \(diff))")
     }
 
     @Test("a THIRD round extends reuse: resolving the full sequence again matches the same full forward pass")
     func qwen35SecondContinuationRoundAlsoMatches() async throws {
-        MLXRandom.seed(1003)
-        let model = try makeHybridQwen35Model()
-        let allTokens = (0 ..< 30).map { ($0 * 5 + 1) % 32 }
-        let firstPrefixLen = 8
-        let secondPrefixLen = 18
-
-        let reference = referenceSuffixLogits(
-            model: model, tokens: allTokens, suffixStart: secondPrefixLen)
-
-        let promptCache = PromptCache()
-        let modelID = "qwen35-hybrid-chain-\(UUID().uuidString)"
-
-        // Round 1: prefix only.
-        let firstPrefix = Array(allTokens.prefix(firstPrefixLen))
-        let round1 = await resolveOnce(
-            cache: promptCache, modelID: modelID, newTokens: firstPrefix, model: model)
-        _ = model.callAsFunction(
-            MLXArray(round1.tokensToFeed).expandedDimensions(axis: 0), cache: round1.cache)
-        await promptCache.store(
-            modelID: modelID, tokens: firstPrefix, cache: SendableBox(round1.cache))
-
-        // Round 2: extend to the second prefix, restoring round 1's checkpoint.
-        let secondPrefix = Array(allTokens.prefix(secondPrefixLen))
-        let round2 = await resolveOnce(
-            cache: promptCache, modelID: modelID, newTokens: secondPrefix, model: model)
-        #expect(round2.tokensToFeed == Array(secondPrefix.suffix(secondPrefixLen - firstPrefixLen)))
-        _ = model.callAsFunction(
-            MLXArray(round2.tokensToFeed).expandedDimensions(axis: 0), cache: round2.cache)
-        await promptCache.store(
-            modelID: modelID, tokens: secondPrefix, cache: SendableBox(round2.cache))
-
-        // Round 3: the full sequence, restoring round 2's (longer) checkpoint.
-        let round3 = await resolveOnce(
-            cache: promptCache, modelID: modelID, newTokens: allTokens, model: model)
-        #expect(round3.tokensToFeed == Array(allTokens.suffix(allTokens.count - secondPrefixLen)))
-        let round3Logits = model.callAsFunction(
-            MLXArray(round3.tokensToFeed).expandedDimensions(axis: 0), cache: round3.cache)
-
-        let diff = maxAbsDiff(round3Logits, reference)
-        #expect(
-            diff <= 1e-3,
-            "chained checkpoint reuse across three rounds diverged from a full forward pass (diff \(diff))")
+        try await assertSecondContinuationRoundAlsoMatches(
+            seed: 1003, modelFactory: { try self.makeHybridQwen35Model() },
+            tokenFormula: { ($0 * 5 + 1) % 32 }, modelIDPrefix: "qwen35-hybrid-chain")
     }
 
     @Test("a THIRD round extends reuse for Qwen3NextModel too: resolving the full sequence again matches the same full forward pass")
     func qwen3NextSecondContinuationRoundAlsoMatches() async throws {
-        MLXRandom.seed(1004)
-        let model = try makeHybridQwen3NextModel()
-        let allTokens = (0 ..< 30).map { ($0 * 3 + 2) % 32 }
-        let firstPrefixLen = 8
-        let secondPrefixLen = 18
-
-        let reference = referenceSuffixLogits(
-            model: model, tokens: allTokens, suffixStart: secondPrefixLen)
-
-        let promptCache = PromptCache()
-        let modelID = "qwen3next-hybrid-chain-\(UUID().uuidString)"
-
-        // Round 1: prefix only.
-        let firstPrefix = Array(allTokens.prefix(firstPrefixLen))
-        let round1 = await resolveOnce(
-            cache: promptCache, modelID: modelID, newTokens: firstPrefix, model: model)
-        _ = model.callAsFunction(
-            MLXArray(round1.tokensToFeed).expandedDimensions(axis: 0), cache: round1.cache)
-        await promptCache.store(
-            modelID: modelID, tokens: firstPrefix, cache: SendableBox(round1.cache))
-
-        // Round 2: extend to the second prefix, restoring round 1's checkpoint.
-        let secondPrefix = Array(allTokens.prefix(secondPrefixLen))
-        let round2 = await resolveOnce(
-            cache: promptCache, modelID: modelID, newTokens: secondPrefix, model: model)
-        #expect(round2.tokensToFeed == Array(secondPrefix.suffix(secondPrefixLen - firstPrefixLen)))
-        _ = model.callAsFunction(
-            MLXArray(round2.tokensToFeed).expandedDimensions(axis: 0), cache: round2.cache)
-        await promptCache.store(
-            modelID: modelID, tokens: secondPrefix, cache: SendableBox(round2.cache))
-
-        // Round 3: the full sequence, restoring round 2's (longer) checkpoint.
-        let round3 = await resolveOnce(
-            cache: promptCache, modelID: modelID, newTokens: allTokens, model: model)
-        #expect(round3.tokensToFeed == Array(allTokens.suffix(allTokens.count - secondPrefixLen)))
-        let round3Logits = model.callAsFunction(
-            MLXArray(round3.tokensToFeed).expandedDimensions(axis: 0), cache: round3.cache)
-
-        let diff = maxAbsDiff(round3Logits, reference)
-        #expect(
-            diff <= 1e-3,
-            "chained checkpoint reuse across three rounds diverged from a full forward pass (diff \(diff))")
+        try await assertSecondContinuationRoundAlsoMatches(
+            seed: 1004, modelFactory: { try self.makeHybridQwen3NextModel() },
+            tokenFormula: { ($0 * 3 + 2) % 32 }, modelIDPrefix: "qwen3next-hybrid-chain")
     }
 }
 

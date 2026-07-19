@@ -1026,7 +1026,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         load: @escaping ContainerLoader
     ) {
         self.configuration = configuration
-        self.capabilities = LanguageModelCapabilities(capabilities: capabilities)
+        self.capabilities = LanguageModelCapabilities(capabilities)
         self.configurationResolver = configurationResolver
         self.weightsLocation = weightsLocation
         self.load = load
@@ -3851,6 +3851,46 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             return emitter.process(chunk)
         }
 
+        /// Handles one `.token` event during unconstrained reasoning
+        /// generation: records the token, runs it through the reasoning-
+        /// segment scanner via `processReasoningToken`, and forwards any
+        /// segments it produced to the channel. Extracted so `runReasoning`'s
+        /// generation loop can dispatch the `.token` case with a single call.
+        ///
+        /// - Parameters:
+        ///   - token: The freshly generated token ID.
+        ///   - generatedTokenIDs: The running transcript of generated tokens
+        ///     (mutated: `token` is appended).
+        ///   - emitter: The reasoning-segment scanner (mutated: state advances
+        ///     as `</think>` is detected).
+        ///   - detokenizer: The streaming detokenizer (mutated: accumulates
+        ///     the token, possibly yielding a decoded chunk).
+        ///   - reasoningTokenCount: Running count of tokens attributed to
+        ///     reasoning (mutated).
+        ///   - responseEntryID: The response entry to stream `.response` segments into.
+        ///   - reasoningEntryID: The entry to stream `.reasoning` segments into.
+        ///   - channel: The generation channel to send events on.
+        private static func handleGeneratedToken(
+            _ token: Int,
+            generatedTokenIDs: inout [Int],
+            emitter: inout ReasoningEventEmitter,
+            detokenizer: inout NaiveStreamingDetokenizer,
+            reasoningTokenCount: inout Int,
+            responseEntryID: String,
+            reasoningEntryID: String,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            generatedTokenIDs.append(token)
+            guard
+                let segments = processReasoningToken(
+                    token, emitter: &emitter, detokenizer: &detokenizer,
+                    reasoningTokenCount: &reasoningTokenCount)
+            else { return }
+            await sendSegments(
+                segments, responseEntryID: responseEntryID,
+                reasoningEntryID: reasoningEntryID, channel: channel)
+        }
+
         /// Reasoning-aware unconstrained generation.
         ///
         /// Routes thinking delimited by the model's reasoning markers to
@@ -3905,15 +3945,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 try Task.checkCancellation()
                 switch generation {
                 case .token(let token):
-                    generatedTokenIDs.append(token)
-                    if let segments = Self.processReasoningToken(
-                        token, emitter: &emitter, detokenizer: &detokenizer,
-                        reasoningTokenCount: &reasoningTokenCount)
-                    {
-                        await Self.sendSegments(
-                            segments, responseEntryID: responseEntryID,
-                            reasoningEntryID: reasoningEntryID, channel: channel)
-                    }
+                    await Self.handleGeneratedToken(
+                        token, generatedTokenIDs: &generatedTokenIDs, emitter: &emitter,
+                        detokenizer: &detokenizer, reasoningTokenCount: &reasoningTokenCount,
+                        responseEntryID: responseEntryID, reasoningEntryID: reasoningEntryID,
+                        channel: channel)
                 case .info(let info):
                     completionInfo = info
                 }
