@@ -63,11 +63,13 @@ extension PromptCache {
     /// from any real chunk key (which are `Hasher`-derived and, in practice,
     /// unpredictable, making an accidental collision with this sentinel
     /// vanishingly unlikely).
-    static let rootChunkKey = 0
+    internal static let rootChunkKey = 0
 
     /// The exact element count a touched `KVCacheSimple.state` must have:
-    /// `[keys, values]` (see `KVCacheSimple.state` in `KVCache.swift`). Named
-    /// so every verification site that checks this shape invariant
+    /// `[keys, values]`.
+    ///
+    /// (see `KVCacheSimple.state` in `KVCache.swift`). Named so every
+    /// verification site that checks this shape invariant
     /// (``snapshotHybridCheckpoint(tokens:cache:)``, ``verifySimpleLayer(_:tokenCount:)``)
     /// shares one point of change rather than repeating the literal `2`.
     private static let kvCacheSimpleStateElementCount = 2
@@ -131,7 +133,7 @@ extension PromptCache {
     /// never allocating a fresh buffer or invoking the `Concatenate` primitive
     /// in that case -- so a lone matched chunk's concatenation result would
     /// otherwise alias the chunk store's own owned tensor by reference.
-    static func ownedCopy(of array: MLXArray) -> MLXArray {
+    internal static func ownedCopy(of array: MLXArray) -> MLXArray {
         let owned = MLXArray(data: array.asData(access: .copy))
         owned.eval()
         return owned
@@ -216,7 +218,7 @@ extension PromptCache {
     ///   mixed-type layer -- including a genuine hybrid stack, which
     ///   instead participates in reuse via ``isHybridMambaAttention(_:)``'s
     ///   checkpoint mechanism, never this one.
-    nonisolated static func isChunkable(_ cache: [KVCache]) -> Bool {
+    internal nonisolated static func isChunkable(_ cache: [KVCache]) -> Bool {
         !cache.isEmpty && cache.allSatisfy { type(of: $0) == KVCacheSimple.self }
     }
 
@@ -272,7 +274,7 @@ extension PromptCache {
     /// - Parameter cache: The cache stack to check, one entry per model layer.
     /// - Returns: `true` when `cache` mixes at least one `KVCacheSimple` and
     ///   at least one `MambaCache` layer.
-    nonisolated static func isHybridMambaAttention(_ cache: [KVCache]) -> Bool {
+    internal nonisolated static func isHybridMambaAttention(_ cache: [KVCache]) -> Bool {
         guard let kinds = hybridLayerKinds(cache) else { return false }
         return kinds.contains(.simple) && kinds.contains(.mamba)
     }
@@ -363,9 +365,7 @@ extension PromptCache {
                 // capturing it anyway would produce a checkpoint that
                 // silently does not correspond to `tokens`, restorable only
                 // into a wrong future round. Refuse rather than guess.
-                guard layer.state.count == kvCacheSimpleStateElementCount,
-                    let simple = layer as? KVCacheSimple,
-                    simple.offset == tokens.count
+                guard verifySimpleKVCacheState(layer, tokenCount: tokens.count) != nil
                 else { return nil }
             }
             let owned = layer.state.map { ownedCopy(of: $0) }
@@ -404,7 +404,7 @@ extension PromptCache {
     /// - Returns: One freshly constructed `KVCacheSimple`/`MambaCache` per
     ///   layer, in the same order as `checkpoint.layers`, each seeded with
     ///   an owned copy of that layer's checkpointed state.
-    nonisolated static func restoreHybridCheckpoint(_ checkpoint: HybridCheckpoint) -> [KVCache] {
+    internal nonisolated static func restoreHybridCheckpoint(_ checkpoint: HybridCheckpoint) -> [KVCache] {
         checkpoint.layers.map { entry in
             let restoredState = entry.state.map { ownedCopy(of: $0) }
             switch entry.kind {
@@ -502,6 +502,37 @@ extension PromptCache {
         return simpleLayers
     }
 
+    /// Verifies a cache layer's `state` is exactly `[keys, values]` and its
+    /// `offset` exactly matches `tokenCount`, WITHOUT requiring `layer` to
+    /// be exactly `KVCacheSimple` (as opposed to a subclass) -- callers that
+    /// need that additional exact-type guarantee (see
+    /// ``verifySimpleLayer(_:tokenCount:)``) check it themselves before
+    /// calling this.
+    ///
+    /// Shared by ``snapshotHybridCheckpoint(tokens:cache:)`` (whose
+    /// `KVCacheSimple` layers, in a genuine hybrid stack, are never
+    /// `ChunkedKVCache`, so the exact-type check ``verifySimpleLayer(_:tokenCount:)``
+    /// needs doesn't apply there) and ``verifySimpleLayer(_:tokenCount:)``
+    /// itself (which layers on the exact-type check before delegating the
+    /// rest of the verification here).
+    ///
+    /// - Parameters:
+    ///   - layer: The cache layer to verify.
+    ///   - tokenCount: The token count `layer`'s `offset` must exactly
+    ///     match.
+    /// - Returns: `layer` downcast to `KVCacheSimple` if its `offset`
+    ///   matches `tokenCount` and its `state` is the expected `[keys,
+    ///   values]` pair; `nil` otherwise.
+    private static func verifySimpleKVCacheState(
+        _ layer: KVCache, tokenCount: Int
+    ) -> KVCacheSimple? {
+        guard layer.state.count == kvCacheSimpleStateElementCount,
+            let simple = layer as? KVCacheSimple,
+            simple.offset == tokenCount
+        else { return nil }
+        return simple
+    }
+
     /// Verifies a single cache layer is a chunkable, fully-offset
     /// `KVCacheSimple` -- the per-layer check `verifiedSimpleLayers` applies
     /// to every entry in `cache`.
@@ -516,7 +547,9 @@ extension PromptCache {
     /// and slicing against it would use the wrong physical extent. An
     /// exact dynamic-type check excludes every such subclass, matching
     /// this function's own "not chunkable" degradation for any cache
-    /// shape it can't safely reason about.
+    /// shape it can't safely reason about. That exact-type check is this
+    /// function's own addition on top of ``verifySimpleKVCacheState(_:tokenCount:)``,
+    /// which the rest of the verification is delegated to.
     ///
     /// - Parameters:
     ///   - layer: The cache layer to verify.
@@ -528,12 +561,8 @@ extension PromptCache {
     private static func verifySimpleLayer(
         _ layer: KVCache, tokenCount: Int
     ) -> KVCacheSimple? {
-        guard type(of: layer) == KVCacheSimple.self,
-            let simple = layer as? KVCacheSimple,
-            simple.offset == tokenCount,
-            simple.state.count == kvCacheSimpleStateElementCount
-        else { return nil }
-        return simple
+        guard type(of: layer) == KVCacheSimple.self else { return nil }
+        return verifySimpleKVCacheState(layer, tokenCount: tokenCount)
     }
 
     /// Slices every layer in `simpleLayers` over the shared `[start, end)`
@@ -614,7 +643,7 @@ extension PromptCache {
     /// - Returns: One `StoredChunk` per full `chunkSize`-token span (possibly
     ///   empty, if `tokens.count < chunkSize`), or `nil` if any layer isn't a
     ///   verified, fully-offset `KVCacheSimple`.
-    nonisolated static func sliceChunks(
+    internal nonisolated static func sliceChunks(
         tokens: [Int], cache: [KVCache], chunkSize: Int
     ) -> [StoredChunk]? {
         guard chunkSize > 0,
@@ -672,7 +701,7 @@ extension PromptCache {
     ///   `chunkSize` -- nothing to store, not an error) or `cache`'s layers
     ///   aren't a verified, chunkable `KVCacheSimple` stack (mirrors
     ///   `sliceChunks`'s own degradation).
-    nonisolated static func sliceTailChunk(
+    internal nonisolated static func sliceTailChunk(
         tokens: [Int], cache: [KVCache], chunkSize: Int, parentKey: Int
     ) -> StoredChunk? {
         guard chunkSize > 0 else { return nil }
