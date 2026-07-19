@@ -20,8 +20,8 @@ comments:
 
     Task is done and green: swift build clean, swift test --filter PromptCacheAssembleTests 10/10, full unfiltered swift test 605/605 (two consecutive full runs, one flaky unrelated Gemma4ChunkedPrefillTests numeric-tolerance blip on the first run reproduced as passing on rerun and in isolation 3x), diagnostics 0/0, adversarial double-check PASS. Leaving in `doing` for /review.
   timestamp: 2026-07-19T11:45:12.961188+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: c180
 title: 'Cleanup: deep nesting in MLXLanguageModel.swift reasoning-token loop + keyParts/valueParts duplication in PromptCache.assemble()'
 ---
 Surfaced by a fresh `review working` run while fixing kanban `r9rf5g7` (hybrid checkpoint review findings) — both are PRE-EXISTING code, confirmed via `git diff` to fall outside that task's changed hunks, so intentionally not touched there to stay in scope.

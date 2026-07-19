@@ -487,25 +487,46 @@ extension PromptCache {
         var simpleLayers: [KVCacheSimple] = []
         simpleLayers.reserveCapacity(cache.count)
         for layer in cache {
-            // `as? KVCacheSimple` alone is not enough: `ChunkedKVCache` is a
-            // SUBCLASS of `KVCacheSimple` (see `Libraries/MLXLMCommon/KVCache.swift`)
-            // that overrides `update`/`trim`/`copy`/`metaState` but not
-            // `state`/`isTrimmable`. Once its `maybeTrimFront()` has physically
-            // trimmed `keys`/`values` down to its own chunk size while `offset`
-            // keeps tracking the full logical token position, the inherited
-            // `state` getter's `offset == keys.dim(2)` branch no longer holds,
-            // and slicing against it would use the wrong physical extent. An
-            // exact dynamic-type check excludes every such subclass, matching
-            // this function's own "not chunkable" degradation for any cache
-            // shape it can't safely reason about.
-            guard type(of: layer) == KVCacheSimple.self,
-                let simple = layer as? KVCacheSimple,
-                simple.offset == tokenCount,
-                simple.state.count == 2
+            guard
+                let simple = verifySimpleLayer(layer, tokenCount: tokenCount)
             else { return nil }
             simpleLayers.append(simple)
         }
         return simpleLayers
+    }
+
+    /// Verifies a single cache layer is a chunkable, fully-offset
+    /// `KVCacheSimple` -- the per-layer check `verifiedSimpleLayers` applies
+    /// to every entry in `cache`.
+    ///
+    /// `as? KVCacheSimple` alone is not enough: `ChunkedKVCache` is a
+    /// SUBCLASS of `KVCacheSimple` (see `Libraries/MLXLMCommon/KVCache.swift`)
+    /// that overrides `update`/`trim`/`copy`/`metaState` but not
+    /// `state`/`isTrimmable`. Once its `maybeTrimFront()` has physically
+    /// trimmed `keys`/`values` down to its own chunk size while `offset`
+    /// keeps tracking the full logical token position, the inherited
+    /// `state` getter's `offset == keys.dim(2)` branch no longer holds,
+    /// and slicing against it would use the wrong physical extent. An
+    /// exact dynamic-type check excludes every such subclass, matching
+    /// this function's own "not chunkable" degradation for any cache
+    /// shape it can't safely reason about.
+    ///
+    /// - Parameters:
+    ///   - layer: The cache layer to verify.
+    ///   - tokenCount: The token count `layer`'s `offset` must exactly
+    ///     match.
+    /// - Returns: `layer` downcast to `KVCacheSimple` if it's exactly a
+    ///   `KVCacheSimple` whose `offset` matches `tokenCount` and whose
+    ///   `state` is the expected `[keys, values]` pair; `nil` otherwise.
+    private static func verifySimpleLayer(
+        _ layer: KVCache, tokenCount: Int
+    ) -> KVCacheSimple? {
+        guard type(of: layer) == KVCacheSimple.self,
+            let simple = layer as? KVCacheSimple,
+            simple.offset == tokenCount,
+            simple.state.count == 2
+        else { return nil }
+        return simple
     }
 
     /// Slices every layer in `simpleLayers` over the shared `[start, end)`
