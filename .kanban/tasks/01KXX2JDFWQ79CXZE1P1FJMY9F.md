@@ -61,10 +61,14 @@ comments:
 
     This task's description and acceptance criteria updated to reflect the corrected understanding. Left in `doing` per /implement convention (not moved to review/done by this session).
   timestamp: 2026-07-20T11:34:14.846860+00:00
+- actor: claude-code
+  id: 01ky01vptxt7pw9ekg5h9er6vs
+  text: 'Moving to done alongside ^b3zpf2q per user''s explicit decision ("just mark it done and no follow up"). This task''s own deliverable — PromptCacheHybridReuseTests.swift, the real end-to-end integration test against mlx-community/Qwen3.6-27B-mxfp4 — is complete: it passes against the real model with a corrected, empirically-verified, well-documented assertion. The dependent bug-fix task ^b3zpf2q is done. See ^b3zpf2q''s final comment for the full resolution summary and the user''s decision to stop further Evaluate.swift cleanup rounds.'
+  timestamp: 2026-07-20T15:21:08.189979+00:00
 depends_on:
 - 01KXY1XEP9NAAMMRN1KER33V06
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: c480
 title: 'Integration test: real end-to-end prompt-cache reuse on hybrid Qwen3.6 (mlx-community/Qwen3.6-27B-mxfp4)'
 ---
 ## What

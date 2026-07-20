@@ -225,10 +225,23 @@ comments:
 
     All 6 findings in the "2026-07-20 08:42" review comment are fixed and checkboxes flipped to [x], with the exhaustive-sweep instruction (identifier renames beyond the cited ones, full generate-family duplicate comparison) also completed and documented in that same comment. Task left in `doing` for `/review`.
   timestamp: 2026-07-20T14:58:01.164618+00:00
+- actor: claude-code
+  id: 01ky01vayxjt4dfsj128v2rsh4
+  text: |-
+    USER DECISION: after 5 consecutive review rounds on Libraries/MLXLMCommon/Evaluate.swift (round 1: missing docs; round 2: more missing docs + 4 duplication instances; round 3/4: naming + 2 more duplication instances; round 5: 14 more findings — mostly duplicated logit-processing sequences and generate/generateTokens overload pairs in long-standing functions like generateTask/generateTokenTask/speculateRound() that predate this task entirely), the findings were not converging to zero and had drifted far from this task's actual scope (a caching bug fix). Surfaced this to the user with two options (keep grinding vs. stop and land the fix). User explicitly chose: "just mark it done and no follow up."
+
+    Final state accepted as done:
+    - The real caching bug (hybrid checkpoints dropped on EOS-terminated rounds) is fixed, sound, and unit-tested (PromptCacheStorePlanTests).
+    - Both real integration tests (PromptCacheHybridReuseTests against the actual Qwen3.6-27B model, PromptCacheReuseTests pure-attention regression) pass against the real models.
+    - Full unit suite green: 613 tests, 0 failures.
+    - Round 5's 14 findings (all pre-existing duplication/complexity in Evaluate.swift unrelated to the caching fix) are explicitly NOT being addressed further, per user direction. No follow-up cleanup task filed, per explicit user instruction ("no follow up").
+
+    Moving to done per user's direct authorization, overriding the default review-gate process for this specific task.
+  timestamp: 2026-07-20T15:20:56.029225+00:00
 depends_on:
 - 01KXX2JDFWQ79CXZE1P1FJMY9F
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: c380
 title: 'Fix root cause: hybrid prompt-cache always drops (TokenIterator lookahead advances cache one step beyond observed tokens)'
 ---
 ## What
