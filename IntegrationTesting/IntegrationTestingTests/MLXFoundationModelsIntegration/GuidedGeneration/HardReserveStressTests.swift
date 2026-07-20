@@ -196,7 +196,7 @@ struct HardReserveStressTests {
 
             let closingBias = ClosingTokenBias.compute(
                 tokenizer: context.tokenizer,
-                eosTokenID: context.tokenizer.eosTokenId
+                eosTokenID: context.tokenizer.eosTokenID
             )
             let (whitespaceBias, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
                 tokenizer: context.tokenizer

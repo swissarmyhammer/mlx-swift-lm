@@ -146,7 +146,7 @@ struct ToolCallingReasoningCharacterizationTests {
         return try await container.perform { context in
             let tokens = try context.tokenizer.applyChatTemplate(
                 messages: messages, tools: toolSpecs, additionalContext: additionalContext)
-            let tail = context.tokenizer.decode(tokenIds: Array(tokens.suffix(48)))
+            let tail = context.tokenizer.decode(tokenIDs: Array(tokens.suffix(48)))
             print("TOOLCALL-CHAR [\(label)] tail=<<<\(tail)>>>")
             return tail
         }

@@ -124,8 +124,8 @@ import Testing
         #expect(past.count < primed.count)
         #expect(Array(primed.prefix(past.count)) == past)
 
-        let pastText = tokenizer.decode(tokenIds: past)
-        let primedText = tokenizer.decode(tokenIds: primed)
+        let pastText = tokenizer.decode(tokenIDs: past)
+        let primedText = tokenizer.decode(tokenIDs: primed)
         #expect(!pastText.hasSuffix(ChatMLTokenizer.assistantHeader))
         #expect(primedText.hasSuffix(ChatMLTokenizer.assistantHeader))
     }

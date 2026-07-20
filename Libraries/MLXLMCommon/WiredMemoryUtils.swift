@@ -38,7 +38,7 @@ public enum WiredMemoryUtils {
     ) -> [Int] {
         guard count > 0 else { return [] }
 
-        let pad = tokenizer.eosTokenId ?? tokenizer.unknownTokenId ?? 0
+        let pad = tokenizer.eosTokenID ?? tokenizer.unknownTokenID ?? 0
         var tokens: [Int] = []
 
         var chunk = seedText

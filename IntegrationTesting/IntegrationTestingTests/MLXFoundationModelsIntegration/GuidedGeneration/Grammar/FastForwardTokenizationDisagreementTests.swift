@@ -156,7 +156,7 @@ struct FastForwardTokenizationDisagreementTests {
             return GemmaSeeds(
                 vocab: gemmaVocab.vocab,
                 vocabType: gemmaVocab.vocabType,
-                eosTokenId: Int32(gemmaContext.tokenizer.eosTokenId ?? 0),
+                eosTokenId: Int32(gemmaContext.tokenizer.eosTokenID ?? 0),
                 seedTokenId: Int32(firstId)
             )
         }

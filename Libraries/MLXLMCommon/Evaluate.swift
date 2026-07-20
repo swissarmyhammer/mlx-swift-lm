@@ -1186,7 +1186,7 @@ private func buildStopTokenIds(
 ) -> Set<Int> {
     // Build complete EOS token set from all sources.
     var stopTokenIds = modelConfiguration.eosTokenIds
-    if let tokenizerEOS = tokenizer.eosTokenId {
+    if let tokenizerEOS = tokenizer.eosTokenID {
         stopTokenIds.insert(tokenizerEOS)
     }
     for token in modelConfiguration.extraEOSTokens {
@@ -1224,7 +1224,7 @@ private func runSynchronousGenerationLoop(
         }
 
         // Check for end-of-sequence tokens.
-        if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
+        if token == tokenizer.unknownTokenID || stopTokenIds.contains(token) {
             stopReason = .stop
             break
         }
@@ -1368,7 +1368,7 @@ public func generate(
 
     return GenerateResult(
         inputText: input.text, tokenIDs: result.generatedTokenIds,
-        output: context.tokenizer.decode(tokenIds: result.generatedTokenIds),
+        output: context.tokenizer.decode(tokenIDs: result.generatedTokenIds),
         promptTime: result.promptTime + result.promptPrefillTime,
         generateTime: result.generateTime
     )
@@ -1986,7 +1986,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 }
 
                 // Check for end-of-sequence tokens
-                if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
+                if token == tokenizer.unknownTokenID || stopTokenIds.contains(token) {
                     stopReason = handleStopToken(token)
                     break tokenLoop
                 }

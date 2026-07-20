@@ -65,8 +65,43 @@ comments:
   id: 01ky02a05zqvhzc26xwxagahvz
   text: Committed (da05ef4) and moved to done per user's explicit direction ("just commit and mark done, no review") — the same treatment applied to ^b3zpf2q. All acceptance criteria and the 73-item review findings checklist were already checked off by the prior implement passes; full suite verified green (816 tests, 0 failures) before commit.
   timestamp: 2026-07-20T15:28:56.511314+00:00
-position_column: done
-position_ordinal: c580
+- actor: claude-code
+  id: 01ky04ergts4tcqbexdcfwcs1x
+  text: |-
+    /implement iteration 3: worked the fresh 5-item Review Findings (2026-07-20 10:25) checklist — all boxes flipped to [x]. Task pulled review→doing.
+
+    Findings 1–3 (HuggingFaceIntegrationMacros.swift):
+    - Finding 1 via TDD: updated the 4 expansion pins in LanguageModelMacroTests to `weightsLocation: { ID in` / `Repo.ID(rawValue: ID)`, observed RED (4 failures), then changed the macro's emitted text. `ID` in value position does not shadow the qualified type reference `HuggingFace.Repo.ID`.
+    - Finding 2: LoadContainerMacro.expansion + LoadContextMacro.expansion consolidated into shared fileprivate `loadExpansion(calling:macroName:)` on FreestandingMacroExpansionSyntax (next to the existing argument/progressHandlerArgument helpers). Behavior-preserving: emitted text and diagnostics byte-identical, all 6 load-macro pin/diagnostic tests unchanged and green.
+    - Finding 3: the two if-let forwarding blocks replaced by `for label in ["capabilities", "configurationResolver"]` loop — emitted text unchanged, pins green.
+
+    Findings 4–5 (Tokenizer.swift) — ID-casing sweep, consistent across the surface this task owns:
+    - `decode(tokenIds:)` one-arg convenience → `decode(tokenIDs:)`; `eosTokenId`→`eosTokenID`; same-class `bosTokenId`→`bosTokenID`, `unknownTokenId`→`unknownTokenID`; private `tokenId(of:)`→`tokenID(of:)`.
+    - Call sites updated (compiler-verified in main package): Evaluate.swift (eosTokenID/unknownTokenID x3 + decode), WiredMemoryUtils, ModelContainer (internal call only), GuidedGenerationLoop (incl. doc), TokenizerVocabExtractor, XGrammarBridge, MLXFoundationModels/MLXLanguageModel (incl. doc), IntegrationTestHelpers (4 sites), ReasoningConfig doc.
+    - Tests: TokenizerTokenIdTests.swift git-mv'd to TokenizerTokenIDTests.swift (suite/test names + assertions renamed); TokenizerGenerationPromptTests decode call sites; XgTokenizerStopRegistrationTests comment.
+    - IntegrationTesting (separate Xcode project): 13 files' `tokenizer.eosTokenId` accesses + 2 `decode(tokenIds:` call sites + 1 doc comment renamed; verified via xcodebuild build-for-testing → TEST BUILD SUCCEEDED.
+    - Docs: skills/mlx-swift-lm/references/tokenizer-chat.md, MLXEmbedders/README.md, MLXGuidedGeneration/README.md, MLXLMCommon/Documentation.docc/upgrade.md (decode example → decode(tokenIDs:)).
+
+    BOUNDARY DECISIONS (per parent guidance + ^9mv1q33 precedent): protocol requirement labels UNCHANGED (`decode(tokenIds:skipSpecialTokens:)`, `convertTokenToId`, `convertIdToToken`) — findings cited only the convenience surface; ModelContainer's own `decode(tokenIds:)` async method + deprecated alias keep their labels (pre-existing public API, not cited); unrelated same-named declarations stay (FalconH1 Codable config, CXGrammar/IntegrationTesting fixture fields `fixture.eosTokenId`/`seeds.eosTokenId` bound to JSON fixture keys, model configs). swift-transformers bridge unaffected (`upstream.decode(tokens:)`).
+
+    Gotcha for future agents: BSD sed does not support `\b` — the first sweep silently no-op'd on all word-boundary patterns; re-ran with plain patterns and verified by grep + compiler.
+
+    Verification: `swift build --build-tests` exit 0 (only pre-existing MLXVLM/ParoQuant warnings, untouched files); full `swift test` exit 0, ZERO failures — swift-testing 273+80+258+7 = 618, XCTest bundles all green incl. 197-test bundle and 12 macro tests; IntegrationTesting TEST BUILD SUCCEEDED. Not committed (tree carries concurrent WIP in PromptCache/MLXFoundationModels — stage selectively). Task left in doing.
+  timestamp: 2026-07-20T16:06:29.658966+00:00
+- actor: claude-code
+  id: 01ky05cy4jasjdb9p8n6p6jx9t
+  text: |-
+    really-done complete for iteration 3. Adversarial double-check verdict: REVISE with 3 minor documentation-level findings (no correctness, blast-radius, or emitted-text problems; it independently re-verified the load-macro emitted text is byte-identical, the ID closure rename has no shadowing hazard, no missed one-arg decode(tokenIds:) call sites, and no bleed into concurrent-WIP hunks).
+
+    Resolution:
+    1. FIXED — StopTokenRegressionIntegrationTests.swift: two per-test doc comments still said `eosTokenId`; updated to `eosTokenID` (file's header doc had already been swept).
+    2. FIXED — MLXFoundationModels/MLXLanguageModel.swift: comment "Preserve the historical `eosTokenId ?? 0` fallback" updated to `eosTokenID ?? 0` to match the code below it.
+    3. PROCEEDING WITH JUSTIFICATION (explicit boundary exclusion) — TestTokenizer.swift, ChatSessionToolRoundTripTests.swift, Gemma4UnifiedTests.swift declare their OWN pre-existing `eosTokenId`/`unknownTokenId` members on mock Tokenizer conformers. These are not the renamed extension properties (which are extension members, not protocol requirements — dispatch is static; the double-check confirmed behavior is unchanged and they were never reachable through `any Tokenizer`). They pre-date this task, were not cited by any finding, and match the documented exclusion precedent in ^9mv1q33 ("Tokenizer-protocol conformances in test doubles (TestTokenizer etc.)"). Renaming them is a candidate follow-up sweep, not this card's scope.
+
+    Fresh verification after the comment fixes: `swift build --build-tests` 0 errors; IntegrationTesting xcodebuild build-for-testing TEST BUILD SUCCEEDED; full `swift test` exit 0, zero failures (swift-testing 273+80+258+7 = 618 passed; all XCTest bundles 0 failures). Task left in `doing`, nothing committed.
+  timestamp: 2026-07-20T16:22:58.450734+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'Tokenizer: expose addGenerationPrompt:false chat-template render (prereq for stable-boundary hybrid checkpoints)'
 ---
 ## What
@@ -208,3 +243,11 @@ public func applyChatTemplate(
 - [x] `Libraries/MLXLMCommon/Tokenizer.swift:123` — Public method `append(token:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the method's purpose and parameters.
 - [x] `Libraries/MLXLMCommon/Tokenizer.swift:134` — Public mutating method next in NaiveStreamingDetokenizer lacks documentation. Add a doc comment explaining what this method returns and when it returns nil.
 - [x] `Libraries/MLXLMCommon/Tokenizer.swift:138` — Public method `next()` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the method's purpose and return value.
+
+## Review Findings (2026-07-20 10:25)
+
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:240` — Generated code contains closure parameter named `id` instead of `ID` — ID acronyms in lowerCamelCase must be all-uppercase as one unit. Change closure parameter from `{ id in` to `{ ID in`.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:248` — LoadContextMacro.expansion duplicates LoadContainerMacro.expansion (lines 218–230), differing only in literals (function name and error message). Consolidate both into a shared parameterized helper function to maintain them in lockstep and reduce surface area.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:308` — The two if-let blocks for optional 'capabilities' and 'configurationResolver' arguments in LanguageModelMacro.expansion are near-verbatim duplicates differing only in argument label and variable names. Extract a helper loop or function to handle optional argument forwarding: for label in ["capabilities", "configurationResolver"] { if let value = argument(label) { arguments.append("\(label): \(value)") } }.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:147` — Method parameter named `tokenIds` instead of `tokenIDs` — ID acronyms in lowerCamelCase must be all-uppercase as one unit. Change `tokenIds` to `tokenIDs` in the method parameter.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:173` — Property named `eosTokenId` instead of `eosTokenID` — ID acronyms in lowerCamelCase must be all-uppercase as one unit. Change property name from `eosTokenId` to `eosTokenID`.

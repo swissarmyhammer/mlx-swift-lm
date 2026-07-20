@@ -36,10 +36,10 @@ let resultEmbeddings = await modelContainer.perform {
             MLXArray(
                 elem
                     + Array(
-                        repeating: tokenizer.eosTokenId ?? 0,
+                        repeating: tokenizer.eosTokenID ?? 0,
                         count: maxLength - elem.count))
         })
-    let mask = (padded .!= tokenizer.eosTokenId ?? 0)
+    let mask = (padded .!= tokenizer.eosTokenID ?? 0)
     let tokenTypes = MLXArray.zeros(like: padded)
     let result = pooling(
         model(padded, positionIds: nil, tokenTypeIds: tokenTypes, attentionMask: mask),

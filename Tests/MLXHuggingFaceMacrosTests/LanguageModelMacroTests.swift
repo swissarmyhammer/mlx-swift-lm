@@ -16,9 +16,9 @@ final class LanguageModelMacroTests: XCTestCase {
             expandedSource: """
                 let model = MLXLanguageModel(
                     configuration: config,
-                    weightsLocation: { id in
+                    weightsLocation: { ID in
                         let cache = HuggingFace.HubCache.default
-                        guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                        guard let repo = HuggingFace.Repo.ID(rawValue: ID) else {
                             return cache.cacheDirectory
                         }
                         if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
@@ -45,9 +45,9 @@ final class LanguageModelMacroTests: XCTestCase {
                 let model = MLXLanguageModel(
                     configuration: config,
                     capabilities: [.guidedGeneration, .toolCalling],
-                    weightsLocation: { id in
+                    weightsLocation: { ID in
                         let cache = HuggingFace.HubCache.default
-                        guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                        guard let repo = HuggingFace.Repo.ID(rawValue: ID) else {
                             return cache.cacheDirectory
                         }
                         if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
@@ -74,9 +74,9 @@ final class LanguageModelMacroTests: XCTestCase {
                 let model = MLXLanguageModel(
                     configuration: config,
                     configurationResolver: MyResolver(),
-                    weightsLocation: { id in
+                    weightsLocation: { ID in
                         let cache = HuggingFace.HubCache.default
-                        guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                        guard let repo = HuggingFace.Repo.ID(rawValue: ID) else {
                             return cache.cacheDirectory
                         }
                         if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
@@ -104,9 +104,9 @@ final class LanguageModelMacroTests: XCTestCase {
                     configuration: config,
                     capabilities: [.guidedGeneration, .toolCalling],
                     configurationResolver: MyResolver(),
-                    weightsLocation: { id in
+                    weightsLocation: { ID in
                         let cache = HuggingFace.HubCache.default
-                        guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                        guard let repo = HuggingFace.Repo.ID(rawValue: ID) else {
                             return cache.cacheDirectory
                         }
                         if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),

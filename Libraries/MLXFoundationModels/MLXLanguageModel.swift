@@ -356,7 +356,7 @@ private actor ModelCache {
     ///
     /// Registers the model's FULL stop-token set with xgrammar — the same
     /// set `GuidedGenerationLoop.buildStopTokenIDs` stops generation on —
-    /// not just `tokenizer.eosTokenId`. An unregistered stop token (e.g.
+    /// not just `tokenizer.eosTokenID`. An unregistered stop token (e.g.
     /// GLM's secondary `eos_token_id` entries `<|user|>`/`<|observation|>`)
     /// is an ordinary vocab entry the grammar can admit as string
     /// *content*, and constrained decode then samples it mid-envelope and
@@ -378,11 +378,11 @@ private actor ModelCache {
             let vocab = TokenizerVocabExtractor.extractForGrammar(from: tokenizer)
             let stopTokenIDs = GuidedGenerationLoop.buildStopTokenIDs(
                 tokenizer: tokenizer, configuration: configuration)
-            // Preserve the historical `eosTokenId ?? 0` fallback for the
+            // Preserve the historical `eosTokenID ?? 0` fallback for the
             // (degenerate) no-stop-tokens-at-all case.
             let stops =
                 stopTokenIDs.isEmpty
-                ? [Int32(tokenizer.eosTokenId ?? 0)]
+                ? [Int32(tokenizer.eosTokenID ?? 0)]
                 : stopTokenIDs.sorted().map(Int32.init)
             return try GrammarTokenizer(
                 vocab: vocab.vocab,
@@ -417,7 +417,7 @@ private actor ModelCache {
         getOrCreateCached(modelID: modelID, cache: &tokenizerBiases) {
             let closing = ClosingTokenBias.compute(
                 tokenizer: tokenizer,
-                eosTokenID: tokenizer.eosTokenId
+                eosTokenID: tokenizer.eosTokenID
             )
             let (whitespace, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
                 tokenizer: tokenizer
@@ -4113,7 +4113,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             input: LMInput, reasoningConfig: ReasoningConfig, tokenizer: any Tokenizer
         ) -> Bool {
             let tokens = input.text.tokens.asArray(Int.self)
-            let renderedTail = tokenizer.decode(tokenIds: Array(tokens.suffix(64)))
+            let renderedTail = tokenizer.decode(tokenIDs: Array(tokens.suffix(64)))
             return ReasoningEventEmitter.promptEndsInsideReasoning(
                 renderedPromptTail: renderedTail, config: reasoningConfig)
         }

@@ -229,14 +229,14 @@ let container = try await EmbedderModelFactory.load(
 
 ### Renamed methods
 
-`decode(tokens:)` is renamed to `decode(tokenIds:)` to align with the `transformers` library in Python:
+`decode(tokens:)` is renamed to `decode(tokenIDs:)` to align with the `transformers` library in Python:
 
 ```swift
 // Before (2.x)
 let text = tokenizer.decode(tokens: ids)
 
 // After (3.0)
-let text = tokenizer.decode(tokenIds: ids)
+let text = tokenizer.decode(tokenIDs: ids)
 ```
 
 ## Breaking Changes

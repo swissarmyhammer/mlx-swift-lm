@@ -91,7 +91,7 @@ public struct ReasoningConfig: Sendable, Equatable {
     ///
     /// Not load-bearing in v1 — detection is always string-scan based (the
     /// decoded stream renders the delimiter as literal text whether or not it is
-    /// a special token, because `decode(tokenIds:)` defaults
+    /// a special token, because `decode(tokenIDs:)` defaults
     /// `skipSpecialTokens: false`). Reserved for a future token-ID-stream
     /// optimization.
     public var isSpecialToken: Bool

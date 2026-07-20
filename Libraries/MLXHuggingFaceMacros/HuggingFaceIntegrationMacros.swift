@@ -30,6 +30,36 @@ extension FreestandingMacroExpansionSyntax {
     fileprivate var progressHandlerArgument: String {
         argument("progressHandler")?.description ?? "{ _ in }"
     }
+
+    /// Builds the expansion shared by ``LoadContainerMacro`` and
+    /// ``LoadContextMacro``: a call to the given load function wired to the
+    /// default hub downloader and tokenizer loader, forwarding the caller's
+    /// required labeled `configuration` and optional `progressHandler`
+    /// arguments.
+    ///
+    /// - Parameters:
+    ///   - function: the load function to call, e.g. `"loadModelContainer"`
+    ///   - macroName: the invoking macro's name, used in the
+    ///     missing-configuration diagnostic
+    /// - Returns: the load call expression
+    /// - Throws: `MacroExpansionError` when the labeled `configuration`
+    ///   argument is missing
+    fileprivate func loadExpansion(calling function: String, macroName: String) throws
+        -> ExprSyntax
+    {
+        guard let configuration = argument("configuration") else {
+            throw MacroExpansionError.message("\(macroName) requires a configuration")
+        }
+
+        return
+            """
+            \(raw: function)(
+                from: #hubDownloader(),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: \(configuration),
+                progressHandler: \(raw: progressHandlerArgument))
+            """
+    }
 }
 
 /// Implements `#hubDownloader`: wraps a `HuggingFace.HubClient` (defaulting to
@@ -254,19 +284,8 @@ public struct LoadContainerMacro: ExpressionMacro {
         of node: some FreestandingMacroExpansionSyntax,
         in context: some MacroExpansionContext
     ) throws -> ExprSyntax {
-        guard let configuration = node.argument("configuration") else {
-            throw MacroExpansionError.message(
-                "#huggingFaceLoadModelContainer requires a configuration")
-        }
-
-        return
-            """
-            loadModelContainer(
-                from: #hubDownloader(),
-                using: #huggingFaceTokenizerLoader(),
-                configuration: \(configuration),
-                progressHandler: \(raw: node.progressHandlerArgument))
-            """
+        try node.loadExpansion(
+            calling: "loadModelContainer", macroName: "#huggingFaceLoadModelContainer")
     }
 }
 
@@ -290,18 +309,7 @@ public struct LoadContextMacro: ExpressionMacro {
         of node: some FreestandingMacroExpansionSyntax,
         in context: some MacroExpansionContext
     ) throws -> ExprSyntax {
-        guard let configuration = node.argument("configuration") else {
-            throw MacroExpansionError.message("#huggingFaceLoadModel requires a configuration")
-        }
-
-        return
-            """
-            loadModel(
-                from: #hubDownloader(),
-                using: #huggingFaceTokenizerLoader(),
-                configuration: \(configuration),
-                progressHandler: \(raw: node.progressHandlerArgument))
-            """
+        try node.loadExpansion(calling: "loadModel", macroName: "#huggingFaceLoadModel")
     }
 }
 
@@ -336,21 +344,20 @@ public struct LanguageModelMacro: ExpressionMacro {
                 "#huggingFaceLanguageModel requires a configuration")
         }
 
-        // Forward the caller's configuration verbatim, then forward
-        // capabilities / configurationResolver only when the caller supplied
-        // them so the MLXLanguageModel init's own defaults apply otherwise.
+        // Forward the caller's configuration verbatim, then forward the
+        // optional arguments only when the caller supplied them so the
+        // MLXLanguageModel init's own defaults apply otherwise.
         var arguments = ["configuration: \(configuration)"]
-        if let capabilities = argument("capabilities") {
-            arguments.append("capabilities: \(capabilities)")
-        }
-        if let resolver = argument("configurationResolver") {
-            arguments.append("configurationResolver: \(resolver)")
+        for label in ["capabilities", "configurationResolver"] {
+            if let value = argument(label) {
+                arguments.append("\(label): \(value)")
+            }
         }
         arguments.append(
             """
-            weightsLocation: { id in
+            weightsLocation: { ID in
                     let cache = HuggingFace.HubCache.default
-                    guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                    guard let repo = HuggingFace.Repo.ID(rawValue: ID) else {
                         return cache.cacheDirectory
                     }
                     if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),

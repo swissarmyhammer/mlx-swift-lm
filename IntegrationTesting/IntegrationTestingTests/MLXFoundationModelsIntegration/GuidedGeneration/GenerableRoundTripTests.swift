@@ -309,7 +309,7 @@ struct GenerableRoundTripTests {
             // exercises the same sampling path real callers hit.
             let closingBias = ClosingTokenBias.compute(
                 tokenizer: context.tokenizer,
-                eosTokenID: context.tokenizer.eosTokenId
+                eosTokenID: context.tokenizer.eosTokenID
             )
             let structuralReserve = CompletionReserve.estimate(
                 schemaJSON: jsonSchema,

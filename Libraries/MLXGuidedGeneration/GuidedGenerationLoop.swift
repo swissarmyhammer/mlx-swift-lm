@@ -274,7 +274,7 @@ public enum GuidedGenerationLoop {
             // `applyMaskAndSample` set it to -inf, so argmax would not
             // have selected it.
             if state.mask.needsApply,
-                tokenID == context.tokenizer.unknownTokenId || stopTokenIDs.contains(tokenID)
+                tokenID == context.tokenizer.unknownTokenID || stopTokenIDs.contains(tokenID)
             {
                 logStopReason(
                     diagnosticLog: diagnosticLog, "EOS/unk tokenID=\(tokenID)",
@@ -1079,7 +1079,7 @@ public enum GuidedGenerationLoop {
     ///    `<eos>` + `<end_of_turn>`); this source is the only way to pick
     ///    up the turn-ender when the tokenizer's primary EOS is the
     ///    completion EOS.
-    /// 2. `tokenizer.eosTokenId` — the tokenizer's single primary EOS.
+    /// 2. `tokenizer.eosTokenID` — the tokenizer's single primary EOS.
     /// 3. `configuration.extraEOSTokens` — hardcoded-by-token-string
     ///    additions from registry entries (e.g. `["<end_of_turn>"]` on
     ///    some Gemma variants in `LLMModelFactory`). Callers needing extra
@@ -1097,7 +1097,7 @@ public enum GuidedGenerationLoop {
         configuration: ModelConfiguration
     ) -> Set<Int> {
         var stopTokenIDs = Set(configuration.eosTokenIds)
-        if let eos = tokenizer.eosTokenId {
+        if let eos = tokenizer.eosTokenID {
             stopTokenIDs.insert(eos)
         }
         for token in configuration.extraEOSTokens {
