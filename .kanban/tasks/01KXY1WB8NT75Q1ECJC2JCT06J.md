@@ -100,7 +100,7 @@ comments:
 
     Fresh verification after the comment fixes: `swift build --build-tests` 0 errors; IntegrationTesting xcodebuild build-for-testing TEST BUILD SUCCEEDED; full `swift test` exit 0, zero failures (swift-testing 273+80+258+7 = 618 passed; all XCTest bundles 0 failures). Task left in `doing`, nothing committed.
   timestamp: 2026-07-20T16:22:58.450734+00:00
-position_column: doing
+position_column: review
 position_ordinal: '80'
 title: 'Tokenizer: expose addGenerationPrompt:false chat-template render (prereq for stable-boundary hybrid checkpoints)'
 ---

@@ -1,0 +1,1 @@
+{"id":"01KXX99EY9VVYSMAAXQ1WT9KXB","timestamp":"2026-07-19T13:33:15.593606Z","op":"create","item_id":"01KXX99EY9E038C75NB2BD0B3T","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: '008672'\n+tag_name: minimax-m3\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: '008672'\n-tag_name: minimax-m3\n","transaction_id":null}
