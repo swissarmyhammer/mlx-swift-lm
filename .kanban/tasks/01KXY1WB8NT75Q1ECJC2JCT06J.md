@@ -44,6 +44,23 @@ comments:
   id: 01kxzz1fxfq7b9kpn2vk5kx06a
   text: '/finish iteration 1: implement landed green in `doing` (swift test 816/816 — XCTest 203, swift-testing 613). Files: Libraries/MLXLMCommon/Tokenizer.swift (optional protocol method, default nil), Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift (bridge delegates to swift-transformers'' 7-arg protocol requirement — tools + additionalContext forwarded, nothing dropped), Tests/MLXHuggingFaceMacrosTests/LanguageModelMacroTests.swift (expansion pin), Tests/MLXLMTests/TokenizerGenerationPromptTests.swift (default-nil + ChatML strict-prefix contract). TDD RED→GREEN verified. Orchestrator note: tree carries a CONCURRENT session''s WIP (Evaluate.swift rename, MLXFoundationModels files) — checkpoint commit will stage only this task''s files. Next: /test verify → scoped /commit → /review HEAD~1..HEAD.'
   timestamp: 2026-07-20T14:31:51.983711+00:00
+- actor: claude-code
+  id: 01ky01dy4rd3weh3rz5e21czw6
+  text: |-
+    /implement iteration 2: worked the 73-item Review Findings checklist — all boxes flipped to [x].
+
+    Root fixes (TDD RED→GREEN observed for each behavior change):
+
+    1. Libraries/MLXLMCommon/Tokenizer.swift — documented EVERY public declaration (all 8 protocol requirements + 3 token properties, all extension conveniences, TokenizerError enum/case/errorDescription, StreamingDetokenizer protocol + append, NaiveStreamingDetokenizer struct/init/append/next). Extracted private `tokenId(of:)` helper now shared by eosTokenId/unknownTokenId and the NEW `bosTokenId` (completes the Token→TokenId pattern). Added convenience overloads `applyChatTemplate(messages:addGenerationPrompt:)` and `applyChatTemplate(messages:tools:addGenerationPrompt:)` mirroring the 3-param conveniences.
+
+    2. Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift — documented all six public macro structs and their expansion methods. LoadContainerMacro and LoadContextMacro now REQUIRE the labeled `configuration` argument (matching LanguageModelMacro); shared fileprivate `argument(_:)` + `progressHandlerArgument` helpers on FreestandingMacroExpansionSyntax kill the verbatim progress-extraction duplication; LanguageModelMacro reuses the same helper. Call-site audit: the public macro declarations in Libraries/MLXHuggingFace/Macros.swift already declare labeled `configuration:` and every doc/README example uses the label — zero call-site changes needed (repo-wide grep confirmed no positional usage).
+
+    3. Tests: NEW Tests/MLXLMTests/TokenizerTokenIdTests.swift (bosTokenId RED was a compile error before implementation); 3 new convenience-overload tests in TokenizerGenerationPromptTests.swift; NEW LoadContainerMacroTests + LoadContextMacroTests in Tests/MLXHuggingFaceMacrosTests/LanguageModelMacroTests.swift (labeled-expansion pin, progressHandler-forwarding pin, positional-diagnoses test — the diagnoses tests were observed RED, "Expected 1 diagnostics but received 0", before the guard change).
+
+    Verification: full `swift test` exit 0, zero failures — XCTest 203+70 assorted bundle tests incl. MLXHuggingFaceMacrosTests now 12 tests, swift-testing runs 273+80+258+7 (618) all passed. Forced recompile of all touched targets (content-neutral change + revert): zero compiler warnings. Validators (PostToolUse) clean throughout.
+
+    Task left in `doing` for /review. Nothing committed (tree still carries concurrent WIP in Evaluate.swift + MLXFoundationModels — commit must stage selectively).
+  timestamp: 2026-07-20T15:13:36.920128+00:00
 position_column: doing
 position_ordinal: '8280'
 title: 'Tokenizer: expose addGenerationPrompt:false chat-template render (prereq for stable-boundary hybrid checkpoints)'
@@ -73,3 +90,117 @@ Prerequisite for the hybrid prompt-cache fix (see the dependent task "PromptCach
 ## Workflow
 
 - Use `/tdd` — write failing tests first, then implement to make them pass. #qwen
+
+## Review Findings (2026-07-20 09:38)
+
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:12` — Public struct DownloaderMacro lacks documentation. All public APIs require doc comments per Swift conventions. Add a doc comment explaining what DownloaderMacro does and when to use it.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:34` — Public struct TokenizerAdaptorMacro lacks documentation. All public APIs require doc comments per Swift conventions. Add a doc comment explaining what TokenizerAdaptorMacro does.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:35` — Public static method expansion in TokenizerAdaptorMacro lacks documentation. Add a doc comment explaining this macro's expansion behavior.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:48` — Public struct `TokenizerAdaptorMacro` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment above the struct declaration explaining its purpose.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:49` — Public static method `expansion` on `TokenizerAdaptorMacro` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining what the macro expands to.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:96` — Public struct `TokenizerLoaderMacro` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment above the struct declaration explaining its purpose.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:97` — Public static method `expansion` on `TokenizerLoaderMacro` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining what the macro expands to.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:103` — Public struct TokenizerLoaderMacro lacks documentation. Add a doc comment explaining what TokenizerLoaderMacro does.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:104` — Public static method expansion in TokenizerLoaderMacro lacks documentation. Add a doc comment explaining this macro's expansion behavior.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:114` — Public struct `LoadContainerMacro` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment above the struct declaration explaining its purpose.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:115` — Public static method `expansion` on `LoadContainerMacro` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining what the macro expands to.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:119` — LoadContainerMacro extracts the first argument unconditionally as `configuration` (line 119), but LanguageModelMacro explicitly checks for the labeled 'configuration' argument using a helper function (line 225). This creates inconsistent behavior: LoadContainerMacro accepts any positional first argument, while LanguageModelMacro requires the label. Update LoadContainerMacro to explicitly check for the 'configuration' label:
+```swift
+guard let configuration = node.arguments.first(where: { $0.label?.text == "configuration" })?.expression else {
+    throw MacroExpansionError.message(
+        "#huggingFaceLoadModelContainer requires a configuration")
+}
+```.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:120` — LoadContainerMacro extracts the first argument unconditionally as `configuration` (line 120), but LanguageModelMacro explicitly checks for the labeled 'configuration' argument. This creates inconsistent behavior: LoadContainerMacro accepts any positional first argument, while LanguageModelMacro requires the label. Update LoadContainerMacro to explicitly check for the 'configuration' label:
+```swift
+guard let configuration = node.arguments.first(where: { $0.label?.text == "configuration" })?.expression else {
+    throw MacroExpansionError.message(
+        "#huggingFaceLoadModelContainer requires a configuration")
+}
+```.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:121` — Public struct LoadContainerMacro lacks documentation. Add a doc comment explaining what LoadContainerMacro does.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:122` — Public static method expansion in LoadContainerMacro lacks documentation. Add a doc comment explaining this macro's expansion behavior.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:133` — Public struct `LoadContextMacro` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment above the struct declaration explaining its purpose.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:134` — LoadContextMacro extracts the first argument unconditionally as `configuration` (line 134), but LanguageModelMacro explicitly checks for the labeled 'configuration' argument. This creates inconsistent API contracts: LoadContextMacro accepts any positional first argument, while LanguageModelMacro requires the label. Update LoadContextMacro to explicitly check for the 'configuration' label:
+```swift
+guard let configuration = node.arguments.first(where: { $0.label?.text == "configuration" })?.expression else {
+    throw MacroExpansionError.message(
+        "#huggingFaceLoadModel requires a configuration")
+}
+```.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:134` — Public static method `expansion` on `LoadContextMacro` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining what the macro expands to.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:143` — Public struct LoadContextMacro lacks documentation. Add a doc comment explaining what LoadContextMacro does.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:144` — Public static method expansion in LoadContextMacro lacks documentation. Add a doc comment explaining this macro's expansion behavior.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:150` — LoadContextMacro extracts the first argument unconditionally as `configuration` (line 150), but LanguageModelMacro explicitly checks for the labeled 'configuration' argument. This creates inconsistent API contracts: LoadContextMacro accepts any positional first argument, while LanguageModelMacro requires the label. Update LoadContextMacro to explicitly check for the 'configuration' label:
+```swift
+guard let configuration = node.arguments.first(where: { $0.label?.text == "configuration" })?.expression else {
+    throw MacroExpansionError.message(
+        "#huggingFaceLoadModel requires a configuration")
+}
+```.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:153` — Public struct `LanguageModelMacro` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment above the struct declaration explaining its purpose.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:154` — Public static method `expansion` on `LanguageModelMacro` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining what the macro expands to.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:163` — Public struct LanguageModelMacro lacks documentation. Add a doc comment explaining what LanguageModelMacro does.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:164` — Public static method expansion in LanguageModelMacro lacks documentation. Add a doc comment explaining this macro's expansion behavior.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:168` — Progress handler extraction logic is verbatim duplicated in LoadContextMacro (line 197). The if-else block that extracts the progressHandler argument is identical; it should be extracted into a shared helper function to avoid drift between the two macros. Extract the progress extraction logic into a helper function that takes the node and returns the progress string, then call it from both LoadContainerMacro and LoadContextMacro.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:7` — Protocol requirement func encode lacks documentation. Protocol members must be documented per Swift conventions. Add a doc comment explaining what encode does, its parameters, and return value.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:7` — Public protocol requirement `encode(text:addSpecialTokens:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the method's purpose, parameters, and return value.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:8` — Protocol requirement func decode lacks documentation. Add a doc comment explaining what decode does.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:8` — Public protocol requirement `decode(tokenIds:skipSpecialTokens:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the method's purpose, parameters, and return value.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:9` — Protocol requirement func convertTokenToId lacks documentation. Add a doc comment explaining what this function does and when it returns nil.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:9` — Public protocol requirement `convertTokenToId(_:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the method's purpose and parameters.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:10` — Protocol requirement func convertIdToToken lacks documentation. Add a doc comment explaining what this function does.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:10` — Public protocol requirement `convertIdToToken(_:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the method's purpose and parameters.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:12` — Protocol requirement var bosToken lacks documentation. Add a doc comment explaining what this token represents.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:12` — Public protocol property `bosToken` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining what this property represents (beginning-of-sequence token).
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:13` — Protocol requirement var eosToken lacks documentation. Add a doc comment explaining what this token represents.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:13` — Public protocol property `eosToken` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining what this property represents (end-of-sequence token).
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:14` — Protocol requirement var unknownToken lacks documentation. Add a doc comment explaining what this token represents.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:14` — Public protocol property `unknownToken` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining what this property represents.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:16` — Protocol requirement func applyChatTemplate (3-parameter version) lacks documentation. This is a complex public API requiring usage clarity. Add a doc comment explaining the parameters, return value, and when it throws.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:16` — Public protocol requirement `applyChatTemplate(messages:tools:additionalContext:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the method's purpose, parameters, and return value.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:50` — Public convenience method func encode in Tokenizer extension lacks documentation. Add a doc comment explaining this convenience overload.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:51` — Property eosTokenId and unknownTokenId (line 56) have identical implementations differing only by variable name. Both follow the pattern: guard-let on a token property, then return convertTokenToId(token). This is one function with an argument waiting to be extracted. Extract a shared helper function like `private func getTokenId(for token: String?) -> Int?` and call it from both properties: `public var eosTokenId: Int? { getTokenId(for: eosToken) }`.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:54` — Public convenience method func decode in Tokenizer extension lacks documentation. Add a doc comment explaining this convenience overload.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:54` — Public extension method `encode(text:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining this convenience overload with default parameter.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:58` — Public computed property eosTokenId in Tokenizer extension lacks documentation. Add a doc comment explaining what this property returns.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:58` — Public extension method `decode(tokenIds:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining this convenience overload with default parameter.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:62` — The protocol provides convenience properties `eosTokenId` and `unknownTokenId` (lines 53–62) that convert token strings to optional Int IDs, but there is no corresponding `bosTokenId` property. Since `bosToken` is a protocol property (line 11) and can be looked up via `convertTokenToId` exactly like the others, this breaks the established pattern of providing a TokenId convenience for each Token property. Add a `bosTokenId` convenience property to match the pattern:
+```swift
+public var bosTokenId: Int? {
+    guard let bosToken else { return nil }
+    return convertTokenToId(bosToken)
+}
+```.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:62` — Public extension property `eosTokenId` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining what this computed property represents (end-of-sequence token ID).
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:63` — Public computed property unknownTokenId in Tokenizer extension lacks documentation. Add a doc comment explaining what this property returns.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:67` — Public extension property `unknownTokenId` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining what this computed property represents.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:68` — Public convenience method func applyChatTemplate (1-parameter version) in Tokenizer extension lacks documentation. Add a doc comment explaining this convenience overload.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:72` — Public extension method `applyChatTemplate(messages:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining this convenience overload.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:73` — Public convenience method func applyChatTemplate (2-parameter version) in Tokenizer extension lacks documentation. Add a doc comment explaining this convenience overload.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:74` — The 3-parameter `applyChatTemplate` method has convenience overloads (lines 60–72) that provide partial application, but the new 4-parameter version does not follow the same pattern. Callers must always supply all four parameters explicitly, even for common cases like rendering with just `messages` and `addGenerationPrompt`. Add at least one convenience overload for the 4-parameter method:
+```swift
+public func applyChatTemplate(
+    messages: [[String: any Sendable]],
+    addGenerationPrompt: Bool
+) throws -> [Int]? {
+    try applyChatTemplate(messages: messages, tools: nil, additionalContext: nil, addGenerationPrompt: addGenerationPrompt)
+}
+```.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:78` — Public extension method `applyChatTemplate(messages:tools:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining this convenience overload.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:92` — Public enum case missingChatTemplate lacks documentation. Add a doc comment explaining when this error case occurs.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:94` — Public computed property errorDescription in TokenizerError enum lacks documentation. Add a doc comment explaining what this property returns.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:98` — Public enum `TokenizerError` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the error type and its cases.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:99` — Public enum case `missingChatTemplate` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining when this error occurs.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:100` — Public protocol StreamingDetokenizer lacks documentation. Add a doc comment explaining what this protocol does and its purpose.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:101` — Public property `errorDescription` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining what this property provides.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:104` — Public struct NaiveStreamingDetokenizer lacks documentation. Add a doc comment explaining what this implementation does and when to use it.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:109` — Public protocol `StreamingDetokenizer` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the protocol's purpose and usage.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:110` — Public initializer in NaiveStreamingDetokenizer lacks documentation. Add a doc comment explaining what the tokenizer parameter is.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:110` — Public protocol requirement `append(token:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the method's purpose and parameters.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:113` — Public struct `NaiveStreamingDetokenizer` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the struct's purpose as a naive streaming detokenizer implementation.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:117` — Public mutating method append in NaiveStreamingDetokenizer lacks documentation. Add a doc comment explaining what this method does.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:119` — Public initializer lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the initializer's parameters.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:123` — Public method `append(token:)` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the method's purpose and parameters.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:134` — Public mutating method next in NaiveStreamingDetokenizer lacks documentation. Add a doc comment explaining what this method returns and when it returns nil.
+- [x] `Libraries/MLXLMCommon/Tokenizer.swift:138` — Public method `next()` lacks a documentation comment; every public declaration must carry a `///` doc comment. Add a `///` documentation comment explaining the method's purpose and return value.

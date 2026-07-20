@@ -146,4 +146,54 @@ import Testing
 
         #expect(explicit == primed)
     }
+
+    /// The `(messages:addGenerationPrompt:)` convenience must match the full
+    /// 4-parameter render with `tools: nil, additionalContext: nil`.
+    @Test func messagesAndGenerationPromptConvenienceMatchesFullRender() throws {
+        let tokenizer: any Tokenizer = ChatMLTokenizer()
+        let messages: [[String: any Sendable]] = [["role": "user", "content": "hi"]]
+
+        let full = try #require(
+            try tokenizer.applyChatTemplate(
+                messages: messages,
+                tools: nil,
+                additionalContext: nil,
+                addGenerationPrompt: false))
+        let convenience = try #require(
+            try tokenizer.applyChatTemplate(messages: messages, addGenerationPrompt: false))
+
+        #expect(convenience == full)
+    }
+
+    /// The `(messages:tools:addGenerationPrompt:)` convenience must match the
+    /// full 4-parameter render with `additionalContext: nil`.
+    @Test func messagesToolsAndGenerationPromptConvenienceMatchesFullRender() throws {
+        let tokenizer: any Tokenizer = ChatMLTokenizer()
+        let messages: [[String: any Sendable]] = [["role": "user", "content": "hi"]]
+
+        let full = try #require(
+            try tokenizer.applyChatTemplate(
+                messages: messages,
+                tools: nil,
+                additionalContext: nil,
+                addGenerationPrompt: true))
+        let convenience = try #require(
+            try tokenizer.applyChatTemplate(
+                messages: messages, tools: nil, addGenerationPrompt: true))
+
+        #expect(convenience == full)
+    }
+
+    /// The convenience overloads must preserve the default-`nil` opt-out for
+    /// conformers that do not implement the generation-prompt render.
+    @Test func convenienceOverloadsReturnNilForOptedOutTokenizer() throws {
+        let tokenizer: any Tokenizer = MinimalTokenizer()
+        let messages: [[String: any Sendable]] = [["role": "user", "content": "hi"]]
+
+        #expect(
+            try tokenizer.applyChatTemplate(messages: messages, addGenerationPrompt: false) == nil)
+        #expect(
+            try tokenizer.applyChatTemplate(
+                messages: messages, tools: nil, addGenerationPrompt: false) == nil)
+    }
 }

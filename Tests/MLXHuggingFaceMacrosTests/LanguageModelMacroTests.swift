@@ -237,3 +237,101 @@ final class TokenizerAdaptorMacroTests: XCTestCase {
             macros: testMacros)
     }
 }
+
+final class LoadContainerMacroTests: XCTestCase {
+    let testMacros: [String: Macro.Type] = [
+        "huggingFaceLoadModelContainer": LoadContainerMacro.self
+    ]
+
+    func testLabeledConfigurationExpands() {
+        assertMacroExpansion(
+            "let container = #huggingFaceLoadModelContainer(configuration: config)",
+            expandedSource: """
+                let container = loadModelContainer(
+                    from: #hubDownloader(),
+                    using: #huggingFaceTokenizerLoader(),
+                    configuration: config,
+                    progressHandler: { _ in
+                    })
+                """,
+            macros: testMacros)
+    }
+
+    func testProgressHandlerForwarded() {
+        assertMacroExpansion(
+            "let container = #huggingFaceLoadModelContainer(configuration: config, progressHandler: handler)",
+            expandedSource: """
+                let container = loadModelContainer(
+                    from: #hubDownloader(),
+                    using: #huggingFaceTokenizerLoader(),
+                    configuration: config,
+                    progressHandler: handler)
+                """,
+            macros: testMacros)
+    }
+
+    /// A positional (unlabeled) first argument must be rejected — the macro
+    /// requires the labeled `configuration` argument, matching
+    /// `#huggingFaceLanguageModel`.
+    func testPositionalConfigurationDiagnoses() {
+        assertMacroExpansion(
+            "let container = #huggingFaceLoadModelContainer(config)",
+            expandedSource: "let container = #huggingFaceLoadModelContainer(config)",
+            diagnostics: [
+                DiagnosticSpec(
+                    message: "#huggingFaceLoadModelContainer requires a configuration",
+                    line: 1,
+                    column: 17)
+            ],
+            macros: testMacros)
+    }
+}
+
+final class LoadContextMacroTests: XCTestCase {
+    let testMacros: [String: Macro.Type] = [
+        "huggingFaceLoadModel": LoadContextMacro.self
+    ]
+
+    func testLabeledConfigurationExpands() {
+        assertMacroExpansion(
+            "let context = #huggingFaceLoadModel(configuration: config)",
+            expandedSource: """
+                let context = loadModel(
+                    from: #hubDownloader(),
+                    using: #huggingFaceTokenizerLoader(),
+                    configuration: config,
+                    progressHandler: { _ in
+                    })
+                """,
+            macros: testMacros)
+    }
+
+    func testProgressHandlerForwarded() {
+        assertMacroExpansion(
+            "let context = #huggingFaceLoadModel(configuration: config, progressHandler: handler)",
+            expandedSource: """
+                let context = loadModel(
+                    from: #hubDownloader(),
+                    using: #huggingFaceTokenizerLoader(),
+                    configuration: config,
+                    progressHandler: handler)
+                """,
+            macros: testMacros)
+    }
+
+    /// A positional (unlabeled) first argument must be rejected — the macro
+    /// requires the labeled `configuration` argument, matching
+    /// `#huggingFaceLanguageModel`.
+    func testPositionalConfigurationDiagnoses() {
+        assertMacroExpansion(
+            "let context = #huggingFaceLoadModel(config)",
+            expandedSource: "let context = #huggingFaceLoadModel(config)",
+            diagnostics: [
+                DiagnosticSpec(
+                    message: "#huggingFaceLoadModel requires a configuration",
+                    line: 1,
+                    column: 15)
+            ],
+            macros: testMacros)
+    }
+}
