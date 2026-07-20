@@ -61,8 +61,12 @@ comments:
 
     Task left in `doing` for /review. Nothing committed (tree still carries concurrent WIP in Evaluate.swift + MLXFoundationModels — commit must stage selectively).
   timestamp: 2026-07-20T15:13:36.920128+00:00
-position_column: review
-position_ordinal: '80'
+- actor: claude-code
+  id: 01ky02a05zqvhzc26xwxagahvz
+  text: Committed (da05ef4) and moved to done per user's explicit direction ("just commit and mark done, no review") — the same treatment applied to ^b3zpf2q. All acceptance criteria and the 73-item review findings checklist were already checked off by the prior implement passes; full suite verified green (816 tests, 0 failures) before commit.
+  timestamp: 2026-07-20T15:28:56.511314+00:00
+position_column: done
+position_ordinal: c580
 title: 'Tokenizer: expose addGenerationPrompt:false chat-template render (prereq for stable-boundary hybrid checkpoints)'
 ---
 ## What
