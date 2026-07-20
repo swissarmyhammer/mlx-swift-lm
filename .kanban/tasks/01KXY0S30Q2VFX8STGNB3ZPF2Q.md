@@ -90,6 +90,55 @@ comments:
 
     Task left in `doing` for `/review`; not moved to review/done by this session. `^1fjmy9f` updated in parallel to match (left in `doing`).
   timestamp: 2026-07-20T11:33:41.154690+00:00
+- actor: claude-code
+  id: 01kxzpfs7mj3ztxmevsghc83tg
+  text: |-
+    ## Review Findings (2026-07-20 06:37)
+
+    19 findings from the checkpoint review. 11 are DROPPED per the /finish skill's blanket "never refactor existing tests" exception — they're on pre-existing IntegrationTestingTests files that this branch's ^324sy19 fix only mechanically touched (adding one missing `configuration:` argument per call site, never rewriting logic):
+    - DROPPED (pre-existing test duplication/coverage gaps, not introduced by this diff): GenerableRoundTripTests.swift collectText/transcript/assertValidJSON duplication with MultiModelGuidedGenerationTests.swift; GuidedGenerationTests.swift/HardReserveStressTests.swift `sanitize(_:)` duplication; MultiModelGuidedGenerationTests.swift's duplicated guided-generation pattern across two test methods; MultiModelGuidedGenerationTests.swift's destinationName enum-validation gap; FMTestHelpers.swift's `@unchecked Sendable` doc-invariant gap (pre-existing class, only a 1-line fixture constant was added to this file).
+
+    Remaining 8 findings are on `Libraries/MLXLMCommon/Evaluate.swift` (production library code, not test code — fully in scope, must be fixed):
+
+    - [x] `Libraries/MLXLMCommon/Evaluate.swift:177` — Public method `sample` lacks documentation.
+    - [x] `Libraries/MLXLMCommon/Evaluate.swift:247` — Public method `sample` lacks documentation.
+    - [x] `Libraries/MLXLMCommon/Evaluate.swift:548` — Public method `next` lacks documentation.
+    - [x] `Libraries/MLXLMCommon/Evaluate.swift:734` — Public method `next` lacks documentation.
+    - [x] `Libraries/MLXLMCommon/Evaluate.swift:835` — Property `tokenIds` uses mixed-case acronym; rename to `tokenIDs`.
+    - [x] `Libraries/MLXLMCommon/Evaluate.swift:838` — Property `promptTokenIds` uses mixed-case acronym; rename to `promptTokenIDs`.
+    - [x] `Libraries/MLXLMCommon/Evaluate.swift:1350` — `tokenLoop` in `generateLoopTask` has excessive nesting (4+ levels: while → if stop-check → if includeStopToken → switch). Extract `handleStopToken(...)`/`handleGeneratedToken(...)` helpers to reduce nesting.
+  timestamp: 2026-07-20T12:02:23.092925+00:00
+- actor: claude-code
+  id: 01kxzr4fanjszqsp4jra8c57zk
+  text: |-
+    Fixed all 8 review findings from the "2026-07-20 06:37" comment (checkboxes flipped to [x] in that comment):
+
+    1-2. Added one-line doc comments to ArgMaxSampler.sample ("Greedily selects the single highest-probability token (no randomness).") and TopPSampler.sample ("Samples a token from `logits` after applying the configured top-p/top-k/min-p filters and temperature scaling."). Left CategoricalSampler.sample undocumented -- it was not one of the two flagged findings, avoiding scope creep.
+
+    3-4. Added doc comments to TokenIterator.next() (describes the "return previous, prefetch next" pipelining and the maxTokens nil-return) and SpeculativeTokenIterator.next() (describes draining the pending buffer vs. running a new speculateRound()).
+
+    5-6. Renamed GenerateResult.tokenIds -> tokenIDs and GenerateResult.promptTokenIds -> promptTokenIDs (stored/computed properties, matching codebase's uppercase-ID acronym convention), including the matching init parameter label, the deprecated-alias `renamed:` strings, and the one construction call site in the file's deprecated generate(input:context:iterator:didGenerate:) function. Repo-wide grep (including IntegrationTesting) confirmed no other file references these two properties by member access -- all other `tokenIds`-named hits repo-wide are the unrelated Tokenizer.decode(tokenIds:skipSpecialTokens:) protocol method, deliberately left untouched.
+
+    7. Extracted `handleStopToken(_:)` (returns GenerateStopReason) and `handleGeneratedToken(_:)` (returns TokenLoopDisposition) as local nested functions inside generateLoopTask's performIteration closure, reducing tokenLoop's nesting from 4 levels to 2. Verified the extraction preserves the stopTokenFedToCache capture logic added by this task's earlier work, and all three handler dispositions (.more/.stop/.cancelled) map identically to the original inline code.
+
+    Verified green:
+    - `swift build`: clean, 0 errors/warnings.
+    - `swift test` (full, unfiltered): 265+0+80+258+7 = 610 tests, 0 failures -- baseline held.
+    - `xcodebuild ... -only-testing:IntegrationTestingTests/PromptCacheHybridReuseTests`: PASSED (real Qwen3.6 hybrid model).
+    - `xcodebuild ... -only-testing:IntegrationTestingTests/PromptCacheReuseTests`: PASSED (pure-attention regression).
+    - `mcp__sah__diagnostics check working`: 0 errors, 0 warnings.
+
+    Adversarial double-check agent dispatched to verify behavior-preservation of the tokenLoop extraction and completeness of the rename; awaiting its verdict before finalizing. Task left in `doing` per /implement contract -- not moved to review/done by this session.
+  timestamp: 2026-07-20T12:31:09.653899+00:00
+- actor: claude-code
+  id: 01kxzscdnkaf8547ekvc8p75wz
+  text: |-
+    Adversarial double-check verdict: PASS, no findings.
+
+    Verified independently: diff touches only Evaluate.swift (plus kanban bookkeeping); doc comments on ArgMaxSampler.sample/TopPSampler.sample/TokenIterator.next()/SpeculativeTokenIterator.next() are accurate and non-generic; the tokenIds->tokenIDs/promptTokenIds->promptTokenIDs rename is complete and self-consistent (init param, both @available(renamed:) alias strings, computed-property bodies, the one construction call site) with no leftover references anywhere in the repo; and the tokenLoop extraction was re-derived statement-by-statement and confirmed behavior-preserving in every case, including the subtle "onStopToken's .more case still falls through to terminate the loop" quirk and the stopTokenFedToCache capture on the includeStopToken==false path.
+
+    really-done gate satisfied: swift build clean, swift test 610/610 green, both xcodebuild integration tests (PromptCacheHybridReuseTests real-model + PromptCacheReuseTests pure-attention) PASSED, diagnostics clean, adversarial double-check PASS. Task left in `doing` for /review.
+  timestamp: 2026-07-20T12:52:58.675917+00:00
 depends_on:
 - 01KXX2JDFWQ79CXZE1P1FJMY9F
 position_column: doing
