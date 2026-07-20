@@ -18,6 +18,36 @@ public protocol Tokenizer: Sendable {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int]
+
+    /// Renders the chat template with explicit control over the template's
+    /// generation-priming region (e.g. ChatML's trailing
+    /// `<|im_start|>assistant\n` header).
+    ///
+    /// This is an optional capability. The default implementation returns
+    /// `nil`, meaning the renderer cannot control the generation prompt;
+    /// callers must treat `nil` as "no stable boundary computable" and skip
+    /// any behavior that depends on it.
+    ///
+    /// Passing `addGenerationPrompt: false` renders the messages as past
+    /// turns — the exact form they re-render as once later turns are appended
+    /// — which lets callers compute the prefix of a prompt that stays stable
+    /// across rounds.
+    ///
+    /// - Parameters:
+    ///   - messages: array of message dictionaries representing the conversation
+    ///   - tools: optional array of tool specifications available to the model
+    ///   - additionalContext: optional extra template variables
+    ///   - addGenerationPrompt: whether to append the generation-priming region
+    /// - Returns: token ids for the rendered conversation, or `nil` when the
+    ///   tokenizer does not support controlling the generation prompt
+    /// - Throws: `TokenizerError.missingChatTemplate` if no chat template is
+    ///   configured
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?,
+        addGenerationPrompt: Bool
+    ) throws -> [Int]?
 }
 
 extension Tokenizer {
@@ -50,6 +80,18 @@ extension Tokenizer {
         tools: [[String: any Sendable]]?
     ) throws -> [Int] {
         try applyChatTemplate(messages: messages, tools: tools, additionalContext: nil)
+    }
+
+    /// Default implementation of the optional generation-prompt-controlled
+    /// render: this tokenizer cannot control the generation prompt, so it
+    /// opts out by returning `nil` and callers skip the dependent behavior.
+    public func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?,
+        addGenerationPrompt: Bool
+    ) throws -> [Int]? {
+        nil
     }
 }
 

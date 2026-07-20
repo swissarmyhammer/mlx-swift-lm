@@ -139,3 +139,101 @@ final class LanguageModelMacroTests: XCTestCase {
             macros: testMacros)
     }
 }
+
+final class TokenizerAdaptorMacroTests: XCTestCase {
+    let testMacros: [String: Macro.Type] = [
+        "adaptHuggingFaceTokenizer": TokenizerAdaptorMacro.self
+    ]
+
+    /// The generated bridge must implement the optional
+    /// `applyChatTemplate(messages:tools:additionalContext:addGenerationPrompt:)`
+    /// capability by delegating to swift-transformers' full protocol requirement
+    /// (verified against the pinned 1.3.3 checkout), forwarding
+    /// `addGenerationPrompt` so callers can render past turns without the
+    /// template's generation-priming region.
+    func testBridgeExpansion() {
+        assertMacroExpansion(
+            "let tokenizer = #adaptHuggingFaceTokenizer(t)",
+            expandedSource: """
+                let tokenizer = // make sure you:
+                //
+                // import Tokenizers
+                //
+                { (huggingFaceTokenizer: Tokenizers.Tokenizer) -> MLXLMCommon.Tokenizer in
+                    struct TokenizerBridge: MLXLMCommon.Tokenizer {
+                        private let upstream: any Tokenizers.Tokenizer
+
+                        init(_ upstream: any Tokenizers.Tokenizer) {
+                            self.upstream = upstream
+                        }
+
+                        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+                            upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
+                        }
+
+                        // swift-transformers uses `decode(tokens:)` instead of `decode(tokenIds:)`.
+                        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+                            upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
+                        }
+
+                        func convertTokenToId(_ token: String) -> Int? {
+                            upstream.convertTokenToId(token)
+                        }
+
+                        func convertIdToToken(_ id: Int) -> String? {
+                            upstream.convertIdToToken(id)
+                        }
+
+                        var bosToken: String? {
+                            upstream.bosToken
+                        }
+                        var eosToken: String? {
+                            upstream.eosToken
+                        }
+                        var unknownToken: String? {
+                            upstream.unknownToken
+                        }
+
+                        func applyChatTemplate(
+                            messages: [[String: any Sendable]],
+                            tools: [[String: any Sendable]]?,
+                            additionalContext: [String: any Sendable]?
+                        ) throws -> [Int] {
+                            do {
+                                return try upstream.applyChatTemplate(
+                                    messages: messages, tools: tools, additionalContext: additionalContext)
+                            } catch Tokenizers.TokenizerError.missingChatTemplate {
+                                throw MLXLMCommon.TokenizerError.missingChatTemplate
+                            }
+                        }
+
+                        // Renders with explicit control over the generation prompt by
+                        // delegating to swift-transformers' full applyChatTemplate
+                        // protocol requirement.
+                        func applyChatTemplate(
+                            messages: [[String: any Sendable]],
+                            tools: [[String: any Sendable]]?,
+                            additionalContext: [String: any Sendable]?,
+                            addGenerationPrompt: Bool
+                        ) throws -> [Int]? {
+                            do {
+                                return try upstream.applyChatTemplate(
+                                    messages: messages,
+                                    chatTemplate: nil,
+                                    addGenerationPrompt: addGenerationPrompt,
+                                    truncation: false,
+                                    maxLength: nil,
+                                    tools: tools,
+                                    additionalContext: additionalContext)
+                            } catch Tokenizers.TokenizerError.missingChatTemplate {
+                                throw MLXLMCommon.TokenizerError.missingChatTemplate
+                            }
+                        }
+                    }
+
+                    return TokenizerBridge(huggingFaceTokenizer)
+                }(t)
+                """,
+            macros: testMacros)
+    }
+}

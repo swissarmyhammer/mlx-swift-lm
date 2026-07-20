@@ -121,6 +121,29 @@ public struct TokenizerAdaptorMacro: ExpressionMacro {
                             throw MLXLMCommon.TokenizerError.missingChatTemplate
                         }
                     }
+
+                    // Renders with explicit control over the generation prompt by
+                    // delegating to swift-transformers' full applyChatTemplate
+                    // protocol requirement.
+                    func applyChatTemplate(
+                        messages: [[String: any Sendable]],
+                        tools: [[String: any Sendable]]?,
+                        additionalContext: [String: any Sendable]?,
+                        addGenerationPrompt: Bool
+                    ) throws -> [Int]? {
+                        do {
+                            return try upstream.applyChatTemplate(
+                                messages: messages,
+                                chatTemplate: nil,
+                                addGenerationPrompt: addGenerationPrompt,
+                                truncation: false,
+                                maxLength: nil,
+                                tools: tools,
+                                additionalContext: additionalContext)
+                        } catch Tokenizers.TokenizerError.missingChatTemplate {
+                            throw MLXLMCommon.TokenizerError.missingChatTemplate
+                        }
+                    }
                 }
 
                 return TokenizerBridge(huggingFaceTokenizer)
