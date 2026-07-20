@@ -1855,6 +1855,12 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
             var promptTime: TimeInterval = 0
             var tokenCount = 0
             var stopReason: GenerateStopReason?
+            // The terminal stop token whose forward pass already advanced the
+            // cache but which is discarded (not emitted) below when
+            // `includeStopToken == false`. Surfaced in the final `.info` so a
+            // prompt-cache consumer can reconcile the resulting one-token
+            // offset gap -- see `GenerateCompletionInfo.stopTokenFedToCache`.
+            var stopTokenFedToCache: Int?
 
             let stopTokenIds = buildStopTokenIds(
                 modelConfiguration: modelConfiguration,
@@ -1892,6 +1898,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                             break tokenLoop
                         }
                     } else {
+                        stopTokenFedToCache = token
                         iterator.discardGeneratedToken()
                     }
                     stopReason = .stop
@@ -1933,6 +1940,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 promptTime: promptTime + iterator.promptPrefillTime,
                 generationTime: generateTime,
                 stopReason: stopReason ?? .cancelled,
+                stopTokenFedToCache: stopTokenFedToCache,
                 proposedDraftTokens: mtpStats?.proposedDraftTokens,
                 acceptedDraftTokens: mtpStats?.acceptedDraftTokens,
                 passthroughReason: mtpStats?.passthroughReason,
@@ -2006,6 +2014,26 @@ public struct GenerateCompletionInfo: Sendable {
     /// Reason generation stopped.
     public let stopReason: GenerateStopReason
 
+    /// The terminal EOS/stop token that was fed through the model this
+    /// round -- advancing the KV cache's `offset` by one -- but was NOT
+    /// emitted to the token/text stream and is NOT counted in
+    /// ``generationTokenCount``.
+    ///
+    /// `TokenIterator`'s `next()`-ahead prefetch (see `generateLoopTask`)
+    /// already runs a stop token's forward pass before the loop's own
+    /// stop-check sees it; when `includeStopToken` is `false` (the default),
+    /// that token is discarded rather than yielded, so the cache's real
+    /// advance ends up exactly one token ahead of the observed output. This
+    /// carries that token's identity so a consumer keying a prompt cache on
+    /// the full generated sequence (e.g. `MLXFoundationModels`'
+    /// `Executor.commitPromptCache`) can reconcile the one-token gap against
+    /// the cache's true physical state instead of guessing or dropping.
+    ///
+    /// `nil` when generation ended some other way (token budget, cancellation,
+    /// or `includeStopToken == true`, where the stop token IS yielded and
+    /// therefore already counted).
+    public let stopTokenFedToCache: Int?
+
     /// Total tokens proposed by the MTP drafter across all speculation rounds
     /// in this stream, or nil for non-MTP iterators. Sourced from the
     /// iterator's ``MTPStatsCollecting`` conformance when present.
@@ -2042,6 +2070,7 @@ public struct GenerateCompletionInfo: Sendable {
         promptTime: TimeInterval,
         generationTime: TimeInterval,
         stopReason: GenerateStopReason = .stop,
+        stopTokenFedToCache: Int? = nil,
         proposedDraftTokens: Int? = nil,
         acceptedDraftTokens: Int? = nil,
         passthroughReason: String? = nil,
@@ -2052,6 +2081,7 @@ public struct GenerateCompletionInfo: Sendable {
         self.promptTime = promptTime
         self.generateTime = generationTime
         self.stopReason = stopReason
+        self.stopTokenFedToCache = stopTokenFedToCache
         self.proposedDraftTokens = proposedDraftTokens
         self.acceptedDraftTokens = acceptedDraftTokens
         self.passthroughReason = passthroughReason

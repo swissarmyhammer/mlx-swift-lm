@@ -55,7 +55,8 @@ struct EmitStopSignalTests {
         try await container.perform { context in
             let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: TestFixtures.defaultModelID,
-                tokenizer: context.tokenizer
+                tokenizer: context.tokenizer,
+                configuration: context.configuration
             )
             let constraint = try GrammarConstraint(
                 tokenizer: xgTokenizer,

@@ -516,6 +516,77 @@ actor PromptCache {
         }
     }
 
+    /// What `Executor.commitPromptCache` should do with a completed round,
+    /// given its ``reconcileCacheAdvance`` outcome, whether the round's
+    /// `[KVCache]` can be trimmed (``canTrimPromptCache(_:)``), and the
+    /// identity of any fed-but-uncounted terminal stop token
+    /// (``MLXLMCommon/GenerateCompletionInfo/stopTokenFedToCache``).
+    enum CacheStorePlan: Equatable {
+        /// Store keyed on `promptTokens + generatedTokenIDs`; the cache's
+        /// offset already matches that length exactly.
+        case store
+        /// The cache's offset is one token ahead of the observed IDs and
+        /// the cache CAN be trimmed: trim it back by one, then store keyed
+        /// on `promptTokens + generatedTokenIDs`.
+        case trimThenStore
+        /// The cache's offset is one token ahead of the observed IDs and
+        /// the cache CANNOT be trimmed (a hybrid Mamba/attention stack,
+        /// whose recurrent Mamba state has no per-position history to undo
+        /// -- see ``canTrimPromptCache(_:)``), but the identity of that
+        /// extra fed token IS known: store keyed on the FULL true sequence
+        /// `promptTokens + generatedTokenIDs + [fedStopToken]`, which
+        /// matches the cache's real physical offset exactly (so
+        /// ``snapshotHybridCheckpoint(tokens:cache:)``'s `offset ==
+        /// tokens.count` invariant holds) rather than dropping the round.
+        ///
+        /// Sound AND reusable: the extra fed token is the round's terminal
+        /// stop token, which for a chat model is the same turn-terminator
+        /// (`<|im_end|>` for Qwen) the chat template re-emits after the
+        /// assistant reply in the next round, so the stored sequence is a
+        /// genuine prefix of that next round's render
+        /// (``resolveHybridCheckpoint(modelID:newTokens:)`` matches it
+        /// element-by-element). If it is NOT a genuine prefix, resolve
+        /// simply finds no match next round -- the same outcome as dropping
+        /// -- never mismatched KV state.
+        case storeExtended(fedStopToken: Int)
+        /// The round can't be reconciled with the cache's real state
+        /// soundly; drop the entry so the next round rebuilds.
+        case drop
+    }
+
+    /// Decides the sound storage action for a completed generation round.
+    /// Pure (no I/O, no actor state); unit-tested directly.
+    ///
+    /// - Parameters:
+    ///   - reconciliation: The ``reconcileCacheAdvance`` outcome for this round.
+    ///   - cacheIsTrimmable: Whether the round's cache can be trimmed
+    ///     (``canTrimPromptCache(_:)``).
+    ///   - fedStopToken: The terminal stop token fed through the model
+    ///     (advancing the cache) but excluded from the observed IDs, when
+    ///     known (``MLXLMCommon/GenerateCompletionInfo/stopTokenFedToCache``);
+    ///     `nil` when no such token was fed or its identity is unknown.
+    /// - Returns: The action the caller should take.
+    nonisolated static func planCacheStore(
+        reconciliation: CacheAdvanceReconciliation,
+        cacheIsTrimmable: Bool,
+        fedStopToken: Int?
+    ) -> CacheStorePlan {
+        switch reconciliation {
+        case .matches:
+            return .store
+        case .trimCacheByOne:
+            if cacheIsTrimmable {
+                return .trimThenStore
+            }
+            if let fedStopToken {
+                return .storeExtended(fedStopToken: fedStopToken)
+            }
+            return .drop
+        case .untrustworthy:
+            return .drop
+        }
+    }
+
     /// Slices this round's `(tokens, cache)` into fixed-size chunks
     /// (``PromptCache/sliceChunks(tokens:cache:chunkSize:)``) and checks
     /// them into `modelID`'s shared chunk store (``insert(modelID:chunks:)``),

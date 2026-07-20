@@ -160,7 +160,8 @@ struct HardReserveStressTests {
         let raw: String = try await container.perform { context in
             let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: modelID,
-                tokenizer: context.tokenizer
+                tokenizer: context.tokenizer,
+                configuration: context.configuration
             )
             let constraint = try GrammarConstraint(
                 tokenizer: xgTokenizer,

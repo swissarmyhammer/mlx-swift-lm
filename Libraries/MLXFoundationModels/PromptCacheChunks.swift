@@ -441,16 +441,23 @@ extension PromptCache {
     /// ``isHybridMambaAttention(_:)``'s own definition) and always advances
     /// normally.
     ///
-    /// KNOWN, ACCEPTABLE DEGRADATION: an EOS-terminated round that needs a
-    /// 1-token trim before storing (`Executor.trimCacheIfValid`) will fail
-    /// to store for a hybrid stack too, exactly like any other
-    /// non-trimmable cache shape today (e.g. `RotatingKVCache`) -- not a
-    /// new gap this mechanism introduces. `canTrimPromptCache(_:)` requires
-    /// EVERY layer's `isTrimmable`, and `MambaCache`/`ArraysCache.isTrimmable`
-    /// is `false` (the inherited `BaseKVCache` default, never overridden),
-    /// so a hybrid round needing that trim is simply not stored -- the next
-    /// round falls back to a full reprocess from wherever the last valid
-    /// checkpoint left off, same as any dropped round.
+    /// EOS-TERMINATED ROUNDS: `TokenIterator`'s prefetch feeds a round's
+    /// terminal stop token through the model (advancing this offset by one)
+    /// before discarding it un-emitted, so on a natural stop the offset lands
+    /// exactly one token ahead of the observed generated IDs. A pure-attention
+    /// stack trims that one-token overhang and stores the observed sequence;
+    /// a hybrid stack CAN'T trim (`MambaCache`/`ArraysCache.isTrimmable` is
+    /// `false`, and ``canTrimPromptCache(_:)`` requires every layer to be
+    /// trimmable), but rather than dropping the round it now stores the
+    /// EXTENDED sequence including that fed stop token -- which matches this
+    /// offset exactly (so ``snapshotHybridCheckpoint(tokens:cache:)``'s
+    /// `offset == tokens.count` invariant holds) and is a genuine prefix of
+    /// the next round's render, since the stop token is the same chat-template
+    /// turn-terminator (`<|im_end|>` for Qwen) re-emitted after the assistant
+    /// reply. See `Executor.commitPromptCache` and `PromptCache.planCacheStore`
+    /// for how the fed stop token's identity is recovered and applied. (A
+    /// genuinely non-trimmable, non-hybrid shape with no recoverable fed token
+    /// -- e.g. a `RotatingKVCache` round -- is still dropped, same as before.)
     ///
     /// - Parameter cache: The cache stack this round generated with.
     /// - Returns: The offset to treat as ground truth, or `nil` when `cache`

@@ -345,8 +345,8 @@ comments:
 
     Task left in `doing` per /implement's contract — not moved to review.
   timestamp: 2026-07-19T13:31:45.027972+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: c280
 title: 'PromptCache never engages for hybrid Mamba/attention models (Qwen3.6/Qwen3-Next): cachedTokenCount stays 0'
 ---
 ## What

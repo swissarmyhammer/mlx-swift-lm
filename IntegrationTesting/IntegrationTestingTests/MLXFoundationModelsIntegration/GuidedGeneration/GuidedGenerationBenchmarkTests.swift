@@ -326,7 +326,8 @@ struct GuidedGenerationBenchmarkTests {
             try await container.perform { context in
                 let xg = try await MLXLanguageModel.makeXgTokenizer(
                     modelID: modelID,
-                    tokenizer: context.tokenizer
+                    tokenizer: context.tokenizer,
+                    configuration: context.configuration
                 )
                 return (xg, context.tokenizer)
             }
@@ -449,7 +450,8 @@ struct GuidedGenerationBenchmarkTests {
         try await container.perform { context in
             let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: modelID,
-                tokenizer: context.tokenizer
+                tokenizer: context.tokenizer,
+                configuration: context.configuration
             )
             let constraint = try GrammarConstraint(
                 tokenizer: xgTokenizer,

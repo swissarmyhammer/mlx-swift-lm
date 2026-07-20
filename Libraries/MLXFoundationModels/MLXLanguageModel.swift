@@ -2808,7 +2808,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///     `.token(Int)`/`onTokenCommitted` stream), never a
         ///     re-encoding of decoded text.
         private static func commitPromptCache(
-            modelID: String, slot: PromptCacheSlot, generatedTokenIDs: [Int]
+            modelID: String, slot: PromptCacheSlot, generatedTokenIDs: [Int],
+            stopTokenFedToCache: Int? = nil
         ) async {
             guard let cache = slot.cache else { return }
             guard !generatedTokenIDs.isEmpty else { return }
@@ -2822,36 +2823,49 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // `FalconH1.swift`'s hybrid attention/recurrent layer, which
             // DOES advance its cache's `offset` -- a per-model-family fact,
             // not a blanket guarantee of `MambaCache`/`ArraysCache` itself).
-            // See `cacheAdvanceOffset`'s doc comment for the full reasoning
-            // and the EOS-trim degradation this mechanism accepts.
+            // See `cacheAdvanceOffset`'s doc comment for the full reasoning.
             guard let referenceOffset = PromptCache.cacheAdvanceOffset(cache) else {
                 await MLXLanguageModel.removePromptCache(modelID: modelID)
                 return
             }
             let cacheAdvance = referenceOffset - slot.promptTokens.count
-            let shouldStore: Bool
-            switch PromptCache.reconcileCacheAdvance(
+            let reconciliation = PromptCache.reconcileCacheAdvance(
                 observedTokenCount: generatedTokenIDs.count, cacheAdvance: cacheAdvance)
+            // The token sequence to key the stored entry on. Attention stacks
+            // trim the cache's one-token EOS overhang and store the observed
+            // sequence; hybrid Mamba/attention stacks can't trim, so when the
+            // extra fed token's identity is known they store the EXTENDED
+            // sequence (which matches the cache's real offset exactly) instead
+            // of dropping the round. See `PromptCache.planCacheStore`.
+            let tokensToStore: [Int]
+            switch PromptCache.planCacheStore(
+                reconciliation: reconciliation,
+                cacheIsTrimmable: canTrimPromptCache(cache),
+                fedStopToken: stopTokenFedToCache)
             {
-            case .matches:
-                shouldStore = true
-            case .trimCacheByOne:
-                shouldStore = trimCacheIfValid(
-                    cache, slot: slot, cacheAdvance: cacheAdvance,
-                    generatedTokenCount: generatedTokenIDs.count)
-            case .untrustworthy:
-                shouldStore = false
-            }
-            // Both surviving cases (`.matches`, and `.trimCacheByOne` once
-            // `trimCacheIfValid` succeeds) persist the same entry;
-            // `.untrustworthy` and a failed trim drop it instead. One shared
-            // store call keeps that single behavior in one place.
-            guard shouldStore else {
+            case .store:
+                tokensToStore = slot.promptTokens + generatedTokenIDs
+            case .trimThenStore:
+                // `canTrimPromptCache` being true doesn't guarantee the trim
+                // lands where expected (e.g. a `RotatingKVCache` shortfall), so
+                // `trimCacheIfValid` re-verifies and we drop on failure.
+                guard
+                    trimCacheIfValid(
+                        cache, slot: slot, cacheAdvance: cacheAdvance,
+                        generatedTokenCount: generatedTokenIDs.count)
+                else {
+                    await MLXLanguageModel.removePromptCache(modelID: modelID)
+                    return
+                }
+                tokensToStore = slot.promptTokens + generatedTokenIDs
+            case .storeExtended(let fedStopToken):
+                tokensToStore = slot.promptTokens + generatedTokenIDs + [fedStopToken]
+            case .drop:
                 await MLXLanguageModel.removePromptCache(modelID: modelID)
                 return
             }
             await MLXLanguageModel.storePromptCache(
-                modelID: modelID, tokens: slot.promptTokens + generatedTokenIDs, cache: cache)
+                modelID: modelID, tokens: tokensToStore, cache: cache)
         }
 
         /// Variant of `commitPromptCache` for `runUnconstrained`'s
@@ -2904,7 +2918,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - emittedText: The full decoded text this round generated.
         ///   - tokenizer: Used to re-encode `emittedText` for the fidelity check.
         private static func commitPromptCache(
-            modelID: String, slot: PromptCacheSlot, emittedText: String, tokenizer: any Tokenizer
+            modelID: String, slot: PromptCacheSlot, emittedText: String, tokenizer: any Tokenizer,
+            stopTokenFedToCache: Int? = nil
         ) async {
             guard let cache = slot.cache else { return }
             // See the `generatedTokenIDs` overload's identical guard for
@@ -2924,7 +2939,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 await MLXLanguageModel.removePromptCache(modelID: modelID)
                 return
             }
-            await commitPromptCache(modelID: modelID, slot: slot, generatedTokenIDs: trustedTokens)
+            await commitPromptCache(
+                modelID: modelID, slot: slot, generatedTokenIDs: trustedTokens,
+                stopTokenFedToCache: stopTokenFedToCache)
         }
 
         /// Runs think-then-call Phase 1: unconstrained reasoning until
@@ -3686,6 +3703,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private static func handleGenerationEvent(
             _ generation: Generation,
             emittedText: inout String,
+            stopTokenFedToCache: inout Int?,
             entryID: String,
             slot: PromptCacheSlot,
             channel: LanguageModelExecutorGenerationChannel
@@ -3695,6 +3713,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 emittedText += text
                 await Self.sendDelta(text, entryID: entryID, channel: channel, isReasoning: false)
             case .info(let info):
+                // Carry the terminal stop token that was fed through the model
+                // (advancing the cache) but not decoded into `emittedText`, so
+                // `commitPromptCache` can reconcile the one-token offset gap on
+                // a hybrid cache instead of dropping the round. See
+                // `GenerateCompletionInfo.stopTokenFedToCache`.
+                stopTokenFedToCache = info.stopTokenFedToCache
                 // MLX-LM emits one .info event at end-of-generation with
                 // an authoritative scalar output count
                 // (`generationTokenCount` -- see Evaluate.swift's
@@ -3749,6 +3773,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             let slot = await makePromptCacheSlot(input: input, context: context, parameters: params)
             var emittedText = ""
+            var stopTokenFedToCache: Int?
 
             for await generation in try generate(
                 input: slot.feedInput,
@@ -3758,12 +3783,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             ) {
                 try Task.checkCancellation()
                 await Self.handleGenerationEvent(
-                    generation, emittedText: &emittedText, entryID: entryID, slot: slot,
+                    generation, emittedText: &emittedText,
+                    stopTokenFedToCache: &stopTokenFedToCache, entryID: entryID, slot: slot,
                     channel: channel)
             }
 
             await Self.commitPromptCache(
-                modelID: modelID, slot: slot, emittedText: emittedText, tokenizer: context.tokenizer)
+                modelID: modelID, slot: slot, emittedText: emittedText,
+                tokenizer: context.tokenizer, stopTokenFedToCache: stopTokenFedToCache)
         }
 
         /// Dispatches the no-tools/no-schema path: reasoning routing when a
@@ -3987,7 +4014,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
 
             await Self.commitPromptCache(
-                modelID: modelID, slot: slot, generatedTokenIDs: generatedTokenIDs)
+                modelID: modelID, slot: slot, generatedTokenIDs: generatedTokenIDs,
+                stopTokenFedToCache: completionInfo?.stopTokenFedToCache)
         }
 
         /// Routes each of `segments` to the appropriate channel entry, in order.
@@ -4145,9 +4173,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let (stream, task) = try generateTokensTask(
                 input: slot.feedInput, cache: slot.cache, parameters: params, context: context)
             let closed: Bool
+            var stopTokenFedToCache: Int?
             do {
                 closed = try await collectReasoningTokens(
                     stream: stream, collector: &collector,
+                    stopTokenFedToCache: &stopTokenFedToCache,
                     responseEntryID: responseEntryID, reasoningEntryID: reasoningEntryID,
                     channel: channel)
             } catch {
@@ -4168,7 +4198,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 reasoningEntryID: reasoningEntryID, channel: channel)
 
             await Self.commitPromptCache(
-                modelID: modelID, slot: slot, generatedTokenIDs: collector.reasoningTokenIDs)
+                modelID: modelID, slot: slot, generatedTokenIDs: collector.reasoningTokenIDs,
+                stopTokenFedToCache: stopTokenFedToCache)
 
             return (collector.reasoningTokenIDs, closed)
         }
@@ -4190,12 +4221,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private func collectReasoningTokens(
             stream: AsyncStream<TokenGeneration>,
             collector: inout ReasoningTokenCollector,
+            stopTokenFedToCache: inout Int?,
             responseEntryID: String,
             reasoningEntryID: String,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> Bool {
             for await generation in stream {
                 try Task.checkCancellation()
+                if case .info(let info) = generation {
+                    // The terminal stop token fed into the cache but not
+                    // emitted, so `commitPromptCache` can key a hybrid
+                    // checkpoint on the full true sequence rather than dropping
+                    // it. See `GenerateCompletionInfo.stopTokenFedToCache`.
+                    stopTokenFedToCache = info.stopTokenFedToCache
+                    continue
+                }
                 guard case .token(let token) = generation else { continue }
                 await Self.sendSegments(
                     collector.ingest(token), responseEntryID: responseEntryID,

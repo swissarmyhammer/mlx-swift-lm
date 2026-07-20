@@ -222,6 +222,62 @@ struct PromptCacheAdvanceReconciliationTests {
     }
 }
 
+/// Tests for `PromptCache.planCacheStore`: the store-action decision a round
+/// takes after `reconcileCacheAdvance`, given the cache's trimmability and the
+/// identity of any fed-but-uncounted terminal stop token. This is the seam that
+/// fixes hybrid Mamba/attention checkpoints being dropped on EOS-terminated
+/// rounds (kanban `b3zpf2q`): a `.trimCacheByOne` gap on a non-trimmable cache
+/// whose extra fed token is known must now store the EXTENDED sequence, not drop.
+@Suite("PromptCache store-plan selection")
+struct PromptCacheStorePlanTests {
+
+    @Test("a matching advance stores the observed sequence as-is, regardless of trimmability")
+    func matchesStores() {
+        #expect(
+            PromptCache.planCacheStore(
+                reconciliation: .matches, cacheIsTrimmable: true, fedStopToken: nil) == .store)
+        #expect(
+            PromptCache.planCacheStore(
+                reconciliation: .matches, cacheIsTrimmable: false, fedStopToken: 7) == .store)
+    }
+
+    @Test("a one-ahead advance on a trimmable cache trims then stores (pure-attention path)")
+    func trimmableTrimsThenStores() {
+        #expect(
+            PromptCache.planCacheStore(
+                reconciliation: .trimCacheByOne, cacheIsTrimmable: true, fedStopToken: 7)
+                == .trimThenStore)
+    }
+
+    @Test(
+        "a one-ahead advance on a NON-trimmable cache with a known fed token stores the EXTENDED sequence"
+    )
+    func nonTrimmableKnownTokenStoresExtended() {
+        #expect(
+            PromptCache.planCacheStore(
+                reconciliation: .trimCacheByOne, cacheIsTrimmable: false, fedStopToken: 42)
+                == .storeExtended(fedStopToken: 42))
+    }
+
+    @Test("a one-ahead advance on a non-trimmable cache with NO known fed token drops (can't guess)")
+    func nonTrimmableUnknownTokenDrops() {
+        #expect(
+            PromptCache.planCacheStore(
+                reconciliation: .trimCacheByOne, cacheIsTrimmable: false, fedStopToken: nil)
+                == .drop)
+    }
+
+    @Test("an untrustworthy advance always drops, whatever the trimmability or fed token")
+    func untrustworthyDrops() {
+        #expect(
+            PromptCache.planCacheStore(
+                reconciliation: .untrustworthy, cacheIsTrimmable: false, fedStopToken: 7) == .drop)
+        #expect(
+            PromptCache.planCacheStore(
+                reconciliation: .untrustworthy, cacheIsTrimmable: true, fedStopToken: nil) == .drop)
+    }
+}
+
 /// Tests for `PromptCache.trimAndVerify`'s trim-then-confirm-offset verification logic.
 @Suite("PromptCache trim-and-verify")
 struct PromptCacheTrimAndVerifyTests {

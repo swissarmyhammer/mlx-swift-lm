@@ -432,6 +432,14 @@ enum TestFixtures {
     /// but do need a model known to exercise the full guided-generation and
     /// tool-calling paths.
     static let defaultModelID = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+
+    /// A real hybrid Mamba/attention model (`model_type: qwen3_5` ->
+    /// `Qwen35Model`, per `Libraries/MLXLLM/LLMModelFactory.swift`), for tests
+    /// that need genuine hybrid-checkpoint behavior end-to-end -- unlike
+    /// `defaultModelID`, which is pure attention. Must already be present in
+    /// the local HuggingFace cache (`models--mlx-community--Qwen3.6-27B-mxfp4`);
+    /// this repo does not download it on demand for tests.
+    static let qwen36HybridModelID = "mlx-community/Qwen3.6-27B-mxfp4"
 }
 
 // MARK: - Test Tokenizers

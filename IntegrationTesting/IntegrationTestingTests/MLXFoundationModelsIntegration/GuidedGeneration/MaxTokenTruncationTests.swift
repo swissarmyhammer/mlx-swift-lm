@@ -45,7 +45,8 @@ struct MaxTokenTruncationTests {
 
             let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: TestFixtures.defaultModelID,
-                tokenizer: context.tokenizer
+                tokenizer: context.tokenizer,
+                configuration: context.configuration
             )
 
             let constraint = try GrammarConstraint(
@@ -130,7 +131,8 @@ struct MaxTokenTruncationTests {
         try await container.perform { context in
             let xgTokenizer = try await MLXLanguageModel.makeXgTokenizer(
                 modelID: TestFixtures.defaultModelID,
-                tokenizer: context.tokenizer
+                tokenizer: context.tokenizer,
+                configuration: context.configuration
             )
 
             // Array of strings schema -- needs at least an opening bracket,
