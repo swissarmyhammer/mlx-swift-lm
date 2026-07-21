@@ -140,6 +140,67 @@ final class LanguageModelMacroTests: XCTestCase {
     }
 }
 
+final class DownloaderMacroTests: XCTestCase {
+    let testMacros: [String: Macro.Type] = [
+        "hubDownloader": DownloaderMacro.self
+    ]
+
+    /// The generated bridge must keep `download` flat: repo-ID validation
+    /// lives in the `requireRepoID` helper (which owns the guard-throw) so
+    /// the wrapper itself is a straight-line delegation with the revision
+    /// default applied inline.
+    func testBridgeExpansion() {
+        assertMacroExpansion(
+            "let downloader = #hubDownloader()",
+            expandedSource: """
+                let downloader = // make sure you:
+                //
+                // import HuggingFace
+                //
+                { (hubApi: HuggingFace.HubClient) -> MLXLMCommon.Downloader in
+                    struct HubBridge: MLXLMCommon.Downloader {
+                        private let upstream: HuggingFace.HubClient
+
+                        init(_ upstream: HuggingFace.HubClient) {
+                            self.upstream = upstream
+                        }
+
+                        // Validates that the raw identifier names a well-formed Hugging Face
+                        // repository, throwing `invalidRepositoryID` otherwise. Owns the
+                        // guard-throw so `download` stays a flat delegation.
+                        private func requireRepoID(_ id: String) throws -> HuggingFace.Repo.ID {
+                            guard let repoID = HuggingFace.Repo.ID(rawValue: id) else {
+                                throw HuggingFaceDownloaderError.invalidRepositoryID(id)
+                            }
+                            return repoID
+                        }
+
+                        public func download(
+                            id: String,
+                            revision: String?,
+                            matching patterns: [String],
+                            useLatest: Bool,
+                            progressHandler: @Sendable @escaping (Foundation.Progress) -> Void
+                        ) async throws -> URL {
+                            let repoID = try requireRepoID(id)
+                            return try await upstream.downloadSnapshot(
+                                of: repoID,
+                                revision: revision ?? "main",
+                                matching: patterns,
+                                progressHandler: { @MainActor progress in
+                                    progressHandler(progress)
+                                }
+                            )
+                        }
+                    }
+
+                    return HubBridge(hubApi)
+                }(HubClient())
+                """,
+            macros: testMacros)
+    }
+}
+
 final class TokenizerAdaptorMacroTests: XCTestCase {
     let testMacros: [String: Macro.Type] = [
         "adaptHuggingFaceTokenizer": TokenizerAdaptorMacro.self

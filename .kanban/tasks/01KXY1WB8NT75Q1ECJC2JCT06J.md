@@ -136,6 +136,21 @@ comments:
 
     Verification: `swift test --filter MLXHuggingFaceMacrosTests` 12/12; full `swift test` exit 0, ZERO failures — XCTest 197+12 = 209, swift-testing 273+80+258+7 = 618, total 827 (matches the 827 baseline). Only pre-existing warnings in untouched files. Not committed per instructions; tree still carries concurrent WIP in MLXFoundationModels/PromptCache — stage selectively. Adversarial double-check in flight; task stays in doing.
   timestamp: 2026-07-21T19:21:34.882973+00:00
+- actor: claude-code
+  id: 01ky33qqy231rb49w60865jmx7
+  text: |-
+    /implement iteration 5: worked the single unchecked item in Review Findings (2026-07-21 14:25) — box flipped to [x]. Task pulled review→doing.
+
+    Fix (TDD, RED observed before the macro change): the emitted HubBridge (DownloaderMacro.expansion) gains a documented `private func requireRepoID(_ id: String) throws -> HuggingFace.Repo.ID` owning the guard-throw (same `HuggingFaceDownloaderError.invalidRepositoryID(id)` error), mirroring iteration 4's `mappingMissingChatTemplate` treatment of TokenizerBridge. `download` is now flat: `let repoID = try requireRepoID(id)` + a single `downloadSnapshot` call with the revision default inlined (`revision: revision ?? "main"` — same default handling, the shadowing local is gone). Also dropped pre-existing trailing whitespace on the two rewritten brace lines.
+
+    Whole-file sweep for the guard+`??` pattern class in emitted code: zero recurrences — the only other emitted guard (LanguageModelMacro's weightsLocation closure) is a fallback-return guard with no throw and no `??`, a different class; the macro-side `??` defaults (progressHandlerArgument, DownloaderMacro's HubClient() argument default) have no guard.
+
+    Tests: NEW DownloaderMacroTests.testBridgeExpansion in Tests/MLXHuggingFaceMacrosTests/LanguageModelMacroTests.swift pins the full emitted HubBridge text (previously pinned nowhere). RED showed the old guard-inline emission; GREEN on first run after the macro edit. MLXHuggingFaceMacrosTests now 13 tests.
+
+    BOUNDARY (hard constraints respected): no Id→ID renames (decode(tokenIds:), convertTokenToId, convertIdToToken untouched); concurrent session's untracked WIP (.kanban actor/tag/task files, .reviewignore, .sah/sah.yaml) untouched — working diff is exactly the macro file + test file + this task's own .kanban records.
+
+    Verification: full `swift test` exit 0, ZERO failures — swift-testing 273+80+258+7 = 618, XCTest bundles all 0-failure (197 + 13 macros + assorted) = 828 total (827 baseline + 1 new pin). Only "warning" in the log is SwiftPM's pre-existing "missing creator for mutated node" build-system noise. Adversarial double-check in flight; not committed per instructions; task stays in doing.
+  timestamp: 2026-07-21T19:51:38.690033+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Tokenizer: expose addGenerationPrompt:false chat-template render (prereq for stable-boundary hybrid checkpoints)'
@@ -293,3 +308,9 @@ public func applyChatTemplate(
 > ⚠️ 2/14 review tasks failed — results are INCOMPLETE.
 
 - [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:199` — Function 'expansion' in TokenizerAdaptorMacro has deep nesting with multiple nested closures, struct definitions, and two overloaded methods with identical error-handling logic. Extract TokenizerBridge struct to top-level, deduplicate the two applyChatTemplate implementations using a shared helper, and flatten the guard statement.
+
+## Review Findings (2026-07-21 14:25)
+
+> ⚠️ 4/14 review tasks failed — results are INCOMPLETE.
+
+- [ ] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:104` — The `download` method inside the `HubBridge` struct (emitted by `DownloaderMacro.expansion`) has a `guard let` with an `else` throw (line 105) followed by a `??` default (line 108), adding branching complexity to an otherwise straightforward wrapper function. Extract the repo-ID validation into a separate helper or use a `try?` pattern to simplify the guard-throw chain. Consider validating the ID earlier or using a failable initializer with a cleaner error path.

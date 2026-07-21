@@ -95,27 +95,33 @@ public struct DownloaderMacro: ExpressionMacro {
                         self.upstream = upstream
                     }
 
+                    // Validates that the raw identifier names a well-formed Hugging Face
+                    // repository, throwing `invalidRepositoryID` otherwise. Owns the
+                    // guard-throw so `download` stays a flat delegation.
+                    private func requireRepoID(_ id: String) throws -> HuggingFace.Repo.ID {
+                        guard let repoID = HuggingFace.Repo.ID(rawValue: id) else {
+                            throw HuggingFaceDownloaderError.invalidRepositoryID(id)
+                        }
+                        return repoID
+                    }
+
                     public func download(
                         id: String,
                         revision: String?,
                         matching patterns: [String],
                         useLatest: Bool,
                         progressHandler: @Sendable @escaping (Foundation.Progress) -> Void
-                    ) async throws -> URL {                        
-                        guard let repoID = HuggingFace.Repo.ID(rawValue: id) else {
-                            throw HuggingFaceDownloaderError.invalidRepositoryID(id)
-                        }
-                        let revision = revision ?? "main"
-
+                    ) async throws -> URL {
+                        let repoID = try requireRepoID(id)
                         return try await upstream.downloadSnapshot(
                             of: repoID,
-                            revision: revision,
+                            revision: revision ?? "main",
                             matching: patterns,
                             progressHandler: { @MainActor progress in
                                 progressHandler(progress)
                             }
                         )
-                    }                    
+                    }
                 }
 
                 return HubBridge(hubApi)
