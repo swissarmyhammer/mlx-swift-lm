@@ -137,7 +137,7 @@ struct GoldenReplayTests {
             let tokenizer = try GrammarTokenizer(
                 vocab: vocab.vocab,
                 vocabType: vocab.vocabType,
-                eosTokenID: Int32(context.tokenizer.eosTokenID ?? 0)
+                eosTokenID: Int32(context.tokenizer.eosTokenId ?? 0)
             )
             let constraint = try GrammarConstraint(
                 tokenizer: tokenizer,

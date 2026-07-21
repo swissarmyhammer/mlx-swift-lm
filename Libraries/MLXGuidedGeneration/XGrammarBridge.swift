@@ -735,7 +735,7 @@ public final class GrammarConstraint: @unchecked Sendable {
         // merge-able one and belongs to the sampler.
         var safeCount = 0
         for i in 1 ... encoded.count {
-            let prefixDecoded = hostTokenizer.decode(tokenIDs: Array(encoded[0 ..< i]))
+            let prefixDecoded = hostTokenizer.decode(tokenIds: Array(encoded[0 ..< i]))
             if prefixDecoded.utf8.count < fastForwardByteLength {
                 safeCount = i
             } else {

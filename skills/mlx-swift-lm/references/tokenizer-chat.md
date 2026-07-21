@@ -86,11 +86,11 @@ let tokens = try tokenizer.applyChatTemplate(
 ```swift
 // EOS token
 tokenizer.eosToken        // String, e.g., "</s>"
-tokenizer.eosTokenID      // Int?, e.g., 2
+tokenizer.eosTokenId      // Int?, e.g., 2
 
 // Unknown token
 tokenizer.unknownToken    // String
-tokenizer.unknownTokenID  // Int?
+tokenizer.unknownTokenId  // Int?
 
 // Convert between tokens and IDs
 let id = tokenizer.convertTokenToId("</s>")  // Int?
@@ -104,7 +104,7 @@ EOS tokens come from multiple sources, merged at load time:
 1. **generation_config.json** - `eos_token_id` (primary, overrides others)
 2. **config.json** - `eos_token_id`
 3. **ModelConfiguration** - `extraEOSTokens` (additional tokens)
-4. **Tokenizer** - `eosTokenID`
+4. **Tokenizer** - `eosTokenId`
 
 ```swift
 // Extra EOS tokens in configuration (as strings)
@@ -122,7 +122,7 @@ config.eosTokenIds  // Set<Int>, loaded from generation_config.json
 ```swift
 // In generation loop
 var eosTokenIds = context.configuration.eosTokenIds
-if let tokenizerEos = tokenizer.eosTokenID {
+if let tokenizerEos = tokenizer.eosTokenId {
     eosTokenIds.insert(tokenizerEos)
 }
 for token in context.configuration.extraEOSTokens {

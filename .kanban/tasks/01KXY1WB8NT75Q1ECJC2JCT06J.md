@@ -100,6 +100,27 @@ comments:
 
     Fresh verification after the comment fixes: `swift build --build-tests` 0 errors; IntegrationTesting xcodebuild build-for-testing TEST BUILD SUCCEEDED; full `swift test` exit 0, zero failures (swift-testing 273+80+258+7 = 618 passed; all XCTest bundles 0 failures). Task left in `doing`, nothing committed.
   timestamp: 2026-07-20T16:22:58.450734+00:00
+- actor: claude-code
+  id: 01ky0dr23atq0rwy13h8c3hexd
+  text: |-
+    /finish loop PARKED at the review gate — tooling failure, not a code problem. State: iteration 3 checkpoint `41b8e1f` committed (36 files, tokenID casing sweep + macro dedup), full suite green 827/827 (verified twice), all 78 prior findings fixed and checked. The task needs ONE clean review verdict to move to done.
+
+    Three consecutive review-engine failures on this delta (2026-07-20):
+    1. Session-backend run via reviewer agent: 1800s of silence, internal timeout, killed by user.
+    2. Retry with batch_size 32768: worker fleet grew to 111 `claude --verbose --print` processes, each ~21min elapsed / 3-4s CPU (spawned then stalled), engine logging `Retry` loops. Killed.
+    3. Retry with `backend: "local"`: parameter IGNORED — engine spawned claude-CLI workers again (verified by ppid → this session's `sah serve`), same stall signature. Killed.
+
+    Also observed: 44 `sah serve` daemons running on the machine (daemon leak independent of the worker leak). Earlier reviews of 2- and 7-file deltas completed fine (~17-20 min); the failure correlates with the 36-file batch and/or accumulated daemon state.
+
+    Next agent: re-run `/review 2jct06j HEAD~1..HEAD` once the sah review engine is healthy (likely after killing the leaked `sah serve` daemons / restarting the MCP server). Do NOT move this task to done without that verdict.
+  timestamp: 2026-07-20T18:48:51.562959+00:00
+- actor: claude-code
+  id: 01ky0qckkca9jg92efg0t3x44q
+  text: |-
+    /finish loop PARKED on user instruction — do not re-run review until the user gives the go signal (sah review MCP progress-notifications replacement is being coded in another session; until it lands, Claude Code's 1800s idle timeout kills every silent review run).
+
+    Resume state: all 78 findings fixed and checked; checkpoint `41b8e1f` is the delta needing the verdict — run `review sha 4877962..41b8e1f` (NOT HEAD~1..HEAD; kanban commits landed on top). Model for the local engine is fully cached (unsloth/Qwen3.6-35B-A3B-MTP-GGUF blob finalized + snapshot). Clean verdict → task to done, then ^er33v06 → ^05zt40g continue the #qwen batch.
+  timestamp: 2026-07-20T21:37:22.028876+00:00
 position_column: review
 position_ordinal: '80'
 title: 'Tokenizer: expose addGenerationPrompt:false chat-template render (prereq for stable-boundary hybrid checkpoints)'

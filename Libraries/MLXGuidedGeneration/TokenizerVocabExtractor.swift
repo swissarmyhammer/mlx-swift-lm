@@ -40,7 +40,7 @@ public enum TokenizerVocabExtractor {
     /// - Replaces `\u{2581}` with ASCII space (0x20)
     /// - Decodes `<0xNN>` byte-fallback tokens to their literal byte value
     static func extract(from tokenizer: any Tokenizer) -> VocabData {
-        let eosToken = UInt32(tokenizer.eosTokenID ?? 0)
+        let eosToken = UInt32(tokenizer.eosTokenId ?? 0)
 
         // Discover vocab size by scanning token IDs
         var vocabSize = 0

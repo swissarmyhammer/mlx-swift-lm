@@ -194,7 +194,7 @@ struct MultiModelGuidedGenerationTests {
 
             let closingBias = ClosingTokenBias.compute(
                 tokenizer: context.tokenizer,
-                eosTokenID: context.tokenizer.eosTokenID
+                eosTokenID: context.tokenizer.eosTokenId
             )
             let (whitespaceBias, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
                 tokenizer: context.tokenizer
@@ -321,7 +321,7 @@ struct MultiModelGuidedGenerationTests {
 
             let closingBias = ClosingTokenBias.compute(
                 tokenizer: context.tokenizer,
-                eosTokenID: context.tokenizer.eosTokenID
+                eosTokenID: context.tokenizer.eosTokenId
             )
             let (whitespaceBias, whitespaceTokenIDs) = WhitespaceTokenBias.compute(
                 tokenizer: context.tokenizer

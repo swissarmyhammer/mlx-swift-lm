@@ -113,42 +113,42 @@ extension Tokenizer {
     /// Convenience for ``decode(tokenIds:skipSpecialTokens:)`` with
     /// `skipSpecialTokens: false`.
     ///
-    /// - Parameter tokenIDs: the token IDs to decode
+    /// - Parameter tokenIds: the token IDs to decode
     /// - Returns: the decoded text
-    public func decode(tokenIDs: [Int]) -> String {
-        decode(tokenIds: tokenIDs, skipSpecialTokens: false)
+    public func decode(tokenIds: [Int]) -> String {
+        decode(tokenIds: tokenIds, skipSpecialTokens: false)
     }
 
     /// Looks up the ID of an optional special token via ``convertTokenToId(_:)``.
     ///
-    /// Shared implementation behind ``bosTokenID``, ``eosTokenID`` and
-    /// ``unknownTokenID``.
+    /// Shared implementation behind ``bosTokenId``, ``eosTokenId`` and
+    /// ``unknownTokenId``.
     ///
     /// - Parameter token: the token text, or `nil` when the tokenizer does not
     ///   define the token
     /// - Returns: the token's ID, or `nil` when the token is undefined or not
     ///   in the vocabulary
-    private func tokenID(of token: String?) -> Int? {
+    private func tokenId(of token: String?) -> Int? {
         guard let token else { return nil }
         return convertTokenToId(token)
     }
 
     /// The ID of ``bosToken``, or `nil` when the token is undefined or not in
     /// the vocabulary.
-    public var bosTokenID: Int? {
-        tokenID(of: bosToken)
+    public var bosTokenId: Int? {
+        tokenId(of: bosToken)
     }
 
     /// The ID of ``eosToken``, or `nil` when the token is undefined or not in
     /// the vocabulary.
-    public var eosTokenID: Int? {
-        tokenID(of: eosToken)
+    public var eosTokenId: Int? {
+        tokenId(of: eosToken)
     }
 
     /// The ID of ``unknownToken``, or `nil` when the token is undefined or not
     /// in the vocabulary.
-    public var unknownTokenID: Int? {
-        tokenID(of: unknownToken)
+    public var unknownTokenId: Int? {
+        tokenId(of: unknownToken)
     }
 
     /// Renders the chat template over the conversation, priming the model for
@@ -302,7 +302,7 @@ public struct NaiveStreamingDetokenizer: StreamingDetokenizer {
         segmentTokens.removeAll()
         if let lastToken {
             segmentTokens.append(lastToken)
-            segment = tokenizer.decode(tokenIDs: segmentTokens)
+            segment = tokenizer.decode(tokenIds: segmentTokens)
         } else {
             segment = ""
         }
@@ -313,7 +313,7 @@ public struct NaiveStreamingDetokenizer: StreamingDetokenizer {
     /// - Returns: the new text, or `nil` when the appended tokens do not yet
     ///   decode to a complete unicode character
     public mutating func next() -> String? {
-        let newSegment = tokenizer.decode(tokenIDs: segmentTokens)
+        let newSegment = tokenizer.decode(tokenIds: segmentTokens)
         let new = newSegment.suffix(newSegment.count - segment.count)
 
         // if the new segment ends with REPLACEMENT CHARACTER this means

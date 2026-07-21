@@ -39,7 +39,7 @@ struct ReasoningFamilyVerificationTests {
                     additionalContext: additionalContext)
             )
             let tokens = input.text.tokens.asArray(Int.self)
-            let tail = context.tokenizer.decode(tokenIDs: Array(tokens.suffix(48)))
+            let tail = context.tokenizer.decode(tokenIds: Array(tokens.suffix(48)))
             print("REASONING-DUMP [\(label)] tail=<<<\(tail)>>>")
             return tail
         }

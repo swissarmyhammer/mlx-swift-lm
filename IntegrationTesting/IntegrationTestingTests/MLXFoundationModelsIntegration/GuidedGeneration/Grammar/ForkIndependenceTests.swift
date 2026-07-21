@@ -43,7 +43,7 @@ struct ForkIndependenceTests {
             let tokenizer = try GrammarTokenizer(
                 vocab: vocab.vocab,
                 vocabType: vocab.vocabType,
-                eosTokenID: Int32(context.tokenizer.eosTokenID ?? 0)
+                eosTokenID: Int32(context.tokenizer.eosTokenId ?? 0)
             )
             let parent = try GrammarConstraint(
                 tokenizer: tokenizer,

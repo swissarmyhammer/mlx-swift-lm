@@ -14,7 +14,7 @@ import MLXLMCommon
 /// model-free supply-path check lives in the package target
 /// (`StopTokenRegressionTests`).
 ///
-/// The stop set must union `tokenizer.eosTokenID`,
+/// The stop set must union `tokenizer.eosTokenId`,
 /// `configuration.extraEOSTokens`, AND `configuration.eosTokenIds` — the
 /// field populated from `generation_config.json`'s `eos_token_id` at
 /// model-load time. Chat models like Gemma 3 ship
@@ -25,7 +25,7 @@ import MLXLMCommon
 @Suite(.serialized)
 struct StopTokenRegressionIntegrationTests {
 
-    /// Gemma 3 270M's tokenizer resolves `eosTokenID` to `<eos>` (id 1), but
+    /// Gemma 3 270M's tokenizer resolves `eosTokenId` to `<eos>` (id 1), but
     /// the chat turn ender is `<end_of_turn>` (id 106). Only
     /// `configuration.eosTokenIds` (from `generation_config.json`) surfaces
     /// 106. The stop set must include both, or generation never terminates
@@ -53,7 +53,7 @@ struct StopTokenRegressionIntegrationTests {
         }
     }
 
-    /// Qwen 2.5 3B's tokenizer resolves `eosTokenID` directly to
+    /// Qwen 2.5 3B's tokenizer resolves `eosTokenId` directly to
     /// `<|im_end|>` (id 151645). This asserts that source lands in
     /// the stop set.
     @Test("Qwen 2.5 3B: stop set includes <|im_end|>")

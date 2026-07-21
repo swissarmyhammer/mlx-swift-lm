@@ -4,11 +4,11 @@ import Foundation
 import MLXLMCommon
 import Testing
 
-/// Tests for the token-ID convenience properties (`bosTokenID`, `eosTokenID`,
-/// `unknownTokenID`) provided by the `Tokenizer` protocol extension: each must
+/// Tests for the token-id convenience properties (`bosTokenId`, `eosTokenId`,
+/// `unknownTokenId`) provided by the `Tokenizer` protocol extension: each must
 /// resolve its token string through `convertTokenToId` and return `nil` when
 /// the tokenizer does not define the token.
-@Suite struct TokenizerTokenIDTests {
+@Suite struct TokenizerTokenIdTests {
 
     /// A conformer with a fixed vocabulary so the convenience properties can
     /// resolve token strings to ids.
@@ -52,19 +52,19 @@ import Testing
         ) throws -> [Int] { [] }
     }
 
-    @Test func tokenIDsResolveThroughVocabulary() {
+    @Test func tokenIdsResolveThroughVocabulary() {
         let tokenizer: any Tokenizer = VocabTokenizer()
 
-        #expect(tokenizer.bosTokenID == 1)
-        #expect(tokenizer.eosTokenID == 2)
-        #expect(tokenizer.unknownTokenID == 0)
+        #expect(tokenizer.bosTokenId == 1)
+        #expect(tokenizer.eosTokenId == 2)
+        #expect(tokenizer.unknownTokenId == 0)
     }
 
-    @Test func tokenIDsAreNilWhenTokensUndefined() {
+    @Test func tokenIdsAreNilWhenTokensUndefined() {
         let tokenizer: any Tokenizer = TokenlessTokenizer()
 
-        #expect(tokenizer.bosTokenID == nil)
-        #expect(tokenizer.eosTokenID == nil)
-        #expect(tokenizer.unknownTokenID == nil)
+        #expect(tokenizer.bosTokenId == nil)
+        #expect(tokenizer.eosTokenId == nil)
+        #expect(tokenizer.unknownTokenId == nil)
     }
 }

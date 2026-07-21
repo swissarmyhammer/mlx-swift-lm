@@ -211,7 +211,7 @@ public final class ModelContainer: Sendable {
     /// - Returns: Decoded string
     public func decode(tokenIds: [Int]) async -> String {
         let tokenizer = await self.tokenizer
-        return tokenizer.decode(tokenIDs: tokenIds)
+        return tokenizer.decode(tokenIds: tokenIds)
     }
 
     @available(*, deprecated, renamed: "decode(tokenIds:)")

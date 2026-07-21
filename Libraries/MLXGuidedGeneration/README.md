@@ -69,7 +69,7 @@ let output = try await container.perform { context in
     let grammarTokenizer = try GrammarTokenizer(
         vocab: grammarVocab.vocab,
         vocabType: grammarVocab.vocabType,
-        eosTokenID: Int32(tokenizer.eosTokenID ?? 0))
+        eosTokenID: Int32(tokenizer.eosTokenId ?? 0))
 
     // 3. Compile a JSON Schema into a constraint.
     let schema = #"{"type":"object","properties":{"name":{"type":"string"},"knownFor":{"type":"string"}}}"#

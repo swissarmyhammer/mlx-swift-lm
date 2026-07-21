@@ -5,7 +5,7 @@
 // set `GuidedGenerationLoop.buildStopTokenIDs` stops generation on.
 // GLM-4.7-Flash's `config.json` declares `eos_token_id: [154820, 154827,
 // 154829]` (`<|endoftext|>`, `<|user|>`, `<|observation|>`); with only
-// `tokenizer.eosTokenID` registered, the unregistered ids stayed
+// `tokenizer.eosTokenId` registered, the unregistered ids stayed
 // ordinary vocab entries the grammar was free to admit as string
 // content, and live constrained decode sampled one mid-`response`,
 // truncating the envelope.
