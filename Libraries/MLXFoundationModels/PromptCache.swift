@@ -539,15 +539,21 @@ actor PromptCache {
         /// ``snapshotHybridCheckpoint(tokens:cache:)``'s `offset ==
         /// tokens.count` invariant holds) rather than dropping the round.
         ///
-        /// Sound AND reusable: the extra fed token is the round's terminal
-        /// stop token, which for a chat model is the same turn-terminator
-        /// (`<|im_end|>` for Qwen) the chat template re-emits after the
-        /// assistant reply in the next round, so the stored sequence is a
-        /// genuine prefix of that next round's render
-        /// (``resolveHybridCheckpoint(modelID:newTokens:)`` matches it
-        /// element-by-element). If it is NOT a genuine prefix, resolve
-        /// simply finds no match next round -- the same outcome as dropping
-        /// -- never mismatched KV state.
+        /// Always SOUND, reusable only for some templates: the stored
+        /// sequence exactly matches the cache's real state, and
+        /// ``resolveHybridCheckpoint(modelID:newTokens:)`` verifies any
+        /// reuse element-by-element -- if the sequence is not a genuine
+        /// prefix of a later render, resolve simply finds no match (the
+        /// same outcome as dropping), never mismatched KV state. Whether it
+        /// CAN match is template-dependent: verified on real Qwen3.6
+        /// weights (kanban er33v06), templates that inject
+        /// generation-priming tokens after the final assistant header
+        /// (thinking suppression) bake those tokens into the middle of the
+        /// stored sequence, making it a non-prefix of every later render --
+        /// for those families, cross-round reuse comes from the
+        /// transcript-stable-boundary checkpoint
+        /// `Executor.makePromptCacheSlot` snapshots pre-generation instead,
+        /// and this extended store is simply inert.
         case storeExtended(fedStopToken: Int)
         /// The round can't be reconciled with the cache's real state
         /// soundly; drop the entry so the next round rebuilds.

@@ -26,10 +26,22 @@ comments:
 
     Reading: 248045/248046 = turn start/end, 846 = "user", 74455 = "assistant", 198 = "\n". The 8 generated tokens [8160...16] reappear verbatim in round 2. Only divergence: [248068, 198] after the FINAL assistant header — the generation-priming/thinking-suppression injection, present mid-sequence in the stored round-1 tokens but absent from round 2's re-render of that turn (and re-appended at round 2's own tail). Store path is healthy; reconcile was `.matches` both rounds (EOS-trim theory disproven for this shape).
   timestamp: 2026-07-19T20:44:14.370196+00:00
+- actor: claude-code
+  id: 01ky36w6mnteazrvezvyh5ty48
+  text: 'Picked up. Research done: (a) Tokenizer capability from ^2jct06j confirmed present (Libraries/MLXLMCommon/Tokenizer.swift, default-nil + macro bridge); (b) makePromptCacheSlot''s 4 call sites mapped (runGuidedGenerationLoop, runUnconstrained, runReasoning, runToolCallReasoningPhase) — none currently receive messages, so a small private StableBoundaryRender {messages, tools} will be threaded from dispatchGeneration/runToolCalling; (c) chunked-prefill convention confirmed (LLMModel.prepare: 512-step windows, asyncEval per chunk, eval at end, withPreparedCache) — will mirror it in an internal static Executor.prefillPromptCache test seam rather than routing through generate(maxTokens:0), so unit tests can drive it without a ModelContext; (d) PromptCache.store''s hybrid branch self-verifies offset==tokens.count via snapshotHybridCheckpoint, so the pre-generation store needs no extra verification; (e) message-dict conversion will use DefaultMessageGenerator — the model''s own generator (LLMModel.messageGenerator) is unreachable from MLXFoundationModels (no MLXLLM dep), and a mismatch only shortens the common prefix (less reuse), never corrupts. Plan: TDD commonPrefixLength + transcriptStableLength + split-prefill checkpoint-at-boundary logits test in PromptCacheHybridArchitectureTests, then wire makePromptCacheSlot (becomes throwing for cancellation propagation), then revise integration bound + stale storeExtended/cacheAdvanceOffset comments.'
+  timestamp: 2026-07-21T20:46:30.549176+00:00
+- actor: claude-code
+  id: 01ky37wmvvj6zb9w96bsfxgn5n
+  text: 'Implementation landed, all four card steps done. TDD trail: RED (stubs: commonPrefixLength=0, transcriptStableLength=nil, prefillPromptCache no-op → 5 targeted assertion failures incl. round-2 full-refeed in the new split-prefill logits tests) → GREEN (26/26 in PromptCacheHybridArchitectureTests). Key implementation decisions beyond the card''s letter: (1) makePromptCacheSlot is now `throws` — prefill cancellation propagates as CancellationError instead of needing partial-cache repair logic (nothing is stored before the prefill completes, and the resolved cache is round-private, so no partial state can persist); (2) PromptCacheSlot gained `splitPrefillTokenCount` so cachedTokenCount = matchedLen, i.e. only genuinely cache-served tokens — the split-prefilled span is re-fed this round and must not be reported as cached (this is also what makes the revised integration bound meaningful: round 2 reported 17-ish reused tokens, not stableLen₂); (3) chunked forward pass implemented as internal static Executor.prefillPromptCache mirroring LLMModel.prepare (512 windows, asyncEval per chunk, eval at end, withPreparedCache) rather than generate(maxTokens:0), so unit tests drive it without a ModelContext; (4) message-dict conversion uses DefaultMessageGenerator (model''s own generator unreachable from MLXFoundationModels; mismatch only shortens the common prefix, never mis-positions the checkpoint). Test results: full `swift test` exit 0, zero failures/warnings (628 swift-testing tests + XCTest targets); xcodebuild PromptCacheHybridReuseTests vs REAL mlx-community/Qwen3.6-27B-mxfp4 PASSED with the new bound (fresh compile of MLXFoundationModels confirmed in the build log — not a stale binary); xcodebuild PromptCacheReuseTests (Qwen2.5 pure attention) PASSED. Stale EOS-trim reusability claims corrected in cacheAdvanceOffset + CacheStorePlan.storeExtended docs and the integration test rewritten around the stable-boundary mechanism. DISCOVERY (out of scope, not fixed): prewarm''s populatePromptCacheChunks renders WITH the generation prompt, so for hybrid models it stores a checkpoint equal to the first respond() round''s full prompt — resolveHybridCheckpoint requires candidate < newTokens, so prewarm→first-round hybrid reuse is structurally zero; a follow-up could apply the same stable-boundary render there.'
+  timestamp: 2026-07-21T21:04:13.691904+00:00
+- actor: claude-code
+  id: 01ky38eqvsp8brpfxrmn4re8ha
+  text: 'really-done complete. Adversarial double-check verdict: REVISE with ONE low-severity latent finding — slotAdoptingResultCache rebuilt the slot without carrying splitPrefillTokenCount (benign today: finalSlot only feeds commitPromptCache and the usage tuple reads the original slot, but a future reader of finalSlot.cachedTokenCount would over-report). FIXED: the copy now carries splitPrefillTokenCount through. No dedicated unit test for that one-line field-carry — the helper and struct are private with no observable behavior difference today; it is covered transitively by the full suite (justification logged per really-done contract). Double-check also confirmed independently: mid-round snapshot soundness (ownedCopy both ways), cancellation safety (resolve''s hybrid arm returns a private restored copy; nothing partial persists), edge cases (stableLen 0 / == count / <= matchedLen all skip cleanly with untouched cache), path preservation (multimodal, rotating/maxKVSize, pure attention, prewarm), and re-ran the 26 hybrid unit tests itself. One informational note accepted as-is: guided-path baseline renders raw messages while guidedInput may someday carry schema-in-prompt rendering — today guidedGenerationMessages returns messages unchanged, so no divergence exists; if adapter-side schema-in-prompt rendering ever lands, its boundary render should use the guided messages (degradation until then would only shorten the prefix, never corrupt). Post-fix fresh verification: full swift test exit 0 (628 swift-testing tests, zero failures); xcodebuild PromptCacheHybridReuseTests vs real Qwen3.6-27B-mxfp4 PASSED again; PromptCacheReuseTests passed earlier this session on the same library code paths (fix touches only the guided/tool finalSlot copy, not the pure-attention path). Task left in doing, ready for /review. Not committed per instructions.'
+  timestamp: 2026-07-21T21:14:06.585807+00:00
 depends_on:
 - 01KXY1WB8NT75Q1ECJC2JCT06J
-position_column: todo
-position_ordinal: '9180'
+position_column: doing
+position_ordinal: '80'
 title: 'PromptCache: hybrid checkpoints must snapshot at the transcript-stable boundary (fixes Qwen3.6 cachedTokenCount == 0)'
 ---
 ## What
@@ -55,18 +67,18 @@ Diagnostic technique if re-instrumentation is needed: temporary `pcdbg()` file-l
 
 ## Acceptance Criteria
 
-- [ ] `PromptCacheHybridReuseTests` passes against real `mlx-community/Qwen3.6-27B-mxfp4` with the revised stable-prefix bound (round 2 `cachedTokenCount >= first.promptTokenCount - 8` and `> 0`)
-- [ ] New unit test: split-prefill checkpoint at a stable boundary + continuation with a divergent generation-region suffix → checkpoint matched, suffix-only feed, logits match full forward pass within 1e-3
-- [ ] Pure-attention path untouched: `PromptCacheReuseTests` (Qwen2.5) and the full `swift test` suite stay green
-- [ ] Stale/disproven EOS-trim explanations corrected in code comments where they claim to explain the Qwen3.6 zero-reuse behavior
-- [ ] No temporary instrumentation left in the committed diff
+- [x] `PromptCacheHybridReuseTests` passes against real `mlx-community/Qwen3.6-27B-mxfp4` with the revised stable-prefix bound (round 2 `cachedTokenCount >= first.promptTokenCount - 8` and `> 0`)
+- [x] New unit test: split-prefill checkpoint at a stable boundary + continuation with a divergent generation-region suffix → checkpoint matched, suffix-only feed, logits match full forward pass within 1e-3
+- [x] Pure-attention path untouched: `PromptCacheReuseTests` (Qwen2.5) and the full `swift test` suite stay green
+- [x] Stale/disproven EOS-trim explanations corrected in code comments where they claim to explain the Qwen3.6 zero-reuse behavior
+- [x] No temporary instrumentation left in the committed diff
 
 ## Tests
 
-- [ ] Extend `Tests/MLXFoundationModelsTests/PromptCacheHybridArchitectureTests.swift` (stable-boundary unit tests, tiny models)
-- [ ] Run: `swift test --filter MLXFoundationModelsTests` → green
-- [ ] Run: `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/PromptCacheHybridReuseTests` → passes
-- [ ] Run: `... -only-testing:IntegrationTestingTests/PromptCacheReuseTests` → still passes
+- [x] Extend `Tests/MLXFoundationModelsTests/PromptCacheHybridArchitectureTests.swift` (stable-boundary unit tests, tiny models)
+- [x] Run: `swift test --filter MLXFoundationModelsTests` → green
+- [x] Run: `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/PromptCacheHybridReuseTests` → passes
+- [x] Run: `... -only-testing:IntegrationTestingTests/PromptCacheReuseTests` → still passes
 
 ## Workflow
 

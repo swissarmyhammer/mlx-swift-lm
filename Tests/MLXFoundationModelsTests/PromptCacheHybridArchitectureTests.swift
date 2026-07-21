@@ -611,6 +611,232 @@ struct PromptCacheHybridArchitectureTests {
             seed: 1004, modelFactory: { try self.makeHybridQwen3NextModel() },
             tokenFormula: { ($0 * 3 + 2) % 32 }, modelIDPrefix: "qwen3next-hybrid-chain")
     }
+
+    // MARK: - Transcript-stable boundary (kanban er33v06)
+
+    @Test("commonPrefixLength counts the shared leading run, and nothing else")
+    func commonPrefixLengthBasics() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        #expect(MLXLanguageModel.Executor.commonPrefixLength([1, 2, 3], [1, 2, 3]) == 3)
+        #expect(MLXLanguageModel.Executor.commonPrefixLength([1, 2, 3, 4], [1, 2, 9, 4]) == 2)
+        #expect(MLXLanguageModel.Executor.commonPrefixLength([1, 2], [1, 2, 3, 4]) == 2)
+        #expect(MLXLanguageModel.Executor.commonPrefixLength([1, 2, 3, 4], [1, 2]) == 2)
+        #expect(MLXLanguageModel.Executor.commonPrefixLength([], [1, 2]) == 0)
+        #expect(MLXLanguageModel.Executor.commonPrefixLength([9, 1], [1, 9]) == 0)
+    }
+
+    @Test("transcriptStableLength is the prompt's common prefix with the past-turns render")
+    func transcriptStableLengthUsesPastTurnsRender() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let tokenizer = StableBoundaryProbeTokenizer()
+        let messages: [[String: any Sendable]] = [
+            ["role": "user", "content": "ab"]
+        ]
+        // The live prompt renders WITH the generation-priming region; the
+        // base render (addGenerationPrompt: false) stops at the
+        // transcript-stable boundary, so the stable length is exactly the
+        // base render's full length.
+        let promptTokens = try #require(
+            try tokenizer.applyChatTemplate(messages: messages, addGenerationPrompt: true))
+        let baseTokens = try #require(
+            try tokenizer.applyChatTemplate(messages: messages, addGenerationPrompt: false))
+        #expect(promptTokens.count > baseTokens.count, "sanity: priming region must add tokens")
+
+        let stableLength = MLXLanguageModel.Executor.transcriptStableLength(
+            promptTokens: promptTokens, messages: messages, tools: nil, tokenizer: tokenizer)
+        #expect(stableLength == baseTokens.count)
+    }
+
+    @Test("transcriptStableLength is nil when the tokenizer opts out of generation-prompt control")
+    func transcriptStableLengthNilForOptedOutTokenizer() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let stableLength = MLXLanguageModel.Executor.transcriptStableLength(
+            promptTokens: [1, 2, 3],
+            messages: [["role": "user", "content": "x"]],
+            tools: nil,
+            tokenizer: OptedOutProbeTokenizer())
+        #expect(stableLength == nil)
+    }
+
+    /// Shared body for `qwen35StableBoundaryCheckpointMatchesFullForwardPass`/
+    /// `qwen3NextStableBoundaryCheckpointMatchesFullForwardPass`: proves the
+    /// SPLIT-PREFILL flow `Executor.makePromptCacheSlot` runs for a hybrid
+    /// stack is numerically sound. Round 1's prompt is a stable prefix plus a
+    /// generation-priming suffix that later rounds re-render WITHOUT (the
+    /// Qwen3.6 template shape from kanban er33v06). The round prefills up to
+    /// the stable boundary via `prefillPromptCache`, snapshots a checkpoint
+    /// THERE (pre-generation), then keeps feeding the same live cache through
+    /// the priming region and stores the usual post-round checkpoint too.
+    /// Round 2 diverges from round 1's fed sequence exactly at the boundary:
+    /// the post-round checkpoint must miss, the stable-boundary checkpoint
+    /// must win, and feeding only the continuation through the restored cache
+    /// must reproduce a full fresh forward pass's logits within 1e-3.
+    ///
+    /// - Parameters:
+    ///   - seed: The `MLXRandom` seed for this model's weights.
+    ///   - modelFactory: Builds the real, tiny hybrid model under test.
+    ///   - tokenFormula: Maps a position `0..<14` to a stable-prefix token ID.
+    ///   - modelIDPrefix: A human-readable prefix for this run's unique model ID.
+    private func assertStableBoundaryCheckpointMatchesFullForwardPass(
+        seed: UInt64, modelFactory: () throws -> any MLXLMCommon.LanguageModel,
+        tokenFormula: (Int) -> Int, modelIDPrefix: String
+    ) async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        MLXRandom.seed(seed)
+        let model = try modelFactory()
+        let stableLength = 14
+        let stableTokens = (0 ..< stableLength).map(tokenFormula)
+        // Round 1's fed prompt ends in a generation-priming region ([50, 51])
+        // that round 2's re-render of these turns as history will NOT contain.
+        let round1Prompt = stableTokens + [50, 51]
+        // Round 2 extends the STABLE prefix with different tokens -- it
+        // diverges from round 1's fed sequence exactly at the boundary.
+        let continuation = [40, 41, 42, 43, 44, 45]
+        let round2Tokens = stableTokens + continuation
+
+        let reference = referenceSuffixLogits(
+            model: model, tokens: round2Tokens, suffixStart: stableLength)
+
+        let promptCache = PromptCache()
+        let modelID = "\(modelIDPrefix)-\(UUID().uuidString)"
+
+        // Round 1: nothing stored yet -- fresh cache, feed everything.
+        let round1 = await resolveOnce(
+            cache: promptCache, modelID: modelID, newTokens: round1Prompt, model: model)
+        #expect(round1.tokensToFeed == round1Prompt, "first round: nothing stored yet")
+
+        // Split prefill: advance the cache to the stable boundary and
+        // snapshot a checkpoint THERE, before any priming/generation tokens.
+        try MLXLanguageModel.Executor.prefillPromptCache(
+            tokens: stableTokens, model: model, cache: round1.cache)
+        await promptCache.store(
+            modelID: modelID, tokens: stableTokens, cache: SendableBox(round1.cache))
+        #expect(
+            await promptCache.hybridCheckpointCount(modelID: modelID) == 1,
+            "the pre-generation stable-boundary checkpoint must snapshot cleanly")
+
+        // The SAME live cache then continues through the priming region
+        // (generation's own prefill) -- the stored checkpoint must be
+        // unaffected by this later mutation (owned-copy independence).
+        _ = model.callAsFunction(
+            MLXArray(Array(round1Prompt[stableLength...])).expandedDimensions(axis: 0),
+            cache: round1.cache)
+        // The existing post-round store is KEPT: it snapshots the full fed
+        // sequence, which round 2's divergent re-render can never match.
+        await promptCache.store(
+            modelID: modelID, tokens: round1Prompt, cache: SendableBox(round1.cache))
+        #expect(await promptCache.hybridCheckpointCount(modelID: modelID) == 2)
+
+        // Round 2: the post-round checkpoint diverges at the boundary and
+        // must MISS; the stable-boundary checkpoint must win the
+        // longest-prefix scan, feeding only the continuation.
+        let round2 = await resolveOnce(
+            cache: promptCache, modelID: modelID, newTokens: round2Tokens, model: model)
+        #expect(
+            round2.tokensToFeed == continuation,
+            "the stable-boundary checkpoint must match; the post-round checkpoint cannot")
+
+        let round2Logits = model.callAsFunction(
+            MLXArray(round2.tokensToFeed).expandedDimensions(axis: 0), cache: round2.cache)
+        let diff = maxAbsDiff(round2Logits, reference)
+        #expect(
+            diff <= 1e-3,
+            "stable-boundary checkpoint restore diverged from a full forward pass (diff \(diff))")
+    }
+
+    @Test("a checkpoint snapshotted at the stable boundary mid-round restores and matches (Qwen35TextModel)")
+    func qwen35StableBoundaryCheckpointMatchesFullForwardPass() async throws {
+        try await assertStableBoundaryCheckpointMatchesFullForwardPass(
+            seed: 1005, modelFactory: { try self.makeHybridQwen35Model() },
+            tokenFormula: { ($0 * 7 + 3) % 32 },
+            modelIDPrefix: "qwen35-hybrid-stable-boundary")
+    }
+
+    @Test("a checkpoint snapshotted at the stable boundary mid-round restores and matches (Qwen3NextModel)")
+    func qwen3NextStableBoundaryCheckpointMatchesFullForwardPass() async throws {
+        try await assertStableBoundaryCheckpointMatchesFullForwardPass(
+            seed: 1006, modelFactory: { try self.makeHybridQwen3NextModel() },
+            tokenFormula: { ($0 * 11 + 5) % 32 },
+            modelIDPrefix: "qwen3next-hybrid-stable-boundary")
+    }
+}
+
+/// A minimal tokenizer implementing the OPTIONAL generation-prompt-controlled
+/// render: each message renders as `[90, roleToken, contentBytes..., 91]`,
+/// and `addGenerationPrompt: true` appends the priming region `[90, 7, 99]`
+/// -- so the `addGenerationPrompt: false` render is a strict prefix of the
+/// primed render, mirroring a real ChatML-style template.
+private struct StableBoundaryProbeTokenizer: MLXLMCommon.Tokenizer {
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        text.utf8.map(Int.init)
+    }
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        String(decoding: tokenIds.map(UInt8.init), as: UTF8.self)
+    }
+    func convertTokenToId(_ token: String) -> Int? { nil }
+    func convertIdToToken(_ id: Int) -> String? { nil }
+    var bosToken: String? { nil }
+    var eosToken: String? { nil }
+    var unknownToken: String? { nil }
+
+    private func render(
+        messages: [[String: any Sendable]], addGenerationPrompt: Bool
+    ) -> [Int] {
+        var tokens: [Int] = []
+        for message in messages {
+            let role = message["role"] as? String ?? ""
+            let content = message["content"] as? String ?? ""
+            tokens += [90, role == "user" ? 1 : 2]
+            tokens += encode(text: content, addSpecialTokens: false)
+            tokens += [91]
+        }
+        if addGenerationPrompt {
+            tokens += [90, 7, 99]
+        }
+        return tokens
+    }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] {
+        render(messages: messages, addGenerationPrompt: true)
+    }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?,
+        addGenerationPrompt: Bool
+    ) throws -> [Int]? {
+        render(messages: messages, addGenerationPrompt: addGenerationPrompt)
+    }
+}
+
+/// A tokenizer that keeps the protocol's DEFAULT `nil` implementation of the
+/// generation-prompt-controlled render -- the opt-out shape callers must
+/// treat as "no stable boundary computable".
+private struct OptedOutProbeTokenizer: MLXLMCommon.Tokenizer {
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        text.utf8.map(Int.init)
+    }
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        String(decoding: tokenIds.map(UInt8.init), as: UTF8.self)
+    }
+    func convertTokenToId(_ token: String) -> Int? { nil }
+    func convertIdToToken(_ id: Int) -> String? { nil }
+    var bosToken: String? { nil }
+    var eosToken: String? { nil }
+    var unknownToken: String? { nil }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] {
+        messages.flatMap { encode(text: $0["content"] as? String ?? "", addSpecialTokens: false) }
+    }
 }
 
 #endif

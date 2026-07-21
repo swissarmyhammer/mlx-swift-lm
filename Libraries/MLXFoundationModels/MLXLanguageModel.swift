@@ -2216,7 +2216,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 try Self.validateContextSize(
                     tokenCount: input.text.tokens.size, contextLength: setup.contextLength)
                 try await runGuidedGeneration(
-                    schemaJSON: schemaJSON, input: input, modelID: modelID,
+                    schemaJSON: schemaJSON, input: input, messages: messages, modelID: modelID,
                     requestedMaxTokens: requestedMaxTokens, entryID: entryID,
                     context: context, channel: channel)
                 return true
@@ -2236,6 +2236,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 try await runTextGeneration(
                     reasoningSetup: setup.reasoningSetup,
                     fallbackInput: fallbackInput,
+                    messages: messages,
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: request.generationOptions.temperature,
                     samplingMode: requestedSamplingMode,
@@ -2690,15 +2691,40 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let feedInput: LMInput
             let promptTokens: [Int]
 
+            /// How many of `promptTokens` this round's hybrid SPLIT PREFILL
+            /// re-fed itself, outside `feedInput` (the span between the
+            /// resolved match and the transcript-stable boundary -- see
+            /// `makePromptCacheSlot`). Those tokens were forward-passed
+            /// fresh this round, so they must not be reported as served
+            /// from cache. Zero on every non-split round.
+            var splitPrefillTokenCount = 0
+
             /// How many of `promptTokens` were served from a prior
             /// round's `PromptCache` slot rather than re-fed this round --
-            /// `promptTokens.count` minus the suffix actually fed via
-            /// `feedInput`. Zero when this round didn't participate in
-            /// prompt-cache reuse (multimodal input, first turn, or a
-            /// full rebuild, all of which feed the entire prompt).
+            /// `promptTokens.count` minus every token actually fed this
+            /// round (the `feedInput` suffix plus any split-prefill span).
+            /// Zero when this round didn't participate in prompt-cache
+            /// reuse (multimodal input, first turn, or a full rebuild,
+            /// all of which feed the entire prompt).
             var cachedTokenCount: Int {
-                promptTokens.count - feedInput.text.tokens.size
+                promptTokens.count - feedInput.text.tokens.size - splitPrefillTokenCount
             }
+        }
+
+        /// What `makePromptCacheSlot` needs to re-render this round's
+        /// conversation as PAST turns and compute its transcript-stable
+        /// boundary (see `transcriptStableLength`): the same messages and
+        /// tool specs the round's prompt was rendered from -- but never the
+        /// reasoning-suppression/priming `additionalContext`, which belongs
+        /// to the generation region a past-turns render omits. `nil` at
+        /// `makePromptCacheSlot` means the caller can't supply them, so the
+        /// hybrid split prefill is skipped -- behavior unchanged.
+        private struct StableBoundaryRender {
+            /// The chat messages this round's prompt was rendered from.
+            let messages: [Chat.Message]
+            /// The tool specs rendered into the prompt (the tool-calling
+            /// path); `nil` on the tool-free paths.
+            let tools: [[String: any Sendable]]?
         }
 
         /// The `isTextOnly` gate plus the `PromptCache.resolve` call it
@@ -2734,6 +2760,23 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Resolves a generation call's prompt-cache participation against
         /// `input`. See `PromptCacheSlot`.
         ///
+        /// For a hybrid Mamba/attention cache with a computable
+        /// transcript-stable boundary (see `transcriptStableLength`), SPLITS
+        /// the prefill: forward-passes the span between the resolved match
+        /// and the stable boundary itself, snapshots a hybrid checkpoint AT
+        /// the boundary -- before any generation-region tokens touch the
+        /// cache -- and hands only the remainder to generation. This is what
+        /// makes hybrid checkpoints matchable across rounds at all for
+        /// template families that inject generation-priming tokens after the
+        /// final assistant header (Qwen3.6's thinking suppression): a
+        /// post-round checkpoint bakes those tokens into the middle of its
+        /// sequence, and Mamba state cannot be trimmed backward past them,
+        /// so it can never match a later round's re-render (kanban er33v06).
+        /// The post-round store in `commitPromptCache` is still made too --
+        /// it remains correct, and useful for templates without
+        /// generation-region injection -- and both simply compete in
+        /// `PromptCache.resolveHybridCheckpoint`'s longest-prefix scan.
+        ///
         /// - Parameters:
         ///   - input: The full, unreduced prompt for this round.
         ///   - context: The loaded model context.
@@ -2742,9 +2785,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///     grammar-constrained paths, matching
         ///     `GuidedGenerationLoop.run`'s own `model.newCache(parameters:
         ///     nil)`.
+        ///   - stableBoundary: The messages/tools to compute the
+        ///     transcript-stable boundary from, or `nil` to skip the hybrid
+        ///     split prefill entirely.
+        /// - Throws: `CancellationError` if the task is cancelled during the
+        ///   split prefill's forward pass (before any checkpoint is stored,
+        ///   so nothing partial ever persists).
         private func makePromptCacheSlot(
-            input: LMInput, context: ModelContext, parameters: GenerateParameters?
-        ) async -> PromptCacheSlot {
+            input: LMInput, context: ModelContext, parameters: GenerateParameters?,
+            stableBoundary: StableBoundaryRender?
+        ) async throws -> PromptCacheSlot {
             let promptTokens = input.text.tokens.asArray(Int.self)
             guard
                 let resolved = await resolvePromptCacheIfTextOnly(
@@ -2753,10 +2803,178 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             else {
                 return PromptCacheSlot(cache: nil, feedInput: input, promptTokens: promptTokens)
             }
+            if let stableBoundary, PromptCache.isHybridMambaAttention(resolved.cache),
+                let slot = try await makeSplitPrefillSlot(
+                    promptTokens: promptTokens, resolved: resolved,
+                    stableBoundary: stableBoundary, context: context)
+            {
+                return slot
+            }
             return PromptCacheSlot(
                 cache: resolved.cache,
                 feedInput: LMInput(tokens: MLXArray(resolved.tokensToFeed)),
                 promptTokens: promptTokens)
+        }
+
+        /// The hybrid split-prefill arm of `makePromptCacheSlot` (see that
+        /// method's doc comment for the mechanism and why it exists):
+        /// computes the transcript-stable boundary, forward-passes
+        /// `promptTokens[matchedLength..<stableLength]` through the resolved
+        /// cache (`prefillPromptCache`), snapshots a hybrid checkpoint keyed
+        /// on exactly `promptTokens[0..<stableLength]` (the cache's offset
+        /// equals that length by construction, so `PromptCache.store`'s
+        /// hybrid `offset == tokens.count` verification passes), and returns
+        /// a slot feeding only `promptTokens[stableLength...]` to generation.
+        ///
+        /// Converts `stableBoundary.messages` via `DefaultMessageGenerator`:
+        /// the model's OWN `MessageGenerator` lives behind
+        /// `UserInputProcessor` and isn't reachable from this module, and
+        /// the hybrid families this path serves (Qwen3.6/Qwen3-Next) use the
+        /// default generator anyway. A mismatched generator merely shortens
+        /// the computed common prefix (less reuse, split skipped) -- it can
+        /// never mis-position the checkpoint, because the boundary is a
+        /// common-prefix length against the REAL `promptTokens`, and the
+        /// checkpoint stores exactly the tokens it forward-passed.
+        ///
+        /// - Parameters:
+        ///   - promptTokens: This round's full rendered prompt tokens.
+        ///   - resolved: The `PromptCache.resolve` outcome for this round.
+        ///   - stableBoundary: The messages/tools to render the past-turns
+        ///     baseline from.
+        ///   - context: The loaded model context.
+        /// - Returns: The split slot, or `nil` when no boundary is
+        ///   computable or the split wouldn't help (the resolved match
+        ///   already reaches the boundary, or the boundary covers the whole
+        ///   prompt, leaving nothing to feed generation) -- the cache is
+        ///   untouched in every `nil` case, so the caller's ordinary slot
+        ///   stays valid.
+        /// - Throws: `CancellationError` if the task is cancelled during the
+        ///   prefill forward pass.
+        private func makeSplitPrefillSlot(
+            promptTokens: [Int],
+            resolved: (cache: [KVCache], tokensToFeed: [Int]),
+            stableBoundary: StableBoundaryRender,
+            context: ModelContext
+        ) async throws -> PromptCacheSlot? {
+            let matchedLength = promptTokens.count - resolved.tokensToFeed.count
+            guard
+                let stableLength = Self.transcriptStableLength(
+                    promptTokens: promptTokens,
+                    messages: DefaultMessageGenerator().generate(
+                        messages: stableBoundary.messages),
+                    tools: stableBoundary.tools,
+                    tokenizer: context.tokenizer),
+                matchedLength < stableLength, stableLength < promptTokens.count
+            else { return nil }
+
+            try Self.prefillPromptCache(
+                tokens: Array(promptTokens[matchedLength ..< stableLength]),
+                model: context.model, cache: resolved.cache)
+            await MLXLanguageModel.storePromptCache(
+                modelID: modelID, tokens: Array(promptTokens[0 ..< stableLength]),
+                cache: resolved.cache)
+            return PromptCacheSlot(
+                cache: resolved.cache,
+                feedInput: LMInput(tokens: MLXArray(Array(promptTokens[stableLength...]))),
+                promptTokens: promptTokens,
+                splitPrefillTokenCount: stableLength - matchedLength)
+        }
+
+        /// Length of the longest shared leading run of `lhs` and `rhs`.
+        ///
+        /// - Parameters:
+        ///   - lhs: One token sequence.
+        ///   - rhs: The other token sequence.
+        /// - Returns: How many leading elements the two sequences share.
+        static func commonPrefixLength(_ lhs: [Int], _ rhs: [Int]) -> Int {
+            var length = 0
+            while length < lhs.count, length < rhs.count, lhs[length] == rhs[length] {
+                length += 1
+            }
+            return length
+        }
+
+        /// Computes the transcript-stable boundary of `promptTokens`: the
+        /// length of its longest prefix that later rounds re-render
+        /// identically once this round's turns are history.
+        ///
+        /// Renders the SAME conversation as past turns -- `addGenerationPrompt:
+        /// false`, and deliberately WITHOUT any reasoning-suppression/priming
+        /// `additionalContext` -- because that is exactly the form a future
+        /// round re-renders these turns in. The common prefix of this round's
+        /// live prompt against that baseline is therefore the prefix that is
+        /// guaranteed to reappear verbatim at the start of every later round's
+        /// prompt: everything past it (assistant header, thinking-suppression
+        /// injections, other generation-priming tokens) belongs to the
+        /// template's generation region and is re-rendered differently -- or
+        /// not at all -- once the turn is history (see kanban er33v06's
+        /// token-level trace for Qwen3.6's `[248068, 198]` injection).
+        ///
+        /// - Parameters:
+        ///   - promptTokens: This round's full rendered prompt tokens.
+        ///   - messages: The raw message dictionaries the prompt was rendered from.
+        ///   - tools: The tool specs rendered into the prompt, if any.
+        ///   - tokenizer: The tokenizer to render the past-turns baseline with.
+        /// - Returns: The stable prefix length, or `nil` when the tokenizer
+        ///   cannot control the generation prompt (the optional
+        ///   `applyChatTemplate(messages:tools:additionalContext:addGenerationPrompt:)`
+        ///   capability returned `nil`) or the render throws -- callers skip
+        ///   the boundary-dependent behavior, leaving this round unchanged.
+        static func transcriptStableLength(
+            promptTokens: [Int],
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            tokenizer: any Tokenizer
+        ) -> Int? {
+            // `try?` flattens the render's own optional (the capability's
+            // `nil` opt-out) and a thrown error into one `nil` -- both mean
+            // "no stable boundary computable" here.
+            guard
+                let baseTokens = try? tokenizer.applyChatTemplate(
+                    messages: messages, tools: tools, additionalContext: nil,
+                    addGenerationPrompt: false)
+            else { return nil }
+            return commonPrefixLength(promptTokens, baseTokens)
+        }
+
+        /// Forward-passes `tokens` through `model` into `cache`, in chunked
+        /// prefill steps -- mirroring `LLMModel.prepare`'s own prefill
+        /// conventions (512-token windows, `asyncEval` per chunk so the CPU
+        /// builds chunk N+1's graph while the GPU evaluates chunk N, one
+        /// `eval` to flush at the end).
+        ///
+        /// Used by `makePromptCacheSlot`'s hybrid split prefill to advance a
+        /// resolved cache exactly to the transcript-stable boundary before
+        /// snapshotting a checkpoint there -- and an internal test seam, so
+        /// unit tests can drive the same forward-pass path against tiny
+        /// synthetic hybrid models without a full `ModelContext`.
+        ///
+        /// - Parameters:
+        ///   - tokens: The token span to prefill.
+        ///   - model: The model to forward-pass through.
+        ///   - cache: The live cache to advance; every layer's state advances
+        ///     by exactly `tokens.count` positions once this returns.
+        /// - Throws: `CancellationError` if the task is cancelled between
+        ///   chunks (mirroring `LLMModel.prepare`'s cooperative-cancellation
+        ///   check; see ml-explore/mlx-swift-examples#230).
+        static func prefillPromptCache(
+            tokens: [Int], model: any MLXLMCommon.LanguageModel, cache: [KVCache]
+        ) throws {
+            let prefillStepSize = 512
+            var y = LMInput.Text(tokens: MLXArray(tokens))
+            var state: LMOutput.State?
+            try withPreparedCache(cache, lengths: y.sequenceLengths) {
+                while y.tokens.size > 0 {
+                    try Task.checkCancellation()
+                    let step = min(prefillStepSize, y.tokens.size)
+                    let output = model(
+                        y[.newAxis, ..<step], cache: cache.isEmpty ? nil : cache, state: state)
+                    state = output.state
+                    asyncEval(cache)
+                    y = y[step...]
+                }
+                eval(cache)
+            }
         }
 
         /// Trims `cache` back into sync with the observed generated-token
@@ -2960,6 +3178,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - maxTokens: The resolved token budget for this request.
         ///   - request: The generation request (temperature/reasoning options).
         ///   - requestedSamplingMode: The caller's sampling mode override, if any.
+        ///   - stableBoundary: The messages/tools for the hybrid
+        ///     stable-boundary computation (see `makePromptCacheSlot`).
         ///   - reasoningEntryID: The entry to stream reasoning segments into.
         ///   - entryID: The response entry (for the incomplete-output signal).
         ///   - context: The loaded model context.
@@ -2974,6 +3194,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             maxTokens: Int,
             request: LanguageModelExecutorGenerationRequest,
             requestedSamplingMode: MLXSamplingMode?,
+            stableBoundary: StableBoundaryRender?,
             reasoningEntryID: String,
             entryID: String,
             context: ModelContext,
@@ -2984,6 +3205,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 primedInside: primedInside, maxTokens: maxTokens,
                 requestedTemperature: request.generationOptions.temperature,
                 samplingMode: requestedSamplingMode,
+                stableBoundary: stableBoundary,
                 reasoningEntryID: reasoningEntryID,
                 responseEntryID: entryID,
                 context: context, channel: channel)
@@ -3007,6 +3229,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - phase2MaxTokens: The remaining token budget for this phase.
         ///   - context: The loaded model context.
         ///   - setup: The constraint/bias/reserve setup from `prepareConstraintSetup`.
+        ///   - stableBoundary: The messages/tools for the hybrid
+        ///     stable-boundary computation (see `makePromptCacheSlot`).
         /// - Returns: The buffered output text, the generated token count
         ///   (nil if generation threw before completing), how many prompt
         ///   tokens were served from a `PromptCache` slot this round, and
@@ -3018,14 +3242,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             phase2Input: LMInput,
             phase2MaxTokens: Int,
             context: ModelContext,
-            setup: ConstraintSetup
+            setup: ConstraintSetup,
+            stableBoundary: StableBoundaryRender?
         ) async throws -> (
             outputBuffer: String, generatedTokenCount: Int, cachedTokenCount: Int,
             incomplete: Bool
         ) {
             var outputBuffer = ""
             let result = try await runGuidedGenerationLoop(
-                input: phase2Input, context: context, setup: setup, maxTokens: phase2MaxTokens
+                input: phase2Input, context: context, setup: setup, maxTokens: phase2MaxTokens,
+                stableBoundary: stableBoundary
             ) { text in
                 outputBuffer += text
                 return !Task.isCancelled
@@ -3048,6 +3274,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///     `setup.maxTokens`, since the tool-calling path's Phase 2 may
         ///     run under a reduced budget after Phase 1 reasoning consumed
         ///     part of it.
+        ///   - stableBoundary: The messages/tools for the hybrid
+        ///     stable-boundary computation (see `makePromptCacheSlot`).
         ///   - onText: Called with each generated text delta; return `false`
         ///     to stop generation early.
         /// - Returns: The generated token count (nil if generation threw
@@ -3086,7 +3314,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) -> PromptCacheSlot {
             guard slot.cache != nil else { return slot }
             return PromptCacheSlot(
-                cache: resultCache, feedInput: slot.feedInput, promptTokens: slot.promptTokens)
+                cache: resultCache, feedInput: slot.feedInput, promptTokens: slot.promptTokens,
+                splitPrefillTokenCount: slot.splitPrefillTokenCount)
         }
 
         private func runGuidedGenerationLoop(
@@ -3094,6 +3323,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             context: ModelContext,
             setup: ConstraintSetup,
             maxTokens: Int,
+            stableBoundary: StableBoundaryRender?,
             onText: @escaping (String) -> Bool
         ) async throws -> (generatedTokenCount: Int, cachedTokenCount: Int, incomplete: Bool) {
             var incomplete = false
@@ -3108,7 +3338,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // `parameters: nil` matches GuidedGenerationLoop.run's own
             // `model.newCache(parameters: nil)` -- a rebuilt cache here has
             // the same "flavor" it would have gotten unassisted.
-            let slot = await makePromptCacheSlot(input: input, context: context, parameters: nil)
+            let slot = try await makePromptCacheSlot(
+                input: input, context: context, parameters: nil, stableBoundary: stableBoundary)
             // The slot to commit: `slot` itself unless `run` returns
             // (successfully) a replacement cache -- see
             // `slotAdoptingResultCache`'s doc. Stays at `slot` if `run`
@@ -3435,6 +3666,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // `thinkThenCallPhase1Engages`) — MiniMax-M2's template
             // pre-opens `<think>\n`; a non-primed alwaysOn prompt stays
             // single-phase.
+            // The tool path's stable-boundary render carries the SAME
+            // messages and tool specs the tool-aware prompt was rendered
+            // from -- future rounds re-render past turns with the tool
+            // block still present, so `tools:` belongs in the baseline.
+            let stableBoundary = StableBoundaryRender(messages: messages, tools: toolSpecs)
+
             var reasoningTokenIDs: [Int] = []
             if let reasoningConfig = thinkThenCallConfig {
                 let primedInside = Self.reasoningPrimedInside(
@@ -3448,6 +3685,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         primedInside: primedInside,
                         maxTokens: setup.maxTokens,
                         request: request, requestedSamplingMode: requestedSamplingMode,
+                        stableBoundary: stableBoundary,
                         reasoningEntryID: reasoningEntryID, entryID: entryID,
                         context: context, channel: channel)
                     reasoningTokenIDs = phase1.tokenIDs
@@ -3487,7 +3725,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             let phase2 = try await executeToolCallingPhase2(
                 phase2Input: phase2Input, phase2MaxTokens: phase2MaxTokens,
-                context: context, setup: setup)
+                context: context, setup: setup, stableBoundary: stableBoundary)
             let outputBuffer = phase2.outputBuffer
             let incomplete = phase2.incomplete
             let generatedTokenCount = phase2.generatedTokenCount
@@ -3627,6 +3865,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Parameters:
         ///   - schemaJSON: The developer-supplied JSON schema.
         ///   - input: The rendered prompt to generate from.
+        ///   - messages: The chat messages `input` was rendered from, for
+        ///     the hybrid stable-boundary computation (see `makePromptCacheSlot`).
         ///   - modelID: The model identifier for constraint/tokenizer caches.
         ///   - requestedMaxTokens: The caller's token budget override, if any.
         ///   - entryID: The response entry to stream output into.
@@ -3636,6 +3876,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private func runGuidedGeneration(
             schemaJSON: String,
             input: LMInput,
+            messages: [Chat.Message],
             modelID: String,
             requestedMaxTokens: Int?,
             entryID: String,
@@ -3664,7 +3905,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }()
 
             let result = try await runGuidedGenerationLoop(
-                input: input, context: context, setup: setup, maxTokens: setup.maxTokens
+                input: input, context: context, setup: setup, maxTokens: setup.maxTokens,
+                stableBoundary: StableBoundaryRender(messages: messages, tools: nil)
             ) { text in
                 textContinuation.yield(text)
                 return !Task.isCancelled
@@ -3747,6 +3989,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///
         /// - Parameters:
         ///   - input: The rendered prompt to generate from.
+        ///   - messages: The chat messages `input` was rendered from, for
+        ///     the hybrid stable-boundary computation (see `makePromptCacheSlot`).
         ///   - requestedMaxTokens: The caller's token budget override, if any.
         ///   - requestedTemperature: The caller's temperature override, if any.
         ///   - samplingMode: The caller's sampling mode override, if any.
@@ -3756,6 +4000,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Throws: `CancellationError` if the task is cancelled mid-loop.
         private func runUnconstrained(
             input: LMInput,
+            messages: [Chat.Message],
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingMode: MLXSamplingMode?,
@@ -3771,7 +4016,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 samplingMode: samplingMode
             )
 
-            let slot = await makePromptCacheSlot(input: input, context: context, parameters: params)
+            let slot = try await makePromptCacheSlot(
+                input: input, context: context, parameters: params,
+                stableBoundary: StableBoundaryRender(messages: messages, tools: nil))
             var emittedText = ""
             var stopTokenFedToCache: Int?
 
@@ -3800,6 +4047,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - reasoningSetup: The reasoning input/config/primed-state bundle
         ///     from `prepareRespondSetup`, or `nil` to run unconstrained.
         ///   - fallbackInput: The prompt to generate from when `reasoningSetup` is `nil`.
+        ///   - messages: The chat messages this round's prompt was rendered
+        ///     from, for the hybrid stable-boundary computation (see
+        ///     `makePromptCacheSlot`).
         ///   - requestedMaxTokens: The caller's token budget override, if any.
         ///   - requestedTemperature: The caller's temperature override, if any.
         ///   - samplingMode: The caller's sampling mode override, if any.
@@ -3811,6 +4061,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private func runTextGeneration(
             reasoningSetup: (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?,
             fallbackInput: LMInput,
+            messages: [Chat.Message],
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingMode: MLXSamplingMode?,
@@ -3822,6 +4073,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if let reasoning = reasoningSetup {
                 try await runReasoning(
                     input: reasoning.input,
+                    messages: messages,
                     reasoningConfig: reasoning.reasoningConfig,
                     primedInside: reasoning.primedInside,
                     requestedMaxTokens: requestedMaxTokens,
@@ -3834,6 +4086,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } else {
                 try await runUnconstrained(
                     input: fallbackInput,
+                    messages: messages,
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: requestedTemperature,
                     samplingMode: samplingMode,
@@ -3929,6 +4182,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///
         /// - Parameters:
         ///   - input: The rendered, reasoning-primed prompt to generate from.
+        ///   - messages: The chat messages `input` was rendered from, for
+        ///     the hybrid stable-boundary computation (see `makePromptCacheSlot`).
         ///   - reasoningConfig: The resolved reasoning config for this model.
         ///   - primedInside: Whether the prompt already ends inside an open reasoning span.
         ///   - requestedMaxTokens: The caller's token budget override, if any.
@@ -3941,6 +4196,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Throws: `CancellationError` if the task is cancelled mid-loop.
         private func runReasoning(
             input: LMInput,
+            messages: [Chat.Message],
             reasoningConfig: ReasoningConfig,
             primedInside: Bool,
             requestedMaxTokens: Int?,
@@ -3964,7 +4220,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var completionInfo: GenerateCompletionInfo?
             var generatedTokenIDs: [Int] = []
 
-            let slot = await makePromptCacheSlot(input: input, context: context, parameters: params)
+            let slot = try await makePromptCacheSlot(
+                input: input, context: context, parameters: params,
+                stableBoundary: StableBoundaryRender(messages: messages, tools: nil))
 
             for await generation in try generateTokens(
                 input: slot.feedInput, cache: slot.cache, parameters: params, context: context
@@ -4139,6 +4397,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - maxTokens: The resolved token budget for this request.
         ///   - requestedTemperature: The caller's temperature override, if any.
         ///   - samplingMode: The caller's sampling mode override, if any.
+        ///   - stableBoundary: The messages/tools for the hybrid
+        ///     stable-boundary computation (see `makePromptCacheSlot`).
         ///   - reasoningEntryID: The entry to stream reasoning segments into.
         ///   - responseEntryID: The response entry to stream `.response` segments into.
         ///   - context: The loaded model context.
@@ -4154,6 +4414,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             maxTokens: Int,
             requestedTemperature: Double?,
             samplingMode: MLXSamplingMode?,
+            stableBoundary: StableBoundaryRender?,
             reasoningEntryID: String,
             responseEntryID: String,
             context: ModelContext,
@@ -4168,7 +4429,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 config: reasoningConfig, primedInside: primedInside, tokenizer: context.tokenizer
             )
 
-            let slot = await makePromptCacheSlot(input: input, context: context, parameters: params)
+            let slot = try await makePromptCacheSlot(
+                input: input, context: context, parameters: params, stableBoundary: stableBoundary)
 
             let (stream, task) = try generateTokensTask(
                 input: slot.feedInput, cache: slot.cache, parameters: params, context: context)

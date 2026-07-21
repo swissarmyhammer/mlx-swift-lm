@@ -25,7 +25,7 @@
 // only orders this suite's own tests against each other).
 //
 // IMPORTANT -- the assertion below intentionally documents a real,
-// structural floor for THIS two-round scenario, not an aspirational ceiling;
+// structural bound for THIS two-round scenario, not an aspirational ceiling;
 // do not casually loosen or tighten it without re-deriving why from the
 // chat-template mechanism explained at the assertion site.
 //
@@ -35,23 +35,23 @@
 // degradation: a round whose cache lands in
 // `PromptCache.reconcileCacheAdvance`'s `.trimCacheByOne` case used to be
 // DROPPED entirely, because hybrid checkpoints cannot be trimmed
-// (`MambaCache.isTrimmable == false`), unlike pure attention. That bug is now
-// FIXED -- see `PromptCache.planCacheStore`'s `.storeExtended` case and
-// `GenerateCompletionInfo.stopTokenFedToCache` (`Libraries/MLXLMCommon/
-// Evaluate.swift`): an EOS-terminated hybrid round now stores the true,
-// extended `[prompt + generated + stopToken]` sequence instead of dropping.
+// (`MambaCache.isTrimmable == false`), unlike pure attention. That bug is
+// FIXED (`PromptCache.planCacheStore`'s `.storeExtended` case), but
+// real-model verification against `mlx-community/Qwen3.6-27B-mxfp4` proved
+// it was never this test's failure: round 1 here terminates by hitting
+// `maximumResponseTokens` (a budget cutoff, not EOS), reconciles as
+// `.matches`, and stores cleanly on its own. The real cause is the
+// chat-template mechanism documented at the assertion below: Qwen3.6
+// renders a turn's generation region differently live vs. as history, so
+// round 1's FED token sequence is never a prefix of round 2's re-render.
 //
-// Real-model verification (run against `mlx-community/Qwen3.6-27B-mxfp4`)
-// proved that fix does NOT make this specific test pass, because this test's
-// failure was never the EOS-trim bug: round 1 here terminates by hitting
-// `maximumResponseTokens` (a budget cutoff, not EOS), which reconciles as
-// `.matches` and stores cleanly on its own. The real, irreducible cause is a
-// completely different mechanism -- Qwen3.6's chat template renders a
-// `<think>` reasoning turn differently live vs. as history -- documented in
-// full at the assertion below. No sound cache-layer change can close that
-// gap, so the bound is corrected to the genuinely-reachable value for this
-// scenario (verified empirically, not assumed) rather than weakened to a
-// meaningless `> 0`.
+// The fix for THAT (kanban er33v06) is the transcript-stable-boundary
+// split prefill in `MLXLanguageModel.Executor.makePromptCacheSlot`: each
+// hybrid round now also snapshots a checkpoint at the exact prefix future
+// rounds re-render verbatim, BEFORE any generation-region tokens touch the
+// cache. Full-prefix reuse (`>= prompt + output - 1`) remains structurally
+// UNACHIEVABLE for this template family -- the correct maximum is the
+// stable prefix, which is what the bound below asserts.
 
 #if FoundationModelsIntegration
 
@@ -157,68 +157,59 @@ struct PromptCacheHybridReuseTests {
         #expect(!second.text.isEmpty, "Second round should produce some response text")
 
         // Round 2 replays round 1's OWN real reply verbatim before its new
-        // question, so at first glance its rendered prefix looks like a
-        // byte-for-byte continuation of round 1's stored tokens -- it is
-        // NOT, because Qwen3.6's chat template renders the SAME assistant
-        // turn differently depending on whether it is being generated live
-        // or replayed as history:
+        // question, but its rendered prefix is NOT a byte-for-byte
+        // continuation of what round 1 FED the model: Qwen3.6's chat
+        // template renders the SAME assistant turn differently depending on
+        // whether it is being generated live or replayed as history:
         //
-        //   - Round 1's generation prompt (fed into, and cached by, round 1)
-        //     is `...<|im_start|>assistant\n<think>\n` -- the template
-        //     unconditionally opens a `<think>` block for whichever turn is
-        //     currently being generated.
-        //   - Round 2 renders that SAME assistant turn as HISTORY (it now
-        //     precedes a newer user turn), and Qwen3.6's template strips
-        //     reasoning from any assistant turn that is not the response to
-        //     the most recent user query -- so round 2 renders
-        //     `...<|im_start|>assistant\n` followed DIRECTLY by the reply
-        //     content, with no `<think>\n` at all.
+        //   - Round 1's generation prompt ends in a generation-priming
+        //     region after the final assistant header (`<|im_start|>
+        //     assistant\n` + the thinking-suppression injection `[248068,
+        //     198]` -- the executor renders reasoning-suppressed prompts
+        //     for this family, see `ReasoningConfig`'s qwen3 row).
+        //   - Round 2 renders that SAME assistant turn as HISTORY, with no
+        //     generation-region tokens at all, and appends its OWN priming
+        //     suffix after its new final user turn instead.
         //
-        // Verified empirically against the real model (temporary debug
-        // instrumentation in `PromptCache.resolveHybridCheckpoint`, removed
-        // after confirming): round 1's stored checkpoint and round 2's
-        // re-rendered prefix share their first 17 tokens (through
-        // `...assistant\n`), then diverge at the `<think>` token -- round
-        // 1's checkpoint has it, round 2's render does not.
+        // Verified empirically against the real model (token-level trace on
+        // kanban er33v06): round 1's fed prompt and round 2's re-render
+        // share everything through `...assistant\n` (17 of round 1's 19
+        // prompt tokens), then diverge at the injected priming tokens. So a
+        // checkpoint keyed on round 1's FULL fed sequence can never match a
+        // later round -- Mamba state cannot be trimmed backward past the
+        // baked-in priming tokens, and `PromptCache.resolveHybridCheckpoint`
+        // only reuses a checkpoint on an exact, WHOLE-checkpoint prefix
+        // match.
         //
-        // That divergence lands INSIDE the stored checkpoint (token 17 of
-        // the 27-token prefix observed empirically -- see `sharedPrefixTokens`
-        // below for this round's actual value), not at its boundary, and
-        // `PromptCache.resolveHybridCheckpoint` only reuses a checkpoint on
-        // an EXACT, WHOLE-checkpoint prefix match -- unlike attention's
-        // chunk store, a hybrid `MambaCache`'s recurrent state cannot be
-        // sliced or truncated to an earlier position (see
-        // `PromptCache.isChunkable`'s doc), so there is no partial-prefix
-        // credit for the 17 tokens that DO match. The whole checkpoint
-        // simply fails to match, and `cachedTokenCount` is exactly 0 -- not
-        // "shared prefix minus a few tokens".
-        //
-        // This is unrelated to the hybrid EOS-trim degradation this test
-        // used to chase (see the file header): that bug is fixed
-        // (`PromptCache.planCacheStore`'s `.storeExtended` case), but round
-        // 1 here reconciles as `.matches` (it terminates by hitting
-        // `maximumResponseTokens`, not EOS) and stores cleanly regardless --
-        // the drop happens entirely on the RESOLVE side, from the
-        // chat-template divergence above. No sound cache-layer change can
-        // close it: the two renders are genuinely different token sequences
-        // by design of Qwen3.6's template. If a future change (partial-
-        // prefix hybrid reuse, or transcript replay that preserves
-        // reasoning) makes some of this 17-token overlap reusable, RAISE
-        // this bound accordingly -- it documents today's real, structural
-        // floor, not a permanent ceiling.
+        // The fix (kanban er33v06): `MLXLanguageModel.Executor
+        // .makePromptCacheSlot` computes the transcript-stable boundary --
+        // the same messages re-rendered as past turns via
+        // `applyChatTemplate(addGenerationPrompt: false)` -- and snapshots a
+        // hybrid checkpoint exactly THERE, before the priming tokens touch
+        // the cache. Round 2 must therefore reuse round 1's stable prefix:
+        // its prompt tokens minus the assistant header + priming region
+        // (empirically 2 tokens for this template; 8 is a safe allowance for
+        // template evolution). Full-prefix reuse (`>= sharedPrefixTokens -
+        // 1`, the pure-attention bound) remains structurally unreachable --
+        // round 1's generated reply and priming tokens sit behind the
+        // divergence, and there is no partial-prefix credit for a hybrid
+        // checkpoint -- so the STABLE PREFIX is the correct maximum, and
+        // this bound asserts it is actually achieved rather than settling
+        // for a meaningless `> 0` alone.
         #expect(
-            second.cachedTokenCount == 0,
+            second.cachedTokenCount >= first.promptTokenCount - 8
+                && second.cachedTokenCount > 0,
             """
-            Second round's cached token count (\(second.cachedTokenCount)) should be exactly 0. \
-            Qwen3.6's chat template strips the `<think>` reasoning scaffold from round 1's \
-            assistant turn once it is replayed as history in round 2, so round 2's re-rendered \
-            prefix diverges from round 1's stored hybrid checkpoint (\(sharedPrefixTokens) = \
-            \(first.promptTokenCount) prompt + \(first.outputTokenCount) output tokens) 17 \
-            tokens in. Hybrid checkpoints only match on an exact WHOLE-checkpoint prefix (Mamba \
-            state cannot be partially reused), so that divergence drops the ENTIRE checkpoint, \
-            not just the diverging suffix -- a real, structural template/cache-shape \
-            interaction, not the EOS-trim degradation this test used to chase (that one is \
-            fixed; see PromptCache.planCacheStore).
+            Second round's cached token count (\(second.cachedTokenCount)) should cover round \
+            1's transcript-stable prefix: at least its prompt token count \
+            (\(first.promptTokenCount)) minus an 8-token allowance for the assistant header + \
+            generation-priming region, and strictly positive. Round 1 stores TWO hybrid \
+            checkpoints -- one at the transcript-stable boundary (pre-generation, see \
+            MLXLanguageModel.Executor.makePromptCacheSlot) and one post-round covering all \
+            \(sharedPrefixTokens) fed tokens (\(first.promptTokenCount) prompt + \
+            \(first.outputTokenCount) output). The post-round one can never match round 2's \
+            re-render (Qwen3.6 strips the generation-priming region from history turns), but \
+            the stable-boundary one must.
             """
         )
 

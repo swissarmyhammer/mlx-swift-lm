@@ -451,13 +451,18 @@ extension PromptCache {
     /// trimmable), but rather than dropping the round it now stores the
     /// EXTENDED sequence including that fed stop token -- which matches this
     /// offset exactly (so ``snapshotHybridCheckpoint(tokens:cache:)``'s
-    /// `offset == tokens.count` invariant holds) and is a genuine prefix of
-    /// the next round's render, since the stop token is the same chat-template
-    /// turn-terminator (`<|im_end|>` for Qwen) re-emitted after the assistant
-    /// reply. See `Executor.commitPromptCache` and `PromptCache.planCacheStore`
-    /// for how the fed stop token's identity is recovered and applied. (A
-    /// genuinely non-trimmable, non-hybrid shape with no recoverable fed token
-    /// -- e.g. a `RotatingKVCache` round -- is still dropped, same as before.)
+    /// `offset == tokens.count` invariant holds). Whether that extended
+    /// sequence is a prefix of the next round's render is a per-template
+    /// fact, not a guarantee: verified on real Qwen3.6 weights (kanban
+    /// er33v06), templates that inject generation-priming tokens after the
+    /// final assistant header make the whole fed sequence a NON-prefix of
+    /// every later render regardless of its tail -- for those, cross-round
+    /// reuse comes from the transcript-stable-boundary checkpoint
+    /// `Executor.makePromptCacheSlot` snapshots pre-generation instead. See
+    /// `Executor.commitPromptCache` and `PromptCache.planCacheStore` for how
+    /// the fed stop token's identity is recovered and applied. (A genuinely
+    /// non-trimmable, non-hybrid shape with no recoverable fed token -- e.g.
+    /// a `RotatingKVCache` round -- is still dropped, same as before.)
     ///
     /// - Parameter cache: The cache stack this round generated with.
     /// - Returns: The offset to treat as ground truth, or `nil` when `cache`
