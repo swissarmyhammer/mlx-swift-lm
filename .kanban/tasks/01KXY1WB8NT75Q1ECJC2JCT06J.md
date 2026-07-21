@@ -121,7 +121,22 @@ comments:
 
     Resume state: all 78 findings fixed and checked; checkpoint `41b8e1f` is the delta needing the verdict — run `review sha 4877962..41b8e1f` (NOT HEAD~1..HEAD; kanban commits landed on top). Model for the local engine is fully cached (unsloth/Qwen3.6-35B-A3B-MTP-GGUF blob finalized + snapshot). Clean verdict → task to done, then ^er33v06 → ^05zt40g continue the #qwen batch.
   timestamp: 2026-07-20T21:37:22.028876+00:00
-position_column: review
+- actor: claude-code
+  id: 01ky320pd2a9vkv3q43w2cw2dm
+  text: |-
+    /implement iteration 4: worked the single unchecked item in Review Findings (2026-07-21 14:00) — box flipped to [x]. Task pulled review→doing.
+
+    Fix (TDD, RED observed before the macro change — pin updated first, 1 failure; GREEN on first run after):
+
+    1. Macro-side flattening (HuggingFaceIntegrationMacros.swift, TokenizerAdaptorMacro): the entire emitted-closure literal hoisted out of `expansion` into a documented `private static let bridgeClosure`; `expansion` is now flat — the existing guard plus a single `return "\(raw: bridgeClosure)(\(argument))"`. Same diagnostic, same applied-closure shape.
+    2. Emitted-text dedup: the generated TokenizerBridge gains a shared `private func mappingMissingChatTemplate<Rendered>(_ render: () throws -> Rendered) throws -> Rendered` holding the one do/catch that maps Tokenizers.TokenizerError.missingChatTemplate → MLXLMCommon.TokenizerError.missingChatTemplate; both `applyChatTemplate` implementations now delegate through it (identical upstream calls otherwise — nothing else in the emitted text changed).
+    3. Tests/MLXHuggingFaceMacrosTests/LanguageModelMacroTests.swift: testBridgeExpansion pin updated to the new emitted text (matched exactly on first GREEN run).
+
+    BOUNDARY (hard constraint per revert dd459ee): all Id casings on the tokenizer surface left untouched — decode(tokenIds:), convertTokenToId, convertIdToToken unchanged in the emitted bridge.
+
+    Verification: `swift test --filter MLXHuggingFaceMacrosTests` 12/12; full `swift test` exit 0, ZERO failures — XCTest 197+12 = 209, swift-testing 273+80+258+7 = 618, total 827 (matches the 827 baseline). Only pre-existing warnings in untouched files. Not committed per instructions; tree still carries concurrent WIP in MLXFoundationModels/PromptCache — stage selectively. Adversarial double-check in flight; task stays in doing.
+  timestamp: 2026-07-21T19:21:34.882973+00:00
+position_column: doing
 position_ordinal: '80'
 title: 'Tokenizer: expose addGenerationPrompt:false chat-template render (prereq for stable-boundary hybrid checkpoints)'
 ---
@@ -272,3 +287,9 @@ public func applyChatTemplate(
 - [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:308` — The two if-let blocks for optional 'capabilities' and 'configurationResolver' arguments in LanguageModelMacro.expansion are near-verbatim duplicates differing only in argument label and variable names. Extract a helper loop or function to handle optional argument forwarding: for label in ["capabilities", "configurationResolver"] { if let value = argument(label) { arguments.append("\(label): \(value)") } }.
 - [x] `Libraries/MLXLMCommon/Tokenizer.swift:147` — Method parameter named `tokenIds` instead of `tokenIDs` — ID acronyms in lowerCamelCase must be all-uppercase as one unit. Change `tokenIds` to `tokenIDs` in the method parameter.
 - [x] `Libraries/MLXLMCommon/Tokenizer.swift:173` — Property named `eosTokenId` instead of `eosTokenID` — ID acronyms in lowerCamelCase must be all-uppercase as one unit. Change property name from `eosTokenId` to `eosTokenID`.
+
+## Review Findings (2026-07-21 14:00)
+
+> ⚠️ 2/14 review tasks failed — results are INCOMPLETE.
+
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:199` — Function 'expansion' in TokenizerAdaptorMacro has deep nesting with multiple nested closures, struct definitions, and two overloaded methods with identical error-handling logic. Extract TokenizerBridge struct to top-level, deduplicate the two applyChatTemplate implementations using a shared helper, and flatten the guard statement.

@@ -194,16 +194,27 @@ final class TokenizerAdaptorMacroTests: XCTestCase {
                             upstream.unknownToken
                         }
 
+                        // Runs a swift-transformers chat-template render, mapping its
+                        // missing-chat-template error onto the MLXLMCommon equivalent.
+                        // Shared by both `applyChatTemplate` implementations.
+                        private func mappingMissingChatTemplate<Rendered>(
+                            _ render: () throws -> Rendered
+                        ) throws -> Rendered {
+                            do {
+                                return try render()
+                            } catch Tokenizers.TokenizerError.missingChatTemplate {
+                                throw MLXLMCommon.TokenizerError.missingChatTemplate
+                            }
+                        }
+
                         func applyChatTemplate(
                             messages: [[String: any Sendable]],
                             tools: [[String: any Sendable]]?,
                             additionalContext: [String: any Sendable]?
                         ) throws -> [Int] {
-                            do {
-                                return try upstream.applyChatTemplate(
+                            try mappingMissingChatTemplate {
+                                try upstream.applyChatTemplate(
                                     messages: messages, tools: tools, additionalContext: additionalContext)
-                            } catch Tokenizers.TokenizerError.missingChatTemplate {
-                                throw MLXLMCommon.TokenizerError.missingChatTemplate
                             }
                         }
 
@@ -216,8 +227,8 @@ final class TokenizerAdaptorMacroTests: XCTestCase {
                             additionalContext: [String: any Sendable]?,
                             addGenerationPrompt: Bool
                         ) throws -> [Int]? {
-                            do {
-                                return try upstream.applyChatTemplate(
+                            try mappingMissingChatTemplate {
+                                try upstream.applyChatTemplate(
                                     messages: messages,
                                     chatTemplate: nil,
                                     addGenerationPrompt: addGenerationPrompt,
@@ -225,8 +236,6 @@ final class TokenizerAdaptorMacroTests: XCTestCase {
                                     maxLength: nil,
                                     tools: tools,
                                     additionalContext: additionalContext)
-                            } catch Tokenizers.TokenizerError.missingChatTemplate {
-                                throw MLXLMCommon.TokenizerError.missingChatTemplate
                             }
                         }
                     }

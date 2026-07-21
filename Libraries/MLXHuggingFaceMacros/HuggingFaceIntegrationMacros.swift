@@ -128,10 +128,103 @@ public struct DownloaderMacro: ExpressionMacro {
 /// `Tokenizers.Tokenizer` in an `MLXLMCommon.Tokenizer` bridge, mapping the
 /// naming and error differences between the two protocols.
 public struct TokenizerAdaptorMacro: ExpressionMacro {
-    /// Expands to an immediately-applied closure that defines a
-    /// `TokenizerBridge` struct conforming to `MLXLMCommon.Tokenizer` —
-    /// including the optional generation-prompt-controlled chat-template
-    /// render — and returns it wrapping the caller's tokenizer.
+    /// The source text of the generated bridge: a closure that defines a
+    /// `TokenizerBridge` struct conforming to `MLXLMCommon.Tokenizer` and
+    /// returns it wrapping the closure's tokenizer argument. The expansion
+    /// applies this closure to the caller's tokenizer expression.
+    ///
+    /// Inside the emitted struct, both `applyChatTemplate` implementations
+    /// share `mappingMissingChatTemplate`, which maps swift-transformers'
+    /// missing-chat-template error onto the MLXLMCommon equivalent.
+    private static let bridgeClosure = """
+        // make sure you:
+        //
+        // import Tokenizers
+        //
+        { (huggingFaceTokenizer: Tokenizers.Tokenizer) -> MLXLMCommon.Tokenizer in
+            struct TokenizerBridge: MLXLMCommon.Tokenizer {
+                private let upstream: any Tokenizers.Tokenizer
+
+                init(_ upstream: any Tokenizers.Tokenizer) {
+                    self.upstream = upstream
+                }
+
+                func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+                    upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
+                }
+
+                // swift-transformers uses `decode(tokens:)` instead of `decode(tokenIds:)`.
+                func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+                    upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
+                }
+
+                func convertTokenToId(_ token: String) -> Int? {
+                    upstream.convertTokenToId(token)
+                }
+
+                func convertIdToToken(_ id: Int) -> String? {
+                    upstream.convertIdToToken(id)
+                }
+
+                var bosToken: String? { upstream.bosToken }
+                var eosToken: String? { upstream.eosToken }
+                var unknownToken: String? { upstream.unknownToken }
+
+                // Runs a swift-transformers chat-template render, mapping its
+                // missing-chat-template error onto the MLXLMCommon equivalent.
+                // Shared by both `applyChatTemplate` implementations.
+                private func mappingMissingChatTemplate<Rendered>(
+                    _ render: () throws -> Rendered
+                ) throws -> Rendered {
+                    do {
+                        return try render()
+                    } catch Tokenizers.TokenizerError.missingChatTemplate {
+                        throw MLXLMCommon.TokenizerError.missingChatTemplate
+                    }
+                }
+
+                func applyChatTemplate(
+                    messages: [[String: any Sendable]],
+                    tools: [[String: any Sendable]]?,
+                    additionalContext: [String: any Sendable]?
+                ) throws -> [Int] {
+                    try mappingMissingChatTemplate {
+                        try upstream.applyChatTemplate(
+                            messages: messages, tools: tools, additionalContext: additionalContext)
+                    }
+                }
+
+                // Renders with explicit control over the generation prompt by
+                // delegating to swift-transformers' full applyChatTemplate
+                // protocol requirement.
+                func applyChatTemplate(
+                    messages: [[String: any Sendable]],
+                    tools: [[String: any Sendable]]?,
+                    additionalContext: [String: any Sendable]?,
+                    addGenerationPrompt: Bool
+                ) throws -> [Int]? {
+                    try mappingMissingChatTemplate {
+                        try upstream.applyChatTemplate(
+                            messages: messages,
+                            chatTemplate: nil,
+                            addGenerationPrompt: addGenerationPrompt,
+                            truncation: false,
+                            maxLength: nil,
+                            tools: tools,
+                            additionalContext: additionalContext)
+                    }
+                }
+            }
+
+            return TokenizerBridge(huggingFaceTokenizer)
+        }
+        """
+
+    /// Expands to an immediately-applied closure (``bridgeClosure``) that
+    /// defines a `TokenizerBridge` struct conforming to
+    /// `MLXLMCommon.Tokenizer` — including the optional
+    /// generation-prompt-controlled chat-template render — and returns it
+    /// wrapping the caller's tokenizer.
     ///
     /// - Parameters:
     ///   - node: the macro invocation; its required first argument is the
@@ -147,81 +240,7 @@ public struct TokenizerAdaptorMacro: ExpressionMacro {
             throw MacroExpansionError.message("#adaptHuggingFaceTokenizer requires an argument")
         }
 
-        return
-            """
-            // make sure you:
-            //
-            // import Tokenizers
-            //
-            { (huggingFaceTokenizer: Tokenizers.Tokenizer) -> MLXLMCommon.Tokenizer in
-                struct TokenizerBridge: MLXLMCommon.Tokenizer {
-                    private let upstream: any Tokenizers.Tokenizer
-
-                    init(_ upstream: any Tokenizers.Tokenizer) {
-                        self.upstream = upstream
-                    }
-
-                    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
-                        upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
-                    }
-
-                    // swift-transformers uses `decode(tokens:)` instead of `decode(tokenIds:)`.
-                    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
-                        upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
-                    }
-
-                    func convertTokenToId(_ token: String) -> Int? {
-                        upstream.convertTokenToId(token)
-                    }
-
-                    func convertIdToToken(_ id: Int) -> String? {
-                        upstream.convertIdToToken(id)
-                    }
-
-                    var bosToken: String? { upstream.bosToken }
-                    var eosToken: String? { upstream.eosToken }
-                    var unknownToken: String? { upstream.unknownToken }
-
-                    func applyChatTemplate(
-                        messages: [[String: any Sendable]],
-                        tools: [[String: any Sendable]]?,
-                        additionalContext: [String: any Sendable]?
-                    ) throws -> [Int] {
-                        do {
-                            return try upstream.applyChatTemplate(
-                                messages: messages, tools: tools, additionalContext: additionalContext)
-                        } catch Tokenizers.TokenizerError.missingChatTemplate {
-                            throw MLXLMCommon.TokenizerError.missingChatTemplate
-                        }
-                    }
-
-                    // Renders with explicit control over the generation prompt by
-                    // delegating to swift-transformers' full applyChatTemplate
-                    // protocol requirement.
-                    func applyChatTemplate(
-                        messages: [[String: any Sendable]],
-                        tools: [[String: any Sendable]]?,
-                        additionalContext: [String: any Sendable]?,
-                        addGenerationPrompt: Bool
-                    ) throws -> [Int]? {
-                        do {
-                            return try upstream.applyChatTemplate(
-                                messages: messages,
-                                chatTemplate: nil,
-                                addGenerationPrompt: addGenerationPrompt,
-                                truncation: false,
-                                maxLength: nil,
-                                tools: tools,
-                                additionalContext: additionalContext)
-                        } catch Tokenizers.TokenizerError.missingChatTemplate {
-                            throw MLXLMCommon.TokenizerError.missingChatTemplate
-                        }
-                    }
-                }
-
-                return TokenizerBridge(huggingFaceTokenizer)
-            }(\(argument))
-            """
+        return "\(raw: bridgeClosure)(\(argument))"
     }
 }
 
