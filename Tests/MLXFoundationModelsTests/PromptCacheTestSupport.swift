@@ -113,6 +113,34 @@ func makeChunkableCache(tokenCount: Int, headDim: Int = 4, valueOffset: Int = 0)
     return cache
 }
 
+/// A `PromptCache.HybridCheckpoint` with placeholder (never content-inspected)
+/// tensors -- for tests exercising the hybrid checkpoint store's
+/// longest-prefix-match/eviction bookkeeping, which never reads `layers`'
+/// tensor content, only `tokens`/`byteSize`/`lastUsed`. Shared by
+/// `PromptCacheHybridArchitectureTests` (matching/LRU semantics) and
+/// `PromptCacheHybridEvictionScopeTests` (kanban `vgznm16`'s eviction-scope
+/// and cross-conversation isolation coverage).
+///
+/// - Parameters:
+///   - tokens: The full token prefix the checkpoint claims to cover.
+///   - byteSize: The byte footprint to account for this checkpoint --
+///     explicit (not derived from the placeholder tensors) so byte-budget
+///     tests can drive eviction pressure precisely.
+/// - Returns: A two-layer (`.mamba`, `.simple`) checkpoint with placeholder
+///   tensor state.
+func makeHybridCheckpoint(
+    tokens: [Int], byteSize: Int = 64
+) -> PromptCache.HybridCheckpoint {
+    let dummy = MLXArray([Int32(0)])
+    return PromptCache.HybridCheckpoint(
+        tokens: tokens,
+        layers: [
+            (kind: .mamba, state: [dummy, dummy]),
+            (kind: .simple, state: [dummy, dummy]),
+        ],
+        byteSize: byteSize, lastUsed: 0)
+}
+
 /// One `resolve()` round against a cache.
 ///
 /// Hides the single-use `SendableBox` plumbing (`consume()` traps on a

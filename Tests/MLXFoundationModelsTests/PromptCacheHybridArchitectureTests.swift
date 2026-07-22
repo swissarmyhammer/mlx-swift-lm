@@ -151,23 +151,6 @@ struct PromptCacheHybridArchitectureTests {
         return Qwen3NextModel(config)
     }
 
-    /// A `HybridCheckpoint` with placeholder (never content-inspected)
-    /// tensors -- for tests exercising `resolveHybridCheckpoint`'s
-    /// longest-prefix-match/eviction bookkeeping, which never reads
-    /// `layers`' tensor content, only `tokens`/`byteSize`/`lastUsed`.
-    private func makeHybridCheckpoint(
-        tokens: [Int], byteSize: Int = 64
-    ) -> PromptCache.HybridCheckpoint {
-        let dummy = MLXArray([Int32(0)])
-        return PromptCache.HybridCheckpoint(
-            tokens: tokens,
-            layers: [
-                (kind: .mamba, state: [dummy, dummy]),
-                (kind: .simple, state: [dummy, dummy]),
-            ],
-            byteSize: byteSize, lastUsed: 0)
-    }
-
     private func maxAbsDiff(_ a: MLXArray, _ b: MLXArray) -> Float {
         abs(a - b).max().item(Float.self)
     }
