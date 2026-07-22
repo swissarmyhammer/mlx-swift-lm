@@ -1,8 +1,13 @@
 ---
+comments:
+- actor: claude-code
+  id: 01ky60866n8rs5j354v22jdjbg
+  text: 'Closed as duplicate in chain reconciliation (user decision 2026-07-22): superseded by ^ayw1xee; unique content (verified tool-call format, <mm:think> reasoning tags, chat-template probe) folded there.'
+  timestamp: 2026-07-22T22:48:26.581136+00:00
 depends_on:
 - 01KXX99P1H2Z3DV0TM0AGBFEBR
-position_column: todo
-position_ordinal: '8680'
+position_column: done
+position_ordinal: cf80
 title: 'MiniMax M3: tool-call parsing and reasoning-tag integration'
 ---
 #minimax-m3

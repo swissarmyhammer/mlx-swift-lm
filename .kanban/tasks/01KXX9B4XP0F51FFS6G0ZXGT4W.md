@@ -1,8 +1,13 @@
 ---
+comments:
+- actor: claude-code
+  id: 01ky6082gthrpvb8tsn176nd6s
+  text: 'Closed as duplicate in chain reconciliation (user decision 2026-07-22): superseded by ^xgvth41 (attention/norm content) and ^8dbc476 (dense-fallback content); unique content folded there.'
+  timestamp: 2026-07-22T22:48:22.810178+00:00
 depends_on:
 - 01KXX99P1H2Z3DV0TM0AGBFEBR
-position_column: todo
-position_ordinal: '8380'
+position_column: done
+position_ordinal: cc80
 title: 'MiniMax M3: attention with per-head QK norm, partial RoPE, MSA dense fallback'
 ---
 #minimax-m3

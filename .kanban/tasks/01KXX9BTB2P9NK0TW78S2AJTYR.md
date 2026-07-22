@@ -1,8 +1,13 @@
 ---
+comments:
+- actor: claude-code
+  id: 01ky6083gfksxqb0qpz0q1grx0
+  text: 'Closed as duplicate in chain reconciliation (user decision 2026-07-22): superseded by ^mv9aq7w; unique content folded there.'
+  timestamp: 2026-07-22T22:48:23.823460+00:00
 depends_on:
 - 01KXX9B4XP0F51FFS6G0ZXGT4W
-position_column: todo
-position_ordinal: '8480'
+position_column: done
+position_ordinal: cd80
 title: 'MiniMax M3: hybrid dense/MoE MLP with swigluoai, routing bias, shared expert'
 ---
 #minimax-m3

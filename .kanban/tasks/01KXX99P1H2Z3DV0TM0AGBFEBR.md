@@ -1,6 +1,11 @@
 ---
-position_column: todo
-position_ordinal: '8280'
+comments:
+- actor: claude-code
+  id: 01ky60816nmsd00j526j2rmxdy
+  text: 'Closed as duplicate in chain reconciliation (user decision 2026-07-22): superseded by ^xgvth41; unique content folded there.'
+  timestamp: 2026-07-22T22:48:21.461039+00:00
+position_column: done
+position_ordinal: cb80
 title: 'MiniMax M3: MiniMaxM3Configuration decodes flat and VL-nested configs'
 ---
 #minimax-m3

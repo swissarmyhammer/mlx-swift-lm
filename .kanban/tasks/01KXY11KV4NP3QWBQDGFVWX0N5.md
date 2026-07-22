@@ -33,4 +33,4 @@ If, on reading the real checkpoint/modeling code, the MTP heads turn out structu
 
 ## Workflow
 
-- Use `/tdd` — write failing tests first, then implement to make them pass. #minimax
+- Use `/tdd` — write failing tests first, then implement to make them pass. #minimax #minimax-m3

@@ -1,8 +1,13 @@
 ---
+comments:
+- actor: claude-code
+  id: 01ky6084taqp7k193z8yv5asny
+  text: 'Closed as duplicate in chain reconciliation (user decision 2026-07-22): superseded by ^xgvth41 (assembly/sanitize/quantization content) and ^wz8y8qq (registration content); unique content folded there.'
+  timestamp: 2026-07-22T22:48:25.162862+00:00
 depends_on:
 - 01KXX9BTB2P9NK0TW78S2AJTYR
-position_column: todo
-position_ordinal: '8580'
+position_column: done
+position_ordinal: ce80
 title: 'MiniMax M3: model assembly, weight sanitize, factory registration'
 ---
 #minimax-m3

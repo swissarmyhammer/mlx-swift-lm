@@ -1,9 +1,14 @@
 ---
+comments:
+- actor: claude-code
+  id: 01ky60879j59jrdzmjkxd3gegx
+  text: 'Closed as duplicate in chain reconciliation (user decision 2026-07-22): superseded by ^wz8y8qq (real-weights coherence test) and ^ayw1xee (gated tool round trip); unique content (runner split, DeviceTier gating, env-var checkpoint override, mixed-precision assertion) folded there.'
+  timestamp: 2026-07-22T22:48:27.698231+00:00
 depends_on:
 - 01KXX9CKB1K44R5CQHKWERYYAK
 - 01KXX9D2PVPZNGQ6GQQA7SWY35
-position_column: todo
-position_ordinal: '8780'
+position_column: done
+position_ordinal: d080
 title: 'MiniMax M3: gated end-to-end integration test with real checkpoint'
 ---
 #minimax-m3

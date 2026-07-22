@@ -18,6 +18,10 @@ Replace ^xgvth41's dense-only attention with real MiniMax Sparse Attention (MSA)
 
 Known interaction to document (not fix): `PromptCache.isChunkable`/`isHybridMambaAttention` (MLXFoundationModels) recognize neither this cache type — M3 sessions simply won't participate in prompt-cache reuse; `MLXLanguageModel.supportsPromptCacheReuse` correctly reports `false`. State this in a doc comment on `MiniMaxM3KVCache`.
 
+### Folded from ^0zxgt4w (chain reconciliation 2026-07-22)
+
+- Both upstream mlx-lm reference PRs (#1398 `minimax_m3_vl.py`, #1401 `minimax_m3`) implement full dense causal attention instead of MSA and do not construct the sparse index-head modules at all — dense is numerically exact up to ~(sparse_topk_blocks × sparse_block_size = 2048) tokens plus the init/local windows, and an accepted approximation beyond. This chain implements real MSA instead; the exactness window doubles as the sparse==dense equivalence regression anchor already in the acceptance criteria.
+
 ## Acceptance Criteria
 
 - [ ] For sequences ≤ 2048 tokens, sparse and dense paths produce identical logits on a tiny config (max-abs-diff ≤ 1e-5) — the exactness window is the regression anchor
@@ -32,4 +36,4 @@ Known interaction to document (not fix): `PromptCache.isChunkable`/`isHybridMamb
 
 ## Workflow
 
-- Use `/tdd` — write failing tests first, then implement to make them pass. #minimax
+- Use `/tdd` — write failing tests first, then implement to make them pass. #minimax #minimax-m3
