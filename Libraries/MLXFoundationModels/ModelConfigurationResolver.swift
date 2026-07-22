@@ -48,8 +48,12 @@ public protocol ModelConfigurationResolver: Sendable {
 /// unchanged. Wired in by ``MLXLanguageModel``'s convenience init so the
 /// common case (let the factory infer everything) stays zero-config.
 public struct DefaultConfigurationResolver: ModelConfigurationResolver {
+    /// Creates the zero-config default resolver. Stateless -- there is
+    /// nothing to configure.
     public init() {}
 
+    /// Returns `configuration` unchanged -- the zero-config default
+    /// behavior (see ``ModelConfigurationResolver/resolve(_:for:)``).
     public func resolve(
         _ configuration: ModelConfiguration,
         for descriptor: ModelDescriptor

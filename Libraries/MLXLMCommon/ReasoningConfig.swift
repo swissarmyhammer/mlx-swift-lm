@@ -160,13 +160,30 @@ public struct ReasoningConfig: Sendable, Equatable {
         startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
         promptStrategy: .alwaysOn)
 
+    /// Builds a Qwen3-family configuration: `<think>` delimiters, thinking
+    /// toggled via the `enable_thinking` template kwarg (the start delimiter
+    /// is a registered special token for Qwen3 tokenizers). The single
+    /// definition of the family protocol shared by ``qwen3ThinkConfig`` and
+    /// ``qwen35ThinkConfig``, which differ only in history preservation.
+    ///
+    /// - Parameter historyPreservationKey: the chat-template kwarg that
+    ///   replays past turns' reasoning into history re-renders, or `nil`
+    ///   (the default) for families without one.
+    /// - Returns: the family configuration.
+    private static func makeQwen3Config(
+        historyPreservationKey: String? = nil
+    ) -> ReasoningConfig {
+        ReasoningConfig(
+            startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
+            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
+            isSpecialToken: true,
+            historyPreservationKey: historyPreservationKey)
+    }
+
     /// The Qwen3-family configuration: `<think>` delimiters, thinking toggled
     /// via the `enable_thinking` template kwarg (the start delimiter is a
     /// registered special token for Qwen3 tokenizers).
-    private static let qwen3ThinkConfig = ReasoningConfig(
-        startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
-        promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
-        isSpecialToken: true)
+    private static let qwen3ThinkConfig = makeQwen3Config()
 
     /// The Qwen3.6 (model_type "qwen3_5") configuration: the shared Qwen3
     /// protocol plus the template's `preserve_thinking` kwarg, which replays
@@ -174,10 +191,7 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// prompt-cache continuity extend through a round's own generated
     /// response (see ``historyPreservationKey``). Pre-3.6 Qwen3 templates
     /// have no such variable, so only this family's row carries the key.
-    private static let qwen35ThinkConfig = ReasoningConfig(
-        startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
-        promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
-        isSpecialToken: true,
+    private static let qwen35ThinkConfig = makeQwen3Config(
         historyPreservationKey: "preserve_thinking")
 
     /// How an ``inferenceTable`` entry's `value` is compared against the

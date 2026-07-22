@@ -178,6 +178,7 @@ struct ConstraintSetup {
 // MARK: - Model Cache Actor
 
 /// Thread-safe model cache using Swift actor isolation.
+///
 /// Prevents race conditions when multiple concurrent requests try to load the model.
 /// Supports caching multiple models by their identifiers.
 private actor ModelCache {
@@ -197,6 +198,7 @@ private actor ModelCache {
     private var suppressedLoadIDs: Set<String> = []
     private var xgTokenizers: [String: GrammarTokenizer] = [:]
     /// Cached compiled constraint templates keyed by (modelID, schemaJSON).
+    ///
     /// Clone from template instead of recompiling the grammar each request.
     private var constraintTemplates: [String: GrammarConstraint] = [:]
     /// Cached per-model logit biases (closing + whitespace). Pure functions of
@@ -208,6 +210,7 @@ private actor ModelCache {
     private var lastErrors: [String: any Error] = [:]
 
     /// Gets the cached model container for the given model ID, loading it if necessary.
+    ///
     /// Concurrent callers for the same model will share the same loading task, preventing duplicate loads.
     ///
     /// The `loader` closure carries the transport types (downloader, tokenizer
@@ -589,10 +592,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     // MARK: - Model Caching (CRITICAL for performance)
 
     /// Shared model cache - thread-safe via actor isolation.
+    ///
     /// Without caching, model loading takes 2-30 seconds per request.
     private static let cache = ModelCache()
 
     /// Shared token-prefix KV-cache -- thread-safe via actor isolation.
+    ///
     /// Lets `Executor.respond` reuse a prior round's KV state instead of
     /// re-prefilling the whole transcript every turn. See `PromptCache`.
     private static let promptCache = PromptCache()
@@ -741,6 +746,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     }
 
     /// Whether the shared cache already holds an `GrammarTokenizer` for the model.
+    ///
     /// Internal test seam (not public API): lets `PrewarmGrammarTests` confirm
     /// `warmUp()` pre-created the tokenizer.
     ///
@@ -1731,14 +1737,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             /// when the request carries a schema, so `ContextOptions.includeSchemaInPrompt`
             /// is consulted at the seam where the guided-generation prompt is
             /// actually assembled -- not just `input`, which never consults
-            /// the schema at all. Equal to `input` today in every case (that
-            /// seam is currently a no-op -- see its doc comment), but re-
-            /// rendered separately only when it would actually differ, so a
+            /// the schema at all. Equal to `input` today whenever the
+            /// resolved family carries no history-preservation context (the
+            /// schema seam is currently a no-op -- see its doc comment);
+            /// re-rendered separately only when the schema seam or the
+            /// history context would actually change the render, so a
             /// future schema-in-prompt renderer added there does not need to
             /// touch this call site to take effect. `nil` under the same
             /// condition as `input` (tools enabled), and also when the
-            /// request carries no schema at all.
-            let guidedInput: LMInput?
+            /// request carries no schema at all. Paired with the
+            /// stable-boundary baseline built from the SAME
+            /// history-affecting context as the render itself (see
+            /// `makeGuidedRender`), so `runGuidedGeneration`'s hybrid
+            /// prompt-cache boundary always agrees with the prompt it fed.
+            let guidedInput: (input: LMInput, stableBoundary: StableBoundaryRender)?
             /// The model's context window length, read from `config.json`'s
             /// `max_position_embeddings` field. `nil` when the model's
             /// configuration doesn't expose a recognized context-length
@@ -1905,36 +1917,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             /// The reasoning-primed render plus its config and primed-state,
             /// when declared reasoning applies; `nil` otherwise.
             let reasoningSetup: (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?
-            /// The guided-generation render honoring `includeSchemaInPrompt`;
-            /// `nil` when tools are enabled or the request carries no schema.
-            let guided: LMInput?
+            /// The guided-generation render honoring `includeSchemaInPrompt`,
+            /// paired with the stable-boundary baseline built from the SAME
+            /// history-affecting context (see `makeGuidedRender`); `nil`
+            /// when tools are enabled or the request carries no schema.
+            let guided: (input: LMInput, stableBoundary: StableBoundaryRender)?
         }
 
-        /// Computes the reasoning-suppression, reasoning-priming, and guided-
-        /// input prompt-rendering gates, once the per-instance configuration
-        /// has been resolved and the eager render is in hand. Each gate is
-        /// independently conditioned (tool state, schema presence, declared
-        /// vs. resolved reasoning), but all three read from the same
-        /// `resolved`/`input`/`messages`, so they are computed together here
-        /// rather than re-derived inline across `prepareRespondSetup`.
-        ///
-        /// - Parameters:
-        ///   - request: The generation request; supplies tool/schema gating and reasoning level.
-        ///   - messages: The rendered chat messages for this round.
-        ///   - context: The loaded model context (tokenizer, processor).
-        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
-        ///   - resolved: The per-instance configuration already resolved from `config.json`.
-        ///   - needsEagerInput: Whether tools are disabled, so the eager
-        ///     render (and, in turn, the guided-input render) is meaningful.
-        ///   - input: The eager render `prepareRespondSetup` already computed,
-        ///     or `nil` when tools are enabled.
-        ///   - schemaJSON: The developer-supplied JSON schema, if any, already
-        ///     encoded. Used only to build the guided render's schema-in-prompt
-        ///     rendering; the grammar constraint itself is compiled from this
-        ///     same value independently in `runGuidedGeneration`.
-        /// - Returns: The `PromptVariants` bundling every gate's render.
-        /// - Throws: Whatever `UserInputProcessor.prepare` or reasoning-prompt
-        ///   preparation throw.
         /// Whether the unconstrained path should render a reasoning-
         /// SUPPRESSED prompt this round: reasoning is declared OFF, the
         /// round is on the unconstrained path (no tools/schema --
@@ -1985,6 +1974,31 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             needsEagerInput && schemaJSON != nil && input != nil
         }
 
+        /// Computes the reasoning-suppression, reasoning-priming, and guided-
+        /// input prompt-rendering gates, once the per-instance configuration
+        /// has been resolved and the eager render is in hand. Each gate is
+        /// independently conditioned (tool state, schema presence, declared
+        /// vs. resolved reasoning), but all three read from the same
+        /// `resolved`/`input`/`messages`, so they are computed together here
+        /// rather than re-derived inline across `prepareRespondSetup`.
+        ///
+        /// - Parameters:
+        ///   - request: The generation request; supplies tool/schema gating and reasoning level.
+        ///   - messages: The rendered chat messages for this round.
+        ///   - context: The loaded model context (tokenizer, processor).
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - resolved: The per-instance configuration already resolved from `config.json`.
+        ///   - needsEagerInput: Whether tools are disabled, so the eager
+        ///     render (and, in turn, the guided-input render) is meaningful.
+        ///   - input: The eager render `prepareRespondSetup` already computed,
+        ///     or `nil` when tools are enabled.
+        ///   - schemaJSON: The developer-supplied JSON schema, if any, already
+        ///     encoded. Used only to build the guided render's schema-in-prompt
+        ///     rendering; the grammar constraint itself is compiled from this
+        ///     same value independently in `runGuidedGeneration`.
+        /// - Returns: The `PromptVariants` bundling every gate's render.
+        /// - Throws: Whatever `UserInputProcessor.prepare` or reasoning-prompt
+        ///   preparation throw.
         private func preparePromptVariants(
             request: LanguageModelExecutorGenerationRequest,
             messages: [Chat.Message],
@@ -2051,12 +2065,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // The prompt actually fed to guided generation. Honors
             // `ContextOptions.includeSchemaInPrompt` at the seam where the
             // guided-generation prompt is assembled -- see
-            // `guidedGenerationMessages(from:schemaJSON:includeSchemaInPrompt:)`.
-            // Only re-renders when that seam actually appended something
-            // (i.e. `includeSchemaInPrompt` did not say `true`): reusing
-            // `input` unchanged otherwise avoids a second, wasted
+            // `guidedGenerationMessages(from:schemaJSON:includeSchemaInPrompt:)` --
+            // and threads the resolved family's history-preservation context
+            // through `makeGuidedRender`, so the live render and its
+            // stable-boundary baseline agree (exactly like the unconstrained
+            // path). Only re-renders when the schema seam actually appended
+            // something OR a history context is in play: the eager `input`
+            // was rendered context-free, so it is only reusable when the
+            // guided render is context-free and message-identical --
+            // reusing it then avoids a second, wasted
             // `UserInputProcessor.prepare` call for byte-identical messages.
-            let guidedInput: LMInput?
+            let guided: (input: LMInput, stableBoundary: StableBoundaryRender)?
             if Self.shouldBuildGuidedInput(
                 needsEagerInput: needsEagerInput, schemaJSON: schemaJSON, input: input),
                 let schemaJSON, let input
@@ -2064,19 +2083,25 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 let guidedMessages = Self.guidedGenerationMessages(
                     from: messages, schemaJSON: schemaJSON,
                     includeSchemaInPrompt: request.contextOptions.includeSchemaInPrompt)
-                if guidedMessages.count == messages.count {
-                    guidedInput = input
+                let historyContext = resolved.reasoningConfig?.historyPreservationContext
+                let render = Self.makeGuidedRender(
+                    messages: guidedMessages, historyContext: historyContext)
+                if guidedMessages.count == messages.count, historyContext == nil {
+                    guided = (input, render.stableBoundary)
                 } else {
-                    guidedInput = try await Self.preparedInputMappingImageFailures(
-                        processor: context.processor, input: UserInput(chat: guidedMessages),
-                        messages: guidedMessages, transcriptEntries: request.transcript)
+                    guided = (
+                        try await Self.preparedInputMappingImageFailures(
+                            processor: context.processor, input: render.userInput,
+                            messages: guidedMessages, transcriptEntries: request.transcript),
+                        render.stableBoundary
+                    )
                 }
             } else {
-                guidedInput = nil
+                guided = nil
             }
 
             return PromptVariants(
-                suppressed: suppressedInput, reasoningSetup: reasoningSetup, guided: guidedInput)
+                suppressed: suppressedInput, reasoningSetup: reasoningSetup, guided: guided)
         }
 
         /// Renders the prompt, resolves the per-instance configuration, and
@@ -2227,15 +2252,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // tool-calling branch above returns first) -- `guidedInput`
                 // is guaranteed present here. Validate whichever prompt will
                 // actually reach generation -- `guidedInput`, which may carry
-                // the adapter's own schema-in-prompt rendering on top of
-                // `input` -- mirroring how the reasoning path below validates
-                // its own primed prompt rather than always the baseline.
-                let input = Self.unwrapSetupField(
+                // the adapter's own schema-in-prompt rendering and the
+                // family's history-preservation context on top of `input` --
+                // mirroring how the reasoning path below validates its own
+                // primed prompt rather than always the baseline.
+                let guided = Self.unwrapSetupField(
                     setup.guidedInput, fieldName: "guidedInput", contextPath: "guided-generation")
                 try Self.validateContextSize(
-                    tokenCount: input.text.tokens.size, contextLength: setup.contextLength)
+                    tokenCount: guided.input.text.tokens.size, contextLength: setup.contextLength)
                 try await runGuidedGeneration(
-                    schemaJSON: schemaJSON, input: input, messages: messages, modelID: modelID,
+                    schemaJSON: schemaJSON, input: guided.input,
+                    stableBoundary: guided.stableBoundary, modelID: modelID,
                     requestedMaxTokens: requestedMaxTokens, entryID: entryID,
                     context: context, channel: channel)
                 return true
@@ -2770,7 +2797,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// omits. `nil` at `makePromptCacheSlot` means the caller can't
         /// supply them, so the hybrid split prefill is skipped -- behavior
         /// unchanged.
-        private struct StableBoundaryRender {
+        ///
+        /// `internal` (not `private`) solely as a test seam:
+        /// `PromptCacheHybridArchitectureTests` inspects the
+        /// `makeGuidedRender` pair's boundary fields via `@testable import`,
+        /// which never elevates `private`/`fileprivate` access.
+        struct StableBoundaryRender {
             /// The chat messages this round's prompt was rendered from.
             let messages: [Chat.Message]
             /// The tool specs rendered into the prompt (the tool-calling
@@ -2786,6 +2818,42 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             /// (`enable_thinking`) are deliberately NOT part of this: they
             /// don't affect a render without a generation prompt.
             let historyContext: [String: any Sendable]?
+        }
+
+        /// Builds the guided-generation path's live-render input and its
+        /// stable-boundary baseline from ONE history-affecting context, so
+        /// the two renders cannot disagree.
+        ///
+        /// The guided path threads the resolved family's
+        /// `ReasoningConfig.historyPreservationContext` (e.g. Qwen3.6's
+        /// `preserve_thinking: true`) through this single seam: the returned
+        /// `userInput` carries it as the live render's `additionalContext`,
+        /// and the returned `stableBoundary` carries the same value for the
+        /// past-turns baseline `transcriptStableLength` renders -- exactly
+        /// the pairing the unconstrained path maintains (see
+        /// `runTextGeneration`). A `nil` context keeps both sides
+        /// context-free, byte-identical to the pre-history-preservation
+        /// renders. Reasoning-suppression/priming flags never appear here:
+        /// the guided path carries no thinking toggle, and the boundary
+        /// baseline must exclude generation-region flags by design (see
+        /// `StableBoundaryRender.historyContext`).
+        ///
+        /// - Parameters:
+        ///   - messages: The guided-generation messages for this round
+        ///     (already routed through `guidedGenerationMessages`).
+        ///   - historyContext: The resolved family's history-preservation
+        ///     context, or `nil` when it has none.
+        /// - Returns: The live-render `UserInput` and the matching
+        ///   stable-boundary baseline.
+        static func makeGuidedRender(
+            messages: [Chat.Message],
+            historyContext: [String: any Sendable]?
+        ) -> (userInput: UserInput, stableBoundary: StableBoundaryRender) {
+            (
+                UserInput(chat: messages, additionalContext: historyContext),
+                StableBoundaryRender(
+                    messages: messages, tools: nil, historyContext: historyContext)
+            )
         }
 
         /// The `isTextOnly` gate plus the `PromptCache.resolve` call it
@@ -3580,61 +3648,55 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 setup.reserves(forMaxTokens: setup.maxTokens).completionReserve)
         }
 
-        /// Tool-calling generation path. Continuation rounds from
-        /// `LanguageModelSession`'s auto-loop re-enter this path too: the
-        /// transcript's prior tool-call and tool-output entries are replayed
-        /// into the prompt by `TranscriptConverter`, so the model sees the
-        /// results and chooses another tool call or the final answer
-        /// (multi-turn tool calling).
-        ///
-        /// Forces the model to emit a JSON object matching one of the
-        /// declared tools -- including a synthetic "final answer" tool whose
-        /// arguments carry the free-text response. After generation, parses
-        /// the output to route to either a toolCallDelta (real tool) or
-        /// textDelta (final answer) event. Buffers the full output before
-        /// emitting; streaming within the final-answer path
-        /// (reparse-each-delta) is not yet implemented.
+        /// What `runToolCalling` prepares before any generation work runs:
+        /// the tool-aware prompt, the constraint setup framing the
+        /// tool-call envelope, the think-then-call gate, and the
+        /// stable-boundary baseline shared by both phases. See
+        /// `prepareToolCallingContext`.
+        private struct ToolCallingContext {
+            /// The think-then-call reasoning config, when the resolved
+            /// family qualifies; `nil` keeps the round single-phase.
+            let thinkThenCallConfig: ReasoningConfig?
+            /// The tool-aware-template-rendered prompt.
+            let toolAwareInput: LMInput
+            /// The constraint/bias/reserve setup for the tool-call envelope.
+            let setup: ConstraintSetup
+            /// The stable-boundary baseline both phases render against.
+            let stableBoundary: StableBoundaryRender
+        }
+
+        /// Prepares everything `runToolCalling`'s generation phases need:
+        /// builds the tool list (with the synthetic final-answer tool),
+        /// renders the tool-aware prompt through the model's own
+        /// `UserInputProcessor` (validated against the context window),
+        /// compiles the tool-calling grammar into a `ConstraintSetup`, and
+        /// assembles the stable-boundary baseline from the same
+        /// messages/tools/history context the prompt was rendered from.
         ///
         /// - Parameters:
         ///   - request: The generation request; supplies the enabled tools,
-        ///     developer schema, and generation options.
+        ///     developer schema, and reasoning options.
         ///   - messages: The rendered chat messages for this round.
         ///   - modelID: The model identifier for constraint/tokenizer caches.
         ///   - requestedMaxTokens: The caller's token budget override, if any.
-        ///   - requestedSamplingMode: The caller's sampling mode override, if any.
         ///   - declaresReasoning: Whether `.reasoning` was declared at init.
         ///   - resolved: The resolved model configuration.
-        ///   - contextLength: The model's context window length, if known;
-        ///     validated against the re-tokenized tool-aware prompt before
-        ///     any grammar/generation work runs.
-        ///   - entryID: The response entry to stream output into.
-        ///   - toolCallsEntryID: The entry to stream tool-call events into.
-        ///   - reasoningEntryID: The entry to stream think-then-call reasoning into.
+        ///   - contextLength: The model's context window length, if known.
         ///   - context: The loaded model context.
-        ///   - channel: The generation channel to send events on.
+        /// - Returns: The prepared `ToolCallingContext`.
         /// - Throws: `LanguageModelError.contextSizeExceeded` when the
         ///   tool-aware prompt exceeds `contextLength`, or whatever the
-        ///   grammar/tokenizer/generation calls throw.
-        /// - Returns: `false` only when think-then-call Phase 1 was cut off
-        ///   before `</think>` closed -- Phase 1 already synchronized the
-        ///   GPU on its way out, so the caller must skip its own tail
-        ///   `Stream.gpu.synchronize()` and return immediately. `true` on
-        ///   every other exit.
-        private func runToolCalling(
+        ///   grammar/tokenizer/render calls throw.
+        private func prepareToolCallingContext(
             request: LanguageModelExecutorGenerationRequest,
             messages: [Chat.Message],
             modelID: String,
             requestedMaxTokens: Int?,
-            requestedSamplingMode: MLXSamplingMode?,
             declaresReasoning: Bool,
             resolved: ModelConfiguration,
             contextLength: Int?,
-            entryID: String,
-            toolCallsEntryID: String,
-            reasoningEntryID: String,
-            context: ModelContext,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async throws -> Bool {
+            context: ModelContext
+        ) async throws -> ToolCallingContext {
             let finalAnswerDef = FinalAnswerTool.makeToolDefinition(
                 responseSchema: request.schema
             )
@@ -3654,7 +3716,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // `enable_thinking` templates (Qwen3/QwQ, which render the
             // tool block AND honor the kwarg) and `.alwaysOn` templates
             // (MiniMax-M2), the latter confirmed post-render by the
-            // primed-inside gate at the Phase 1 call below — a
+            // primed-inside gate at the Phase 1 call site — a
             // non-primed alwaysOn prompt (tool-blind R1-style) stays
             // single-phase unchanged. Thinking-disabled requests stay
             // single-phase too.
@@ -3732,6 +3794,70 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 requestedMaxTokens: requestedMaxTokens
             )
 
+            // The tool path's stable-boundary render carries the SAME
+            // messages, tool specs, and history context the tool-aware
+            // prompt was rendered from -- future rounds re-render past turns
+            // with the tool block (and any preserved thinking) still
+            // present, so both belong in the baseline.
+            return ToolCallingContext(
+                thinkThenCallConfig: thinkThenCallConfig,
+                toolAwareInput: toolAwareInput,
+                setup: setup,
+                stableBoundary: StableBoundaryRender(
+                    messages: messages, tools: toolSpecs, historyContext: historyContext))
+        }
+
+        /// The two-phase result `executeThinkThenCallPhases` reports when
+        /// Phase 1 wasn't cut off: Phase 2's buffered envelope output and
+        /// counts, plus Phase 1's reasoning-token count.
+        private struct ThinkThenCallOutcome {
+            /// The buffered Phase 2 output (a JSON tool-call envelope).
+            let outputBuffer: String
+            /// Phase 2's generated token count.
+            let generatedTokenCount: Int
+            /// How many prompt tokens were served from a `PromptCache`
+            /// slot this round.
+            let cachedTokenCount: Int
+            /// Whether Phase 2's output was incomplete.
+            let incomplete: Bool
+            /// Phase 1's reasoning token count (zero on the single-phase path).
+            let reasoningTokenCount: Int
+        }
+
+        /// Runs `runToolCalling`'s generation phases: think-then-call
+        /// Phase 1 when the prepared context qualifies (unconstrained
+        /// reasoning until `</think>`, retaining the token IDs), then
+        /// constrained Phase 2 continuing from that reasoning under the
+        /// remaining budget.
+        ///
+        /// - Parameters:
+        ///   - toolCalling: The prepared prompt/constraint/boundary bundle
+        ///     from `prepareToolCallingContext`.
+        ///   - request: The generation request (temperature/reasoning options).
+        ///   - requestedSamplingMode: The caller's sampling mode override, if any.
+        ///   - contextLength: The model's context window length, if known;
+        ///     Phase 2's reasoning-extended prompt is re-validated against it.
+        ///   - entryID: The response entry (for the incomplete-output signal).
+        ///   - reasoningEntryID: The entry to stream Phase 1 reasoning into.
+        ///   - context: The loaded model context.
+        ///   - channel: The generation channel to send events on.
+        /// - Returns: The two-phase outcome, or `nil` when Phase 1 was cut
+        ///   off before `</think>` closed -- Phase 1 already signalled
+        ///   incomplete output and synchronized the GPU on its way out, so
+        ///   the caller must return immediately without its own tail sync.
+        /// - Throws: `LanguageModelError.contextSizeExceeded` when Phase
+        ///   1's reasoning pushes the prompt past `contextLength`, or
+        ///   whatever the phase executors throw.
+        private func executeThinkThenCallPhases(
+            toolCalling: ToolCallingContext,
+            request: LanguageModelExecutorGenerationRequest,
+            requestedSamplingMode: MLXSamplingMode?,
+            contextLength: Int?,
+            entryID: String,
+            reasoningEntryID: String,
+            context: ModelContext,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws -> ThinkThenCallOutcome? {
             // PHASE 1 (think-then-call): reason unconstrained until
             // `</think>`, retaining the token IDs to prefill into the
             // constrained phase below. Empty on the single-phase path.
@@ -3740,32 +3866,25 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // `thinkThenCallPhase1Engages`) — MiniMax-M2's template
             // pre-opens `<think>\n`; a non-primed alwaysOn prompt stays
             // single-phase.
-            // The tool path's stable-boundary render carries the SAME
-            // messages, tool specs, and history context the tool-aware
-            // prompt was rendered from -- future rounds re-render past turns
-            // with the tool block (and any preserved thinking) still
-            // present, so both belong in the baseline.
-            let stableBoundary = StableBoundaryRender(
-                messages: messages, tools: toolSpecs, historyContext: historyContext)
-
             var reasoningTokenIDs: [Int] = []
-            if let reasoningConfig = thinkThenCallConfig {
+            if let reasoningConfig = toolCalling.thinkThenCallConfig {
                 let primedInside = Self.reasoningPrimedInside(
-                    input: toolAwareInput, reasoningConfig: reasoningConfig,
+                    input: toolCalling.toolAwareInput, reasoningConfig: reasoningConfig,
                     tokenizer: context.tokenizer)
                 if Self.thinkThenCallPhase1Engages(
                     reasoningConfig: reasoningConfig, primedInside: primedInside)
                 {
                     let phase1 = try await executeThinkThenCallPhase1(
-                        reasoningConfig: reasoningConfig, toolAwareInput: toolAwareInput,
+                        reasoningConfig: reasoningConfig,
+                        toolAwareInput: toolCalling.toolAwareInput,
                         primedInside: primedInside,
-                        maxTokens: setup.maxTokens,
+                        maxTokens: toolCalling.setup.maxTokens,
                         request: request, requestedSamplingMode: requestedSamplingMode,
-                        stableBoundary: stableBoundary,
+                        stableBoundary: toolCalling.stableBoundary,
                         reasoningEntryID: reasoningEntryID, entryID: entryID,
                         context: context, channel: channel)
                     reasoningTokenIDs = phase1.tokenIDs
-                    guard !phase1.cutOff else { return false }
+                    guard !phase1.cutOff else { return nil }
                 }
             }
 
@@ -3778,18 +3897,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // path used to have unconditionally.
             let phase2Input =
                 reasoningTokenIDs.isEmpty
-                ? toolAwareInput
+                ? toolCalling.toolAwareInput
                 : LMInput(
                     text: .init(
                         tokens: MLXArray(
-                            toolAwareInput.text.tokens.asArray(Int.self) + reasoningTokenIDs)),
-                    image: toolAwareInput.image,
-                    video: toolAwareInput.video,
-                    audio: toolAwareInput.audio)
+                            toolCalling.toolAwareInput.text.tokens.asArray(Int.self)
+                                + reasoningTokenIDs)),
+                    image: toolCalling.toolAwareInput.image,
+                    video: toolCalling.toolAwareInput.video,
+                    audio: toolCalling.toolAwareInput.audio)
             // Phase 1's reasoning tokens can push the prompt over the
-            // context window even when the original `toolAwareInput` (validated
-            // above) was within it -- re-validate the actual Phase 2 input,
-            // not just its no-reasoning-tokens starting point.
+            // context window even when the original `toolAwareInput`
+            // (validated at render time) was within it -- re-validate the
+            // actual Phase 2 input, not just its no-reasoning-tokens
+            // starting point.
             try Self.validateContextSize(
                 tokenCount: phase2Input.text.tokens.size, contextLength: contextLength)
             // Shared budget (match the unconstrained path): the
@@ -3797,17 +3918,97 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // at the completion reserve so it always has room to close
             // the tool call.
             let phase2MaxTokens = Self.resolvePhase2MaxTokens(
-                reasoningTokenIDs: reasoningTokenIDs, setup: setup)
+                reasoningTokenIDs: reasoningTokenIDs, setup: toolCalling.setup)
 
             let phase2 = try await executeToolCallingPhase2(
                 phase2Input: phase2Input, phase2MaxTokens: phase2MaxTokens,
-                context: context, setup: setup, stableBoundary: stableBoundary)
-            let outputBuffer = phase2.outputBuffer
-            let incomplete = phase2.incomplete
-            let generatedTokenCount = phase2.generatedTokenCount
+                context: context, setup: toolCalling.setup,
+                stableBoundary: toolCalling.stableBoundary)
+            return ThinkThenCallOutcome(
+                outputBuffer: phase2.outputBuffer,
+                generatedTokenCount: phase2.generatedTokenCount,
+                cachedTokenCount: phase2.cachedTokenCount,
+                incomplete: phase2.incomplete,
+                reasoningTokenCount: reasoningTokenIDs.count)
+        }
+
+        /// Tool-calling generation path. Continuation rounds from
+        /// `LanguageModelSession`'s auto-loop re-enter this path too: the
+        /// transcript's prior tool-call and tool-output entries are replayed
+        /// into the prompt by `TranscriptConverter`, so the model sees the
+        /// results and chooses another tool call or the final answer
+        /// (multi-turn tool calling).
+        ///
+        /// Forces the model to emit a JSON object matching one of the
+        /// declared tools -- including a synthetic "final answer" tool whose
+        /// arguments carry the free-text response. After generation, parses
+        /// the output to route to either a toolCallDelta (real tool) or
+        /// textDelta (final answer) event. Buffers the full output before
+        /// emitting; streaming within the final-answer path
+        /// (reparse-each-delta) is not yet implemented.
+        ///
+        /// - Parameters:
+        ///   - request: The generation request; supplies the enabled tools,
+        ///     developer schema, and generation options.
+        ///   - messages: The rendered chat messages for this round.
+        ///   - modelID: The model identifier for constraint/tokenizer caches.
+        ///   - requestedMaxTokens: The caller's token budget override, if any.
+        ///   - requestedSamplingMode: The caller's sampling mode override, if any.
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init.
+        ///   - resolved: The resolved model configuration.
+        ///   - contextLength: The model's context window length, if known;
+        ///     validated against the re-tokenized tool-aware prompt before
+        ///     any grammar/generation work runs.
+        ///   - entryID: The response entry to stream output into.
+        ///   - toolCallsEntryID: The entry to stream tool-call events into.
+        ///   - reasoningEntryID: The entry to stream think-then-call reasoning into.
+        ///   - context: The loaded model context.
+        ///   - channel: The generation channel to send events on.
+        /// - Throws: `LanguageModelError.contextSizeExceeded` when the
+        ///   tool-aware prompt exceeds `contextLength`, or whatever the
+        ///   grammar/tokenizer/generation calls throw.
+        /// - Returns: `false` only when think-then-call Phase 1 was cut off
+        ///   before `</think>` closed -- Phase 1 already synchronized the
+        ///   GPU on its way out, so the caller must skip its own tail
+        ///   `Stream.gpu.synchronize()` and return immediately. `true` on
+        ///   every other exit.
+        private func runToolCalling(
+            request: LanguageModelExecutorGenerationRequest,
+            messages: [Chat.Message],
+            modelID: String,
+            requestedMaxTokens: Int?,
+            requestedSamplingMode: MLXSamplingMode?,
+            declaresReasoning: Bool,
+            resolved: ModelConfiguration,
+            contextLength: Int?,
+            entryID: String,
+            toolCallsEntryID: String,
+            reasoningEntryID: String,
+            context: ModelContext,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws -> Bool {
+            let toolCalling = try await prepareToolCallingContext(
+                request: request, messages: messages, modelID: modelID,
+                requestedMaxTokens: requestedMaxTokens,
+                declaresReasoning: declaresReasoning, resolved: resolved,
+                contextLength: contextLength, context: context)
+
+            guard
+                let outcome = try await executeThinkThenCallPhases(
+                    toolCalling: toolCalling, request: request,
+                    requestedSamplingMode: requestedSamplingMode,
+                    contextLength: contextLength, entryID: entryID,
+                    reasoningEntryID: reasoningEntryID, context: context,
+                    channel: channel)
+            else {
+                // Phase 1 was cut off before `</think>` closed; it already
+                // signalled incomplete output and synchronized the GPU on
+                // its way out -- the caller must skip its own tail sync.
+                return false
+            }
 
             try await emitToolCallingEvent(
-                outputBuffer: outputBuffer,
+                outputBuffer: outcome.outputBuffer,
                 userResponseSchema: request.schema,
                 entryID: entryID,
                 toolCallsEntryID: toolCallsEntryID,
@@ -3815,17 +4016,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             )
 
             // Output total spans both phases (reasoning + envelope).
-            let reasoningCount = reasoningTokenIDs.count
-            let totalOutput = generatedTokenCount + reasoningCount
             await Self.sendUsageUpdate(
                 entryID: entryID,
-                promptTokenCount: toolAwareInput.text.tokens.size,
-                cachedTokenCount: phase2.cachedTokenCount,
-                outputTokenCount: totalOutput,
-                reasoningTokenCount: reasoningCount,
+                promptTokenCount: toolCalling.toolAwareInput.text.tokens.size,
+                cachedTokenCount: outcome.cachedTokenCount,
+                outputTokenCount: outcome.generatedTokenCount + outcome.reasoningTokenCount,
+                reasoningTokenCount: outcome.reasoningTokenCount,
                 channel: channel)
 
-            if incomplete {
+            if outcome.incomplete {
                 await Self.sendIncompleteOutputMetadata(entryID: entryID, channel: channel)
             }
 
@@ -3941,8 +4140,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Parameters:
         ///   - schemaJSON: The developer-supplied JSON schema.
         ///   - input: The rendered prompt to generate from.
-        ///   - messages: The chat messages `input` was rendered from, for
-        ///     the hybrid stable-boundary computation (see `makePromptCacheSlot`).
+        ///   - stableBoundary: The hybrid stable-boundary baseline built
+        ///     alongside `input` from the SAME history-affecting context
+        ///     (see `makeGuidedRender` and `makePromptCacheSlot`).
         ///   - modelID: The model identifier for constraint/tokenizer caches.
         ///   - requestedMaxTokens: The caller's token budget override, if any.
         ///   - entryID: The response entry to stream output into.
@@ -3952,7 +4152,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private func runGuidedGeneration(
             schemaJSON: String,
             input: LMInput,
-            messages: [Chat.Message],
+            stableBoundary: StableBoundaryRender,
             modelID: String,
             requestedMaxTokens: Int?,
             entryID: String,
@@ -3980,13 +4180,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 }
             }()
 
-            // The guided render is context-free (no reasoning flags), so
-            // the stable-boundary baseline must be too -- see
+            // `stableBoundary` was built alongside `input` from the SAME
+            // history-affecting context (see `makeGuidedRender`), so the
+            // baseline render always agrees with the fed prompt -- see
             // `StableBoundaryRender.historyContext`.
             let result = try await runGuidedGenerationLoop(
                 input: input, context: context, setup: setup, maxTokens: setup.maxTokens,
-                stableBoundary: StableBoundaryRender(
-                    messages: messages, tools: nil, historyContext: nil)
+                stableBoundary: stableBoundary
             ) { text in
                 textContinuation.yield(text)
                 return !Task.isCancelled
@@ -4571,6 +4771,48 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             return (collector.reasoningTokenIDs, closed)
         }
 
+        /// What `collectReasoningTokens`' consume loop should do after
+        /// `processReasoningStreamEvent` handles one stream event.
+        private enum ReasoningCollectionStep {
+            /// Bookkeeping-only event; nothing to route, keep consuming.
+            case proceed
+            /// Route `segments` to the channel; when `stopsAfter` is `true`
+            /// the collector's reasoning span closed on this token and the
+            /// loop must stop consuming after routing them.
+            case emit(segments: [ReasoningEventEmitter.Segment], stopsAfter: Bool)
+        }
+
+        /// Processes one stream event for `collectReasoningTokens`: records
+        /// completion-info bookkeeping, or feeds a generated token through
+        /// `collector` -- returning what the consume loop should do next,
+        /// so the loop body stays a flat dispatch with no nested
+        /// conditionals.
+        ///
+        /// - Parameters:
+        ///   - generation: The stream event to process.
+        ///   - collector: The reasoning-token collector to feed tokens into.
+        ///   - stopTokenFedToCache: The terminal stop token fed into the
+        ///     cache but not emitted (mutated on `.info`), so
+        ///     `commitPromptCache` can key a hybrid checkpoint on the full
+        ///     true sequence rather than dropping it. See
+        ///     `GenerateCompletionInfo.stopTokenFedToCache`.
+        /// - Returns: The step the consume loop should take.
+        private static func processReasoningStreamEvent(
+            _ generation: TokenGeneration,
+            collector: inout ReasoningTokenCollector,
+            stopTokenFedToCache: inout Int?
+        ) -> ReasoningCollectionStep {
+            switch generation {
+            case .info(let info):
+                stopTokenFedToCache = info.stopTokenFedToCache
+                return .proceed
+            case .token(let token):
+                return .emit(
+                    segments: collector.ingest(token),
+                    stopsAfter: collector.shouldStopAfterReasoning)
+            }
+        }
+
         /// Consumes `stream`, feeding each generated token into `collector`
         /// and routing its emitted segments to the appropriate channel
         /// entry, until the stream ends or the collector's reasoning span
@@ -4579,6 +4821,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Parameters:
         ///   - stream: The raw token stream from `generateTokensTask`.
         ///   - collector: The reasoning-token collector to feed tokens into.
+        ///   - stopTokenFedToCache: The terminal stop token recorded from
+        ///     the stream's completion info, if any (mutated).
         ///   - responseEntryID: The entry `.response` segments stream into.
         ///   - reasoningEntryID: The entry `.reasoning` segments stream into.
         ///   - channel: The generation channel to send events on.
@@ -4595,20 +4839,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) async throws -> Bool {
             for await generation in stream {
                 try Task.checkCancellation()
-                if case .info(let info) = generation {
-                    // The terminal stop token fed into the cache but not
-                    // emitted, so `commitPromptCache` can key a hybrid
-                    // checkpoint on the full true sequence rather than dropping
-                    // it. See `GenerateCompletionInfo.stopTokenFedToCache`.
-                    stopTokenFedToCache = info.stopTokenFedToCache
+                switch Self.processReasoningStreamEvent(
+                    generation, collector: &collector,
+                    stopTokenFedToCache: &stopTokenFedToCache)
+                {
+                case .proceed:
                     continue
-                }
-                guard case .token(let token) = generation else { continue }
-                await Self.sendSegments(
-                    collector.ingest(token), responseEntryID: responseEntryID,
-                    reasoningEntryID: reasoningEntryID, channel: channel)
-                if collector.shouldStopAfterReasoning {
-                    return true
+                case .emit(let segments, let stopsAfter):
+                    await Self.sendSegments(
+                        segments, responseEntryID: responseEntryID,
+                        reasoningEntryID: reasoningEntryID, channel: channel)
+                    if stopsAfter {
+                        return true
+                    }
                 }
             }
             return false

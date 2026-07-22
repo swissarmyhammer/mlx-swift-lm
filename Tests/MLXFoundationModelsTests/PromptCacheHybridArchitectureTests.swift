@@ -724,6 +724,78 @@ struct PromptCacheHybridArchitectureTests {
         #expect(stableLength == nil)
     }
 
+    @Test("makeGuidedRender threads ONE history context to both the live render and the stable-boundary baseline")
+    func makeGuidedRenderAgreesOnHistoryContext() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let messages: [Chat.Message] = [
+            .user(content: "ab"), .assistant(content: "cd"), .user(content: "ef"),
+        ]
+        // The context exactly as the guided path derives it: from the
+        // resolved family's `ReasoningConfig.historyPreservationContext`.
+        let historyContext = ReasoningConfig(
+            startDelimiter: "<think>", endDelimiter: "</think>",
+            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
+            historyPreservationKey: "preserve_thinking"
+        ).historyPreservationContext
+
+        let render = MLXLanguageModel.Executor.makeGuidedRender(
+            messages: messages, historyContext: historyContext)
+        #expect(render.userInput.additionalContext?["preserve_thinking"] as? Bool == true)
+        #expect(render.stableBoundary.historyContext?["preserve_thinking"] as? Bool == true)
+        #expect(render.stableBoundary.tools == nil)
+        #expect(render.stableBoundary.messages.count == messages.count)
+
+        // A family with no history-preservation key stays context-free on
+        // BOTH sides -- the guided render is byte-identical to before.
+        let contextFree = MLXLanguageModel.Executor.makeGuidedRender(
+            messages: messages, historyContext: nil)
+        #expect(contextFree.userInput.additionalContext == nil)
+        #expect(contextFree.stableBoundary.historyContext == nil)
+    }
+
+    @Test("a guided round's stable boundary recovers the full past-turns prefix because live and baseline renders agree")
+    func guidedStableBoundaryCarriesHistoryContext() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let tokenizer = StableBoundaryProbeTokenizer()
+        let chat: [Chat.Message] = [
+            .user(content: "ab"), .assistant(content: "cd"), .user(content: "ef"),
+        ]
+        let messages: [[String: any Sendable]] = [
+            ["role": "user", "content": "ab"],
+            ["role": "assistant", "content": "cd"],
+            ["role": "user", "content": "ef"],
+        ]
+        let render = MLXLanguageModel.Executor.makeGuidedRender(
+            messages: chat, historyContext: ["preserve_thinking": true])
+
+        // The guided LIVE prompt renders with the pair's user-input
+        // context (its history region carries the preserved-thinking
+        // markers) plus the generation-priming region...
+        let promptTokens = try #require(
+            try tokenizer.applyChatTemplate(
+                messages: messages, tools: render.stableBoundary.tools,
+                additionalContext: render.userInput.additionalContext,
+                addGenerationPrompt: true))
+        let baseWithContext = try #require(
+            try tokenizer.applyChatTemplate(
+                messages: messages, tools: render.stableBoundary.tools,
+                additionalContext: render.stableBoundary.historyContext,
+                addGenerationPrompt: false))
+
+        // ...and the boundary baseline renders with the SAME context
+        // (both halves come from `makeGuidedRender`'s single
+        // `historyContext`), so the stable prefix spans the full
+        // past-turns render instead of collapsing at the first history
+        // marker -- the agreement the old context-free guided baseline
+        // could not provide for a history-preserving family.
+        let stableLength = MLXLanguageModel.Executor.transcriptStableLength(
+            promptTokens: promptTokens, messages: messages,
+            tools: render.stableBoundary.tools,
+            additionalContext: render.stableBoundary.historyContext,
+            tokenizer: tokenizer)
+        #expect(stableLength == baseWithContext.count)
+    }
+
     /// Shared body for `qwen35StableBoundaryCheckpointMatchesFullForwardPass`/
     /// `qwen3NextStableBoundaryCheckpointMatchesFullForwardPass`: proves the
     /// SPLIT-PREFILL flow `Executor.makePromptCacheSlot` runs for a hybrid
