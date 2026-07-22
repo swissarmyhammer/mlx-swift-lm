@@ -43,8 +43,8 @@ comments:
 
     Full `swift test` green: 647 Swift Testing tests + all XCTest bundles, 0 failures (verified twice; one earlier run showed a transient MLXLMTests failure note that did not reproduce standalone (283/283) nor in two subsequent full runs — unrelated to this tests-target-only change).
   timestamp: 2026-07-22T21:00:29.320604+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: c880
 title: 'Suspected cross-session leak in hybrid prompt-cache checkpoint store (Qwen3.6): full-suite-only failure, faster-than-normal + wrong output'
 ---
 ## What
