@@ -26,8 +26,12 @@ comments:
 
     Verification: full `swift test` green — 642 swift-testing tests (272+283+80+7 across targets) + 13 XCTest, 0 failures. Real-weights gate re-run and PASSED: xcodebuild IntegrationTestingTests/PromptCacheHybridReuseTests, 2/2 (suppressed + thinking modes, thinking round took 42s). No Id→ID renames; Qwen3VL.swift/VLMModelFactory.swift untouched (superseded findings left to hybeksr). Not committed, per instructions; task left in doing.
   timestamp: 2026-07-22T15:30:25.240079+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01ky5refbzsv0zkymrgb0g9k5j
+  text: 'CLOSING via partial review gate — USER-APPROVED 2026-07-22. Final gate evidence: ReasoningConfig.swift clean (14/14 validators, 0 findings), ModelConfigurationResolver.swift clean (14/14, 0 findings), PromptCacheHybridArchitectureTests.swift declared out-of-scope by the engine (0 attempted). MLXLanguageModel.swift UNREVIEWABLE in the current sah build: 274,465 bytes exceeds the hard 262,144-byte review batch cap, and the error''s own remedy is dead — `batch_size` is ignored as an op param (both spellings) and via .sah/sah.yaml (both key shapes). Mitigation: the file''s pre-fix state was fully reviewed by the completed 2026-07-22 run (14/14 units), the unreviewed delta (commit 4d7cbaf) is exactly that run''s findings'' fixes, all 12 checklist items verified [x], full swift test 655 green, real-weights PromptCacheHybridReuseTests passes both modes on mlx-community/Qwen3.6-27B-mxfp4. FOLLOW-UP for whoever fixes sah''s batch_size knob: run `review file` on Libraries/MLXFoundationModels/MLXLanguageModel.swift to close the coverage gap. All prior review rounds'' findings sections remain in the description; the ~215 pre-existing Qwen3VL/VLMModelFactory findings stay SUPERSEDED per the 9mv1q33 scope-out to hybeksr.'
+  timestamp: 2026-07-22T20:32:03.967281+00:00
+position_column: done
+position_ordinal: c780
 title: 'Qwen3.6: set preserve_thinking + replay reasoning_content so prompt-cache continuity extends through responses'
 ---
 ## What
