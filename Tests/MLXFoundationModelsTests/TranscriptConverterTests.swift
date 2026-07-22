@@ -247,6 +247,155 @@ struct TranscriptConverterTests {
         #expect(messages[0].content == "Hi")
     }
 
+    // MARK: - Reasoning replay (replayReasoning: true)
+
+    /// With replay enabled, a `.reasoning` entry's text rides on the NEXT
+    /// `.response` entry's assistant message as `reasoning`, mirroring the
+    /// reasoning → response emission order the executor streams them in.
+    @Test
+    func testReasoningAttachesToFollowingResponseWhenReplayEnabled() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let entries: [Transcript.Entry] = [
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "What is 2 + 2?"))],
+                    responseFormat: nil)),
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "2 + 2 is 4"))]
+                )),
+            .response(
+                Transcript.Response(
+                    assetIDs: [], segments: [.text(Transcript.TextSegment(content: "4"))])),
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "And 3 + 3?"))],
+                    responseFormat: nil)),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+
+        #expect(messages.count == 3)
+        #expect(messages[1].role == .assistant)
+        #expect(messages[1].content == "4")
+        #expect(messages[1].reasoning == "2 + 2 is 4")
+    }
+
+    /// The default (`replayReasoning: false`) preserves today's behavior:
+    /// reasoning entries are dropped and the assistant message carries no
+    /// replayed reasoning — the gate belongs to families whose templates
+    /// support preserved thinking, not to every model.
+    @Test
+    func testReasoningNotAttachedWhenReplayDisabled() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let entries: [Transcript.Entry] = [
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "2 + 2 is 4"))]
+                )),
+            .response(
+                Transcript.Response(
+                    assetIDs: [], segments: [.text(Transcript.TextSegment(content: "4"))])),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+
+        #expect(messages.count == 1)
+        #expect(messages[0].role == .assistant)
+        #expect(messages[0].reasoning == nil)
+    }
+
+    /// Consecutive `.reasoning` entries ahead of one response all belong to
+    /// that response: their texts join with newlines, exactly like segments
+    /// within a single entry.
+    @Test
+    func testConsecutiveReasoningEntriesJoinForFollowingResponse() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let entries: [Transcript.Entry] = [
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "first thought"))]
+                )),
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "second thought"))]
+                )),
+            .response(
+                Transcript.Response(
+                    assetIDs: [], segments: [.text(Transcript.TextSegment(content: "done"))])),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+
+        #expect(messages.count == 1)
+        #expect(messages[0].reasoning == "first thought\nsecond thought")
+    }
+
+    /// Reasoning belongs to the entry generated immediately after it. When
+    /// something other than a `.response` intervenes (here a new prompt),
+    /// the pending reasoning is discarded rather than mis-attributed to a
+    /// later, unrelated response.
+    @Test
+    func testReasoningNotCarriedPastInterveningEntry() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let entries: [Transcript.Entry] = [
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "stale thought"))]
+                )),
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "Hi"))],
+                    responseFormat: nil)),
+            .response(
+                Transcript.Response(
+                    assetIDs: [], segments: [.text(Transcript.TextSegment(content: "Hello"))])),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+
+        #expect(messages.count == 2)
+        #expect(messages[1].role == .assistant)
+        #expect(messages[1].reasoning == nil)
+    }
+
+    /// A think-then-call round's reasoning precedes a `.toolCalls` entry, not
+    /// a `.response`. Replay deliberately does NOT attach it there — the
+    /// tool-call turn is replayed as the verbatim envelope text it always
+    /// was — so the pending reasoning is discarded, and the eventual final
+    /// response carries only its own reasoning.
+    @Test
+    func testReasoningBeforeToolCallsIsNotAttached() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let entries: [Transcript.Entry] = [
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "should I call a tool?"))]
+                )),
+            .toolCalls(
+                Transcript.ToolCalls([
+                    Transcript.ToolCall(
+                        id: "call-1", toolName: "lookup",
+                        arguments: GeneratedContent(properties: [:]))
+                ])),
+            .response(
+                Transcript.Response(
+                    assetIDs: [], segments: [.text(Transcript.TextSegment(content: "answer"))])),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+
+        #expect(messages.count == 2)
+        #expect(messages[0].role == .assistant)
+        #expect(messages[0].reasoning == nil, "tool-call turn must not carry the reasoning")
+        #expect(messages[1].reasoning == nil, "final response must not inherit stale reasoning")
+    }
+
     @Test
     func testLabeledImageAttachmentBecomesUserMessageImage() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }

@@ -1487,13 +1487,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // Re-render format-aware (see `respond`): a `.mistral` model's
             // tool-call turns must replay as structured `tool_calls` so its
             // strict-alternation chat template accepts a warmed transcript
-            // that already contains a tool round.
+            // that already contains a tool round. History-preserving
+            // families likewise replay reasoning and render with their
+            // history context, so the warmed tokens match what `respond`'s
+            // own renders will re-produce.
+            let loadedConfiguration = await container.configuration
+            let historyContext = loadedConfiguration.reasoningConfig?.historyPreservationContext
             let messages = TranscriptConverter.mlxMessages(
-                for: transcript, toolCallFormat: await container.configuration.toolCallFormat)
+                for: transcript, toolCallFormat: loadedConfiguration.toolCallFormat,
+                replayReasoning: loadedConfiguration.reasoningConfig?.historyPreservationKey
+                    != nil)
 
             let modelID = self.modelID
             try await container.perform(nonSendable: messages) { context, messages in
-                let input = try await context.processor.prepare(input: UserInput(chat: messages))
+                let input = try await context.processor.prepare(
+                    input: UserInput(chat: messages, additionalContext: historyContext))
 
                 // Bail out before ever materializing `tokens` below: unlike
                 // `makePromptCacheSlot` (whose callers need a real, uncached
@@ -1590,9 +1598,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // the loaded configuration -- the documented source of truth for
             // it (see `ModelConfigurationResolver`); non-Mistral families
             // render exactly as before.
-            let toolCallFormat = await container.configuration.toolCallFormat
+            let loadedConfiguration = await container.configuration
+            let toolCallFormat = loadedConfiguration.toolCallFormat
             var collected = TranscriptConverter.mlxMessages(
-                for: request.transcript, toolCallFormat: toolCallFormat)
+                for: request.transcript, toolCallFormat: toolCallFormat,
+                // History-preserving families (Qwen3.6) replay past turns'
+                // reasoning as `reasoning_content` so history re-renders
+                // stay byte-continuous with what each round actually fed --
+                // see `ReasoningConfig.historyPreservationKey`. Read from the
+                // loaded configuration like `toolCallFormat` above (message
+                // construction precedes per-call resolution); a resolver
+                // patch of `reasoningConfig` still governs the render-time
+                // `preserve_thinking` context, not this replay gate.
+                replayReasoning: loadedConfiguration.reasoningConfig?.historyPreservationKey
+                    != nil)
             // MLX tokenizer crashes on empty chat input; provide a fallback.
             if collected.isEmpty {
                 collected = [Chat.Message.user(content: "")]
@@ -2237,6 +2256,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     reasoningSetup: setup.reasoningSetup,
                     fallbackInput: fallbackInput,
                     messages: messages,
+                    // The suppressed render (the only fed render that can
+                    // carry it -- see `prepareRespondSetup`'s
+                    // `effectiveInput`) merged the resolved family's history
+                    // context; a config-free model resolves nil here.
+                    historyContext: setup.resolved.reasoningConfig?.historyPreservationContext,
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: request.generationOptions.temperature,
                     samplingMode: requestedSamplingMode,
@@ -2308,6 +2332,31 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     LanguageModelError.UnsupportedCapability(
                         capability: .reasoning,
                         debugDescription: debugDescription))
+            }
+        }
+
+        /// Merges two optional chat-template `additionalContext` fragments
+        /// -- the prompt strategy's thinking flag (`enable_thinking`) and the
+        /// family's history-preservation flag (`preserve_thinking`) -- into
+        /// the single dictionary `applyChatTemplate` takes. `nil` + `nil`
+        /// stays `nil`, so renders without any context remain byte-identical
+        /// to before. The fragments' keys are disjoint by construction
+        /// (strategy kwarg vs. `ReasoningConfig.historyPreservationKey`);
+        /// `rhs` wins on a collision.
+        ///
+        /// - Parameters:
+        ///   - lhs: The first context fragment, if any.
+        ///   - rhs: The second context fragment, if any (wins on collision).
+        /// - Returns: The merged context, or `nil` when both are `nil`.
+        static func mergedAdditionalContext(
+            _ lhs: [String: any Sendable]?,
+            _ rhs: [String: any Sendable]?
+        ) -> [String: any Sendable]? {
+            switch (lhs, rhs) {
+            case (nil, nil): return nil
+            case (let some?, nil): return some
+            case (nil, let some?): return some
+            case (let a?, let b?): return a.merging(b) { _, new in new }
             }
         }
 
@@ -2714,17 +2763,29 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// What `makePromptCacheSlot` needs to re-render this round's
         /// conversation as PAST turns and compute its transcript-stable
         /// boundary (see `transcriptStableLength`): the same messages and
-        /// tool specs the round's prompt was rendered from -- but never the
-        /// reasoning-suppression/priming `additionalContext`, which belongs
-        /// to the generation region a past-turns render omits. `nil` at
-        /// `makePromptCacheSlot` means the caller can't supply them, so the
-        /// hybrid split prefill is skipped -- behavior unchanged.
+        /// tool specs the round's prompt was rendered from, plus the
+        /// history-affecting `additionalContext` the live render carried
+        /// (`historyContext`) -- but never the reasoning-suppression/priming
+        /// flags, which belong to the generation region a past-turns render
+        /// omits. `nil` at `makePromptCacheSlot` means the caller can't
+        /// supply them, so the hybrid split prefill is skipped -- behavior
+        /// unchanged.
         private struct StableBoundaryRender {
             /// The chat messages this round's prompt was rendered from.
             let messages: [Chat.Message]
             /// The tool specs rendered into the prompt (the tool-calling
             /// path); `nil` on the tool-free paths.
             let tools: [[String: any Sendable]]?
+            /// The history-affecting `additionalContext` the round's LIVE
+            /// render carried (`ReasoningConfig.historyPreservationContext`,
+            /// e.g. Qwen3.6's `preserve_thinking: true`), or `nil` when the
+            /// live render had none. The past-turns baseline must render
+            /// with the SAME history context -- a mismatched baseline
+            /// diverges from the live prompt at the first history turn,
+            /// collapsing the stable prefix. Generation-region-only flags
+            /// (`enable_thinking`) are deliberately NOT part of this: they
+            /// don't affect a render without a generation prompt.
+            let historyContext: [String: any Sendable]?
         }
 
         /// The `isTextOnly` gate plus the `PromptCache.resolve` call it
@@ -2863,6 +2924,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     messages: DefaultMessageGenerator().generate(
                         messages: stableBoundary.messages),
                     tools: stableBoundary.tools,
+                    additionalContext: stableBoundary.historyContext,
                     tokenizer: context.tokenizer),
                 matchedLength < stableLength, stableLength < promptTokens.count
             else { return nil }
@@ -2899,21 +2961,26 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// identically once this round's turns are history.
         ///
         /// Renders the SAME conversation as past turns -- `addGenerationPrompt:
-        /// false`, and deliberately WITHOUT any reasoning-suppression/priming
-        /// `additionalContext` -- because that is exactly the form a future
-        /// round re-renders these turns in. The common prefix of this round's
-        /// live prompt against that baseline is therefore the prefix that is
-        /// guaranteed to reappear verbatim at the start of every later round's
-        /// prompt: everything past it (assistant header, thinking-suppression
-        /// injections, other generation-priming tokens) belongs to the
-        /// template's generation region and is re-rendered differently -- or
-        /// not at all -- once the turn is history (see kanban er33v06's
-        /// token-level trace for Qwen3.6's `[248068, 198]` injection).
+        /// false`, with only the history-affecting `additionalContext` the
+        /// live render carried (never its reasoning-suppression/priming
+        /// flags, which only affect the generation region) -- because that is
+        /// exactly the form a future round re-renders these turns in. The
+        /// common prefix of this round's live prompt against that baseline is
+        /// therefore the prefix that is guaranteed to reappear verbatim at
+        /// the start of every later round's prompt: everything past it
+        /// (assistant header, thinking-suppression injections, other
+        /// generation-priming tokens) belongs to the template's generation
+        /// region and is re-rendered differently -- or not at all -- once the
+        /// turn is history (see kanban er33v06's token-level trace for
+        /// Qwen3.6's `[248068, 198]` injection).
         ///
         /// - Parameters:
         ///   - promptTokens: This round's full rendered prompt tokens.
         ///   - messages: The raw message dictionaries the prompt was rendered from.
         ///   - tools: The tool specs rendered into the prompt, if any.
+        ///   - additionalContext: The history-affecting context the live
+        ///     render carried (see `StableBoundaryRender.historyContext`),
+        ///     or `nil` when it had none.
         ///   - tokenizer: The tokenizer to render the past-turns baseline with.
         /// - Returns: The stable prefix length, or `nil` when the tokenizer
         ///   cannot control the generation prompt (the optional
@@ -2924,6 +2991,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             promptTokens: [Int],
             messages: [[String: any Sendable]],
             tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?,
             tokenizer: any Tokenizer
         ) -> Int? {
             // `try?` flattens the render's own optional (the capability's
@@ -2931,7 +2999,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // "no stable boundary computable" here.
             guard
                 let baseTokens = try? tokenizer.applyChatTemplate(
-                    messages: messages, tools: tools, additionalContext: nil,
+                    messages: messages, tools: tools, additionalContext: additionalContext,
                     addGenerationPrompt: false)
             else { return nil }
             return commonPrefixLength(promptTokens, baseTokens)
@@ -3596,12 +3664,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 reasoningLevel: request.contextOptions.reasoningLevel)
             // Thread `enable_thinking` through the tool-aware template
             // (3-arg form) so the prompt is both tool-aware and
-            // thinking-primed; nil on the single-phase path.
-            let reasoningContext = try thinkThenCallConfig.flatMap {
+            // thinking-primed; nil on the single-phase path. History
+            // preservation (`preserve_thinking`) is independent of the
+            // think-then-call gate: it comes from the resolved family
+            // config, so a history-preserving model's tool rounds render
+            // past turns consistently in both phases.
+            let historyContext = resolved.reasoningConfig?.historyPreservationContext
+            let strategyContext = try thinkThenCallConfig.flatMap {
                 try $0.promptStrategy.additionalContext(
                     forThinkingEnabled: Self.thinkingEnabled(
                         for: request.contextOptions.reasoningLevel))
             }
+            let reasoningContext = Self.mergedAdditionalContext(strategyContext, historyContext)
             // Route through the model's own `UserInputProcessor` -- the
             // same one the eager (non-tool) path uses in
             // `prepareRespondSetup` -- instead of hand-rolling
@@ -3667,10 +3741,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // pre-opens `<think>\n`; a non-primed alwaysOn prompt stays
             // single-phase.
             // The tool path's stable-boundary render carries the SAME
-            // messages and tool specs the tool-aware prompt was rendered
-            // from -- future rounds re-render past turns with the tool
-            // block still present, so `tools:` belongs in the baseline.
-            let stableBoundary = StableBoundaryRender(messages: messages, tools: toolSpecs)
+            // messages, tool specs, and history context the tool-aware
+            // prompt was rendered from -- future rounds re-render past turns
+            // with the tool block (and any preserved thinking) still
+            // present, so both belong in the baseline.
+            let stableBoundary = StableBoundaryRender(
+                messages: messages, tools: toolSpecs, historyContext: historyContext)
 
             var reasoningTokenIDs: [Int] = []
             if let reasoningConfig = thinkThenCallConfig {
@@ -3904,9 +3980,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 }
             }()
 
+            // The guided render is context-free (no reasoning flags), so
+            // the stable-boundary baseline must be too -- see
+            // `StableBoundaryRender.historyContext`.
             let result = try await runGuidedGenerationLoop(
                 input: input, context: context, setup: setup, maxTokens: setup.maxTokens,
-                stableBoundary: StableBoundaryRender(messages: messages, tools: nil)
+                stableBoundary: StableBoundaryRender(
+                    messages: messages, tools: nil, historyContext: nil)
             ) { text in
                 textContinuation.yield(text)
                 return !Task.isCancelled
@@ -3985,12 +4065,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         }
 
         /// Unconstrained text generation. Used on the no-tools/no-schema
-        /// path when the model has no reasoning config to route through.
+        /// path when the model has no reasoning config to route through --
+        /// or when reasoning is suppressed (the suppressed render is fed as
+        /// `input`, and any history context it carried rides along in
+        /// `historyContext`).
         ///
         /// - Parameters:
         ///   - input: The rendered prompt to generate from.
         ///   - messages: The chat messages `input` was rendered from, for
         ///     the hybrid stable-boundary computation (see `makePromptCacheSlot`).
+        ///   - historyContext: The history-affecting `additionalContext` the
+        ///     fed render carried, for the stable-boundary baseline (see
+        ///     `StableBoundaryRender.historyContext`); `nil` when it had none.
         ///   - requestedMaxTokens: The caller's token budget override, if any.
         ///   - requestedTemperature: The caller's temperature override, if any.
         ///   - samplingMode: The caller's sampling mode override, if any.
@@ -4001,6 +4087,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private func runUnconstrained(
             input: LMInput,
             messages: [Chat.Message],
+            historyContext: [String: any Sendable]?,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingMode: MLXSamplingMode?,
@@ -4018,7 +4105,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             let slot = try await makePromptCacheSlot(
                 input: input, context: context, parameters: params,
-                stableBoundary: StableBoundaryRender(messages: messages, tools: nil))
+                stableBoundary: StableBoundaryRender(
+                    messages: messages, tools: nil, historyContext: historyContext))
             var emittedText = ""
             var stopTokenFedToCache: Int?
 
@@ -4050,6 +4138,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - messages: The chat messages this round's prompt was rendered
         ///     from, for the hybrid stable-boundary computation (see
         ///     `makePromptCacheSlot`).
+        ///   - historyContext: The history-affecting `additionalContext` the
+        ///     round's fed render carried, for the unconstrained arm's
+        ///     stable-boundary baseline (the reasoning arm derives its own
+        ///     from `reasoningSetup.reasoningConfig`); `nil` when none.
         ///   - requestedMaxTokens: The caller's token budget override, if any.
         ///   - requestedTemperature: The caller's temperature override, if any.
         ///   - samplingMode: The caller's sampling mode override, if any.
@@ -4062,6 +4154,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             reasoningSetup: (input: LMInput, reasoningConfig: ReasoningConfig, primedInside: Bool)?,
             fallbackInput: LMInput,
             messages: [Chat.Message],
+            historyContext: [String: any Sendable]?,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingMode: MLXSamplingMode?,
@@ -4087,6 +4180,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 try await runUnconstrained(
                     input: fallbackInput,
                     messages: messages,
+                    historyContext: historyContext,
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: requestedTemperature,
                     samplingMode: samplingMode,
@@ -4220,9 +4314,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var completionInfo: GenerateCompletionInfo?
             var generatedTokenIDs: [Int] = []
 
+            // The reasoning-primed render carried the family's history
+            // context (merged in `preparedInput`); the stable-boundary
+            // baseline must render with the same one.
             let slot = try await makePromptCacheSlot(
                 input: input, context: context, parameters: params,
-                stableBoundary: StableBoundaryRender(messages: messages, tools: nil))
+                stableBoundary: StableBoundaryRender(
+                    messages: messages, tools: nil,
+                    historyContext: reasoningConfig.historyPreservationContext))
 
             for await generation in try generateTokens(
                 input: slot.feedInput, cache: slot.cache, parameters: params, context: context
@@ -4326,10 +4425,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             transcriptEntries: some Collection<Transcript.Entry>,
             cannotDisableMessage: String
         ) async throws -> LMInput {
-            let additionalContext = try additionalContextOrThrowCapabilityError(
+            let strategyContext = try additionalContextOrThrowCapabilityError(
                 promptStrategy: reasoningConfig.promptStrategy,
                 thinkingEnabled: thinkingEnabled,
                 debugDescription: cannotDisableMessage)
+            // History-preserving families (Qwen3.6) additionally render past
+            // assistant turns WITH their replayed reasoning, so the same
+            // fed-token prefix reappears verbatim in later rounds' history
+            // re-renders (see `ReasoningConfig.historyPreservationKey`).
+            let additionalContext = mergedAdditionalContext(
+                strategyContext, reasoningConfig.historyPreservationContext)
             return try await preparedInputMappingImageFailures(
                 processor: processor,
                 input: UserInput(chat: messages, additionalContext: additionalContext),

@@ -44,6 +44,16 @@ public enum Chat {
         /// Tool-call metadata associated with this message.
         public var tool: Tool?
 
+        /// The chain-of-thought a past assistant turn produced, replayed into
+        /// history re-renders as the raw dictionary's `reasoning_content` key.
+        ///
+        /// Only meaningful on ``Role/assistant`` messages, and only consumed
+        /// by chat templates that support preserved thinking (e.g. Qwen3.6's
+        /// `preserve_thinking`); templates without the variable ignore the
+        /// key. `nil` (the default) omits the key entirely, keeping every
+        /// other family's raw dictionaries byte-identical to before.
+        public var reasoning: String?
+
         /// Tool-call metadata attached to a message: either the tool calls
         /// emitted by an assistant message, or the id of the tool call that
         /// a tool-result message is answering.
@@ -79,12 +89,16 @@ public enum Chat {
         ///   - videos: Video attachments associated with the message.
         ///   - audios: Audio attachments associated with the message.
         ///   - tool: Tool-call metadata associated with the message, if any.
+        ///   - reasoning: The chain-of-thought a past assistant turn
+        ///     produced, if it should be replayed into history re-renders
+        ///     (see ``reasoning``).
         public init(
             role: Role, content: String,
             images: [UserInput.Image] = [],
             videos: [UserInput.Video] = [],
             audios: [UserInput.Audio] = [],
-            tool: Tool? = nil
+            tool: Tool? = nil,
+            reasoning: String? = nil
         ) {
             self.role = role
             self.content = content
@@ -92,6 +106,7 @@ public enum Chat {
             self.videos = videos
             self.audios = audios
             self.tool = tool
+            self.reasoning = reasoning
         }
 
         /// Shared factory helper backing the role-specific factory methods
@@ -104,9 +119,12 @@ public enum Chat {
             images: [UserInput.Image] = [],
             videos: [UserInput.Video] = [],
             audios: [UserInput.Audio] = [],
-            tool: Tool? = nil
+            tool: Tool? = nil,
+            reasoning: String? = nil
         ) -> Self {
-            Self(role: role, content: content, images: images, videos: videos, audios: audios, tool: tool)
+            Self(
+                role: role, content: content, images: images, videos: videos, audios: audios,
+                tool: tool, reasoning: reasoning)
         }
 
         /// Creates a system message that provides instructions or context to the model.
@@ -129,16 +147,19 @@ public enum Chat {
         ///   - images: Image attachments associated with the message.
         ///   - videos: Video attachments associated with the message.
         ///   - toolCalls: Tool calls emitted by the assistant, if any.
+        ///   - reasoning: The chain-of-thought this turn produced, if it
+        ///     should be replayed into history re-renders (see ``reasoning``).
         /// - Returns: A new ``Message`` with the ``Role/assistant`` role.
         public static func assistant(
             content: String,
             images: [UserInput.Image] = [],
             videos: [UserInput.Video] = [],
-            toolCalls: [ToolCall]? = nil
+            toolCalls: [ToolCall]? = nil,
+            reasoning: String? = nil
         ) -> Self {
             create(
                 role: .assistant, content: content, images: images, videos: videos,
-                tool: toolCalls.map { .calls(toolCalls: $0) })
+                tool: toolCalls.map { .calls(toolCalls: $0) }, reasoning: reasoning)
         }
 
         /// Creates a user message.
@@ -223,7 +244,8 @@ extension MessageGenerator {
 
     /// Default implementation that produces a raw dictionary containing
     /// `role` and `content`, plus `tool_calls`/`tool_call_id` when tool
-    /// metadata is present (see ``addToolMetadata(to:for:)``).
+    /// metadata is present (see ``addToolMetadata(to:for:)``) and
+    /// `reasoning_content` when ``Chat/Message/reasoning`` is set.
     ///
     /// Note: media attachments (``Chat/Message/images``, ``Chat/Message/videos``,
     /// ``Chat/Message/audios``) are intentionally *not* included in this
@@ -241,8 +263,23 @@ extension MessageGenerator {
         ]
 
         addToolMetadata(to: &dictionary, for: message)
+        addReasoningMetadata(to: &dictionary, for: message)
 
         return dictionary
+    }
+
+    /// Adds replayed chain-of-thought metadata (`reasoning_content`) from a
+    /// structured message to a raw message dictionary, for
+    /// history-preserving chat templates (see ``Chat/Message/reasoning``).
+    /// Omitted when `reasoning` is nil so every other family's dictionaries
+    /// stay byte-identical to before. Custom `generate(message:)`
+    /// implementations that can serve history-preserving families (e.g.
+    /// `Qwen3VLMessageGenerator`) must call this alongside
+    /// ``addToolMetadata(to:for:)``.
+    public func addReasoningMetadata(to dictionary: inout Message, for message: Chat.Message) {
+        if let reasoning = message.reasoning {
+            dictionary["reasoning_content"] = reasoning
+        }
     }
 
     /// Adds tool-call metadata from a structured message to a raw message dictionary.

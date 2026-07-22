@@ -643,8 +643,73 @@ struct PromptCacheHybridArchitectureTests {
         #expect(promptTokens.count > baseTokens.count, "sanity: priming region must add tokens")
 
         let stableLength = MLXLanguageModel.Executor.transcriptStableLength(
-            promptTokens: promptTokens, messages: messages, tools: nil, tokenizer: tokenizer)
+            promptTokens: promptTokens, messages: messages, tools: nil,
+            additionalContext: nil, tokenizer: tokenizer)
         #expect(stableLength == baseTokens.count)
+    }
+
+    @Test("transcriptStableLength renders the past-turns baseline with the history context")
+    func transcriptStableLengthCarriesHistoryContext() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let tokenizer = StableBoundaryProbeTokenizer()
+        let messages: [[String: any Sendable]] = [
+            ["role": "user", "content": "ab"],
+            ["role": "assistant", "content": "cd"],
+            ["role": "user", "content": "ef"],
+        ]
+        let historyContext: [String: any Sendable] = ["preserve_thinking": true]
+        // The live prompt renders WITH the history-preservation context (its
+        // history region carries the preserved-thinking markers) plus the
+        // generation-priming region.
+        let promptTokens = try #require(
+            try tokenizer.applyChatTemplate(
+                messages: messages, tools: nil, additionalContext: historyContext,
+                addGenerationPrompt: true))
+        let baseWithContext = try #require(
+            try tokenizer.applyChatTemplate(
+                messages: messages, tools: nil, additionalContext: historyContext,
+                addGenerationPrompt: false))
+        let baseWithout = try #require(
+            try tokenizer.applyChatTemplate(messages: messages, addGenerationPrompt: false))
+        #expect(
+            baseWithContext.count > baseWithout.count,
+            "sanity: the history context must change the past-turns render")
+
+        // The baseline must carry the SAME history-affecting context the
+        // live render used — a context-free baseline diverges from the live
+        // prompt at the first history marker, collapsing the stable prefix.
+        let stableLength = MLXLanguageModel.Executor.transcriptStableLength(
+            promptTokens: promptTokens, messages: messages, tools: nil,
+            additionalContext: historyContext, tokenizer: tokenizer)
+        #expect(stableLength == baseWithContext.count)
+    }
+
+    @Test("mergedAdditionalContext keeps nil renders nil and merges present fragments")
+    func mergedAdditionalContextMergesFragments() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        // nil + nil must stay nil: renders that never carried a context must
+        // remain byte-identical to before (UserInput treats nil and [:]
+        // differently only in intent, but nil is the historical shape).
+        #expect(MLXLanguageModel.Executor.mergedAdditionalContext(nil, nil) == nil)
+
+        let strategy: [String: any Sendable] = ["enable_thinking": false]
+        let history: [String: any Sendable] = ["preserve_thinking": true]
+
+        let strategyOnly = try #require(
+            MLXLanguageModel.Executor.mergedAdditionalContext(strategy, nil))
+        #expect(strategyOnly.count == 1)
+        #expect(strategyOnly["enable_thinking"] as? Bool == false)
+
+        let historyOnly = try #require(
+            MLXLanguageModel.Executor.mergedAdditionalContext(nil, history))
+        #expect(historyOnly.count == 1)
+        #expect(historyOnly["preserve_thinking"] as? Bool == true)
+
+        let merged = try #require(
+            MLXLanguageModel.Executor.mergedAdditionalContext(strategy, history))
+        #expect(merged.count == 2)
+        #expect(merged["enable_thinking"] as? Bool == false)
+        #expect(merged["preserve_thinking"] as? Bool == true)
     }
 
     @Test("transcriptStableLength is nil when the tokenizer opts out of generation-prompt control")
@@ -654,6 +719,7 @@ struct PromptCacheHybridArchitectureTests {
             promptTokens: [1, 2, 3],
             messages: [["role": "user", "content": "x"]],
             tools: nil,
+            additionalContext: nil,
             tokenizer: OptedOutProbeTokenizer())
         #expect(stableLength == nil)
     }
@@ -780,13 +846,23 @@ private struct StableBoundaryProbeTokenizer: MLXLMCommon.Tokenizer {
     var unknownToken: String? { nil }
 
     private func render(
-        messages: [[String: any Sendable]], addGenerationPrompt: Bool
+        messages: [[String: any Sendable]], addGenerationPrompt: Bool,
+        additionalContext: [String: any Sendable]?
     ) -> [Int] {
+        // Mirrors a history-preserving template (Qwen3.6's
+        // `preserve_thinking`): the context flag changes how HISTORY turns
+        // render (an extra marker token per message), so a stable-boundary
+        // baseline computed without the live render's context diverges from
+        // it at the first history turn.
+        let preservesHistory = additionalContext?["preserve_thinking"] as? Bool == true
         var tokens: [Int] = []
         for message in messages {
             let role = message["role"] as? String ?? ""
             let content = message["content"] as? String ?? ""
             tokens += [90, role == "user" ? 1 : 2]
+            if preservesHistory {
+                tokens += [77]
+            }
             tokens += encode(text: content, addSpecialTokens: false)
             tokens += [91]
         }
@@ -801,7 +877,7 @@ private struct StableBoundaryProbeTokenizer: MLXLMCommon.Tokenizer {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        render(messages: messages, addGenerationPrompt: true)
+        render(messages: messages, addGenerationPrompt: true, additionalContext: additionalContext)
     }
 
     func applyChatTemplate(
@@ -810,7 +886,9 @@ private struct StableBoundaryProbeTokenizer: MLXLMCommon.Tokenizer {
         additionalContext: [String: any Sendable]?,
         addGenerationPrompt: Bool
     ) throws -> [Int]? {
-        render(messages: messages, addGenerationPrompt: addGenerationPrompt)
+        render(
+            messages: messages, addGenerationPrompt: addGenerationPrompt,
+            additionalContext: additionalContext)
     }
 }
 

@@ -38,10 +38,23 @@ comments:
   id: 01ky38eqvsp8brpfxrmn4re8ha
   text: 'really-done complete. Adversarial double-check verdict: REVISE with ONE low-severity latent finding — slotAdoptingResultCache rebuilt the slot without carrying splitPrefillTokenCount (benign today: finalSlot only feeds commitPromptCache and the usage tuple reads the original slot, but a future reader of finalSlot.cachedTokenCount would over-report). FIXED: the copy now carries splitPrefillTokenCount through. No dedicated unit test for that one-line field-carry — the helper and struct are private with no observable behavior difference today; it is covered transitively by the full suite (justification logged per really-done contract). Double-check also confirmed independently: mid-round snapshot soundness (ownedCopy both ways), cancellation safety (resolve''s hybrid arm returns a private restored copy; nothing partial persists), edge cases (stableLen 0 / == count / <= matchedLen all skip cleanly with untouched cache), path preservation (multimodal, rotating/maxKVSize, pure attention, prewarm), and re-ran the 26 hybrid unit tests itself. One informational note accepted as-is: guided-path baseline renders raw messages while guidedInput may someday carry schema-in-prompt rendering — today guidedGenerationMessages returns messages unchanged, so no divergence exists; if adapter-side schema-in-prompt rendering ever lands, its boundary render should use the guided messages (degradation until then would only shorten the prefix, never corrupt). Post-fix fresh verification: full swift test exit 0 (628 swift-testing tests, zero failures); xcodebuild PromptCacheHybridReuseTests vs real Qwen3.6-27B-mxfp4 PASSED again; PromptCacheReuseTests passed earlier this session on the same library code paths (fix touches only the guided/tool finalSlot copy, not the pure-attention path). Task left in doing, ready for /review. Not committed per instructions.'
   timestamp: 2026-07-21T21:14:06.585807+00:00
+- actor: claude-code
+  id: 01ky484hwze1n53xs5jjsxde9c
+  text: |-
+    Review pass (task-mode, scoped `HEAD~1..HEAD`, checkpoint e78994c), 2026-07-21.
+
+    Run 1 (16:16) was heavily degraded and discarded after one permitted retry — engine caveat verbatim: "⚠️ 16/28 review tasks failed — results are INCOMPLETE." Its 5 "findings" were all self-described no-ops at MLXLanguageModel.swift:100 ("No change needed").
+
+    Run 2 (20:57) engine caveat verbatim: "⚠️ 7/28 review tasks failed — results are INCOMPLETE."
+
+    Run 2 counts: findings 1, confirmed 1, refuted 32. The single confirmed finding (PromptCache.swift:801, duplication in `globalLRUVictim()`/`updateBest`) is a null finding — its own verdict text states "This is a false positive — `updateBest` is already an extracted shared helper... The duplication is at the call site, differing only by the `LRUVictim` case wrapper, which is the correct abstraction." No change required; dropped as non-actionable.
+
+    Zero surviving findings → moved to done.
+  timestamp: 2026-07-22T06:27:47.231305+00:00
 depends_on:
 - 01KXY1WB8NT75Q1ECJC2JCT06J
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: c680
 title: 'PromptCache: hybrid checkpoints must snapshot at the transcript-stable boundary (fixes Qwen3.6 cachedTokenCount == 0)'
 ---
 ## What

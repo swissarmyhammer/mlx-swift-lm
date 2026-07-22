@@ -1842,6 +1842,11 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
             "content": imageContent + videoContent + textContent,
         ]
         addToolMetadata(to: &dictionary, for: message)
+        // Qwen3.6 ("qwen3_5") checkpoints ship a VLM processor config and
+        // render through this generator; their history-preserving template
+        // reads replayed reasoning from `reasoning_content` (see
+        // `Chat.Message.reasoning`).
+        addReasoningMetadata(to: &dictionary, for: message)
         return dictionary
     }
 }

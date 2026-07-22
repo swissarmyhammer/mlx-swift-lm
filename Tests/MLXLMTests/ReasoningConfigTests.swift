@@ -56,6 +56,81 @@ struct ReasoningConfigTests {
         #expect(config?.promptStrategy == .templateFlag(key: "enable_thinking", defaultOn: true))
     }
 
+    /// Qwen3.6 (model_type "qwen3_5") keeps the shared Qwen3 protocol but its
+    /// chat template additionally supports `preserve_thinking` — replaying
+    /// past turns' reasoning into history re-renders — which is what makes
+    /// prompt-cache continuity extend through a round's own generated
+    /// response for this family.
+    @Test func inferQwen35CarriesHistoryPreservationKey() {
+        let config = ReasoningConfig.infer(
+            from: "qwen3_5", modelID: "mlx-community/Qwen3.6-27B-mxfp4")
+        #expect(config?.startDelimiter == "<think>")
+        #expect(config?.endDelimiter == "</think>")
+        #expect(config?.promptStrategy == .templateFlag(key: "enable_thinking", defaultOn: true))
+        #expect(config?.historyPreservationKey == "preserve_thinking")
+    }
+
+    /// The qwen3_5 row is keyed on the model_type prefix, so the MoE and
+    /// text-only variants (`qwen3_5_moe`, `qwen3_5_text`) resolve the same
+    /// history-preserving configuration.
+    @Test func inferQwen35PrefixVariantsCarryHistoryPreservationKey() {
+        for modelType in ["qwen3_5_moe", "qwen3_5_text"] {
+            let config = ReasoningConfig.infer(
+                from: modelType, modelID: "mlx-community/Qwen3.6-35B-A3B-mxfp4")
+            #expect(config?.historyPreservationKey == "preserve_thinking")
+        }
+    }
+
+    /// Pre-3.6 Qwen3 templates have no `preserve_thinking` variable, so the
+    /// plain qwen3 row must NOT carry the history-preservation key — the
+    /// executor's history-replay gates key off it per family.
+    @Test func inferPlainQwen3HasNoHistoryPreservationKey() {
+        let config = ReasoningConfig.infer(
+            from: "qwen3", modelID: "mlx-community/Qwen3-4B-4bit")
+        #expect(config != nil)
+        #expect(config?.historyPreservationKey == nil)
+    }
+
+    /// Qwen3-VL (model_type "qwen3_vl") resolves the shared qwen3 row —
+    /// pinned deliberately, because `VLMModelFactory._load` now consults
+    /// this table (it previously never inferred a reasoning config at all).
+    /// Instruct checkpoints' chat template has no `enable_thinking` variable
+    /// and never renders `<think>` (verified against
+    /// mlx-community/Qwen3-VL-4B-Instruct-4bit's chat_template.jinja), so
+    /// the suppression kwarg is ignored and renders stay byte-identical;
+    /// genuinely-thinking VL variants get the same prefix-keyed treatment
+    /// the table already documents for text models — refined by on-device
+    /// verification and registry overrides, not by scoping the factory.
+    @Test func inferQwen3VLResolvesSharedQwen3Row() {
+        let config = ReasoningConfig.infer(
+            from: "qwen3_vl", modelID: "mlx-community/Qwen3-VL-4B-Instruct-4bit")
+        #expect(config?.promptStrategy == .templateFlag(key: "enable_thinking", defaultOn: true))
+        #expect(config?.historyPreservationKey == nil)
+    }
+
+    // MARK: - historyPreservationContext
+
+    /// A configured history-preservation key maps to the single-entry
+    /// `additionalContext` (`[key: true]`) that history-affecting renders
+    /// merge in.
+    @Test func historyPreservationContextMapsKeyToTrue() throws {
+        let config = ReasoningConfig(
+            startDelimiter: "<think>", endDelimiter: "</think>",
+            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
+            historyPreservationKey: "preserve_thinking")
+        let context = try #require(config.historyPreservationContext)
+        #expect(context.count == 1)
+        #expect(context["preserve_thinking"] as? Bool == true)
+    }
+
+    /// Without a key there is nothing to merge: the context is `nil`, so
+    /// families that don't preserve history render exactly as before.
+    @Test func historyPreservationContextNilWithoutKey() {
+        let config = ReasoningConfig(
+            startDelimiter: "<think>", endDelimiter: "</think>", promptStrategy: .alwaysOn)
+        #expect(config.historyPreservationContext == nil)
+    }
+
     /// A checkpoint reporting `model_type == "deepseek_v3"` resolves
     /// always-on by type alone — no repo-id signal needed (a plain
     /// DeepSeek-V3 upload carries no "deepseek-r1"/"r1-distill" id marker).

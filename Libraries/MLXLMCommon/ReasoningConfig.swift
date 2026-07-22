@@ -96,6 +96,26 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// optimization.
     public var isSpecialToken: Bool
 
+    /// The chat-template kwarg that makes past assistant turns re-render WITH
+    /// their reasoning (e.g. Qwen3.6's `preserve_thinking`), or `nil` for
+    /// families whose templates strip history reasoning unconditionally.
+    ///
+    /// When set, history-affecting renders merge ``historyPreservationContext``
+    /// into their `additionalContext`, and prior turns' reasoning is replayed
+    /// as `reasoning_content` on the corresponding assistant message — the two
+    /// halves that together keep a round's fed tokens byte-continuous with the
+    /// next round's history re-render (prompt-cache continuity through
+    /// responses). The tradeoff is context growth: preserved reasoning stays
+    /// in every later prompt.
+    public var historyPreservationKey: String? = nil
+
+    /// The single-entry `additionalContext` (`[historyPreservationKey: true]`)
+    /// that history-affecting renders merge in, or `nil` when the family has
+    /// no ``historyPreservationKey`` — leaving those renders exactly as before.
+    public var historyPreservationContext: [String: any Sendable]? {
+        historyPreservationKey.map { [$0: true] }
+    }
+
     /// Creates a reasoning configuration with the given delimiters and prompt
     /// strategy.
     ///
@@ -106,16 +126,21 @@ public struct ReasoningConfig: Sendable, Equatable {
     ///     the chat template.
     ///   - isSpecialToken: whether ``startDelimiter`` is a registered special
     ///     token for this model's tokenizer (diagnostic only; defaults to `false`).
+    ///   - historyPreservationKey: the chat-template kwarg that makes past
+    ///     assistant turns re-render with their reasoning, or `nil` (the
+    ///     default) for families without one.
     public init(
         startDelimiter: String,
         endDelimiter: String,
         promptStrategy: ReasoningPromptStrategy,
-        isSpecialToken: Bool = false
+        isSpecialToken: Bool = false,
+        historyPreservationKey: String? = nil
     ) {
         self.startDelimiter = startDelimiter
         self.endDelimiter = endDelimiter
         self.promptStrategy = promptStrategy
         self.isSpecialToken = isSpecialToken
+        self.historyPreservationKey = historyPreservationKey
     }
 
     // MARK: - Inference
@@ -142,6 +167,18 @@ public struct ReasoningConfig: Sendable, Equatable {
         startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
         promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
         isSpecialToken: true)
+
+    /// The Qwen3.6 (model_type "qwen3_5") configuration: the shared Qwen3
+    /// protocol plus the template's `preserve_thinking` kwarg, which replays
+    /// past turns' reasoning into history re-renders — the hook that lets
+    /// prompt-cache continuity extend through a round's own generated
+    /// response (see ``historyPreservationKey``). Pre-3.6 Qwen3 templates
+    /// have no such variable, so only this family's row carries the key.
+    private static let qwen35ThinkConfig = ReasoningConfig(
+        startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
+        promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
+        isSpecialToken: true,
+        historyPreservationKey: "preserve_thinking")
 
     /// How an ``inferenceTable`` entry's `value` is compared against the
     /// model's lowercased `model_type` or repo id.
@@ -181,6 +218,12 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// would otherwise also match it.
     private static let inferenceTable:
         [(match: ReasoningMatch, value: String, config: ReasoningConfig)] = [
+            // Qwen3.6 (model_type "qwen3_5" / "qwen3_5_moe" / "qwen3_5_text"):
+            // the shared Qwen3 protocol plus `preserve_thinking` history
+            // replay. Must precede the generic "qwen3" prefix row, which
+            // would otherwise claim the family first.
+            (.prefix, "qwen3_5", qwen35ThinkConfig),
+
             // Qwen3 family: <think>/</think>, thinking toggled via `enable_thinking`.
             //
             // Keyed on the model_type prefix, so a non-thinking Qwen3 variant (e.g.

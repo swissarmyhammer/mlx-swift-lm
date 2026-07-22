@@ -151,8 +151,15 @@ comments:
 
     Verification: full `swift test` exit 0, ZERO failures — swift-testing 273+80+258+7 = 618, XCTest bundles all 0-failure (197 + 13 macros + assorted) = 828 total (827 baseline + 1 new pin). Only "warning" in the log is SwiftPM's pre-existing "missing creator for mutated node" build-system noise. Adversarial double-check in flight; not committed per instructions; task stays in doing.
   timestamp: 2026-07-21T19:51:38.690033+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01ky352v2b5fdznyq0v1x6dmrc
+  text: |-
+    Checkbox-persistence follow-up (coordinator request): the 14:25 HubBridge finding is now genuinely `- [x]` — verified via get task AND on-disk .kanban/tasks/01KXY1WB8NT75Q1ECJC2JCT06J.md (unchecked count 0, checked 86, progress 1.0, byte size unchanged at 48512 so no other character moved; the 15:02 zero-findings section preserved verbatim).
+
+    ROOT CAUSE of the lost flip, for future agents: `update task` with a `description_edit` old_string/new_string parameter returns ok but SILENTLY NO-OPS — tried both stringified-JSON and object forms; each returned ok, rewrote the task files (touching timestamps), and left the checkbox unchanged on disk. That is why iteration 5's flip never persisted despite an ok response. The only write path that works is passing the FULL text via the `description` parameter. Always re-read (get task or the .md on disk) after any description write before claiming a flip stuck. No code touched, nothing committed, task left in its current column (review).
+  timestamp: 2026-07-21T20:15:10.923937+00:00
+position_column: done
+position_ordinal: c580
 title: 'Tokenizer: expose addGenerationPrompt:false chat-template render (prereq for stable-boundary hybrid checkpoints)'
 ---
 ## What
@@ -313,4 +320,8 @@ public func applyChatTemplate(
 
 > ⚠️ 4/14 review tasks failed — results are INCOMPLETE.
 
-- [ ] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:104` — The `download` method inside the `HubBridge` struct (emitted by `DownloaderMacro.expansion`) has a `guard let` with an `else` throw (line 105) followed by a `??` default (line 108), adding branching complexity to an otherwise straightforward wrapper function. Extract the repo-ID validation into a separate helper or use a `try?` pattern to simplify the guard-throw chain. Consider validating the ID earlier or using a failable initializer with a cleaner error path.
+- [x] `Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift:104` — The `download` method inside the `HubBridge` struct (emitted by `DownloaderMacro.expansion`) has a `guard let` with an `else` throw (line 105) followed by a `??` default (line 108), adding branching complexity to an otherwise straightforward wrapper function. Extract the repo-ID validation into a separate helper or use a `try?` pattern to simplify the guard-throw chain. Consider validating the ID earlier or using a failable initializer with a cleaner error path.
+
+## Review Findings (2026-07-21 15:02)
+
+> ⚠️ 3/14 review tasks failed — results are INCOMPLETE.

@@ -9,10 +9,11 @@ import MLXLMCommon
 /// The configuration seam for ``MLXLanguageModel``: adjust the loaded,
 /// already-inferred ``ModelConfiguration`` for a model on a per-call basis.
 ///
-/// `LLMModelFactory._load` fully infers reasoning, tool-call format, and eos
-/// tokens (passing the load-bearing `modelId`) before the adapter runs, so the
-/// configuration handed to ``resolve(_:for:)`` is already complete. A resolver
-/// patches a per-call copy; it does not perform inference.
+/// `LLMModelFactory._load` / `VLMModelFactory._load` fully infer reasoning,
+/// tool-call format, and eos tokens (passing the load-bearing `modelId`)
+/// before the adapter runs, so the configuration handed to ``resolve(_:for:)``
+/// is already complete. A resolver patches a per-call copy; it does not
+/// perform inference.
 ///
 /// - Important: The returned value is consumed as a per-call local. It is
 ///   **never** written back to `context.configuration`, `Executor.Configuration`,

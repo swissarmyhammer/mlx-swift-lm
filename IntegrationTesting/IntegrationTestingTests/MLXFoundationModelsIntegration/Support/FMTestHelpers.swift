@@ -279,12 +279,44 @@ func respondCollectingTextAndUsage(
 ) async throws -> (
     text: String, promptTokenCount: Int, cachedTokenCount: Int, outputTokenCount: Int
 ) {
+    let collected = try await respondCollectingReasoningTextAndUsage(
+        executor, request: request, model: model)
+    return (
+        collected.text, collected.promptTokenCount, collected.cachedTokenCount,
+        collected.outputTokenCount
+    )
+}
+
+/// The reasoning-aware superset of `respondCollectingTextAndUsage`: also
+/// accumulates `.reasoning` appendText deltas, for tests that must replay a
+/// round's chain-of-thought into the next round's transcript (the
+/// history-preservation prompt-cache tests) or assert on it directly.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func respondCollectingReasoningTextAndUsage(
+    _ executor: MLXLanguageModel.Executor,
+    request: LanguageModelExecutorGenerationRequest,
+    model: MLXLanguageModel
+) async throws -> (
+    reasoning: String, text: String, promptTokenCount: Int, cachedTokenCount: Int,
+    outputTokenCount: Int
+) {
     let stream = try await executeResponse(executor, request: request, model: model)
+    var reasoning = ""
     var text = ""
     var promptTokenCount: Int?
     var cachedTokenCount = 0
     var outputTokenCount = 0
     for try await event in stream {
+        if let reasoningEvent = reflectedChannelPayload(
+            of: event, caseLabel: "reasoning",
+            as: LanguageModelExecutorGenerationChannel.Reasoning.self),
+            let fragment = reflectedChannelPayload(
+                of: reasoningEvent.action, caseLabel: "appendText",
+                as: LanguageModelExecutorGenerationChannel.TextFragment.self)
+        {
+            reasoning += fragment.content
+            continue
+        }
         guard
             let response = reflectedChannelPayload(
                 of: event, caseLabel: "response",
@@ -309,7 +341,7 @@ func respondCollectingTextAndUsage(
     }
     let count = try #require(
         promptTokenCount, "Expected at least one .updateUsage event before stream completion")
-    return (text, count, cachedTokenCount, outputTokenCount)
+    return (reasoning, text, count, cachedTokenCount, outputTokenCount)
 }
 
 /// Reflectively extracts a channel event/action's associated value.

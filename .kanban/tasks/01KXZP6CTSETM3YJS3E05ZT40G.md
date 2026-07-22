@@ -1,8 +1,21 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '9280'
+comments:
+- actor: claude-code
+  id: 01ky49246chbkrxrh10pexbcyr
+  text: 'Picked up. Research done: (1) chat_template.jinja confirmed — assistant history renders `<think>\n{reasoning_content|trim}\n</think>\n\n{content}` when `preserve_thinking is true`, and reasoning_content is read from the message dict when it `is string`; (2) Qwen3.6-27B-mxfp4 model_type is `qwen3_5`, loads as Qwen35Model via LLMModelFactory (DefaultMessageGenerator on the text path), reasoningConfig inferred at load via the `.prefix "qwen3"` row; (3) Transcript.Reasoning carries `segments`, and reasoning entries precede their response entry in stream order. Plan: ReasoningConfig gains historyPreservationKey (+historyPreservationContext), new inference row `.prefix "qwen3_5"` BEFORE the qwen3 row; Chat.Message gains `reasoning` emitted as reasoning_content by the default MessageGenerator; TranscriptConverter.mlxMessages gains replayReasoning gate attaching pending reasoning to the next .response; executor merges historyPreservationContext into preparedInput/tool-path renders AND threads it into StableBoundaryRender/transcriptStableLength so the stable baseline agrees with live history renders. Guided path stays context-free on both sides (consistent). TDD loops: ReasoningConfigTests → MessageGenerator test → TranscriptConverterTests → executor seams → real-weights PromptCacheHybridReuseTests strengthened in both modes.'
+  timestamp: 2026-07-22T06:43:56.236617+00:00
+- actor: claude-code
+  id: 01ky4ajm2gv108kc4rs71w8mms
+  text: 'Implementation landed, all green. Key discovery along the way: Qwen3.6-27B-mxfp4 ships a Qwen3VLProcessor config and loads through VLMModelFactory, which — unlike LLMModelFactory — never inferred ReasoningConfig. So resolved.reasoningConfig was nil at respond time: the er33v06-era "suppressed" runs were actually feeding the EAGER thinking-primed render (19 tokens, `<think>\n` tail; the model narrated its chain-of-thought into the response channel — first integration run printed "Here''s a thinking process:" as the ANSWER), and thinking mode never routed to runReasoning at all. Fixes: (1) VLMModelFactory._load now infers reasoningConfig mirroring LLMModelFactory (registry override wins) and passes it into the built ModelConfiguration; (2) Qwen3VLMessageGenerator emits reasoning_content via a new shared addReasoningMetadata helper (the VLM path renders the live prompt). Core design as planned: ReasoningConfig.historyPreservationKey ("preserve_thinking", qwen3_5-prefix row ahead of the qwen3 row) + historyPreservationContext; Chat.Message.reasoning → reasoning_content in the default MessageGenerator; TranscriptConverter.mlxMessages(replayReasoning:) attaches pending reasoning to the next .response (accumulates consecutive entries, discards across intervening entries incl. .toolCalls); executor merges historyPreservationContext into preparedInput/tool-path renders and threads it through StableBoundaryRender into transcriptStableLength (guided path stays context-free on both sides). Results: swift test fully green (282+80+270+7). PromptCacheHybridReuseTests strengthened to the strong bound (cached >= round1 prompt+output - 8) and passes in BOTH modes on real weights (suppressed 3.2s, thinking 44.1s). Quality with preserved thinking looks clean: suppressed rounds answer "Hi"/"Bye" directly; thinking rounds produce a structured reasoning trace in the reasoning channel and terse correct answers — round 2 (with round 1''s thinking preserved in history) shows no degradation.'
+  timestamp: 2026-07-22T07:10:25.360513+00:00
+- actor: claude-code
+  id: 01ky4b94fbftyejgcpsnqcm37n
+  text: 'really-done: verification commands green (full swift test 283+80+270+7 = 640 tests, 0 failures; real-weights PromptCacheHybridReuseTests both modes pass). Adversarial double-check returned REVISE with two findings, both resolved: (1) qwen3_vl behavior flip from the new VLM-factory reasoning inference — grounded with evidence (mlx-community/Qwen3-VL-4B-Instruct-4bit''s chat_template.jinja has NO enable_thinking variable and never renders <think>, so for Instruct checkpoints the suppression kwarg is ignored and renders stay byte-identical; genuinely-thinking VL variants get the same prefix-keyed treatment the inference table already documents for text models, refined by on-device verification/registry overrides) and pinned with ReasoningConfigTests.inferQwen3VLResolvesSharedQwen3Row documenting the deliberate choice. Scoping the factory to qwen3_5 was rejected as an inconsistent parallel code path — the table IS the scoping mechanism, same as the LLM factory. This consequence is surfaced in the final report for user sign-off. (2) Dangling doc pointer in TranscriptConverter.mlxMessages — reworded to state the think-then-call discard rationale inline. Task left in doing for /review.'
+  timestamp: 2026-07-22T07:22:43.051811+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'Qwen3.6: set preserve_thinking + replay reasoning_content so prompt-cache continuity extends through responses'
 ---
 ## What
@@ -25,18 +38,23 @@ Implementation:
 
 Caveats to document: reasoning stays in context (context growth per turn — the tradeoff the template flag exists for); confirm response quality is acceptable with preserved thinking (Qwen's default convention strips it; the template authors added the flag expressly for agentic/cache-friendly flows).
 
+## Implementation notes (landed)
+
+- Discovered during real-weights verification: Qwen3.6-27B-mxfp4 ships a `Qwen3VLProcessor` config and loads through `VLMModelFactory`, which never inferred `ReasoningConfig` — so the executor's suppression/reasoning routing was inert for this checkpoint all along (the "suppressed" er33v06 runs actually fed the eager thinking-primed render). Fixed by mirroring `LLMModelFactory`'s reasoning inference in `VLMModelFactory._load`, and emitting `reasoning_content` from `Qwen3VLMessageGenerator` via a shared `addReasoningMetadata` helper.
+- The stable-boundary baseline (`transcriptStableLength`) now renders with the SAME history-affecting `additionalContext` the live render carried (`StableBoundaryRender.historyContext`); the guided path stays context-free on both sides.
+
 ## Acceptance Criteria
 
-- [ ] Past assistant messages carry `reasoning_content`; render for qwen3_5-family includes `preserve_thinking: true`
-- [ ] Real-weights two-round test (PromptCacheHybridReuseTests pattern, mlx-community/Qwen3.6-27B-mxfp4): round 2 `cachedTokenCount` ≈ round 1's `promptTokenCount + outputTokenCount` within a small fixed slack (the strong bound, previously unreachable) — in BOTH suppressed and thinking modes
-- [ ] Non-Qwen3.6 families' renders byte-identical to before (regression: existing TranscriptConverter + template-mirror tests green)
-- [ ] `swift test` fully green
+- [x] Past assistant messages carry `reasoning_content`; render for qwen3_5-family includes `preserve_thinking: true`
+- [x] Real-weights two-round test (PromptCacheHybridReuseTests pattern, mlx-community/Qwen3.6-27B-mxfp4): round 2 `cachedTokenCount` ≈ round 1's `promptTokenCount + outputTokenCount` within a small fixed slack (the strong bound, previously unreachable) — in BOTH suppressed and thinking modes
+- [x] Non-Qwen3.6 families' renders byte-identical to before (regression: existing TranscriptConverter + template-mirror tests green)
+- [x] `swift test` fully green
 
 ## Tests
 
-- [ ] Extend `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift`: reasoning_content attachment + preserve_thinking context gating (unit, no weights)
-- [ ] Extend/adjust `IntegrationTesting/.../PromptCacheHybridReuseTests.swift`: strengthen the bound back toward full-prefix reuse once this lands
-- [ ] Run: `swift test --filter MLXFoundationModelsTests` → green; the integration test → passes with the strong bound
+- [x] Extend `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift`: reasoning_content attachment + preserve_thinking context gating (unit, no weights)
+- [x] Extend/adjust `IntegrationTesting/.../PromptCacheHybridReuseTests.swift`: strengthen the bound back toward full-prefix reuse once this lands
+- [x] Run: `swift test --filter MLXFoundationModelsTests` → green; the integration test → passes with the strong bound
 
 ## Workflow
 

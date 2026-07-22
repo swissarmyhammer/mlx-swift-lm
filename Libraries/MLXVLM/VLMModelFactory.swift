@@ -386,6 +386,18 @@ public final class VLMModelFactory: GenericModelFactory {
             mutableConfiguration.toolCallFormat = ToolCallFormat.infer(from: baseConfig.modelType)
         }
 
+        // Reasoning protocol: registry override wins; otherwise infer from
+        // model_type + repo id, mirroring `LLMModelFactory._load`. VLM
+        // checkpoints of reasoning families (e.g. Qwen3.6's "qwen3_5", which
+        // ships a VLM processor config and loads through this factory) carry
+        // the same chat-template thinking protocol as their text siblings;
+        // without this the `MLXFoundationModels` executor sees a nil
+        // `reasoningConfig` and can neither suppress nor route thinking.
+        if mutableConfiguration.reasoningConfig == nil {
+            mutableConfiguration.reasoningConfig = ReasoningConfig.infer(
+                from: baseConfig.modelType, modelID: configuration.name, configData: configData)
+        }
+
         // Load tokenizer from model directory (or alternate tokenizer repo),
         // processor config, and weights in parallel using async let.
         // Note: loadProcessorConfig does synchronous I/O but is marked async to enable
@@ -439,7 +451,8 @@ public final class VLMModelFactory: GenericModelFactory {
             extraEOSTokens: mutableConfiguration.extraEOSTokens,
             stopStrings: mutableConfiguration.stopStrings,
             eosTokenIds: mutableConfiguration.eosTokenIds,
-            toolCallFormat: mutableConfiguration.toolCallFormat)
+            toolCallFormat: mutableConfiguration.toolCallFormat,
+            reasoningConfig: mutableConfiguration.reasoningConfig)
 
         return .init(
             configuration: modelConfig, model: model, processor: processor,

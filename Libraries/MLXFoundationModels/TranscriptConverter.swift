@@ -32,121 +32,181 @@ struct TranscriptConverter {
     ///     `.minimaxM2`) instead carry the calls as structured tool-call
     ///     metadata on a single assistant message (see the `.toolCalls` case)
     ///     so their sequence-validating chat templates accept the exchange.
+    ///   - replayReasoning: Whether a `.reasoning` entry's text should ride
+    ///     on the `.response` entry it precedes as ``Chat/Message/reasoning``
+    ///     (replayed into history renders as `reasoning_content`). `false`
+    ///     (the default) preserves the historical behavior — reasoning
+    ///     entries are dropped. Gated per model family by the executor on
+    ///     `ReasoningConfig.historyPreservationKey`: only templates that
+    ///     support preserved thinking (Qwen3.6's `preserve_thinking`) get
+    ///     replay, keeping every other family's renders byte-identical.
     /// - Returns: Array of MLX Chat.Message objects
     static func mlxMessages(
         for entries: some Collection<Transcript.Entry>,
-        toolCallFormat: ToolCallFormat? = nil
+        toolCallFormat: ToolCallFormat? = nil,
+        replayReasoning: Bool = false
     ) -> [Chat.Message] {
-        entries.flatMap { entry -> [Chat.Message] in
-            switch entry {
-            case .instructions(let instructions):
-                // System message for model instructions. Labeled image
-                // attachments ride along as message images, mirroring the
-                // prompt path, so the `.vision` gate sees them and they are
-                // not silently dropped.
-                return makeTextImageMessage(
-                    from: instructions.segments,
-                    make: { Chat.Message.system(content: $0, images: $1) },
-                    emptyWarning: "Skipping instructions entry with no text or image content")
-
-            case .prompt(let prompt):
-                // User message for prompts. Labeled image attachments
-                // (public `.attachment` segments) ride along as message
-                // images; text is still concatenated as before.
-                return makeTextImageMessage(
-                    from: prompt.segments,
-                    make: { Chat.Message.user(content: $0, images: $1) },
-                    emptyWarning: "Skipping prompt entry with no text or image content")
-
-            case .response(let response):
-                // Assistant message for previous responses. Includes
-                // `.structure` segments (like `.toolOutput` below): a prior
-                // turn's response may have been a guided/structured
-                // generation (a `Generable` result carried as `.structure`,
-                // not `.text`), and that content must survive replay into
-                // the next turn's prompt rather than being silently dropped.
-                guard let text = extractText(from: response.segments, includeStructure: true)
-                else {
-                    logger.warning("Skipping response entry with no text or structure content")
-                    return []
+        var messages: [Chat.Message] = []
+        // Reasoning text awaiting its response: the executor streams a
+        // round's reasoning entry immediately before the response entry it
+        // belongs to, so replay attaches a pending reasoning to the NEXT
+        // `.response` — and to nothing else. Consecutive reasoning entries
+        // accumulate; any other intervening entry discards the pending text.
+        // In particular, think-then-call reasoning (a `.reasoning` entry
+        // followed by `.toolCalls`) is deliberately dropped: the tool-call
+        // turn is replayed as the verbatim envelope text the model actually
+        // produced, and attaching Phase-1 reasoning there would change that
+        // turn's render without real-weights verification of the seam.
+        var pendingReasoning: String?
+        for entry in entries {
+            if replayReasoning, case .reasoning(let reasoning) = entry {
+                // Accumulate rather than convert: the reasoning text becomes
+                // message metadata on the response that follows, not a
+                // message of its own. Multiple consecutive reasoning entries
+                // join with newlines, exactly like segments within one entry.
+                if let text = extractText(from: reasoning.segments) {
+                    pendingReasoning = pendingReasoning.map { $0 + "\n" + text } ?? text
                 }
-                return [Chat.Message.assistant(content: text)]
+                continue
+            }
+            var converted = convert(entry: entry, toolCallFormat: toolCallFormat)
+            if case .response = entry, let reasoning = pendingReasoning, !converted.isEmpty {
+                converted[0].reasoning = reasoning
+            }
+            // Consumed by the response above, or discarded: reasoning
+            // belongs to the entry generated immediately after it and must
+            // never be mis-attributed to a later, unrelated response.
+            pendingReasoning = nil
+            messages.append(contentsOf: converted)
+        }
+        return messages
+    }
 
-            case .toolCalls(let toolCalls):
-                // Some chat templates validate the message sequence around
-                // tool turns and reject a tool-call turn replayed as verbatim
-                // assistant text content (the default below):
-                //
-                // - Mistral enforces strict user/assistant alternation and
-                //   counts any assistant message *without* `tool_calls`
-                //   toward it, so a completed round (user -> tool call ->
-                //   tool result -> answer) renders as user, assistant,
-                //   assistant and the template raises `TemplateException`.
-                // - MiniMax-M2 requires every `tool` message to follow an
-                //   assistant message carrying `tool_calls` (a plain
-                //   assistant turn resets its `last_tool_call` tracker), so
-                //   the tool result itself raises `TemplateException`.
-                //
-                // For these formats, carry the round's calls as structured
-                // `tool_calls` on a single assistant message instead: the
-                // template renders its own native tool-call shape (Mistral's
-                // `[TOOL_CALLS]name[ARGS]args`, MiniMax's
-                // `<minimax:tool_call><invoke …>`), the exact form those
-                // models are trained to consume.
-                if let toolCallFormat, Self.structuredToolCallFormats.contains(toolCallFormat) {
-                    return [
-                        Chat.Message.assistant(
-                            content: "", toolCalls: toolCalls.map(structuredToolCall(from:)))
-                    ]
-                }
-                // Every other family: one assistant message per tool call,
-                // each carrying the exact `{"name": ..., "arguments": ...}`
-                // envelope text the Executor's own tool-calling grammar
-                // generates (see `unwrapToolCallMarkers` in
-                // MLXLanguageModel.swift) -- replayed verbatim rather than
-                // through Chat.Message's structured `toolCalls:` parameter, so
-                // a continuation round sees byte-identical history to what it
-                // actually produced, not a template's own `tool_calls`
-                // re-rendering of it.
-                return toolCalls.map { call in
-                    Chat.Message.assistant(
-                        content:
-                            "{\"\(ToolCallEnvelopeKey.name)\": \(jsonStringLiteral(call.toolName)), "
-                            + "\"\(ToolCallEnvelopeKey.arguments)\": \(call.arguments.jsonString)}")
-                }
+    /// Converts a single transcript entry to its chat message(s) — the
+    /// per-entry body of ``mlxMessages(for:toolCallFormat:replayReasoning:)``,
+    /// which owns the cross-entry reasoning-replay state around it.
+    ///
+    /// - Parameters:
+    ///   - entry: The transcript entry to convert.
+    ///   - toolCallFormat: See ``mlxMessages(for:toolCallFormat:replayReasoning:)``.
+    /// - Returns: The entry's chat messages (empty for entries with nothing
+    ///   to carry, including `.reasoning` when replay is disabled).
+    private static func convert(
+        entry: Transcript.Entry,
+        toolCallFormat: ToolCallFormat?
+    ) -> [Chat.Message] {
+        switch entry {
+        case .instructions(let instructions):
+            // System message for model instructions. Labeled image
+            // attachments ride along as message images, mirroring the
+            // prompt path, so the `.vision` gate sees them and they are
+            // not silently dropped.
+            return makeTextImageMessage(
+                from: instructions.segments,
+                make: { Chat.Message.system(content: $0, images: $1) },
+                emptyWarning: "Skipping instructions entry with no text or image content")
 
-            case .toolOutput(let toolOutput):
-                // Tool-role message carrying the executed tool's result,
-                // correlated to its call via `id`. Always emitted (even when
-                // the tool produced no text) so a continuation round's prompt
-                // always differs from the round that made the call --
-                // dropping empty outputs would make the two rounds' rendered
-                // prompts identical and risk the model repeating the same
-                // call forever. Image attachment segments (e.g. a tool that
-                // returns a photo) ride along as message images, mirroring
-                // the instructions/prompt path, so they are not silently
-                // dropped.
-                return [
-                    Chat.Message.tool(
-                        content: extractToolOutputText(from: toolOutput.segments),
-                        images: extractImages(from: toolOutput.segments),
-                        id: toolOutput.id)
-                ]
+        case .prompt(let prompt):
+            // User message for prompts. Labeled image attachments
+            // (public `.attachment` segments) ride along as message
+            // images; text is still concatenated as before.
+            return makeTextImageMessage(
+                from: prompt.segments,
+                make: { Chat.Message.user(content: $0, images: $1) },
+                emptyWarning: "Skipping prompt entry with no text or image content")
 
-            case .reasoning:
-                // Prior-turn reasoning is intentionally NOT replayed into the
-                // model's chat history (per SKILL.md): the answer carries
-                // forward, the chain-of-thought does not. Dropped explicitly so
-                // a future SDK change is reviewed here rather than silently
-                // absorbed by the catch-all below.
-                logger.debug("Skipping reasoning entry (not replayed into chat history)")
-                return []
-
-            @unknown default:
-                // Skip unrecognized future entry types.
-                logger.debug("Skipping unsupported entry type")
+        case .response(let response):
+            // Assistant message for previous responses. Includes
+            // `.structure` segments (like `.toolOutput` below): a prior
+            // turn's response may have been a guided/structured
+            // generation (a `Generable` result carried as `.structure`,
+            // not `.text`), and that content must survive replay into
+            // the next turn's prompt rather than being silently dropped.
+            guard let text = extractText(from: response.segments, includeStructure: true)
+            else {
+                logger.warning("Skipping response entry with no text or structure content")
                 return []
             }
+            return [Chat.Message.assistant(content: text)]
+
+        case .toolCalls(let toolCalls):
+            // Some chat templates validate the message sequence around
+            // tool turns and reject a tool-call turn replayed as verbatim
+            // assistant text content (the default below):
+            //
+            // - Mistral enforces strict user/assistant alternation and
+            //   counts any assistant message *without* `tool_calls`
+            //   toward it, so a completed round (user -> tool call ->
+            //   tool result -> answer) renders as user, assistant,
+            //   assistant and the template raises `TemplateException`.
+            // - MiniMax-M2 requires every `tool` message to follow an
+            //   assistant message carrying `tool_calls` (a plain
+            //   assistant turn resets its `last_tool_call` tracker), so
+            //   the tool result itself raises `TemplateException`.
+            //
+            // For these formats, carry the round's calls as structured
+            // `tool_calls` on a single assistant message instead: the
+            // template renders its own native tool-call shape (Mistral's
+            // `[TOOL_CALLS]name[ARGS]args`, MiniMax's
+            // `<minimax:tool_call><invoke …>`), the exact form those
+            // models are trained to consume.
+            if let toolCallFormat, Self.structuredToolCallFormats.contains(toolCallFormat) {
+                return [
+                    Chat.Message.assistant(
+                        content: "", toolCalls: toolCalls.map(structuredToolCall(from:)))
+                ]
+            }
+            // Every other family: one assistant message per tool call,
+            // each carrying the exact `{"name": ..., "arguments": ...}`
+            // envelope text the Executor's own tool-calling grammar
+            // generates (see `unwrapToolCallMarkers` in
+            // MLXLanguageModel.swift) -- replayed verbatim rather than
+            // through Chat.Message's structured `toolCalls:` parameter, so
+            // a continuation round sees byte-identical history to what it
+            // actually produced, not a template's own `tool_calls`
+            // re-rendering of it.
+            return toolCalls.map { call in
+                Chat.Message.assistant(
+                    content:
+                        "{\"\(ToolCallEnvelopeKey.name)\": \(jsonStringLiteral(call.toolName)), "
+                        + "\"\(ToolCallEnvelopeKey.arguments)\": \(call.arguments.jsonString)}")
+            }
+
+        case .toolOutput(let toolOutput):
+            // Tool-role message carrying the executed tool's result,
+            // correlated to its call via `id`. Always emitted (even when
+            // the tool produced no text) so a continuation round's prompt
+            // always differs from the round that made the call --
+            // dropping empty outputs would make the two rounds' rendered
+            // prompts identical and risk the model repeating the same
+            // call forever. Image attachment segments (e.g. a tool that
+            // returns a photo) ride along as message images, mirroring
+            // the instructions/prompt path, so they are not silently
+            // dropped.
+            return [
+                Chat.Message.tool(
+                    content: extractToolOutputText(from: toolOutput.segments),
+                    images: extractImages(from: toolOutput.segments),
+                    id: toolOutput.id)
+            ]
+
+        case .reasoning:
+            // Reasoning entries produce no message of their own. With
+            // replay disabled (the historical default, per SKILL.md) the
+            // chain-of-thought is dropped: the answer carries forward,
+            // the thinking does not. With replay enabled, `mlxMessages`
+            // consumes `.reasoning` entries BEFORE dispatching here and
+            // attaches their text to the following response — so this
+            // case only runs, and only drops, when replay is off.
+            // Explicit rather than folded into the catch-all below so a
+            // future SDK change is reviewed here.
+            logger.debug("Skipping reasoning entry (not replayed into chat history)")
+            return []
+
+        @unknown default:
+            // Skip unrecognized future entry types.
+            logger.debug("Skipping unsupported entry type")
+            return []
         }
     }
 
