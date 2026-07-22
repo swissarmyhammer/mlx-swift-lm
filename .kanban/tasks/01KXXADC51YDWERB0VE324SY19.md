@@ -1,10 +1,15 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01ky5zq510m9q89pgmbn13jp3z
+  text: 'CLOSED STALE (user decision 2026-07-22). Evidence: this fork has no CI (pull_request.yml triggers on PR only and every job is gated `if: github.repository == ''ml-explore/mlx-swift-lm''`; zero runs exist), so the check is the local gate — the IntegrationTesting xcodeproj target has built and tested green repeatedly since this card was filed: TEST BUILD SUCCEEDED on 2026-07-21 (post-revert verification at dd459ee) and full PromptCacheHybridReuseTests + PromptCacheReuseTests passes on 2026-07-22 (er33v06/05zt40g gates, both modes, real weights). The makeXgTokenizer signature regression was fixed in passing during the intervening work.'
+  timestamp: 2026-07-22T22:39:08.320820+00:00
 depends_on:
 - 01KXX2JDFWQ79CXZE1P1FJMY9F
-position_column: todo
-position_ordinal: '8880'
+position_column: done
+position_ordinal: c980
 title: 'Fix regression: IntegrationTestingTests xcodeproj target failed to build after makeXgTokenizer signature change (^r9rf5g7)'
 ---
 ## What

@@ -65,6 +65,10 @@ comments:
   id: 01ky01vptxt7pw9ekg5h9er6vs
   text: 'Moving to done alongside ^b3zpf2q per user''s explicit decision ("just mark it done and no follow up"). This task''s own deliverable — PromptCacheHybridReuseTests.swift, the real end-to-end integration test against mlx-community/Qwen3.6-27B-mxfp4 — is complete: it passes against the real model with a corrected, empirically-verified, well-documented assertion. The dependent bug-fix task ^b3zpf2q is done. See ^b3zpf2q''s final comment for the full resolution summary and the user''s decision to stop further Evaluate.swift cleanup rounds.'
   timestamp: 2026-07-20T15:21:08.189979+00:00
+- actor: claude-code
+  id: 01ky5zr39b8rbsr9cs4fn80xb5
+  text: 'SUPERSESSION NOTE (2026-07-22): this card''s closing narrative — "cachedTokenCount == 0 is the real, structural, empirically-verified floor; no sound fix at the cache layer can close this gap" — was subsequently DISPROVEN. ^er33v06 (transcript-stable-boundary split-prefill checkpoints, commit e78994c) and ^05zt40g (preserve_thinking + reasoning_content replay, commits 5891f01/4d7cbaf) closed the gap this card attributed to the chat template: PromptCacheHybridReuseTests now asserts the STRONG bound (second.cachedTokenCount >= first.promptTokenCount + first.outputTokenCount - 8, and > 0) and passes against real mlx-community/Qwen3.6-27B-mxfp4 in both suppressed and thinking modes. The test file this card created remains the living gate; read it at HEAD, not this card''s description, for current behavior. No action needed on this card — recorded for historical accuracy only.'
+  timestamp: 2026-07-22T22:39:39.307775+00:00
 depends_on:
 - 01KXY1XEP9NAAMMRN1KER33V06
 position_column: done

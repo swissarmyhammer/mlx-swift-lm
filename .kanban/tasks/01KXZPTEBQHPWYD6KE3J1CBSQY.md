@@ -1,11 +1,16 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01ky5zq9ynbk52f6b020b22yfs
+  text: 'CLOSED STALE (user decision 2026-07-22) — the re-scope checkpoint this card mandated has been reached and answered. er33v06 (stable-boundary checkpoints) + 05zt40g (preserve_thinking replay) landed and were measured: real Qwen3.6-27B-mxfp4 round-2 reuse hits the strong bound (>= prompt+output-8) in both suppressed and thinking modes, and the user confirms caching is working in the downstream FoundationModelsRouter. The residual value of block-boundary snapshots (forked/edited-history conversations) does not currently justify the MLXLMCommon prefill restructure. If fork-heavy workloads become important, this card''s design notes (attention-in-chunk-store + constant-size Mamba snapshots at chunk boundaries, vLLM/SGLang/llama.cpp prior art) remain the starting point.'
+  timestamp: 2026-07-22T22:39:13.365894+00:00
 depends_on:
 - 01KXY1XEP9NAAMMRN1KER33V06
 - 01KXZP6CTSETM3YJS3E05ZT40G
-position_column: todo
-position_ordinal: '9380'
+position_column: done
+position_ordinal: ca80
 title: 'PromptCache: block-boundary hybrid state snapshots married to the chunk store (vLLM-style prefix caching)'
 ---
 ## What
