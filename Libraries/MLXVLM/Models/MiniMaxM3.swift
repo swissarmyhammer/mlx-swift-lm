@@ -48,6 +48,61 @@ public let defaultRoutedScalingFactor: Float = 2.0
 /// (`init` and `init(from:)`).
 let defaultMoeLayerStart = 3
 
+/// Default DSA indexer per-index-head dimension (`sparse_index_dim`),
+/// verified against the `mlx-community/MiniMax-M3-4bit` checkpoint's
+/// `config.json`. Shared by `MiniMaxM3SparseAttentionConfiguration`'s
+/// memberwise `init` and its `init(from:)` decoder fallback.
+public let defaultIndexDim = 128
+
+/// Default DSA indexer head count (`sparse_num_index_heads`). See `defaultIndexDim`.
+public let defaultNumIndexHeads = 4
+
+/// Default DSA indexer top-k selected block count (`sparse_topk_blocks`). See `defaultIndexDim`.
+public let defaultTopkBlocks = 16
+
+/// Default DSA indexer block size, in tokens (`sparse_block_size`). See `defaultIndexDim`.
+public let defaultBlockSize = 128
+
+/// Default checkpoint model type (`model_type`), verified against the
+/// `mlx-community/MiniMax-M3-4bit` checkpoint's `config.json`. Shared by
+/// `MiniMaxM3TextConfiguration`'s memberwise `init` and its `init(from:)`
+/// decoder fallback.
+public let defaultModelType = "minimax_m3"
+
+/// Default decoder-layer count (`num_hidden_layers`). See `defaultModelType`.
+public let defaultHiddenLayers = 60
+
+/// Default key/value head count for grouped-query attention
+/// (`num_key_value_heads`). See `defaultModelType`.
+public let defaultKvHeads = 4
+
+/// Default vocabulary size (`vocab_size`). See `defaultModelType`.
+public let defaultVocabularySize = 200_064
+
+/// Default maximum sequence length supported by RoPE
+/// (`max_position_embeddings`). See `defaultModelType`.
+public let defaultMaxPositionEmbeddings = 1_048_576
+
+/// Default RoPE base frequency (`rope_theta`). See `defaultModelType`.
+public let defaultRopeTheta: Float = 5_000_000
+
+/// Default MLP activation function name (`hidden_act`). See `defaultModelType`.
+public let defaultHiddenAct = "swigluoai"
+
+/// Default QK-norm layout (`qk_norm_type`). Also referenced by
+/// `MiniMaxM3LanguageModel`'s `init` precondition, which fails fast if a
+/// checkpoint ever requests a different layout. See `defaultModelType`.
+public let defaultQkNormType = "per_head"
+
+/// Default dense (non-MoE) MLP intermediate size (`dense_intermediate_size`). See `defaultModelType`.
+public let defaultDenseIntermediateSize = 12288
+
+/// Default number of routed experts selected per token (`num_experts_per_tok`). See `defaultModelType`.
+public let defaultNumExpertsPerTok = 4
+
+/// Default multi-token-prediction module count (`num_mtp_modules`). See `defaultModelType`.
+public let defaultNumMTPModules = 7
+
 // MARK: - MiniMaxM3SwiGLUOAI
 
 /// Clipped SwiGLU activation used by MiniMax-M3's dense MLPs, shared expert,
@@ -271,7 +326,10 @@ public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
     /// the values verified against the `mlx-community/MiniMax-M3-4bit`
     /// checkpoint's `config.json`.
     public init(
-        indexDim: Int = 128, numIndexHeads: Int = 4, topkBlocks: Int = 16, blockSize: Int = 128
+        indexDim: Int = defaultIndexDim,
+        numIndexHeads: Int = defaultNumIndexHeads,
+        topkBlocks: Int = defaultTopkBlocks,
+        blockSize: Int = defaultBlockSize
     ) {
         self.indexDim = indexDim
         self.numIndexHeads = numIndexHeads
@@ -285,10 +343,11 @@ public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
     /// `mlx-community/MiniMax-M3-4bit` checkpoint's `config.json`.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        indexDim = try container.decodeIfPresent(Int.self, forKey: .indexDim) ?? 128
-        numIndexHeads = try container.decodeIfPresent(Int.self, forKey: .numIndexHeads) ?? 4
-        topkBlocks = try container.decodeIfPresent(Int.self, forKey: .topkBlocks) ?? 16
-        blockSize = try container.decodeIfPresent(Int.self, forKey: .blockSize) ?? 128
+        indexDim = try container.decodeIfPresent(Int.self, forKey: .indexDim) ?? defaultIndexDim
+        numIndexHeads =
+            try container.decodeIfPresent(Int.self, forKey: .numIndexHeads) ?? defaultNumIndexHeads
+        topkBlocks = try container.decodeIfPresent(Int.self, forKey: .topkBlocks) ?? defaultTopkBlocks
+        blockSize = try container.decodeIfPresent(Int.self, forKey: .blockSize) ?? defaultBlockSize
     }
 }
 
@@ -308,6 +367,20 @@ public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
 /// decoder's own root container when one isn't present. Unknown keys
 /// (`vision_config`, `mtp`-related fields, `quantization`) are simply never
 /// referenced by `CodingKeys` and so never fail decoding.
+///
+/// **`encode(to:)` is one-directional, not a round-trip inverse of
+/// `init(from:)`.** The synthesized `Encodable` conformance always writes a
+/// flat JSON object -- decoding a VL-nested checkpoint (fields under
+/// `text_config`) and re-encoding the result does *not* reproduce the
+/// original nesting. This mirrors `Gemma3TextConfiguration`'s identical
+/// asymmetry and is harmless today: nothing in this repo round-trips these
+/// configuration types through `JSONEncoder` (the one real `config.json`
+/// rewriter, `ModelConversion.updateModelConfigWithQuantization`, patches a
+/// raw `[String: JSONValue]` dictionary instead, specifically to preserve
+/// shape fidelity for keys it doesn't model as Swift types). If a future
+/// caller needs faithful VL-nested round-tripping, add a custom
+/// `encode(to:)` that re-nests under `text_config` when `modelType` is the
+/// VL variant -- don't assume the synthesized encoder already does this.
 public struct MiniMaxM3TextConfiguration: Codable, Sendable {
     /// Checkpoint model type: `"minimax_m3_vl"` (VL-nested) or `"minimax_m3"` (flat) (`model_type`).
     public var modelType: String
@@ -387,28 +460,28 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
     /// defaulting each parameter to the value verified against the
     /// `mlx-community/MiniMax-M3-4bit` checkpoint's `config.json`.
     public init(
-        modelType: String = "minimax_m3",
+        modelType: String = defaultModelType,
         hiddenSize: Int = 6144,
-        hiddenLayers: Int = 60,
+        hiddenLayers: Int = defaultHiddenLayers,
         attentionHeads: Int = 64,
-        kvHeads: Int = 4,
+        kvHeads: Int = defaultKvHeads,
         headDim: Int = 128,
-        vocabularySize: Int = 200_064,
-        maxPositionEmbeddings: Int = 1_048_576,
+        vocabularySize: Int = defaultVocabularySize,
+        maxPositionEmbeddings: Int = defaultMaxPositionEmbeddings,
         rmsNormEps: Float = 1e-6,
         useGemmaNorm: Bool = true,
-        ropeTheta: Float = 5_000_000,
+        ropeTheta: Float = defaultRopeTheta,
         rotaryDim: Int? = nil,
         partialRotaryFactor: Float = 0.5,
-        hiddenAct: String = "swigluoai",
+        hiddenAct: String = defaultHiddenAct,
         useQkNorm: Bool = true,
-        qkNormType: String = "per_head",
+        qkNormType: String = defaultQkNormType,
         tieWordEmbeddings: Bool = false,
-        denseIntermediateSize: Int = 12288,
+        denseIntermediateSize: Int = defaultDenseIntermediateSize,
         intermediateSize: Int = 3072,
         sharedIntermediateSize: Int? = nil,
         numLocalExperts: Int = 128,
-        numExpertsPerTok: Int = 4,
+        numExpertsPerTok: Int = defaultNumExpertsPerTok,
         nSharedExperts: Int = 1,
         scoringFunc: String = "sigmoid",
         useRoutingBias: Bool = true,
@@ -417,7 +490,7 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         swigluAlpha: Float = defaultSwigluAlpha,
         swigluLimit: Float = defaultSwigluLimit,
         swigluBeta: Float = defaultSwigluBeta,
-        numMTPModules: Int = 7,
+        numMTPModules: Int = defaultNumMTPModules,
         sparseAttention: MiniMaxM3SparseAttentionConfiguration = MiniMaxM3SparseAttentionConfiguration()
     ) {
         self.modelType = modelType
@@ -512,37 +585,46 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
                 try decoder.container(keyedBy: CodingKeys.self)
             }
 
-        modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? "minimax_m3"
+        modelType =
+            try container.decodeIfPresent(String.self, forKey: .modelType) ?? defaultModelType
         hiddenSize = try container.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 6144
-        hiddenLayers = try container.decodeIfPresent(Int.self, forKey: .hiddenLayers) ?? 60
+        hiddenLayers =
+            try container.decodeIfPresent(Int.self, forKey: .hiddenLayers) ?? defaultHiddenLayers
         attentionHeads = try container.decodeIfPresent(Int.self, forKey: .attentionHeads) ?? 64
-        kvHeads = try container.decodeIfPresent(Int.self, forKey: .kvHeads) ?? 4
+        kvHeads = try container.decodeIfPresent(Int.self, forKey: .kvHeads) ?? defaultKvHeads
         headDim = try container.decodeIfPresent(Int.self, forKey: .headDim) ?? 128
         vocabularySize =
-            try container.decodeIfPresent(Int.self, forKey: .vocabularySize) ?? 200_064
+            try container.decodeIfPresent(Int.self, forKey: .vocabularySize)
+            ?? defaultVocabularySize
         maxPositionEmbeddings =
-            try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 1_048_576
+            try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings)
+            ?? defaultMaxPositionEmbeddings
         rmsNormEps = try container.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
         useGemmaNorm = try container.decodeIfPresent(Bool.self, forKey: .useGemmaNorm) ?? true
-        ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 5_000_000
+        ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? defaultRopeTheta
         partialRotaryFactor =
             try container.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 0.5
         rotaryDim =
             try container.decodeIfPresent(Int.self, forKey: .rotaryDim)
             ?? Int(partialRotaryFactor * Float(headDim))
-        hiddenAct = try container.decodeIfPresent(String.self, forKey: .hiddenAct) ?? "swigluoai"
+        hiddenAct =
+            try container.decodeIfPresent(String.self, forKey: .hiddenAct) ?? defaultHiddenAct
         useQkNorm = try container.decodeIfPresent(Bool.self, forKey: .useQkNorm) ?? true
-        qkNormType = try container.decodeIfPresent(String.self, forKey: .qkNormType) ?? "per_head"
+        qkNormType =
+            try container.decodeIfPresent(String.self, forKey: .qkNormType) ?? defaultQkNormType
         tieWordEmbeddings =
             try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
         denseIntermediateSize =
-            try container.decodeIfPresent(Int.self, forKey: .denseIntermediateSize) ?? 12288
+            try container.decodeIfPresent(Int.self, forKey: .denseIntermediateSize)
+            ?? defaultDenseIntermediateSize
         intermediateSize =
             try container.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 3072
         let decodedSharedIntermediateSize = try container.decodeIfPresent(
             Int.self, forKey: .sharedIntermediateSize)
         numLocalExperts = try container.decodeIfPresent(Int.self, forKey: .numLocalExperts) ?? 128
-        numExpertsPerTok = try container.decodeIfPresent(Int.self, forKey: .numExpertsPerTok) ?? 4
+        numExpertsPerTok =
+            try container.decodeIfPresent(Int.self, forKey: .numExpertsPerTok)
+            ?? defaultNumExpertsPerTok
         nSharedExperts = try container.decodeIfPresent(Int.self, forKey: .nSharedExperts) ?? 1
         scoringFunc = try container.decodeIfPresent(String.self, forKey: .scoringFunc) ?? "sigmoid"
         useRoutingBias = try container.decodeIfPresent(Bool.self, forKey: .useRoutingBias) ?? true
@@ -556,7 +638,8 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
             try container.decodeIfPresent(Float.self, forKey: .swigluLimit) ?? defaultSwigluLimit
         swigluBeta =
             try container.decodeIfPresent(Float.self, forKey: .swigluBeta) ?? defaultSwigluBeta
-        numMTPModules = try container.decodeIfPresent(Int.self, forKey: .numMTPModules) ?? 7
+        numMTPModules =
+            try container.decodeIfPresent(Int.self, forKey: .numMTPModules) ?? defaultNumMTPModules
         sparseAttention =
             try container.decodeIfPresent(
                 MiniMaxM3SparseAttentionConfiguration.self, forKey: .sparseAttention)
@@ -836,7 +919,7 @@ final class MiniMaxM3LanguageModel: Module, KVCacheDimensionProvider {
             "MiniMaxM3 only supports use_gemma_norm=true (dense-attention stage, ^xgvth41)")
         if config.useQkNorm {
             precondition(
-                config.qkNormType == "per_head",
+                config.qkNormType == defaultQkNormType,
                 "MiniMaxM3 only supports qk_norm_type=\"per_head\" (dense-attention stage, ^xgvth41)"
             )
         }
@@ -917,7 +1000,18 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
     /// drop unused vision-tower/multi-modal-projector/MTP/sparse-attention-indexer
     /// weights, and remap per-expert fallback weights (`w1`/`w2`/`w3`) into the
     /// fused `gate_up_proj`/`down_proj` layout `FusedGateUpSwitchGLU` expects.
+    /// The three phases are independent transformations, applied in order --
+    /// see `_mergeQuantized`, `_filterUnusedWeights`, and `_remapExpertWeights`.
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        let merged = _mergeQuantized(weights)
+        let filtered = _filterUnusedWeights(merged)
+        return _remapExpertWeights(filtered)
+    }
+
+    /// `sanitize` step 1: merge fp8/bf16 block-quantized `weight_scale_inv`
+    /// pairs (M2's dequant path, for bf16/fp8-original checkpoints) into
+    /// their dequantized weight.
+    private func _mergeQuantized(_ weights: [String: MLXArray]) -> [String: MLXArray] {
         func dequant(weight: MLXArray, scaleInv: MLXArray) -> MLXArray {
             let dtype = weight.dtype
             let bs = 128
@@ -934,8 +1028,6 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
                 .asType(dtype)
         }
 
-        // Step 1: merge fp8/bf16 block-quantized `weight_scale_inv` pairs
-        // (M2's dequant path, for bf16/fp8-original checkpoints).
         var merged: [String: MLXArray] = [:]
         for (key, value) in weights {
             if key.contains("weight_scale_inv") {
@@ -947,18 +1039,22 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
                 merged[key] = value
             }
         }
+        return merged
+    }
 
-        // Step 2: drop vision-tower / multi-modal-projector / MTP weights
-        // (verified absent from the mlx-community/MiniMax-M3-4bit checkpoint;
-        // MTP task will revisit), strip the sparse-attention indexer weights
-        // (`index_q_proj`/`index_k_proj`/`index_q_norm`/`index_k_norm` --
-        // confirmed present under `self_attn.` on every MoE-scheduled layer
-        // in the real checkpoint's safetensors index; this dense-only stage
-        // doesn't build the indexer, task ^8dbc476 does), and re-key flat
-        // (`minimax_m3`) checkpoints into the `language_model.`-prefixed
-        // layout the VL checkpoint already uses.
+    /// `sanitize` step 2: drop vision-tower / multi-modal-projector / MTP
+    /// weights (verified absent from the mlx-community/MiniMax-M3-4bit
+    /// checkpoint; MTP task will revisit), strip the sparse-attention
+    /// indexer weights (`index_q_proj`/`index_k_proj`/`index_q_norm`/
+    /// `index_k_norm` -- confirmed present under `self_attn.` on every
+    /// MoE-scheduled layer in the real checkpoint's safetensors index; this
+    /// dense-only stage doesn't build the indexer, task ^8dbc476 does),
+    /// re-key flat (`minimax_m3`) checkpoints into the `language_model.`
+    /// -prefixed layout the VL checkpoint already uses, and drop the tied
+    /// `lm_head` weight when `configuration.tieWordEmbeddings` is set.
+    private func _filterUnusedWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
         var prefixed: [String: MLXArray] = [:]
-        for (key, value) in merged {
+        for (key, value) in weights {
             if key.hasPrefix("vision_tower.") || key.hasPrefix("multi_modal_projector.")
                 || key.hasPrefix("patch_merge_mlp.")
             {
@@ -979,17 +1075,22 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
             prefixed["language_model.lm_head.weight"] = nil
         }
 
-        // Step 3: fallback remap for unconverted per-expert checkpoints
-        // (`w1`/`w2`/`w3`, M2's layout) into `FusedGateUpSwitchGLU`'s fused
-        // `gate_up_proj`/`down_proj` layout (gate = first half, up = second
-        // half of the fused column dimension, matching
-        // `MiniMaxM3SparseMoeBlock`'s split order). The published
-        // mlx-community checkpoint already ships fused, pre-stacked expert
-        // weights and never reaches this loop's body (the guard fails
-        // immediately). This fallback stacks only the `numLocalExperts`
-        // *routed* experts; it does not attempt to synthesize the packed
-        // shared-expert row, since no unconverted-per-expert M3 checkpoint
-        // exists yet to verify that layout against.
+        return prefixed
+    }
+
+    /// `sanitize` step 3: fallback remap for unconverted per-expert
+    /// checkpoints (`w1`/`w2`/`w3`, M2's layout) into
+    /// `FusedGateUpSwitchGLU`'s fused `gate_up_proj`/`down_proj` layout
+    /// (gate = first half, up = second half of the fused column dimension,
+    /// matching `MiniMaxM3SparseMoeBlock`'s split order). The published
+    /// mlx-community checkpoint already ships fused, pre-stacked expert
+    /// weights and never reaches this loop's body (the guard fails
+    /// immediately). This fallback stacks only the `numLocalExperts`
+    /// *routed* experts; it does not attempt to synthesize the packed
+    /// shared-expert row, since no unconverted-per-expert M3 checkpoint
+    /// exists yet to verify that layout against.
+    private func _remapExpertWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
+        var prefixed = weights
         for layerIndex in 0 ..< configuration.hiddenLayers
         where configuration.isMoELayer(layerIndex) {
             let prefix = "language_model.model.layers.\(layerIndex).block_sparse_moe"
@@ -1013,7 +1114,6 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
                 prefixed["\(prefix).switch_mlp.down_proj.\(key)"] = MLX.stacked(down)
             }
         }
-
         return prefixed
     }
 }
