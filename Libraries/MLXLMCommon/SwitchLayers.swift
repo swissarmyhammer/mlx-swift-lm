@@ -4,27 +4,21 @@ import MLXNN
 
 // Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/switch_layers.py
 
-/// Compiled, shapeless `silu(gate) * up` product used as the default
-/// gate/up combination for ``SwitchGLU`` and ``FusedGateUpSwitchGLU`` when no
-/// custom activation is supplied.
+/// A compiled, shapeless `silu(gate) * up` product used as the default gate/up combination for ``SwitchGLU`` and ``FusedGateUpSwitchGLU`` when no custom activation is supplied.
 public let compiledSiluProduct: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
     shapeless: true
 ) { gate, up in
     MLXNN.silu(gate) * up
 }
 
-/// Combines expert outputs weighted by routing coefficients, summing across
-/// experts per token: `(outputs * weights).sum(axis: -2)`, where `weights`
-/// has been expanded to broadcast against `outputs`' trailing feature axis.
+/// Combines expert outputs weighted by routing coefficients, summing across experts per token: `(outputs * weights).sum(axis: -2)`, where `weights` has been expanded to broadcast against `outputs`' trailing feature axis.
 public let weightedExpertSum: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
     shapeless: true
 ) { outputs, weights in
     (outputs * MLX.expandedDimensions(weights, axis: -1)).sum(axis: -2)
 }
 
-/// Flattens `x` and `indices` and sorts tokens by their assigned expert index
-/// so that each expert's tokens are contiguous, enabling an efficient batched
-/// gather-matmul in ``SwitchLinear``/``QuantizedSwitchLinear``.
+/// Flattens `x` and `indices` and sorts tokens by their assigned expert index so that each expert's tokens are contiguous, enabling an efficient batched gather-matmul in ``SwitchLinear``/``QuantizedSwitchLinear``.
 ///
 /// - Parameters:
 ///   - x: token hidden states with a trailing `[num_tokens, m, ...]`-shaped
@@ -46,8 +40,7 @@ public func gatherSort(x: MLXArray, indices: MLXArray) -> (MLXArray, MLXArray, M
     )
 }
 
-/// Inverse of ``gatherSort``: restores `x` to its original token order using
-/// the `invOrder` permutation produced by the matching `gatherSort` call.
+/// Inverse of ``gatherSort``: restores `x` to its original token order using the `invOrder` permutation produced by the matching `gatherSort` call.
 ///
 /// - Parameters:
 ///   - x: expert outputs in sorted-by-expert order.
@@ -63,11 +56,7 @@ public func scatterUnsort(x: MLXArray, invOrder: MLXArray, shape: [Int]? = nil) 
     return x
 }
 
-/// Shared forward path for the switch-layer MoE modules: expands `x` for
-/// per-expert routing, sorts tokens by expert when the batch is large enough
-/// to benefit, invokes `combine` to compute the (already gate/up-activated)
-/// per-expert hidden state, projects down via `downProj`, then unsorts and
-/// squeezes back to the caller's shape.
+/// Shared forward path for the switch-layer MoE modules: expands `x` for per-expert routing, sorts tokens by expert when the batch is large enough to benefit, invokes `combine` to compute the (already gate/up-activated) per-expert hidden state, projects down via `downProj`, then unsorts and squeezes back to the caller's shape.
 ///
 /// `combine` receives the (possibly sorted) hidden states, the matching
 /// expert indices, and whether sorting was applied, and must return the
@@ -103,9 +92,7 @@ private func switchGLUForward(
 
 // MARK: - SwitchGLU
 
-/// A mixture-of-experts gated linear unit that routes each token through the
-/// `gate_proj` / `up_proj` / `down_proj` rows selected by its expert indices,
-/// combining `activation(gate) * up` before the down projection.
+/// A mixture-of-experts gated linear unit that routes each token through the `gate_proj` / `up_proj` / `down_proj` rows selected by its expert indices, combining `activation(gate) * up` before the down projection.
 ///
 /// Used by sparse MoE decoder blocks throughout the repo (e.g. Mixtral,
 /// DeepSeek-V3, Qwen3-MoE) wherever experts ship as separate gate/up weights
@@ -122,8 +109,7 @@ public final class SwitchGLU: Module {
     let activation: (MLXArray) -> MLXArray
     let activationProduct: (@Sendable (MLXArray, MLXArray) -> MLXArray)?
 
-    /// Creates a `SwitchGLU` with `numExperts` independent gate/up/down expert
-    /// weight matrices.
+    /// Creates a `SwitchGLU` with `numExperts` independent gate/up/down expert weight matrices.
     ///
     /// - Parameters:
     ///   - inputDims: hidden size of the token embeddings entering/leaving the block.
@@ -162,9 +148,7 @@ public final class SwitchGLU: Module {
         super.init()
     }
 
-    /// Routes `x` through the experts selected by `indices`, combining the
-    /// gate/up projections with the configured activation and projecting the
-    /// result back down to `inputDims`.
+    /// Routes `x` through the experts selected by `indices`, combining the gate/up projections with the configured activation and projecting the result back down to `inputDims`.
     ///
     /// - Parameters:
     ///   - x: token hidden states, shape `[..., inputDims]`.
@@ -185,9 +169,7 @@ public final class SwitchGLU: Module {
 
 // MARK: - FusedGateUpSwitchGLU
 
-/// SwitchGLU variant for models that ship a single fused `gate_up_proj` weight
-/// of shape `[numExperts, 2*hiddenDims, inputDims]` instead of separate
-/// `gate_proj` / `up_proj`.
+/// SwitchGLU variant for models that ship a single fused `gate_up_proj` weight of shape `[numExperts, 2*hiddenDims, inputDims]` instead of separate `gate_proj` / `up_proj`.
 ///
 /// Used by Gemma 4 26B MoE and MiniMax-M3.
 public final class FusedGateUpSwitchGLU: Module {
@@ -207,8 +189,7 @@ public final class FusedGateUpSwitchGLU: Module {
     /// out of sync.
     private static let gateUpFusionFactor = 2
 
-    /// Creates a `FusedGateUpSwitchGLU` with `numExperts` fused gate/up expert
-    /// weight matrices.
+    /// Creates a `FusedGateUpSwitchGLU` with `numExperts` fused gate/up expert weight matrices.
     ///
     /// - Parameters:
     ///   - inputDims: hidden size of the token embeddings entering/leaving the block.
@@ -262,11 +243,7 @@ public final class FusedGateUpSwitchGLU: Module {
         super.init()
     }
 
-    /// Routes `x` through the experts selected by `indices`, splitting the
-    /// fused gate/up projection in half, combining the halves with the
-    /// configured activation (`twoArgActivation`, `activationProduct`, or the
-    /// single-argument `activation` fallback, in that order of precedence),
-    /// and projecting the result back down to `inputDims`.
+    /// Routes `x` through the experts selected by `indices`, splitting the fused gate/up projection in half, combining the halves with the configured activation (`twoArgActivation`, `activationProduct`, or the single-argument `activation` fallback, in that order of precedence), and projecting the result back down to `inputDims`.
     ///
     /// - Parameters:
     ///   - x: token hidden states, shape `[..., inputDims]`.
@@ -287,8 +264,7 @@ public final class FusedGateUpSwitchGLU: Module {
     }
 }
 
-/// Adds the per-expert bias (if present) selected by `indices` to `result`,
-/// broadcasting the gathered bias row against the trailing token axis.
+/// Adds the per-expert bias (if present) selected by `indices` to `result`, broadcasting the gathered bias row against the trailing token axis.
 ///
 /// Shared by ``SwitchLinear`` and ``QuantizedSwitchLinear``'s `callAsFunction`.
 ///
@@ -316,10 +292,7 @@ public let defaultQuantizationBits = 4
 
 // MARK: - SwitchLinear
 
-/// A per-expert linear layer: holds `numExperts` independent `[outputDims,
-/// inputDims]` weight matrices (plus optional per-expert bias) and applies
-/// the one selected by each token's expert index via a gather-matmul, rather
-/// than materializing a dense batched matmul over all experts.
+/// A per-expert linear layer: holds `numExperts` independent `[outputDims, inputDims]` weight matrices (plus optional per-expert bias) and applies the one selected by each token's expert index via a gather-matmul, rather than materializing a dense batched matmul over all experts.
 public class SwitchLinear: Module, Quantizable {
     @ModuleInfo(key: "weight") var weight: MLXArray
     @ModuleInfo(key: "bias") var bias: MLXArray?
@@ -328,9 +301,7 @@ public class SwitchLinear: Module, Quantizable {
     let outputDims: Int
     let numExperts: Int
 
-    /// Creates a `SwitchLinear` with randomly-initialized weights (uniform in
-    /// `[-1/sqrt(inputDims), 1/sqrt(inputDims)]`), matching `MLXNN.Linear`'s
-    /// default initialization scaled per expert.
+    /// Creates a `SwitchLinear` with randomly-initialized weights (uniform in `[-1/sqrt(inputDims), 1/sqrt(inputDims)]`), matching `MLXNN.Linear`'s default initialization scaled per expert.
     ///
     /// - Parameters:
     ///   - inputDims: input feature dimension.
@@ -372,8 +343,7 @@ public class SwitchLinear: Module, Quantizable {
         self._bias.wrappedValue = bias
     }
 
-    /// Applies the per-expert weight (and bias, if present) selected by
-    /// `indices` to `x` via a gather-matmul.
+    /// Applies the per-expert weight (and bias, if present) selected by `indices` to `x` via a gather-matmul.
     ///
     /// - Parameters:
     ///   - x: input activations, shape `[..., inputDims]`.
@@ -405,10 +375,7 @@ public class SwitchLinear: Module, Quantizable {
     }
 }
 
-/// Quantized counterpart of ``SwitchLinear``: stores the per-expert weight
-/// matrix in packed/quantized form (plus per-group `scales` and `biases` for
-/// dequantization) instead of full-precision floats, and applies it via a
-/// quantized gather-matmul.
+/// Quantized counterpart of ``SwitchLinear``: stores the per-expert weight matrix in packed/quantized form (plus per-group `scales` and `biases` for dequantization) instead of full-precision floats, and applies it via a quantized gather-matmul.
 public final class QuantizedSwitchLinear: SwitchLinear, Quantized {
     @ModuleInfo(key: "scales") var scales: MLXArray
     @ModuleInfo(key: "biases") var biases: MLXArray?
@@ -420,8 +387,7 @@ public final class QuantizedSwitchLinear: SwitchLinear, Quantized {
     /// The quantization scheme (e.g. affine vs. symmetric) used for this layer.
     public let mode: QuantizationMode
 
-    /// Quantizes an existing ``SwitchLinear``'s weights into this layer,
-    /// freezing the result (quantized parameters are not trainable).
+    /// Quantizes an existing ``SwitchLinear``'s weights into this layer, freezing the result (quantized parameters are not trainable).
     ///
     /// - Parameters:
     ///   - other: the full-precision `SwitchLinear` to quantize.
@@ -449,8 +415,7 @@ public final class QuantizedSwitchLinear: SwitchLinear, Quantized {
         self.freeze()
     }
 
-    /// Applies the per-expert quantized weight (and bias, if present) selected
-    /// by `indices` to `x` via a quantized gather-matmul, dequantizing on the fly.
+    /// Applies the per-expert quantized weight (and bias, if present) selected by `indices` to `x` via a quantized gather-matmul, dequantizing on the fly.
     ///
     /// - Parameters:
     ///   - x: input activations, shape `[..., inputDims]`.
