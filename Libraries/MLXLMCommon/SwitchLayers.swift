@@ -105,10 +105,12 @@ private func switchGLUForward(
 
 /// A mixture-of-experts gated linear unit that routes each token through the
 /// `gate_proj` / `up_proj` / `down_proj` rows selected by its expert indices,
-/// combining `activation(gate) * up` before the down projection. Used by
-/// sparse MoE decoder blocks throughout the repo (e.g. Mixtral, DeepSeek-V3,
-/// Qwen3-MoE) wherever experts ship as separate gate/up weights rather than a
-/// single fused tensor (see ``FusedGateUpSwitchGLU`` for that layout).
+/// combining `activation(gate) * up` before the down projection.
+///
+/// Used by sparse MoE decoder blocks throughout the repo (e.g. Mixtral,
+/// DeepSeek-V3, Qwen3-MoE) wherever experts ship as separate gate/up weights
+/// rather than a single fused tensor (see ``FusedGateUpSwitchGLU`` for that
+/// layout).
 public final class SwitchGLU: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: SwitchLinear
     @ModuleInfo(key: "up_proj") var upProj: SwitchLinear
@@ -185,7 +187,9 @@ public final class SwitchGLU: Module {
 
 /// SwitchGLU variant for models that ship a single fused `gate_up_proj` weight
 /// of shape `[numExperts, 2*hiddenDims, inputDims]` instead of separate
-/// `gate_proj` / `up_proj`. Used by Gemma 4 26B MoE and MiniMax-M3.
+/// `gate_proj` / `up_proj`.
+///
+/// Used by Gemma 4 26B MoE and MiniMax-M3.
 public final class FusedGateUpSwitchGLU: Module {
     @ModuleInfo(key: "gate_up_proj") var gateUpProj: SwitchLinear
     @ModuleInfo(key: "down_proj") var downProj: SwitchLinear
@@ -196,6 +200,12 @@ public final class FusedGateUpSwitchGLU: Module {
     let activation: (MLXArray) -> MLXArray
     let activationProduct: (@Sendable (MLXArray, MLXArray) -> MLXArray)?
     let twoArgActivation: ((MLXArray, MLXArray) -> MLXArray)?
+
+    /// Number of components fused into `gate_up_proj` (gate + up = 2). Used to
+    /// size the fused projection's output dimension and to split it back into
+    /// its two halves; kept as a single constant so the two sites cannot drift
+    /// out of sync.
+    private static let gateUpFusionFactor = 2
 
     /// Creates a `FusedGateUpSwitchGLU` with `numExperts` fused gate/up expert
     /// weight matrices.
@@ -244,7 +254,8 @@ public final class FusedGateUpSwitchGLU: Module {
         }
 
         self._gateUpProj.wrappedValue = SwitchLinear(
-            inputDims: inputDims, outputDims: 2 * hiddenDims, numExperts: numExperts, bias: bias)
+            inputDims: inputDims, outputDims: Self.gateUpFusionFactor * hiddenDims,
+            numExperts: numExperts, bias: bias)
         self._downProj.wrappedValue = SwitchLinear(
             inputDims: hiddenDims, outputDims: inputDims, numExperts: numExperts, bias: bias)
 
@@ -264,7 +275,7 @@ public final class FusedGateUpSwitchGLU: Module {
     public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
         switchGLUForward(x, indices, downProj: downProj) { x, expertIndices, doSort in
             let gateUp = self.gateUpProj(x, expertIndices, sortedIndices: doSort)
-            let parts = MLX.split(gateUp, parts: 2, axis: -1)
+            let parts = MLX.split(gateUp, parts: Self.gateUpFusionFactor, axis: -1)
             if let twoArgActivation = self.twoArgActivation {
                 return twoArgActivation(parts[0], parts[1])
             } else if let activationProduct = self.activationProduct {
@@ -278,6 +289,7 @@ public final class FusedGateUpSwitchGLU: Module {
 
 /// Adds the per-expert bias (if present) selected by `indices` to `result`,
 /// broadcasting the gathered bias row against the trailing token axis.
+///
 /// Shared by ``SwitchLinear`` and ``QuantizedSwitchLinear``'s `callAsFunction`.
 ///
 /// - Parameters:
@@ -289,6 +301,18 @@ private func applyBias(_ result: MLXArray, bias: MLXArray?, indices: MLXArray) -
     guard let bias else { return result }
     return result + MLX.expandedDimensions(bias[indices], axis: -2)
 }
+
+/// Default number of elements sharing a single quantization scale/bias group.
+/// Shared by ``SwitchLinear/toQuantized(groupSize:bits:mode:)`` and
+/// ``QuantizedSwitchLinear/init(_:groupSize:bits:mode:)`` so their defaults
+/// cannot drift out of sync.
+public let defaultQuantizationGroupSize = 64
+
+/// Default number of bits per quantized weight value. Shared by
+/// ``SwitchLinear/toQuantized(groupSize:bits:mode:)`` and
+/// ``QuantizedSwitchLinear/init(_:groupSize:bits:mode:)`` so their defaults
+/// cannot drift out of sync.
+public let defaultQuantizationBits = 4
 
 // MARK: - SwitchLinear
 
@@ -373,7 +397,10 @@ public class SwitchLinear: Module, Quantizable {
     ///   - bits: number of bits per quantized value.
     ///   - mode: the quantization scheme to apply.
     /// - Returns: a new ``QuantizedSwitchLinear`` wrapping quantized weights.
-    public func toQuantized(groupSize: Int = 64, bits: Int = 4, mode: QuantizationMode) -> Module {
+    public func toQuantized(
+        groupSize: Int = defaultQuantizationGroupSize, bits: Int = defaultQuantizationBits,
+        mode: QuantizationMode
+    ) -> Module {
         QuantizedSwitchLinear(self, groupSize: groupSize, bits: bits, mode: mode)
     }
 }
@@ -402,7 +429,8 @@ public final class QuantizedSwitchLinear: SwitchLinear, Quantized {
     ///   - bits: number of bits per quantized value.
     ///   - mode: the quantization scheme to apply.
     public init(
-        _ other: SwitchLinear, groupSize: Int = 64, bits: Int = 4, mode: QuantizationMode = .affine
+        _ other: SwitchLinear, groupSize: Int = defaultQuantizationGroupSize,
+        bits: Int = defaultQuantizationBits, mode: QuantizationMode = .affine
     ) {
         self.groupSize = groupSize
         self.bits = bits
