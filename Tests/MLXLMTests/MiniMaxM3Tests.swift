@@ -497,6 +497,38 @@ struct MiniMaxM3Tests {
         #expect(config.isMoELayer(3))
     }
 
+    @Test("decoding throws a DecodingError instead of crashing when use_gemma_norm is unsupported")
+    func decodeThrowsForUnsupportedUseGemmaNorm() {
+        let json = """
+            { "model_type": "minimax_m3", "use_gemma_norm": false }
+            """
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(MiniMaxM3TextConfiguration.self, from: Data(json.utf8))
+        }
+    }
+
+    @Test(
+        "decoding throws a DecodingError instead of crashing when qk_norm_type is unsupported and use_qk_norm is true"
+    )
+    func decodeThrowsForUnsupportedQkNormType() {
+        let json = """
+            { "model_type": "minimax_m3", "use_qk_norm": true, "qk_norm_type": "flat" }
+            """
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(MiniMaxM3TextConfiguration.self, from: Data(json.utf8))
+        }
+    }
+
+    @Test("an unsupported qk_norm_type does not throw when use_qk_norm is false")
+    func decodeDoesNotThrowForUnsupportedQkNormTypeWhenDisabled() throws {
+        let json = """
+            { "model_type": "minimax_m3", "use_qk_norm": false, "qk_norm_type": "flat" }
+            """
+        let config = try JSONDecoder().decode(MiniMaxM3TextConfiguration.self, from: Data(json.utf8))
+        #expect(config.qkNormType == "flat")
+        #expect(config.useQkNorm == false)
+    }
+
     // MARK: - Partial rotary
 
     /// Hand-rolled reference for `MLXFast.RoPE`'s non-traditional convention

@@ -90,8 +90,9 @@ public let defaultRopeTheta: Float = 5_000_000
 public let defaultHiddenAct = "swigluoai"
 
 /// Default QK-norm layout (`qk_norm_type`). Also referenced by
-/// `MiniMaxM3LanguageModel`'s `init` precondition, which fails fast if a
-/// checkpoint ever requests a different layout. See `defaultModelType`.
+/// `MiniMaxM3TextConfiguration.init(from:)`'s decode-time validation, which
+/// throws a `DecodingError` if a checkpoint ever requests a different
+/// layout. See `defaultModelType`.
 public let defaultQkNormType = "per_head"
 
 /// Default dense (non-MoE) MLP intermediate size (`dense_intermediate_size`). See `defaultModelType`.
@@ -612,6 +613,30 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         useQkNorm = try container.decodeIfPresent(Bool.self, forKey: .useQkNorm) ?? true
         qkNormType =
             try container.decodeIfPresent(String.self, forKey: .qkNormType) ?? defaultQkNormType
+
+        // This dense-attention-stage implementation only supports Gemma-mode
+        // RMSNorm and per-head QK-norm -- both hold for the one verified real
+        // checkpoint, but `use_gemma_norm`/`qk_norm_type` are external,
+        // checkpoint-supplied data, so an unsupported value must fail
+        // decoding with a typed error rather than crash the process later
+        // (flagged by adversarial review of kanban ^xgvth41).
+        guard useGemmaNorm else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .useGemmaNorm, in: container,
+                debugDescription:
+                    "MiniMaxM3 only supports use_gemma_norm=true (dense-attention stage, ^xgvth41)"
+            )
+        }
+        if useQkNorm {
+            guard qkNormType == defaultQkNormType else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .qkNormType, in: container,
+                    debugDescription:
+                        "MiniMaxM3 only supports qk_norm_type=\"per_head\" (dense-attention stage, ^xgvth41)"
+                )
+            }
+        }
+
         tieWordEmbeddings =
             try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
         denseIntermediateSize =
@@ -858,8 +883,14 @@ class MiniMaxM3DecoderLayer: Module {
         let mlpOutput: MLXArray
         if let blockSparseMoe {
             mlpOutput = blockSparseMoe(postAttentionLayerNorm(h))
+        } else if let denseMLP {
+            mlpOutput = denseMLP(postAttentionLayerNorm(h))
         } else {
-            mlpOutput = denseMLP!(postAttentionLayerNorm(h))
+            // Unreachable: `init` always sets exactly one of `blockSparseMoe`
+            // / `denseMLP` based on `config.isMoELayer(layerIndex)`.
+            fatalError(
+                "MiniMaxM3DecoderLayer has neither blockSparseMoe nor denseMLP set -- invariant violated by init"
+            )
         }
         return h + mlpOutput
     }
@@ -908,22 +939,15 @@ final class MiniMaxM3LanguageModel: Module, KVCacheDimensionProvider {
     let kvHeads: [Int]
 
     init(_ config: MiniMaxM3TextConfiguration) {
-        // `useGemmaNorm`/`qkNormType` decode faithfully but are not wired to
-        // any branch below -- every norm unconditionally uses Gemma-mode
-        // RMSNorm, and QK-norm (when enabled) is always per-head. Both hold
-        // for the one verified real checkpoint; fail fast rather than
-        // silently mis-computing numerics if a future checkpoint sets either
-        // differently (flagged by adversarial review of kanban ^xgvth41).
-        precondition(
-            config.useGemmaNorm,
-            "MiniMaxM3 only supports use_gemma_norm=true (dense-attention stage, ^xgvth41)")
-        if config.useQkNorm {
-            precondition(
-                config.qkNormType == defaultQkNormType,
-                "MiniMaxM3 only supports qk_norm_type=\"per_head\" (dense-attention stage, ^xgvth41)"
-            )
-        }
-
+        // `useGemmaNorm`/`qkNormType` are not wired to any branch below --
+        // every norm unconditionally uses Gemma-mode RMSNorm, and QK-norm
+        // (when enabled) is always per-head. Both hold for the one verified
+        // real checkpoint; unsupported values are rejected earlier, at decode
+        // time, by `MiniMaxM3TextConfiguration.init(from:)` -- see its
+        // `use_gemma_norm`/`qk_norm_type` validation -- since those fields are
+        // external, checkpoint-supplied data and must fail with a typed
+        // decoding error rather than crash a running process (flagged by
+        // adversarial review of kanban ^xgvth41).
         self.kvHeads = Array(repeating: config.kvHeads, count: config.hiddenLayers)
         _model.wrappedValue = MiniMaxM3ModelInner(config)
 
