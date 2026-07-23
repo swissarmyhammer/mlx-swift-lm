@@ -142,6 +142,7 @@ public class FusedGateUpSwitchGLU: Module {
     let numExperts: Int
     let activation: (MLXArray) -> MLXArray
     let activationProduct: (@Sendable (MLXArray, MLXArray) -> MLXArray)?
+    let twoArgActivation: ((MLXArray, MLXArray) -> MLXArray)?
 
     public init(
         inputDims: Int,
@@ -154,6 +155,7 @@ public class FusedGateUpSwitchGLU: Module {
         self.numExperts = numExperts
         self.activation = MLXNN.silu
         self.activationProduct = compiledSiluProduct
+        self.twoArgActivation = nil
 
         self._gateUpProj.wrappedValue = SwitchLinear(
             inputDims: inputDims, outputDims: 2 * hiddenDims, numExperts: numExperts, bias: bias)
@@ -175,6 +177,36 @@ public class FusedGateUpSwitchGLU: Module {
         self.numExperts = numExperts
         self.activation = activation
         self.activationProduct = nil
+        self.twoArgActivation = nil
+
+        self._gateUpProj.wrappedValue = SwitchLinear(
+            inputDims: inputDims, outputDims: 2 * hiddenDims, numExperts: numExperts, bias: bias)
+        self._downProj.wrappedValue = SwitchLinear(
+            inputDims: hiddenDims, outputDims: inputDims, numExperts: numExperts, bias: bias)
+
+        super.init()
+    }
+
+    /// Initializer for models whose activation combines the fused gate/up
+    /// halves directly rather than via the `activation(gate) * up` seam above
+    /// -- e.g. MiniMax-M3's swigluoai, which clips the gate and up halves
+    /// asymmetrically before combining them (see `MiniMaxM3SwiGLUOAI`) rather
+    /// than computing a plain elementwise product. The closure receives the
+    /// split halves as `(gate, up)`, matching the `activationProduct`
+    /// convention above.
+    public init(
+        inputDims: Int,
+        hiddenDims: Int,
+        numExperts: Int,
+        twoArgActivation: @escaping (MLXArray, MLXArray) -> MLXArray,
+        bias: Bool = false
+    ) {
+        self.inputDims = inputDims
+        self.hiddenDims = hiddenDims
+        self.numExperts = numExperts
+        self.activation = { $0 }
+        self.activationProduct = nil
+        self.twoArgActivation = twoArgActivation
 
         self._gateUpProj.wrappedValue = SwitchLinear(
             inputDims: inputDims, outputDims: 2 * hiddenDims, numExperts: numExperts, bias: bias)
@@ -199,7 +231,9 @@ public class FusedGateUpSwitchGLU: Module {
         let gateUp = gateUpProj(x, idx, sortedIndices: doSort)
         let parts = MLX.split(gateUp, parts: 2, axis: -1)
         let activated =
-            if let activationProduct {
+            if let twoArgActivation {
+                twoArgActivation(parts[0], parts[1])
+            } else if let activationProduct {
                 activationProduct(parts[0], parts[1])
             } else {
                 activation(parts[0]) * parts[1]
