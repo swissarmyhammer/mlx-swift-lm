@@ -84,15 +84,15 @@ private func switchGLUForward(
 
     let doSort = indices.size >= 64
 
-    var idx = indices
+    var expertIndices = indices
     var inverseOrder = MLXArray()
 
     if doSort {
-        (x, idx, inverseOrder) = gatherSort(x: x, indices: indices)
+        (x, expertIndices, inverseOrder) = gatherSort(x: x, indices: indices)
     }
 
-    let activated = combine(x, idx, doSort)
-    var out = downProj(activated, idx, sortedIndices: doSort)
+    let activated = combine(x, expertIndices, doSort)
+    var out = downProj(activated, expertIndices, sortedIndices: doSort)
 
     if doSort {
         out = scatterUnsort(x: out, invOrder: inverseOrder, shape: indices.shape)
@@ -109,7 +109,7 @@ private func switchGLUForward(
 /// sparse MoE decoder blocks throughout the repo (e.g. Mixtral, DeepSeek-V3,
 /// Qwen3-MoE) wherever experts ship as separate gate/up weights rather than a
 /// single fused tensor (see ``FusedGateUpSwitchGLU`` for that layout).
-public class SwitchGLU: Module {
+public final class SwitchGLU: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: SwitchLinear
     @ModuleInfo(key: "up_proj") var upProj: SwitchLinear
     @ModuleInfo(key: "down_proj") var downProj: SwitchLinear
@@ -169,9 +169,9 @@ public class SwitchGLU: Module {
     ///   - indices: per-token expert indices, shape `[..., k]` for top-`k` routing.
     /// - Returns: per-token, per-selected-expert outputs, shape `[..., k, inputDims]`.
     public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
-        switchGLUForward(x, indices, downProj: downProj) { x, idx, doSort in
-            let xUp = self.upProj(x, idx, sortedIndices: doSort)
-            let xGate = self.gateProj(x, idx, sortedIndices: doSort)
+        switchGLUForward(x, indices, downProj: downProj) { x, expertIndices, doSort in
+            let xUp = self.upProj(x, expertIndices, sortedIndices: doSort)
+            let xGate = self.gateProj(x, expertIndices, sortedIndices: doSort)
             if let activationProduct = self.activationProduct {
                 return activationProduct(xGate, xUp)
             } else {
@@ -186,7 +186,7 @@ public class SwitchGLU: Module {
 /// SwitchGLU variant for models that ship a single fused `gate_up_proj` weight
 /// of shape `[numExperts, 2*hiddenDims, inputDims]` instead of separate
 /// `gate_proj` / `up_proj`. Used by Gemma 4 26B MoE and MiniMax-M3.
-public class FusedGateUpSwitchGLU: Module {
+public final class FusedGateUpSwitchGLU: Module {
     @ModuleInfo(key: "gate_up_proj") var gateUpProj: SwitchLinear
     @ModuleInfo(key: "down_proj") var downProj: SwitchLinear
 
@@ -262,8 +262,8 @@ public class FusedGateUpSwitchGLU: Module {
     ///   - indices: per-token expert indices, shape `[..., k]` for top-`k` routing.
     /// - Returns: per-token, per-selected-expert outputs, shape `[..., k, inputDims]`.
     public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
-        switchGLUForward(x, indices, downProj: downProj) { x, idx, doSort in
-            let gateUp = self.gateUpProj(x, idx, sortedIndices: doSort)
+        switchGLUForward(x, indices, downProj: downProj) { x, expertIndices, doSort in
+            let gateUp = self.gateUpProj(x, expertIndices, sortedIndices: doSort)
             let parts = MLX.split(gateUp, parts: 2, axis: -1)
             if let twoArgActivation = self.twoArgActivation {
                 return twoArgActivation(parts[0], parts[1])
@@ -382,13 +382,13 @@ public class SwitchLinear: Module, Quantizable {
 /// matrix in packed/quantized form (plus per-group `scales` and `biases` for
 /// dequantization) instead of full-precision floats, and applies it via a
 /// quantized gather-matmul.
-public class QuantizedSwitchLinear: SwitchLinear, Quantized {
+public final class QuantizedSwitchLinear: SwitchLinear, Quantized {
     @ModuleInfo(key: "scales") var scales: MLXArray
     @ModuleInfo(key: "biases") var biases: MLXArray?
 
-    /// Number of bits used per quantized weight value.
-    public let groupSize: Int
     /// Number of elements sharing a single quantization scale/bias group.
+    public let groupSize: Int
+    /// Number of bits used per quantized weight value.
     public let bits: Int
     /// The quantization scheme (e.g. affine vs. symmetric) used for this layer.
     public let mode: QuantizationMode

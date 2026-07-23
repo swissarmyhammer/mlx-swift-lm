@@ -50,6 +50,23 @@ comments:
 
     Verified: `swift build` clean (no warnings in SwitchLayers.swift; pre-existing unrelated warnings in Qwen25VL.swift/Gemma4.swift untouched). `swift test --filter MLXLMTests` — 293/293 tests passed across 24 suites, including SwitchLayersTests and MixtralTests (which exercise SwitchGLU/SwitchLinear). Checkbox for this finding flipped to [x] in the task description; task left in `review` column per instructions.
   timestamp: 2026-07-23T14:24:30.805965+00:00
+- actor: claude-code
+  id: 01ky7ppnjrs6kh6ph359hfpfac
+  text: |-
+    Fixed review findings (2026-07-23 09:25) in `Libraries/MLXLMCommon/SwitchLayers.swift`:
+
+    1. Renamed `idx` → `expertIndices` in `switchGLUForward`'s local var and threaded the rename through both call sites' closure parameter names (`SwitchGLU.callAsFunction` and `FusedGateUpSwitchGLU.callAsFunction`), since they're the same conceptual value passed through — left them inconsistent (`idx` vs `expertIndices`) would have been worse than the original.
+    2. Marked `SwitchGLU` as `public final class`.
+    3. Marked `FusedGateUpSwitchGLU` as `public final class`.
+    4. Marked `QuantizedSwitchLinear` as `public final class`.
+    5. Swapped the doc comments on `QuantizedSwitchLinear.groupSize` and `.bits` so each now correctly describes its own property.
+
+    Subclassing check: grepped the whole repo for `class \w+\s*:\s*(SwitchGLU|FusedGateUpSwitchGLU|QuantizedSwitchLinear)` — no matches. Nothing subclasses any of the three, so `final` is safe; no conflict to flag.
+
+    Verification (fresh, this pass): `swift build` — exit 0, no warnings from SwitchLayers.swift (confirmed via `mcp__sah__diagnostics check working`: 0 errors/0 warnings; the only warnings in the full `swift build` output are pre-existing, unrelated ones in Gemma4.swift/Qwen25VL.swift, documented in an earlier review pass as out of scope after the revert). `swift test --filter MLXLMTests` — 293/293 passed across 24 suites. Also ran the XCTest-based `SwitchLayersTests` directly (not surfaced by the Swift-Testing filter) — 1/1 passed.
+
+    Task description updated: all 5 items in the "Review Findings (2026-07-23 09:25)" section flipped to `[x]`, everything else left verbatim. Left in `doing` per instructions; not committing, not moving columns.
+  timestamp: 2026-07-23T14:40:04.184258+00:00
 position_column: review
 position_ordinal: '80'
 title: 'MiniMax-M3: MoE block + swigluoai activation building blocks'
@@ -59,3 +76,11 @@ title: 'MiniMax-M3: MoE block + swigluoai activation building blocks'
 ## Review Findings (2026-07-23 09:03)
 
 - [x] `Libraries/MLXLMCommon/SwitchLayers.swift:274` — The bias-addition logic appears identically in both `SwitchLinear.callAsFunction` and `QuantizedSwitchLinear.callAsFunction`. If this logic ever needs to change (e.g., a fix to how bias is broadcasted or scaled), both implementations must be updated in lockstep or drift will introduce a bug. Extract this 3-line block into a private helper method on SwitchLinear (e.g., `private func applyBias(_ result: inout MLXArray)`) and call it from both `callAsFunction` implementations, eliminating the duplicate.
+
+## Review Findings (2026-07-23 09:25)
+
+- [x] `Libraries/MLXLMCommon/SwitchLayers.swift:87` — Variable name `idx` is abbreviated when clarity requires a full name. Per the naming-clarity rule (DON'T: `cnt`, `idx`, `usr`, `mgr`), this should be spelled out. Rename `idx` to `expertIndices` (or `sortedExpertIndices` for clarity about what it may become after sorting).
+- [x] `Libraries/MLXLMCommon/SwitchLayers.swift:112` — `SwitchGLU` is not marked `final`, but the class design and documentation give no indication it is a deliberate extension point for subclassing. Per the value-semantics rule, classes not designed for subclassing should be marked `final`. Mark `SwitchGLU` as `public final class`.
+- [x] `Libraries/MLXLMCommon/SwitchLayers.swift:131` — `FusedGateUpSwitchGLU` is not marked `final`, but the class design and documentation give no indication it is a deliberate extension point for subclassing. Per the value-semantics rule, classes not designed for subclassing should be marked `final`. Mark `FusedGateUpSwitchGLU` as `public final class`.
+- [x] `Libraries/MLXLMCommon/SwitchLayers.swift:226` — `QuantizedSwitchLinear` is a concrete subclass that itself is not designed for further subclassing. Per the value-semantics rule, such classes should be marked `final`. Mark `QuantizedSwitchLinear` as `public final class`.
+- [x] `Libraries/MLXLMCommon/SwitchLayers.swift:244` — Documentation comments for the `groupSize` and `bits` properties are swapped. Line 244's comment 'Number of bits used per quantized weight value' describes `bits` (line 247), not `groupSize` (line 245). Line 246's comment describes `groupSize`, not `bits`. Swap the documentation comments: move line 244's comment to line 246, and line 246's comment to line 244, so each property's documentation matches its declaration.
