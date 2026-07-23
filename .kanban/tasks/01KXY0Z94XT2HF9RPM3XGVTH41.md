@@ -41,9 +41,22 @@ comments:
 
     Task is green and ready for `/review`.
   timestamp: 2026-07-23T17:44:44.395685+00:00
+- actor: claude-code
+  id: 01ky83c99a1cn4mwt10h9ygm3j
+  text: |-
+    Fixed all 50 review findings (2026-07-23 12:51), scoped entirely to Libraries/MLXVLM/Models/MiniMaxM3.swift:
+
+    **Duplication/magic-number findings (5):** extracted five file-level shared constants — `defaultSwigluAlpha`/`defaultSwigluLimit`/`defaultSwigluBeta` (1.702/7.0/1.0), `defaultRoutedScalingFactor` (2.0), and `defaultMoeLayerStart` (3, internal — only used in the two default-schedule closures, not a public default-arg value). The swiglu/routedScalingFactor constants had to be declared `public` rather than the review's suggested file-private, because Swift requires default-argument-value expressions on `public init`s to be at least as accessible as the initializer itself — `private`/`internal` triggered "is private/internal and cannot be referenced from a default argument value" build errors. All four call sites for each constant (SwiGLUOAI init, MoEConfiguration init, TextConfiguration init, TextConfiguration init(from:) decoder fallback) and both MoE-layer-schedule boundary closures (`init` and `init(from:)`) now reference the shared constants instead of repeating literals.
+
+    **Doc-comment findings (45):** added `///` doc comments to every flagged public symbol — all fields of `MiniMaxM3SparseAttentionConfiguration` and its `init`, all previously-undocumented fields of `MiniMaxM3TextConfiguration` (the 4 already-documented fields — rotaryDim, denseIntermediateSize, intermediateSize, moeLayerFreq — were correctly excluded from the findings and left alone), `MiniMaxM3Configuration`'s fields and init, and `MiniMaxM3Model`'s `configuration`/`kvHeads`/`vocabularySize` properties, its `init`, `callAsFunction`, `sanitize` (detailed transformation-pipeline doc per the finding's suggested wording), and the `LoRAModel` extension's `loraLayers`. Each summary line ends with a period.
+
+    All 50 findings confirmed valid on inspection (none were refutable) — all flipped to `[x]` in the task description's Review Findings section; the Acceptance Criteria and Tests checkboxes were left untouched as instructed.
+
+    Verification: `swift build` — clean, no errors or warnings from MiniMaxM3.swift. `swift test --filter MLXLMTests` — 308/308 tests pass across 24 suites (MiniMaxM3Tests suite green), no regressions. No files outside MiniMaxM3.swift were edited.
+  timestamp: 2026-07-23T18:21:35.402298+00:00
 depends_on:
 - 01KXY0Y9BWWYW6Z97NHMV9AQ7W
-position_column: doing
+position_column: review
 position_ordinal: '80'
 title: 'MiniMax-M3: config + dense-attention language model + weight sanitization'
 ---
@@ -96,3 +109,56 @@ References: upstream mlx-lm PRs #1398 (`minimax_m3_vl.py`) and #1401 (`minimax_m
 ## Workflow
 
 - Use `/tdd` — write failing tests first, then implement to make them pass. #minimax #minimax-m3
+
+## Review Findings (2026-07-23 12:51)
+
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:28` — Hardcoded swigluAlpha=1.702 repeated across four locations (init defaults and decoder fallback). Changes must be synchronized. Define file-level constant `let SWIGLU_DEFAULT_ALPHA: Float = 1.702` and use it everywhere.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:28` — Hardcoded swigluLimit=7.0 repeated across four locations (init defaults and decoder fallback). Changes must be synchronized. Define file-level constant `let SWIGLU_DEFAULT_LIMIT: Float = 7.0` and use it everywhere.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:28` — Hardcoded swigluBeta=1.0 repeated across four locations (init defaults and decoder fallback). Changes must be synchronized. Define file-level constant `let SWIGLU_DEFAULT_BETA: Float = 1.0` and use it everywhere.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:103` — Hardcoded routedScalingFactor=2.0 repeated across three locations (MiniMaxM3MoEConfiguration.init, MiniMaxM3TextConfiguration.init, and init(from:) decoder). Changes must be synchronized. Define file-level constant `let ROUTED_SCALING_FACTOR_DEFAULT: Float = 2.0` and use it everywhere.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:286` — Hardcoded MOE schedule boundary ($0 < 3 ? 0 : 1) is duplicated at lines 286 and 345 in init and init(from:). If the threshold changes, both locations must be updated. Extract boundary to a constant: `let MOE_LAYER_START = 3`, then use `$0 < MOE_LAYER_START ? 0 : 1` in both places, or create a helper method that computes the default schedule.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:309` — Public property `indexDim` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `indexDim` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:310` — Public property `numIndexHeads` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `numIndexHeads` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:311` — Public initializer `init(...)` for `MiniMaxM3SparseAttentionConfiguration` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `public init` method explaining its parameters and purpose.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:311` — Public property `topkBlocks` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `topkBlocks` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:312` — Public property `blockSize` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `blockSize` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:334` — Public property `modelType` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `modelType` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:335` — Public property `hiddenSize` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `hiddenSize` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:336` — Public property `hiddenLayers` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `hiddenLayers` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:337` — Public property `attentionHeads` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `attentionHeads` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:338` — Public property `kvHeads` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `kvHeads` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:339` — Public property `headDim` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `headDim` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:340` — Public property `vocabularySize` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `vocabularySize` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:341` — Public property `maxPositionEmbeddings` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `maxPositionEmbeddings` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:342` — Public property `rmsNormEps` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `rmsNormEps` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:343` — Public property `useGemmaNorm` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `useGemmaNorm` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:344` — Public property `ropeTheta` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `ropeTheta` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:349` — Public property `partialRotaryFactor` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `partialRotaryFactor` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:350` — Public property `hiddenAct` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `hiddenAct` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:351` — Public property `useQkNorm` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `useQkNorm` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:352` — Public property `qkNormType` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `qkNormType` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:353` — Public property `tieWordEmbeddings` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `tieWordEmbeddings` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:358` — Public property `sharedIntermediateSize` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `sharedIntermediateSize` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:359` — Public property `numLocalExperts` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `numLocalExperts` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:360` — Public property `numExpertsPerTok` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `numExpertsPerTok` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:361` — Public property `nSharedExperts` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `nSharedExperts` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:362` — Public property `scoringFunc` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `scoringFunc` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:363` — Public property `useRoutingBias` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `useRoutingBias` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:364` — Public property `routedScalingFactor` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `routedScalingFactor` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:369` — Public property `swigluAlpha` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `swigluAlpha` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:370` — Public property `swigluLimit` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `swigluLimit` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:371` — Public property `swigluBeta` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `swigluBeta` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:372` — Public property `numMTPModules` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `numMTPModules` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:373` — Public property `sparseAttention` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `sparseAttention` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:410` — Public property `modelType` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `modelType` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:411` — Public property `textConfiguration` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `textConfiguration` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:424` — Public initializer `init(...)` for `MiniMaxM3Configuration` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `public init` method.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:629` — Public property `configuration` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `configuration` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:630` — Public computed property `kvHeads` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `kvHeads` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:631` — Public computed property `vocabularySize` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `vocabularySize` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:633` — Public initializer `init(_:)` for `MiniMaxM3Model` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `public init` method explaining the configuration parameter.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:642` — Public function `callAsFunction(_:cache:)` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `callAsFunction` method.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:663` — Public function `sanitize(weights:)` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `sanitize` method explaining its purpose and behavior.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:757` — Public computed property `loraLayers` is missing a `///` doc comment; every public declaration must be documented. Add a `///` doc comment above the `loraLayers` property.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:770` — Public method `sanitize` performs complex weight transformation but lacks documentation. The method dequantizes block-quantized weights, drops unused modules (vision tower, MTP, sparse-attention indexer), remaps per-expert fallback weights into fused layout, and applies other transformations critical to model loading. Without documentation, callers cannot understand when to call it or what it modifies. Add a doc comment above the method declaration explaining the transformation pipeline, e.g.: `/// Sanitize and prepare weight dictionary for model loading: dequantize block-quantized weights, drop unused tower/MTP/DSA weights, and remap per-expert fallback weights into the fused SwitchGLU layout expected by decoder layers.`.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:799` — Public property `loraLayers` in LoRAModel protocol extension lacks documentation. The property exposes decoder layers for LoRA adaptation, but users need documentation explaining what layers are included and their purpose in the context of LoRA fine-tuning. Add a doc comment explaining the property's purpose, e.g.: `/// The decoder layers available for LoRA parameter adaptation.`.

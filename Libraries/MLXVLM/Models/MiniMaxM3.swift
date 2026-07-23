@@ -21,6 +21,33 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+// MARK: - Shared defaults
+
+/// Default SwiGLU-OAI gate-branch sigmoid steepness (`swiglu_alpha`) when the
+/// checkpoint config omits it. Shared by `MiniMaxM3SwiGLUOAI`,
+/// `MiniMaxM3MoEConfiguration`, and `MiniMaxM3TextConfiguration` so the value
+/// only needs to change in one place.
+public let defaultSwigluAlpha: Float = 1.702
+
+/// Default SwiGLU-OAI clip limit (`swiglu_limit`) applied to both branches
+/// when the checkpoint config omits it. See `defaultSwigluAlpha`.
+public let defaultSwigluLimit: Float = 7.0
+
+/// Default SwiGLU-OAI linear-branch additive bias (`swiglu_beta`) when the
+/// checkpoint config omits it. See `defaultSwigluAlpha`.
+public let defaultSwigluBeta: Float = 1.0
+
+/// Default MoE routing-weight scaling factor (`routed_scaling_factor`) when
+/// the checkpoint config omits it. Shared by `MiniMaxM3MoEConfiguration` and
+/// `MiniMaxM3TextConfiguration`.
+public let defaultRoutedScalingFactor: Float = 2.0
+
+/// First MoE-scheduled layer index in the verified default schedule (layers
+/// before this index are dense; this index and beyond are MoE). Shared by
+/// both of `MiniMaxM3TextConfiguration`'s default `moeLayerFreq` derivations
+/// (`init` and `init(from:)`).
+let defaultMoeLayerStart = 3
+
 // MARK: - MiniMaxM3SwiGLUOAI
 
 /// Clipped SwiGLU activation used by MiniMax-M3's dense MLPs, shared expert,
@@ -53,7 +80,10 @@ struct MiniMaxM3SwiGLUOAI {
     let limit: Float
     let beta: Float
 
-    init(alpha: Float = 1.702, limit: Float = 7.0, beta: Float = 1.0) {
+    init(
+        alpha: Float = defaultSwigluAlpha, limit: Float = defaultSwigluLimit,
+        beta: Float = defaultSwigluBeta
+    ) {
         self.alpha = alpha
         self.limit = limit
         self.beta = beta
@@ -92,10 +122,10 @@ struct MiniMaxM3MoEConfiguration: Sendable {
         intermediateSize: Int,
         numLocalExperts: Int,
         numExpertsPerTok: Int,
-        routedScalingFactor: Float = 2.0,
-        swigluAlpha: Float = 1.702,
-        swigluLimit: Float = 7.0,
-        swigluBeta: Float = 1.0
+        routedScalingFactor: Float = defaultRoutedScalingFactor,
+        swigluAlpha: Float = defaultSwigluAlpha,
+        swigluLimit: Float = defaultSwigluLimit,
+        swigluBeta: Float = defaultSwigluBeta
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -221,9 +251,13 @@ class MiniMaxM3SparseMoeBlock: Module {
 /// top-level keys. They decode as ordinary unknown keys (ignored) since this
 /// dense-only task does not build the indexer.
 public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
+    /// Per-index-head dimension used by the DSA indexer (`sparse_index_dim`).
     public var indexDim: Int
+    /// Number of index heads used by the DSA indexer (`sparse_num_index_heads`).
     public var numIndexHeads: Int
+    /// Number of top-scoring blocks the indexer selects per query (`sparse_topk_blocks`).
     public var topkBlocks: Int
+    /// Block size, in tokens, used by the DSA indexer (`sparse_block_size`).
     public var blockSize: Int
 
     enum CodingKeys: String, CodingKey {
@@ -233,6 +267,9 @@ public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
         case blockSize = "sparse_block_size"
     }
 
+    /// Creates a sparse-attention (DSA indexer) configuration, defaulting to
+    /// the values verified against the `mlx-community/MiniMax-M3-4bit`
+    /// checkpoint's `config.json`.
     public init(
         indexDim: Int = 128, numIndexHeads: Int = 4, topkBlocks: Int = 16, blockSize: Int = 128
     ) {
@@ -268,44 +305,72 @@ public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
 /// (`vision_config`, `mtp`-related fields, `quantization`) are simply never
 /// referenced by `CodingKeys` and so never fail decoding.
 public struct MiniMaxM3TextConfiguration: Codable, Sendable {
+    /// Checkpoint model type: `"minimax_m3_vl"` (VL-nested) or `"minimax_m3"` (flat) (`model_type`).
     public var modelType: String
+    /// Hidden (model) dimension (`hidden_size`).
     public var hiddenSize: Int
+    /// Number of decoder layers (`num_hidden_layers`).
     public var hiddenLayers: Int
+    /// Number of query attention heads (`num_attention_heads`).
     public var attentionHeads: Int
+    /// Number of key/value heads for grouped-query attention (`num_key_value_heads`).
     public var kvHeads: Int
+    /// Per-head dimension (`head_dim`).
     public var headDim: Int
+    /// Vocabulary size (`vocab_size`).
     public var vocabularySize: Int
+    /// Maximum sequence length supported by RoPE (`max_position_embeddings`).
     public var maxPositionEmbeddings: Int
+    /// Epsilon used by every RMSNorm in the model (`rms_norm_eps`).
     public var rmsNormEps: Float
+    /// Whether RMSNorm uses Gemma-mode `(1 + weight)` scaling (`use_gemma_norm`).
     public var useGemmaNorm: Bool
+    /// RoPE base frequency (`rope_theta`).
     public var ropeTheta: Float
     /// Number of head dimensions that actually rotate (`partialRotaryFactor * headDim`
     /// unless the checkpoint provides `rotary_dim` explicitly). 64 for the
     /// verified real config (128 head dims, factor 0.5).
     public var rotaryDim: Int
+    /// Fraction of `headDim` that rotates when `rotaryDim` isn't given explicitly (`partial_rotary_factor`).
     public var partialRotaryFactor: Float
+    /// Activation function name used by the dense/MoE MLPs (`hidden_act`).
     public var hiddenAct: String
+    /// Whether per-head QK-norm is applied to queries and keys (`use_qk_norm`).
     public var useQkNorm: Bool
+    /// QK-norm layout; only `"per_head"` is supported by this dense-attention stage (`qk_norm_type`).
     public var qkNormType: String
+    /// Whether the output projection shares weights with the input embedding (`tie_word_embeddings`).
     public var tieWordEmbeddings: Bool
     /// Dense (non-MoE) MLP intermediate size, layers 0..<3 in the verified schedule.
     public var denseIntermediateSize: Int
     /// Per-expert MoE intermediate size.
     public var intermediateSize: Int
+    /// Shared-expert MLP intermediate size (`shared_intermediate_size`).
     public var sharedIntermediateSize: Int
+    /// Number of routed experts per MoE layer (`num_local_experts`).
     public var numLocalExperts: Int
+    /// Number of routed experts selected per token (`num_experts_per_tok`).
     public var numExpertsPerTok: Int
+    /// Number of shared experts always selected alongside the routed experts (`n_shared_experts`).
     public var nSharedExperts: Int
+    /// Router scoring function name (`scoring_func`).
     public var scoringFunc: String
+    /// Whether router selection is biased by `e_score_correction_bias` (`use_routing_bias`).
     public var useRoutingBias: Bool
+    /// Scaling factor applied to routed-expert routing weights (`routed_scaling_factor`).
     public var routedScalingFactor: Float
     /// Per-layer dense/MoE schedule (`0` dense, `1` MoE). Verified real
     /// schedule: layers 0-2 dense, 3-59 MoE.
     public var moeLayerFreq: [Int]
+    /// SwiGLU-OAI gate-branch sigmoid steepness (`swiglu_alpha`).
     public var swigluAlpha: Float
+    /// SwiGLU-OAI clip limit applied to both branches (`swiglu_limit`).
     public var swigluLimit: Float
+    /// SwiGLU-OAI linear-branch additive bias (`swiglu_beta`).
     public var swigluBeta: Float
+    /// Number of multi-token-prediction modules present in the checkpoint (`num_mtp_modules`).
     public var numMTPModules: Int
+    /// DSA (sparse attention indexer) hyperparameters (`sparse_attention_config`).
     public var sparseAttention: MiniMaxM3SparseAttentionConfiguration
 
     /// Whether `layerIndex` uses the MoE block (`true`) or the dense MLP (`false`).
@@ -340,11 +405,11 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         nSharedExperts: Int = 1,
         scoringFunc: String = "sigmoid",
         useRoutingBias: Bool = true,
-        routedScalingFactor: Float = 2.0,
+        routedScalingFactor: Float = defaultRoutedScalingFactor,
         moeLayerFreq: [Int]? = nil,
-        swigluAlpha: Float = 1.702,
-        swigluLimit: Float = 7.0,
-        swigluBeta: Float = 1.0,
+        swigluAlpha: Float = defaultSwigluAlpha,
+        swigluLimit: Float = defaultSwigluLimit,
+        swigluBeta: Float = defaultSwigluBeta,
         numMTPModules: Int = 7,
         sparseAttention: MiniMaxM3SparseAttentionConfiguration = MiniMaxM3SparseAttentionConfiguration()
     ) {
@@ -374,7 +439,8 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         self.scoringFunc = scoringFunc
         self.useRoutingBias = useRoutingBias
         self.routedScalingFactor = routedScalingFactor
-        self.moeLayerFreq = moeLayerFreq ?? (0 ..< hiddenLayers).map { $0 < 3 ? 0 : 1 }
+        self.moeLayerFreq =
+            moeLayerFreq ?? (0 ..< hiddenLayers).map { $0 < defaultMoeLayerStart ? 0 : 1 }
         self.swigluAlpha = swigluAlpha
         self.swigluLimit = swigluLimit
         self.swigluBeta = swigluBeta
@@ -470,11 +536,15 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         scoringFunc = try container.decodeIfPresent(String.self, forKey: .scoringFunc) ?? "sigmoid"
         useRoutingBias = try container.decodeIfPresent(Bool.self, forKey: .useRoutingBias) ?? true
         routedScalingFactor =
-            try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor) ?? 2.0
+            try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor)
+            ?? defaultRoutedScalingFactor
         let decodedMoeLayerFreq = try container.decodeIfPresent([Int].self, forKey: .moeLayerFreq)
-        swigluAlpha = try container.decodeIfPresent(Float.self, forKey: .swigluAlpha) ?? 1.702
-        swigluLimit = try container.decodeIfPresent(Float.self, forKey: .swigluLimit) ?? 7.0
-        swigluBeta = try container.decodeIfPresent(Float.self, forKey: .swigluBeta) ?? 1.0
+        swigluAlpha =
+            try container.decodeIfPresent(Float.self, forKey: .swigluAlpha) ?? defaultSwigluAlpha
+        swigluLimit =
+            try container.decodeIfPresent(Float.self, forKey: .swigluLimit) ?? defaultSwigluLimit
+        swigluBeta =
+            try container.decodeIfPresent(Float.self, forKey: .swigluBeta) ?? defaultSwigluBeta
         numMTPModules = try container.decodeIfPresent(Int.self, forKey: .numMTPModules) ?? 7
         sparseAttention =
             try container.decodeIfPresent(
@@ -482,7 +552,8 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
             ?? MiniMaxM3SparseAttentionConfiguration()
 
         self.sharedIntermediateSize = decodedSharedIntermediateSize ?? intermediateSize
-        self.moeLayerFreq = decodedMoeLayerFreq ?? (0 ..< hiddenLayers).map { $0 < 3 ? 0 : 1 }
+        self.moeLayerFreq =
+            decodedMoeLayerFreq ?? (0 ..< hiddenLayers).map { $0 < defaultMoeLayerStart ? 0 : 1 }
     }
 }
 
@@ -492,7 +563,9 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
 /// -attention-only task) plus `vision_config` (decoded upstream but unused
 /// here -- vision support is a later task).
 public struct MiniMaxM3Configuration: Codable, Sendable {
+    /// Top-level checkpoint model type (`"minimax_m3_vl"`).
     public var modelType: String
+    /// The text-model configuration used by the dense-attention language model.
     public var textConfiguration: MiniMaxM3TextConfiguration
 
     enum CodingKeys: String, CodingKey {
@@ -500,6 +573,7 @@ public struct MiniMaxM3Configuration: Codable, Sendable {
         case textConfiguration = "text_config"
     }
 
+    /// Creates a top-level MiniMax-M3 configuration from its model type and text configuration.
     public init(
         modelType: String = "minimax_m3_vl",
         textConfiguration: MiniMaxM3TextConfiguration = MiniMaxM3TextConfiguration()
@@ -795,16 +869,21 @@ final class MiniMaxM3LanguageModel: Module, KVCacheDimensionProvider {
 public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionProvider {
     @ModuleInfo(key: "language_model") var languageModel: MiniMaxM3LanguageModel
 
+    /// The text-model configuration this instance was constructed from.
     public let configuration: MiniMaxM3TextConfiguration
+    /// Per-layer key/value head counts, forwarded from the language model.
     public var kvHeads: [Int] { languageModel.kvHeads }
+    /// Vocabulary size, forwarded from `configuration`.
     public var vocabularySize: Int { configuration.vocabularySize }
 
+    /// Creates a dense-attention MiniMax-M3 language model from its text configuration.
     public init(_ config: MiniMaxM3TextConfiguration) {
         self.configuration = config
         _languageModel.wrappedValue = MiniMaxM3LanguageModel(config)
         super.init()
     }
 
+    /// Runs the language model over `inputs`, reading from and updating `cache` in place if provided.
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         languageModel(inputs, cache: cache)
     }
@@ -821,6 +900,12 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
         return (0 ..< numLayers).map { _ in KVCacheSimple() }
     }
 
+    /// Sanitize and prepare weight dictionary for model loading: dequantize
+    /// block-quantized (fp8/bf16 `weight_scale_inv`) weights, re-key flat
+    /// `minimax_m3` checkpoints into the `language_model.`-prefixed layout,
+    /// drop unused vision-tower/multi-modal-projector/MTP/sparse-attention-indexer
+    /// weights, and remap per-expert fallback weights (`w1`/`w2`/`w3`) into the
+    /// fused `gate_up_proj`/`down_proj` layout `FusedGateUpSwitchGLU` expects.
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         func dequant(weight: MLXArray, scaleInv: MLXArray) -> MLXArray {
             let dtype = weight.dtype
@@ -923,6 +1008,7 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
 }
 
 extension MiniMaxM3Model: LoRAModel {
+    /// The decoder layers available for LoRA parameter adaptation.
     public var loraLayers: [Module] {
         languageModel.model.layers
     }
