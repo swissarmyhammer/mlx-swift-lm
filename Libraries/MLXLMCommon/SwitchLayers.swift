@@ -276,6 +276,20 @@ public class FusedGateUpSwitchGLU: Module {
     }
 }
 
+/// Adds the per-expert bias (if present) selected by `indices` to `result`,
+/// broadcasting the gathered bias row against the trailing token axis.
+/// Shared by ``SwitchLinear`` and ``QuantizedSwitchLinear``'s `callAsFunction`.
+///
+/// - Parameters:
+///   - result: the gather-matmul output to add bias to, shape `[..., outputDims]`.
+///   - bias: per-expert bias, shape `[numExperts, outputDims]`, or `nil` if unused.
+///   - indices: per-token expert indices selecting which bias row to use.
+/// - Returns: `result` with the gathered bias added, or `result` unchanged if `bias` is `nil`.
+private func applyBias(_ result: MLXArray, bias: MLXArray?, indices: MLXArray) -> MLXArray {
+    guard let bias else { return result }
+    return result + MLX.expandedDimensions(bias[indices], axis: -2)
+}
+
 // MARK: - SwitchLinear
 
 /// A per-expert linear layer: holds `numExperts` independent `[outputDims,
@@ -347,13 +361,9 @@ public class SwitchLinear: Module, Quantizable {
         _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false
     ) -> MLXArray {
         let weightT = self.weight.swappedAxes(-1, -2)
-        var result = MLX.gatherMM(x, weightT, rhsIndices: indices, sortedIndices: sortedIndices)
+        let result = MLX.gatherMM(x, weightT, rhsIndices: indices, sortedIndices: sortedIndices)
 
-        if let bias = self.bias {
-            result = result + MLX.expandedDimensions(bias[indices], axis: -2)
-        }
-
-        return result
+        return applyBias(result, bias: self.bias, indices: indices)
     }
 
     /// Returns a quantized copy of this layer as a ``QuantizedSwitchLinear``.
@@ -423,7 +433,7 @@ public class QuantizedSwitchLinear: SwitchLinear, Quantized {
     override public func callAsFunction(
         _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false
     ) -> MLXArray {
-        var result = MLX.gatherQuantizedMM(
+        let result = MLX.gatherQuantizedMM(
             x,
             self.weight,
             scales: self.scales,
@@ -436,10 +446,6 @@ public class QuantizedSwitchLinear: SwitchLinear, Quantized {
             sortedIndices: sortedIndices
         )
 
-        if let bias = self.bias {
-            result = result + MLX.expandedDimensions(bias[indices], axis: -2)
-        }
-
-        return result
+        return applyBias(result, bias: self.bias, indices: indices)
     }
 }
