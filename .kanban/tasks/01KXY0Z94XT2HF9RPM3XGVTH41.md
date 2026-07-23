@@ -1,10 +1,50 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01ky80jc1bdh6w0bsrbq8h2937
+  text: |-
+    Implementation complete, tests green. Summary:
+
+    **Research phase**: Downloaded the REAL `config.json` and `model.safetensors.index.json` from https://huggingface.co/mlx-community/MiniMax-M3-4bit via curl (network access available). This surfaced discrepancies vs. the task description:
+    - `sparse_attention_config` in the real config has MORE fields than the task's "verified real shape" claimed (`use_sparse_attention`, `sparse_disable_index_value`, `sparse_score_type`, `sparse_init_block`, `sparse_local_block`, `sparse_attention_freq` all present, nested under `text_config.sparse_attention_config` as the task said, but the task's claim that flat keys like `use_sparse_attention` "are not in the config" was itself imprecise — they ARE in the config, just nested, not flat). Decoded the 4 documented fields (index_dim/num_index_heads/topk_blocks/block_size) plus tolerate the rest as unknown/ignored keys.
+    - Real checkpoint confirms: dense layers (0-2) use `mlp.gate_proj/up_proj/down_proj` naming; MoE layers (3-59) use `block_sparse_moe.gate` + `block_sparse_moe.switch_mlp.gate_up_proj/down_proj` (already fused, 129-row incl. shared expert) + `self_attn.index_q_proj/index_k_proj/index_q_norm/index_k_norm` (sparse indexer, stripped this task). Vision drop prefixes confirmed: `vision_tower.`, `multi_modal_projector.`, `patch_merge_mlp.` (no MTP keys present at all in this checkpoint — the drop rule for `mtp.`/`.mtp.` is defensive/best-guess, documented as such since no real MTP-carrying checkpoint exists yet to verify against).
+    - Real per-layer quantization override confirmed: `language_model.model.layers.3.block_sparse_moe.gate` at 8-bit vs 4-bit default — this is the concrete case pinned by a dedicated test.
+
+    **Design decisions**:
+    - Config: `MiniMaxM3TextConfiguration.init(from:)` follows Gemma3Text.swift's nested-`text_config`-with-fallback-to-root pattern exactly, so both VL-nested and flat `minimax_m3` shapes decode through the same type. `MiniMaxM3Configuration` (top-level) is a plain Codable wrapper requiring `text_config` (VL shape only).
+    - Attention: per-head Gemma-mode QK-norm (`Gemma.RMSNorm`, reused from MLXLMCommon) applied on `(B,L,heads,headDim)` BEFORE the transpose to `(B,heads,L,headDim)` — norm weight shape is `[headDim]`, pinned by a dedicated test plus a non-uniform-weight cross-head test. Partial RoPE via `initializeRope(dims: rotaryDim, ...)` relies on `MLXFast.RoPE`'s native pass-through for dims beyond `dimensions` (no custom split/concat logic needed).
+    - Decoder layer: dense (layers 0-2) and MoE (3-59) variants are TWO separate optional `@ModuleInfo`-wrapped properties (`denseMLP`/`blockSparseMoe`), not a single polymorphic `UnaryLayer` property (unlike DeepSeekV3's uniform "mlp" key) — because the real checkpoint uses genuinely different key names per variant (`mlp.*` vs `block_sparse_moe.*`), confirmed from the real safetensors index.
+    - `sanitize`: preserves `language_model.` prefix (re-keys flat/unprefixed weights INTO it, never away), drops vision/MTP/sparse-indexer keys, and includes an M2-style per-expert `w1/w2/w3` fallback stacking path (concatenates gate+up along the output axis into the fused `gate_up_proj` layout) — documented as untested-against-any-real-checkpoint since the only real M3 checkpoint already ships fused weights; the fallback only stacks the `numLocalExperts` routed rows and does not attempt to synthesize the packed shared-expert row (no real per-expert M3 checkpoint exists to verify that layout).
+    - Reused `MiniMaxM3SparseMoeBlock` as-is from ^mv9aq7w's landed code (only edit: added `UnaryLayer` conformance, needed for MLP-vs-MoE dispatch parity but not exercised in the final design since decoder layer now uses two typed optionals instead).
+
+    **Dead end / discovery**: The tiny-model determinism test (`forwardPassIsDeterministicUnderFixedSeed`) initially failed intermittently when run as part of the full suite (passed in isolation) — root cause was Swift Testing's default test parallelism racing on MLX's shared global RNG state across concurrent tests. Fixed by adding `@Suite(.serialized)` to `MiniMaxM3Tests`, mirroring the existing `RoPEApplicationTests` precedent in this repo for the same reason. Stable across repeated runs after the fix.
+
+    **Process note**: Given the scale/interdependency of this task (config+attention+decoder+model+sanitize all compile-interdependent), I wrote the full production implementation in one pass (backed by extensive research against the real downloaded checkpoint artifacts) before writing the test suite, rather than strict per-unit red-green-refactor. Tests were then run and iterated to green as the verification step. Flagging this as a deviation from strict TDD ordering per the /tdd skill's mandate, in the interest of transparency.
+
+    **Test results**: `swift test --filter MLXLMTests.MiniMaxM3` — 25/25 pass (stable across 3+ repeated runs). `swift test --filter MLXLMTests` — 308/308 pass across 24 suites, no regressions. `swift build --build-tests` — clean, zero warnings from touched files.
+
+    Leaving in `doing` per workflow (orchestrator's /review step moves to review).
+  timestamp: 2026-07-23T17:32:29.099571+00:00
+- actor: claude-code
+  id: 01ky818t3bgwk9xw3dhz3vjxe6
+  text: |-
+    Adversarial double-check (via really-done) returned REVISE with two findings, both fixed:
+
+    1. (Moderate) `useGemmaNorm`/`qkNormType` decoded from config but never consulted by any branch — every norm unconditionally used Gemma-mode RMSNorm and per-head QK-norm regardless of what the config said, which would silently mis-compute numerics for a hypothetical checkpoint that set either differently. Fixed by adding `precondition` checks in `MiniMaxM3LanguageModel.init` that fail fast (`use_gemma_norm` must be true; `qk_norm_type` must be `"per_head"` when QK-norm is enabled) rather than silently miscomputing.
+    2. (Minor) `sanitizeRemapsPerExpertFallbackWeights` test used equal `hiddenSize`/`intermediateSize` (4/4), so the fused-shape assertion couldn't distinguish a correctly-oriented `[numLocalExperts, 2*intermediateSize, hiddenSize]` tensor from an accidentally-transposed one. Fixed by using unequal dims (hiddenSize=6, intermediateSize=4) so the shape assertion is now actually discriminating.
+
+    Also self-caught and fixed (before the double-check even finished, per its own report of catching the file mid-edit): reverted an unnecessary `UnaryLayer` conformance I'd added to the pre-existing `MiniMaxM3SparseMoeBlock` (and to my new `MiniMaxM3MLP`) that became dead code once the decoder layer settled on two separate typed-optional properties (`denseMLP`/`blockSparseMoe`) instead of a single polymorphic `mlp: UnaryLayer` property — and corrected the decoder layer's doc comment, which had been describing the wrong (unused) design.
+
+    Re-verified after all fixes: `swift build --build-tests` clean (zero warnings from touched files), `swift test --filter MLXLMTests.MiniMaxM3` 25/25 pass, `swift test --filter MLXLMTests` 308/308 pass across 24 suites (no regressions). Diagnostics clean on both touched files.
+
+    Task is green and ready for `/review`.
+  timestamp: 2026-07-23T17:44:44.395685+00:00
 depends_on:
 - 01KXY0Y9BWWYW6Z97NHMV9AQ7W
-position_column: todo
-position_ordinal: 8a80
+position_column: doing
+position_ordinal: '80'
 title: 'MiniMax-M3: config + dense-attention language model + weight sanitization'
 ---
 ## What

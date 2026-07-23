@@ -205,3 +205,725 @@ class MiniMaxM3SparseMoeBlock: Module {
         return weightedExpertSum(y, allWeights)
     }
 }
+
+// MARK: - MiniMaxM3SparseAttentionConfiguration
+
+/// MiniMax-M3's DSA (sparse attention indexer) hyperparameters, decoded from
+/// `text_config.sparse_attention_config`.
+///
+/// Only the four fields the future indexer (kanban ^8dbc476) will need are
+/// modeled here; the real `mlx-community/MiniMax-M3-4bit` checkpoint's
+/// `config.json` nests several additional fields alongside these
+/// (`use_sparse_attention`, `sparse_disable_index_value`,
+/// `sparse_score_type`, `sparse_init_block`, `sparse_local_block`,
+/// `sparse_attention_freq`) -- verified directly from the downloaded config,
+/// which contradicts an earlier (incorrect) assumption that these were flat
+/// top-level keys. They decode as ordinary unknown keys (ignored) since this
+/// dense-only task does not build the indexer.
+public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
+    public var indexDim: Int
+    public var numIndexHeads: Int
+    public var topkBlocks: Int
+    public var blockSize: Int
+
+    enum CodingKeys: String, CodingKey {
+        case indexDim = "sparse_index_dim"
+        case numIndexHeads = "sparse_num_index_heads"
+        case topkBlocks = "sparse_topk_blocks"
+        case blockSize = "sparse_block_size"
+    }
+
+    public init(
+        indexDim: Int = 128, numIndexHeads: Int = 4, topkBlocks: Int = 16, blockSize: Int = 128
+    ) {
+        self.indexDim = indexDim
+        self.numIndexHeads = numIndexHeads
+        self.topkBlocks = topkBlocks
+        self.blockSize = blockSize
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        indexDim = try container.decodeIfPresent(Int.self, forKey: .indexDim) ?? 128
+        numIndexHeads = try container.decodeIfPresent(Int.self, forKey: .numIndexHeads) ?? 4
+        topkBlocks = try container.decodeIfPresent(Int.self, forKey: .topkBlocks) ?? 16
+        blockSize = try container.decodeIfPresent(Int.self, forKey: .blockSize) ?? 128
+    }
+}
+
+// MARK: - MiniMaxM3TextConfiguration
+
+/// MiniMax-M3's text-model configuration.
+///
+/// Decodes **both** checkpoint shapes:
+/// - VL-nested: `model_type: "minimax_m3_vl"`, fields under `text_config`
+///   (the published `mlx-community/MiniMax-M3-4bit` checkpoint).
+/// - Flat: `model_type: "minimax_m3"`, fields at the JSON root (upstream
+///   mlx-lm PR #1401-style text-only conversions).
+///
+/// Follows `Gemma3TextConfiguration`'s (`Libraries/MLXLLM/Models/
+/// Gemma3Text.swift`) fallback-to-`text_config` `init(from:)` pattern:
+/// look for a nested `text_config` container first, and only decode from the
+/// decoder's own root container when one isn't present. Unknown keys
+/// (`vision_config`, `mtp`-related fields, `quantization`) are simply never
+/// referenced by `CodingKeys` and so never fail decoding.
+public struct MiniMaxM3TextConfiguration: Codable, Sendable {
+    public var modelType: String
+    public var hiddenSize: Int
+    public var hiddenLayers: Int
+    public var attentionHeads: Int
+    public var kvHeads: Int
+    public var headDim: Int
+    public var vocabularySize: Int
+    public var maxPositionEmbeddings: Int
+    public var rmsNormEps: Float
+    public var useGemmaNorm: Bool
+    public var ropeTheta: Float
+    /// Number of head dimensions that actually rotate (`partialRotaryFactor * headDim`
+    /// unless the checkpoint provides `rotary_dim` explicitly). 64 for the
+    /// verified real config (128 head dims, factor 0.5).
+    public var rotaryDim: Int
+    public var partialRotaryFactor: Float
+    public var hiddenAct: String
+    public var useQkNorm: Bool
+    public var qkNormType: String
+    public var tieWordEmbeddings: Bool
+    /// Dense (non-MoE) MLP intermediate size, layers 0..<3 in the verified schedule.
+    public var denseIntermediateSize: Int
+    /// Per-expert MoE intermediate size.
+    public var intermediateSize: Int
+    public var sharedIntermediateSize: Int
+    public var numLocalExperts: Int
+    public var numExpertsPerTok: Int
+    public var nSharedExperts: Int
+    public var scoringFunc: String
+    public var useRoutingBias: Bool
+    public var routedScalingFactor: Float
+    /// Per-layer dense/MoE schedule (`0` dense, `1` MoE). Verified real
+    /// schedule: layers 0-2 dense, 3-59 MoE.
+    public var moeLayerFreq: [Int]
+    public var swigluAlpha: Float
+    public var swigluLimit: Float
+    public var swigluBeta: Float
+    public var numMTPModules: Int
+    public var sparseAttention: MiniMaxM3SparseAttentionConfiguration
+
+    /// Whether `layerIndex` uses the MoE block (`true`) or the dense MLP (`false`).
+    public func isMoELayer(_ layerIndex: Int) -> Bool {
+        guard layerIndex >= 0, layerIndex < moeLayerFreq.count else { return false }
+        return moeLayerFreq[layerIndex] == 1
+    }
+
+    public init(
+        modelType: String = "minimax_m3",
+        hiddenSize: Int = 6144,
+        hiddenLayers: Int = 60,
+        attentionHeads: Int = 64,
+        kvHeads: Int = 4,
+        headDim: Int = 128,
+        vocabularySize: Int = 200_064,
+        maxPositionEmbeddings: Int = 1_048_576,
+        rmsNormEps: Float = 1e-6,
+        useGemmaNorm: Bool = true,
+        ropeTheta: Float = 5_000_000,
+        rotaryDim: Int? = nil,
+        partialRotaryFactor: Float = 0.5,
+        hiddenAct: String = "swigluoai",
+        useQkNorm: Bool = true,
+        qkNormType: String = "per_head",
+        tieWordEmbeddings: Bool = false,
+        denseIntermediateSize: Int = 12288,
+        intermediateSize: Int = 3072,
+        sharedIntermediateSize: Int? = nil,
+        numLocalExperts: Int = 128,
+        numExpertsPerTok: Int = 4,
+        nSharedExperts: Int = 1,
+        scoringFunc: String = "sigmoid",
+        useRoutingBias: Bool = true,
+        routedScalingFactor: Float = 2.0,
+        moeLayerFreq: [Int]? = nil,
+        swigluAlpha: Float = 1.702,
+        swigluLimit: Float = 7.0,
+        swigluBeta: Float = 1.0,
+        numMTPModules: Int = 7,
+        sparseAttention: MiniMaxM3SparseAttentionConfiguration = MiniMaxM3SparseAttentionConfiguration()
+    ) {
+        self.modelType = modelType
+        self.hiddenSize = hiddenSize
+        self.hiddenLayers = hiddenLayers
+        self.attentionHeads = attentionHeads
+        self.kvHeads = kvHeads
+        self.headDim = headDim
+        self.vocabularySize = vocabularySize
+        self.maxPositionEmbeddings = maxPositionEmbeddings
+        self.rmsNormEps = rmsNormEps
+        self.useGemmaNorm = useGemmaNorm
+        self.ropeTheta = ropeTheta
+        self.partialRotaryFactor = partialRotaryFactor
+        self.rotaryDim = rotaryDim ?? Int(partialRotaryFactor * Float(headDim))
+        self.hiddenAct = hiddenAct
+        self.useQkNorm = useQkNorm
+        self.qkNormType = qkNormType
+        self.tieWordEmbeddings = tieWordEmbeddings
+        self.denseIntermediateSize = denseIntermediateSize
+        self.intermediateSize = intermediateSize
+        self.sharedIntermediateSize = sharedIntermediateSize ?? intermediateSize
+        self.numLocalExperts = numLocalExperts
+        self.numExpertsPerTok = numExpertsPerTok
+        self.nSharedExperts = nSharedExperts
+        self.scoringFunc = scoringFunc
+        self.useRoutingBias = useRoutingBias
+        self.routedScalingFactor = routedScalingFactor
+        self.moeLayerFreq = moeLayerFreq ?? (0 ..< hiddenLayers).map { $0 < 3 ? 0 : 1 }
+        self.swigluAlpha = swigluAlpha
+        self.swigluLimit = swigluLimit
+        self.swigluBeta = swigluBeta
+        self.numMTPModules = numMTPModules
+        self.sparseAttention = sparseAttention
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case modelType = "model_type"
+        case hiddenSize = "hidden_size"
+        case hiddenLayers = "num_hidden_layers"
+        case attentionHeads = "num_attention_heads"
+        case kvHeads = "num_key_value_heads"
+        case headDim = "head_dim"
+        case vocabularySize = "vocab_size"
+        case maxPositionEmbeddings = "max_position_embeddings"
+        case rmsNormEps = "rms_norm_eps"
+        case useGemmaNorm = "use_gemma_norm"
+        case ropeTheta = "rope_theta"
+        case rotaryDim = "rotary_dim"
+        case partialRotaryFactor = "partial_rotary_factor"
+        case hiddenAct = "hidden_act"
+        case useQkNorm = "use_qk_norm"
+        case qkNormType = "qk_norm_type"
+        case tieWordEmbeddings = "tie_word_embeddings"
+        case denseIntermediateSize = "dense_intermediate_size"
+        case intermediateSize = "intermediate_size"
+        case sharedIntermediateSize = "shared_intermediate_size"
+        case numLocalExperts = "num_local_experts"
+        case numExpertsPerTok = "num_experts_per_tok"
+        case nSharedExperts = "n_shared_experts"
+        case scoringFunc = "scoring_func"
+        case useRoutingBias = "use_routing_bias"
+        case routedScalingFactor = "routed_scaling_factor"
+        case moeLayerFreq = "moe_layer_freq"
+        case swigluAlpha = "swiglu_alpha"
+        case swigluLimit = "swiglu_limit"
+        case swigluBeta = "swiglu_beta"
+        case numMTPModules = "num_mtp_modules"
+        case sparseAttention = "sparse_attention_config"
+    }
+
+    enum VLMCodingKeys: String, CodingKey {
+        case textConfig = "text_config"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let nestedContainer = try decoder.container(keyedBy: VLMCodingKeys.self)
+
+        // VL checkpoints (and configs converted via mlx_lm.convert) nest the
+        // text-model fields under `text_config`; flat `minimax_m3` configs
+        // (upstream mlx-lm PR #1401-style text-only conversions) have them at
+        // the root -- mirrors Gemma3TextConfiguration's fallback.
+        let container =
+            if nestedContainer.contains(.textConfig) {
+                try nestedContainer.nestedContainer(keyedBy: CodingKeys.self, forKey: .textConfig)
+            } else {
+                try decoder.container(keyedBy: CodingKeys.self)
+            }
+
+        modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? "minimax_m3"
+        hiddenSize = try container.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 6144
+        hiddenLayers = try container.decodeIfPresent(Int.self, forKey: .hiddenLayers) ?? 60
+        attentionHeads = try container.decodeIfPresent(Int.self, forKey: .attentionHeads) ?? 64
+        kvHeads = try container.decodeIfPresent(Int.self, forKey: .kvHeads) ?? 4
+        headDim = try container.decodeIfPresent(Int.self, forKey: .headDim) ?? 128
+        vocabularySize =
+            try container.decodeIfPresent(Int.self, forKey: .vocabularySize) ?? 200_064
+        maxPositionEmbeddings =
+            try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 1_048_576
+        rmsNormEps = try container.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
+        useGemmaNorm = try container.decodeIfPresent(Bool.self, forKey: .useGemmaNorm) ?? true
+        ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 5_000_000
+        partialRotaryFactor =
+            try container.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 0.5
+        rotaryDim =
+            try container.decodeIfPresent(Int.self, forKey: .rotaryDim)
+            ?? Int(partialRotaryFactor * Float(headDim))
+        hiddenAct = try container.decodeIfPresent(String.self, forKey: .hiddenAct) ?? "swigluoai"
+        useQkNorm = try container.decodeIfPresent(Bool.self, forKey: .useQkNorm) ?? true
+        qkNormType = try container.decodeIfPresent(String.self, forKey: .qkNormType) ?? "per_head"
+        tieWordEmbeddings =
+            try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
+        denseIntermediateSize =
+            try container.decodeIfPresent(Int.self, forKey: .denseIntermediateSize) ?? 12288
+        intermediateSize =
+            try container.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 3072
+        let decodedSharedIntermediateSize = try container.decodeIfPresent(
+            Int.self, forKey: .sharedIntermediateSize)
+        numLocalExperts = try container.decodeIfPresent(Int.self, forKey: .numLocalExperts) ?? 128
+        numExpertsPerTok = try container.decodeIfPresent(Int.self, forKey: .numExpertsPerTok) ?? 4
+        nSharedExperts = try container.decodeIfPresent(Int.self, forKey: .nSharedExperts) ?? 1
+        scoringFunc = try container.decodeIfPresent(String.self, forKey: .scoringFunc) ?? "sigmoid"
+        useRoutingBias = try container.decodeIfPresent(Bool.self, forKey: .useRoutingBias) ?? true
+        routedScalingFactor =
+            try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor) ?? 2.0
+        let decodedMoeLayerFreq = try container.decodeIfPresent([Int].self, forKey: .moeLayerFreq)
+        swigluAlpha = try container.decodeIfPresent(Float.self, forKey: .swigluAlpha) ?? 1.702
+        swigluLimit = try container.decodeIfPresent(Float.self, forKey: .swigluLimit) ?? 7.0
+        swigluBeta = try container.decodeIfPresent(Float.self, forKey: .swigluBeta) ?? 1.0
+        numMTPModules = try container.decodeIfPresent(Int.self, forKey: .numMTPModules) ?? 7
+        sparseAttention =
+            try container.decodeIfPresent(
+                MiniMaxM3SparseAttentionConfiguration.self, forKey: .sparseAttention)
+            ?? MiniMaxM3SparseAttentionConfiguration()
+
+        self.sharedIntermediateSize = decodedSharedIntermediateSize ?? intermediateSize
+        self.moeLayerFreq = decodedMoeLayerFreq ?? (0 ..< hiddenLayers).map { $0 < 3 ? 0 : 1 }
+    }
+}
+
+// MARK: - MiniMaxM3Configuration
+
+/// Top-level MiniMax-M3 VL configuration: `text_config` (used by this dense
+/// -attention-only task) plus `vision_config` (decoded upstream but unused
+/// here -- vision support is a later task).
+public struct MiniMaxM3Configuration: Codable, Sendable {
+    public var modelType: String
+    public var textConfiguration: MiniMaxM3TextConfiguration
+
+    enum CodingKeys: String, CodingKey {
+        case modelType = "model_type"
+        case textConfiguration = "text_config"
+    }
+
+    public init(
+        modelType: String = "minimax_m3_vl",
+        textConfiguration: MiniMaxM3TextConfiguration = MiniMaxM3TextConfiguration()
+    ) {
+        self.modelType = modelType
+        self.textConfiguration = textConfiguration
+    }
+}
+
+// MARK: - MiniMaxM3Attention
+
+/// MiniMax-M3's dense self-attention: GQA (64 query heads / 4 KV heads in the
+/// verified config), partial RoPE (only the first `rotaryDim` of `headDim`
+/// dims rotate -- `initializeRope` handles this natively since
+/// `MLXFast.RoPE`/`RoPE` leave any dims beyond `dimensions` untouched), and
+/// per-head Gemma-mode QK-norm applied *after* reshaping to
+/// `(B, L, heads, headDim)` (unlike M2's flat, pre-reshape norm over
+/// `heads * headDim`). `attention_output_gate` is `false` for M3 -- no output
+/// gate module. Sparse (DSA) attention is a follow-up task (^8dbc476); this
+/// is the dense fallback path used by every layer for now.
+class MiniMaxM3Attention: Module {
+    let numAttentionHeads: Int
+    let numKeyValueHeads: Int
+    let headDim: Int
+    let scale: Float
+
+    @ModuleInfo(key: "q_proj") var wq: Linear
+    @ModuleInfo(key: "k_proj") var wk: Linear
+    @ModuleInfo(key: "v_proj") var wv: Linear
+    @ModuleInfo(key: "o_proj") var wo: Linear
+
+    @ModuleInfo(key: "q_norm") var qNorm: Gemma.RMSNorm?
+    @ModuleInfo(key: "k_norm") var kNorm: Gemma.RMSNorm?
+
+    @ModuleInfo var rope: RoPELayer
+
+    init(_ config: MiniMaxM3TextConfiguration) {
+        self.numAttentionHeads = config.attentionHeads
+        self.numKeyValueHeads = config.kvHeads
+        self.headDim = config.headDim
+        self.scale = pow(Float(headDim), -0.5)
+
+        _wq.wrappedValue = Linear(config.hiddenSize, numAttentionHeads * headDim, bias: false)
+        _wk.wrappedValue = Linear(config.hiddenSize, numKeyValueHeads * headDim, bias: false)
+        _wv.wrappedValue = Linear(config.hiddenSize, numKeyValueHeads * headDim, bias: false)
+        _wo.wrappedValue = Linear(numAttentionHeads * headDim, config.hiddenSize, bias: false)
+
+        if config.useQkNorm {
+            _qNorm.wrappedValue = Gemma.RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
+            _kNorm.wrappedValue = Gemma.RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
+        }
+
+        self.rope = initializeRope(
+            dims: config.rotaryDim,
+            base: config.ropeTheta,
+            traditional: false,
+            scalingConfig: nil,
+            maxPositionEmbeddings: config.maxPositionEmbeddings
+        )
+
+        super.init()
+    }
+
+    func callAsFunction(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) -> MLXArray {
+        let (B, L) = (x.dim(0), x.dim(1))
+
+        var queries = wq(x)
+        var keys = wk(x)
+        let values = wv(x)
+
+        // Reshape into per-head structure *before* QK-norm: M3's norm is a
+        // per-head RMSNorm over `headDim`, applied on (B, L, heads, headDim),
+        // not M2's flat norm over the whole `heads * headDim` projection.
+        queries = queries.reshaped(B, L, numAttentionHeads, headDim)
+        keys = keys.reshaped(B, L, numKeyValueHeads, headDim)
+
+        if let qNorm, let kNorm {
+            queries = qNorm(queries)
+            keys = kNorm(keys)
+        }
+
+        queries = queries.transposed(0, 2, 1, 3)
+        keys = keys.transposed(0, 2, 1, 3)
+        let v = values.reshaped(B, L, numKeyValueHeads, headDim).transposed(0, 2, 1, 3)
+
+        let offset = cache?.ropeOffset
+        queries = applyRotaryPosition(rope, to: queries, offset: offset)
+        keys = applyRotaryPosition(rope, to: keys, offset: offset)
+
+        let output = attentionWithCacheUpdate(
+            queries: queries,
+            keys: keys,
+            values: v,
+            cache: cache,
+            scale: scale,
+            mask: mask
+        )
+        .transposed(0, 2, 1, 3)
+        .reshaped(B, L, -1)
+
+        return wo(output)
+    }
+}
+
+// MARK: - MiniMaxM3MLP
+
+/// Dense (non-MoE) MLP used by layers 0..<3 in the verified schedule, sized
+/// by `denseIntermediateSize` (12,288) rather than the per-expert
+/// `intermediateSize` (3,072) the MoE blocks use. Shares
+/// `MiniMaxM3SwiGLUOAI`'s clipped activation with the MoE path.
+class MiniMaxM3MLP: Module {
+    @ModuleInfo(key: "gate_proj") var gateProj: Linear
+    @ModuleInfo(key: "up_proj") var upProj: Linear
+    @ModuleInfo(key: "down_proj") var downProj: Linear
+
+    let activation: MiniMaxM3SwiGLUOAI
+
+    init(_ config: MiniMaxM3TextConfiguration) {
+        _gateProj.wrappedValue = Linear(
+            config.hiddenSize, config.denseIntermediateSize, bias: false)
+        _upProj.wrappedValue = Linear(config.hiddenSize, config.denseIntermediateSize, bias: false)
+        _downProj.wrappedValue = Linear(
+            config.denseIntermediateSize, config.hiddenSize, bias: false)
+        self.activation = MiniMaxM3SwiGLUOAI(
+            alpha: config.swigluAlpha, limit: config.swigluLimit, beta: config.swigluBeta)
+        super.init()
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        downProj(activation(upProj(x), gateProj(x)))
+    }
+}
+
+// MARK: - MiniMaxM3DecoderLayer
+
+/// A single decoder layer: dense `MiniMaxM3MLP` for layers 0..<3, MoE
+/// `MiniMaxM3SparseMoeBlock` from layer 3 on, per `config.moeLayerFreq`.
+///
+/// Unlike `DeepseekV3DecoderLayer` (`Libraries/MLXLLM/Models/DeepseekV3.swift`),
+/// which reuses a single `mlp`-keyed property for both variants, M3's two
+/// variants are exposed through two separate optional `@ModuleInfo`-wrapped
+/// properties (`denseMLP`/`blockSparseMoe`) -- verified directly against the
+/// real checkpoint's safetensors index: dense layers ship `mlp.gate_proj/
+/// up_proj/down_proj`, while MoE layers ship `block_sparse_moe.gate` +
+/// `block_sparse_moe.switch_mlp.*`, genuinely different key prefixes rather
+/// than one shared name.
+class MiniMaxM3DecoderLayer: Module {
+    @ModuleInfo(key: "self_attn") var selfAttn: MiniMaxM3Attention
+    @ModuleInfo(key: "block_sparse_moe") var blockSparseMoe: MiniMaxM3SparseMoeBlock?
+    @ModuleInfo(key: "mlp") var denseMLP: MiniMaxM3MLP?
+
+    @ModuleInfo(key: "input_layernorm") var inputLayerNorm: Gemma.RMSNorm
+    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: Gemma.RMSNorm
+
+    init(_ config: MiniMaxM3TextConfiguration, layerIndex: Int) {
+        _selfAttn.wrappedValue = MiniMaxM3Attention(config)
+
+        if config.isMoELayer(layerIndex) {
+            _blockSparseMoe.wrappedValue = MiniMaxM3SparseMoeBlock(
+                MiniMaxM3MoEConfiguration(
+                    hiddenSize: config.hiddenSize,
+                    intermediateSize: config.intermediateSize,
+                    numLocalExperts: config.numLocalExperts,
+                    numExpertsPerTok: config.numExpertsPerTok,
+                    routedScalingFactor: config.routedScalingFactor,
+                    swigluAlpha: config.swigluAlpha,
+                    swigluLimit: config.swigluLimit,
+                    swigluBeta: config.swigluBeta
+                ))
+        } else {
+            _denseMLP.wrappedValue = MiniMaxM3MLP(config)
+        }
+
+        _inputLayerNorm.wrappedValue = Gemma.RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        _postAttentionLayerNorm.wrappedValue = Gemma.RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
+
+        super.init()
+    }
+
+    func callAsFunction(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) -> MLXArray {
+        let h = x + selfAttn(inputLayerNorm(x), mask: mask, cache: cache)
+        let mlpOutput: MLXArray
+        if let blockSparseMoe {
+            mlpOutput = blockSparseMoe(postAttentionLayerNorm(h))
+        } else {
+            mlpOutput = denseMLP!(postAttentionLayerNorm(h))
+        }
+        return h + mlpOutput
+    }
+}
+
+// MARK: - MiniMaxM3ModelInner
+
+class MiniMaxM3ModelInner: Module {
+    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+    let layers: [MiniMaxM3DecoderLayer]
+    @ModuleInfo(key: "norm") var norm: Gemma.RMSNorm
+
+    init(_ config: MiniMaxM3TextConfiguration) {
+        _embedTokens.wrappedValue = Embedding(
+            embeddingCount: config.vocabularySize, dimensions: config.hiddenSize)
+        self.layers = (0 ..< config.hiddenLayers).map {
+            MiniMaxM3DecoderLayer(config, layerIndex: $0)
+        }
+        _norm.wrappedValue = Gemma.RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        super.init()
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        var h = embedTokens(inputs)
+
+        let mask = createAttentionMask(h: h, cache: cache?.first)
+
+        for (i, layer) in layers.enumerated() {
+            h = layer(h, mask: mask, cache: cache?[i])
+        }
+
+        return norm(h)
+    }
+}
+
+// MARK: - MiniMaxM3LanguageModel
+
+/// The `language_model.*`-keyed submodule: `model` (embeddings, decoder
+/// layers, final norm) + `lm_head`. Wrapped by `MiniMaxM3Model` under the
+/// `language_model` module key -- see that type's documentation for why the
+/// prefix must be preserved.
+final class MiniMaxM3LanguageModel: Module, KVCacheDimensionProvider {
+    @ModuleInfo(key: "model") var model: MiniMaxM3ModelInner
+    @ModuleInfo(key: "lm_head") var lmHead: Linear?
+
+    let kvHeads: [Int]
+
+    init(_ config: MiniMaxM3TextConfiguration) {
+        // `useGemmaNorm`/`qkNormType` decode faithfully but are not wired to
+        // any branch below -- every norm unconditionally uses Gemma-mode
+        // RMSNorm, and QK-norm (when enabled) is always per-head. Both hold
+        // for the one verified real checkpoint; fail fast rather than
+        // silently mis-computing numerics if a future checkpoint sets either
+        // differently (flagged by adversarial review of kanban ^xgvth41).
+        precondition(
+            config.useGemmaNorm,
+            "MiniMaxM3 only supports use_gemma_norm=true (dense-attention stage, ^xgvth41)")
+        if config.useQkNorm {
+            precondition(
+                config.qkNormType == "per_head",
+                "MiniMaxM3 only supports qk_norm_type=\"per_head\" (dense-attention stage, ^xgvth41)"
+            )
+        }
+
+        self.kvHeads = Array(repeating: config.kvHeads, count: config.hiddenLayers)
+        _model.wrappedValue = MiniMaxM3ModelInner(config)
+
+        if !config.tieWordEmbeddings {
+            _lmHead.wrappedValue = Linear(config.hiddenSize, config.vocabularySize, bias: false)
+        }
+
+        super.init()
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        let out = model(inputs, cache: cache)
+        if let lmHead {
+            return lmHead(out)
+        }
+        return model.embedTokens.asLinear(out)
+    }
+}
+
+// MARK: - MiniMaxM3Model
+
+/// MiniMax-M3's dense-attention language model. **Not yet registered with the
+/// VLM factory** -- there is no vision tower here, and this type does not
+/// conform to `VLMModel` (which would require a real `prepare(_:cache:
+/// state:windowSize:)` implementation); that lands with vision support in a
+/// later task. This is the deliverable for kanban ^xgvth41: a model type that
+/// compiles and runs tiny-config forward passes with a KV cache.
+///
+/// **Preserves the `language_model.` module-path prefix.** The published VL
+/// checkpoint's weights *and* its per-module quantization overrides are keyed
+/// `language_model.model.layers.N...` (e.g. one MoE gate ships at 8-bit while
+/// the checkpoint default is 4-bit) -- `loadWeights` resolves quantization by
+/// module path (`PerLayerQuantization.quantization(layer:)`), so re-keying
+/// weights away from this prefix would silently fall back to the wrong
+/// quantization and fail the shape check at load. Follows the `Qwen35.swift`
+/// `@ModuleInfo(key: "language_model")` wrapper precedent.
+public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionProvider {
+    @ModuleInfo(key: "language_model") var languageModel: MiniMaxM3LanguageModel
+
+    public let configuration: MiniMaxM3TextConfiguration
+    public var kvHeads: [Int] { languageModel.kvHeads }
+    public var vocabularySize: Int { configuration.vocabularySize }
+
+    public init(_ config: MiniMaxM3TextConfiguration) {
+        self.configuration = config
+        _languageModel.wrappedValue = MiniMaxM3LanguageModel(config)
+        super.init()
+    }
+
+    public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        languageModel(inputs, cache: cache)
+    }
+
+    /// One `KVCacheSimple` per decoder layer (or `RotatingKVCache` when
+    /// `parameters.maxKVSize` is set), matching every layer's dense
+    /// `MiniMaxM3Attention` -- there is no linear/SSM layer mix here to
+    /// special-case, unlike e.g. `Qwen35`.
+    public func newCache(parameters: GenerateParameters? = nil) -> [KVCache] {
+        let numLayers = kvHeads.count
+        if let maxKVSize = parameters?.maxKVSize {
+            return (0 ..< numLayers).map { _ in RotatingKVCache(maxSize: maxKVSize, keep: 4) }
+        }
+        return (0 ..< numLayers).map { _ in KVCacheSimple() }
+    }
+
+    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        func dequant(weight: MLXArray, scaleInv: MLXArray) -> MLXArray {
+            let dtype = weight.dtype
+            let bs = 128
+            let (m, n) = (weight.dim(0), weight.dim(1))
+            let padBottom = (bs - m % bs) % bs
+            let padSide = (bs - n % bs) % bs
+
+            var padded = padded(
+                weight, widths: [.init((0, padBottom)), .init((0, padSide))])
+            padded = padded.reshaped(
+                [(m + padBottom) / bs, bs, (n + padSide) / bs, bs])
+            let scaled = padded * scaleInv[0..., .newAxis, 0..., .newAxis]
+            return scaled.reshaped([m + padBottom, n + padSide])[0 ..< m, 0 ..< n]
+                .asType(dtype)
+        }
+
+        // Step 1: merge fp8/bf16 block-quantized `weight_scale_inv` pairs
+        // (M2's dequant path, for bf16/fp8-original checkpoints).
+        var merged: [String: MLXArray] = [:]
+        for (key, value) in weights {
+            if key.contains("weight_scale_inv") {
+                let weightKey = key.replacingOccurrences(of: "_scale_inv", with: "")
+                if let weight = weights[weightKey] {
+                    merged[weightKey] = dequant(weight: weight, scaleInv: value)
+                }
+            } else if merged[key] == nil {
+                merged[key] = value
+            }
+        }
+
+        // Step 2: drop vision-tower / multi-modal-projector / MTP weights
+        // (verified absent from the mlx-community/MiniMax-M3-4bit checkpoint;
+        // MTP task will revisit), strip the sparse-attention indexer weights
+        // (`index_q_proj`/`index_k_proj`/`index_q_norm`/`index_k_norm` --
+        // confirmed present under `self_attn.` on every MoE-scheduled layer
+        // in the real checkpoint's safetensors index; this dense-only stage
+        // doesn't build the indexer, task ^8dbc476 does), and re-key flat
+        // (`minimax_m3`) checkpoints into the `language_model.`-prefixed
+        // layout the VL checkpoint already uses.
+        var prefixed: [String: MLXArray] = [:]
+        for (key, value) in merged {
+            if key.hasPrefix("vision_tower.") || key.hasPrefix("multi_modal_projector.")
+                || key.hasPrefix("patch_merge_mlp.")
+            {
+                continue
+            }
+            if key.hasPrefix("mtp.") || key.contains(".mtp.") {
+                continue
+            }
+            if key.contains("self_attn.index_") {
+                continue
+            }
+
+            let newKey = key.hasPrefix("language_model.") ? key : "language_model.\(key)"
+            prefixed[newKey] = value
+        }
+
+        if configuration.tieWordEmbeddings {
+            prefixed["language_model.lm_head.weight"] = nil
+        }
+
+        // Step 3: fallback remap for unconverted per-expert checkpoints
+        // (`w1`/`w2`/`w3`, M2's layout) into `FusedGateUpSwitchGLU`'s fused
+        // `gate_up_proj`/`down_proj` layout (gate = first half, up = second
+        // half of the fused column dimension, matching
+        // `MiniMaxM3SparseMoeBlock`'s split order). The published
+        // mlx-community checkpoint already ships fused, pre-stacked expert
+        // weights and never reaches this loop's body (the guard fails
+        // immediately). This fallback stacks only the `numLocalExperts`
+        // *routed* experts; it does not attempt to synthesize the packed
+        // shared-expert row, since no unconverted-per-expert M3 checkpoint
+        // exists yet to verify that layout against.
+        for layerIndex in 0 ..< configuration.hiddenLayers
+        where configuration.isMoELayer(layerIndex) {
+            let prefix = "language_model.model.layers.\(layerIndex).block_sparse_moe"
+            guard prefixed["\(prefix).experts.0.w1.weight"] != nil else { continue }
+
+            for key in ["weight", "scales", "biases"] {
+                guard prefixed["\(prefix).experts.0.w1.\(key)"] != nil else { continue }
+
+                let gate = (0 ..< configuration.numLocalExperts).map {
+                    prefixed.removeValue(forKey: "\(prefix).experts.\($0).w1.\(key)")!
+                }
+                let up = (0 ..< configuration.numLocalExperts).map {
+                    prefixed.removeValue(forKey: "\(prefix).experts.\($0).w3.\(key)")!
+                }
+                let down = (0 ..< configuration.numLocalExperts).map {
+                    prefixed.removeValue(forKey: "\(prefix).experts.\($0).w2.\(key)")!
+                }
+
+                prefixed["\(prefix).switch_mlp.gate_up_proj.\(key)"] =
+                    MLX.concatenated([MLX.stacked(gate), MLX.stacked(up)], axis: 1)
+                prefixed["\(prefix).switch_mlp.down_proj.\(key)"] = MLX.stacked(down)
+            }
+        }
+
+        return prefixed
+    }
+}
+
+extension MiniMaxM3Model: LoRAModel {
+    public var loraLayers: [Module] {
+        languageModel.model.layers
+    }
+}
