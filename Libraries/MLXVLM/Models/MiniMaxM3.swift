@@ -279,6 +279,10 @@ public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
         self.blockSize = blockSize
     }
 
+    /// Decodes a sparse-attention (DSA indexer) configuration from
+    /// `text_config.sparse_attention_config`, defaulting any field the
+    /// checkpoint omits to the value verified against the
+    /// `mlx-community/MiniMax-M3-4bit` checkpoint's `config.json`.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         indexDim = try container.decodeIfPresent(Int.self, forKey: .indexDim) ?? 128
@@ -379,6 +383,9 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         return moeLayerFreq[layerIndex] == 1
     }
 
+    /// Creates a text-model configuration directly from field values,
+    /// defaulting each parameter to the value verified against the
+    /// `mlx-community/MiniMax-M3-4bit` checkpoint's `config.json`.
     public init(
         modelType: String = "minimax_m3",
         hiddenSize: Int = 6144,
@@ -487,6 +494,10 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         case textConfig = "text_config"
     }
 
+    /// Decodes a text-model configuration from either checkpoint shape:
+    /// VL-nested, with fields under a `text_config` container, or flat, with
+    /// fields at the decoder's own root -- falling back field-by-field to the
+    /// verified defaults whenever a key is absent from either shape.
     public init(from decoder: Decoder) throws {
         let nestedContainer = try decoder.container(keyedBy: VLMCodingKeys.self)
 
