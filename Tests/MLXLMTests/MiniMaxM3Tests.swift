@@ -1,5 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
+import CoreImage
 import Foundation
 import MLX
 import MLXNN
@@ -870,5 +871,151 @@ struct MiniMaxM3Tests {
         eval(model)
         let keys = Set(model.parameters().flattened().map(\.0))
         #expect(keys.contains("\(overridePath).weight"))
+    }
+
+    // MARK: - VLMTypeRegistry / VLMProcessorTypeRegistry / VLMRegistry registration
+
+    /// Tiny nested VL config (`minimax_m3_vl`, `text_config` wrapper) --
+    /// mirrors `tinyModelConfig()`'s dimensions but as literal JSON, keeping
+    /// registry-resolution tests fast (no full 60-layer/128-expert allocation).
+    private static let tinyNestedVLConfigJSON = """
+        {
+            "model_type": "minimax_m3_vl",
+            "text_config": {
+                "hidden_size": 32,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "head_dim": 16,
+                "vocab_size": 48,
+                "dense_intermediate_size": 64,
+                "intermediate_size": 16,
+                "num_local_experts": 4,
+                "num_experts_per_tok": 2,
+                "moe_layer_freq": [0, 1]
+            }
+        }
+        """
+
+    /// Tiny flat `minimax_m3` config (no VL nesting) -- same dimensions as
+    /// `tinyNestedVLConfigJSON`'s `text_config`.
+    private static let tinyFlatConfigJSON = """
+        {
+            "model_type": "minimax_m3",
+            "hidden_size": 32,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 16,
+            "vocab_size": 48,
+            "dense_intermediate_size": 64,
+            "intermediate_size": 16,
+            "num_local_experts": 4,
+            "num_experts_per_tok": 2,
+            "moe_layer_freq": [0, 1]
+        }
+        """
+
+    @Test("VLMTypeRegistry resolves minimax_m3_vl to MiniMaxM3Model")
+    func vlmTypeRegistryResolvesNestedVLModelType() async throws {
+        let model = try await VLMTypeRegistry.shared.createModel(
+            configuration: Data(Self.tinyNestedVLConfigJSON.utf8), modelType: "minimax_m3_vl")
+        #expect(model is MiniMaxM3Model)
+    }
+
+    @Test("VLMTypeRegistry resolves the flat minimax_m3 model type to the same MiniMaxM3Model")
+    func vlmTypeRegistryResolvesFlatModelType() async throws {
+        let model = try await VLMTypeRegistry.shared.createModel(
+            configuration: Data(Self.tinyFlatConfigJSON.utf8), modelType: "minimax_m3")
+        #expect(model is MiniMaxM3Model)
+    }
+
+    @Test("VLMProcessorTypeRegistry resolves MiniMaxM3VLProcessor to MiniMaxM3Processor")
+    func vlmProcessorTypeRegistryResolvesMiniMaxM3Processor() async throws {
+        let data = Data(
+            """
+            { "processor_class": "MiniMaxM3VLProcessor" }
+            """.utf8)
+        let processor = try await VLMProcessorTypeRegistry.shared.createModel(
+            configuration: data, processorType: "MiniMaxM3VLProcessor", tokenizer: TestTokenizer())
+        #expect(processor is MiniMaxM3Processor)
+    }
+
+    @Test("VLMRegistry exposes a minimaxM34bit entry pointing at mlx-community/MiniMax-M3-4bit")
+    func vlmRegistryHasMiniMaxM34bitEntry() {
+        #expect(VLMRegistry.minimaxM34bit.name == "mlx-community/MiniMax-M3-4bit")
+        #expect(VLMRegistry.all().contains { $0.name == VLMRegistry.minimaxM34bit.name })
+    }
+
+    // MARK: - loadProcessorConfig fallback (preprocessor_config.json missing processor_class)
+
+    @Test(
+        "loadProcessorConfig falls back to processor_config.json when preprocessor_config.json lacks processor_class"
+    )
+    func loadProcessorConfigFallsBackForMissingProcessorClass() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try
+            """
+            { "image_processor_type": "MiniMaxM3VLImageProcessor" }
+            """
+            .write(
+                to: tempDir.appendingPathComponent("preprocessor_config.json"),
+                atomically: true, encoding: .utf8)
+        try
+            """
+            { "processor_class": "MiniMaxM3VLProcessor" }
+            """
+            .write(
+                to: tempDir.appendingPathComponent("processor_config.json"),
+                atomically: true, encoding: .utf8)
+
+        let (_, config) = try await loadProcessorConfig(from: tempDir)
+        #expect(config.processorClass == "MiniMaxM3VLProcessor")
+    }
+
+    // MARK: - MiniMaxM3Processor
+
+    @Test("MiniMaxM3Processor tokenizes plain text prompts")
+    func processorTokenizesTextPrompt() async throws {
+        let processor = MiniMaxM3Processor(
+            MiniMaxM3ProcessorConfiguration(), tokenizer: TestTokenizer())
+        let input = try await processor.prepare(input: UserInput(prompt: "2+2="))
+        #expect(input.text.tokens.size > 0)
+        #expect(input.image == nil)
+        #expect(input.video == nil)
+    }
+
+    @Test("MiniMaxM3Processor throws a descriptive error for image input instead of ignoring it")
+    func processorThrowsForImageInput() async throws {
+        let processor = MiniMaxM3Processor(
+            MiniMaxM3ProcessorConfiguration(), tokenizer: TestTokenizer())
+        let image = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 4, height: 4))
+
+        do {
+            _ = try await processor.prepare(
+                input: UserInput(prompt: "describe", images: [.ciImage(image)]))
+            Issue.record("expected VLMError.mediaNotSupported to be thrown")
+        } catch {
+            #expect(error as? VLMError == VLMError.mediaNotSupported("image"))
+        }
+    }
+
+    @Test("MiniMaxM3Processor throws a descriptive error for video input instead of ignoring it")
+    func processorThrowsForVideoInput() async throws {
+        let processor = MiniMaxM3Processor(
+            MiniMaxM3ProcessorConfiguration(), tokenizer: TestTokenizer())
+        let video = UserInput.Video.url(URL(fileURLWithPath: "/nonexistent/video.mp4"))
+
+        do {
+            _ = try await processor.prepare(
+                input: UserInput(prompt: "describe", videos: [video]))
+            Issue.record("expected VLMError.mediaNotSupported to be thrown")
+        } catch {
+            #expect(error as? VLMError == VLMError.mediaNotSupported("video"))
+        }
     }
 }

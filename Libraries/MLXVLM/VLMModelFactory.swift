@@ -15,6 +15,7 @@ public enum VLMError: LocalizedError, Equatable {
     case processing(String)
     case noVideoTrackFound
     case videoNotDecodable
+    case mediaNotSupported(String)
 
     public var errorDescription: String? {
         switch self {
@@ -38,6 +39,8 @@ public enum VLMError: LocalizedError, Equatable {
             return String(localized: "Video file has no video tracks.")
         case .videoNotDecodable:
             return String(localized: "Video file not decodable.")
+        case .mediaNotSupported(let mediaType):
+            return String(localized: "This model does not yet support \(mediaType) input.")
         }
     }
 }
@@ -105,6 +108,14 @@ public enum VLMTypeRegistry {
         "lfm2_vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "glm_ocr": create(GlmOcrConfiguration.self, GlmOcr.init),
+        "minimax_m3_vl": create(MiniMaxM3Configuration.self) {
+            (config: MiniMaxM3Configuration) -> MiniMaxM3Model in
+            MiniMaxM3Model(config.textConfiguration)
+        },
+        // Flat `minimax_m3` conversions (upstream mlx-lm PR #1401-style
+        // text-only checkpoints) decode straight into the text config --
+        // there is no `text_config`/`vision_config` nesting to unwrap.
+        "minimax_m3": create(MiniMaxM3TextConfiguration.self, MiniMaxM3Model.init),
     ])
 }
 
@@ -140,6 +151,8 @@ public enum VLMProcessorTypeRegistry {
             LFM2VLProcessorConfiguration.self, LFM2VLProcessor.init),
         "Glm46VProcessor": create(
             GlmOcrProcessorConfiguration.self, GlmOcrProcessor.init),
+        "MiniMaxM3VLProcessor": create(
+            MiniMaxM3ProcessorConfiguration.self, MiniMaxM3Processor.init),
     ])
 }
 
@@ -268,6 +281,11 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<|im_end|>"]
     )
 
+    static public let minimaxM34bit = ModelConfiguration(
+        id: "mlx-community/MiniMax-M3-4bit",
+        defaultPrompt: ""
+    )
+
     static public func all() -> [ModelConfiguration] {
         [
             paligemma3bMix448_8bit,
@@ -287,6 +305,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             fastvlm,
             qwen3_5_27B_4bit,
             qwen3_5_35B_A3B_4bit,
+            minimaxM34bit,
         ]
     }
 
@@ -468,17 +487,37 @@ private struct ProcessorConfigError: Error {
 }
 
 /// Loads processor configuration, preferring preprocessor_config.json over processor_config.json.
+///
+/// Some checkpoints (e.g. `mlx-community/MiniMax-M3-4bit`) ship a
+/// `preprocessor_config.json` that only configures the image/video
+/// sub-processors and omits `processor_class` entirely, while the composite
+/// `processor_config.json` alongside it carries the real value. When the
+/// preferred file decodes but is missing exactly that key, this falls back to
+/// `processor_config.json` instead of failing the whole load.
+///
 /// Marked async to enable parallel scheduling via async let, though the underlying I/O is synchronous.
 /// Throws ProcessorConfigError wrapping any underlying error with the filename.
-private func loadProcessorConfig(from modelDirectory: URL) async throws -> (
+func loadProcessorConfig(from modelDirectory: URL) async throws -> (
     Data, BaseProcessorConfiguration
 ) {
     let processorConfigURL = modelDirectory.appending(component: "processor_config.json")
     let preprocessorConfigURL = modelDirectory.appending(component: "preprocessor_config.json")
-    let url =
-        FileManager.default.fileExists(atPath: preprocessorConfigURL.path)
-        ? preprocessorConfigURL
-        : processorConfigURL
+    let preferPreprocessor = FileManager.default.fileExists(atPath: preprocessorConfigURL.path)
+    let primaryURL = preferPreprocessor ? preprocessorConfigURL : processorConfigURL
+
+    do {
+        return try decodeProcessorConfig(at: primaryURL)
+    } catch let error as ProcessorConfigError
+    where preferPreprocessor && isMissingProcessorClassKey(error.underlying)
+        && FileManager.default.fileExists(atPath: processorConfigURL.path)
+    {
+        return try decodeProcessorConfig(at: processorConfigURL)
+    }
+}
+
+/// Reads and decodes `BaseProcessorConfiguration` from `url`, wrapping any
+/// failure in a `ProcessorConfigError` that carries the filename.
+private func decodeProcessorConfig(at url: URL) throws -> (Data, BaseProcessorConfiguration) {
     do {
         let data = try Data(contentsOf: url)
         let config = try JSONDecoder.json5().decode(BaseProcessorConfiguration.self, from: data)
@@ -486,6 +525,14 @@ private func loadProcessorConfig(from modelDirectory: URL) async throws -> (
     } catch {
         throw ProcessorConfigError(filename: url.lastPathComponent, underlying: error)
     }
+}
+
+/// Whether `error` is a `DecodingError.keyNotFound` for
+/// `BaseProcessorConfiguration`'s `processor_class` key -- the specific
+/// failure `loadProcessorConfig` falls back on.
+private func isMissingProcessorClassKey(_ error: Error) -> Bool {
+    guard case .keyNotFound(let key, _) = error as? DecodingError else { return false }
+    return key.stringValue == BaseProcessorConfiguration.CodingKeys.processorClass.rawValue
 }
 
 public class TrampolineModelFactory: NSObject, ModelFactoryTrampoline {

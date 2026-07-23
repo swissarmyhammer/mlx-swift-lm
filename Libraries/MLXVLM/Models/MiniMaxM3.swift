@@ -969,12 +969,15 @@ final class MiniMaxM3LanguageModel: Module, KVCacheDimensionProvider {
 
 // MARK: - MiniMaxM3Model
 
-/// MiniMax-M3's dense-attention language model. **Not yet registered with the
-/// VLM factory** -- there is no vision tower here, and this type does not
-/// conform to `VLMModel` (which would require a real `prepare(_:cache:
-/// state:windowSize:)` implementation); that lands with vision support in a
-/// later task. This is the deliverable for kanban ^xgvth41: a model type that
-/// compiles and runs tiny-config forward passes with a KV cache.
+/// MiniMax-M3's dense-attention language model. Registered with the VLM
+/// factory under both `"minimax_m3_vl"` (VL-nested) and `"minimax_m3"` (flat)
+/// model types (kanban ^wz8y8qq) and conforms to `VLMModel` via the
+/// `prepare(_:cache:state:windowSize:)` implementation below -- but there is
+/// still no vision tower here: `MiniMaxM3Processor` rejects image/video
+/// input with a descriptive error, and real vision support (a vision tower
+/// plus image-aware `prepare`) is a later task. This type was originally the
+/// deliverable for kanban ^xgvth41: a model that compiles and runs
+/// tiny-config forward passes with a KV cache.
 ///
 /// **Preserves the `language_model.` module-path prefix.** The published VL
 /// checkpoint's weights *and* its per-module quantization overrides are keyed
@@ -1146,5 +1149,119 @@ extension MiniMaxM3Model: LoRAModel {
     /// The decoder layers available for LoRA parameter adaptation.
     public var loraLayers: [Module] {
         languageModel.model.layers
+    }
+}
+
+// MARK: - MiniMaxM3Model + VLMModel
+
+extension MiniMaxM3Model: VLMModel {
+    /// Prefills `input`'s tokens in `windowSize`-sized chunks and returns the
+    /// remainder for the `TokenIterator` to consume one token at a time.
+    ///
+    /// Mirrors `LLMModel`'s default `prepare(_:cache:state:windowSize:)` --
+    /// MiniMax-M3 has no vision tower yet, so `input.image`/`input.video` are
+    /// always `nil` here: `MiniMaxM3Processor` rejects image/video input
+    /// before an `LMInput` is ever constructed.
+    public func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
+    ) throws -> PrepareResult {
+        let prefillStepSize = windowSize ?? 512
+        var y = input.text
+
+        try withPreparedCache(cache, lengths: y.sequenceLengths) {
+            var state: LMOutput.State? = state
+            while y.tokens.size > prefillStepSize {
+                try Task.checkCancellation()
+                let chunk = y[.newAxis, ..<prefillStepSize]
+                let output = self(chunk, cache: cache.isEmpty ? nil : cache, state: state)
+                state = output.state
+                asyncEval(cache)
+                y = y[prefillStepSize...]
+            }
+            eval(cache)
+        }
+
+        return .tokens(y)
+    }
+}
+
+// MARK: - MiniMaxM3ProcessorConfiguration + MiniMaxM3Processor
+
+/// Declared processor class name (`processor_class`) MiniMax-M3's checkpoint
+/// declares, used when the config the checkpoint ships omits the key
+/// entirely. Shared by `MiniMaxM3ProcessorConfiguration`'s memberwise `init`
+/// and its `init(from:)` decoder fallback.
+public let defaultMiniMaxM3ProcessorClass = "MiniMaxM3VLProcessor"
+
+/// Configuration for `MiniMaxM3Processor`.
+///
+/// Only the declared processor class name is modeled -- the checkpoint's
+/// image/video processor fields (`image_processor`/`video_processor` in
+/// `processor_config.json`) are unused until vision support lands.
+public struct MiniMaxM3ProcessorConfiguration: Codable, Sendable {
+    /// Declared processor class name (`processor_class`), verified as
+    /// `"MiniMaxM3VLProcessor"` against the checkpoint's `processor_config.json`.
+    public let processorClass: String
+
+    enum CodingKeys: String, CodingKey {
+        case processorClass = "processor_class"
+    }
+
+    /// Creates a processor configuration directly from its declared class name.
+    public init(processorClass: String = defaultMiniMaxM3ProcessorClass) {
+        self.processorClass = processorClass
+    }
+
+    /// Decodes a processor configuration, defaulting `processorClass` when
+    /// the checkpoint's config omits it.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        processorClass =
+            try container.decodeIfPresent(String.self, forKey: .processorClass)
+            ?? defaultMiniMaxM3ProcessorClass
+    }
+}
+
+/// Text-only input processor for MiniMax-M3.
+///
+/// Ports the text path of mlx-vlm's `processing_minimax_m3_vl.py`: applies
+/// the tokenizer's chat template to the prompt, falling back to plain-text
+/// joining when the tokenizer has no chat template (matching
+/// `LLMUserInputProcessor`). Image and video input are not yet supported --
+/// vision support is a later task -- so `prepare(input:)` throws
+/// `VLMError.mediaNotSupported` rather than silently dropping media the
+/// caller attached.
+public struct MiniMaxM3Processor: UserInputProcessor {
+    private let configuration: MiniMaxM3ProcessorConfiguration
+    private let tokenizer: any Tokenizer
+
+    /// Creates a text-only MiniMax-M3 input processor.
+    public init(_ configuration: MiniMaxM3ProcessorConfiguration, tokenizer: any Tokenizer) {
+        self.configuration = configuration
+        self.tokenizer = tokenizer
+    }
+
+    /// Converts `input` into an `LMInput`, throwing when `input` carries an
+    /// image or video attachment MiniMax-M3 cannot yet process.
+    public func prepare(input: UserInput) async throws -> LMInput {
+        guard input.images.isEmpty else {
+            throw VLMError.mediaNotSupported("image")
+        }
+        guard input.videos.isEmpty else {
+            throw VLMError.mediaNotSupported("video")
+        }
+
+        let messages = DefaultMessageGenerator().generate(from: input)
+        do {
+            let promptTokens = try tokenizer.applyChatTemplate(
+                messages: messages, tools: input.tools, additionalContext: input.additionalContext)
+            return LMInput(tokens: MLXArray(promptTokens))
+        } catch TokenizerError.missingChatTemplate {
+            let prompt =
+                messages
+                .compactMap { $0["content"] as? String }
+                .joined(separator: "\n\n")
+            return LMInput(tokens: MLXArray(tokenizer.encode(text: prompt)))
+        }
     }
 }

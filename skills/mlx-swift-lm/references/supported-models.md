@@ -141,6 +141,7 @@ VLMRegistry.paligemma3bMix448_8bit // mlx-community/paligemma-3b-mix-448-8bit
 | `pixtral` | Pixtral |
 | `mistral3` | Mistral 3 VLM |
 | `lfm2_vl`, `lfm2-vl` | LFM2 VL |
+| `minimax_m3_vl`, `minimax_m3` | MiniMax-M3 (text-only; image/video input throws until vision support lands) |
 
 ## Loading Any Model
 

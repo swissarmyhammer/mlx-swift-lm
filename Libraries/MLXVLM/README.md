@@ -68,6 +68,7 @@ The following models have been tried:
 - mlx-community/gemma-3-12b-it-qat-4bit
 - mlx-community/gemma-3-27b-it-qat-4bit
 - HuggingFaceTB/SmolVLM2-500M-Video-Instruct-mlx
+- mlx-community/MiniMax-M3-4bit (text-only -- image/video input throws until vision support lands)
 
 Currently supported model types are:
 
@@ -78,6 +79,7 @@ Currently supported model types are:
 - idefics3
 - gemma3
 - smolvlm
+- minimax_m3_vl, minimax_m3 (text-only; `MiniMaxM3Processor` throws on image/video input)
 
 See [llm-tool](../../Tools/llm-tool)
 
