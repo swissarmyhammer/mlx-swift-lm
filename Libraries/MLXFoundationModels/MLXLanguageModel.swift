@@ -3555,8 +3555,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Derives the think-then-call reasoning config for the tool-calling
         /// path — the static, pre-render gate. Two strategy families qualify:
         ///
-        /// - `.templateFlag` (Qwen3/QwQ): their template both renders the
-        ///   tool block AND honors `enable_thinking`.
+        /// - `.templateFlag`/`.templateStringFlag` (Qwen3/QwQ, MiniMax-M3):
+        ///   their template both renders the tool block AND honors the
+        ///   thinking kwarg (boolean `enable_thinking` or M3's string-valued
+        ///   `thinking_mode`).
         /// - `.alwaysOn` (MiniMax-M2, R1-style): whether Phase 1 actually
         ///   runs is decided post-render by `thinkThenCallPhase1Engages`,
         ///   which requires the rendered prompt to end inside an open
@@ -3584,7 +3586,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 let reasoningConfig = resolved.reasoningConfig
             else { return nil }
             switch reasoningConfig.promptStrategy {
-            case .templateFlag, .alwaysOn:
+            case .templateFlag, .templateStringFlag, .alwaysOn:
                 return reasoningConfig
             case .none:
                 // No prompt-level thinking protocol to run Phase 1 against.
@@ -3596,9 +3598,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// closing delimiter) should run for this round's rendered prompt —
         /// the post-render gate, complementing `makeThinkThenCallConfig`.
         ///
-        /// - `.templateFlag`: always engages — the kwarg primed the template,
-        ///   and the model emits its own `<think>` opener (Qwen3-style), so
-        ///   prompt priming is irrelevant.
+        /// - `.templateFlag`/`.templateStringFlag`: always engages — the
+        ///   kwarg primed the template, and the model emits its own `<think>`
+        ///   opener (Qwen3-style) or the template pre-opens it when forced on
+        ///   (MiniMax-M3's `thinking_mode: "enabled"`), so prompt priming is
+        ///   irrelevant to the decision either way.
         /// - `.alwaysOn`: engages only when the rendered prompt ends inside
         ///   an open reasoning span (MiniMax-M2's template pre-opens
         ///   `<think>\n`, so its constrained tool round would otherwise mix
@@ -3619,7 +3623,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             primedInside: Bool
         ) -> Bool {
             switch reasoningConfig.promptStrategy {
-            case .templateFlag:
+            case .templateFlag, .templateStringFlag:
                 return true
             case .alwaysOn:
                 return primedInside

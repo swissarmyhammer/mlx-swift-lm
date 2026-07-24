@@ -46,6 +46,71 @@ struct ReasoningConfigTests {
         #expect(config?.promptStrategy == .alwaysOn)
     }
 
+    /// MiniMax-M3 (model_type "minimax_m3"/"minimax_m3_vl") is toggleable,
+    /// unlike M2: its chat template exposes a `thinking_mode` kwarg
+    /// ("enabled"/"disabled"/"adaptive") rather than always priming
+    /// `<think>\n`.
+    @Test func inferMiniMaxM3IsToggleable() {
+        let config = ReasoningConfig.infer(
+            from: "minimax_m3", modelID: "mlx-community/MiniMax-M3-4bit")
+        #expect(config?.startDelimiter == "<mm:think>")
+        #expect(config?.endDelimiter == "</mm:think>")
+        #expect(
+            config?.promptStrategy
+                == .templateStringFlag(
+                    key: "thinking_mode", onValue: "enabled", offValue: "disabled",
+                    defaultValue: "adaptive"))
+    }
+
+    /// The "minimax_m3" row is keyed on the model_type prefix, so the VL
+    /// variant ("minimax_m3_vl") resolves the same toggleable configuration
+    /// as the flat text model type.
+    @Test func inferMiniMaxM3VLResolvesSharedRow() {
+        let config = ReasoningConfig.infer(
+            from: "minimax_m3_vl", modelID: "mlx-community/MiniMax-M3-4bit")
+        #expect(config?.startDelimiter == "<mm:think>")
+        #expect(
+            config?.promptStrategy
+                == .templateStringFlag(
+                    key: "thinking_mode", onValue: "enabled", offValue: "disabled",
+                    defaultValue: "adaptive"))
+    }
+
+    /// Pins the exact contract `VLMModelFactory._load` relies on for
+    /// `minimax_m3_vl`: its reasoning-inference block is a direct,
+    /// model-type-agnostic passthrough to `ReasoningConfig.infer(from:
+    /// baseConfig.modelType, modelID: configuration.name, configData:
+    /// configData)` (verified by reading `VLMModelFactory.swift` -- the same
+    /// generic call already exercised for Qwen3.6's "qwen3_5" VL onboarding,
+    /// per `inferQwen3VLResolvesSharedQwen3Row` above). Since the wiring
+    /// itself carries no minimax_m3_vl-specific logic, this inference-table
+    /// result IS the factory's resolved `reasoningConfig` for that model
+    /// type; per `ReasoningConfigResolutionTests`'s documented precedent, the
+    /// `_load` glue itself is verified end-to-end only by the gated
+    /// real-weights integration test, not a synthetic-weights unit test.
+    @Test func vlmModelFactoryResolvesMiniMaxM3VLReasoningRow() {
+        let config = ReasoningConfig.infer(
+            from: "minimax_m3_vl", modelID: "mlx-community/MiniMax-M3-4bit")
+        #expect(
+            config
+                == ReasoningConfig(
+                    startDelimiter: "<mm:think>", endDelimiter: "</mm:think>",
+                    promptStrategy: .templateStringFlag(
+                        key: "thinking_mode", onValue: "enabled", offValue: "disabled",
+                        defaultValue: "adaptive")))
+    }
+
+    /// Regression for the same `_load` contract: a VLM model whose
+    /// `model_type` matches no ``inferenceTable`` row resolves `nil`, so
+    /// `VLMModelFactory._load` leaves `reasoningConfig` unset rather than
+    /// synthesizing a spurious configuration.
+    @Test func vlmModelFactoryNoMatchingRowResolvesNil() {
+        #expect(
+            ReasoningConfig.infer(
+                from: "some_future_vlm_architecture", modelID: "mlx-community/Future-VLM-4bit")
+                == nil)
+    }
+
     /// The Qwen3 entry is keyed on the model_type *prefix*, so family
     /// variants (e.g. `qwen3_moe`) resolve the same configuration as plain
     /// `qwen3`.
@@ -252,6 +317,34 @@ struct ReasoningConfigTests {
         let ctx = try strategy.additionalContext(forThinkingEnabled: true)
         #expect(ctx?["use_chain_of_thought"] as? Bool == true)
         #expect(ctx?["enable_thinking"] == nil)
+    }
+
+    @Test func templateStringFlagThinkingOn() throws {
+        let strategy = ReasoningPromptStrategy.templateStringFlag(
+            key: "thinking_mode", onValue: "enabled", offValue: "disabled",
+            defaultValue: "adaptive")
+        let ctx = try strategy.additionalContext(forThinkingEnabled: true)
+        #expect(ctx?["thinking_mode"] as? String == "enabled")
+    }
+
+    @Test func templateStringFlagThinkingOff() throws {
+        let strategy = ReasoningPromptStrategy.templateStringFlag(
+            key: "thinking_mode", onValue: "enabled", offValue: "disabled",
+            defaultValue: "adaptive")
+        let ctx = try strategy.additionalContext(forThinkingEnabled: false)
+        #expect(ctx?["thinking_mode"] as? String == "disabled")
+    }
+
+    /// Unspecified preference sends the family's own default value (M3's
+    /// "adaptive" -- unlike `.templateFlag`, whose unspecified case falls
+    /// back to a boolean `defaultOn`, this is a third string, not one of the
+    /// on/off values).
+    @Test func templateStringFlagUnspecifiedUsesDefaultValue() throws {
+        let strategy = ReasoningPromptStrategy.templateStringFlag(
+            key: "thinking_mode", onValue: "enabled", offValue: "disabled",
+            defaultValue: "adaptive")
+        let ctx = try strategy.additionalContext(forThinkingEnabled: nil)
+        #expect(ctx?["thinking_mode"] as? String == "adaptive")
     }
 
     @Test func alwaysOnIgnoresEnabledLevels() throws {

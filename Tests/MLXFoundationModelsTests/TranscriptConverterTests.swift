@@ -990,6 +990,78 @@ struct TranscriptConverterTests {
         #expect(names == ["get_weather", "get_time"])
     }
 
+    /// M3's chat_template.jinja tracks `last_tool_call.name` with the exact
+    /// same logic as M2's (verified against mlx-community/MiniMax-M3-4bit's
+    /// `chat_template.jinja`, whose `tool` role branch is byte-identical to
+    /// M2's), so `firstMiniMaxToolValidatorViolation` mirrors both formats.
+    @Test
+    func testMiniMaxM3ToolRoundRendersTemplateAcceptableSequence() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let entries = try completedToolRoundEntries()
+        let messages = TranscriptConverter.mlxMessages(for: entries, toolCallFormat: .minimaxM3)
+        let raw = DefaultMessageGenerator().generate(messages: messages)
+
+        #expect(firstMiniMaxToolValidatorViolation(in: raw) == nil)
+
+        #expect(messages.map(\.role) == [.system, .user, .assistant, .tool, .assistant])
+
+        let toolCallMessage = raw[2]
+        #expect(toolCallMessage["role"] as? String == "assistant")
+        let calls = try #require(toolCallMessage["tool_calls"] as? [[String: any Sendable]])
+        #expect(calls.count == 1)
+        let function = try #require(calls[0]["function"] as? [String: any Sendable])
+        #expect(function["name"] as? String == "get_weather")
+        let arguments = try #require(function["arguments"] as? [String: any Sendable])
+        #expect(arguments["location"] as? String == "Tokyo")
+    }
+
+    @Test
+    func testVerbatimToolCallRenderingViolatesMiniMaxM3ToolValidator() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // Guards the fix's motivation, mirroring the M2 regression: the
+        // default (verbatim-content) rendering carries no `tool_calls`
+        // metadata, so M3's template resets `last_tool_call` and raises on
+        // the tool result -- exactly why `.minimaxM3` must render structured
+        // `tool_calls` too.
+        let entries = try completedToolRoundEntries()
+        let messages = TranscriptConverter.mlxMessages(for: entries)
+        let raw = DefaultMessageGenerator().generate(messages: messages)
+
+        #expect(firstMiniMaxToolValidatorViolation(in: raw) != nil)
+    }
+
+    @Test
+    func testMiniMaxM3MultipleToolCallsFoldIntoOneAssistantMessage() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let first = Transcript.ToolCall(
+            id: "call-1", toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location": "Tokyo"}"#))
+        let second = Transcript.ToolCall(
+            id: "call-2", toolName: "get_time",
+            arguments: try GeneratedContent(json: #"{"timezone": "JST"}"#))
+        let entries: [Transcript.Entry] = [
+            .toolCalls(Transcript.ToolCalls(id: "tc-1", [first, second]))
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, toolCallFormat: .minimaxM3)
+
+        // Parallel calls in one round fold into a single assistant turn, so
+        // M3's template renders one namespaced `<tool_call>` block with one
+        // `<invoke>` per call, matching how the model itself emits a
+        // parallel round.
+        #expect(messages.count == 1)
+        let raw = DefaultMessageGenerator().generate(message: messages[0])
+        let calls = try #require(raw["tool_calls"] as? [[String: any Sendable]])
+        #expect(calls.count == 2)
+        let names = calls.compactMap {
+            ($0["function"] as? [String: any Sendable])?["name"] as? String
+        }
+        #expect(names == ["get_weather", "get_time"])
+    }
+
     @Test
     func testNonMistralToolCallRenderingUnchanged() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }

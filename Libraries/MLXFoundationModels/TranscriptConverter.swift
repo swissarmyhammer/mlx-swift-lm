@@ -29,9 +29,10 @@ struct TranscriptConverter {
     ///     preserve the historical rendering: one assistant message per call
     ///     carrying the verbatim `{"name":…, "arguments":…}` envelope as text
     ///     content. Formats in ``structuredToolCallFormats`` (`.mistral`,
-    ///     `.minimaxM2`) instead carry the calls as structured tool-call
-    ///     metadata on a single assistant message (see the `.toolCalls` case)
-    ///     so their sequence-validating chat templates accept the exchange.
+    ///     `.minimaxM2`, `.minimaxM3`) instead carry the calls as structured
+    ///     tool-call metadata on a single assistant message (see the
+    ///     `.toolCalls` case) so their sequence-validating chat templates
+    ///     accept the exchange.
     ///   - replayReasoning: Whether a `.reasoning` entry's text should ride
     ///     on the `.response` entry it precedes as ``Chat/Message/reasoning``
     ///     (replayed into history renders as `reasoning_content`). `false`
@@ -275,7 +276,9 @@ struct TranscriptConverter {
     /// instead of verbatim assistant text content, because their chat
     /// templates validate the message sequence around tool turns (see the
     /// `.toolCalls` case in `mlxMessages`).
-    private static let structuredToolCallFormats: Set<ToolCallFormat> = [.mistral, .minimaxM2]
+    private static let structuredToolCallFormats: Set<ToolCallFormat> = [
+        .mistral, .minimaxM2, .minimaxM3,
+    ]
 
     /// Bridges a FoundationModels `Transcript.ToolCall` into MLXLMCommon's
     /// structured ``ToolCall`` so a `.toolCalls` entry of a format in

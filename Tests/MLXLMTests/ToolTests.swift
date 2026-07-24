@@ -992,6 +992,180 @@ struct ToolTests {
         #expect(toolCall.function.arguments["query"] == .string("AI news"))
     }
 
+    // MARK: - MiniMax M3 Format Tests
+
+    /// Fixture strings verbatim from upstream mlx-lm PR #1416
+    /// (`tests/test_tool_parsing.py::test_minimax_m3`), which added the
+    /// `minimax_m3.py` reference parser this Swift port mirrors.
+    private static let minimaxM3NamespaceToken = "]<]minimax[>["
+
+    @Test("Test MiniMax M3 Tool Call Parser - single parameter")
+    func testMiniMaxM3ParserSingleParameter() throws {
+        let parser = MiniMaxM3ToolCallParser()
+        let ns = Self.minimaxM3NamespaceToken
+        let content =
+            "\(ns)<tool_call>\(ns)<invoke name=\"get_current_temperature\">"
+            + "\(ns)<location>London\(ns)</location>\(ns)</invoke>\(ns)</tool_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_current_temperature")
+        #expect(toolCall.function.arguments["location"] == .string("London"))
+    }
+
+    @Test("Test MiniMax M3 Tool Call Parser - multiple parameters")
+    func testMiniMaxM3ParserMultipleParameters() throws {
+        let parser = MiniMaxM3ToolCallParser()
+        let ns = Self.minimaxM3NamespaceToken
+        let content =
+            "\(ns)<tool_call>\(ns)<invoke name=\"multiply\">"
+            + "\(ns)<a>12234585\(ns)</a>\(ns)<b>48838483920\(ns)</b>"
+            + "\(ns)</invoke>\(ns)</tool_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "multiply")
+        #expect(toolCall.function.arguments["a"] == .int(12_234_585))
+        #expect(toolCall.function.arguments["b"] == .int(48_838_483_920))
+    }
+
+    @Test("Test MiniMax M3 Tool Call Parser - nested array of objects")
+    func testMiniMaxM3ParserNestedArrayOfObjects() throws {
+        let parser = MiniMaxM3ToolCallParser()
+        let ns = Self.minimaxM3NamespaceToken
+        let content =
+            "\(ns)<tool_call>\(ns)<invoke name=\"filter\">"
+            + "\(ns)<rules>"
+            + "\(ns)<item>\(ns)<field>city\(ns)</field>\(ns)<value>Paris\(ns)</value>\(ns)</item>"
+            + "\(ns)<item>\(ns)<field>year\(ns)</field>\(ns)<value>2026\(ns)</value>\(ns)</item>"
+            + "\(ns)</rules>"
+            + "\(ns)</invoke>\(ns)</tool_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "filter")
+        guard case .array(let rules) = toolCall.function.arguments["rules"] else {
+            Issue.record("expected rules to be an array")
+            return
+        }
+        #expect(rules.count == 2)
+        #expect(rules[0] == .object(["field": .string("city"), "value": .string("Paris")]))
+        #expect(rules[1] == .object(["field": .string("year"), "value": .int(2026)]))
+    }
+
+    @Test("Test MiniMax M3 Tool Call Parser - conversational prefix before the call")
+    func testMiniMaxM3ParserConversationalPrefix() throws {
+        let parser = MiniMaxM3ToolCallParser()
+        let ns = Self.minimaxM3NamespaceToken
+        let content =
+            "I'll look up the current time for you."
+            + "\(ns)<tool_call>\(ns)<invoke name=\"get_time\">\(ns)</invoke>\(ns)</tool_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "get_time")
+        #expect(toolCall.function.arguments.isEmpty)
+    }
+
+    @Test("Test MiniMax M3 Tool Call Parser - no tool call returns nil")
+    func testMiniMaxM3ParserNoToolCallReturnsNil() throws {
+        let parser = MiniMaxM3ToolCallParser()
+        #expect(parser.parse(content: "just plain text, no tool call", tools: nil) == nil)
+    }
+
+    @Test("Test MiniMax M3 Tool Call Parser - malformed argument XML surfaces __parse_error__")
+    func testMiniMaxM3ParserMalformedArgumentsSurfacesParseError() throws {
+        let parser = MiniMaxM3ToolCallParser()
+        let ns = Self.minimaxM3NamespaceToken
+        let content =
+            "\(ns)<tool_call>\(ns)<invoke name=\"exec\">"
+            + "\(ns)<command>ls & rm <oops"
+            + "\(ns)</invoke>\(ns)</tool_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "exec")
+        guard case .string(let message)? = toolCall.function.arguments["__parse_error__"] else {
+            Issue.record("expected a __parse_error__ string argument")
+            return
+        }
+        #expect(!message.isEmpty)
+    }
+
+    @Test("Test MiniMax M3 Tool Call Parser - bare item list surfaces __parse_error__")
+    func testMiniMaxM3ParserNonObjectArgumentsSurfacesParseError() throws {
+        let parser = MiniMaxM3ToolCallParser()
+        let ns = Self.minimaxM3NamespaceToken
+        let content =
+            "\(ns)<tool_call>\(ns)<invoke name=\"exec\">"
+            + "\(ns)<item>a\(ns)</item>"
+            + "\(ns)</invoke>\(ns)</tool_call>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments["__parse_error__"] != nil)
+    }
+
+    @Test("Test MiniMax M3 Format via ToolCallProcessor")
+    func testMiniMaxM3FormatProcessor() throws {
+        let processor = ToolCallProcessor(format: .minimaxM3)
+        let ns = Self.minimaxM3NamespaceToken
+        let content =
+            "\(ns)<tool_call>\(ns)<invoke name=\"search\">"
+            + "\(ns)<query>AI news\(ns)</query>\(ns)</invoke>\(ns)</tool_call>"
+
+        _ = processor.processChunk(content)
+
+        #expect(processor.toolCalls.count == 1)
+        let toolCall = try #require(processor.toolCalls.first)
+        #expect(toolCall.function.name == "search")
+        #expect(toolCall.function.arguments["query"] == .string("AI news"))
+    }
+
+    /// Regression (adversarial review of ^ayw1xee): a scalar value that
+    /// merely contains a stray `<`/`>` -- ordinary text, not an attempt at a
+    /// tag -- must round-trip as a plain string rather than being
+    /// misdiagnosed as malformed XML.
+    @Test("Test MiniMax M3 Tool Call Parser - stray angle brackets in a scalar value are not malformed")
+    func testMiniMaxM3ParserStrayAngleBracketsInScalarValue() throws {
+        let parser = MiniMaxM3ToolCallParser()
+        let ns = Self.minimaxM3NamespaceToken
+
+        // No closing '>' anywhere in the value.
+        let noClose =
+            "\(ns)<tool_call>\(ns)<invoke name=\"compare\">"
+            + "\(ns)<condition>3 < 5\(ns)</condition>\(ns)</invoke>\(ns)</tool_call>"
+        let noCloseCall = try #require(parser.parse(content: noClose, tools: nil))
+        #expect(noCloseCall.function.arguments["condition"] == .string("3 < 5"))
+
+        // A '<' and a later '>' exist, but the candidate name between them
+        // ("5 > 2" split at the '<' -> " 5 ") is not a plausible identifier.
+        let implausibleName =
+            "\(ns)<tool_call>\(ns)<invoke name=\"compare\">"
+            + "\(ns)<condition>3 < 5 > 2\(ns)</condition>\(ns)</invoke>\(ns)</tool_call>"
+        let implausibleCall = try #require(parser.parse(content: implausibleName, tools: nil))
+        #expect(implausibleCall.function.arguments["condition"] == .string("3 < 5 > 2"))
+    }
+
+    @Test("Test MiniMax M3 Tool Call Parser - EOS recovers multiple invokes from one wrapper")
+    func testMiniMaxM3ParserEOSRecoversMultipleInvokes() throws {
+        let parser = MiniMaxM3ToolCallParser()
+        let ns = Self.minimaxM3NamespaceToken
+        let content =
+            "\(ns)<tool_call>\(ns)<invoke name=\"search\">"
+            + "\(ns)<query>weather\(ns)</query>\(ns)</invoke>"
+            + "\(ns)<invoke name=\"read_file\">"
+            + "\(ns)<path>/tmp/test.txt\(ns)</path>\(ns)</invoke>\(ns)</tool_call>"
+
+        let toolCalls = parser.parseEOS(content, tools: nil)
+
+        #expect(toolCalls.count == 2)
+        #expect(toolCalls[0].function.name == "search")
+        #expect(toolCalls[0].function.arguments["query"] == .string("weather"))
+        #expect(toolCalls[1].function.name == "read_file")
+        #expect(toolCalls[1].function.arguments["path"] == .string("/tmp/test.txt"))
+    }
+
     // MARK: - Llama 3 Format Tests
 
     @Test("Test Llama 3 Tool Call Parser")
@@ -1072,6 +1246,7 @@ struct ToolTests {
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
+        #expect(ToolCallFormat.minimaxM3.rawValue == "minimax_m3")
         #expect(ToolCallFormat.mistral.rawValue == "mistral")
 
         // Test round-trip via raw value
@@ -1167,6 +1342,13 @@ struct ToolTests {
         // consumes the `<minimax:tool_call>` invoke/parameter format.
         #expect(ToolCallFormat.infer(from: "minimax") == .minimaxM2)
         #expect(ToolCallFormat.infer(from: "MiniMax") == .minimaxM2)
+
+        // MiniMax-M3 (model_type "minimax_m3" / "minimax_m3_vl", e.g.
+        // mlx-community/MiniMax-M3-4bit): prefix match so both the flat text
+        // and VL model types resolve to the same namespaced-XML format.
+        #expect(ToolCallFormat.infer(from: "minimax_m3") == .minimaxM3)
+        #expect(ToolCallFormat.infer(from: "minimax_m3_vl") == .minimaxM3)
+        #expect(ToolCallFormat.infer(from: "MINIMAX_M3_VL") == .minimaxM3)
 
         // Llama models - require secondary signals from configData
         #expect(ToolCallFormat.infer(from: "llama") == nil)  // Should be nil without configData

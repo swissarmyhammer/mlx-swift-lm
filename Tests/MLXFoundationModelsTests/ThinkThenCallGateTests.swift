@@ -36,6 +36,17 @@ struct ThinkThenCallGateTests {
         startDelimiter: "<think>", endDelimiter: "</think>",
         promptStrategy: .alwaysOn)
 
+    /// MiniMax-M3's toggleable-but-string-valued strategy. Behaves like
+    /// `.templateFlag` for both gates below (see `ReasoningConfig.swift`'s
+    /// `minimaxM3ThinkConfig` doc): the template both renders the tool block
+    /// and honors `thinking_mode`, and -- unlike `.alwaysOn` -- reasoning is
+    /// never forced, so priming is irrelevant to whether Phase 1 engages.
+    private let templateStringFlagConfig = ReasoningConfig(
+        startDelimiter: "<mm:think>", endDelimiter: "</mm:think>",
+        promptStrategy: .templateStringFlag(
+            key: "thinking_mode", onValue: "enabled", offValue: "disabled",
+            defaultValue: "adaptive"))
+
     private func configuration(reasoning: ReasoningConfig?) -> ModelConfiguration {
         ModelConfiguration(id: "test/model", reasoningConfig: reasoning)
     }
@@ -101,6 +112,16 @@ struct ThinkThenCallGateTests {
         }
     }
 
+    @Test("templateStringFlag families still qualify (MiniMax-M3)")
+    func templateStringFlagQualifies() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let config = MLXLanguageModel.Executor.makeThinkThenCallConfig(
+            declaresReasoning: true,
+            resolved: configuration(reasoning: templateStringFlagConfig),
+            reasoningLevel: nil)
+        #expect(config == templateStringFlagConfig)
+    }
+
     @Test(".none prompt strategy never qualifies")
     func noneStrategyDisqualifies() {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
@@ -127,6 +148,21 @@ struct ThinkThenCallGateTests {
         #expect(
             MLXLanguageModel.Executor.thinkThenCallPhase1Engages(
                 reasoningConfig: templateFlagConfig, primedInside: true))
+    }
+
+    @Test("templateStringFlag engages Phase 1 regardless of prompt priming (MiniMax-M3)")
+    func templateStringFlagAlwaysEngages() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        // M3 only pre-opens `<mm:think>` when the caller forces
+        // `thinking_mode: "enabled"`; the unspecified/adaptive default does
+        // not prime the prompt, yet the model may still choose to think, so
+        // Phase 1 must engage regardless of priming, exactly like Qwen3.
+        #expect(
+            MLXLanguageModel.Executor.thinkThenCallPhase1Engages(
+                reasoningConfig: templateStringFlagConfig, primedInside: false))
+        #expect(
+            MLXLanguageModel.Executor.thinkThenCallPhase1Engages(
+                reasoningConfig: templateStringFlagConfig, primedInside: true))
     }
 
     @Test("alwaysOn engages Phase 1 only when the prompt ends inside an open think block")

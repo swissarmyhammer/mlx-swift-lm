@@ -124,6 +124,14 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
     case minimaxM2 = "minimax_m2"
 
+    /// MiniMax M3 namespaced XML format: parameters are arbitrary
+    /// `<key>value</key>` children rather than M2's `<parameter name="k">v</parameter>`
+    /// attribute style. Every tag is prefixed with M3's literal namespace token.
+    ///
+    /// See ``MiniMaxM3ToolCallParser`` for the full format and parsing details.
+    /// Example: `]<]minimax[>[<invoke name="f">]<]minimax[>[<k>v]<]minimax[>[</k>]<]minimax[>[</invoke>`
+    case minimaxM3 = "minimax_m3"
+
     /// Mistral V11+ format with [TOOL_CALLS] and [ARGS] delimiters.
     /// Example: `[TOOL_CALLS]get_weather [ARGS]{"location": "Tokyo"}`
     case mistral
@@ -170,6 +178,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return KimiK2ToolCallParser()
         case .minimaxM2:
             return MiniMaxM2ToolCallParser()
+        case .minimaxM3:
+            return MiniMaxM3ToolCallParser()
         case .mistral:
             return MistralToolCallParser()
         case .llama3:
@@ -256,6 +266,14 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             // and earlier MiniMax families (minimax_text_01, minimax_m1) neither
             // load here nor share M2's `<minimax:tool_call>` invoke format.
             (.exact, "minimax", .minimaxM2),
+
+            // MiniMax-M3 family (minimax_m3, minimax_m3_vl, e.g.
+            // mlx-community/MiniMax-M3-4bit). Prefix match so both the flat
+            // text and VL model types resolve to the same row. Distinct from
+            // M2: namespaced XML with arbitrary `<key>value</key>` parameter
+            // children rather than `<parameter name="k">v</parameter>` -- see
+            // ``MiniMaxM3ToolCallParser``.
+            (.prefix, "minimax_m3", .minimaxM3),
         ]
 
     /// Infer the tool call format based on model type from config.json.

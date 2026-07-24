@@ -31,6 +31,16 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
     /// model's own template default.
     case templateFlag(key: String, defaultOn: Bool)
 
+    /// Toggleable via a chat-template keyword argument that takes one of
+    /// three string values rather than a boolean (e.g. MiniMax-M3's
+    /// `thinking_mode`: `"enabled"` / `"disabled"` / `"adaptive"`).
+    ///
+    /// The `key` is the kwarg name; `onValue`/`offValue` are the strings sent
+    /// when the caller forces thinking on/off; `defaultValue` is the string
+    /// sent when the caller expresses no preference, matching the model's own
+    /// template default.
+    case templateStringFlag(key: String, onValue: String, offValue: String, defaultValue: String)
+
     /// The model always reasons and cannot be turned off (e.g. DeepSeek-R1).
     case alwaysOn
 
@@ -52,6 +62,14 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
         switch self {
         case .templateFlag(let key, let defaultOn):
             return [key: thinkingEnabled ?? defaultOn]
+        case .templateStringFlag(let key, let onValue, let offValue, let defaultValue):
+            let value: String
+            switch thinkingEnabled {
+            case .some(true): value = onValue
+            case .some(false): value = offValue
+            case .none: value = defaultValue
+            }
+            return [key: value]
         // .none is non-suppressible just like .alwaysOn: there is no
         // prompt-level knob to turn thinking off, so asking to disable it
         // raises the same typed error. The capability gate at
@@ -194,6 +212,19 @@ public struct ReasoningConfig: Sendable, Equatable {
     private static let qwen35ThinkConfig = makeQwen3Config(
         historyPreservationKey: "preserve_thinking")
 
+    /// MiniMax-M3 (model_type "minimax_m3"/"minimax_m3_vl", e.g.
+    /// mlx-community/MiniMax-M3-4bit): `<mm:think>` delimiters. Unlike M2's
+    /// `.alwaysOn`, M3's chat template exposes a toggleable `thinking_mode`
+    /// kwarg ("enabled" / "disabled" / "adaptive") that both drives the
+    /// system-prompt instructions and, when forced, pre-primes the generation
+    /// prompt with the opening/closing delimiter -- mirroring
+    /// `enable_thinking`'s toggle role for Qwen3 above, just string-valued.
+    private static let minimaxM3ThinkConfig = ReasoningConfig(
+        startDelimiter: "<mm:think>", endDelimiter: "</mm:think>",
+        promptStrategy: .templateStringFlag(
+            key: "thinking_mode", onValue: "enabled", offValue: "disabled",
+            defaultValue: "adaptive"))
+
     /// How an ``inferenceTable`` entry's `value` is compared against the
     /// model's lowercased `model_type` or repo id.
     private enum ReasoningMatch {
@@ -263,6 +294,13 @@ public struct ReasoningConfig: Sendable, Equatable {
             // Exact match: earlier MiniMax families (minimax_text_01,
             // minimax_m1) do not share M2's protocol.
             (.exact, "minimax", alwaysOnThinkConfig),
+
+            // MiniMax-M3 (model_type "minimax_m3" / "minimax_m3_vl", e.g.
+            // mlx-community/MiniMax-M3-4bit): unlike M2, thinking is
+            // toggleable via the template's `thinking_mode` kwarg, not
+            // always-on. Prefix match so both the flat text and VL model
+            // types resolve to the same row.
+            (.prefix, "minimax_m3", minimaxM3ThinkConfig),
         ]
 
     /// Infer a reasoning configuration from a model's `model_type` and repo id.

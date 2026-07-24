@@ -1,10 +1,67 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kya9ynwqz7ekm0rpcaf511ck
+  text: |-
+    Milestone: MLXLMCommon + MLXFoundationModels wiring done and green.
+
+    Verified ground truth (curl, not WebFetch summaries, which hallucinated the namespace token slightly differently each time):
+    - Real chat_template.jinja from mlx-community/MiniMax-M3-4bit (fetched via HF resolve URL).
+    - Real minimax_m3.py parser + tests from mlx-lm PR #1416 (fetched via patch-diff.githubusercontent.com raw diff).
+
+    Confirmed: M3 tool-call format is `]<]minimax[>[<tool_call>]<]minimax[>[<invoke name="...">]<]minimax[>[<key>value]<]minimax[>[</key>...]<]minimax[>[</invoke>]<]minimax[>[</tool_call>` — namespace token `]<]minimax[>[` prepended to every tag, arbitrary `<key>value</key>` children (mappings -> nested tags, iterables -> `<item>` children). Confirmed M3 reasoning is `<mm:think>`/`</mm:think>` gated by a template `thinking_mode` kwarg taking "enabled"/"disabled"/"adaptive" (NOT boolean) — pre-opens `<mm:think>` in the generation prompt only when forced "enabled", closes immediately when "disabled", no priming when adaptive/unset.
+
+    Implemented:
+    1. `Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift` (new) — hand-rolled recursive XML-fragment parser (no XMLParser/XMLDocument dependency, matching M2/XMLFunctionParser conventions), ported from mlx-lm PR #1416's `minimax_m3.py` including the `__parse_error__` surfacing for malformed/non-object argument XML (rather than silently degrading to `{}`).
+    2. `ToolCallFormat.swift` — new `.minimaxM3` case (rawValue `minimax_m3`), `createParser()` wiring, inference-table row (`.prefix, "minimax_m3"`) covering both `minimax_m3` and `minimax_m3_vl`.
+    3. `ReasoningConfig.swift` — new `ReasoningPromptStrategy.templateStringFlag(key:onValue:offValue:defaultValue:)` case (M3's `thinking_mode` is a 3-valued string kwarg, not a boolean — `.templateFlag` couldn't represent it faithfully: sending a Bool would never match the template's string comparisons and thinking would silently always render as "adaptive" regardless of caller intent). Added `minimaxM3ThinkConfig` + inference-table row.
+    4. `MLXLanguageModel.swift` — extended the two think-then-call gate switches (`makeThinkThenCallConfig`, `thinkThenCallPhase1Engages`) to treat `.templateStringFlag` identically to `.templateFlag` (Phase 1 always engages regardless of prompt priming — matches Qwen3's "model may choose to think" semantics, verified via `reasoningPrimedInside`'s generic literal-scan detection working correctly for M3's conditional priming without any special-casing).
+    5. `TranscriptConverter.swift` — added `.minimaxM3` to `structuredToolCallFormats`.
+
+    Tests (all green, `swift test` full suite passes — one Gemma4ChunkedPrefillTests flake observed on one run, unrelated to this change, not reproduced on 2 subsequent full runs):
+    - ToolTests.swift: 9 new MiniMaxM3 parser tests (single/multi param, nested array-of-objects, conversational prefix, no-call, malformed XML, non-object args, ToolCallProcessor integration, EOS multi-invoke) + rawValue/inference assertions.
+    - ReasoningConfigTests.swift: templateStringFlag unit tests (on/off/unspecified) + minimax_m3/minimax_m3_vl inference tests + explicit VLMModelFactory-contract-pinning tests (see below).
+    - ThinkThenCallGateTests.swift: templateStringFlag coverage for both gates.
+    - TranscriptConverterTests.swift: M3 mirror tests reusing `firstMiniMaxToolValidatorViolation` (M3's tool-role validator in chat_template.jinja is byte-identical logic to M2's).
+
+    VLMModelFactory verification decision: `_load`'s reasoning-inference block (`if mutableConfiguration.reasoningConfig == nil { mutableConfiguration.reasoningConfig = ReasoningConfig.infer(from: baseConfig.modelType, modelID: configuration.name, configData: configData) }`) is a generic, model-type-agnostic passthrough — verified by reading the code, unchanged by this task. Per `ReasoningConfigResolutionTests.swift`'s own documented precedent ("Sites 4-5 ... are verified end-to-end by the on-device reasoning integration tests"), the `_load` glue itself is not synthetic-weights unit tested anywhere in this codebase (same for the earlier qwen3_5 VLM onboarding). Added `vlmModelFactoryResolvesMiniMaxM3VLReasoningRow` + `vlmModelFactoryNoMatchingRowResolvesNil` to ReasoningConfigTests.swift, explicitly documenting and pinning this contract at the `ReasoningConfig.infer` level (the actual logic `_load` delegates to) rather than attempting a full synthetic-checkpoint `_load()` round trip (would require fabricating on-disk safetensors matching MiniMaxM3Model's shapes — disproportionate for a two-line generic passthrough with no model-specific logic).
+
+    Next: chat-template probe test (real M3 template via swift-jinja `Template` directly — found the `Jinja.Template(_:with:)` + `Value(any:)` API, avoids needing a full PreTrainedTokenizer/vocab) + gated tool-round-trip integration test mirroring MiniMaxM3CoherenceIntegrationTests.swift.
+  timestamp: 2026-07-24T14:54:58.455013+00:00
+- actor: claude-code
+  id: 01kyaawj4898263f2g40cej5j3
+  text: |-
+    Milestone: IntegrationTesting pieces landed.
+
+    1. `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MiniMaxM3ChatTemplateProbeTests.swift` (new) — renders the REAL M3 chat_template.jinja (checked in verbatim as a raw Swift string literal, fetched via curl from the mlx-community/MiniMax-M3-4bit HF repo) directly through swift-jinja's `Template(_:with:)` + `Value(any:)` API — no PreTrainedTokenizer/vocab needed, since applyChatTemplate is just Template.render under the hood. 4 tests, all run and PASS against the real template: system+user+tool-call+tool-result+assistant round renders the namespaced `<tool_call>`/`<invoke>` wrapper correctly; plain no-tools render works; `thinking_mode: "enabled"`/`"disabled"` correctly prime the generation prompt with `<mm:think>`/`</mm:think>`; `"adaptive"` primes nothing. This directly exercises and validates the exact contract `ReasoningConfig.minimaxM3ThinkConfig` and the `.minimaxM3` tool-call format depend on.
+
+    2. `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/MiniMaxM3ToolCallingIntegrationTests.swift` (new) — gated real-weights tool round trip (toolCalls -> toolOutput -> response) mirroring `MiniMaxM3CoherenceIntegrationTests`'s exact gating convention (220GB memory floor, `MLX_MINIMAX_M3_CHECKPOINT` override, graceful skip on load failure). `xcodebuild build-for-testing` succeeds. Attempted an actual run (this sandbox has 512GB RAM, so the memory gate passes and it proceeds to load): after 180s only a lock file existed in the HF cache (`~/.cache/huggingface/hub/.locks/models--mlx-community--MiniMax-M3-4bit`), no snapshot/blob data — confirms the same ~120-214GB-checkpoint bandwidth impracticality documented by the prior task (^wz8y8qq's coherence test). Did NOT complete to a pass/fail verdict in this session, same as that precedent.
+
+    Full `swift test` suite: green (335/335 in the MLXLMTests bundle, 80/80 MLXFoundationModelsTests, 282/282 MLXGuidedGenerationTests, 7/7 others — 2 fresh full runs, no failures). No files touched outside this task's scope (confirmed via git status: Qwen25VL.swift, Gemma4.swift, MiniMax.swift/M2 untouched).
+
+    Adversarial double-check agent launched to review the diff before handoff.
+  timestamp: 2026-07-24T15:11:17.640323+00:00
+- actor: claude-code
+  id: 01kyac15s9r8hmxvbxdytvsar6
+  text: |-
+    Adversarial double-check found a genuine bug in `MiniMaxM3ToolCallParser.parseElements`: a scalar argument value merely containing a stray `<`/`>` (e.g. `"3 < 5"`) was misread as a broken tag and flagged `__parse_error__` instead of round-tripping as plain text.
+
+    Fixed: added `isPlausibleTagName(_:)` (tag-name candidates must look like real identifiers: start with a letter/underscore, then alphanumeric/`_`/`-`) and made two of the parser's failure branches lenient when no sibling element has parsed successfully yet in the current fragment (`results.isEmpty ? [] : nil` instead of always `nil`): (1) no closing `>` found at all for a `<`, and (2) the candidate tag name isn't a plausible identifier. This correctly handles natural-language comparisons like `"3 < 5"` and `"3 < 5 > 2"` as scalars.
+
+    Deliberately did NOT extend the same leniency to "a plausible-looking tag name that never finds its matching close tag" (e.g. `"List<String>"`) — verified that upstream's own reference parser (`ET.fromstring` in Python) would ALSO raise `ParseError` for that case, since unescaped `<`/`>` forming what looks like real nested tag structure is genuinely invalid XML per spec; M3's chat template renders leaf values via unescaped `{{ val }}`, so this is a latent, pre-existing quirk in the upstream template/parser pairing, not something this Swift port should diverge from to appear more lenient than the reference it's verified against. Added a regression test covering both fixed cases (`testMiniMaxM3ParserStrayAngleBracketsInScalarValue` in ToolTests.swift). Verified the original "malformed" (`<command>...` unclosed) and "non-object" (`<item>a</item>`) tests still fail correctly (unchanged).
+
+    Full `swift test` green (336/336 in the affected bundle) and `xcodebuild build-for-testing`/the chat-template probe test re-verified green after the fix.
+
+    Other double-check findings: (2) mixed loose-text + child-tag fragments could silently drop text -- rated low priority/optional by the reviewer, not fixed (extremely low real-world likelihood given `to_xml`'s actual output shape, and explicitly marked optional). (3) VLMModelFactory verification test calls `ReasoningConfig.infer` directly rather than `_load` end-to-end -- already disclosed and justified in the prior comment (matches the qwen3_5 precedent; not a hidden gap). No scope creep: git status confirms Qwen25VL.swift, Gemma4.swift, MiniMax.swift (M2) untouched.
+
+    Task remains in `doing`, ready for `/review`.
+  timestamp: 2026-07-24T15:31:17.417220+00:00
 depends_on:
 - 01KXY0ZVCCPBKZ1ANETWZ8Y8QQ
-position_column: todo
-position_ordinal: 8d80
+position_column: doing
+position_ordinal: '80'
 title: 'MiniMax-M3: tool calling + reasoning wiring through FoundationModels'
 ---
 ## What
