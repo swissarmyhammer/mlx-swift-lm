@@ -150,4 +150,4 @@ title: 'MiniMax-M3: MoE block + swigluoai activation building blocks'
 /// ``QuantizedSwitchLinear/init(_:groupSize:bits:mode:)`` so their defaults
 /// cannot drift out of sync.
 ```
-.
+. #1398 #1401 #minimax #minimax-m3

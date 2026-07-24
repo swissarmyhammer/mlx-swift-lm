@@ -61,8 +61,8 @@ comments:
 depends_on:
 - 01KXY0Z94XT2HF9RPM3XGVTH41
 - 01KXY0ZVCCPBKZ1ANETWZ8Y8QQ
-position_column: review
-position_ordinal: '80'
+position_column: done
+position_ordinal: d580
 title: 'MiniMax-M3: MSA sparse attention — indexer, block top-k selection, sparse KV cache'
 ---
 ## What

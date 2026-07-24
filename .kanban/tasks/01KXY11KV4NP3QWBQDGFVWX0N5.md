@@ -1,11 +1,42 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kyaz90s9z18knmppmy7164p2
+  text: |-
+    BLOCKED — needs user sign-off. Researched the real checkpoint and the actual HF `transformers` reference modeling code before writing any Swift. Conclusion: MiniMax-M3 does not ship, and its reference implementation does not support, any real MTP drafter module. There is nothing to port and nothing to un-drop.
+
+    Evidence gathered this session (all reproducible, commands run against live HF endpoints):
+
+    1. **Real checkpoint has zero MTP weight tensors.** Downloaded `model.safetensors.index.json` for both `MiniMaxAI/MiniMax-M3` (full precision, 60 layers, 23,416 weight keys) and `mlx-community/MiniMax-M3-4bit` (the exact checkpoint this repo's `VLMModelFactory.minimaxM34bit` points to, 2,543 weight keys). Case-insensitive grep for `mtp` and `nextn` across both index files: **0 matches**. The prefixes present are only `language_model.lm_head`, `language_model.model.*`, `multi_modal_projector.*`, `patch_merge_mlp.*`, `vision_tower.vision_model.*` — no `mtp.*` prefix of any kind, in either checkpoint.
+
+    2. **`config.json` carries `num_mtp_modules: 7` and `num_nextn_predict_layers: 1` as inert fields.** Fetched the transformers config class (`configuration_minimax_m3_vl.py` from `huggingface/transformers` main branch, since this repo has no local `modeling_*.py` — `model.safetensors.index.json`/`config.json`/`configuration_minimax_m3_vl.py`/`processing_minimax.py`/`image_processor.py`/`video_processor.py` are the only Python siblings on the HF repo, no custom trust_remote_code modeling file). The config class's `__init__` never reads or types these two fields — they pass through `**kwargs` from the raw JSON and are never consumed. They are metadata leftover from an internal/training-only variant, not a contract the shipped model or its released weights honor.
+
+    3. **The reference modeling code (`modeling_minimax_m3_vl.py`, fetched from `huggingface/transformers` main) has no MTP module class at all.** Full class list: `MiniMaxM3VLSparseCacheLayer`, `...StaticCacheLayer`, `RMSNorm`, `DenseMLP`, `Experts`, `TopKRouter`, `SparseMoeBlock`, `RotaryEmbedding`, `Attention`, `Indexer`, `DecoderLayer`, `PreTrainedModel`, `TextModel`, `ForCausalLM`, vision tower classes, `MultiModalProjector`, `Model`, `SparseForConditionalGeneration`. No norm/projection/decoder-layer/lm_head structure for a drafter anywhere — nothing matching the task's assumed "per-module norm/projection/decoder-layer + shared lm_head" DeepSeek-V3-style MTP block exists to port. The only MTP-related line in the entire file is on `MiniMaxM3VLPreTrainedModel`: `_keys_to_ignore_on_load_unexpected = [r"(^|\.)mtp\..*"]` — i.e. the reference implementation's stance on `mtp.*` keys is to **silently discard them if ever present**, not load or run them. That is exactly what this repo's pre-task `_filterUnusedWeights` already does (drops `mtp.`/`.mtp.` keys) — the current code already matches upstream's documented behavior; there is no "wrong" drop to fix.
+
+    4. **DeepseekV3.swift (cited in the task as "MTP drafter prior art") has no MTP code at all.** Grepped the file for `mtp`/`MTP`: zero matches. The actual MTP-drafter prior art in this repo is `Gemma4Assistant.swift` + `Gemma4AssistantRegistration.swift`, which is architecturally a **wholly separate drafter checkpoint** (its own `config.json`, own weight files, loaded via `MTPDrafterModelFactory`/`MTPDrafterRegistry` as an independent model, e.g. `mlx-community/gemma-4-31B-it-assistant-bf16`) — not weights embedded in the target's own safetensors under an `mtp.*` prefix. `MTPDrafterModel.draftBlock(target:lastToken:lastHidden:sharedKV:queryOffset:blockSize:sampler:)` is built around that shape: a standalone model that borrows the target's tokenizer and receives the target's hidden state / shared KV as method arguments each round.
+
+    5. **The community's actual speculative-decoding solution for MiniMax-M3 is a separate EAGLE3 draft model**, not an embedded MTP head: `Inferact/MiniMax-M3-EAGLE3` on HF — "a 1-layer dense Llama (`LlamaForCausalLMEagle3`, ~3.3B params) operating on MiniMax-M3's hidden_size=6144/vocab_size=200064; at serve time it shares the target's embedding and LM head (EAGLE3)," trained via TorchSpec/vLLM, served with `num_speculative_tokens=3`. This is EAGLE-style speculation (predicts from the target's own hidden states with a separate small drafter), architecturally close to the Gemma4-assistant shape in this repo, but is a **different, separately-trained checkpoint** with a **different config/weight layout** than anything describable as "M3's 7 MTP modules."
+
+    **Why this blocks the task as scoped:** the task's premise — "exploit M3's 7 multi-token-prediction (MTP) modules for speculative self-drafting" via weights embedded in the main checkpoint (DeepSeek-V3-style) — does not correspond to anything that exists in the real checkpoint or the real reference code. There is no MTP structure to read shapes from, no weights to verify against, and the upstream reference explicitly discards any such keys rather than running them. Per the task's own escalation clause, I am not forcing a guessed-at module structure with no ground truth to validate it against, and not silently descoping to "build an EAGLE3 drafter instead" without sign-off, since that's a materially different piece of work (separate checkpoint, separate registry entry, separate training-data-dependent weight shapes I cannot verify without downloading that ~3.3B-param repo).
+
+    **Options for the user to choose from:**
+    - (a) Close/descope this task — MiniMax-M3 has no embedded MTP mechanism to wire up; speculative decoding for M3 would need a wholly new drafter checkpoint effort (EAGLE3-style), not a variant of this task.
+    - (b) Retarget the task to port the EAGLE3 drafter (`Inferact/MiniMax-M3-EAGLE3`) as a new `MTPDrafterModel` conformer, following the Gemma4-assistant pattern (separate checkpoint via `MTPDrafterModelFactory`) rather than an in-checkpoint MTP head — this is a different, larger scope (new architecture family: `LlamaForCausalLMEagle3`) that would need its own task write-up.
+    - (c) If the user has a different/internal MiniMax-M3 checkpoint variant that genuinely ships `mtp.*` weights (not the two public repos checked here), point me at its `model.safetensors.index.json` and I will re-open verification against real key names/shapes.
+
+    No source files were modified this session — only research was performed (HF checkpoint index/config downloads, transformers source fetch). Task left in `doing` per the escalation protocol, not moved to review.
+  timestamp: 2026-07-24T21:07:37.385790+00:00
+- actor: claude-code
+  id: 01kyazj5184hv7ebjjm8qs4zd9
+  text: 'User decision 2026-07-24: close as won''t-do. Confirmed the task''s premise does not hold — MiniMax-M3 has no embedded MTP mechanism to wire up (verified against both MiniMaxAI/MiniMax-M3 full-precision and mlx-community/MiniMax-M3-4bit safetensors indexes: zero mtp/nextn weight keys in either; the reference modeling_minimax_m3_vl.py from huggingface/transformers contains no MTP module class and explicitly discards any mtp.* keys via _keys_to_ignore_on_load_unexpected; config.json''s num_mtp_modules/num_nextn_predict_layers fields are inert and never read by the config class; DeepseekV3.swift, cited as prior art, has zero MTP-related code). The real community speculative-decoding path for M3 is a separate, independently-trained EAGLE3 drafter (Inferact/MiniMax-M3-EAGLE3) — architecturally and organizationally distinct from an in-checkpoint MTP head, and out of scope for this task as written. No source files were modified; this task is closed without code changes. Porting the EAGLE3 drafter, if wanted, would be new/separate scope requiring its own task.'
+  timestamp: 2026-07-24T21:12:36.648220+00:00
 depends_on:
 - 01KXY10EDJVJJRPZDPW8DBC476
 - 01KXY126Z47BS8VE2DW9A2AW98
-position_column: todo
-position_ordinal: '8e80'
+position_column: done
+position_ordinal: d780
 title: 'MiniMax-M3: MTP speculative decoding via the 7 MTP modules'
 ---
 ## What
