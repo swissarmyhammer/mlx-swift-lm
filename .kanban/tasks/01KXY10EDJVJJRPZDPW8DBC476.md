@@ -42,11 +42,78 @@ comments:
 
     Task is green and ready for `/review`. Leaving in `doing` per workflow.
   timestamp: 2026-07-24T18:12:18.782296+00:00
+- actor: claude-code
+  id: 01kyaqbe4yxcp2bn9wr7dpskcd
+  text: |-
+    Fixed all 20 confirmed review findings from the 2026-07-24 13:18 pass, all in Libraries/MLXVLM/Models/MiniMaxM3.swift:
+
+    - Marked 5 classes `final`: MiniMaxM3SparseMoeBlock, MiniMaxM3Attention, MiniMaxM3MLP, MiniMaxM3DecoderLayer, MiniMaxM3ModelInner. Verified none are subclassed anywhere in the repo (grepped for `: MiniMaxM3<Name>` — only property-type declarations matched, no subclass declarations) before adding `final`. (MiniMaxM3KVCache, MiniMaxM3LanguageModel, MiniMaxM3Model were already `final`.)
+    - Added doc comments to all 9 flagged MiniMaxM3KVCache public members: `offset`, `maxSize`, `update(keys:values:)`, `innerState()`, `state`, `metaState`, `trim(_:)`, `makeMask(n:windowSize:returnArray:)`, `copy()`.
+    - Replaced both `indexKeys!` force-unwraps with `guard let indexKeys else { fatalError(...) }` (in `updateIndexAndFetch` and the `state` setter's `case 3` branch). Confirmed via the surrounding control flow that the guard's else-branch is unreachable in both cases (mirrors the review's suggested fix).
+    - Extracted named constants: `MiniMaxM3KVCache.expectedStateComponentsWithoutIndex`/`expectedStateComponentsWithIndex` (2/3) used in both the switch case labels and the `fatalError` message; `MiniMaxM3Model.languageModelPrefix` ("language_model.") used in `_filterUnusedWeights`'s ternary and lm_head-drop key, and in `_remapExpertWeights`'s layer-prefix construction; a local `gateWeightType` ("w1") constant in `_remapExpertWeights` used at all three "w1" call sites (existence guards + `collectExpertWeights` call) so the checkpoint-probe and collection paths can't drift.
+
+    Verification: `swift build` — clean, exit 0, no new warnings. `swift test --filter MLXLMTests` — 341/341 passed, exit 0.
+
+    Note: a fresh `review working` pass (2026-07-24 13:38, after these fixes) surfaced one new, unrelated finding — `MiniMaxM3SwiGLUOAI`'s doc comment (pre-existing, untouched by this task) leads with a `- Parameters:` block instead of a summary sentence. Out of scope for this task's 20 confirmed findings; left as-is pending explicit scoping.
+
+    Also: a kanban tooling side-effect — updating this task's `description` field cleared the `tags` array (["1398","1401","minimax","minimax-m3"] → []), and the `tag task` op did not restore it (it only re-appended literal "#tag" text to the description, which I've since cleaned back up to a single trailing occurrence). Per project convention I'm not retrying further kanban-tag fixes here; flagging for awareness in case tags need manual restoration.
+  timestamp: 2026-07-24T18:49:07.998987+00:00
 depends_on:
 - 01KXY0Z94XT2HF9RPM3XGVTH41
 - 01KXY0ZVCCPBKZ1ANETWZ8Y8QQ
-position_column: doing
+position_column: review
 position_ordinal: '80'
 title: 'MiniMax-M3: MSA sparse attention — indexer, block top-k selection, sparse KV cache'
 ---
-## What\n\nReplace ^xgvth41's dense-only attention with real MiniMax Sparse Attention (MSA) on layers 3–59, mirroring mlx-vlm's `language.py`:\n\n1. **`MiniMaxM3Indexer`** (inside `Libraries/MLXVLM/Models/MiniMaxM3.swift`): learnable `index_q_proj`/`index_k_proj` (index_heads 4, index_dim 128) with their own per-head RMSNorms and RoPE, scoring key blocks (block size 128) per query, top-k 16 block selection (`max` score type per the config; support `lse` if the reference does), causal masking with init/local block handling.\n2. **`MiniMaxM3KVCache`**: a custom cache type (conforming to `MLXLMCommon.KVCache` — see `Libraries/MLXLMCommon/KVCache.swift`) that stores regular K/V plus `index_keys` and an `index_offset`, mirroring the reference's sparse-aware cache. Lives model-local in MiniMaxM3.swift unless a shared home is clearly better. `newCache(parameters:)` returns this type for sparse layers, `KVCacheSimple` for layers 0–2.\n3. **Dense fallback** exactly like the reference: when total blocks ≤ topk (sequence ≤ 2048 tokens) or during short prefill, run dense attention — the results are numerically identical there, which is also the equivalence test.\n\nKnown interaction to document (not fix): `PromptCache.isChunkable`/`isHybridMambaAttention` (MLXFoundationModels) recognize neither this cache type — M3 sessions simply won't participate in prompt-cache reuse; `MLXLanguageModel.supportsPromptCacheReuse` correctly reports `false`. State this in a doc comment on `MiniMaxM3KVCache`.\n\n### Folded from ^0zxgt4w (chain reconciliation 2026-07-22)\n\n- Both upstream mlx-lm reference PRs (#1398 `minimax_m3_vl.py`, #1401 `minimax_m3`) implement full dense causal attention instead of MSA and do not construct the sparse index-head modules at all — dense is numerically exact up to ~(sparse_topk_blocks × sparse_block_size = 2048) tokens plus the init/local windows, and an accepted approximation beyond. This chain implements real MSA instead; the exactness window doubles as the sparse==dense equivalence regression anchor already in the acceptance criteria.\n\n## Acceptance Criteria\n\n- [x] For sequences ≤ 2048 tokens, sparse and dense paths produce identical logits on a tiny config (max-abs-diff ≤ 1e-5) — the exactness window is the regression anchor\n- [x] For sequences > topk×block on a tiny config (shrink block/topk in the test config, e.g. block 4 / topk 2), the indexer selects the expected blocks for a hand-constructed input, and generation runs incrementally through `MiniMaxM3KVCache` without shape errors\n- [ ] Real-weights coherence test from ^wz8y8qq still passes with sparse attention active (blocked: checkpoint not downloadable in this session, see comments — measured ~6.2MB/s sustained against the real ~225GB checkpoint, ~10.9h minimum)\n- [x] `isTrimmable == false` on the sparse cache and a doc comment records the PromptCache non-participation\n\n## Tests\n\n- [x] Extend `Tests/MLXLMTests/MiniMaxM3Tests.swift`: sparse==dense equivalence test, indexer block-selection test with shrunk block/topk, incremental decode test through the custom cache\n- [ ] Run: `swift test --filter MLXLMTests` → green (done, 340/340); re-run the ^wz8y8qq integration coherence case → passes (blocked, see above)\n\n## Workflow\n\n- Use `/tdd` — write failing tests first, then implement to make them pass. #minimax #minimax-m3
+## What
+
+Replace ^xgvth41's dense-only attention with real MiniMax Sparse Attention (MSA) on layers 3–59, mirroring mlx-vlm's `language.py`:
+
+1. **`MiniMaxM3Indexer`** (inside `Libraries/MLXVLM/Models/MiniMaxM3.swift`): learnable `index_q_proj`/`index_k_proj` (index_heads 4, index_dim 128) with their own per-head RMSNorms and RoPE, scoring key blocks (block size 128) per query, top-k 16 block selection (`max` score type per the config; support `lse` if the reference does), causal masking with init/local block handling.
+2. **`MiniMaxM3KVCache`**: a custom cache type (conforming to `MLXLMCommon.KVCache` — see `Libraries/MLXLMCommon/KVCache.swift`) that stores regular K/V plus `index_keys` and an `index_offset`, mirroring the reference's sparse-aware cache. Lives model-local in MiniMaxM3.swift unless a shared home is clearly better. `newCache(parameters:)` returns this type for sparse layers, `KVCacheSimple` for layers 0–2.
+3. **Dense fallback** exactly like the reference: when total blocks ≤ topk (sequence ≤ 2048 tokens) or during short prefill, run dense attention — the results are numerically identical there, which is also the equivalence test.
+
+Known interaction to document (not fix): `PromptCache.isChunkable`/`isHybridMambaAttention` (MLXFoundationModels) recognize neither this cache type — M3 sessions simply won't participate in prompt-cache reuse; `MLXLanguageModel.supportsPromptCacheReuse` correctly reports `false`. State this in a doc comment on `MiniMaxM3KVCache`.
+
+### Folded from ^0zxgt4w (chain reconciliation 2026-07-22)
+
+- Both upstream mlx-lm reference PRs (#1398 `minimax_m3_vl.py`, #1401 `minimax_m3`) implement full dense causal attention instead of MSA and do not construct the sparse index-head modules at all — dense is numerically exact up to ~(sparse_topk_blocks × sparse_block_size = 2048) tokens plus the init/local windows, and an accepted approximation beyond. This chain implements real MSA instead; the exactness window doubles as the sparse==dense equivalence regression anchor already in the acceptance criteria.
+
+## Acceptance Criteria
+
+- [x] For sequences ≤ 2048 tokens, sparse and dense paths produce identical logits on a tiny config (max-abs-diff ≤ 1e-5) — the exactness window is the regression anchor
+- [x] For sequences > topk×block on a tiny config (shrink block/topk in the test config, e.g. block 4 / topk 2), the indexer selects the expected blocks for a hand-constructed input, and generation runs incrementally through `MiniMaxM3KVCache` without shape errors
+- [ ] Real-weights coherence test from ^wz8y8qq still passes with sparse attention active (blocked: checkpoint not downloadable in this session, see comments — measured ~6.2MB/s sustained against the real ~225GB checkpoint, ~10.9h minimum)
+- [x] `isTrimmable == false` on the sparse cache and a doc comment records the PromptCache non-participation
+
+## Tests
+
+- [x] Extend `Tests/MLXLMTests/MiniMaxM3Tests.swift`: sparse==dense equivalence test, indexer block-selection test with shrunk block/topk, incremental decode test through the custom cache
+- [ ] Run: `swift test --filter MLXLMTests` → green (done, 341/341); re-run the ^wz8y8qq integration coherence case → passes (blocked, see above)
+
+## Workflow
+
+- Use `/tdd` — write failing tests first, then implement to make them pass. #minimax #minimax-m3
+
+## Review Findings (2026-07-24 13:18)
+
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:292` — `MiniMaxM3SparseMoeBlock` is a non-final internal class with no indication of being designed for subclassing; it should be marked `final` to clarify intent and prevent accidental subclassing. Change to `final class MiniMaxM3SparseMoeBlock: Module {`.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:537` — Public property `offset` lacks documentation explaining what it represents or how to use it. Add a doc comment explaining that this is the current KV cache offset.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:538` — Public property `maxSize` lacks documentation explaining its purpose. Add a doc comment explaining that this property returns nil since the cache has no maximum size limit.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:544` — Public method `update(keys:values:)` lacks documentation explaining its behavior or parameters. Add a doc comment documenting parameters and return value.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:571` — Public method `innerState()` lacks documentation explaining what it returns. Add a doc comment explaining the purpose and format of the returned state arrays.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:573` — Public property `state` lacks documentation explaining how it manages KV cache state. Add a doc comment explaining what arrays are included and how the state is structured.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:589` — Public property `metaState` lacks documentation explaining its format and usage. Add a doc comment explaining what metadata is stored and how it should be serialized/deserialized.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:600` — Public method `trim(_:)` lacks documentation explaining what it does or why it returns 0. Add a doc comment explaining that trimming is not supported and always returns 0.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:602` — Public method `makeMask(n:windowSize:returnArray:)` lacks documentation explaining parameters or behavior. Add a doc comment documenting all parameters and the attention mask mode it creates.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:606` — Public method `copy()` lacks documentation explaining what it does. Add a doc comment explaining that this creates a deep copy of the cache state.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:718` — Hardcoded literal `2` in switch case and error message should be a named constant. Define a named constant like `let expectedStateComponentsWithoutIndex = 2` at the top of the class or file, then use it in both the case label and the error message.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:722` — Hardcoded literal `3` in switch case and error message should be a named constant. Define a named constant like `let expectedStateComponentsWithIndex = 3` at the top of the class or file, then use it in both the case label and the error message.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:815` — Force unwrap of optional `indexKeys!` without proper error handling or guard. Use a guard let to safely unwrap.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:840` — Hardcoded literal `"language_model."` appears twice on the same line in a ternary expression and should be a named constant. Define a constant like `let languageModelPrefix = "language_model."`.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:862` — Force unwrap of optional `indexKeys!` in the state property setter without proper error handling. Use a guard let to safely unwrap.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:874` — Hardcoded literal `"w1"` appears (second of three occurrences) in the guard inside the for loop in `_remapExpertWeights`. Use the named constant defined for the first occurrence.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:975` — `MiniMaxM3Attention` is a non-final internal class with no indication of being designed for subclassing; it should be marked `final`.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:1192` — `MiniMaxM3MLP` is a non-final internal class with no indication of being designed for subclassing; it should be marked `final`.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:1208` — `MiniMaxM3DecoderLayer` is a non-final internal class with no indication of being designed for subclassing; it should be marked `final`.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:1237` — `MiniMaxM3ModelInner` is a non-final internal class with no indication of being designed for subclassing; it should be marked `final`.

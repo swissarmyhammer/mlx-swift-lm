@@ -275,7 +275,7 @@ struct MiniMaxM3MoEConfiguration: Sendable {
 /// `2 * intermediateSize` column dimension) -- verified against mlx-vlm's
 /// `MiniMaxPackedSwitchGLU.__call__`: `gate, up = mx.split(gate_up, 2,
 /// axis=-1)`, then `self.activation(up, gate)`.
-class MiniMaxM3SparseMoeBlock: Module {
+final class MiniMaxM3SparseMoeBlock: Module {
     let numExpertsPerTok: Int
     let numLocalExperts: Int
     let routedScalingFactor: Float
@@ -806,6 +806,13 @@ public struct MiniMaxM3Configuration: Codable, Sendable {
 /// `PromptCache` to recognize a cache type with two independent offsets
 /// (`offset` and `indexOffset`) is separate follow-up work, not fixed here.
 public final class MiniMaxM3KVCache: KVCache {
+    /// Number of `state` array elements when no index-key history has been
+    /// recorded yet (`keys`, `values`). See the `state` setter.
+    private static let expectedStateComponentsWithoutIndex = 2
+    /// Number of `state` array elements once index-key history is present
+    /// (`keys`, `values`, `indexKeys`). See the `state` setter.
+    private static let expectedStateComponentsWithIndex = 3
+
     private let kvCache = KVCacheSimple()
     private var indexKeys: MLXArray?
     /// Growth step size for `indexKeys`. Reads `kvCache.step` directly
@@ -820,12 +827,26 @@ public final class MiniMaxM3KVCache: KVCache {
     /// desync them; see `isTrimmable`).
     public private(set) var indexOffset = 0
 
+    /// Number of tokens currently held in the regular (non-index) key/value
+    /// cache -- the current KV cache offset, forwarded from the wrapped
+    /// `KVCacheSimple`.
     public var offset: Int { kvCache.offset }
+
+    /// Always `nil`: this cache, like the `KVCacheSimple` it wraps for the
+    /// regular K/V buffers, has no maximum size limit.
     public var maxSize: Int? { nil }
 
     /// Creates an empty sparse-attention KV cache.
     public init() {}
 
+    /// Appends `keys`/`values` to the regular (non-index) key/value cache
+    /// and returns the full accumulated history, forwarding directly to the
+    /// wrapped `KVCacheSimple`.
+    ///
+    /// - Parameters:
+    ///   - keys: New-token keys, shaped `[batch, kvHeads, newTokens, headDim]`.
+    ///   - values: New-token values, shaped like `keys`.
+    /// - Returns: The full accumulated `(keys, values)` history.
     public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         kvCache.update(keys: keys, values: values)
     }
@@ -855,13 +876,25 @@ public final class MiniMaxM3KVCache: KVCache {
 
         indexOffset += incoming
         indexKeys?[.ellipsis, previous ..< indexOffset, 0...] = keys
-        return indexKeys![.ellipsis, ..<indexOffset, 0...]
+        guard let indexKeys else {
+            fatalError("indexKeys must be initialized by the growth step above")
+        }
+        return indexKeys[.ellipsis, ..<indexOffset, 0...]
     }
 
+    /// Returns the raw arrays backing this cache's persisted state: the
+    /// wrapped `KVCacheSimple`'s inner state (keys, values), plus the raw,
+    /// untrimmed `indexKeys` buffer if one has been allocated yet.
     public func innerState() -> [MLXArray] {
         kvCache.innerState() + (indexKeys.map { [$0] } ?? [])
     }
 
+    /// The cache's serializable state: `[keys, values]` when no index-key
+    /// history has been recorded yet, or `[keys, values, indexKeys]` once it
+    /// has (with `indexKeys` trimmed to `indexOffset` on read). Setting
+    /// reconstructs the wrapped `KVCacheSimple` and `indexKeys`/`indexOffset`
+    /// from the supplied arrays; see `expectedStateComponentsWithoutIndex`/
+    /// `expectedStateComponentsWithIndex` for the accepted array counts.
     public var state: [MLXArray] {
         get {
             var result = kvCache.state
@@ -872,22 +905,29 @@ public final class MiniMaxM3KVCache: KVCache {
         }
         set {
             switch newValue.count {
-            case 2:
+            case Self.expectedStateComponentsWithoutIndex:
                 kvCache.state = newValue
                 indexKeys = nil
                 indexOffset = 0
-            case 3:
+            case Self.expectedStateComponentsWithIndex:
                 kvCache.state = [newValue[0], newValue[1]]
                 indexKeys = newValue[2]
-                indexOffset = indexKeys!.dim(2)
+                guard let indexKeys else {
+                    fatalError("indexKeys must be non-nil immediately after assignment above")
+                }
+                indexOffset = indexKeys.dim(2)
             default:
                 fatalError(
-                    "MiniMaxM3KVCache state must have 2 (keys, values) or 3 (+ indexKeys) arrays, got \(newValue.count)"
+                    "MiniMaxM3KVCache state must have \(Self.expectedStateComponentsWithoutIndex) (keys, values) or \(Self.expectedStateComponentsWithIndex) (+ indexKeys) arrays, got \(newValue.count)"
                 )
             }
         }
     }
 
+    /// Serialized `indexOffset`, carried alongside `state` for cache
+    /// checkpointing/restoration: a single-element array holding the
+    /// string-encoded token count of `indexKeys`. Defaults to `0` when
+    /// absent or unparsable.
     public var metaState: [String] {
         get { [String(indexOffset)] }
         set { indexOffset = newValue.first.flatMap { Int($0) } ?? 0 }
@@ -899,15 +939,30 @@ public final class MiniMaxM3KVCache: KVCache {
     /// generation loop currently needs to trim a MiniMax-M3 session.
     public var isTrimmable: Bool { false }
 
+    /// Trimming is not supported by this cache; always returns `0` (no
+    /// tokens trimmed). See `isTrimmable`.
     @discardableResult
     public func trim(_ n: Int) -> Int { 0 }
 
+    /// Builds the attention mask mode for the next `n` query positions,
+    /// forwarding directly to the wrapped `KVCacheSimple`'s causal-mask
+    /// construction (this cache has no sliding-window-aware masking of its
+    /// own -- see `MiniMaxM3Attention.resolveMask`'s doc comment for why a
+    /// sliding-window cache instead falls back to dense masking).
+    ///
+    /// - Parameters:
+    ///   - n: Number of new query positions to build a mask for.
+    ///   - windowSize: Sliding-window size, or `nil` for unrestricted causal attention.
+    ///   - returnArray: When `true`, forces a materialized mask array rather than a deferred mask mode.
+    /// - Returns: The mask mode to pass to scaled-dot-product attention.
     public func makeMask(
         n: Int, windowSize: Int?, returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
         kvCache.makeMask(n: n, windowSize: windowSize, returnArray: returnArray)
     }
 
+    /// Creates a deep copy of this cache's current state (regular K/V plus
+    /// `indexKeys`/`indexOffset`), independent of the original.
     public func copy() -> any KVCache {
         let new = MiniMaxM3KVCache()
         let s = state
@@ -1098,7 +1153,7 @@ struct MiniMaxM3Indexer {
 /// dense-fallback threshold. Layers 0..<3 have no indexer and always run
 /// plain dense causal attention, mirroring the verified real checkpoint's
 /// dense/MoE schedule.
-class MiniMaxM3Attention: Module {
+final class MiniMaxM3Attention: Module {
     let numAttentionHeads: Int
     let numKeyValueHeads: Int
     let headDim: Int
@@ -1258,7 +1313,7 @@ class MiniMaxM3Attention: Module {
 /// by `denseIntermediateSize` (12,288) rather than the per-expert
 /// `intermediateSize` (3,072) the MoE blocks use. Shares
 /// `MiniMaxM3SwiGLUOAI`'s clipped activation with the MoE path.
-class MiniMaxM3MLP: Module {
+final class MiniMaxM3MLP: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
@@ -1294,7 +1349,7 @@ class MiniMaxM3MLP: Module {
 /// up_proj/down_proj`, while MoE layers ship `block_sparse_moe.gate` +
 /// `block_sparse_moe.switch_mlp.*`, genuinely different key prefixes rather
 /// than one shared name.
-class MiniMaxM3DecoderLayer: Module {
+final class MiniMaxM3DecoderLayer: Module {
     @ModuleInfo(key: "self_attn") var selfAttn: MiniMaxM3Attention
     @ModuleInfo(key: "block_sparse_moe") var blockSparseMoe: MiniMaxM3SparseMoeBlock?
     @ModuleInfo(key: "mlp") var denseMLP: MiniMaxM3MLP?
@@ -1351,7 +1406,7 @@ class MiniMaxM3DecoderLayer: Module {
 
 // MARK: - MiniMaxM3ModelInner
 
-class MiniMaxM3ModelInner: Module {
+final class MiniMaxM3ModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     let layers: [MiniMaxM3DecoderLayer]
     @ModuleInfo(key: "norm") var norm: Gemma.RMSNorm
@@ -1443,6 +1498,11 @@ final class MiniMaxM3LanguageModel: Module, KVCacheDimensionProvider {
 /// quantization and fail the shape check at load. Follows the `Qwen35.swift`
 /// `@ModuleInfo(key: "language_model")` wrapper precedent.
 public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionProvider {
+    /// Module-path prefix applied to flat (`minimax_m3`) checkpoint keys and
+    /// checked against already-prefixed (`minimax_m3_vl`) ones -- see
+    /// `_filterUnusedWeights` and `_remapExpertWeights`.
+    private static let languageModelPrefix = "language_model."
+
     @ModuleInfo(key: "language_model") var languageModel: MiniMaxM3LanguageModel
 
     /// The text-model configuration this instance was constructed from.
@@ -1552,12 +1612,13 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
                 continue
             }
 
-            let newKey = key.hasPrefix("language_model.") ? key : "language_model.\(key)"
+            let newKey =
+                key.hasPrefix(Self.languageModelPrefix) ? key : Self.languageModelPrefix + key
             prefixed[newKey] = value
         }
 
         if configuration.tieWordEmbeddings {
-            prefixed["language_model.lm_head.weight"] = nil
+            prefixed["\(Self.languageModelPrefix)lm_head.weight"] = nil
         }
 
         return prefixed
@@ -1575,6 +1636,11 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
     /// shared-expert row, since no unconverted-per-expert M3 checkpoint
     /// exists yet to verify that layout against.
     private func _remapExpertWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
+        /// Per-expert gate-projection weight type (`w1`), used both to probe
+        /// for an unconverted per-expert checkpoint and to collect its
+        /// tensors below -- kept as a single constant so the probe and the
+        /// collection can never drift to different key paths.
+        let gateWeightType = "w1"
         var prefixed = weights
 
         /// Removes and collects the per-expert `weightType` tensors for
@@ -1590,13 +1656,15 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
 
         for layerIndex in 0 ..< configuration.hiddenLayers
         where configuration.isMoELayer(layerIndex) {
-            let prefix = "language_model.model.layers.\(layerIndex).block_sparse_moe"
-            guard prefixed["\(prefix).experts.0.w1.weight"] != nil else { continue }
+            let prefix = "\(Self.languageModelPrefix)model.layers.\(layerIndex).block_sparse_moe"
+            guard prefixed["\(prefix).experts.0.\(gateWeightType).weight"] != nil else { continue }
 
             for key in ["weight", "scales", "biases"] {
-                guard prefixed["\(prefix).experts.0.w1.\(key)"] != nil else { continue }
+                guard prefixed["\(prefix).experts.0.\(gateWeightType).\(key)"] != nil else {
+                    continue
+                }
 
-                let gate = collectExpertWeights(key, weightType: "w1", prefix: prefix)
+                let gate = collectExpertWeights(key, weightType: gateWeightType, prefix: prefix)
                 let up = collectExpertWeights(key, weightType: "w3", prefix: prefix)
                 let down = collectExpertWeights(key, weightType: "w2", prefix: prefix)
 
