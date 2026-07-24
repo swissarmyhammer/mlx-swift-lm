@@ -72,6 +72,20 @@ public let defaultTopkBlocks = 16
 /// Default DSA indexer block size, in tokens (`sparse_block_size`). See `defaultIndexDim`.
 public let defaultBlockSize = 128
 
+/// Default DSA indexer count of always-selected leading ("init") key blocks
+/// (`sparse_init_block`). Shared by `MiniMaxM3SparseAttentionConfiguration`'s
+/// memberwise `init` and its `init(from:)` decoder fallback.
+public let defaultSparseInitBlocks = 0
+
+/// Default DSA indexer count of always-selected trailing ("local") key
+/// blocks ending at the query's own block (`sparse_local_block`). See
+/// `defaultSparseInitBlocks`.
+public let defaultSparseLocalBlocks = 1
+
+/// Default DSA indexer intra-block score aggregation, `"max"` or `"lse"`
+/// (`sparse_score_type`). See `defaultSparseInitBlocks`.
+public let defaultSparseScoreType = "max"
+
 /// Default checkpoint model type (`model_type`), verified against the
 /// `mlx-community/MiniMax-M3-4bit` checkpoint's `config.json`. Shared by
 /// `MiniMaxM3TextConfiguration`'s memberwise `init` and its `init(from:)`
@@ -333,15 +347,18 @@ class MiniMaxM3SparseMoeBlock: Module {
 /// MiniMax-M3's DSA (sparse attention indexer) hyperparameters, decoded from
 /// `text_config.sparse_attention_config`.
 ///
-/// Only the four fields the future indexer (kanban ^8dbc476) will need are
-/// modeled here; the real `mlx-community/MiniMax-M3-4bit` checkpoint's
-/// `config.json` nests several additional fields alongside these
-/// (`use_sparse_attention`, `sparse_disable_index_value`,
-/// `sparse_score_type`, `sparse_init_block`, `sparse_local_block`,
-/// `sparse_attention_freq`) -- verified directly from the downloaded config,
-/// which contradicts an earlier (incorrect) assumption that these were flat
-/// top-level keys. They decode as ordinary unknown keys (ignored) since this
-/// dense-only task does not build the indexer.
+/// Seven of the real `mlx-community/MiniMax-M3-4bit` checkpoint's
+/// `sparse_attention_config` fields are modeled: the four decoded since
+/// kanban ^xgvth41 (`sparse_index_dim`/`sparse_num_index_heads`/
+/// `sparse_topk_blocks`/`sparse_block_size`) plus three more this task
+/// (^8dbc476) needs to actually run the indexer (`sparse_init_block`,
+/// `sparse_local_block`, `sparse_score_type`). `use_sparse_attention`,
+/// `sparse_disable_index_value`, and `sparse_attention_freq` remain
+/// undecoded and unverified against real values -- this port instead reuses
+/// the already-verified `moeLayerFreq` schedule
+/// (`MiniMaxM3TextConfiguration.isMoELayer`) to decide which layers build the
+/// indexer, rather than introduce a fourth unverified schedule field. They
+/// decode as ordinary unknown keys (ignored).
 public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
     /// Per-index-head dimension used by the DSA indexer (`sparse_index_dim`).
     public var indexDim: Int
@@ -351,12 +368,25 @@ public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
     public var topkBlocks: Int
     /// Block size, in tokens, used by the DSA indexer (`sparse_block_size`).
     public var blockSize: Int
+    /// Number of leading key blocks always force-selected regardless of
+    /// score (`sparse_init_block`).
+    public var initBlocks: Int
+    /// Number of trailing key blocks, ending at the query's own block,
+    /// always force-selected regardless of score (`sparse_local_block`).
+    public var localBlocks: Int
+    /// Intra-block score aggregation: `"max"` (per-token max) or `"lse"`
+    /// (log-sum-exp) (`sparse_score_type`). Aggregation across index heads is
+    /// always max, regardless of this setting.
+    public var scoreType: String
 
     enum CodingKeys: String, CodingKey {
         case indexDim = "sparse_index_dim"
         case numIndexHeads = "sparse_num_index_heads"
         case topkBlocks = "sparse_topk_blocks"
         case blockSize = "sparse_block_size"
+        case initBlocks = "sparse_init_block"
+        case localBlocks = "sparse_local_block"
+        case scoreType = "sparse_score_type"
     }
 
     /// Creates a sparse-attention (DSA indexer) configuration, defaulting to
@@ -366,12 +396,18 @@ public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
         indexDim: Int = defaultIndexDim,
         numIndexHeads: Int = defaultNumIndexHeads,
         topkBlocks: Int = defaultTopkBlocks,
-        blockSize: Int = defaultBlockSize
+        blockSize: Int = defaultBlockSize,
+        initBlocks: Int = defaultSparseInitBlocks,
+        localBlocks: Int = defaultSparseLocalBlocks,
+        scoreType: String = defaultSparseScoreType
     ) {
         self.indexDim = indexDim
         self.numIndexHeads = numIndexHeads
         self.topkBlocks = topkBlocks
         self.blockSize = blockSize
+        self.initBlocks = initBlocks
+        self.localBlocks = localBlocks
+        self.scoreType = scoreType
     }
 
     /// Decodes a sparse-attention (DSA indexer) configuration from
@@ -385,6 +421,12 @@ public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
             try container.decodeIfPresent(Int.self, forKey: .numIndexHeads) ?? defaultNumIndexHeads
         topkBlocks = try container.decodeIfPresent(Int.self, forKey: .topkBlocks) ?? defaultTopkBlocks
         blockSize = try container.decodeIfPresent(Int.self, forKey: .blockSize) ?? defaultBlockSize
+        initBlocks =
+            try container.decodeIfPresent(Int.self, forKey: .initBlocks) ?? defaultSparseInitBlocks
+        localBlocks =
+            try container.decodeIfPresent(Int.self, forKey: .localBlocks) ?? defaultSparseLocalBlocks
+        scoreType =
+            try container.decodeIfPresent(String.self, forKey: .scoreType) ?? defaultSparseScoreType
     }
 }
 
@@ -745,17 +787,317 @@ public struct MiniMaxM3Configuration: Codable, Sendable {
     }
 }
 
+// MARK: - MiniMaxM3KVCache
+
+/// Sparse-attention-aware KV cache for MiniMax-M3's DSA layers (3-59):
+/// wraps a plain `KVCacheSimple` for the regular grouped-query K/V, plus an
+/// independently-tracked `indexKeys` buffer (the DSA indexer's own
+/// single-head `index_k_proj` output) and `indexOffset`, mirroring
+/// mlx-vlm's `MiniMaxM3KVCache` (`language.py`).
+///
+/// **Does not participate in `MLXFoundationModels` prompt-cache reuse.**
+/// `PromptCache.isChunkable`/`isHybridMambaAttention` (in the
+/// `MLXFoundationModels` package) recognize `KVCacheSimple` and hybrid
+/// Mamba/attention cache mixes, but neither check matches this type -- so
+/// `MLXLanguageModel.supportsPromptCacheReuse` correctly reports `false` for
+/// any MiniMax-M3 session, and prompt prefill always runs from scratch
+/// rather than reusing a cached prefix. This is a deliberate, documented
+/// limitation of this task (^8dbc476) rather than a bug: teaching
+/// `PromptCache` to recognize a cache type with two independent offsets
+/// (`offset` and `indexOffset`) is separate follow-up work, not fixed here.
+public final class MiniMaxM3KVCache: KVCache {
+    private let kvCache = KVCacheSimple()
+    private var indexKeys: MLXArray?
+    /// Growth step size for `indexKeys`. Reads `kvCache.step` directly
+    /// (rather than a separately-hardcoded literal) so the two buffers'
+    /// growth chunking can never drift out of sync.
+    private var indexStep: Int { kvCache.step }
+
+    /// Number of tokens present in `indexKeys`. Tracked independently from
+    /// `offset` -- mirroring the reference cache -- even though the two
+    /// normally advance in lockstep during ordinary single-sequence
+    /// generation (this cache has no independent trim path that could ever
+    /// desync them; see `isTrimmable`).
+    public private(set) var indexOffset = 0
+
+    public var offset: Int { kvCache.offset }
+    public var maxSize: Int? { nil }
+
+    /// Creates an empty sparse-attention KV cache.
+    public init() {}
+
+    public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        kvCache.update(keys: keys, values: values)
+    }
+
+    /// Appends the indexer's new-token key projections to `indexKeys` and
+    /// returns the full accumulated index-key history, mirroring mlx-vlm's
+    /// `MiniMaxM3KVCache.update_index_and_fetch`.
+    func updateIndexAndFetch(_ keys: MLXArray) -> MLXArray {
+        let previous = indexOffset
+        let incoming = keys.dim(2)
+
+        let needsGrowth = indexKeys.map { previous + incoming > $0.dim(2) } ?? true
+        if needsGrowth {
+            let (B, heads, headDim) = (keys.dim(0), keys.dim(1), keys.dim(3))
+            let steps = (indexStep + incoming - 1) / indexStep
+            let newKeys = MLXArray.zeros(
+                [B, heads, steps * indexStep, headDim], dtype: keys.dtype)
+            if var current = indexKeys {
+                if previous % indexStep != 0 {
+                    current = current[.ellipsis, ..<previous, 0...]
+                }
+                indexKeys = concatenated([current, newKeys], axis: 2)
+            } else {
+                indexKeys = newKeys
+            }
+        }
+
+        indexOffset += incoming
+        indexKeys?[.ellipsis, previous ..< indexOffset, 0...] = keys
+        return indexKeys![.ellipsis, ..<indexOffset, 0...]
+    }
+
+    public func innerState() -> [MLXArray] {
+        kvCache.innerState() + (indexKeys.map { [$0] } ?? [])
+    }
+
+    public var state: [MLXArray] {
+        get {
+            var result = kvCache.state
+            if let indexKeys {
+                result.append(indexKeys[.ellipsis, ..<indexOffset, 0...])
+            }
+            return result
+        }
+        set {
+            switch newValue.count {
+            case 2:
+                kvCache.state = newValue
+                indexKeys = nil
+                indexOffset = 0
+            case 3:
+                kvCache.state = [newValue[0], newValue[1]]
+                indexKeys = newValue[2]
+                indexOffset = indexKeys!.dim(2)
+            default:
+                fatalError(
+                    "MiniMaxM3KVCache state must have 2 (keys, values) or 3 (+ indexKeys) arrays, got \(newValue.count)"
+                )
+            }
+        }
+    }
+
+    public var metaState: [String] {
+        get { [String(indexOffset)] }
+        set { indexOffset = newValue.first.flatMap { Int($0) } ?? 0 }
+    }
+
+    /// Always `false`. mlx-vlm's reference cache supports trimming both
+    /// buffers in lockstep, but this Swift port's first sparse-cache landing
+    /// (^8dbc476) keeps trimming out of scope -- nothing in this repo's
+    /// generation loop currently needs to trim a MiniMax-M3 session.
+    public var isTrimmable: Bool { false }
+
+    @discardableResult
+    public func trim(_ n: Int) -> Int { 0 }
+
+    public func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        kvCache.makeMask(n: n, windowSize: windowSize, returnArray: returnArray)
+    }
+
+    public func copy() -> any KVCache {
+        let new = MiniMaxM3KVCache()
+        let s = state
+        if !s.isEmpty {
+            new.state = s.map { $0[.ellipsis] }
+        }
+        return new
+    }
+}
+
+// MARK: - MiniMaxM3Indexer
+
+/// MiniMax-M3's MSA (sparse attention) block selector: scores every causal
+/// key block against the current query, force-selects the leading
+/// `initBlocks` and trailing `localBlocks` blocks, and returns the top-
+/// `topkBlocks` block indices per query -- mirrors mlx-vlm's
+/// `MiniMaxM3Indexer` (`language.py`).
+///
+/// Not itself an `MLXNN.Module`, mirroring the Python reference exactly: the
+/// learnable `index_q_proj`/`index_k_proj`/`index_q_norm`/`index_k_norm`
+/// submodules live directly on the owning `MiniMaxM3Attention` (so the
+/// checkpoint's flat `self_attn.index_*` weight keys are preserved -- a
+/// nested `indexer` submodule would key-path them as
+/// `self_attn.indexer.index_*` instead, which would not match the real
+/// checkpoint), and this struct only borrows references to them plus the
+/// attention's shared `rope` instance.
+struct MiniMaxM3Indexer {
+    let indexHeads: Int
+    let indexDim: Int
+    let blockSize: Int
+    let topkBlocks: Int
+    let initBlocks: Int
+    let localBlocks: Int
+    let scoreType: String
+    let scale: Float
+
+    let indexQProj: Linear
+    let indexKProj: Linear
+    let indexQNorm: Gemma.RMSNorm
+    let indexKNorm: Gemma.RMSNorm
+    let rope: RoPELayer
+
+    /// Projects and RoPE-embeds this call's own index queries/keys, folds the
+    /// new index keys into `cache`'s independent index-key history (if a
+    /// cache is given), and either selects the top-`topkBlocks` key blocks
+    /// per query or signals the dense fallback (`nil`) when the accumulated
+    /// index-key history is short enough that every causal block would be
+    /// selected anyway (`totalLen <= topkBlocks * blockSize` -- mirrors
+    /// mlx-vlm's `MiniMaxM3Indexer.__call__`; for the verified default
+    /// config this is 2048 tokens).
+    ///
+    /// - Returns: `(blockIndices, totalLen)` when block selection ran, or
+    ///   `nil` for the dense fallback. `blockIndices` has shape
+    ///   `(B, L, min(topkBlocks, numBlocks))`, ascending-sorted per query
+    ///   with `-1` marking unused slots.
+    func callAsFunction(
+        _ x: MLXArray, offset: RoPEOffset?, cache: MiniMaxM3KVCache?, qStart: Int
+    ) -> (blockIndices: MLXArray, totalLen: Int)? {
+        let (B, L) = (x.dim(0), x.dim(1))
+
+        var idxQ = indexQProj(x).reshaped(B, L, indexHeads, indexDim)
+        var idxK = indexKProj(x).reshaped(B, L, 1, indexDim)
+        idxQ = indexQNorm(idxQ).transposed(0, 2, 1, 3)
+        idxK = indexKNorm(idxK).transposed(0, 2, 1, 3)
+        idxQ = applyRotaryPosition(rope, to: idxQ, offset: offset)
+        idxK = applyRotaryPosition(rope, to: idxK, offset: offset)
+
+        if let cache {
+            idxK = cache.updateIndexAndFetch(idxK)
+        }
+
+        let totalLen = idxK.dim(2)
+        guard totalLen > blockSize * topkBlocks else { return nil }
+
+        let blockIndices = selectBlocks(idxQueries: idxQ, idxKeys: idxK, qStart: qStart)
+        return (blockIndices, totalLen)
+    }
+
+    /// Scores every causal key block against `idxQueries` (max- or
+    /// lse-aggregated over each block's tokens, then max-aggregated across
+    /// index heads), force-selects the leading `initBlocks` and trailing
+    /// `localBlocks` blocks, and returns the ascending-sorted indices of the
+    /// top `min(topkBlocks, numBlocks)` blocks per query (`-1` for unused
+    /// slots) -- mirrors mlx-vlm's `MiniMaxM3Indexer.select_blocks`
+    /// (mask-free path; this port has no batched left-padding to support).
+    private func selectBlocks(idxQueries: MLXArray, idxKeys: MLXArray, qStart: Int) -> MLXArray {
+        let (B, hIdx, L) = (idxQueries.dim(0), idxQueries.dim(1), idxQueries.dim(2))
+        let totalLen = idxKeys.dim(2)
+        let numBlocks = (totalLen + blockSize - 1) / blockSize
+        let neg = MLXArray(-Float.infinity)
+
+        var scores = matmul(
+            idxQueries.asType(.float32), idxKeys.asType(.float32).swappedAxes(-1, -2))
+        scores = scores * scale
+
+        let qPositions = MLXArray(Int32(qStart) ..< Int32(qStart + L))
+        let kPositions = MLXArray(Int32(0) ..< Int32(totalLen))
+        let tokenCausal = kPositions.reshaped(1, totalLen) .<= qPositions.reshaped(L, 1)
+        scores = which(tokenCausal, scores, neg)
+
+        let pad = numBlocks * blockSize - totalLen
+        if pad > 0 {
+            scores = padded(
+                scores,
+                widths: [.init((0, 0)), .init((0, 0)), .init((0, 0)), .init((0, pad))],
+                value: neg)
+        }
+
+        let blocks = MLXArray(Int32(0) ..< Int32(numBlocks))
+        let curBlock = qPositions.floorDivide(blockSize)
+        let causalBlock = blocks.reshaped(1, numBlocks) .<= curBlock.reshaped(L, 1)
+
+        let blockedScores = scores.reshaped(B, hIdx, L, numBlocks, blockSize)
+        let intraBlock =
+            scoreType == "lse"
+            ? logSumExp(blockedScores, axis: -1)
+            : max(blockedScores, axis: -1)
+        var blockScores = max(intraBlock, axis: 1)
+        blockScores = which(blockScores .== blockScores, blockScores, neg)  // NaN guard
+
+        var selectedScores = which(causalBlock, blockScores, neg)
+
+        if initBlocks > 0 {
+            let initMask = (blocks.reshaped(1, numBlocks) .< initBlocks) & causalBlock
+            selectedScores = which(initMask, Float(1e30), selectedScores)
+        }
+        if localBlocks > 0 {
+            let localStart = maximum(curBlock - (localBlocks - 1), 0)
+            let localMask =
+                (blocks.reshaped(1, numBlocks) .>= localStart.reshaped(L, 1))
+                & (blocks.reshaped(1, numBlocks) .<= curBlock.reshaped(L, 1))
+                & causalBlock
+            selectedScores = which(localMask, Float(1e29), selectedScores)
+        }
+
+        let topk = min(topkBlocks, numBlocks)
+        let topkIdx = argPartition(-selectedScores, kth: topk - 1, axis: -1)[.ellipsis, ..<topk]
+            .asType(.int32)
+        let validBlocks = broadcast(causalBlock, to: [B, L, numBlocks])
+        let topkValid = takeAlong(validBlocks, topkIdx, axis: -1)
+        let invalid = MLXArray.full(topkIdx.shape, values: MLXArray(numBlocks), dtype: .int32)
+        var blockIndices = which(topkValid, topkIdx, invalid)
+        let order = argSort(blockIndices, axis: -1)
+        blockIndices = takeAlong(blockIndices, order, axis: -1)
+        blockIndices = which(blockIndices .== numBlocks, -1, blockIndices)
+        return blockIndices
+    }
+
+    /// Expands `blockIndices` (per-query selected key blocks) into a
+    /// per-token boolean attention mask over `keyLength` keys, ANDed with
+    /// per-token causal masking -- mirrors mlx-vlm's
+    /// `MiniMaxM3Indexer.build_block_mask` (mask-free path).
+    func buildBlockMask(blockIndices: MLXArray, keyLength: Int, qStart: Int) -> MLXArray {
+        let (B, L, _) = (blockIndices.dim(0), blockIndices.dim(1), blockIndices.dim(2))
+        let numBlocks = (keyLength + blockSize - 1) / blockSize
+        let blocks = MLXArray(Int32(0) ..< Int32(numBlocks))
+        let blockKeep = (blockIndices[.ellipsis, .newAxis] .== blocks).any(axis: -2)
+
+        let kPositions = MLXArray(Int32(0) ..< Int32(keyLength))
+        let keyBlocks = broadcast(
+            kPositions.floorDivide(blockSize).reshaped(1, 1, keyLength), to: [B, L, keyLength])
+        let keyKeep = takeAlong(blockKeep, keyBlocks, axis: -1)
+
+        let qPositions = MLXArray(Int32(qStart) ..< Int32(qStart + L))
+        let causal = kPositions.reshaped(1, keyLength) .<= qPositions.reshaped(L, 1)
+
+        return (keyKeep & causal).reshaped(B, 1, L, keyLength)
+    }
+}
+
 // MARK: - MiniMaxM3Attention
 
-/// MiniMax-M3's dense self-attention: GQA (64 query heads / 4 KV heads in the
+/// MiniMax-M3's self-attention: GQA (64 query heads / 4 KV heads in the
 /// verified config), partial RoPE (only the first `rotaryDim` of `headDim`
 /// dims rotate -- `initializeRope` handles this natively since
 /// `MLXFast.RoPE`/`RoPE` leave any dims beyond `dimensions` untouched), and
 /// per-head Gemma-mode QK-norm applied *after* reshaping to
 /// `(B, L, heads, headDim)` (unlike M2's flat, pre-reshape norm over
 /// `heads * headDim`). `attention_output_gate` is `false` for M3 -- no output
-/// gate module. Sparse (DSA) attention is a follow-up task (^8dbc476); this
-/// is the dense fallback path used by every layer for now.
+/// gate module.
+///
+/// **MiniMax Sparse Attention (MSA), layers 3-59 (kanban ^8dbc476).** Layers
+/// where `config.isMoELayer(layerIndex)` build a `MiniMaxM3Indexer` (its own
+/// `index_q_proj`/`index_k_proj` projections, per-head RMSNorms, and the
+/// attention's shared RoPE instance) that scores and selects the top-
+/// `sparseAttention.topkBlocks` key blocks per query -- see
+/// `MiniMaxM3Indexer`'s documentation for the selection algorithm and the
+/// dense-fallback threshold. Layers 0..<3 have no indexer and always run
+/// plain dense causal attention, mirroring the verified real checkpoint's
+/// dense/MoE schedule.
 class MiniMaxM3Attention: Module {
     let numAttentionHeads: Int
     let numKeyValueHeads: Int
@@ -772,7 +1114,17 @@ class MiniMaxM3Attention: Module {
 
     @ModuleInfo var rope: RoPELayer
 
-    init(_ config: MiniMaxM3TextConfiguration) {
+    @ModuleInfo(key: "index_q_proj") var indexQProj: Linear?
+    @ModuleInfo(key: "index_k_proj") var indexKProj: Linear?
+    @ModuleInfo(key: "index_q_norm") var indexQNorm: Gemma.RMSNorm?
+    @ModuleInfo(key: "index_k_norm") var indexKNorm: Gemma.RMSNorm?
+
+    /// The MSA block selector for this layer, or `nil` for dense-only layers
+    /// (0..<3). See `MiniMaxM3Indexer`'s documentation for why it borrows
+    /// this attention's own submodules rather than owning them itself.
+    let indexer: MiniMaxM3Indexer?
+
+    init(_ config: MiniMaxM3TextConfiguration, layerIndex: Int = 0) {
         self.numAttentionHeads = config.attentionHeads
         self.numKeyValueHeads = config.kvHeads
         self.headDim = config.headDim
@@ -788,13 +1140,44 @@ class MiniMaxM3Attention: Module {
             _kNorm.wrappedValue = Gemma.RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
         }
 
-        self.rope = initializeRope(
+        let rope = initializeRope(
             dims: config.rotaryDim,
             base: config.ropeTheta,
             traditional: false,
             scalingConfig: nil,
             maxPositionEmbeddings: config.maxPositionEmbeddings
         )
+        self.rope = rope
+
+        if config.isMoELayer(layerIndex) {
+            let sparse = config.sparseAttention
+            let indexQProj = Linear(
+                config.hiddenSize, sparse.numIndexHeads * sparse.indexDim, bias: false)
+            let indexKProj = Linear(config.hiddenSize, sparse.indexDim, bias: false)
+            let indexQNorm = Gemma.RMSNorm(dimensions: sparse.indexDim, eps: config.rmsNormEps)
+            let indexKNorm = Gemma.RMSNorm(dimensions: sparse.indexDim, eps: config.rmsNormEps)
+            _indexQProj.wrappedValue = indexQProj
+            _indexKProj.wrappedValue = indexKProj
+            _indexQNorm.wrappedValue = indexQNorm
+            _indexKNorm.wrappedValue = indexKNorm
+            self.indexer = MiniMaxM3Indexer(
+                indexHeads: sparse.numIndexHeads,
+                indexDim: sparse.indexDim,
+                blockSize: sparse.blockSize,
+                topkBlocks: sparse.topkBlocks,
+                initBlocks: sparse.initBlocks,
+                localBlocks: sparse.localBlocks,
+                scoreType: sparse.scoreType,
+                scale: scale,
+                indexQProj: indexQProj,
+                indexKProj: indexKProj,
+                indexQNorm: indexQNorm,
+                indexKNorm: indexKNorm,
+                rope: rope
+            )
+        } else {
+            self.indexer = nil
+        }
 
         super.init()
     }
@@ -827,18 +1210,45 @@ class MiniMaxM3Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
+        let effectiveMask = resolveMask(x: x, mask: mask, offset: offset, cache: cache)
+
         let output = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,
             values: v,
             cache: cache,
             scale: scale,
-            mask: mask
+            mask: effectiveMask
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
 
         return wo(output)
+    }
+
+    /// Resolves the attention mask for this call: the dense `mask` passed in
+    /// by the caller, unchanged, for dense-only layers, a cache that can't
+    /// track index keys (e.g. `RotatingKVCache`, when `maxKVSize` is set --
+    /// mirrors mlx-vlm's `use_sparse_mask` gate), or the dense fallback; a
+    /// block-sparse mask built from the indexer's top-k block selection
+    /// otherwise.
+    private func resolveMask(
+        x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, offset: RoPEOffset?,
+        cache: KVCache?
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        guard let indexer else { return mask }
+        guard cache == nil || cache is MiniMaxM3KVCache else { return mask }
+
+        let sparseCache = cache as? MiniMaxM3KVCache
+        let qStart = sparseCache?.indexOffset ?? 0
+        guard
+            let (blockIndices, totalLen) = indexer(
+                x, offset: offset, cache: sparseCache, qStart: qStart)
+        else {
+            return mask
+        }
+        return .array(
+            indexer.buildBlockMask(blockIndices: blockIndices, keyLength: totalLen, qStart: qStart))
     }
 }
 
@@ -893,7 +1303,7 @@ class MiniMaxM3DecoderLayer: Module {
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: Gemma.RMSNorm
 
     init(_ config: MiniMaxM3TextConfiguration, layerIndex: Int) {
-        _selfAttn.wrappedValue = MiniMaxM3Attention(config)
+        _selfAttn.wrappedValue = MiniMaxM3Attention(config, layerIndex: layerIndex)
 
         if config.isMoELayer(layerIndex) {
             _blockSparseMoe.wrappedValue = MiniMaxM3SparseMoeBlock(
@@ -1012,9 +1422,11 @@ final class MiniMaxM3LanguageModel: Module, KVCacheDimensionProvider {
 
 // MARK: - MiniMaxM3Model
 
-/// MiniMax-M3's dense-attention language model. Registered with the VLM
-/// factory under both `"minimax_m3_vl"` (VL-nested) and `"minimax_m3"` (flat)
-/// model types (kanban ^wz8y8qq) and conforms to `VLMModel` via the
+/// MiniMax-M3's language model: dense attention on layers 0..<3, MSA
+/// (MiniMax Sparse Attention) on layers 3-59 -- see `MiniMaxM3Attention` and
+/// `MiniMaxM3Indexer` (kanban ^8dbc476). Registered with the VLM factory
+/// under both `"minimax_m3_vl"` (VL-nested) and `"minimax_m3"` (flat) model
+/// types (kanban ^wz8y8qq) and conforms to `VLMModel` via the
 /// `prepare(_:cache:state:windowSize:)` implementation below -- but there is
 /// still no vision tower here: `MiniMaxM3Processor` rejects image/video
 /// input with a descriptive error, and real vision support (a vision tower
@@ -1052,26 +1464,31 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
         languageModel(inputs, cache: cache)
     }
 
-    /// One `KVCacheSimple` per decoder layer (or `RotatingKVCache` when
-    /// `parameters.maxKVSize` is set), matching every layer's dense
-    /// `MiniMaxM3Attention` -- there is no linear/SSM layer mix here to
-    /// special-case, unlike e.g. `Qwen35`.
+    /// `MiniMaxM3KVCache` per MSA layer (`configuration.isMoELayer`, layers
+    /// 3-59 in the verified schedule), `KVCacheSimple` per dense layer
+    /// (0..<3) -- or `RotatingKVCache` for every layer when
+    /// `parameters.maxKVSize` is set, matching the pre-MSA behavior for that
+    /// path (a sliding-window cache doesn't track index keys, so
+    /// `MiniMaxM3Attention.resolveMask` treats it like "no cache" support and
+    /// falls back to dense masking for those layers -- see its doc comment).
     public func newCache(parameters: GenerateParameters? = nil) -> [KVCache] {
         let numLayers = kvHeads.count
         if let maxKVSize = parameters?.maxKVSize {
             return (0 ..< numLayers).map { _ in RotatingKVCache(maxSize: maxKVSize, keep: 4) }
         }
-        return (0 ..< numLayers).map { _ in KVCacheSimple() }
+        return (0 ..< numLayers).map { layerIndex -> KVCache in
+            configuration.isMoELayer(layerIndex) ? MiniMaxM3KVCache() : KVCacheSimple()
+        }
     }
 
     /// Sanitize and prepare weight dictionary for model loading: dequantize
     /// block-quantized (fp8/bf16 `weight_scale_inv`) weights, re-key flat
     /// `minimax_m3` checkpoints into the `language_model.`-prefixed layout,
-    /// drop unused vision-tower/multi-modal-projector/MTP/sparse-attention-indexer
-    /// weights, and remap per-expert fallback weights (`w1`/`w2`/`w3`) into the
-    /// fused `gate_up_proj`/`down_proj` layout `FusedGateUpSwitchGLU` expects.
-    /// The three phases are independent transformations, applied in order --
-    /// see `_mergeQuantized`, `_filterUnusedWeights`, and `_remapExpertWeights`.
+    /// drop unused vision-tower/multi-modal-projector/MTP weights, and remap
+    /// per-expert fallback weights (`w1`/`w2`/`w3`) into the fused
+    /// `gate_up_proj`/`down_proj` layout `FusedGateUpSwitchGLU` expects. The
+    /// three phases are independent transformations, applied in order -- see
+    /// `_mergeQuantized`, `_filterUnusedWeights`, and `_remapExpertWeights`.
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         let merged = _mergeQuantized(weights)
         let filtered = _filterUnusedWeights(merged)
@@ -1114,14 +1531,15 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
 
     /// `sanitize` step 2: drop vision-tower / multi-modal-projector / MTP
     /// weights (verified absent from the mlx-community/MiniMax-M3-4bit
-    /// checkpoint; MTP task will revisit), strip the sparse-attention
-    /// indexer weights (`index_q_proj`/`index_k_proj`/`index_q_norm`/
-    /// `index_k_norm` -- confirmed present under `self_attn.` on every
-    /// MoE-scheduled layer in the real checkpoint's safetensors index; this
-    /// dense-only stage doesn't build the indexer, task ^8dbc476 does),
-    /// re-key flat (`minimax_m3`) checkpoints into the `language_model.`
-    /// -prefixed layout the VL checkpoint already uses, and drop the tied
-    /// `lm_head` weight when `configuration.tieWordEmbeddings` is set.
+    /// checkpoint; MTP task will revisit), re-key flat (`minimax_m3`)
+    /// checkpoints into the `language_model.`-prefixed layout the VL
+    /// checkpoint already uses, and drop the tied `lm_head` weight when
+    /// `configuration.tieWordEmbeddings` is set. The sparse-attention indexer
+    /// weights (`self_attn.index_q_proj`/`index_k_proj`/`index_q_norm`/
+    /// `index_k_norm`, confirmed present on every MoE-scheduled layer in the
+    /// real checkpoint's safetensors index) are no longer stripped here --
+    /// `MiniMaxM3Indexer` (kanban ^8dbc476) now builds and loads them like
+    /// any other layer weight.
     private func _filterUnusedWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
         var prefixed: [String: MLXArray] = [:]
         for (key, value) in weights {
@@ -1131,9 +1549,6 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
                 continue
             }
             if key.hasPrefix("mtp.") || key.contains(".mtp.") {
-                continue
-            }
-            if key.contains("self_attn.index_") {
                 continue
             }
 

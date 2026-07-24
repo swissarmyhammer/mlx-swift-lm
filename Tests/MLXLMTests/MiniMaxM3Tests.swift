@@ -10,14 +10,20 @@ import Testing
 @testable import MLXVLM
 
 /// Tests for MiniMax-M3's swigluoai activation, sparse MoE block (kanban
-/// ^mv9aq7w), and the full `MiniMaxM3TextConfiguration` + dense-attention
-/// decoder/model/sanitize (kanban ^xgvth41). MSA sparse attention itself is
-/// not built here -- that is a follow-up task (^8dbc476); every layer uses
-/// dense `MiniMaxM3Attention`.
+/// ^mv9aq7w), the full `MiniMaxM3TextConfiguration` + decoder/model/sanitize
+/// (kanban ^xgvth41), and MiniMax Sparse Attention (MSA) -- the
+/// `MiniMaxM3Indexer` block selector and `MiniMaxM3KVCache` sparse-aware
+/// cache (kanban ^8dbc476). Layers 0..<3 always use dense
+/// `MiniMaxM3Attention`; layers 3..<60 (`config.isMoELayer`) build an
+/// indexer and run block-sparse attention once the KV history exceeds
+/// `topkBlocks * blockSize` tokens (2048 for the verified default config),
+/// falling back to dense attention below that -- numerically identical,
+/// which doubles as the equivalence regression anchor below.
 ///
 /// Reference: mlx-vlm `mlx_vlm/models/minimax_m3_vl/language.py`
 /// (`MiniMaxSwiGLUOAI`, `MiniMaxPackedSwitchGLU`, `MiniMaxSparseMoeBlock`,
-/// `_minimax_moe_select`), cross-checked against upstream mlx-lm PRs
+/// `_minimax_moe_select`, `MiniMaxAttention`, `MiniMaxM3Indexer`,
+/// `MiniMaxM3KVCache`), cross-checked against upstream mlx-lm PRs
 /// #1398/#1401 and the `mlx-community/MiniMax-M3-4bit` checkpoint's
 /// `config.json` / `model.safetensors.index.json` / safetensors shard
 /// headers (downloaded directly while implementing ^xgvth41).
@@ -642,6 +648,222 @@ struct MiniMaxM3Tests {
         #expect(MLX.abs(head0 - head1).max().item(Float.self) < 1e-6)
     }
 
+    // MARK: - MSA sparse attention (indexer, dense fallback, sparse KV cache)
+
+    @Test(
+        "sparse-capable attention (dense fallback, KV length <= topkBlocks * blockSize) matches dense-only attention within 1e-5"
+    )
+    func sparseAttentionDenseFallbackMatchesDenseAttention() throws {
+        let config = tinyAttentionConfig(hiddenSize: 16, attentionHeads: 4, kvHeads: 2, headDim: 8)
+
+        MLXRandom.seed(11)
+        // Dense-only (layer 0, config.moeLayerFreq == [0]) vs. sparse-capable
+        // (layer index forced into the MoE range) attention built from the
+        // same config -- the indexer's own weights are randomly initialized
+        // and irrelevant here since the sequence below is far shorter than
+        // the default dense-fallback threshold (2048 tokens).
+        let denseAttention = MiniMaxM3Attention(config, layerIndex: 0)
+        let sparseConfig = MiniMaxM3TextConfiguration(
+            hiddenSize: config.hiddenSize, hiddenLayers: 2, attentionHeads: config.attentionHeads,
+            kvHeads: config.kvHeads, headDim: config.headDim, vocabularySize: 32,
+            denseIntermediateSize: 16, intermediateSize: 8, numLocalExperts: 2,
+            numExpertsPerTok: 1, moeLayerFreq: [0, 1])
+        let sparseAttention = MiniMaxM3Attention(sparseConfig, layerIndex: 1)
+        eval(denseAttention, sparseAttention)
+        #expect(sparseAttention.indexer != nil)
+
+        // Copy the shared (non-indexer) weights from the dense instance into
+        // the sparse one so both compute attention from identical Q/K/V/O/
+        // norm weights -- only the code path differs.
+        let denseParams = denseAttention.parameters().flattened()
+        let sharedKeys: Set<String> = [
+            "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
+            "q_norm.weight", "k_norm.weight",
+        ]
+        let shared = denseParams.filter { sharedKeys.contains($0.0) }
+        try sparseAttention.update(parameters: ModuleParameters.unflattened(shared), verify: [])
+        eval(sparseAttention)
+
+        let tokens = MLXRandom.normal([1, 8, config.hiddenSize])
+        let mask = MLXFast.ScaledDotProductAttentionMaskMode.causal
+
+        let denseOutput = denseAttention(tokens, mask: mask, cache: nil)
+        let sparseOutput = sparseAttention(tokens, mask: mask, cache: nil)
+        eval(denseOutput, sparseOutput)
+
+        let maxDiff = MLX.abs(denseOutput - sparseOutput).max().item(Float.self)
+        #expect(maxDiff <= 1e-5)
+    }
+
+    @Test("the indexer selects the expected blocks for a hand-constructed input (shrunk block=4, topk=2)")
+    func indexerSelectsExpectedBlocksForHandConstructedInput() throws {
+        // indexDim/numIndexHeads/hiddenSize/headDim all shrunk to 4, with
+        // rotaryDim: 2 -- only the first 2 of indexDim's 4 dims rotate, so
+        // placing every hand-constructed vector's only nonzero component in
+        // dim 2 or 3 (below) passes through RoPE completely unchanged
+        // (exactly, not approximately), keeping the selection math below
+        // hand-computable regardless of position. Every vector also has
+        // equal norm, so Gemma-mode RMSNorm's per-token scalar rescale
+        // doesn't disturb cross-key score ranking either.
+        let sparseConfig = MiniMaxM3SparseAttentionConfiguration(
+            indexDim: 4, numIndexHeads: 1, topkBlocks: 2, blockSize: 4, initBlocks: 0,
+            localBlocks: 1, scoreType: "max")
+        let config = MiniMaxM3TextConfiguration(
+            hiddenSize: 4, hiddenLayers: 1, attentionHeads: 1, kvHeads: 1, headDim: 4,
+            vocabularySize: 8, rotaryDim: 2, denseIntermediateSize: 2, intermediateSize: 2,
+            numLocalExperts: 2, numExpertsPerTok: 1, moeLayerFreq: [1],
+            sparseAttention: sparseConfig)
+        let attention = MiniMaxM3Attention(config, layerIndex: 0)
+
+        // Identity index_q_proj / index_k_proj so idx_q == x and idx_k ==
+        // x exactly (pre-norm).
+        let identity = MLXArray(
+            (0 ..< 4).flatMap { row in (0 ..< 4).map { col in Float(row == col ? 1 : 0) } }, [4, 4])
+        try attention.update(
+            parameters: ModuleParameters.unflattened([
+                "index_q_proj.weight": identity,
+                "index_k_proj.weight": identity,
+            ]), verify: [])
+        eval(attention)
+
+        guard let indexer = attention.indexer else {
+            Issue.record("expected a sparse indexer for a MoE-scheduled layer")
+            return
+        }
+
+        // 3 blocks of 4 tokens each (block size 4): block 0 is orthogonal
+        // filler (dim 2) -- unrelated to the query; block 1 is aligned with
+        // the query (dim 3) -- the expected non-forced winner; block 2 is
+        // the query's own (always force-selected via localBlocks=1) block,
+        // ending with the query token itself, dim 3, at position 11.
+        let a: [Float] = [0, 0, 0, 1]
+        let b: [Float] = [0, 0, 1, 0]
+        var rows: [[Float]] = Array(repeating: b, count: 4)  // block 0
+        rows += Array(repeating: a, count: 4)  // block 1
+        rows += Array(repeating: b, count: 3) + [a]  // block 2 (query last)
+        let x = MLXArray(rows.flatMap { $0 }, [1, 12, 4])
+
+        guard let (blockIndices, totalLen) = indexer(x, offset: nil, cache: nil, qStart: 0) else {
+            Issue.record("expected block selection to run, not the dense fallback")
+            return
+        }
+        eval(blockIndices)
+
+        #expect(totalLen == 12)
+        let lastQuerySelection = blockIndices[0, 11, 0...].asArray(Int32.self).sorted()
+        #expect(lastQuerySelection == [1, 2])
+    }
+
+    @Test("the indexer selects the expected blocks with scoreType \"lse\", including the all-masked-block NaN guard")
+    func indexerSelectsExpectedBlocksWithLogSumExpScoreType() throws {
+        // Same hand-constructed setup as the "max" score-type test above,
+        // but with scoreType: "lse" -- exercises the untested logSumExp
+        // intra-block aggregation path, including its NaN guard: querying
+        // from position 0 (block 0's first token) leaves blocks 1 and 2
+        // entirely non-causal (every token-level score is -inf before the
+        // block reshape), so `logSumExp` reduces an all-`-inf` row, which
+        // would produce NaN without the guard that follows it.
+        let sparseConfig = MiniMaxM3SparseAttentionConfiguration(
+            indexDim: 4, numIndexHeads: 1, topkBlocks: 2, blockSize: 4, initBlocks: 0,
+            localBlocks: 1, scoreType: "lse")
+        let config = MiniMaxM3TextConfiguration(
+            hiddenSize: 4, hiddenLayers: 1, attentionHeads: 1, kvHeads: 1, headDim: 4,
+            vocabularySize: 8, rotaryDim: 2, denseIntermediateSize: 2, intermediateSize: 2,
+            numLocalExperts: 2, numExpertsPerTok: 1, moeLayerFreq: [1],
+            sparseAttention: sparseConfig)
+        let attention = MiniMaxM3Attention(config, layerIndex: 0)
+
+        let identity = MLXArray(
+            (0 ..< 4).flatMap { row in (0 ..< 4).map { col in Float(row == col ? 1 : 0) } }, [4, 4])
+        try attention.update(
+            parameters: ModuleParameters.unflattened([
+                "index_q_proj.weight": identity,
+                "index_k_proj.weight": identity,
+            ]), verify: [])
+        eval(attention)
+
+        guard let indexer = attention.indexer else {
+            Issue.record("expected a sparse indexer for a MoE-scheduled layer")
+            return
+        }
+
+        let a: [Float] = [0, 0, 0, 1]
+        let b: [Float] = [0, 0, 1, 0]
+        var rows: [[Float]] = Array(repeating: b, count: 4)  // block 0
+        rows += Array(repeating: a, count: 4)  // block 1
+        rows += Array(repeating: b, count: 3) + [a]  // block 2 (query last)
+        let x = MLXArray(rows.flatMap { $0 }, [1, 12, 4])
+
+        guard let (blockIndices, totalLen) = indexer(x, offset: nil, cache: nil, qStart: 0) else {
+            Issue.record("expected block selection to run, not the dense fallback")
+            return
+        }
+        eval(blockIndices)
+
+        #expect(totalLen == 12)
+
+        // Last query (position 11): same expected winner as the "max"
+        // variant -- block 1's logsumexp over 4 equal high-similarity
+        // tokens is still comfortably larger than block 0's over 4 equal
+        // near-zero-similarity tokens, and block 2 is forced via localBlocks.
+        let lastQuerySelection = blockIndices[0, 11, 0...].asArray(Int32.self).sorted()
+        #expect(lastQuerySelection == [1, 2])
+
+        // First query (position 0): only block 0 is causally valid; blocks 1
+        // and 2 are entirely masked out (all `-inf` before the intra-block
+        // logsumexp), which is exactly the NaN-guard's target case. No crash
+        // and no NaN in the result is itself the assertion here, plus block 0
+        // must still be selected (the one real, non-sentinel entry).
+        let firstQuerySelection = blockIndices[0, 0, 0...].asArray(Int32.self)
+        #expect(firstQuerySelection.contains(0))
+        #expect(firstQuerySelection.allSatisfy { $0 == 0 || $0 == -1 })
+    }
+
+    @Test("generation runs incrementally through MiniMaxM3KVCache without shape errors (shrunk block=2, topk=2)")
+    func incrementalDecodeThroughSparseCacheProducesExpectedShapes() {
+        let sparseConfig = MiniMaxM3SparseAttentionConfiguration(
+            indexDim: 4, numIndexHeads: 2, topkBlocks: 2, blockSize: 2)
+        let config = MiniMaxM3TextConfiguration(
+            hiddenSize: 16, hiddenLayers: 2, attentionHeads: 4, kvHeads: 2, headDim: 8,
+            vocabularySize: 32, denseIntermediateSize: 16, intermediateSize: 8,
+            numLocalExperts: 2, numExpertsPerTok: 1, moeLayerFreq: [0, 1],
+            sparseAttention: sparseConfig)
+
+        MLXRandom.seed(21)
+        let model = MiniMaxM3Model(config)
+        eval(model)
+
+        let cache = model.newCache(parameters: nil)
+        #expect(cache[0] is KVCacheSimple)
+        #expect(cache[1] is MiniMaxM3KVCache)
+
+        // Prefill 5 tokens (threshold is topkBlocks * blockSize == 4, so
+        // this prefill alone already crosses into the sparse-selection
+        // path for the last couple of tokens), then decode 5 more tokens
+        // one at a time -- each incremental step grows the sparse cache's
+        // index-key history further past the threshold.
+        let tokens = MLXArray(Array(0 ..< 10).map { Int32($0) }).reshaped(1, 10)
+
+        let prefillLogits = model(tokens[0..., 0 ..< 5], cache: cache)
+        eval(prefillLogits)
+        #expect(prefillLogits.shape == [1, 5, config.vocabularySize])
+
+        var lastLogits = prefillLogits
+        for i in 5 ..< 10 {
+            let token = tokens[0..., i ..< (i + 1)]
+            lastLogits = model(token, cache: cache)
+            eval(lastLogits)
+            #expect(lastLogits.shape == [1, 1, config.vocabularySize])
+        }
+    }
+
+    @Test("MiniMaxM3KVCache.isTrimmable is false")
+    func miniMaxM3KVCacheIsNotTrimmable() {
+        let cache = MiniMaxM3KVCache()
+        #expect(cache.isTrimmable == false)
+        #expect(cache.trim(5) == 0)
+    }
+
     // MARK: - Tiny-model forward pass / KV cache / determinism
 
     private func tinyModelConfig(hiddenLayers: Int = 4, moeLayerFreq: [Int] = [0, 0, 1, 1])
@@ -712,17 +934,20 @@ struct MiniMaxM3Tests {
         #expect(match.item(Bool.self))
     }
 
-    @Test("newCache returns one KVCacheSimple per decoder layer")
+    @Test("newCache returns KVCacheSimple for dense layers, MiniMaxM3KVCache for MoE/sparse layers")
     func newCacheReturnsOneSimpleCachePerLayer() {
-        let config = tinyModelConfig()
+        let config = tinyModelConfig()  // moeLayerFreq: [0, 0, 1, 1]
         let model = MiniMaxM3Model(config)
         let cache = model.newCache(parameters: nil)
 
         #expect(cache.count == config.hiddenLayers)
-        #expect(cache.allSatisfy { $0 is KVCacheSimple })
+        #expect(cache[0] is KVCacheSimple)
+        #expect(cache[1] is KVCacheSimple)
+        #expect(cache[2] is MiniMaxM3KVCache)
+        #expect(cache[3] is MiniMaxM3KVCache)
     }
 
-    @Test("newCache returns 60 KVCacheSimple entries for the real 60-layer schedule")
+    @Test("newCache returns KVCacheSimple for layers 0..<3, MiniMaxM3KVCache for 3..<60 in the real schedule")
     func newCacheReturns60EntriesForRealSchedule() {
         let realSchedule = [0, 0, 0] + Array(repeating: 1, count: 57)
         let config = MiniMaxM3TextConfiguration(
@@ -734,7 +959,8 @@ struct MiniMaxM3Tests {
         let cache = model.newCache(parameters: nil)
 
         #expect(cache.count == 60)
-        #expect(cache.allSatisfy { $0 is KVCacheSimple })
+        #expect(cache[0..<3].allSatisfy { $0 is KVCacheSimple })
+        #expect(cache[3...].allSatisfy { $0 is MiniMaxM3KVCache })
     }
 
     // MARK: - sanitize(weights:)
@@ -746,7 +972,7 @@ struct MiniMaxM3Tests {
         Set(model.parameters().flattened().map(\.0))
     }
 
-    @Test("sanitize drops vision/multi-modal/MTP/index weights and re-keys flat checkpoints")
+    @Test("sanitize drops vision/multi-modal/MTP weights, keeps index weights, and re-keys flat checkpoints")
     func sanitizeDropsExtraneousWeightsAndProducesExactParameterSet() throws {
         let config = tinyModelConfig()
         let model = MiniMaxM3Model(config)
@@ -755,8 +981,11 @@ struct MiniMaxM3Tests {
         let expectedKeys = expectedParameterKeys(for: model)
 
         // Simulate a flat (non-`language_model.`-prefixed) checkpoint by
-        // stripping the prefix from the model's own real parameters, then add
-        // extraneous vision/MTP/sparse-indexer keys that must be dropped.
+        // stripping the prefix from the model's own real parameters --
+        // includes the real self_attn.index_* weights for MoE-scheduled
+        // layers, which sanitize must now load (not drop, since ^8dbc476
+        // built the indexer that consumes them) -- then add extraneous
+        // vision/MTP keys that must still be dropped.
         var rawWeights: [String: MLXArray] = [:]
         for (key, value) in model.parameters().flattened() {
             precondition(key.hasPrefix("language_model."))
@@ -769,10 +998,6 @@ struct MiniMaxM3Tests {
         rawWeights["multi_modal_projector.linear_1.weight"] = MLXArray.zeros([4, 4])
         rawWeights["patch_merge_mlp.linear_1.weight"] = MLXArray.zeros([4, 4])
         rawWeights["mtp.0.embed_tokens.weight"] = MLXArray.zeros([4, 4])
-        rawWeights["model.layers.3.self_attn.index_q_proj.weight"] = MLXArray.zeros([4, 4])
-        rawWeights["model.layers.3.self_attn.index_k_proj.weight"] = MLXArray.zeros([4, 4])
-        rawWeights["model.layers.3.self_attn.index_q_norm.weight"] = MLXArray.zeros([4])
-        rawWeights["model.layers.3.self_attn.index_k_norm.weight"] = MLXArray.zeros([4])
 
         let sanitized = model.sanitize(weights: rawWeights)
 
