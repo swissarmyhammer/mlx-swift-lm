@@ -48,6 +48,15 @@ public let defaultRoutedScalingFactor: Float = 2.0
 /// (`init` and `init(from:)`).
 let defaultMoeLayerStart = 3
 
+/// Default per-layer dense/MoE schedule (`moe_layer_freq`) when the
+/// checkpoint config omits it: layers before `defaultMoeLayerStart` are dense
+/// (`0`), layers at or after it are MoE (`1`). Shared by
+/// `MiniMaxM3TextConfiguration`'s `init` and `init(from:)` to avoid
+/// duplicating the derivation.
+private func defaultMoeLayerFreq(hiddenLayers: Int) -> [Int] {
+    (0 ..< hiddenLayers).map { $0 < defaultMoeLayerStart ? 0 : 1 }
+}
+
 /// Default DSA indexer per-index-head dimension (`sparse_index_dim`),
 /// verified against the `mlx-community/MiniMax-M3-4bit` checkpoint's
 /// `config.json`. Shared by `MiniMaxM3SparseAttentionConfiguration`'s
@@ -548,7 +557,7 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         self.useRoutingBias = useRoutingBias
         self.routedScalingFactor = routedScalingFactor
         self.moeLayerFreq =
-            moeLayerFreq ?? (0 ..< hiddenLayers).map { $0 < defaultMoeLayerStart ? 0 : 1 }
+            moeLayerFreq ?? defaultMoeLayerFreq(hiddenLayers: hiddenLayers)
         self.swigluAlpha = swigluAlpha
         self.swigluLimit = swigluLimit
         self.swigluBeta = swigluBeta
@@ -706,7 +715,7 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
 
         self.sharedIntermediateSize = decodedSharedIntermediateSize ?? intermediateSize
         self.moeLayerFreq =
-            decodedMoeLayerFreq ?? (0 ..< hiddenLayers).map { $0 < defaultMoeLayerStart ? 0 : 1 }
+            decodedMoeLayerFreq ?? defaultMoeLayerFreq(hiddenLayers: hiddenLayers)
     }
 }
 
