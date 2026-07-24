@@ -1173,6 +1173,22 @@ enum MiniMaxM3Vision {
         }
     }
 
+    /// Applies the config-selected MLP activation named by `hiddenAct`
+    /// (`quick_gelu`, `silu`, or `gelu` -- the verified default) -- shared by
+    /// `MLP.callAsFunction` and `MiniMaxM3Projector.callAsFunction`, both of
+    /// which apply the same activation between a checkpoint's two-layer MLP
+    /// projections.
+    static func applyActivation(_ x: MLXArray, hiddenAct: String) -> MLXArray {
+        switch hiddenAct {
+        case "quick_gelu":
+            return x * sigmoid(1.702 * x)
+        case "silu":
+            return silu(x)
+        default:
+            return gelu(x)
+        }
+    }
+
     /// `mlp`: two-layer MLP with a config-selected activation (`quick_gelu`,
     /// `silu`, or `gelu` -- the verified default) -- mirrors mlx-vlm's
     /// `MiniMaxVisionMLP`.
@@ -1189,15 +1205,7 @@ enum MiniMaxM3Vision {
         }
 
         func callAsFunction(_ x: MLXArray) -> MLXArray {
-            var h = fc1(x)
-            switch hiddenAct {
-            case "quick_gelu":
-                h = h * sigmoid(1.702 * h)
-            case "silu":
-                h = silu(h)
-            default:
-                h = gelu(h)
-            }
+            let h = applyActivation(fc1(x), hiddenAct: hiddenAct)
             return fc2(h)
         }
     }
@@ -1317,15 +1325,7 @@ final class MiniMaxM3Projector: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var h = linear1(x)
-        switch hiddenAct {
-        case "silu":
-            h = silu(h)
-        case "quick_gelu":
-            h = h * sigmoid(1.702 * h)
-        default:
-            h = gelu(h)
-        }
+        let h = MiniMaxM3Vision.applyActivation(linear1(x), hiddenAct: hiddenAct)
         return linear2(h)
     }
 }
@@ -2705,8 +2705,12 @@ public struct MiniMaxM3ProcessorConfiguration: Codable, Sendable {
 /// (plain string `content`, unaffected by this type) so ^wz8y8qq's verified
 /// text-only tokenization stays byte-for-byte unchanged.
 public struct MiniMaxM3MessageGenerator: MessageGenerator {
+    /// Creates a message generator for MiniMax-M3's chat template.
     public init() {}
 
+    /// Converts a chat message to MiniMax-M3's structured content-block
+    /// format, expanding each attached image into an `{"type": "image"}`
+    /// placeholder block ahead of the message's text content.
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
         let imageContent = message.images.map { _ in ["type": "image"] }
         let textContent = [["type": "text", "text": message.content]]
