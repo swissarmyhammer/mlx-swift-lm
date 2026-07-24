@@ -69,12 +69,21 @@ public let defaultBlockSize = 128
 /// decoder fallback.
 public let defaultModelType = "minimax_m3"
 
+/// Default hidden (model) dimension (`hidden_size`). See `defaultModelType`.
+public let defaultHiddenSize = 6144
+
 /// Default decoder-layer count (`num_hidden_layers`). See `defaultModelType`.
 public let defaultHiddenLayers = 60
+
+/// Default number of query attention heads (`num_attention_heads`). See `defaultModelType`.
+public let defaultAttentionHeads = 64
 
 /// Default key/value head count for grouped-query attention
 /// (`num_key_value_heads`). See `defaultModelType`.
 public let defaultKvHeads = 4
+
+/// Default per-head dimension (`head_dim`). See `defaultModelType`.
+public let defaultHeadDim = 128
 
 /// Default vocabulary size (`vocab_size`). See `defaultModelType`.
 public let defaultVocabularySize = 200_064
@@ -83,8 +92,15 @@ public let defaultVocabularySize = 200_064
 /// (`max_position_embeddings`). See `defaultModelType`.
 public let defaultMaxPositionEmbeddings = 1_048_576
 
+/// Default epsilon used by every RMSNorm in the model (`rms_norm_eps`). See `defaultModelType`.
+public let defaultRmsNormEps: Float = 1e-6
+
 /// Default RoPE base frequency (`rope_theta`). See `defaultModelType`.
 public let defaultRopeTheta: Float = 5_000_000
+
+/// Default fraction of `headDim` that rotates when `rotaryDim` isn't given
+/// explicitly (`partial_rotary_factor`). See `defaultModelType`.
+public let defaultPartialRotaryFactor: Float = 0.5
 
 /// Default MLP activation function name (`hidden_act`). See `defaultModelType`.
 public let defaultHiddenAct = "swigluoai"
@@ -98,8 +114,19 @@ public let defaultQkNormType = "per_head"
 /// Default dense (non-MoE) MLP intermediate size (`dense_intermediate_size`). See `defaultModelType`.
 public let defaultDenseIntermediateSize = 12288
 
+/// Default per-expert MoE intermediate size (`intermediate_size`). See `defaultModelType`.
+public let defaultIntermediateSize = 3072
+
+/// Default number of routed experts per MoE layer (`num_local_experts`). See
+/// `defaultModelType`. (Distinct from `defaultIndexDim` despite sharing the
+/// same numeric value.)
+public let defaultNumLocalExperts = 128
+
 /// Default number of routed experts selected per token (`num_experts_per_tok`). See `defaultModelType`.
 public let defaultNumExpertsPerTok = 4
+
+/// Default router scoring function name (`scoring_func`). See `defaultModelType`.
+public let defaultScoringFunc = "sigmoid"
 
 /// Default multi-token-prediction module count (`num_mtp_modules`). See `defaultModelType`.
 public let defaultNumMTPModules = 7
@@ -462,29 +489,29 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
     /// `mlx-community/MiniMax-M3-4bit` checkpoint's `config.json`.
     public init(
         modelType: String = defaultModelType,
-        hiddenSize: Int = 6144,
+        hiddenSize: Int = defaultHiddenSize,
         hiddenLayers: Int = defaultHiddenLayers,
-        attentionHeads: Int = 64,
+        attentionHeads: Int = defaultAttentionHeads,
         kvHeads: Int = defaultKvHeads,
-        headDim: Int = 128,
+        headDim: Int = defaultHeadDim,
         vocabularySize: Int = defaultVocabularySize,
         maxPositionEmbeddings: Int = defaultMaxPositionEmbeddings,
-        rmsNormEps: Float = 1e-6,
+        rmsNormEps: Float = defaultRmsNormEps,
         useGemmaNorm: Bool = true,
         ropeTheta: Float = defaultRopeTheta,
         rotaryDim: Int? = nil,
-        partialRotaryFactor: Float = 0.5,
+        partialRotaryFactor: Float = defaultPartialRotaryFactor,
         hiddenAct: String = defaultHiddenAct,
         useQkNorm: Bool = true,
         qkNormType: String = defaultQkNormType,
         tieWordEmbeddings: Bool = false,
         denseIntermediateSize: Int = defaultDenseIntermediateSize,
-        intermediateSize: Int = 3072,
+        intermediateSize: Int = defaultIntermediateSize,
         sharedIntermediateSize: Int? = nil,
-        numLocalExperts: Int = 128,
+        numLocalExperts: Int = defaultNumLocalExperts,
         numExpertsPerTok: Int = defaultNumExpertsPerTok,
         nSharedExperts: Int = 1,
-        scoringFunc: String = "sigmoid",
+        scoringFunc: String = defaultScoringFunc,
         useRoutingBias: Bool = true,
         routedScalingFactor: Float = defaultRoutedScalingFactor,
         moeLayerFreq: [Int]? = nil,
@@ -588,23 +615,27 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
 
         modelType =
             try container.decodeIfPresent(String.self, forKey: .modelType) ?? defaultModelType
-        hiddenSize = try container.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 6144
+        hiddenSize =
+            try container.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? defaultHiddenSize
         hiddenLayers =
             try container.decodeIfPresent(Int.self, forKey: .hiddenLayers) ?? defaultHiddenLayers
-        attentionHeads = try container.decodeIfPresent(Int.self, forKey: .attentionHeads) ?? 64
+        attentionHeads =
+            try container.decodeIfPresent(Int.self, forKey: .attentionHeads) ?? defaultAttentionHeads
         kvHeads = try container.decodeIfPresent(Int.self, forKey: .kvHeads) ?? defaultKvHeads
-        headDim = try container.decodeIfPresent(Int.self, forKey: .headDim) ?? 128
+        headDim = try container.decodeIfPresent(Int.self, forKey: .headDim) ?? defaultHeadDim
         vocabularySize =
             try container.decodeIfPresent(Int.self, forKey: .vocabularySize)
             ?? defaultVocabularySize
         maxPositionEmbeddings =
             try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings)
             ?? defaultMaxPositionEmbeddings
-        rmsNormEps = try container.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
+        rmsNormEps =
+            try container.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? defaultRmsNormEps
         useGemmaNorm = try container.decodeIfPresent(Bool.self, forKey: .useGemmaNorm) ?? true
         ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? defaultRopeTheta
         partialRotaryFactor =
-            try container.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 0.5
+            try container.decodeIfPresent(Float.self, forKey: .partialRotaryFactor)
+            ?? defaultPartialRotaryFactor
         rotaryDim =
             try container.decodeIfPresent(Int.self, forKey: .rotaryDim)
             ?? Int(partialRotaryFactor * Float(headDim))
@@ -643,15 +674,18 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
             try container.decodeIfPresent(Int.self, forKey: .denseIntermediateSize)
             ?? defaultDenseIntermediateSize
         intermediateSize =
-            try container.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 3072
+            try container.decodeIfPresent(Int.self, forKey: .intermediateSize)
+            ?? defaultIntermediateSize
         let decodedSharedIntermediateSize = try container.decodeIfPresent(
             Int.self, forKey: .sharedIntermediateSize)
-        numLocalExperts = try container.decodeIfPresent(Int.self, forKey: .numLocalExperts) ?? 128
+        numLocalExperts =
+            try container.decodeIfPresent(Int.self, forKey: .numLocalExperts) ?? defaultNumLocalExperts
         numExpertsPerTok =
             try container.decodeIfPresent(Int.self, forKey: .numExpertsPerTok)
             ?? defaultNumExpertsPerTok
         nSharedExperts = try container.decodeIfPresent(Int.self, forKey: .nSharedExperts) ?? 1
-        scoringFunc = try container.decodeIfPresent(String.self, forKey: .scoringFunc) ?? "sigmoid"
+        scoringFunc =
+            try container.decodeIfPresent(String.self, forKey: .scoringFunc) ?? defaultScoringFunc
         useRoutingBias = try container.decodeIfPresent(Bool.self, forKey: .useRoutingBias) ?? true
         routedScalingFactor =
             try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor)
@@ -1118,6 +1152,18 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
     /// exists yet to verify that layout against.
     private func _remapExpertWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
         var prefixed = weights
+
+        /// Removes and collects the per-expert `weightType` tensors for
+        /// `key` (e.g. `"weight"`/`"scales"`/`"biases"`) across all
+        /// `configuration.numLocalExperts` routed experts under `prefix`, in
+        /// expert-index order -- the shared shape for gate (`w1`), up
+        /// (`w3`), and down (`w2`) projection collection below.
+        func collectExpertWeights(_ key: String, weightType: String, prefix: String) -> [MLXArray] {
+            (0 ..< configuration.numLocalExperts).map {
+                prefixed.removeValue(forKey: "\(prefix).experts.\($0).\(weightType).\(key)")!
+            }
+        }
+
         for layerIndex in 0 ..< configuration.hiddenLayers
         where configuration.isMoELayer(layerIndex) {
             let prefix = "language_model.model.layers.\(layerIndex).block_sparse_moe"
@@ -1126,15 +1172,9 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
             for key in ["weight", "scales", "biases"] {
                 guard prefixed["\(prefix).experts.0.w1.\(key)"] != nil else { continue }
 
-                let gate = (0 ..< configuration.numLocalExperts).map {
-                    prefixed.removeValue(forKey: "\(prefix).experts.\($0).w1.\(key)")!
-                }
-                let up = (0 ..< configuration.numLocalExperts).map {
-                    prefixed.removeValue(forKey: "\(prefix).experts.\($0).w3.\(key)")!
-                }
-                let down = (0 ..< configuration.numLocalExperts).map {
-                    prefixed.removeValue(forKey: "\(prefix).experts.\($0).w2.\(key)")!
-                }
+                let gate = collectExpertWeights(key, weightType: "w1", prefix: prefix)
+                let up = collectExpertWeights(key, weightType: "w3", prefix: prefix)
+                let down = collectExpertWeights(key, weightType: "w2", prefix: prefix)
 
                 prefixed["\(prefix).switch_mlp.gate_up_proj.\(key)"] =
                     MLX.concatenated([MLX.stacked(gate), MLX.stacked(up)], axis: 1)
@@ -1145,6 +1185,9 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
     }
 }
 
+/// LoRA support for MiniMax-M3: exposes the dense-attention decoder layers as
+/// adaptation targets, matching the `LoRAModel` conformance pattern used by
+/// the other decoder-only models in this package.
 extension MiniMaxM3Model: LoRAModel {
     /// The decoder layers available for LoRA parameter adaptation.
     public var loraLayers: [Module] {
@@ -1154,6 +1197,10 @@ extension MiniMaxM3Model: LoRAModel {
 
 // MARK: - MiniMaxM3Model + VLMModel
 
+/// `VLMModel` conformance for MiniMax-M3. There is no vision tower yet --
+/// `MiniMaxM3Processor` rejects image/video input before an `LMInput` is ever
+/// constructed, so `prepare(_:cache:state:windowSize:)` only ever sees
+/// text-only prefill (real vision support is a later task).
 extension MiniMaxM3Model: VLMModel {
     /// Prefills `input`'s tokens in `windowSize`-sized chunks and returns the
     /// remainder for the `TokenIterator` to consume one token at a time.

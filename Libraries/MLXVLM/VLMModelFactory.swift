@@ -15,6 +15,9 @@ public enum VLMError: LocalizedError, Equatable {
     case processing(String)
     case noVideoTrackFound
     case videoNotDecodable
+    /// Thrown when a model's `UserInputProcessor` doesn't yet support the
+    /// attached media type (e.g. `"image"`/`"video"`) -- used by models like
+    /// `MiniMaxM3Processor` that are text-only until vision support lands.
     case mediaNotSupported(String)
 
     public var errorDescription: String? {
@@ -108,6 +111,9 @@ public enum VLMTypeRegistry {
         "lfm2_vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "glm_ocr": create(GlmOcrConfiguration.self, GlmOcr.init),
+        // VL-nested `minimax_m3_vl` checkpoints decode the full VL config
+        // (text + vision), but only the text-model configuration is used --
+        // there is no vision tower yet (see MiniMaxM3.swift).
         "minimax_m3_vl": create(MiniMaxM3Configuration.self) {
             (config: MiniMaxM3Configuration) -> MiniMaxM3Model in
             MiniMaxM3Model(config.textConfiguration)
@@ -281,6 +287,8 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<|im_end|>"]
     )
 
+    /// Model configuration for the MiniMax-M3-4bit quantized checkpoint
+    /// (`mlx-community/MiniMax-M3-4bit`).
     static public let minimaxM34bit = ModelConfiguration(
         id: "mlx-community/MiniMax-M3-4bit",
         defaultPrompt: ""

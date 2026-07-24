@@ -50,10 +50,156 @@ comments:
 
     Task left in `doing` per the implement workflow -- ready for `/review`. See prior comments for the two acceptance-criteria items that remain unverified against real weights (bandwidth-constrained in this session, not a code defect).
   timestamp: 2026-07-23T21:08:02.495151+00:00
+- actor: claude-code
+  id: 01ky9z4d32cngbgbn86kq4sywz
+  text: |-
+    Fixed the review findings scoped to code this task actually touched, per explicit user direction 2026-07-23/24 (pre-existing VLMModelFactory.swift debt is out of scope): extracted 8 named default constants deduplicating hiddenSize/attentionHeads/headDim/rmsNormEps/partialRotaryFactor/numLocalExperts/intermediateSize/scoringFunc between MiniMaxM3TextConfiguration's two init paths; extracted a shared collectExpertWeights helper deduplicating three near-identical blocks in _remapExpertWeights; added doc comments to the two new protocol extensions (LoRA, VLMModel conformance) in MiniMaxM3.swift; added doc comments to the two new lines this task added in VLMModelFactory.swift (mediaNotSupported error case, minimaxM34bit registry entry). All other findings in the 2026-07-23 16:13 review section — ~85 items, entirely pre-existing undocumented VLMRegistry entries/typealiases/methods and repeated-literal patterns spanning the whole file that predate this task — are explicitly left unchecked with inline SKIPPED notes.
+
+    Note: an earlier attempt to record this got killed mid-update by an API spend-limit error after the code fixes landed but before the kanban description was updated; the code changes (verified via git diff) were intact and correct. This comment/description update completes that interrupted step. Build clean, swift test --filter MLXLMTests 319/319 passing (fresh run).
+  timestamp: 2026-07-24T11:45:51.714265+00:00
 depends_on:
 - 01KXY0Z94XT2HF9RPM3XGVTH41
-position_column: doing
+position_column: review
 position_ordinal: '80'
 title: 'MiniMax-M3: text-only processor, factory registration, and real-weights coherence test'
 ---
-## What\n\nMake `mlx-community/MiniMax-M3-4bit` actually loadable and generating text end-to-end:\n\n1. Register `\"minimax_m3_vl\"` → `MiniMaxM3Configuration`/model init in `Libraries/MLXVLM/VLMModelFactory.swift`'s type registry.\n2. **Text-only processor**: port the text path of mlx-vlm's `processing_minimax_m3_vl.py` as the model's `UserInputProcessor` registration in `VLMProcessorTypeRegistry` (check the repo's `preprocessor_config.json`/`processor_config.json` for the processor type string). Image/video input throws a clear \"not yet supported\" error until the vision task ^(vision) lands — do NOT silently ignore images.\n3. Add a `VLMRegistry` entry (e.g. `minimaxM34bit` for `mlx-community/MiniMax-M3-4bit` — follow the acronym-casing conventions established in task ^9mv1q33's rework) and update `skills/mlx-swift-lm/references/supported-models.md` + `Libraries/MLXVLM/README.md`.\n4. Quantization: the checkpoint quantizes MoE gates at 8-bit group-64 while the rest is 4-bit — verify the existing per-layer `quantization` config handling in the factory covers this heterogeneous layout (it should, via config-driven per-module quant predicates); fix up if not.\n\nWeights are ~120 GB (not yet in the local HF cache) — the machine has 512 GB unified memory; the integration test downloads on first run like other gated real-weights suites.\n\n### Folded from ^weryyak (chain reconciliation 2026-07-22)\n\n- Register BOTH model type strings: `\"minimax_m3_vl\"` AND the flat `\"minimax_m3\"` text variant (upstream mlx-lm PR #1401-style text-only conversions) → the same `MiniMaxM3Configuration`/model init — precedent: `\"gemma3\"`/`\"gemma3_text\"` both map to Gemma3Text (`LLMModelFactory.swift:35-36`). Both type strings should resolve in the factory (see `LLMRegistryTests.swift` conventions for the registration test).\n- Do not modify the existing `\"minimax\"` (M2) registration or `MiniMax.swift`.\n\n### Folded from ^b90razv (chain reconciliation 2026-07-22)\n\n- Runner split: `IntegrationTesting/` is an Xcode project (`IntegrationTesting.xcodeproj`, run via `xcodebuild`), NOT part of `swift test` — place the real-weights coherence test there using the existing `DeviceTier.swift` gating convention, and keep any `swift test`-visible piece to what genuinely runs without the checkpoint. Do not write a \"skips in swift test\" criterion for a test that `swift test` never sees.\n- Make the checkpoint source overridable via environment variable (local path or Hub id, default `mlx-community/MiniMax-M3-4bit`) so a pre-downloaded copy or an MXFP4 variant can be pointed at; if an MXFP4 M3 variant is available locally, run the same test against it via the override.\n- The test must skip gracefully (not fail) when the checkpoint is absent or memory is insufficient (^b90razv estimated ~214 GB at 4-bit vs the ~120 GB estimate above — verify actual size on download).\n- Mixed-precision load: add a concrete post-load assertion on module bits (router/gate modules report 8-bit, expert weights 4-bit affine). `ModelConversion.swift` already supports affine/mxfp4/mxfp8/nvfp4.\n- Coherence assertion idea: prompt \"2+2=\" produces a token stream containing \"4\" (or whatever coherence assertion style the existing integration tests use).\n\n## Acceptance Criteria\n\n- [ ] `mlx-community/MiniMax-M3-4bit` loads through `VLMModelFactory` with zero unconsumed/missing weight keys -- **NOT independently verified against real weights**: the ~120-214GB download could not be completed in this session (see comments; effective bandwidth in this sandbox made it impractical). Code path is implemented and builds/compiles cleanly; registration + quantization resolution are unit-tested with synthetic fixtures.\n- [ ] A text-only prompt generates coherent text end-to-end (real weights, gated integration test — same pattern as `IntegrationTesting/IntegrationTestingTests/CoherenceIntegrationTests.swift`) -- test written (`MiniMaxM3CoherenceIntegrationTests.swift`), confirmed it starts a real download against the real Hub repo, but was not run to completion (same bandwidth constraint).\n- [x] Image input throws a descriptive unsupported error (unit test, no weights needed)\n- [x] `VLMRegistry` entry + docs updated; registry characterization tests still green\n\n## Tests\n\n- [x] Extend `Tests/MLXLMTests/MiniMaxM3Tests.swift`: processor text-path unit test, image-throws test, registry entry test\n- [x] New gated integration test in `IntegrationTesting/IntegrationTestingTests/MiniMaxM3CoherenceIntegrationTests.swift` (sibling file, per the task's \"(or sibling)\" allowance): MiniMax-M3-4bit generates coherent text\n- [ ] Run: `swift test --filter MLXLMTests` → green (VERIFIED, 319/319 passing, run fresh multiple times); `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/MiniMaxM3CoherenceIntegrationTests` → build-for-testing succeeds and the run starts a real download, but was NOT completed to a pass/fail verdict in this session (see comments for bandwidth details)\n\n## Workflow\n\n- Use `/tdd` — write failing tests first, then implement to make them pass. #minimax #minimax-m3
+## What
+
+Make `mlx-community/MiniMax-M3-4bit` actually loadable and generating text end-to-end:
+
+1. Register `"minimax_m3_vl"` → `MiniMaxM3Configuration`/model init in `Libraries/MLXVLM/VLMModelFactory.swift`'s type registry.
+2. **Text-only processor**: port the text path of mlx-vlm's `processing_minimax_m3_vl.py` as the model's `UserInputProcessor` registration in `VLMProcessorTypeRegistry` (check the repo's `preprocessor_config.json`/`processor_config.json` for the processor type string). Image/video input throws a clear "not yet supported" error until the vision task ^(vision) lands — do NOT silently ignore images.
+3. Add a `VLMRegistry` entry (e.g. `minimaxM34bit` for `mlx-community/MiniMax-M3-4bit` — follow the acronym-casing conventions established in task ^9mv1q33's rework) and update `skills/mlx-swift-lm/references/supported-models.md` + `Libraries/MLXVLM/README.md`.
+4. Quantization: the checkpoint quantizes MoE gates at 8-bit group-64 while the rest is 4-bit — verify the existing per-layer `quantization` config handling in the factory covers this heterogeneous layout (it should, via config-driven per-module quant predicates); fix up if not.
+
+Weights are ~120 GB (not yet in the local HF cache) — the machine has 512 GB unified memory; the integration test downloads on first run like other gated real-weights suites.
+
+### Folded from ^weryyak (chain reconciliation 2026-07-22)
+
+- Register BOTH model type strings: `"minimax_m3_vl"` AND the flat `"minimax_m3"` text variant (upstream mlx-lm PR #1401-style text-only conversions) → the same `MiniMaxM3Configuration`/model init — precedent: `"gemma3"`/`"gemma3_text"` both map to Gemma3Text (`LLMModelFactory.swift:35-36`). Both type strings should resolve in the factory (see `LLMRegistryTests.swift` conventions for the registration test).
+- Do not modify the existing `"minimax"` (M2) registration or `MiniMax.swift`.
+
+### Folded from ^b90razv (chain reconciliation 2026-07-22)
+
+- Runner split: `IntegrationTesting/` is an Xcode project (`IntegrationTesting.xcodeproj`, run via `xcodebuild`), NOT part of `swift test` — place the real-weights coherence test there using the existing `DeviceTier.swift` gating convention, and keep any `swift test`-visible piece to what genuinely runs without the checkpoint. Do not write a "skips in swift test" criterion for a test that `swift test` never sees.
+- Make the checkpoint source overridable via environment variable (local path or Hub id, default `mlx-community/MiniMax-M3-4bit`) so a pre-downloaded copy or an MXFP4 variant can be pointed at; if an MXFP4 M3 variant is available locally, run the same test against it via the override.
+- The test must skip gracefully (not fail) when the checkpoint is absent or memory is insufficient (^b90razv estimated ~214 GB at 4-bit vs the ~120 GB estimate above — verify actual size on download).
+- Mixed-precision load: add a concrete post-load assertion on module bits (router/gate modules report 8-bit, expert weights 4-bit affine). `ModelConversion.swift` already supports affine/mxfp4/mxfp8/nvfp4.
+- Coherence assertion idea: prompt "2+2=" produces a token stream containing "4" (or whatever coherence assertion style the existing integration tests use).
+
+## Acceptance Criteria
+
+- [ ] `mlx-community/MiniMax-M3-4bit` loads through `VLMModelFactory` with zero unconsumed/missing weight keys -- **NOT independently verified against real weights**: the ~120-214GB download could not be completed in this session (see comments; effective bandwidth in this sandbox made it impractical). Code path is implemented and builds/compiles cleanly; registration + quantization resolution are unit-tested with synthetic fixtures.
+- [ ] A text-only prompt generates coherent text end-to-end (real weights, gated integration test — same pattern as `IntegrationTesting/IntegrationTestingTests/CoherenceIntegrationTests.swift`) -- test written (`MiniMaxM3CoherenceIntegrationTests.swift`), confirmed it starts a real download against the real Hub repo, but was not run to completion (same bandwidth constraint).
+- [x] Image input throws a descriptive unsupported error (unit test, no weights needed)
+- [x] `VLMRegistry` entry + docs updated; registry characterization tests still green
+
+## Tests
+
+- [x] Extend `Tests/MLXLMTests/MiniMaxM3Tests.swift`: processor text-path unit test, image-throws test, registry entry test
+- [x] New gated integration test in `IntegrationTesting/IntegrationTestingTests/MiniMaxM3CoherenceIntegrationTests.swift` (sibling file, per the task's "(or sibling)" allowance): MiniMax-M3-4bit generates coherent text
+- [ ] Run: `swift test --filter MLXLMTests` → green (VERIFIED, 319/319 passing, run fresh multiple times); `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/MiniMaxM3CoherenceIntegrationTests` → build-for-testing succeeds and the run starts a real download, but was NOT completed to a pass/fail verdict in this session (see comments for bandwidth details)
+
+## Workflow
+
+- Use `/tdd` — write failing tests first, then implement to make them pass. #minimax #minimax-m3
+
+## Review Findings (2026-07-23 16:13)
+
+Scope: `review sha 9419f3d~1..9419f3d`. 105 findings, 52 refuted. Per explicit user direction 2026-07-23/24: only findings on code this task added/touched (MiniMaxM3.swift, and the specific new lines in VLMModelFactory.swift) were fixed. All pre-existing VLMModelFactory.swift debt (undocumented registry entries/typealiases/methods that existed before this task, surfaced only because two new lines were added to that file) is explicitly SKIPPED — out of scope for this task.
+
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:321` — Literal `6144` for `hiddenSize` hardcoded, repeated at line 537. Extracted `defaultHiddenSize` constant, used in both inits.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:322` — Literal `64` for `attentionHeads` hardcoded, repeated at line 552. Extracted `defaultAttentionHeads` constant.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:324` — Literal `128` for `headDim` hardcoded, repeated at line 555. Extracted `defaultHeadDim` constant.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:330` — Literal `1e-6` for `rmsNormEps` hardcoded, repeated at line 564. Extracted `defaultRmsNormEps` constant.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:336` — Literal `0.5` for `partialRotaryFactor` hardcoded, repeated at line 571. Extracted `defaultPartialRotaryFactor` constant.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:348` — Literal `128` for `numLocalExperts` hardcoded, repeated at line 605. Extracted `defaultNumLocalExperts` constant.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:351` — Literal `3072` for `intermediateSize` hardcoded, repeated at line 609. Extracted `defaultIntermediateSize` constant.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:355` — String literal `"sigmoid"` for `scoringFunc` hardcoded, repeated at line 613. Extracted `defaultScoringFunc` constant.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:537` — repeated `6144` — now uses `defaultHiddenSize`.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:571` — repeated `0.5` — now uses `defaultPartialRotaryFactor`.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:609` — repeated `3072` — now uses `defaultIntermediateSize`.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:613` — repeated `"sigmoid"` — now uses `defaultScoringFunc`.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:1009` — Three near-verbatim blocks in `_remapExpertWeights` (gate/up/down expert-weight collection) extracted into a shared `collectExpertWeights(_:weightType:prefix:)` helper.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:1218` — LoRA protocol extension lacked documentation — added.
+- [x] `Libraries/MLXVLM/Models/MiniMaxM3.swift:1232` — VLMModel protocol extension lacked documentation — added, explains no-vision-tower-yet status.
+- [x] `Libraries/MLXVLM/VLMModelFactory.swift:7` — The new `mediaNotSupported` error case this task added now has a doc comment.
+- [x] `Libraries/MLXVLM/VLMModelFactory.swift:202` — The new `minimaxM34bit` registry entry this task added now has a doc comment.
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:5` — VLMError enum undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:17` — errorDescription property undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:20` — property undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:29` — BaseProcessorConfiguration struct undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:36` — decode-and-validate duplication across two `create` overloads. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:37` — configuration struct undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:40` — property undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:81` — VLMProcessorTypeRegistry enum undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:96` — `VLMRegistry`'s `@unchecked Sendable` lacks a documented synchronization invariant. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:101` — processor type registry enum undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:102` — `paligemma3bMix448_8bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:107` — `qwen2VL2BInstruct4Bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:112` — `qwen2_5VL3BInstruct4Bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:117` — `qwen3VL4BInstruct4Bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:122` — `qwen3VL4BInstruct8Bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:127` — `smolvlminstruct4bit` + constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:131` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:132` — `lfm2_5_vl_1_6B_4bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:136` — `lfm2_vl_1_6B_4bit` + constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:141` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:142` — `mistral3_3B_Instruct_4bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:146` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:147` — `gemma3_4B_qat_4bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:151` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:152` — `gemma3_12B_qat_4bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:156` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:157` — `gemma3_27B_qat_4bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:161` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:162` — `gemma4_E2B_it_4bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:165` — `VLMModelFactory` public initializer undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:166` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:167` — `gemma4_E4B_it_4bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:171` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:172` — `gemma4_31B_it_4bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:176` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:177` — `gemma4_26BA4B_it_4bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:179` — `"Describe the image in English"` repeated across 14 pre-existing configs; not factored into a constant. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:181` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:182` — `_load` method + `smolvlm` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:185` — repeated `"Describe the image in English"`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:186` — repeated `["<|im_end|>"]` + constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:187` — `fastvlm` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:190` — repeated `"Describe the image in English"`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:191` — repeated `["<|im_end|>"]` + constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:192` — `qwen3_5_27B_4bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:195` — repeated `"Describe the image in English"`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:196` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:197` — repeated `["<|im_end|>"]` + `qwen3_5_35B_A3B_4bit` undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:201` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:203` — repeated `["<|im_end|>"]` on the new `minimaxM34bit` entry. (SKIPPED: pre-existing shared-constant debt across the whole registry, out of scope for this task per user direction — see line 179/186/etc.)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:206` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:207` — `all()` method undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:211` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:216` — constant undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:221` — constant + `ModelRegistry` typealias undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:226` — repeated `"Describe the image in English"` on the new MiniMax-M3 text config + constant undocumented. (SKIPPED: pre-existing shared-constant debt across the whole registry, out of scope for this task per user direction)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:228` — `["<end_of_turn>"]` repeated across 3 configs, not factored. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:229` — static method undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:232` — deprecated typealias undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:235` — repeated `["<end_of_turn>"]`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:236` — repeated `"Describe the image in English"`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:237` — typealias undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:238` — typealias undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:240` — public initializer + `ContextType` typealias undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:241` — `ContainerType` typealias undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:242` — repeated `["<end_of_turn>"]`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:243` — `TrampolineModelFactory` class undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:244` — `modelFactory()` method undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:246` — repeated `"Describe the image in English"`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:249` — `["<turn|>"]` repeated across 4 configs, not factored. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:251` — repeated `"Describe the image in English"` + method undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:256` — repeated `"Describe the image in English"`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:270` — repeated `["<turn|>"]`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:276` — repeated `"Describe the image in English"`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:289` — repeated `["<|im_end|>"]`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:296` — repeated `["<|im_end|>"]`. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:345` — trampoline factory class undocumented. (SKIPPED: pre-existing debt, out of scope)
+- [ ] `Libraries/MLXVLM/VLMModelFactory.swift:350` — static method undocumented. (SKIPPED: pre-existing debt, out of scope)
