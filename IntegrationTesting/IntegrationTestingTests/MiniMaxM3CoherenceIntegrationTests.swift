@@ -21,7 +21,10 @@ private let models = IntegrationTestModels(
 /// ^wz8y8qq/^b90razv put the checkpoint's real size in the 120-214 GB range;
 /// 220 GB leaves headroom above the higher estimate for the loaded weights
 /// plus KV cache and working memory.
-private let minimaxM3RequiredMemoryBytes: UInt64 = 220 * 1_024 * 1_024 * 1_024
+///
+/// Internal (not `private`) so `MiniMaxM3ImageQAIntegrationTests` (^9a2aw98)
+/// can reuse this exact gate rather than duplicating it.
+let minimaxM3RequiredMemoryBytes: UInt64 = 220 * 1_024 * 1_024 * 1_024
 
 /// Default checkpoint source (a Hub repo id) used when
 /// `MLX_MINIMAX_M3_CHECKPOINT` is not set.
@@ -31,7 +34,9 @@ private let defaultMiniMaxM3CheckpointSource = "mlx-community/MiniMax-M3-4bit"
 /// overrides the default Hub id with either a local directory path or a
 /// different Hub id (e.g. an MXFP4 variant), so a pre-downloaded copy can be
 /// pointed at without waiting on a fresh multi-GB fetch.
-private func resolveMiniMaxM3Configuration() -> ModelConfiguration {
+///
+/// Internal (not `private`) -- see `minimaxM3RequiredMemoryBytes`.
+func resolveMiniMaxM3Configuration() -> ModelConfiguration {
     let source =
         ProcessInfo.processInfo.environment["MLX_MINIMAX_M3_CHECKPOINT"]
         ?? defaultMiniMaxM3CheckpointSource
@@ -45,7 +50,9 @@ private func resolveMiniMaxM3Configuration() -> ModelConfiguration {
 /// local-directory overrides must exist on disk; Hub ids are always
 /// considered available up front (a download failure is caught later and
 /// treated the same as "absent").
-private func checkpointIsAvailable(_ configuration: ModelConfiguration) -> Bool {
+///
+/// Internal (not `private`) -- see `minimaxM3RequiredMemoryBytes`.
+func checkpointIsAvailable(_ configuration: ModelConfiguration) -> Bool {
     if case .directory(let url) = configuration.id {
         return FileManager.default.fileExists(atPath: url.path)
     }

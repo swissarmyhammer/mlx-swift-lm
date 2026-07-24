@@ -112,12 +112,9 @@ public enum VLMTypeRegistry {
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "glm_ocr": create(GlmOcrConfiguration.self, GlmOcr.init),
         // VL-nested `minimax_m3_vl` checkpoints decode the full VL config
-        // (text + vision), but only the text-model configuration is used --
-        // there is no vision tower yet (see MiniMaxM3.swift).
-        "minimax_m3_vl": create(MiniMaxM3Configuration.self) {
-            (config: MiniMaxM3Configuration) -> MiniMaxM3Model in
-            MiniMaxM3Model(config.textConfiguration)
-        },
+        // (text + vision) and build a vision-capable model (see
+        // MiniMaxM3.swift, kanban ^9a2aw98).
+        "minimax_m3_vl": create(MiniMaxM3Configuration.self, MiniMaxM3Model.init),
         // Flat `minimax_m3` conversions (upstream mlx-lm PR #1401-style
         // text-only checkpoints) decode straight into the text config --
         // there is no `text_config`/`vision_config` nesting to unwrap.

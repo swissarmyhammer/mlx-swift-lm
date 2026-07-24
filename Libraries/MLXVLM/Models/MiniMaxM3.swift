@@ -16,6 +16,7 @@
 //  clamp shape (`Libraries/MLXLLM/Models/GPTOSS.swift`).
 //
 
+import CoreImage
 import Foundation
 import MLX
 import MLXLMCommon
@@ -761,29 +762,681 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
     }
 }
 
+// MARK: - MiniMaxM3VisionConfiguration
+
+/// Default vision-tower hidden dimension (`vision_config.hidden_size`),
+/// verified against the `mlx-community/MiniMax-M3-4bit` checkpoint's
+/// `config.json`. Shared by `MiniMaxM3VisionConfiguration`'s memberwise
+/// `init` and its `init(from:)` decoder fallback.
+public let defaultVisionHiddenSize = 1280
+
+/// Default vision-tower MLP intermediate size (`vision_config.intermediate_size`). See `defaultVisionHiddenSize`.
+public let defaultVisionIntermediateSize = 5120
+
+/// Default vision-tower attention head count (`vision_config.num_attention_heads`). See `defaultVisionHiddenSize`.
+public let defaultVisionAttentionHeads = 16
+
+/// Default vision-tower encoder-layer count (`vision_config.num_hidden_layers`). See `defaultVisionHiddenSize`.
+public let defaultVisionHiddenLayers = 32
+
+/// Default vision-tower patch size, in pixels (`vision_config.patch_size`). See `defaultVisionHiddenSize`.
+public let defaultVisionPatchSize = 14
+
+/// Default vision-tower input channel count (`vision_config.num_channels`). See `defaultVisionHiddenSize`.
+public let defaultVisionChannels = 3
+
+/// Default vision-tower LayerNorm epsilon (`vision_config.layer_norm_eps`). See `defaultVisionHiddenSize`.
+public let defaultVisionLayerNormEps: Float = 1e-5
+
+/// Default vision-tower MLP activation function name (`vision_config.hidden_act`). See `defaultVisionHiddenSize`.
+public let defaultVisionHiddenAct = "gelu"
+
+/// Default vision-tower 3D-RoPE base frequency (`vision_config.rope_theta`). See `defaultVisionHiddenSize`.
+public let defaultVisionRopeTheta: Float = 10_000
+
+/// Default patch-merge spatial compression factor
+/// (`vision_config.img_token_compression_config.spatial_merge_size`): a
+/// `spatialMergeSize x spatialMergeSize` block of adjacent patches is
+/// combined into one token by `patch_merge_mlp`. See `defaultVisionHiddenSize`.
+public let defaultVisionSpatialMergeSize = 2
+
+/// Default temporal patch size
+/// (`vision_config.img_token_compression_config.temporal_patch_size`): the
+/// processor replicates a still image this many times along the temporal
+/// axis before patchifying, so every image grid has `t == 1`. See
+/// `defaultVisionHiddenSize`.
+public let defaultVisionTemporalPatchSize = 2
+
+/// Default maximum frame count per video attention segment
+/// (`vision_config.vision_segment_max_frames`); a video grid with more
+/// frames than this is split into consecutive, independently-attended
+/// segments. See `defaultVisionHiddenSize`.
+public let defaultVisionSegmentMaxFrames = 4
+
+/// MiniMax-M3's vision-tower configuration, decoded from `vision_config`.
+///
+/// Only the fields this port's vision tower actually consumes are modeled --
+/// `model_type`, `projection_dim`, `position_embedding_type`, `rope_mode`,
+/// `vocab_size`, `initializer_range`/`initializer_factor`, and
+/// `attention_dropout` are checkpoint metadata this dense (inference-only)
+/// port never reads, so they decode as ordinary unknown keys (ignored).
+public struct MiniMaxM3VisionConfiguration: Decodable, Sendable {
+    /// Vision-tower hidden dimension (`hidden_size`).
+    public var hiddenSize: Int
+    /// Vision-tower MLP intermediate size (`intermediate_size`).
+    public var intermediateSize: Int
+    /// Vision-tower attention head count (`num_attention_heads`).
+    public var numAttentionHeads: Int
+    /// Vision-tower encoder-layer count (`num_hidden_layers`).
+    public var numHiddenLayers: Int
+    /// Vision-tower patch size, in pixels (`patch_size`).
+    public var patchSize: Int
+    /// Vision-tower input channel count (`num_channels`).
+    public var numChannels: Int
+    /// Vision-tower LayerNorm epsilon (`layer_norm_eps`).
+    public var layerNormEps: Float
+    /// Vision-tower MLP activation function name (`hidden_act`).
+    public var hiddenAct: String
+    /// 3D-RoPE base frequency (`rope_theta`).
+    public var ropeTheta: Float
+    /// Patch-merge spatial compression factor
+    /// (`img_token_compression_config.spatial_merge_size`).
+    public var spatialMergeSize: Int
+    /// Temporal patch size (`img_token_compression_config.temporal_patch_size`).
+    public var temporalPatchSize: Int
+    /// Maximum frame count per video attention segment (`vision_segment_max_frames`).
+    public var segmentMaxFrames: Int
+
+    enum CodingKeys: String, CodingKey {
+        case hiddenSize = "hidden_size"
+        case intermediateSize = "intermediate_size"
+        case numAttentionHeads = "num_attention_heads"
+        case numHiddenLayers = "num_hidden_layers"
+        case patchSize = "patch_size"
+        case numChannels = "num_channels"
+        case layerNormEps = "layer_norm_eps"
+        case hiddenAct = "hidden_act"
+        case ropeTheta = "rope_theta"
+        case compression = "img_token_compression_config"
+        case segmentMaxFrames = "vision_segment_max_frames"
+    }
+
+    enum CompressionCodingKeys: String, CodingKey {
+        case spatialMergeSize = "spatial_merge_size"
+        case temporalPatchSize = "temporal_patch_size"
+    }
+
+    /// Creates a vision-tower configuration directly from field values,
+    /// defaulting each parameter to the value verified against the
+    /// `mlx-community/MiniMax-M3-4bit` checkpoint's `config.json`.
+    public init(
+        hiddenSize: Int = defaultVisionHiddenSize,
+        intermediateSize: Int = defaultVisionIntermediateSize,
+        numAttentionHeads: Int = defaultVisionAttentionHeads,
+        numHiddenLayers: Int = defaultVisionHiddenLayers,
+        patchSize: Int = defaultVisionPatchSize,
+        numChannels: Int = defaultVisionChannels,
+        layerNormEps: Float = defaultVisionLayerNormEps,
+        hiddenAct: String = defaultVisionHiddenAct,
+        ropeTheta: Float = defaultVisionRopeTheta,
+        spatialMergeSize: Int = defaultVisionSpatialMergeSize,
+        temporalPatchSize: Int = defaultVisionTemporalPatchSize,
+        segmentMaxFrames: Int = defaultVisionSegmentMaxFrames
+    ) {
+        self.hiddenSize = hiddenSize
+        self.intermediateSize = intermediateSize
+        self.numAttentionHeads = numAttentionHeads
+        self.numHiddenLayers = numHiddenLayers
+        self.patchSize = patchSize
+        self.numChannels = numChannels
+        self.layerNormEps = layerNormEps
+        self.hiddenAct = hiddenAct
+        self.ropeTheta = ropeTheta
+        self.spatialMergeSize = spatialMergeSize
+        self.temporalPatchSize = temporalPatchSize
+        self.segmentMaxFrames = segmentMaxFrames
+    }
+
+    /// Decodes a vision-tower configuration, defaulting any field the
+    /// checkpoint omits (including the entire nested
+    /// `img_token_compression_config` object) to the value verified against
+    /// the `mlx-community/MiniMax-M3-4bit` checkpoint's `config.json`.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hiddenSize =
+            try container.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? defaultVisionHiddenSize
+        intermediateSize =
+            try container.decodeIfPresent(Int.self, forKey: .intermediateSize)
+            ?? defaultVisionIntermediateSize
+        numAttentionHeads =
+            try container.decodeIfPresent(Int.self, forKey: .numAttentionHeads)
+            ?? defaultVisionAttentionHeads
+        numHiddenLayers =
+            try container.decodeIfPresent(Int.self, forKey: .numHiddenLayers)
+            ?? defaultVisionHiddenLayers
+        patchSize =
+            try container.decodeIfPresent(Int.self, forKey: .patchSize) ?? defaultVisionPatchSize
+        numChannels =
+            try container.decodeIfPresent(Int.self, forKey: .numChannels) ?? defaultVisionChannels
+        layerNormEps =
+            try container.decodeIfPresent(Float.self, forKey: .layerNormEps)
+            ?? defaultVisionLayerNormEps
+        hiddenAct =
+            try container.decodeIfPresent(String.self, forKey: .hiddenAct) ?? defaultVisionHiddenAct
+        ropeTheta =
+            try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? defaultVisionRopeTheta
+        segmentMaxFrames =
+            try container.decodeIfPresent(Int.self, forKey: .segmentMaxFrames)
+            ?? defaultVisionSegmentMaxFrames
+
+        if container.contains(.compression) {
+            let compression = try container.nestedContainer(
+                keyedBy: CompressionCodingKeys.self, forKey: .compression)
+            spatialMergeSize =
+                try compression.decodeIfPresent(Int.self, forKey: .spatialMergeSize)
+                ?? defaultVisionSpatialMergeSize
+            temporalPatchSize =
+                try compression.decodeIfPresent(Int.self, forKey: .temporalPatchSize)
+                ?? defaultVisionTemporalPatchSize
+        } else {
+            spatialMergeSize = defaultVisionSpatialMergeSize
+            temporalPatchSize = defaultVisionTemporalPatchSize
+        }
+    }
+}
+
+// MARK: - MiniMaxM3Vision
+
+/// MiniMax-M3's vision tower: a CLIP-style ViT with 3D (time/height/width)
+/// RoPE instead of learned position embeddings, and no in-tower token
+/// compression (patch-merge token compression happens at the
+/// `MiniMaxM3Model` level, in `patch_merge_mlp`, after the
+/// `multi_modal_projector` -- see `MiniMaxM3Model.mergeVisualTokens`).
+///
+/// Reference: mlx-vlm `mlx_vlm/models/minimax_m3_vl/vision.py`
+/// (`MiniMaxVisionEmbeddings`, `MiniMaxVisionAttention`, `MiniMaxVisionMLP`,
+/// `MiniMaxVisionEncoderLayer`, `MiniMaxVisionEncoder`,
+/// `MiniMaxVisionTransformer`, `VisionModel`), verified against the
+/// `mlx-community/MiniMax-M3-4bit` checkpoint's `vision_config` in
+/// `config.json`.
+///
+/// **Only the default feature-selection path is implemented.** The real
+/// checkpoint's top-level `vision_feature_layer`/`vision_feature_select_strategy`
+/// are `-1`/`"full"` -- the plain "run every encoder layer once, project the
+/// final hidden state" path mlx-vlm's `Model._compute_visual_features` takes
+/// when `use_hidden_states` is `false`. Multi-layer hidden-state selection
+/// (`vision_feature_layer` as a list, or `"default"` strategy dropping the
+/// CLS token) is not modeled since no verified checkpoint exercises it.
+enum MiniMaxM3Vision {
+
+    /// Rotates the second half of `x`'s last dimension into the first half,
+    /// negated -- the standard RoPE half-rotation, mirroring mlx-vlm's
+    /// `_rotate_half` (`vision.py`).
+    static func rotateHalf(_ x: MLXArray) -> MLXArray {
+        let half = x.dim(-1) / 2
+        let first = x[.ellipsis, 0 ..< half]
+        let second = x[.ellipsis, half...]
+        return concatenated([-second, first], axis: -1)
+    }
+
+    /// Applies 3D RoPE to `x` (shape `(sequence, heads, headDim)`) using
+    /// precomputed `cos`/`sin` tables (shape `(sequence, rotaryDim)`),
+    /// leaving any trailing dimensions beyond `rotaryDim` untouched --
+    /// mirrors mlx-vlm's `_apply_vision_rope`. `rotaryDim` need not equal
+    /// `headDim`: for the verified default config (`headDim` 80, 3 axes),
+    /// only 78 of 80 head dimensions rotate.
+    static func applyRoPE(_ x: MLXArray, cos: MLXArray, sin: MLXArray) -> MLXArray {
+        guard cos.size > 0 else { return x }
+        let rotaryDim = cos.dim(-1)
+        let cosBroadcast = expandedDimensions(cos, axis: 1)
+        let sinBroadcast = expandedDimensions(sin, axis: 1)
+        let rotated = x[.ellipsis, 0 ..< rotaryDim]
+        let passthrough = x[.ellipsis, rotaryDim...]
+        let result = rotated * cosBroadcast + rotateHalf(rotated) * sinBroadcast
+        return concatenated([result, passthrough], axis: -1).asType(x.dtype)
+    }
+
+    /// One axis's (time, height, or width) RoPE frequency table: `theta`-based
+    /// inverse frequencies outer-producted against `coords` -- mirrors
+    /// mlx-vlm's `_axis_freq`.
+    static func axisFrequencies(_ coords: MLXArray, dimensions: Int, theta: Float) -> MLXArray {
+        let inverseFrequency =
+            1.0
+            / pow(
+                MLXArray(theta),
+                MLXArray(stride(from: 0, to: dimensions, by: 2)).asType(.float32)
+                    / Float(dimensions))
+        return outer(coords.asType(.float32), inverseFrequency)
+    }
+
+    /// Splits `grids` so no segment exceeds `maxFrames` temporal frames --
+    /// mirrors mlx-vlm's `_segment_grid_thw`. Every image grid has `t == 1`
+    /// (see `defaultVisionTemporalPatchSize`), so this only ever subdivides
+    /// video grids; each independent segment gets its own non-causal
+    /// attention block (see `cumulativeSequenceLengths`).
+    static func segmentGrids(_ grids: [THW], maxFrames: Int) -> [THW] {
+        var segments: [THW] = []
+        for grid in grids {
+            guard grid.t > maxFrames else {
+                segments.append(grid)
+                continue
+            }
+            var start = 0
+            while start < grid.t {
+                segments.append(THW(min(maxFrames, grid.t - start), grid.h, grid.w))
+                start += maxFrames
+            }
+        }
+        return segments
+    }
+
+    /// Builds the flattened, per-token 3D-RoPE `cos`/`sin` tables for every
+    /// grid in `grids`, concatenated in order -- mirrors mlx-vlm's
+    /// `MiniMaxVisionTransformer._rotary_pos_emb`. Token order within each
+    /// grid matches `QwenVL.patchify`'s patch order exactly: `(t, h/merge,
+    /// w/merge, mergeRow, mergeCol)`, flattened row-major.
+    static func rotaryPositionEmbedding(
+        grids: [THW], config: MiniMaxM3VisionConfiguration
+    ) -> (cos: MLXArray, sin: MLXArray) {
+        let mergeSize = config.spatialMergeSize
+        let headDim = config.hiddenSize / config.numAttentionHeads
+        let rotaryDims = 2 * (headDim / 2)
+        let axisDim = 2 * ((rotaryDims / 3) / 2)
+
+        var freqSegments: [MLXArray] = []
+        for grid in segmentGrids(grids, maxFrames: config.segmentMaxFrames) {
+            let mergedH = grid.h / mergeSize
+            let mergedW = grid.w / mergeSize
+            guard grid.t > 0, mergedH > 0, mergedW > 0 else { continue }
+
+            let shape = [grid.t, mergedH, mergedW, mergeSize, mergeSize]
+            let tIndex = broadcast(
+                MLXArray(0 ..< grid.t).asType(.int32).reshaped([grid.t, 1, 1, 1, 1]), to: shape)
+            let hBlock = MLXArray(0 ..< mergedH).asType(.int32).reshaped([1, mergedH, 1, 1, 1])
+            let wBlock = MLXArray(0 ..< mergedW).asType(.int32).reshaped([1, 1, mergedW, 1, 1])
+            let intraRow = MLXArray(0 ..< mergeSize).asType(.int32).reshaped([1, 1, 1, mergeSize, 1])
+            let intraCol = MLXArray(0 ..< mergeSize).asType(.int32).reshaped([1, 1, 1, 1, mergeSize])
+            let hIndex = broadcast(hBlock * Int32(mergeSize) + intraRow, to: shape)
+            let wIndex = broadcast(wBlock * Int32(mergeSize) + intraCol, to: shape)
+
+            let freqs = concatenated(
+                [
+                    axisFrequencies(tIndex.flattened(), dimensions: axisDim, theta: config.ropeTheta),
+                    axisFrequencies(hIndex.flattened(), dimensions: axisDim, theta: config.ropeTheta),
+                    axisFrequencies(wIndex.flattened(), dimensions: axisDim, theta: config.ropeTheta),
+                ], axis: -1)
+            freqSegments.append(concatenated([freqs, freqs], axis: -1))
+        }
+
+        guard !freqSegments.isEmpty else {
+            return (MLXArray.zeros([0, 0]), MLXArray.zeros([0, 0]))
+        }
+        let allFrequencies = concatenated(freqSegments, axis: 0)
+        return (MLX.cos(allFrequencies), MLX.sin(allFrequencies))
+    }
+
+    /// Cumulative per-segment token-count boundaries (`[0, len(segment0),
+    /// len(segment0)+len(segment1), ...]`) used to build the block-diagonal
+    /// attention mask -- mirrors mlx-vlm's `cu_seqlens` (built from
+    /// `_segment_grid_thw`, matching `rotaryPositionEmbedding`'s segmentation
+    /// exactly so RoPE and masking stay aligned).
+    static func cumulativeSequenceLengths(grids: [THW], maxFrames: Int) -> [Int] {
+        var boundaries = [0]
+        var total = 0
+        for grid in segmentGrids(grids, maxFrames: maxFrames) {
+            total += grid.product
+            boundaries.append(total)
+        }
+        return boundaries
+    }
+
+    /// `vision_tower.vision_model.embeddings`: a single non-overlapping
+    /// patch-embedding projection (patch stride == patch size, so this is
+    /// exactly a linear projection over each already-patchified token, not a
+    /// true convolution) -- mirrors mlx-vlm's `MiniMaxVisionEmbeddings` /
+    /// `MiniMaxVisionPatchEmbedding`. The checkpoint stores the projection
+    /// weight in Conv3d layout (`hidden, channels, temporalPatch, patch,
+    /// patch`); `MiniMaxM3Model.sanitize` flattens it to the 2D `Linear`
+    /// layout this module expects.
+    final class Embeddings: Module {
+        @ModuleInfo(key: "patch_embedding") var patchEmbedding: Linear
+        let patchDimensions: Int
+
+        init(_ config: MiniMaxM3VisionConfiguration) {
+            self.patchDimensions =
+                config.numChannels * config.temporalPatchSize * config.patchSize * config.patchSize
+            _patchEmbedding.wrappedValue = Linear(patchDimensions, config.hiddenSize, bias: false)
+            super.init()
+        }
+
+        func callAsFunction(_ x: MLXArray) -> MLXArray {
+            patchEmbedding(x.reshaped(-1, patchDimensions))
+        }
+    }
+
+    /// `self_attn`: full (non-causal) multi-head attention over 3D-RoPE'd
+    /// queries/keys, block-diagonal across `cuSeqlens` segments -- mirrors
+    /// mlx-vlm's `MiniMaxVisionAttention`. Follows the same additive-mask
+    /// construction as `Qwen3VLVision.Attention` (`Qwen3VL.swift`).
+    final class Attention: Module {
+        let numHeads: Int
+        let headDim: Int
+        let scale: Float
+
+        @ModuleInfo(key: "q_proj") var qProj: Linear
+        @ModuleInfo(key: "k_proj") var kProj: Linear
+        @ModuleInfo(key: "v_proj") var vProj: Linear
+        @ModuleInfo(key: "out_proj") var outProj: Linear
+
+        init(_ config: MiniMaxM3VisionConfiguration) {
+            self.numHeads = config.numAttentionHeads
+            self.headDim = config.hiddenSize / config.numAttentionHeads
+            self.scale = pow(Float(headDim), -0.5)
+            _qProj.wrappedValue = Linear(config.hiddenSize, config.hiddenSize, bias: true)
+            _kProj.wrappedValue = Linear(config.hiddenSize, config.hiddenSize, bias: true)
+            _vProj.wrappedValue = Linear(config.hiddenSize, config.hiddenSize, bias: true)
+            _outProj.wrappedValue = Linear(config.hiddenSize, config.hiddenSize, bias: true)
+            super.init()
+        }
+
+        func callAsFunction(
+            _ x: MLXArray, cuSeqlens: [Int], cos: MLXArray, sin: MLXArray
+        ) -> MLXArray {
+            let sequenceLength = x.dim(0)
+
+            var q = qProj(x).reshaped(sequenceLength, numHeads, headDim)
+            var k = kProj(x).reshaped(sequenceLength, numHeads, headDim)
+            let v = vProj(x).reshaped(sequenceLength, numHeads, headDim)
+
+            q = MiniMaxM3Vision.applyRoPE(q, cos: cos, sin: sin)
+            k = MiniMaxM3Vision.applyRoPE(k, cos: cos, sin: sin)
+
+            let queries = q.transposed(1, 0, 2)[.newAxis]
+            let keys = k.transposed(1, 0, 2)[.newAxis]
+            let values = v.transposed(1, 0, 2)[.newAxis]
+
+            var mask = MLXArray.ones([1, sequenceLength, sequenceLength], dtype: queries.dtype)
+            mask = mask * MLXArray(-1e9, dtype: queries.dtype)
+            for i in 1 ..< cuSeqlens.count {
+                let start = cuSeqlens[i - 1]
+                let end = cuSeqlens[i]
+                mask[0..., start ..< end, start ..< end] = MLXArray(0, dtype: queries.dtype)
+            }
+
+            let attended = MLXFast.scaledDotProductAttention(
+                queries: queries, keys: keys, values: values, scale: scale, mask: .array(mask)
+            )
+            .transposed(0, 2, 1, 3)
+            .reshaped(sequenceLength, -1)
+
+            return outProj(attended)
+        }
+    }
+
+    /// `mlp`: two-layer MLP with a config-selected activation (`quick_gelu`,
+    /// `silu`, or `gelu` -- the verified default) -- mirrors mlx-vlm's
+    /// `MiniMaxVisionMLP`.
+    final class MLP: Module {
+        @ModuleInfo(key: "fc1") var fc1: Linear
+        @ModuleInfo(key: "fc2") var fc2: Linear
+        let hiddenAct: String
+
+        init(_ config: MiniMaxM3VisionConfiguration) {
+            _fc1.wrappedValue = Linear(config.hiddenSize, config.intermediateSize, bias: true)
+            _fc2.wrappedValue = Linear(config.intermediateSize, config.hiddenSize, bias: true)
+            self.hiddenAct = config.hiddenAct
+            super.init()
+        }
+
+        func callAsFunction(_ x: MLXArray) -> MLXArray {
+            var h = fc1(x)
+            switch hiddenAct {
+            case "quick_gelu":
+                h = h * sigmoid(1.702 * h)
+            case "silu":
+                h = silu(h)
+            default:
+                h = gelu(h)
+            }
+            return fc2(h)
+        }
+    }
+
+    /// One pre-norm transformer block: `self_attn` then `mlp`, each with its
+    /// own residual -- mirrors mlx-vlm's `MiniMaxVisionEncoderLayer`.
+    final class EncoderLayer: Module {
+        @ModuleInfo(key: "self_attn") var selfAttn: Attention
+        @ModuleInfo(key: "layer_norm1") var layerNorm1: LayerNorm
+        @ModuleInfo(key: "mlp") var mlp: MLP
+        @ModuleInfo(key: "layer_norm2") var layerNorm2: LayerNorm
+
+        init(_ config: MiniMaxM3VisionConfiguration) {
+            _selfAttn.wrappedValue = Attention(config)
+            _layerNorm1.wrappedValue = LayerNorm(dimensions: config.hiddenSize, eps: config.layerNormEps)
+            _mlp.wrappedValue = MLP(config)
+            _layerNorm2.wrappedValue = LayerNorm(dimensions: config.hiddenSize, eps: config.layerNormEps)
+            super.init()
+        }
+
+        func callAsFunction(_ x: MLXArray, cuSeqlens: [Int], cos: MLXArray, sin: MLXArray) -> MLXArray {
+            var h = x + selfAttn(layerNorm1(x), cuSeqlens: cuSeqlens, cos: cos, sin: sin)
+            h = h + mlp(layerNorm2(h))
+            return h
+        }
+    }
+
+    /// `encoder`: a plain stack of `EncoderLayer`s -- mirrors mlx-vlm's
+    /// `MiniMaxVisionEncoder`.
+    final class Encoder: Module {
+        @ModuleInfo(key: "layers") var layers: [EncoderLayer]
+
+        init(_ config: MiniMaxM3VisionConfiguration) {
+            _layers.wrappedValue = (0 ..< config.numHiddenLayers).map { _ in EncoderLayer(config) }
+            super.init()
+        }
+
+        func callAsFunction(_ x: MLXArray, cuSeqlens: [Int], cos: MLXArray, sin: MLXArray) -> MLXArray {
+            var h = x
+            for layer in layers {
+                h = layer(h, cuSeqlens: cuSeqlens, cos: cos, sin: sin)
+            }
+            return h
+        }
+    }
+
+    /// `vision_tower.vision_model`: embeddings, a pre-encoder LayerNorm (key
+    /// `pre_layrnorm` -- the checkpoint's own spelling, preserved verbatim so
+    /// weight loading matches), and the encoder stack. No post-encoder norm
+    /// and no in-tower merger: the final encoder layer's raw per-patch hidden
+    /// states are returned directly, matching the verified checkpoint's
+    /// `vision_feature_layer: -1, vision_feature_select_strategy: "full"` --
+    /// mirrors mlx-vlm's `MiniMaxVisionTransformer`.
+    final class Transformer: Module {
+        let config: MiniMaxM3VisionConfiguration
+        @ModuleInfo(key: "embeddings") var embeddings: Embeddings
+        @ModuleInfo(key: "pre_layrnorm") var preLayerNorm: LayerNorm
+        @ModuleInfo(key: "encoder") var encoder: Encoder
+
+        init(_ config: MiniMaxM3VisionConfiguration) {
+            self.config = config
+            _embeddings.wrappedValue = Embeddings(config)
+            _preLayerNorm.wrappedValue = LayerNorm(dimensions: config.hiddenSize, eps: config.layerNormEps)
+            _encoder.wrappedValue = Encoder(config)
+            super.init()
+        }
+
+        func callAsFunction(_ pixelValues: MLXArray, gridTHW: [THW]) -> MLXArray {
+            var hidden = embeddings(pixelValues).reshaped(-1, config.hiddenSize)
+            hidden = preLayerNorm(hidden)
+            let (cosTable, sinTable) = MiniMaxM3Vision.rotaryPositionEmbedding(
+                grids: gridTHW, config: config)
+            let cuSeqlens = MiniMaxM3Vision.cumulativeSequenceLengths(
+                grids: gridTHW, maxFrames: config.segmentMaxFrames)
+            return encoder(hidden, cuSeqlens: cuSeqlens, cos: cosTable, sin: sinTable)
+        }
+    }
+
+    /// `vision_tower`: the checkpoint's top-level wrapper around
+    /// `vision_model` -- mirrors mlx-vlm's `VisionModel`.
+    final class VisionModel: Module {
+        @ModuleInfo(key: "vision_model") var transformer: Transformer
+
+        init(_ config: MiniMaxM3VisionConfiguration) {
+            _transformer.wrappedValue = Transformer(config)
+            super.init()
+        }
+
+        /// The dtype pixel values must be cast to before this vision tower
+        /// consumes them, taken from the patch-embedding projection weight --
+        /// mirrors mlx-vlm's `Model._compute_visual_features` dtype cast.
+        var inputDtype: DType { transformer.embeddings.patchEmbedding.weight.dtype }
+
+        func callAsFunction(_ pixelValues: MLXArray, gridTHW: [THW]) -> MLXArray {
+            transformer(pixelValues, gridTHW: gridTHW)
+        }
+    }
+}
+
+// MARK: - MiniMaxM3Projector
+
+/// A two-layer MLP with a config-selected activation, used for both
+/// `multi_modal_projector` (vision hidden size -> text hidden size) and
+/// `patch_merge_mlp` (`spatialMergeSize^2`-concatenated projected tokens ->
+/// text hidden size) -- mirrors mlx-vlm's `MiniMaxProjector`, which the
+/// checkpoint's `Model` reuses for both roles with different dimensions/bias.
+final class MiniMaxM3Projector: Module {
+    @ModuleInfo(key: "linear_1") var linear1: Linear
+    @ModuleInfo(key: "linear_2") var linear2: Linear
+    let hiddenAct: String
+
+    init(inputDimensions: Int, hiddenDimensions: Int, outputDimensions: Int, bias: Bool, hiddenAct: String) {
+        _linear1.wrappedValue = Linear(inputDimensions, hiddenDimensions, bias: bias)
+        _linear2.wrappedValue = Linear(hiddenDimensions, outputDimensions, bias: bias)
+        self.hiddenAct = hiddenAct
+        super.init()
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        var h = linear1(x)
+        switch hiddenAct {
+        case "silu":
+            h = silu(h)
+        case "quick_gelu":
+            h = h * sigmoid(1.702 * h)
+        default:
+            h = gelu(h)
+        }
+        return linear2(h)
+    }
+}
+
 // MARK: - MiniMaxM3Configuration
 
-/// Top-level MiniMax-M3 VL configuration: `text_config` (used by this dense
-/// -attention-only task) plus `vision_config` (decoded upstream but unused
-/// here -- vision support is a later task).
-public struct MiniMaxM3Configuration: Codable, Sendable {
+/// Default image-token id spliced into the prompt at each image's token
+/// positions (`image_token_index`), verified against the
+/// `mlx-community/MiniMax-M3-4bit` checkpoint's `config.json`. Shared by
+/// `MiniMaxM3Configuration`'s memberwise `init` and its `init(from:)` decoder
+/// fallback.
+public let defaultImageTokenIndex = 200_025
+
+/// Default video-token id (`video_token_index`). See `defaultImageTokenIndex`.
+public let defaultVideoTokenIndex = 200_026
+
+/// Default `multi_modal_projector`/`patch_merge_mlp` activation function name
+/// (`projector_hidden_act`). See `defaultImageTokenIndex`.
+public let defaultProjectorHiddenAct = "gelu"
+
+/// Default `multi_modal_projector` hidden dimension (`projector_hidden_size`). See `defaultImageTokenIndex`.
+public let defaultProjectorHiddenSize = 6144
+
+/// Top-level MiniMax-M3 VL configuration: `text_config` plus `vision_config`
+/// (vision tower + merger + splicing, kanban ^9a2aw98).
+public struct MiniMaxM3Configuration: Decodable, Sendable {
     /// Top-level checkpoint model type (`"minimax_m3_vl"`).
     public var modelType: String
     /// The text-model configuration used by the dense-attention language model.
     public var textConfiguration: MiniMaxM3TextConfiguration
+    /// The vision-tower configuration.
+    public var visionConfiguration: MiniMaxM3VisionConfiguration
+    /// Token id marking an image's spliced-embedding positions (`image_token_index`).
+    public var imageTokenIndex: Int
+    /// Token id marking a video's spliced-embedding positions (`video_token_index`).
+    public var videoTokenIndex: Int
+    /// `multi_modal_projector`/`patch_merge_mlp` activation function name (`projector_hidden_act`).
+    public var projectorHiddenAct: String
+    /// `multi_modal_projector` hidden dimension (`projector_hidden_size`).
+    public var projectorHiddenSize: Int
+    /// Whether `multi_modal_projector`'s linear layers carry a bias (`multimodal_projector_bias`).
+    public var multimodalProjectorBias: Bool
+    /// Whether `patch_merge_mlp`'s linear layers carry a bias (`patch_merge_bias`).
+    public var patchMergeBias: Bool
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
         case textConfiguration = "text_config"
+        case visionConfiguration = "vision_config"
+        case imageTokenIndex = "image_token_index"
+        case videoTokenIndex = "video_token_index"
+        case projectorHiddenAct = "projector_hidden_act"
+        case projectorHiddenSize = "projector_hidden_size"
+        case multimodalProjectorBias = "multimodal_projector_bias"
+        case patchMergeBias = "patch_merge_bias"
     }
 
-    /// Creates a top-level MiniMax-M3 configuration from its model type and text configuration.
+    /// Creates a top-level MiniMax-M3 configuration from its model type, text
+    /// configuration, and vision configuration.
     public init(
         modelType: String = "minimax_m3_vl",
-        textConfiguration: MiniMaxM3TextConfiguration = MiniMaxM3TextConfiguration()
+        textConfiguration: MiniMaxM3TextConfiguration = MiniMaxM3TextConfiguration(),
+        visionConfiguration: MiniMaxM3VisionConfiguration = MiniMaxM3VisionConfiguration(),
+        imageTokenIndex: Int = defaultImageTokenIndex,
+        videoTokenIndex: Int = defaultVideoTokenIndex,
+        projectorHiddenAct: String = defaultProjectorHiddenAct,
+        projectorHiddenSize: Int = defaultProjectorHiddenSize,
+        multimodalProjectorBias: Bool = true,
+        patchMergeBias: Bool = true
     ) {
         self.modelType = modelType
         self.textConfiguration = textConfiguration
+        self.visionConfiguration = visionConfiguration
+        self.imageTokenIndex = imageTokenIndex
+        self.videoTokenIndex = videoTokenIndex
+        self.projectorHiddenAct = projectorHiddenAct
+        self.projectorHiddenSize = projectorHiddenSize
+        self.multimodalProjectorBias = multimodalProjectorBias
+        self.patchMergeBias = patchMergeBias
+    }
+
+    /// Decodes a top-level configuration, defaulting any field the checkpoint
+    /// omits (including the entire `vision_config` object) to the value
+    /// verified against the `mlx-community/MiniMax-M3-4bit` checkpoint's
+    /// `config.json`.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        modelType =
+            try container.decodeIfPresent(String.self, forKey: .modelType) ?? "minimax_m3_vl"
+        textConfiguration =
+            try container.decodeIfPresent(MiniMaxM3TextConfiguration.self, forKey: .textConfiguration)
+            ?? MiniMaxM3TextConfiguration()
+        visionConfiguration =
+            try container.decodeIfPresent(
+                MiniMaxM3VisionConfiguration.self, forKey: .visionConfiguration)
+            ?? MiniMaxM3VisionConfiguration()
+        imageTokenIndex =
+            try container.decodeIfPresent(Int.self, forKey: .imageTokenIndex)
+            ?? defaultImageTokenIndex
+        videoTokenIndex =
+            try container.decodeIfPresent(Int.self, forKey: .videoTokenIndex)
+            ?? defaultVideoTokenIndex
+        projectorHiddenAct =
+            try container.decodeIfPresent(String.self, forKey: .projectorHiddenAct)
+            ?? defaultProjectorHiddenAct
+        projectorHiddenSize =
+            try container.decodeIfPresent(Int.self, forKey: .projectorHiddenSize)
+            ?? defaultProjectorHiddenSize
+        multimodalProjectorBias =
+            try container.decodeIfPresent(Bool.self, forKey: .multimodalProjectorBias) ?? true
+        patchMergeBias = try container.decodeIfPresent(Bool.self, forKey: .patchMergeBias) ?? true
     }
 }
 
@@ -1421,8 +2074,14 @@ final class MiniMaxM3ModelInner: Module {
         super.init()
     }
 
-    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        var h = embedTokens(inputs)
+    /// Runs the decoder stack, embedding `inputs` via `embedTokens` unless
+    /// `inputEmbeddings` is supplied -- vision-augmented prefill (kanban
+    /// ^9a2aw98) passes already-spliced image embeddings here instead of
+    /// letting this method derive them from raw token ids.
+    func callAsFunction(
+        _ inputs: MLXArray, cache: [KVCache]?, inputEmbeddings: MLXArray? = nil
+    ) -> MLXArray {
+        var h = inputEmbeddings ?? embedTokens(inputs)
 
         let mask = createAttentionMask(h: h, cache: cache?.first)
 
@@ -1466,8 +2125,12 @@ final class MiniMaxM3LanguageModel: Module, KVCacheDimensionProvider {
         super.init()
     }
 
-    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        let out = model(inputs, cache: cache)
+    /// Runs the language model, forwarding `inputEmbeddings` through to
+    /// `MiniMaxM3ModelInner` unchanged -- see that method's documentation.
+    func callAsFunction(
+        _ inputs: MLXArray, cache: [KVCache]?, inputEmbeddings: MLXArray? = nil
+    ) -> MLXArray {
+        let out = model(inputs, cache: cache, inputEmbeddings: inputEmbeddings)
         if let lmHead {
             return lmHead(out)
         }
@@ -1504,24 +2167,115 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
     private static let languageModelPrefix = "language_model."
 
     @ModuleInfo(key: "language_model") var languageModel: MiniMaxM3LanguageModel
+    @ModuleInfo(key: "vision_tower") var visionTower: MiniMaxM3Vision.VisionModel?
+    @ModuleInfo(key: "multi_modal_projector") var multiModalProjector: MiniMaxM3Projector?
+    @ModuleInfo(key: "patch_merge_mlp") var patchMergeMlp: MiniMaxM3Projector?
 
     /// The text-model configuration this instance was constructed from.
     public let configuration: MiniMaxM3TextConfiguration
+    /// The vision-tower configuration, or `nil` for a text-only (`minimax_m3`
+    /// flat, or VL-nested but vision-less) instance.
+    public let visionConfiguration: MiniMaxM3VisionConfiguration?
+    /// Token id marking an image's spliced-embedding positions
+    /// (`defaultImageTokenIndex` for a text-only instance, unused).
+    public let imageTokenIndex: Int
+    /// Token id marking a video's spliced-embedding positions. See `imageTokenIndex`.
+    public let videoTokenIndex: Int
     /// Per-layer key/value head counts, forwarded from the language model.
     public var kvHeads: [Int] { languageModel.kvHeads }
     /// Vocabulary size, forwarded from `configuration`.
     public var vocabularySize: Int { configuration.vocabularySize }
 
-    /// Creates a dense-attention MiniMax-M3 language model from its text configuration.
+    /// Creates a dense-attention, text-only MiniMax-M3 language model (no
+    /// vision tower) from its text configuration -- used by the flat
+    /// (`minimax_m3`) registration.
     public init(_ config: MiniMaxM3TextConfiguration) {
         self.configuration = config
+        self.visionConfiguration = nil
+        self.imageTokenIndex = defaultImageTokenIndex
+        self.videoTokenIndex = defaultVideoTokenIndex
         _languageModel.wrappedValue = MiniMaxM3LanguageModel(config)
+        super.init()
+    }
+
+    /// Creates a vision-capable MiniMax-M3 model from its full top-level
+    /// configuration -- used by the VL-nested (`minimax_m3_vl`) registration
+    /// (kanban ^9a2aw98).
+    public init(_ config: MiniMaxM3Configuration) {
+        self.configuration = config.textConfiguration
+        self.visionConfiguration = config.visionConfiguration
+        self.imageTokenIndex = config.imageTokenIndex
+        self.videoTokenIndex = config.videoTokenIndex
+        _languageModel.wrappedValue = MiniMaxM3LanguageModel(config.textConfiguration)
+        _visionTower.wrappedValue = MiniMaxM3Vision.VisionModel(config.visionConfiguration)
+        _multiModalProjector.wrappedValue = MiniMaxM3Projector(
+            inputDimensions: config.visionConfiguration.hiddenSize,
+            hiddenDimensions: config.projectorHiddenSize,
+            outputDimensions: config.textConfiguration.hiddenSize,
+            bias: config.multimodalProjectorBias,
+            hiddenAct: config.projectorHiddenAct)
+        let mergeSize = config.visionConfiguration.spatialMergeSize
+        _patchMergeMlp.wrappedValue = MiniMaxM3Projector(
+            inputDimensions: config.textConfiguration.hiddenSize * mergeSize * mergeSize,
+            hiddenDimensions: config.textConfiguration.hiddenSize,
+            outputDimensions: config.textConfiguration.hiddenSize,
+            bias: config.patchMergeBias,
+            hiddenAct: config.projectorHiddenAct)
         super.init()
     }
 
     /// Runs the language model over `inputs`, reading from and updating `cache` in place if provided.
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         languageModel(inputs, cache: cache)
+    }
+
+    /// Runs the language model over already-computed input embeddings, used
+    /// for vision-augmented prefill where image features have already been
+    /// spliced into the embedding sequence -- see
+    /// `prepare(_:cache:state:windowSize:)`.
+    func callAsFunction(
+        _ inputs: MLXArray, cache: [KVCache]?, inputEmbeddings: MLXArray
+    ) -> MLXArray {
+        languageModel(inputs, cache: cache, inputEmbeddings: inputEmbeddings)
+    }
+
+    /// Runs the vision tower and `multi_modal_projector`, then merges
+    /// adjacent `spatialMergeSize x spatialMergeSize` projected patches into
+    /// single tokens via `patch_merge_mlp` -- mirrors mlx-vlm's
+    /// `Model._compute_visual_features`.
+    private func computeVisualFeatures(pixelValues: MLXArray, gridTHW: [THW]) -> MLXArray {
+        guard let visionTower, let multiModalProjector else {
+            fatalError("computeVisualFeatures called on a MiniMaxM3Model with no vision tower")
+        }
+        let hidden = visionTower(pixelValues.asType(visionTower.inputDtype), gridTHW: gridTHW)
+        return mergeVisualTokens(multiModalProjector(hidden), gridTHW: gridTHW)
+    }
+
+    /// Reduces `features` (one row per un-merged patch, concatenated across
+    /// every grid in `gridTHW` in order) into one row per
+    /// `spatialMergeSize x spatialMergeSize` block via `patch_merge_mlp` --
+    /// mirrors mlx-vlm's `Model._merge_visual_tokens`. Patch order within
+    /// each grid already groups each merge block contiguously (see
+    /// `MiniMaxM3Vision.rotaryPositionEmbedding`'s documentation), so no
+    /// transpose is needed before reshaping.
+    private func mergeVisualTokens(_ features: MLXArray, gridTHW: [THW]) -> MLXArray {
+        guard let patchMergeMlp, let visionConfiguration else {
+            fatalError("mergeVisualTokens called on a MiniMaxM3Model with no vision tower")
+        }
+        let mergeSize = visionConfiguration.spatialMergeSize
+        let featureDim = features.dim(-1)
+        var outputs: [MLXArray] = []
+        var offset = 0
+        for grid in gridTHW {
+            let length = grid.product
+            let block = features[offset ..< offset + length, 0...]
+            offset += length
+            let reshaped = block.reshaped(
+                grid.t, grid.h / mergeSize, grid.w / mergeSize, mergeSize, mergeSize, featureDim
+            ).reshaped(-1, mergeSize * mergeSize * featureDim)
+            outputs.append(patchMergeMlp(reshaped))
+        }
+        return concatenated(outputs, axis: 0)
     }
 
     /// `MiniMaxM3KVCache` per MSA layer (`configuration.isMoELayer`, layers
@@ -1548,11 +2302,13 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
     /// per-expert fallback weights (`w1`/`w2`/`w3`) into the fused
     /// `gate_up_proj`/`down_proj` layout `FusedGateUpSwitchGLU` expects. The
     /// three phases are independent transformations, applied in order -- see
-    /// `_mergeQuantized`, `_filterUnusedWeights`, and `_remapExpertWeights`.
+    /// `_mergeQuantized`, `_filterUnusedWeights`, `_remapExpertWeights`, and
+    /// `_remapVisionWeights`.
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         let merged = _mergeQuantized(weights)
         let filtered = _filterUnusedWeights(merged)
-        return _remapExpertWeights(filtered)
+        let experts = _remapExpertWeights(filtered)
+        return _remapVisionWeights(experts)
     }
 
     /// `sanitize` step 1: merge fp8/bf16 block-quantized `weight_scale_inv`
@@ -1589,26 +2345,36 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
         return merged
     }
 
-    /// `sanitize` step 2: drop vision-tower / multi-modal-projector / MTP
-    /// weights (verified absent from the mlx-community/MiniMax-M3-4bit
-    /// checkpoint; MTP task will revisit), re-key flat (`minimax_m3`)
-    /// checkpoints into the `language_model.`-prefixed layout the VL
-    /// checkpoint already uses, and drop the tied `lm_head` weight when
+    /// `sanitize` step 2: drop MTP weights (out of scope for this port), keep
+    /// vision-tower / multi-modal-projector / patch-merge weights as-is (they
+    /// are already top-level sibling keys matching this model's own module
+    /// tree -- see `MiniMaxM3Model.init(_ config: MiniMaxM3Configuration)` --
+    /// so unlike the language-model weights below, they need no
+    /// `language_model.` prefixing), re-key flat (`minimax_m3`) checkpoints
+    /// into the `language_model.`-prefixed layout the VL checkpoint already
+    /// uses, and drop the tied `lm_head` weight when
     /// `configuration.tieWordEmbeddings` is set. The sparse-attention indexer
     /// weights (`self_attn.index_q_proj`/`index_k_proj`/`index_q_norm`/
     /// `index_k_norm`, confirmed present on every MoE-scheduled layer in the
     /// real checkpoint's safetensors index) are no longer stripped here --
     /// `MiniMaxM3Indexer` (kanban ^8dbc476) now builds and loads them like
     /// any other layer weight.
+    ///
+    /// Un-drops the vision/projector keys this method used to discard
+    /// (kanban ^9a2aw98): a prior task (^wz8y8qq) verified they were absent
+    /// from the one real checkpoint downloaded so far, but a model built with
+    /// vision support (`MiniMaxM3Model.init(_ config: MiniMaxM3Configuration)`)
+    /// now has real submodules to load them into.
     private func _filterUnusedWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
         var prefixed: [String: MLXArray] = [:]
         for (key, value) in weights {
+            if key.hasPrefix("mtp.") || key.contains(".mtp.") {
+                continue
+            }
             if key.hasPrefix("vision_tower.") || key.hasPrefix("multi_modal_projector.")
                 || key.hasPrefix("patch_merge_mlp.")
             {
-                continue
-            }
-            if key.hasPrefix("mtp.") || key.contains(".mtp.") {
+                prefixed[key] = value
                 continue
             }
 
@@ -1675,6 +2441,23 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
         }
         return prefixed
     }
+
+    /// `sanitize` step 4: flattens the vision patch-embedding weight from its
+    /// checkpoint Conv3d layout (`hidden, channels, temporalPatch, patch,
+    /// patch`) into the 2D `Linear` layout `MiniMaxM3Vision.Embeddings`
+    /// expects (`hidden, channels*temporalPatch*patch*patch`) -- see that
+    /// type's documentation. A no-op when the key is absent (text-only
+    /// instance) or already 2D (e.g. a pre-flattened conversion).
+    private func _remapVisionWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
+        let patchEmbeddingKey = "vision_tower.vision_model.embeddings.patch_embedding.weight"
+        guard let weight = weights[patchEmbeddingKey], weight.ndim == 5 else { return weights }
+
+        var remapped = weights
+        let hiddenSize = weight.dim(0)
+        let patchDimensions = weight.dim(1) * weight.dim(2) * weight.dim(3) * weight.dim(4)
+        remapped[patchEmbeddingKey] = weight.reshaped(hiddenSize, patchDimensions)
+        return remapped
+    }
 }
 
 /// LoRA support for MiniMax-M3: exposes the dense-attention decoder layers as
@@ -1689,38 +2472,62 @@ extension MiniMaxM3Model: LoRAModel {
 
 // MARK: - MiniMaxM3Model + VLMModel
 
-/// `VLMModel` conformance for MiniMax-M3. There is no vision tower yet --
-/// `MiniMaxM3Processor` rejects image/video input before an `LMInput` is ever
-/// constructed, so `prepare(_:cache:state:windowSize:)` only ever sees
-/// text-only prefill (real vision support is a later task).
+/// `VLMModel` conformance for MiniMax-M3 (kanban ^9a2aw98). A text-only
+/// instance (`visionTower == nil`, e.g. the flat `minimax_m3` registration)
+/// still only ever sees `input.image == nil` -- `MiniMaxM3Processor` only
+/// attaches an image when the model it will run against might support one --
+/// but `prepare` throws a descriptive error rather than crashing if that
+/// invariant is ever violated.
 extension MiniMaxM3Model: VLMModel {
-    /// Prefills `input`'s tokens in `windowSize`-sized chunks and returns the
-    /// remainder for the `TokenIterator` to consume one token at a time.
-    ///
-    /// Mirrors `LLMModel`'s default `prepare(_:cache:state:windowSize:)` --
-    /// MiniMax-M3 has no vision tower yet, so `input.image`/`input.video` are
-    /// always `nil` here: `MiniMaxM3Processor` rejects image/video input
-    /// before an `LMInput` is ever constructed.
+    /// Prefills `input`'s tokens and returns either the remainder for the
+    /// `TokenIterator` to consume one token at a time (text-only prompts,
+    /// `windowSize`-chunked) or already-computed logits (image prompts,
+    /// prefilled in one shot since vision-augmented input embeddings can't be
+    /// re-derived from a token-id chunk alone) -- mirrors `Qwen3VL.prepare`'s
+    /// split between the two paths (`Qwen3VL.swift`).
     public func prepare(
         _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
     ) throws -> PrepareResult {
-        let prefillStepSize = windowSize ?? 512
-        var y = input.text
+        guard let image = input.image else {
+            let prefillStepSize = windowSize ?? 512
+            var y = input.text
 
-        try withPreparedCache(cache, lengths: y.sequenceLengths) {
-            var state: LMOutput.State? = state
-            while y.tokens.size > prefillStepSize {
-                try Task.checkCancellation()
-                let chunk = y[.newAxis, ..<prefillStepSize]
-                let output = self(chunk, cache: cache.isEmpty ? nil : cache, state: state)
-                state = output.state
-                asyncEval(cache)
-                y = y[prefillStepSize...]
+            try withPreparedCache(cache, lengths: y.sequenceLengths) {
+                var state: LMOutput.State? = state
+                while y.tokens.size > prefillStepSize {
+                    try Task.checkCancellation()
+                    let chunk = y[.newAxis, ..<prefillStepSize]
+                    let output = self(chunk, cache: cache.isEmpty ? nil : cache, state: state)
+                    state = output.state
+                    asyncEval(cache)
+                    y = y[prefillStepSize...]
+                }
+                eval(cache)
             }
+
+            return .tokens(y)
+        }
+
+        guard visionTower != nil, multiModalProjector != nil, patchMergeMlp != nil else {
+            throw VLMError.mediaNotSupported("image")
+        }
+
+        let inputIds = input.text.tokens
+        let textEmbeds = languageModel.model.embedTokens(inputIds)
+        let visualFeatures = computeVisualFeatures(
+            pixelValues: image.pixels, gridTHW: image.frames ?? []
+        ).asType(textEmbeds.dtype)
+        let mergedEmbeds = QwenVL.mergeInputIdsWithImageFeatures(
+            inputIds: inputIds, inputEmbeds: textEmbeds, imageFeatures: visualFeatures,
+            imageTokenId: imageTokenIndex, videoTokenId: videoTokenIndex)
+
+        var logits = MLXArray(0)
+        withPreparedCache(cache, lengths: [inputIds.size]) {
+            logits = self(inputIds, cache: cache.isEmpty ? nil : cache, inputEmbeddings: mergedEmbeds)
             eval(cache)
         }
 
-        return .tokens(y)
+        return .logits(LMOutput(logits: logits))
     }
 }
 
@@ -1732,75 +2539,340 @@ extension MiniMaxM3Model: VLMModel {
 /// and its `init(from:)` decoder fallback.
 public let defaultMiniMaxM3ProcessorClass = "MiniMaxM3VLProcessor"
 
+/// Default `image_mean` (`preprocessor_config.json`'s `image_processor.image_mean`,
+/// the standard OpenAI CLIP normalization mean), used when the checkpoint's
+/// config omits the `image_processor` object entirely. Shared by
+/// `MiniMaxM3ProcessorConfiguration.ImageProcessorSettings`'s memberwise
+/// `init` and its `init(from:)` decoder fallback.
+public let defaultMiniMaxM3ImageMean: [CGFloat] = [0.481_454_66, 0.457_827_5, 0.408_210_73]
+
+/// Default `image_std` (OpenAI CLIP normalization standard deviation). See `defaultMiniMaxM3ImageMean`.
+public let defaultMiniMaxM3ImageStd: [CGFloat] = [0.268_629_54, 0.261_302_58, 0.275_777_11]
+
+/// Default minimum resize pixel budget (`image_processor.min_pixels`), verified
+/// against the `mlx-community/MiniMax-M3-4bit` checkpoint's
+/// `preprocessor_config.json`. See `defaultMiniMaxM3ImageMean`.
+public let defaultMiniMaxM3MinPixels = 3_136
+
+/// Default maximum resize pixel budget (`image_processor.max_pixels`). See `defaultMiniMaxM3ImageMean`.
+public let defaultMiniMaxM3MaxPixels = 451_584
+
 /// Configuration for `MiniMaxM3Processor`.
 ///
-/// Only the declared processor class name is modeled -- the checkpoint's
-/// image/video processor fields (`image_processor`/`video_processor` in
-/// `processor_config.json`) are unused until vision support lands.
+/// `MiniMaxM3ProcessorConfiguration` is decoded from whichever file
+/// `loadProcessorConfig` selects. The real `mlx-community/MiniMax-M3-4bit`
+/// checkpoint's `preprocessor_config.json` omits `processor_class` entirely,
+/// so `loadProcessorConfig` falls back to `processor_config.json` -- a
+/// *composite* document nesting the image-processor fields under an
+/// `image_processor` key rather than at the JSON root (unlike, e.g.,
+/// `Qwen3VLProcessorConfiguration`, which decodes a flat
+/// `preprocessor_config.json` directly). `init(from:)` supports both shapes,
+/// nested-first, falling back to the decoder's own root container when
+/// `image_processor` is absent -- mirrors
+/// `MiniMaxM3TextConfiguration.init(from:)`'s VL-nested/flat fallback pattern.
 public struct MiniMaxM3ProcessorConfiguration: Codable, Sendable {
+    /// The image-preprocessing fields consumed by `MiniMaxM3Processor`,
+    /// mirroring mlx-vlm's `MiniMaxM3VLImageProcessor` defaults.
+    public struct ImageProcessorSettings: Codable, Sendable {
+        /// Per-channel normalization mean (`image_mean`).
+        public let imageMean: [CGFloat]
+        /// Per-channel normalization standard deviation (`image_std`).
+        public let imageStd: [CGFloat]
+        /// Minimum resize pixel budget (`min_pixels`).
+        public let minPixels: Int
+        /// Maximum resize pixel budget (`max_pixels`).
+        public let maxPixels: Int
+        /// Patch size, in pixels (`patch_size`).
+        public let patchSize: Int
+        /// Temporal patch size (`temporal_patch_size`).
+        public let temporalPatchSize: Int
+        /// Spatial patch-merge factor (`merge_size`).
+        public let mergeSize: Int
+
+        enum CodingKeys: String, CodingKey {
+            case imageMean = "image_mean"
+            case imageStd = "image_std"
+            case minPixels = "min_pixels"
+            case maxPixels = "max_pixels"
+            case patchSize = "patch_size"
+            case temporalPatchSize = "temporal_patch_size"
+            case mergeSize = "merge_size"
+        }
+
+        /// Creates image-processor settings directly from field values,
+        /// defaulting each parameter to the value verified against the
+        /// `mlx-community/MiniMax-M3-4bit` checkpoint's `preprocessor_config.json`.
+        public init(
+            imageMean: [CGFloat] = defaultMiniMaxM3ImageMean,
+            imageStd: [CGFloat] = defaultMiniMaxM3ImageStd,
+            minPixels: Int = defaultMiniMaxM3MinPixels,
+            maxPixels: Int = defaultMiniMaxM3MaxPixels,
+            patchSize: Int = defaultVisionPatchSize,
+            temporalPatchSize: Int = defaultVisionTemporalPatchSize,
+            mergeSize: Int = defaultVisionSpatialMergeSize
+        ) {
+            self.imageMean = imageMean
+            self.imageStd = imageStd
+            self.minPixels = minPixels
+            self.maxPixels = maxPixels
+            self.patchSize = patchSize
+            self.temporalPatchSize = temporalPatchSize
+            self.mergeSize = mergeSize
+        }
+
+        /// Decodes image-processor settings, defaulting any field the
+        /// checkpoint omits to the value verified against the
+        /// `mlx-community/MiniMax-M3-4bit` checkpoint's `preprocessor_config.json`.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            imageMean =
+                try container.decodeIfPresent([CGFloat].self, forKey: .imageMean)
+                ?? defaultMiniMaxM3ImageMean
+            imageStd =
+                try container.decodeIfPresent([CGFloat].self, forKey: .imageStd)
+                ?? defaultMiniMaxM3ImageStd
+            minPixels =
+                try container.decodeIfPresent(Int.self, forKey: .minPixels)
+                ?? defaultMiniMaxM3MinPixels
+            maxPixels =
+                try container.decodeIfPresent(Int.self, forKey: .maxPixels)
+                ?? defaultMiniMaxM3MaxPixels
+            patchSize =
+                try container.decodeIfPresent(Int.self, forKey: .patchSize)
+                ?? defaultVisionPatchSize
+            temporalPatchSize =
+                try container.decodeIfPresent(Int.self, forKey: .temporalPatchSize)
+                ?? defaultVisionTemporalPatchSize
+            mergeSize =
+                try container.decodeIfPresent(Int.self, forKey: .mergeSize)
+                ?? defaultVisionSpatialMergeSize
+        }
+    }
+
     /// Declared processor class name (`processor_class`), verified as
     /// `"MiniMaxM3VLProcessor"` against the checkpoint's `processor_config.json`.
     public let processorClass: String
+    /// The image-preprocessing settings, nested under `image_processor` in
+    /// the real checkpoint's `processor_config.json` (see this type's
+    /// documentation), or decoded flat when that key is absent.
+    public let imageProcessor: ImageProcessorSettings
 
     enum CodingKeys: String, CodingKey {
         case processorClass = "processor_class"
+        case imageProcessor = "image_processor"
     }
 
-    /// Creates a processor configuration directly from its declared class name.
-    public init(processorClass: String = defaultMiniMaxM3ProcessorClass) {
+    /// Creates a processor configuration directly from its declared class
+    /// name and image-processor settings.
+    public init(
+        processorClass: String = defaultMiniMaxM3ProcessorClass,
+        imageProcessor: ImageProcessorSettings = ImageProcessorSettings()
+    ) {
         self.processorClass = processorClass
+        self.imageProcessor = imageProcessor
     }
 
     /// Decodes a processor configuration, defaulting `processorClass` when
-    /// the checkpoint's config omits it.
+    /// the checkpoint's config omits it, and decoding `imageProcessor` from a
+    /// nested `image_processor` object when present or from the decoder's
+    /// own root container otherwise (see this type's documentation).
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         processorClass =
             try container.decodeIfPresent(String.self, forKey: .processorClass)
             ?? defaultMiniMaxM3ProcessorClass
+        if let nested = try container.decodeIfPresent(
+            ImageProcessorSettings.self, forKey: .imageProcessor)
+        {
+            imageProcessor = nested
+        } else {
+            imageProcessor = try ImageProcessorSettings(from: decoder)
+        }
     }
 }
 
-/// Text-only input processor for MiniMax-M3.
+/// `MessageGenerator` for MiniMax-M3's chat template, used only when
+/// `UserInput` carries at least one image (kanban ^9a2aw98).
 ///
-/// Ports the text path of mlx-vlm's `processing_minimax_m3_vl.py`: applies
-/// the tokenizer's chat template to the prompt, falling back to plain-text
-/// joining when the tokenizer has no chat template (matching
-/// `LLMUserInputProcessor`). Image and video input are not yet supported --
-/// vision support is a later task -- so `prepare(input:)` throws
-/// `VLMError.mediaNotSupported` rather than silently dropping media the
-/// caller attached.
+/// MiniMax-M3's chat template (`processor_config.json`'s `chat_template`,
+/// `visible_text` macro) renders each `{"type": "image", ...}` content block
+/// as the literal `]<]image[>[` placeholder text (`MiniMaxM3Processor.imageToken`),
+/// which `MiniMaxM3Processor.prepare(input:)` then expands into one repeated
+/// copy per merged image token, wrapped in `]<]start of image[>[`/`]<]end of
+/// image[>[` markup -- mirrors `Qwen3VLMessageGenerator`'s equivalent role
+/// for Qwen's own `<|vision_start|>`/`<|image_pad|>`/`<|vision_end|>` markup
+/// (`Qwen3VL.swift`). Text-only prompts keep using `DefaultMessageGenerator`
+/// (plain string `content`, unaffected by this type) so ^wz8y8qq's verified
+/// text-only tokenization stays byte-for-byte unchanged.
+public struct MiniMaxM3MessageGenerator: MessageGenerator {
+    public init() {}
+
+    public func generate(message: Chat.Message) -> MLXLMCommon.Message {
+        let imageContent = message.images.map { _ in ["type": "image"] }
+        let textContent = [["type": "text", "text": message.content]]
+        var dictionary: MLXLMCommon.Message = [
+            "role": message.role.rawValue,
+            "content": imageContent + textContent,
+        ]
+        addToolMetadata(to: &dictionary, for: message)
+        return dictionary
+    }
+}
+
+/// Input processor for MiniMax-M3: text and image input, ported from
+/// mlx-vlm's `processing_minimax_m3_vl.py`.
+///
+/// **Image path.** Resizes to a patch/merge-factor-aligned grid within the
+/// checkpoint's min/max pixel budget (`QwenVL.targetSize`, the same
+/// smart-resize algorithm as mlx-vlm's `smart_resize` -- both round to
+/// `patchSize * mergeSize` multiples and rescale to fit a pixel-count
+/// budget), patchifies via `QwenVL.patchify` (identical patch/merge-block
+/// ordering to mlx-vlm's `_patchify`), and expands the chat template's single
+/// `]<]image[>[` placeholder per image into `frame.product / mergeSize^2`
+/// repeated copies wrapped in `]<]start of image[>[`/`]<]end of image[>[`
+/// markup (mirrors `QwenVL.replacePaddingTokens`, adapted to MiniMax-M3's own
+/// literal placeholder/markup strings instead of Qwen's
+/// `<|vision_start|>`/`<|image_pad|>`/`<|vision_end|>`). `image_grid_pinpoints`
+/// (`config.json`, spanning 336-2016px) is checkpoint metadata this
+/// smart-resize-based processor never reads -- confirmed absent from
+/// mlx-vlm's `processing_minimax_m3_vl.py`, which only consults
+/// `min_pixels`/`max_pixels`.
+///
+/// **Video path remains a throwing stub.** Half of this repository's VLM
+/// processors have no video support at all (`FastVLM`, `Idefics3`,
+/// `LFM2VL`, `Mistral3`, `Paligemma`, `Pixtral`) -- matching that prevailing
+/// capability level, `prepare(input:)` throws `VLMError.mediaNotSupported("video")`
+/// for video input rather than silently dropping it.
 public struct MiniMaxM3Processor: UserInputProcessor {
+    /// MiniMax-M3's chat template renders each image reference as this
+    /// literal placeholder string before `prepare(input:)` expands it --
+    /// mlx-vlm's `MiniMaxM3VLProcessor.IMAGE_TOKEN`.
+    static let imageToken = "]<]image[>["
+    /// Markup MiniMax-M3's processor wraps each image's expanded placeholder
+    /// run in -- mlx-vlm's `MiniMaxM3VLProcessor.VISION_START_TOKEN`.
+    static let visionStartToken = "]<]start of image[>["
+    /// See `visionStartToken` -- mlx-vlm's `MiniMaxM3VLProcessor.VISION_END_TOKEN`.
+    static let visionEndToken = "]<]end of image[>["
+
     private let configuration: MiniMaxM3ProcessorConfiguration
     private let tokenizer: any Tokenizer
 
-    /// Creates a text-only MiniMax-M3 input processor.
+    /// Creates a MiniMax-M3 input processor.
     public init(_ configuration: MiniMaxM3ProcessorConfiguration, tokenizer: any Tokenizer) {
         self.configuration = configuration
         self.tokenizer = tokenizer
     }
 
-    /// Converts `input` into an `LMInput`, throwing when `input` carries an
-    /// image or video attachment MiniMax-M3 cannot yet process.
-    public func prepare(input: UserInput) async throws -> LMInput {
-        guard input.images.isEmpty else {
-            throw VLMError.mediaNotSupported("image")
+    /// Resizes, normalizes, and patchifies one image, following the same
+    /// sRGB-tone-curve-then-resample-then-normalize pipeline
+    /// `Qwen3VLProcessor.preprocess(images:processing:)` uses (`Qwen3VL.swift`)
+    /// -- see that method's documentation for why the tone-curve step must
+    /// precede resampling.
+    private func preprocess(image: CIImage, processing: UserInput.Processing?) throws -> (
+        MLXArray, THW
+    ) {
+        let settings = configuration.imageProcessor
+        let processed = MediaProcessing.apply(image, processing: processing)
+        let extent = processed.extent.size
+        let factor = settings.patchSize * settings.mergeSize
+
+        let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
+            height: Int(extent.height), width: Int(extent.width), factor: factor,
+            minPixels: settings.minPixels, maxPixels: settings.maxPixels)
+        let targetSize = CGSize(width: resizedWidth, height: resizedHeight)
+
+        let resampled = MediaProcessing.resampleBicubic(
+            MediaProcessing.inSRGBToneCurveSpace(processed), to: targetSize)
+        let normalized = MediaProcessing.asMLXArray(
+            MediaProcessing.normalize(
+                resampled,
+                mean: (settings.imageMean[0], settings.imageMean[1], settings.imageMean[2]),
+                std: (settings.imageStd[0], settings.imageStd[1], settings.imageStd[2])))
+
+        return try QwenVL.patchify(
+            images: [normalized], mergeSize: settings.mergeSize, patchSize: settings.patchSize,
+            temporalPatchSize: settings.temporalPatchSize)
+    }
+
+    /// Expands each image's single `imageToken` placeholder occurrence into
+    /// `frame.product / mergeSize^2` repeated copies wrapped in
+    /// `visionStartToken`/`visionEndToken` -- mirrors mlx-vlm's
+    /// `MiniMaxM3VLProcessor.replace_image_token` and this repository's own
+    /// `QwenVL.replacePaddingTokens` (`QwenVL.swift`).
+    ///
+    /// - Throws: `VLMError.processing` if the number of placeholder
+    ///   occurrences doesn't match the number of images.
+    private func expandImagePlaceholders(in promptTokens: [Int], frames: [THW]) throws -> [Int] {
+        let placeholderTokens = tokenizer.encode(text: Self.imageToken)
+        let placeholderRanges = promptTokens.ranges(of: placeholderTokens)
+        guard placeholderRanges.count == frames.count else {
+            throw VLMError.processing(
+                "Number of image placeholder tokens does not match number of images")
         }
+
+        let mergeLength = configuration.imageProcessor.mergeSize * configuration.imageProcessor.mergeSize
+        let replacementSequences = frames.map { frame -> [Int] in
+            let count = frame.product / mergeLength
+            let text =
+                Self.visionStartToken + Array(repeating: Self.imageToken, count: count).joined()
+                + Self.visionEndToken
+            return tokenizer.encode(text: text)
+        }
+
+        var result: [Int] = []
+        var currentIndex = promptTokens.startIndex
+        for (range, replacement) in zip(placeholderRanges, replacementSequences) {
+            result.append(contentsOf: promptTokens[currentIndex ..< range.lowerBound])
+            result.append(contentsOf: replacement)
+            currentIndex = range.upperBound
+        }
+        if currentIndex < promptTokens.endIndex {
+            result.append(contentsOf: promptTokens[currentIndex...])
+        }
+        return result
+    }
+
+    /// Converts `input` into an `LMInput`, throwing when `input` carries a
+    /// video attachment (see this type's documentation).
+    public func prepare(input: UserInput) async throws -> LMInput {
         guard input.videos.isEmpty else {
             throw VLMError.mediaNotSupported("video")
         }
 
-        let messages = DefaultMessageGenerator().generate(from: input)
-        do {
-            let promptTokens = try tokenizer.applyChatTemplate(
-                messages: messages, tools: input.tools, additionalContext: input.additionalContext)
-            return LMInput(tokens: MLXArray(promptTokens))
-        } catch TokenizerError.missingChatTemplate {
-            let prompt =
-                messages
-                .compactMap { $0["content"] as? String }
-                .joined(separator: "\n\n")
-            return LMInput(tokens: MLXArray(tokenizer.encode(text: prompt)))
+        guard !input.images.isEmpty else {
+            // Exact pre-existing text-only path (^wz8y8qq) -- untouched, so
+            // its verified tokenization stays byte-for-byte identical.
+            let messages = DefaultMessageGenerator().generate(from: input)
+            do {
+                let promptTokens = try tokenizer.applyChatTemplate(
+                    messages: messages, tools: input.tools,
+                    additionalContext: input.additionalContext)
+                return LMInput(tokens: MLXArray(promptTokens))
+            } catch TokenizerError.missingChatTemplate {
+                let prompt =
+                    messages
+                    .compactMap { $0["content"] as? String }
+                    .joined(separator: "\n\n")
+                return LMInput(tokens: MLXArray(tokenizer.encode(text: prompt)))
+            }
         }
+
+        let messages = MiniMaxM3MessageGenerator().generate(from: input)
+        let promptTokens = try tokenizer.applyChatTemplate(
+            messages: messages, tools: input.tools, additionalContext: input.additionalContext)
+
+        let processedImages = try input.images.map {
+            try preprocess(image: $0.asCIImage(), processing: input.processing)
+        }
+        let pixels = concatenated(processedImages.map { $0.0 })
+        let frames = processedImages.map { $0.1 }
+
+        let splicedTokens = try expandImagePlaceholders(in: promptTokens, frames: frames)
+        let promptArray = MLXArray(splicedTokens).expandedDimensions(axis: 0)
+        let mask = ones(like: promptArray).asType(.int8)
+
+        return LMInput(
+            text: .init(tokens: promptArray, mask: mask),
+            image: .init(pixels: pixels, frames: frames))
     }
 }

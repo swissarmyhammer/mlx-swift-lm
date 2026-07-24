@@ -876,6 +876,26 @@ struct MiniMaxM3Tests {
             numExpertsPerTok: 2, moeLayerFreq: moeLayerFreq)
     }
 
+    /// A tiny synthetic vision configuration -- small enough for fast unit
+    /// tests, but with a `hiddenSize`/`numAttentionHeads` ratio (`headDim` 4)
+    /// that still exercises the same 3D-RoPE partial-rotation arithmetic as
+    /// the verified real config (`headDim` 80 -> `axisDim` 26, `rotaryDim` 78).
+    private func tinyVisionConfig() -> MiniMaxM3VisionConfiguration {
+        MiniMaxM3VisionConfiguration(
+            hiddenSize: 8, intermediateSize: 16, numAttentionHeads: 2, numHiddenLayers: 2,
+            patchSize: 2, numChannels: 3)
+    }
+
+    /// A tiny synthetic vision-capable top-level configuration, pairing
+    /// `tinyModelConfig()`'s text configuration with `tinyVisionConfig()`.
+    private func tinyVisionModelConfig(hiddenLayers: Int = 4, moeLayerFreq: [Int] = [0, 0, 1, 1])
+        -> MiniMaxM3Configuration
+    {
+        MiniMaxM3Configuration(
+            textConfiguration: tinyModelConfig(hiddenLayers: hiddenLayers, moeLayerFreq: moeLayerFreq),
+            visionConfiguration: tinyVisionConfig())
+    }
+
     @Test("tiny 2-dense + 2-MoE model forward pass produces (B, L, vocab) logits")
     func tinyModelForwardProducesExpectedShape() {
         MLXRandom.seed(0)
@@ -963,6 +983,105 @@ struct MiniMaxM3Tests {
         #expect(cache[3...].allSatisfy { $0 is MiniMaxM3KVCache })
     }
 
+    // MARK: - MiniMaxM3Vision (vision tower, 3D RoPE)
+
+    @Test("tiny vision tower forward pass produces (tokens, hiddenSize), projector produces (tokens, projectionDim)")
+    func visionTowerForwardProducesExpectedShape() {
+        MLXRandom.seed(0)
+        let visionConfig = tinyVisionConfig()
+        let projectionDim = 12
+
+        let visionTower = MiniMaxM3Vision.VisionModel(visionConfig)
+        let projector = MiniMaxM3Projector(
+            inputDimensions: visionConfig.hiddenSize, hiddenDimensions: 10,
+            outputDimensions: projectionDim, bias: true, hiddenAct: "gelu")
+        eval(visionTower, projector)
+
+        // A single 4x4-patch image (spatialMergeSize 2 divides both dims).
+        let grid = THW(1, 4, 4)
+        let patchDimensions =
+            visionConfig.numChannels * visionConfig.temporalPatchSize * visionConfig.patchSize
+            * visionConfig.patchSize
+        let pixelValues = MLXRandom.normal([grid.product, patchDimensions])
+
+        let hidden = visionTower(pixelValues, gridTHW: [grid])
+        eval(hidden)
+        #expect(hidden.shape == [grid.product, visionConfig.hiddenSize])
+
+        let projected = projector(hidden)
+        eval(projected)
+        #expect(projected.shape == [grid.product, projectionDim])
+    }
+
+    @Test("3D RoPE frequencies match a hand-built (t, h, w) position grid")
+    func threeDRoPEMatchesHandBuiltGrid() {
+        // hiddenSize 6 / 1 head -> headDim 6 -> rotaryDims 6 -> axisDim 2,
+        // chosen so every head dimension rotates (no `x_pass` remainder) and
+        // each axis contributes exactly one frequency: with `dim == 2`,
+        // `axisFrequencies`'s inverse frequency is `theta^0 == 1`, so the
+        // frequency table reduces to the raw (t, h, w) coordinates
+        // themselves -- hand-computable without reimplementing the formula.
+        let config = MiniMaxM3VisionConfiguration(
+            hiddenSize: 6, intermediateSize: 8, numAttentionHeads: 1, numHiddenLayers: 1,
+            patchSize: 2, numChannels: 3, spatialMergeSize: 1)
+        let grid = THW(1, 2, 2)
+
+        let (cosTable, sinTable) = MiniMaxM3Vision.rotaryPositionEmbedding(
+            grids: [grid], config: config)
+        eval(cosTable, sinTable)
+
+        // Token order for a 1x2x2 grid with spatialMergeSize 1 matches
+        // `QwenVL.patchify`'s (t, h/merge, w/merge, mergeRow, mergeCol)
+        // ordering, row-major: (0,0,0), (0,0,1), (0,1,0), (0,1,1).
+        let coordinates: [[Float]] = [
+            [0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1],
+        ]
+        let expected = MLXArray(coordinates.flatMap { $0 + $0 }, [4, 6])
+
+        #expect(cosTable.shape == [4, 6])
+        #expect(sinTable.shape == [4, 6])
+        let cosDiff = MLX.abs(cosTable - MLX.cos(expected)).max().item(Float.self)
+        let sinDiff = MLX.abs(sinTable - MLX.sin(expected)).max().item(Float.self)
+        #expect(cosDiff < 1e-5)
+        #expect(sinDiff < 1e-5)
+    }
+
+    @Test("a tiny vision-capable model's prepare() runs the image path end-to-end and returns logits")
+    func prepareRunsImagePathEndToEnd() throws {
+        MLXRandom.seed(0)
+        let config = tinyVisionModelConfig()
+        let model = MiniMaxM3Model(config)
+        eval(model)
+
+        let visionConfig = config.visionConfiguration
+        let grid = THW(1, 4, 4)
+        let patchDimensions =
+            visionConfig.numChannels * visionConfig.temporalPatchSize * visionConfig.patchSize
+            * visionConfig.patchSize
+        let pixelValues = MLXRandom.normal([grid.product, patchDimensions])
+        let mergeSize = visionConfig.spatialMergeSize
+        let numImageTokens = grid.product / (mergeSize * mergeSize)
+
+        var tokens: [Int32] = [1]
+        tokens.append(contentsOf: Array(repeating: Int32(config.imageTokenIndex), count: numImageTokens))
+        tokens.append(2)
+        let inputIds = MLXArray(tokens).reshaped(1, tokens.count)
+
+        let input = LMInput(
+            text: .init(tokens: inputIds),
+            image: .init(pixels: pixelValues, frames: [grid]))
+
+        let cache = model.newCache(parameters: nil)
+        let result = try model.prepare(input, cache: cache, state: nil, windowSize: nil)
+
+        guard case .logits(let output) = result else {
+            Issue.record("expected .logits for an image prompt, got .tokens")
+            return
+        }
+        eval(output.logits)
+        #expect(output.logits.shape == [1, tokens.count, config.textConfiguration.vocabularySize])
+    }
+
     // MARK: - sanitize(weights:)
 
     /// The full set of parameter paths a real `MiniMaxM3Model` expects,
@@ -972,7 +1091,7 @@ struct MiniMaxM3Tests {
         Set(model.parameters().flattened().map(\.0))
     }
 
-    @Test("sanitize drops vision/multi-modal/MTP weights, keeps index weights, and re-keys flat checkpoints")
+    @Test("sanitize re-keys a flat text-only checkpoint and drops only MTP weights")
     func sanitizeDropsExtraneousWeightsAndProducesExactParameterSet() throws {
         let config = tinyModelConfig()
         let model = MiniMaxM3Model(config)
@@ -984,8 +1103,8 @@ struct MiniMaxM3Tests {
         // stripping the prefix from the model's own real parameters --
         // includes the real self_attn.index_* weights for MoE-scheduled
         // layers, which sanitize must now load (not drop, since ^8dbc476
-        // built the indexer that consumes them) -- then add extraneous
-        // vision/MTP keys that must still be dropped.
+        // built the indexer that consumes them) -- then add an extraneous
+        // MTP key that must still be dropped.
         var rawWeights: [String: MLXArray] = [:]
         for (key, value) in model.parameters().flattened() {
             precondition(key.hasPrefix("language_model."))
@@ -993,10 +1112,6 @@ struct MiniMaxM3Tests {
             rawWeights[flatKey] = value
         }
 
-        rawWeights["vision_tower.vision_model.embeddings.patch_embedding.weight"] = MLXArray.zeros(
-            [4, 4])
-        rawWeights["multi_modal_projector.linear_1.weight"] = MLXArray.zeros([4, 4])
-        rawWeights["patch_merge_mlp.linear_1.weight"] = MLXArray.zeros([4, 4])
         rawWeights["mtp.0.embed_tokens.weight"] = MLXArray.zeros([4, 4])
 
         let sanitized = model.sanitize(weights: rawWeights)
@@ -1004,6 +1119,48 @@ struct MiniMaxM3Tests {
         #expect(Set(sanitized.keys) == expectedKeys)
 
         // The strongest proof: the sanitized weights actually load.
+        try model.update(parameters: ModuleParameters.unflattened(sanitized), verify: [.all])
+    }
+
+    @Test(
+        "sanitize keeps vision-tower/multi-modal-projector/patch-merge weights on a vision-capable model, with zero unconsumed keys"
+    )
+    func sanitizeKeepsVisionWeightsWithZeroUnconsumedKeys() throws {
+        let config = tinyVisionModelConfig()
+        let model = MiniMaxM3Model(config)
+        eval(model)
+
+        let expectedKeys = expectedParameterKeys(for: model)
+
+        // Vision-tower/projector/patch-merge keys are already top-level
+        // (unprefixed) in this model's own parameter tree -- only the
+        // language-model keys carry the `language_model.` prefix that needs
+        // stripping to simulate a flat-checkpoint-style raw weight dict.
+        var rawWeights: [String: MLXArray] = [:]
+        for (key, value) in model.parameters().flattened() {
+            if key.hasPrefix("language_model.") {
+                rawWeights[String(key.dropFirst("language_model.".count))] = value
+            } else {
+                rawWeights[key] = value
+            }
+        }
+
+        // Overwrite the patch-embedding weight with the checkpoint's real
+        // Conv3d layout (5D: hidden, channels, temporalPatch, patch, patch)
+        // instead of this model's own already-flattened 2D `Linear` weight,
+        // to exercise `_remapVisionWeights`'s reshape step too.
+        let visionConfig = config.visionConfiguration
+        rawWeights["vision_tower.vision_model.embeddings.patch_embedding.weight"] =
+            MLXArray.zeros([
+                visionConfig.hiddenSize, visionConfig.numChannels, visionConfig.temporalPatchSize,
+                visionConfig.patchSize, visionConfig.patchSize,
+            ])
+
+        rawWeights["mtp.0.embed_tokens.weight"] = MLXArray.zeros([4, 4])
+
+        let sanitized = model.sanitize(weights: rawWeights)
+
+        #expect(Set(sanitized.keys) == expectedKeys)
         try model.update(parameters: ModuleParameters.unflattened(sanitized), verify: [.all])
     }
 
@@ -1214,18 +1371,120 @@ struct MiniMaxM3Tests {
         #expect(input.video == nil)
     }
 
-    @Test("MiniMaxM3Processor throws a descriptive error for image input instead of ignoring it")
-    func processorThrowsForImageInput() async throws {
+    /// Deterministic stand-in tokenizer for exercising MiniMax-M3's
+    /// image-placeholder chat-template splicing without a real BPE tokenizer
+    /// or Jinja renderer -- `TestTokenizer` can't be used here since its
+    /// `encode(text:)`/`applyChatTemplate` are both random and
+    /// content-independent, so a real placeholder-token occurrence could
+    /// never be found in its output.
+    ///
+    /// `encode(text:)` maps each Unicode scalar to its integer value, so
+    /// concatenated text always encodes to concatenated tokens (keeping
+    /// placeholder subsequences reliably findable), and `applyChatTemplate`
+    /// renders just enough of MiniMax-M3's real chat template
+    /// (`processor_config.json`'s `chat_template`, `visible_text` macro) to
+    /// turn `{"type": "image"}` content blocks (as produced by
+    /// `MiniMaxM3MessageGenerator`) into the literal
+    /// `MiniMaxM3Processor.imageToken` placeholder text.
+    private struct MiniMaxM3FakeTokenizer: MLXLMCommon.Tokenizer {
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            text.unicodeScalars.map { Int($0.value) }
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            String(String.UnicodeScalarView(tokenIds.compactMap { Unicode.Scalar($0) }))
+        }
+
+        func convertTokenToId(_ token: String) -> Int? { nil }
+        func convertIdToToken(_ id: Int) -> String? { nil }
+
+        var bosToken: String? = nil
+        var eosToken: String? = nil
+        var unknownToken: String? = nil
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            var text = ""
+            for message in messages {
+                guard let content = message["content"] else { continue }
+                if let string = content as? String {
+                    text += string
+                } else if let blocks = content as? [[String: String]] {
+                    for block in blocks {
+                        switch block["type"] {
+                        case "text": text += block["text"] ?? ""
+                        case "image": text += MiniMaxM3Processor.imageToken
+                        default: break
+                        }
+                    }
+                }
+            }
+            return encode(text: text, addSpecialTokens: false)
+        }
+    }
+
+    @Test("MiniMaxM3Processor splices a synthetic image's tokens into the prompt")
+    func processorSplicesImageTokens() async throws {
         let processor = MiniMaxM3Processor(
-            MiniMaxM3ProcessorConfiguration(), tokenizer: TestTokenizer())
+            MiniMaxM3ProcessorConfiguration(), tokenizer: MiniMaxM3FakeTokenizer())
+        let image = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64))
+
+        let input = try await processor.prepare(
+            input: UserInput(prompt: "describe", images: [.ciImage(image)]))
+
+        guard let frames = input.image?.frames, let grid = frames.first else {
+            Issue.record("expected image frames on the prepared LMInput")
+            return
+        }
+        #expect(input.image?.pixels != nil)
+
+        let mergeSize = MiniMaxM3ProcessorConfiguration().imageProcessor.mergeSize
+        let expectedImageTokens = grid.product / (mergeSize * mergeSize)
+
+        let promptTokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
+        let placeholderTokens = MiniMaxM3FakeTokenizer().encode(text: MiniMaxM3Processor.imageToken)
+        let occurrences = promptTokens.ranges(of: placeholderTokens).count
+
+        #expect(occurrences == expectedImageTokens)
+    }
+
+    @Test("MiniMaxM3Processor throws a descriptive error for image input when no chat template is configured")
+    func processorThrowsForImageInputWithoutChatTemplate() async throws {
+        // TestTokenizer's `applyChatTemplate` never throws
+        // `TokenizerError.missingChatTemplate` (it just returns random
+        // tokens), so this exercises the real "no template" failure via the
+        // fake tokenizer's own default `Tokenizer` extension instead: a
+        // tokenizer with no chat template configured can't render the image
+        // placeholder markup, so the image path must propagate a clear
+        // error rather than silently mis-tokenizing.
+        struct NoTemplateTokenizer: MLXLMCommon.Tokenizer {
+            func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
+            func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
+            func convertTokenToId(_ token: String) -> Int? { nil }
+            func convertIdToToken(_ id: Int) -> String? { nil }
+            var bosToken: String? = nil
+            var eosToken: String? = nil
+            var unknownToken: String? = nil
+            func applyChatTemplate(
+                messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
+                additionalContext: [String: any Sendable]?
+            ) throws -> [Int] {
+                throw TokenizerError.missingChatTemplate
+            }
+        }
+
+        let processor = MiniMaxM3Processor(
+            MiniMaxM3ProcessorConfiguration(), tokenizer: NoTemplateTokenizer())
         let image = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 4, height: 4))
 
         do {
             _ = try await processor.prepare(
                 input: UserInput(prompt: "describe", images: [.ciImage(image)]))
-            Issue.record("expected VLMError.mediaNotSupported to be thrown")
+            Issue.record("expected TokenizerError.missingChatTemplate to propagate")
         } catch {
-            #expect(error as? VLMError == VLMError.mediaNotSupported("image"))
+            #expect(error is TokenizerError)
         }
     }
 
