@@ -22,7 +22,7 @@ import Foundation
 ///     print(toolCall.function.name)
 /// }
 /// ```
-public class ToolCallProcessor {
+public final class ToolCallProcessor {
 
     // MARK: - Properties
 
