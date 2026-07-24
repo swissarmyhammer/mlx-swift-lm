@@ -10,7 +10,7 @@ import os.log
 
 /// Converts FoundationModels transcript entries to MLX chat message format.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-struct TranscriptConverter {
+public struct TranscriptConverter {
 
     private static let logger = Logger(
         subsystem: mlxFoundationModelsLoggingSubsystem, category: "TranscriptConverter")
@@ -236,6 +236,18 @@ struct TranscriptConverter {
         return [make(text ?? "", images)]
     }
 
+    /// RFC 8259 single-character JSON escape sequences, keyed by the
+    /// unicode scalar they replace. Named so the fallback manual-escape path
+    /// in ``jsonStringLiteral(_:)`` reads as a table lookup rather than a
+    /// hardcoded switch that must stay in sync with the standard by hand.
+    private static let jsonEscapeSequences: [Unicode.Scalar: String] = [
+        "\"": "\\\"",
+        "\\": "\\\\",
+        "\n": "\\n",
+        "\r": "\\r",
+        "\t": "\\t",
+    ]
+
     /// Encodes `value` as a JSON string literal (quotes included), escaping
     /// quotes, backslashes, and control characters per RFC 8259.
     ///
@@ -253,18 +265,12 @@ struct TranscriptConverter {
         // character reaching the constrained grammar's parser.
         var escaped = "\""
         for scalar in value.unicodeScalars {
-            switch scalar {
-            case "\"": escaped += "\\\""
-            case "\\": escaped += "\\\\"
-            case "\n": escaped += "\\n"
-            case "\r": escaped += "\\r"
-            case "\t": escaped += "\\t"
-            default:
-                if scalar.value < 0x20 {
-                    escaped += String(format: "\\u%04x", scalar.value)
-                } else {
-                    escaped.unicodeScalars.append(scalar)
-                }
+            if let sequence = jsonEscapeSequences[scalar] {
+                escaped += sequence
+            } else if scalar.value < 0x20 {
+                escaped += String(format: "\\u%04x", scalar.value)
+            } else {
+                escaped.unicodeScalars.append(scalar)
             }
         }
         escaped += "\""
@@ -419,16 +425,33 @@ struct TranscriptConverter {
         -> [Transcript.Entry]
     {
         entries.filter { entry in
-            switch entry {
-            case .instructions(let instructions):
-                return !extractImages(from: instructions.segments).isEmpty
-            case .prompt(let prompt):
-                return !extractImages(from: prompt.segments).isEmpty
-            case .toolOutput(let toolOutput):
-                return !extractImages(from: toolOutput.segments).isEmpty
-            default:
-                return false
-            }
+            guard let segments = imageBearingSegments(of: entry) else { return false }
+            return !extractImages(from: segments).isEmpty
+        }
+    }
+
+    /// The transcript segments of `entry`, for the entry kinds
+    /// ``entriesWithImages(for:)`` inspects for image content.
+    ///
+    /// Shared by ``entriesWithImages(for:)`` so its three image-bearing
+    /// cases (`.instructions`, `.prompt`, `.toolOutput`) differ only in
+    /// which segments they extract, not in how those segments are checked
+    /// for images.
+    ///
+    /// - Parameter entry: The transcript entry to inspect.
+    /// - Returns: The entry's segments, or `nil` for entry kinds that never
+    ///   carry attachment segments in this converter's design
+    ///   (`.response`/`.toolCalls`/`.reasoning`).
+    private static func imageBearingSegments(of entry: Transcript.Entry) -> [Transcript.Segment]? {
+        switch entry {
+        case .instructions(let instructions):
+            return instructions.segments
+        case .prompt(let prompt):
+            return prompt.segments
+        case .toolOutput(let toolOutput):
+            return toolOutput.segments
+        default:
+            return nil
         }
     }
 }

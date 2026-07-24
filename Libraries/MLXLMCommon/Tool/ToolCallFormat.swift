@@ -44,6 +44,13 @@ public protocol ToolCallParser: Sendable {
     /// Called when generation ends to extract any tool calls still in the buffer.
     /// The default implementation splits on `startTag` (if present) and parses
     /// each segment individually.
+    ///
+    /// - Parameters:
+    ///   - toolCallBuffer: The text remaining in the tool-call buffer when
+    ///     generation ended.
+    ///   - tools: Optional tool schemas for type-aware parsing.
+    /// - Returns: The tool calls recovered from `toolCallBuffer`, in the
+    ///   order they appear.
     func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall]
 }
 
@@ -58,6 +65,13 @@ extension ToolCallParser {
     /// `startTag` and parses each non-empty segment individually (recovering
     /// multiple calls left in the buffer); for untagged formats, parses the
     /// whole buffer as a single call.
+    ///
+    /// - Parameters:
+    ///   - toolCallBuffer: The text remaining in the tool-call buffer when
+    ///     generation ended.
+    ///   - tools: Optional tool schemas for type-aware parsing.
+    /// - Returns: The tool calls recovered from `toolCallBuffer`, in the
+    ///   order they appear.
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         if let startTag {
             return
@@ -152,7 +166,7 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
 
     /// Create the appropriate parser for this format.
     /// - Returns: A parser instance configured for this format
-    public func createParser() -> any ToolCallParser {
+    public func makeParser() -> any ToolCallParser {
         switch self {
         case .json:
             return JSONToolCallParser(

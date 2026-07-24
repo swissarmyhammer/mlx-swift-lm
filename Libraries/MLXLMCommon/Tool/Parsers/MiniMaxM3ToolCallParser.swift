@@ -40,11 +40,33 @@ public struct MiniMaxM3ToolCallParser: ToolCallParser, Sendable {
     /// under, mirroring the reference parser's `__parse_error__` sentinel.
     private static let parseErrorKey = "__parse_error__"
 
-    public let startTag: String? = namespaceToken + "<tool_call>"
-    public let endTag: String? = namespaceToken + "</tool_call>"
+    /// The unprefixed XML wrapper tag name for a tool-call block, shared by
+    /// ``startTag``, ``endTag``, and the wrapper-narrowing search in
+    /// ``extractToolCalls(from:)`` so the literal never drifts between them.
+    private static let toolCallTagName = "tool_call"
 
+    /// The XML tag that marks the start of an M3 tool-call block, prefixed
+    /// with the namespace token every synthesized tag carries.
+    public let startTag: String? = namespaceToken + "<\(toolCallTagName)>"
+
+    /// The XML tag that marks the end of an M3 tool-call block, prefixed
+    /// with the namespace token every synthesized tag carries.
+    public let endTag: String? = namespaceToken + "</\(toolCallTagName)>"
+
+    /// Creates a new MiniMax M3 tool call parser.
     public init() {}
 
+    /// Parses `content` into a single ``ToolCall`` by extracting the first
+    /// `<invoke>` block found, after stripping M3's namespace tokens and any
+    /// conversational prefix outside the `<tool_call>` wrapper.
+    ///
+    /// - Parameters:
+    ///   - content: The text content to parse (may include tags).
+    ///   - tools: Unused -- M3 carries no tool schema through this format,
+    ///     so every leaf value is JSON-sniffed rather than typed from a
+    ///     schema (see ``coerceScalar(_:)``).
+    /// - Returns: The first parsed ``ToolCall``, or `nil` if `content`
+    ///   contains no `<invoke>` block.
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {
         Self.extractToolCalls(from: content).first
     }
@@ -65,7 +87,9 @@ public struct MiniMaxM3ToolCallParser: ToolCallParser, Sendable {
     private static func extractToolCalls(from content: String) -> [ToolCall] {
         var text = content.replacingOccurrences(of: namespaceToken, with: "")
 
-        if let start = text.range(of: "<tool_call>"), let end = text.range(of: "</tool_call>") {
+        if let start = text.range(of: "<\(toolCallTagName)>"),
+            let end = text.range(of: "</\(toolCallTagName)>")
+        {
             text = String(text[start.upperBound ..< end.lowerBound])
         }
 
@@ -191,28 +215,11 @@ public struct MiniMaxM3ToolCallParser: ToolCallParser, Sendable {
             let openTag = "<\(tagName)>"
             let closeTag = "</\(tagName)>"
 
-            var depth = 1
-            var searchStart = openEnd.upperBound
-            var closeRange: Range<Substring.Index>?
-            while depth > 0 {
-                guard
-                    let nextClose = remainder.range(
-                        of: closeTag, range: searchStart ..< remainder.endIndex)
-                else { return nil }
-
-                if let nextOpen = remainder.range(
-                    of: openTag, range: searchStart ..< remainder.endIndex),
-                    nextOpen.lowerBound < nextClose.lowerBound
-                {
-                    depth += 1
-                    searchStart = nextOpen.upperBound
-                } else {
-                    depth -= 1
-                    searchStart = nextClose.upperBound
-                    if depth == 0 { closeRange = nextClose }
-                }
-            }
-            guard let closeRange else { return nil }
+            guard
+                let closeRange = findClosingTag(
+                    in: remainder, openTag: openTag, closeTag: closeTag,
+                    searchStart: openEnd.upperBound)
+            else { return nil }
 
             let body = String(remainder[openEnd.upperBound ..< closeRange.lowerBound])
             results.append((tagName, body))
@@ -220,6 +227,50 @@ public struct MiniMaxM3ToolCallParser: ToolCallParser, Sendable {
         }
 
         return results
+    }
+
+    /// Finds the range of the closing tag matching an already-consumed
+    /// opening `<tagName>`, tracking nesting depth so a child element
+    /// sharing its parent's tag name does not terminate the match early.
+    ///
+    /// Extracted from ``parseElements(in:)`` to keep that function's nesting
+    /// shallow: this depth-tracking search is a self-contained sub-problem
+    /// (find the matching close for one already-opened tag), not part of
+    /// the sibling-scanning loop that calls it.
+    ///
+    /// - Parameters:
+    ///   - remainder: The substring being scanned by ``parseElements(in:)``.
+    ///   - openTag: The literal opening tag, e.g. `<location>`.
+    ///   - closeTag: The literal closing tag, e.g. `</location>`.
+    ///   - searchStart: The index immediately after the already-consumed
+    ///     opening tag.
+    /// - Returns: The range of the matching closing tag, or `nil` if
+    ///   `remainder` never closes the tag (malformed XML).
+    private static func findClosingTag(
+        in remainder: Substring, openTag: String, closeTag: String,
+        searchStart: Substring.Index
+    ) -> Range<Substring.Index>? {
+        var depth = 1
+        var searchStart = searchStart
+        while depth > 0 {
+            guard
+                let nextClose = remainder.range(
+                    of: closeTag, range: searchStart ..< remainder.endIndex)
+            else { return nil }
+
+            if let nextOpen = remainder.range(
+                of: openTag, range: searchStart ..< remainder.endIndex),
+                nextOpen.lowerBound < nextClose.lowerBound
+            {
+                depth += 1
+                searchStart = nextOpen.upperBound
+            } else {
+                depth -= 1
+                searchStart = nextClose.upperBound
+                if depth == 0 { return nextClose }
+            }
+        }
+        return nil
     }
 
     /// Whether `name` looks like a tag name the `to_xml` macro would actually

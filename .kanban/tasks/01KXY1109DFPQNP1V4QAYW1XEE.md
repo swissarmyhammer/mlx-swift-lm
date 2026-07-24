@@ -58,9 +58,28 @@ comments:
 
     Task remains in `doing`, ready for `/review`.
   timestamp: 2026-07-24T15:31:17.417220+00:00
+- actor: claude-code
+  id: 01kyaf9pbaepmcywn007p0atmr
+  text: |
+    Resolved all 17 findings from the 2026-07-24 11:15 review pass across the three named files.
+
+    **MiniMaxM3ToolCallParser.swift** (10 findings): added `///` doc comments to `startTag`, `endTag`, `init()`, and `parse(content:tools:)` (with `- Parameters:`/`- Returns:` on `parse`), following the `GLM4BareToolCallParser.swift` doc-comment convention. Extracted `private static let toolCallTagName = "tool_call"` and rebuilt `startTag`/`endTag`/the `extractToolCalls` wrapper-narrowing search from it, so the `<tool_call>`/`</tool_call>` literal lives in one place. Extracted `findClosingTag(in:openTag:closeTag:searchStart:)` out of `parseElements(in:)` to drop the tag-matching loop's nesting from 4 levels to 2.
+
+    **ToolCallFormat.swift** (3 findings): added `- Parameters:`/`- Returns:` blocks to both the protocol's `parseEOS` requirement and its default-implementation override. **Renamed `createParser()` → `makeParser()`** per the factory-naming-convention finding.
+
+    Call-site sweep for the rename (`grep -rn "createParser" --include="*.swift" .` before and after): two real code call sites found — the declaration in `ToolCallFormat.swift` and the single call site `self.parser = format.createParser()` in `ToolCallProcessor.swift`. Both updated to `makeParser()`. Post-fix sweep confirms zero remaining `.swift` occurrences of `createParser` anywhere in the repo. (The string still appears in two `.kanban/tasks/*.md`/`.jsonl` files — those are historical task records from earlier sessions, not code, and were deliberately left untouched.)
+
+    **TranscriptConverter.swift** (4 findings): added explicit `public` to `public struct TranscriptConverter`. Extracted `jsonEscapeSequences: [Unicode.Scalar: String]` as a named lookup table, replacing the hardcoded switch in `jsonStringLiteral`'s manual-escape fallback. Extracted `imageBearingSegments(of:)` out of `entriesWithImages(for:)` to unify the `.instructions`/`.prompt`/`.toolOutput` segment-extraction-and-check pattern into one code path. Note: the `.instructions`/`.prompt` duplication finding (helper accepting message-constructor + entry-type-name params) was already satisfied by the existing `makeTextImageMessage(from:make:emptyWarning:)` helper at the reviewed commit — verified via `git show b0652ae:...` that this extraction predates the review pass, so no further code change was needed there; checkbox flipped since the code already meets the finding's ask.
+
+    Verification: `swift build` clean, exit 0, no warnings (aside from a pre-existing unrelated `mutated node` provisioning warning for the mlx-swift Cmlx bundle, unchanged by this work). `swift test --filter MLXLMTests` green (336/336, run twice — one run hit the known `Gemma4ChunkedPrefillTests` numerical flake documented in this task's own prior milestone comments; re-ran in isolation and it passed, confirming it's unrelated to these changes since `Gemma4.swift` was never touched). `swift test --filter MLXFoundationModelsTests` green (282/282). No changes to `MLXLanguageModel.swift`, `Qwen25VL.swift`, `Gemma4.swift`, or `MiniMax.swift` (M2) — confirmed via `git status`/diff scope. Task left in `review`; not moved, not committed.
+  timestamp: 2026-07-24T16:28:22.250769+00:00
+- actor: claude-code
+  id: 01kyafx4xypppnfpxb556kr753
+  text: 'Adversarial double-check verdict: PASS. Independently verified: all 17 findings genuinely resolved (not superficial); `findClosingTag` extraction is behaviorally identical to the original inline nested-depth loop; the `jsonEscapeSequences` lookup table produces byte-identical output to the old switch for all five special chars plus control/default paths; `imageBearingSegments(of:)` preserves `entriesWithImages`''s exact per-case output and ordering; zero remaining `.swift` call sites for `createParser` repo-wide; `ToolCallProcessor.swift`''s call site correctly updated; only the four intended files modified (MLXLanguageModel.swift/Qwen25VL.swift/Gemma4.swift/MiniMax.swift confirmed untouched); `swift build` clean; new doc comments match the repo''s dominant convention. No revisions requested. Task remains in place, not committed, not moved.'
+  timestamp: 2026-07-24T16:38:59.774102+00:00
 depends_on:
 - 01KXY0ZVCCPBKZ1ANETWZ8Y8QQ
-position_column: doing
+position_column: review
 position_ordinal: '80'
 title: 'MiniMax-M3: tool calling + reasoning wiring through FoundationModels'
 ---
@@ -107,3 +126,41 @@ Verified format findings (against the checkpoint's `chat_template.jinja` and ups
 ## Workflow
 
 - Use `/tdd` — write failing tests first, then implement to make them pass. #minimax #minimax-m3
+
+## Review Findings (2026-07-24 11:15)
+
+**Scope:** review of checkpoint commit `b0652ae` (13 files changed). `Libraries/MLXFoundationModels/MLXLanguageModel.swift` (274,799 bytes) was **excluded** from this review pass — it exceeds sah's hard 262,144-byte review `batch_size` cap, and `batch_size` overrides do not bypass this limit (confirmed dead). This is the same accepted sah-build gap recorded on ^05zt40g; the file remains unreviewed by the current sah build. The other 12 changed files (excluding the two `.kanban/tasks/*` files, which are not review targets) were each reviewed individually via `review file` against current working-tree content, verified clean of any further uncommitted changes beyond commit `b0652ae`.
+
+### Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift
+- [x] `Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift:43` — Public property `startTag` lacks required `///` documentation comment; API consumers need guidance on its purpose. Add a `///` doc comment explaining this property's role as the XML start marker for tool calls.
+- [x] `Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift:44` — Public property `startTag` lacks documentation. As part of the `ToolCallParser` protocol, callers need to understand its role in tool-call parsing. Add a doc comment explaining what this property does, e.g., `/// The XML tag that marks the start of a tool call block.`.
+- [x] `Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift:44` — Public property `endTag` lacks required `///` documentation comment; API consumers need guidance on its purpose. Add a `///` doc comment explaining this property's role as the XML end marker for tool calls.
+- [x] `Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift:45` — Public property `endTag` lacks documentation. As part of the `ToolCallParser` protocol, callers need to understand its role in tool-call parsing. Add a doc comment explaining what this property does, e.g., `/// The XML tag that marks the end of a tool call block.`.
+- [x] `Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift:46` — Public initializer lacks required `///` documentation comment; callers need guidance on how to construct instances. Add a `///` doc comment describing how to initialize a parser instance.
+- [x] `Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift:47` — Public initializer lacks documentation. Users need to know how to construct instances and what initialization does. Add a doc comment, e.g., `/// Creates a new MiniMax M3 tool call parser.`.
+- [x] `Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift:48` — Public method `parse` lacks required `///` documentation comment; callers need guidance on parameters and return value. Add a `///` doc comment with a summary sentence, then `- Parameters:` block documenting `content` and `tools`, and `- Returns:` describing the return value.
+- [x] `Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift:49` — Public function `parse(content:tools:)` lacks documentation. As a protocol requirement, callers need to understand its role, parameters, and return value. Add a doc comment explaining the function's purpose, parameters, and return value.
+- [x] `Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift:50` — The XML wrapper tag name 'tool_call' is repeated across lines 50, 51, and 62, appearing as `<tool_call>` and `</tool_call>` in property definitions and extraction search. These occurrences must stay synchronized — if the tag name changes, all places must be updated. This configuration should be centralized in a named constant. Define `private static let toolCallTagName = "tool_call"` and construct tags as `"<\(toolCallTagName)>"` and `"</\(toolCallTagName)>"` in both the property definitions and the extraction search at line 62.
+- [x] `Libraries/MLXLMCommon/Tool/Parsers/MiniMaxM3ToolCallParser.swift:196` — Statement nested 4 levels deep exceeds the 3-level threshold: outer while (line 160) → inner while (line 181) → if/else (line 187) → inner if (line 196). This reduces readability and makes the tag-matching logic harder to verify. Extract the inner while loop body (lines 181–198) into a separate helper function named something like `findClosingTag(_:)` that returns the closeRange or nil. This reduces the main function's nesting depth from 4 to 2 and isolates the tag-matching logic.
+
+### Libraries/MLXLMCommon/Tool/ToolCallFormat.swift
+- [x] `Libraries/MLXLMCommon/Tool/ToolCallFormat.swift:42` — Protocol method `parseEOS` has 2 parameters and returns non-Void (`[ToolCall]`), but documentation lacks `- Parameters:` block and `- Returns:` clause. Per rule: `- Returns:` appears iff result is non-Void; 2+ parameters use `- Parameters:` block. Add `- Parameters:` block documenting `toolCallBuffer` and `tools`, and `- Returns:` describing the returned tool calls array.
+- [x] `Libraries/MLXLMCommon/Tool/ToolCallFormat.swift:57` — Extension method `parseEOS` has 2 parameters and returns non-Void (`[ToolCall]`), but documentation lacks `- Parameters:` block and `- Returns:` clause. Per rule: `- Returns:` appears iff result is non-Void; 2+ parameters use `- Parameters:` block. Add `- Parameters:` block documenting `toolCallBuffer` and `tools`, and `- Returns:` describing the returned tool calls array.
+- [x] `Libraries/MLXLMCommon/Tool/ToolCallFormat.swift:148` — Factory method should begin with `make`, not `create`. The method creates and returns a parser instance, so it should follow the factory-method naming convention. Rename `createParser()` to `makeParser()`.
+
+### Libraries/MLXLMCommon/ReasoningConfig.swift
+Clean — no findings.
+
+### Libraries/MLXFoundationModels/TranscriptConverter.swift
+- [x] `Libraries/MLXFoundationModels/TranscriptConverter.swift:9` — Library type `TranscriptConverter` lacks an explicit access modifier. The rule requires spelling access modifiers explicitly on library declarations when the intent is API-shaping, rather than leaning on the implicit `internal` default. This struct is clearly API-shaping—it's the entry point for converting FoundationModels transcripts to MLX format, with full documentation and a clear public name. Add explicit `public` modifier: `public struct TranscriptConverter {`.
+- [x] `Libraries/MLXFoundationModels/TranscriptConverter.swift:103` — The `.instructions` and `.prompt` cases (lines 103-125) are near-identical copies that differ only by the message constructor (`.system` vs `.user`) and warning text. Two blocks differing only by a value are one function with an argument. Extract a shared helper function that accepts the message constructor and entry type name as parameters, then call it for both `.instructions` and `.prompt` cases.
+- [x] `Libraries/MLXFoundationModels/TranscriptConverter.swift:117` — A switch statement hardcodes JSON escape sequences for five special characters (quote, backslash, newline, carriage return, tab). These form a known set whose arms differ only in constants and should be expressed as a lookup table. Extract the escape mappings to a static let dictionary mapping Character to String (e.g., let escapeMap: [Character: String] = ["\"": "\\...", ...]), then use dictionary lookup in the default case instead of the hardcoded switch arms.
+- [x] `Libraries/MLXFoundationModels/TranscriptConverter.swift:310` — Three cases in `entriesWithImages` (lines 310-320) repeat an identical pattern: bind associated value, extract images from `.segments`, return whether not empty. The logic repeats verbatim across `.instructions`, `.prompt`, and `.toolOutput` and could drift if maintenance is needed. Extract a helper function that returns an entry's segments (if it has a `.segments` property), allowing the three cases to be unified by a single check: bind the entry, get its segments, check if images are present.
+
+### Tests (reviewed individually, all clean)
+- `Tests/MLXLMTests/ToolTests.swift` — clean (engine reported nothing in scope).
+- `Tests/MLXLMTests/ReasoningConfigTests.swift` — clean (engine reported nothing in scope).
+- `Tests/MLXFoundationModelsTests/ThinkThenCallGateTests.swift` — clean (engine reported nothing in scope).
+- `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift` — clean (engine reported nothing in scope).
+- `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MiniMaxM3ChatTemplateProbeTests.swift` — clean (engine reported nothing in scope).
+- `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/MiniMaxM3ToolCallingIntegrationTests.swift` — clean (engine reported nothing in scope).
