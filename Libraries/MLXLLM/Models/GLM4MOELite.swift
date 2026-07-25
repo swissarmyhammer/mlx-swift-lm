@@ -491,7 +491,7 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
     public let model: GLM4MoELiteModelInner
     let configuration: GLM4MoELiteConfiguration
 
-    @ModuleInfo(key: "lm_head") var lmHead: Linear
+    @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     public init(_ args: GLM4MoELiteConfiguration) {
         self.configuration = args
@@ -499,16 +499,25 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
         self.kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
         self.model = GLM4MoELiteModelInner(args)
 
-        _lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabularySize, bias: false)
+        if !args.tieWordEmbeddings {
+            _lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabularySize, bias: false)
+        }
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         let out = model(inputs, cache: cache)
-        return lmHead(out)
+        if let lmHead {
+            return lmHead(out)
+        }
+        return model.embedTokens.asLinear(out)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitized = weights
+
+        if configuration.tieWordEmbeddings {
+            sanitized["lm_head.weight"] = nil
+        }
 
         for l in 0 ..< configuration.hiddenLayers {
             let prefix = "model.layers.\(l)"

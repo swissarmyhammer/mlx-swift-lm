@@ -166,7 +166,7 @@ public class GLM4Model: Module, LLMModel, KVCacheDimensionProvider {
     let configuration: GLM4Configuration
     let modelType: String
 
-    @ModuleInfo(key: "lm_head") var lmHead: Linear
+    @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     public init(_ args: GLM4Configuration) {
         self.configuration = args
@@ -175,12 +175,17 @@ public class GLM4Model: Module, LLMModel, KVCacheDimensionProvider {
         self.modelType = args.modelType
         self.model = GLM4ModelInner(args)
 
-        _lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabularySize, bias: false)
+        if !args.tieWordEmbeddings {
+            _lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabularySize, bias: false)
+        }
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         let out = model(inputs, cache: cache)
-        return lmHead(out)
+        if let lmHead {
+            return lmHead(out)
+        }
+        return model.embedTokens.asLinear(out)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
