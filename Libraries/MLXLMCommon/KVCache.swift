@@ -43,7 +43,15 @@ public enum RoPEOffset {
 /// Interface for Key/Value cache for LLMs.
 ///
 /// See ``LanguageModel/newCache(parameters:)``
-public protocol KVCache: Evaluatable {
+/// `KVCache`'s `Evaluatable.innerState()` requirement is structurally
+/// identical to `Updatable.innerState()`, so every conforming cache already
+/// satisfies `Updatable` -- this conformance (added directly to the
+/// protocol's inheritance list, since a protocol extension cannot declare a
+/// new inheritance relationship) is what lets a `[any KVCache]` be passed as
+/// `compile(inputs:outputs:...)`'s state so `compile()` can observe (and
+/// replay) cache mutation across calls. See kanban
+/// 01KYD3ZCWTZ414Y79RSAKVQXXZ for the design note.
+public protocol KVCache: Evaluatable, Updatable {
     /// get the current offset
     var offset: Int { get }
 
