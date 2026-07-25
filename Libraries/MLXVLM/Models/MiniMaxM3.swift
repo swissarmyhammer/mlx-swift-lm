@@ -1489,8 +1489,26 @@ public final class MiniMaxM3KVCache: KVCache {
     /// regular K/V buffers, has no maximum size limit.
     public var maxSize: Int? { nil }
 
+    /// Registers `MiniMaxM3KVCache` with `KVCacheSerializationRegistry` so
+    /// `savePromptCache`/`loadPromptCache` round-trip it correctly instead of
+    /// silently misclassifying it as a plain `KVCacheSimple` (which only
+    /// accepts a 2-array state and crashes once an `indexKeys` history is
+    /// present). Triggered once, lazily, from `init()` below -- guaranteed to
+    /// run before any instance could be saved.
+    private static let registerSerialization: Void = {
+        KVCacheSerializationRegistry.register(MiniMaxM3KVCache.self, className: "MiniMaxM3KVCache") {
+            state, metaState in
+            let cache = MiniMaxM3KVCache()
+            cache.state = state
+            cache.metaState = metaState
+            return cache
+        }
+    }()
+
     /// Creates an empty sparse-attention KV cache.
-    public init() {}
+    public init() {
+        Self.registerSerialization
+    }
 
     /// Appends `keys`/`values` to the regular (non-index) key/value cache
     /// and returns the full accumulated history, forwarding directly to the

@@ -1569,6 +1569,60 @@ struct KVCacheError: Error {
 
 // MARK: - Utility Functions
 
+/// Registry for `KVCache` types defined outside `MLXLMCommon` (e.g.
+/// model-specific caches in `MLXVLM`/`MLXLLM`) that need `savePromptCache`/
+/// `loadPromptCache` support.
+///
+/// `MLXLMCommon` cannot import downstream modules to switch on their
+/// concrete cache types directly, so those types self-register a
+/// serialization name and a restore factory -- typically via a one-time
+/// `static let` triggered from the type's own `init()`, guaranteeing
+/// registration has happened before any instance could be saved. Without
+/// registration, an unrecognized cache type falls back to being saved as a
+/// plain `KVCache` (``KVCacheSimple``), which silently corrupts round-trips
+/// for any type whose `state` doesn't have exactly 2 arrays.
+public enum KVCacheSerializationRegistry {
+    /// Reconstructs a registered cache type from its saved `state`/`metaState`.
+    public typealias RestoreFactory = ([MLXArray], [String]) -> KVCache
+
+    private static let lock = NSLock()
+    // Manually synchronized by `lock` above -- the compiler cannot see that,
+    // so these are marked `nonisolated(unsafe)` rather than restructured into
+    // an actor (which would force `register`/`className`/`restore` async and
+    // ripple into every `KVCache` save/restore call site).
+    nonisolated(unsafe) private static var classNamesByType: [ObjectIdentifier: String] = [:]
+    nonisolated(unsafe) private static var factoriesByClassName: [String: RestoreFactory] = [:]
+
+    /// Registers a custom `KVCache` type under `className` for save/restore support.
+    ///
+    /// - Parameters:
+    ///   - type: the concrete `KVCache` type being registered
+    ///   - className: a name unique among all registered and built-in class names
+    ///   - restore: reconstructs an instance from previously-saved `state`/`metaState`
+    public static func register<T: KVCache>(
+        _ type: T.Type, className: String, restore: @escaping RestoreFactory
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        classNamesByType[ObjectIdentifier(type)] = className
+        factoriesByClassName[className] = restore
+    }
+
+    fileprivate static func className(for cache: KVCache) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return classNamesByType[ObjectIdentifier(type(of: cache))]
+    }
+
+    fileprivate static func restore(
+        className: String, state: [MLXArray], metaState: [String]
+    ) -> KVCache? {
+        lock.lock()
+        defer { lock.unlock() }
+        return factoriesByClassName[className]?(state, metaState)
+    }
+}
+
 /// Map a cache instance to its Python-compatible class name for serialization.
 private func cacheClassName(_ cache: KVCache) -> String {
     switch cache {
@@ -1579,7 +1633,7 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is QuantizedKVCache: return "QuantizedKVCache"
     case is KVCacheSimple: return "KVCache"
     case is CacheList: return "CacheList"
-    default: return "KVCache"
+    default: return KVCacheSerializationRegistry.className(for: cache) ?? "KVCache"
     }
 }
 
@@ -1734,6 +1788,11 @@ private func restoreCacheFromMetaState(
         return try CacheList.fromState(state: state, metaState: metaState)
 
     default:
+        if let restored = KVCacheSerializationRegistry.restore(
+            className: className, state: state, metaState: metaState)
+        {
+            return restored
+        }
         throw KVCacheError(message: "Unknown cache class: \(className)")
     }
 }

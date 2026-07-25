@@ -864,6 +864,54 @@ struct MiniMaxM3Tests {
         #expect(cache.trim(5) == 0)
     }
 
+    @Test(
+        "savePromptCache/loadPromptCache round-trips a heterogeneous [KVCacheSimple, MiniMaxM3KVCache] array without misclassifying the sparse cache as KVCacheSimple"
+    )
+    func miniMaxM3KVCacheSurvivesSaveAndRestoreRoundTrip() throws {
+        // Regression test for a real crash caught by the real-weights
+        // integration test IntegrationTesting/.../MiniMaxM3CacheIntegrationTests
+        // .saveAndRestoreCacheContinuesWithFactRecall (kanban ^m1f02cw):
+        // `cacheClassName`/`restoreCacheFromMetaState` in
+        // Libraries/MLXLMCommon/KVCache.swift had no case for
+        // `MiniMaxM3KVCache`, so it fell through to the default "KVCache"
+        // (KVCacheSimple) class name. Loading that back tried to assign a
+        // 3-array state (keys, values, indexKeys) to a plain KVCacheSimple,
+        // which only accepts 2 -- "MLXLMCommon/KVCache.swift:444: Fatal
+        // error: KVCacheSimple state must have exactly 2 arrays". Fixed via
+        // `KVCacheSerializationRegistry`, which MiniMaxM3KVCache registers
+        // itself into.
+        let denseCache = KVCacheSimple()
+        _ = denseCache.update(
+            keys: MLXArray.zeros([1, 2, 3, 4]), values: MLXArray.zeros([1, 2, 3, 4]))
+
+        let sparseCache = MiniMaxM3KVCache()
+        _ = sparseCache.update(
+            keys: MLXArray.zeros([1, 2, 3, 4]), values: MLXArray.zeros([1, 2, 3, 4]))
+        // Populate `indexKeys` so the saved state has 3 arrays (keys, values,
+        // indexKeys), not 2 -- the exact shape that crashed under the old
+        // misclassification.
+        _ = sparseCache.updateIndexAndFetch(MLXArray.zeros([1, 4, 3, 8]))
+        #expect(sparseCache.state.count == 3)
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try savePromptCache(url: url, cache: [denseCache, sparseCache])
+        let (restored, _) = try loadPromptCache(url: url)
+
+        #expect(restored.count == 2)
+        #expect(restored[0] is KVCacheSimple)
+        guard let restoredSparse = restored[1] as? MiniMaxM3KVCache else {
+            Issue.record("expected restored[1] to be MiniMaxM3KVCache, got \(type(of: restored[1]))")
+            return
+        }
+        #expect(restoredSparse.offset == sparseCache.offset)
+        #expect(restoredSparse.indexOffset == sparseCache.indexOffset)
+        #expect(restoredSparse.state.count == 3)
+    }
+
     // MARK: - Tiny-model forward pass / KV cache / determinism
 
     private func tinyModelConfig(hiddenLayers: Int = 4, moeLayerFreq: [Int] = [0, 0, 1, 1])
