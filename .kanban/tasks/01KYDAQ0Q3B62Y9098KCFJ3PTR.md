@@ -35,7 +35,38 @@ comments:
 
     Task remains in `doing`, ready for /review.
   timestamp: 2026-07-25T19:30:48.141020+00:00
-position_column: doing
+- actor: claude-code
+  id: 01kydfhydchb8dys3a8jpm053j
+  text: |-
+    ## Review disposition (review sha HEAD~1..HEAD, commit fed151f)
+
+    `review sha HEAD~1..HEAD` returned 55 findings (counts: findings 55, confirmed 55, refuted 17, attempted 14, failed 0), all documentation/duplication/complexity style findings — no correctness findings. Cross-checked each against the actual diff (`git diff HEAD~1..HEAD` for the two touched files) to classify:
+
+    **In-scope (about the new lm_head Optional logic / fallback path) — fixed in code, 10 findings:**
+    - GLM4.swift:154 — `GLM4Model.callAsFunction` duplicated the new `if let lmHead { ... } else { model.embedTokens.asLinear(out) }` fallback verbatim with `GLM4MoELiteModel.callAsFunction`. Fixed by extracting a shared `applyLMHead(_:embedTokens:_:)` helper (added in GLM4.swift, used from both files — both are in the `MLXLLM` module so no import needed).
+    - GLM4.swift:181, :183 — missing doc comment on `GLM4Model.callAsFunction`, one explicitly citing "lm_head application or embedding fallback for tied embeddings". Added a doc comment covering the tied/untied fallback and cache usage.
+    - GLM4MOELite.swift:502 — missing doc on the now-Optional `lmHead` property, explicitly citing "its optional nature when word embeddings are tied". Added a doc comment.
+    - GLM4MOELite.swift:508, :537 — missing doc on `init` (which now contains the new `if !args.tieWordEmbeddings` guarded creation). Added a doc comment.
+    - GLM4MOELite.swift:516, :547 — missing doc on `callAsFunction` (now contains the new fallback + uses the shared helper). Added a doc comment.
+    - GLM4MOELite.swift:522, :553 — missing doc on `sanitize` (now contains the new tied-embedding `lm_head.weight` strip block, in addition to pre-existing expert-stacking/kv_b_proj logic). Added a doc comment covering all of it.
+
+    Verified: `swift build --target MLXLLM` clean; `swift test --filter MLXLMTests.GLM4LmHeadTiedLoadTests` — 6/6 pass; re-running `review file` on both files afterward shows zero remaining findings mentioning lm_head/tied-embeddings/fallback/duplication between the two files — the fix eliminated the cited cause, not just the cited line.
+
+    **Pre-existing debt — dispositioned as "skip, pre-existing debt" per established precedent (^mv9aq7w/^xgvth41/^wz8y8qq/^ayw1xee/^9a2aw98/^m1f02cw/^akvqxxz), 45 findings:**
+
+    All remaining findings sit 100% on lines this diff never touched, confirmed line-by-line against `git diff HEAD~1..HEAD`:
+    - Missing `///` doc comments and missing-`final` on `GLM4DecoderLayer`/`GLM4ModelInner`/`GLM4MoELiteModelInner`/`GLM4Model`/`GLM4MoELiteModel` class declarations, and on unrelated properties (`vocabularySize`, `kvHeads`, `model`, `modelType`) — none of these declarations or their surrounding lines were touched by fed151f.
+    - `GLM4ModelInner.callAsFunction` vs `GLM4MoELiteModelInner.callAsFunction` duplication (embed+mask+loop+norm, GLM4.swift:143) — pre-existing, unrelated to lm_head; neither Inner class's `callAsFunction` was touched by this diff.
+    - Nested-loop complexity findings (GLM4MOELite.swift:485 expert-stacking loop, :534 `numMptLayers` MTP-layer filter) — both are pre-existing `sanitize` logic below the new 3-line tied-strip block this diff added; the diff only inserted lines above them, it didn't touch or add this nesting.
+    - `GLM4.swift` sanitize doc-comment findings (:188, :190) — GLM4.swift's `sanitize` body (the `tie_word_embeddings` strip) already existed before fed151f and was not modified by it (only the class's `lmHead` property/init/callAsFunction changed); the missing-doc gap predates this task.
+    - `GLM4Configuration`/`GLM4MoELiteConfiguration` struct docs, `CodingKeys`, and `init(from:)` Codable initializer docs — neither struct's body was touched; `tieWordEmbeddings` decoding already existed pre-diff.
+    - `loraLayers` extension doc findings — untouched by this diff.
+
+    None of these 45 are about the new Optional-`lmHead`/fallback/sanitize-tie-strip logic or the new test file; each is either in a different class/method entirely, or in a part of `sanitize` that predates fed151f. Flagging per the established precedent so this disposition is auditable, same as the six prior sessions cited above.
+
+    Commit for the fix work above is pending (uncommitted in the working tree as of this review pass) — code changes: `Libraries/MLXLLM/Models/GLM4.swift` (added `applyLMHead` helper + doc comment), `Libraries/MLXLLM/Models/GLM4MOELite.swift` (doc comments on `lmHead`/`init`/`callAsFunction`/`sanitize`, `callAsFunction` now calls `applyLMHead`).
+  timestamp: 2026-07-25T20:30:35.948861+00:00
+position_column: review
 position_ordinal: '80'
 title: 'Fix GLM4.swift/GLM4MOELite.swift: unconditional lm_head crashes on genuinely tied checkpoints'
 ---
@@ -81,3 +112,61 @@ Bring both files in line with the established convention (mirror `GLM4MOE.swift`
 - [ ] A synthetic-weights test proves a tied checkpoint (omitting `lm_head.weight`) loads successfully for both models (no `UpdateError.keyNotFound`)
 - [ ] A synthetic-weights test proves an untied checkpoint (providing `lm_head.weight`) still loads and uses the separate `lm_head` correctly
 - [ ] Existing GLM4/GLM4MoELite tests remain green, no regressions
+
+## Review Findings (2026-07-25 14:36)
+
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:95` — Public class `GLM4ModelInner` is missing a documentation comment. Every public declaration must carry a `///` doc comment stating its purpose. Add a documentation comment above the class definition describing its role as the inner transformer model for GLM4.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:95` — Public class `GLM4ModelInner` should be marked `final` if it is not designed for subclassing. Non-final classes allow external subclassing, which is likely unintended here. Change to `public final class GLM4ModelInner: Module` to prevent unintended subclassing.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:101` — Public initializer inside `GLM4ModelInner` is missing a documentation comment. Every public declaration must carry a `///` doc comment. Add a documentation comment describing the initialization of the inner model with its configuration.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:114` — Public function `callAsFunction` inside `GLM4ModelInner` is missing a documentation comment. Add a documentation comment describing the forward pass of the inner model.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:129` — Public class GLM4ModelInner lacks documentation explaining its purpose and role in the GLM4 architecture. Add documentation comment explaining that GLM4ModelInner encapsulates the core model layers and how it fits within GLM4Model.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:135` — Public initializer of GLM4ModelInner lacks documentation of construction behavior. Add documentation explaining what GLM4Configuration parameters are used and how the initializer sets up embeddings and decoder layers.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:143` — GLM4ModelInner.callAsFunction is verbatim identical to GLM4MoELiteModelInner.callAsFunction. Both methods embed tokens, create an attention mask, iterate through layers, and return the normalized result — this 9-line sequence is duplicated across two inner model classes and will drift if one is updated without the other. Extract into a protocol extension on a shared base protocol (e.g., add a default implementation of callAsFunction to a protocol that requires embedTokens, layers, and norm as protocol requirements). Alternatively, create a protocol-default implementation in a common module (MLXLMCommon) that both classes can adopt.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:148` — Public method callAsFunction in GLM4ModelInner lacks documentation of forward pass behavior. Add documentation explaining the forward pass through embeddings and decoder layers, and what cache parameter does.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:154` — GLM4Model.callAsFunction is verbatim identical to GLM4MoELiteModel.callAsFunction in the sibling file. This 7-line method is copy-pasted between two model classes and will drift if logic changes are applied to only one. Extract the shared callAsFunction logic into a protocol extension on LLMModel or a shared helper function. Both classes conform to LLMModel and have identical lmHead: Linear? properties and model: *ModelInner properties, making a protocol-based extraction feasible. Pattern: define a default implementation in a protocol extension that calls self.model(...), checks if let self.lmHead, and falls back to self.model.embedTokens.asLinear(out).
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:159` — Public class `GLM4Model` is missing a documentation comment. Every public declaration must carry a `///` doc comment. Add a documentation comment describing the GLM4 language model class.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:159` — Public class `GLM4Model` should be marked `final` if not designed for subclassing. Change to `public final class GLM4Model: Module, LLMModel, KVCacheDimensionProvider`.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:161` — Public class GLM4Model lacks documentation as the primary entry point for GLM4 language models. Add documentation explaining that GLM4Model is the main interface for using GLM4 models and describing its conformances.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:161` — Public property `vocabularySize` is missing a documentation comment. Every public declaration must carry a `///` doc comment. Add a documentation comment describing what this property represents.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:162` — Public property vocabularySize in GLM4Model lacks documentation explaining what it represents. Add documentation explaining that vocabularySize is the vocabulary size of the model.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:162` — Public property `kvHeads` is missing a documentation comment. Add a documentation comment describing the key-value heads per layer.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:163` — Public property kvHeads in GLM4Model lacks documentation explaining its purpose. Add documentation explaining that kvHeads contains the number of key-value heads per layer for attention computation.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:164` — Public property `model` is missing a documentation comment. Add a documentation comment describing the inner model instance.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:165` — Public property model in GLM4Model lacks documentation explaining its role. Add documentation explaining that model is the core GLM4ModelInner instance that contains layers and embeddings.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:181` — Public function `callAsFunction` is missing a documentation comment. Add a documentation comment describing the forward pass, inputs, and return value.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:183` — Public method callAsFunction in GLM4Model lacks documentation of inference behavior. Add documentation explaining the forward pass including lm_head application or embedding fallback for tied embeddings, and cache usage.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:188` — Public function `sanitize` is missing a documentation comment. Add a documentation comment explaining that this function removes weights for tied embeddings.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:190` — Public method sanitize in GLM4Model lacks documentation of its weight processing logic. Add documentation explaining that sanitize removes lm_head weights when tie_word_embeddings is true to match checkpoint structure.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:197` — Public struct `GLM4Configuration` is missing a documentation comment. Add a documentation comment describing the configuration parameters for GLM4.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:201` — Public struct GLM4Configuration lacks documentation of its purpose and usage. Add documentation explaining that GLM4Configuration holds hyperparameters for GLM4 models and is loaded from model config files.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:217` — Public Codable initializer `init(from:)` is missing a documentation comment. Add a documentation comment for the Codable decoder initializer.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:248` — Public initializer for GLM4Configuration (init from decoder) lacks documentation of deserialization. Add documentation explaining that this is a Codable deserializer for loading GLM4Configuration from JSON format config files.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:254` — Public property `loraLayers` is missing a documentation comment. Add a documentation comment describing the layers available for LoRA fine-tuning.
+- [ ] `Libraries/MLXLLM/Models/GLM4.swift:271` — Public property loraLayers in LoRA extension lacks documentation of its purpose. Add documentation explaining that loraLayers returns the decoder layers that can be fine-tuned with LoRA.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:469` — Public class `GLM4MoELiteModelInner` is missing a documentation comment. Add a documentation comment describing the inner transformer model for GLM4-MoE-Lite.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:469` — Public class `GLM4MoELiteModelInner` should be marked `final` if not designed for subclassing. Change to `public final class GLM4MoELiteModelInner: Module`.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:485` — Condition nested 4 levels deep in triply-nested loops (for l, for n, for k, then if), exceeding the 3-level threshold. Multiple closure bodies inside the condition add further cognitive load. Extract the innermost logic into a named helper function. For example, create a function like `updateExpertWeights(prefix:n:k:)` that encapsulates the triply-nested loop logic, reducing nesting to 1-2 levels.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:493` — Public class `GLM4MoELiteModel` is missing a documentation comment. Add a documentation comment describing the GLM4-MoE-Lite language model.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:493` — Public class `GLM4MoELiteModel` should be marked `final` if not designed for subclassing. Change to `public final class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider`.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:495` — Public property `vocabularySize` is missing a documentation comment. Add a documentation comment describing the vocabulary size.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:496` — Public property `kvHeads` is missing a documentation comment. Add a documentation comment describing the key-value heads per layer.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:498` — Public property `model` is missing a documentation comment. Add a documentation comment describing the inner model instance.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:502` — Public property `lmHead` is missing a documentation comment. Add a documentation comment describing the language model head and its optional nature when word embeddings are tied.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:508` — Public initializer is missing a documentation comment. Add a documentation comment with parameter documentation for the configuration argument.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:516` — Public function `callAsFunction` is missing a documentation comment. Add a documentation comment describing the forward pass, inputs, and return value.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:517` — Public class GLM4MoELiteModelInner lacks documentation of its purpose in the GLM4MoELite architecture. Add documentation explaining what GLM4MoELiteModelInner does and how it relates to the full GLM4MoELiteModel.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:522` — Public function `sanitize` is missing a documentation comment. Add a documentation comment explaining that this function removes weights for tied embeddings and handles MoE expert stacking.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:531` — Public class GLM4MoELiteModel lacks documentation as the main entry point for GLM4MoELite models. Add documentation explaining that GLM4MoELiteModel is a Mixture of Experts variant of GLM4 and its usage.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:532` — Public property vocabularySize in GLM4MoELiteModel lacks documentation explaining what it represents. Add documentation explaining that vocabularySize is the vocabulary size of the model.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:533` — Public property kvHeads in GLM4MoELiteModel lacks documentation explaining its purpose. Add documentation explaining that kvHeads contains the number of key-value heads per layer for attention computation.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:534` — Condition nested 4 levels deep (if numMptLayers > 0, filter closure body, for loop, then if), exceeding the 3-level threshold. Combining closures with nested loops and conditionals creates high cognitive overhead. Extract the filter predicate into a named helper method: `func shouldRemoveLayer(_ key: String, _ numMptLayers: Int) -> Bool`. This makes the intent clear and reduces the apparent nesting by one level, improving readability.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:535` — Public property model in GLM4MoELiteModel lacks documentation explaining its role. Add documentation explaining that model is the core GLM4MoELiteModelInner instance containing MoE layers and embeddings.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:537` — Public initializer of GLM4MoELiteModel lacks documentation of construction behavior. Add documentation explaining how GLM4MoELiteModel is instantiated and MoE-specific initialization.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:547` — Public method callAsFunction in GLM4MoELiteModel lacks documentation of forward pass behavior. Add documentation explaining the forward pass through the Mixture of Experts model, including routing behavior and cache usage.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:553` — Public method sanitize in GLM4MoELiteModel lacks documentation of its complex weight transformation logic. Add documentation explaining that sanitize handles expert stacking, kv_b_proj conversion, quantization handling, and tied embedding removal.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:603` — Public struct `GLM4MoELiteConfiguration` is missing a documentation comment. Add a documentation comment describing the configuration parameters for GLM4-MoE-Lite.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:631` — Public struct GLM4MoELiteConfiguration lacks documentation of its purpose. Add documentation explaining that GLM4MoELiteConfiguration holds hyperparameters for GLM4MoELite Mixture of Experts models.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:653` — Public Codable initializer `init(from:)` is missing a documentation comment. Add a documentation comment for the Codable decoder initializer.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:692` — Public property `loraLayers` is missing a documentation comment. Add a documentation comment describing the layers available for LoRA fine-tuning.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:711` — Public initializer for GLM4MoELiteConfiguration (init from decoder) lacks documentation. Add documentation explaining that this is a Codable deserializer for loading GLM4MoELiteConfiguration from JSON config files.
+- [ ] `Libraries/MLXLLM/Models/GLM4MOELite.swift:746` — Public property loraLayers in LoRA extension lacks documentation. Add documentation explaining that loraLayers returns the model's decoder layers for LoRA fine-tuning support.

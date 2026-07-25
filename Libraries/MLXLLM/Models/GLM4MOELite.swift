@@ -491,8 +491,16 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
     public let model: GLM4MoELiteModelInner
     let configuration: GLM4MoELiteConfiguration
 
+    /// Language-model head projecting hidden states to vocabulary logits.
+    /// `nil` when `args.tieWordEmbeddings` is `true`, in which case
+    /// `callAsFunction` falls back to the tied word-embedding matrix
+    /// instead of a separate `lm_head` weight.
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
+    /// Creates a `GLM4MoELiteModel` from `args`. Builds the inner
+    /// Mixture-of-Experts transformer body and, unless
+    /// `args.tieWordEmbeddings` is `true`, allocates a separate `lm_head`
+    /// projection.
     public init(_ args: GLM4MoELiteConfiguration) {
         self.configuration = args
         self.vocabularySize = args.vocabularySize
@@ -504,14 +512,23 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
         }
     }
 
+    /// Runs the forward pass: encodes `inputs` through the Mixture-of-Experts
+    /// transformer body, then projects to vocabulary logits via `lmHead`
+    /// when the checkpoint provides a separate language-model head, or by
+    /// reusing the tied word-embedding matrix as a linear projection when
+    /// `lmHead` is `nil` (`tie_word_embeddings: true`). `cache` supplies the
+    /// per-layer KV cache used for incremental decoding.
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         let out = model(inputs, cache: cache)
-        if let lmHead {
-            return lmHead(out)
-        }
-        return model.embedTokens.asLinear(out)
+        return applyLMHead(lmHead, embedTokens: model.embedTokens, out)
     }
 
+    /// Adapts a raw checkpoint's weight dictionary to this model's parameter
+    /// layout: drops `lm_head.weight` when embeddings are tied, stacks
+    /// per-expert MoE weights into batched `switch_mlp` tensors, converts
+    /// `kv_b_proj` into the `embed_q`/`unembed_out` pair (re-quantizing when
+    /// needed), and removes any multi-token-prediction layers beyond
+    /// `hiddenLayers`.
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitized = weights
 
