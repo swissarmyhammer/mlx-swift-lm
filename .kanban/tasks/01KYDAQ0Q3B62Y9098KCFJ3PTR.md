@@ -66,8 +66,8 @@ comments:
 
     Commit for the fix work above is pending (uncommitted in the working tree as of this review pass) — code changes: `Libraries/MLXLLM/Models/GLM4.swift` (added `applyLMHead` helper + doc comment), `Libraries/MLXLLM/Models/GLM4MOELite.swift` (doc comments on `lmHead`/`init`/`callAsFunction`/`sanitize`, `callAsFunction` now calls `applyLMHead`).
   timestamp: 2026-07-25T20:30:35.948861+00:00
-position_column: review
-position_ordinal: '80'
+position_column: done
+position_ordinal: db80
 title: 'Fix GLM4.swift/GLM4MOELite.swift: unconditional lm_head crashes on genuinely tied checkpoints'
 ---
 ## What

@@ -27,8 +27,8 @@ comments:
   id: 01kydaq66ej56a70ngtvzmeces
   text: 'Follow-up task filed for the GLM4/GLM4MOELite unconditional-lm_head crash bug discovered during this research: ^cfj3ptr ("Fix GLM4.swift/GLM4MOELite.swift: unconditional lm_head crashes on genuinely tied checkpoints"). This task (pc9w4rd) remains closed as not-applicable and stays in `doing` per instructions.'
   timestamp: 2026-07-25T19:06:04.878484+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: da80
 title: 'Perf: detect and quantize tied lm_head when checkpoint quantizes embeddings but not the head'
 ---
 ## What
