@@ -159,6 +159,105 @@ comments:
     - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/Load.swift (load-time filter extracted to `package func quantizationParameters(forPath:weights:quantization:perLayerQuantization:)`, +37/-10), /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Tests/MLXLMTests/DeepseekV4QuantizationPlanTests.swift (13 tests, +230/-52 across both files). All 6 review findings closed. 3-mutation proof: BaseConfiguration `mode` -> `.affine` FAILS (2 tests, 136 issues); SwitchLayers `MLX.quantized(mode:)` -> `.affine` FAILS (3 issues plus the `[gather_qmm] Scale type must be uint8` abort); BaseConfiguration `quantization(layer:)` `else` -> `return nil` FAILS (1 issue). All three reverted; `git status --porcelain -- Libraries/` then shows only the intended `Load.swift` change. `swift build` exit 0; `swift test --filter DeepseekV4QuantizationPlanTests` 13/13; full `swift test` exit 0, zero failures, 2 pre-existing skips.
     - next: /review round 2
   timestamp: 2026-08-10T17:23:49.989437+00:00
+- actor: claude-code
+  id: 01kzpbzwczga9crhanb0e6aybr
+  text: |
+    ### review — findings
+
+    - scope: `review sha fa51cba~1..fa51cba` (round 2). The engine attempted 9 files, skipped 0, failed 0. Round 1 could not reach production code; this round did.
+    - counts: 3 findings, 3 confirmed, 1 refuted.
+    - evidence: `Libraries/MLXLMCommon/Load.swift:15`, `Libraries/MLXLMCommon/Load.swift:26`, `Libraries/MLXLMCommon/Load.swift:81`.
+
+    #### Round 1 findings: all six confirmed closed
+
+    Read each of the three downstream cards. `^tty95f4` holds the layers-0-and-1 rule, the "submodule must be absent" wording, the 82 keys across 41 layers, and the 44-against-43 fact. `^r92pjcr` holds the 84 keys across the 21 even layers, the missing `hasIndexer(layer:)` gap, and the 44-against-43 fact. `^ag7ant0` holds both facts. Findings 2, 3 and 4 read correct in the test file: the `stubScales(for:)` document comment states the scales assumption in as many words, `ProbeAttention` holds `ProbeCompressor?` and builds it only from layer 2 up with `model.layers.2.attn.compressor.wkv` asserted, and the counts read 82 and 84.
+
+    #### The extraction is behaviour preserving
+
+    Compared the new `quantizationParameters(forPath:weights:quantization:perLayerQuantization:)` body against the closure it came out of. The two-part gate keeps its order: the `weights["\(path).scales"] != nil` test first, the plan second. `guard ... else { return nil }` gives the same result as the old `else { return nil }`, and the `if let perLayerQuantization { return ... }` with a fall-through `return quantization?.asTuple` gives the same result as the old `if/else`. `loadWeights` keeps its `quantization != nil || perLayerQuantization != nil` guard and calls the new function for each path. `weights` moved from a captured value to a parameter; a Swift dictionary is a value type, thus this is the same read.
+
+    `package` is the correct access level and matches `safetensorWeightURLs` in the same file. The test target sits in the same package, thus it can call it.
+
+    #### The three mutations were run again
+
+    - `BaseConfiguration` `mode` forced to `.affine`: 136 issues. Fails.
+    - `SwitchLayers` `MLX.quantized(mode:)` forced to `.affine`: MLX aborts with "[gather_qmm] Scale type must be uint8 but received type float32". Fails.
+    - `quantization(layer:)` `else` changed to `return nil`: `loadFilterGivesTheDefaultToAPathThePlanDoesNotName` fails at `DeepseekV4QuantizationPlanTests.swift:386`. This mutation kept all 8 round-1 tests green; it is now caught.
+
+    Each mutation was reverted. `git status` and `git diff fa51cba` over `Libraries` and `Tests` are both empty.
+
+    #### No other model changed
+
+    `loadWeights` has five production call sites -- `Libraries/MLXVLM/VLMModelFactory.swift:434`, `Libraries/MLXEmbedders/ModelFactory.swift:220`, `Libraries/MLXLLM/LLMModelFactory.swift:736`, `Libraries/MLXLMCommon/MTPDrafterModelFactory.swift:95` and `Libraries/MLXLMCommon/ModelConversion.swift:209`. All five reach the filter through the same call, thus a behaviour-identical extraction leaves them alone. `Tests/MLXLMTests/Gemma4KVSharedLoadTests.swift`, `Tests/MLXLMTests/GLM4LmHeadTiedLoadTests.swift`, `Tests/MLXLMTests/BaseConfigurationTests.swift` and `Tests/MLXLMTests/MiniMaxM3Tests.swift` read this path and all pass. The full `swift test` run passes 282 tests in 44 suites and 7 tests in 5 suites, with no failure and no warning.
+
+    - next: correct the three `Load.swift` findings, then run `/review` again.
+  timestamp: 2026-08-10T17:37:10.047683+00:00
+- actor: claude-code
+  id: 01kzpcq7jr493sy85jx6038aq8
+  text: |
+    ### Review round 2 -- all 3 findings closed in `Load.swift`
+
+    All three are pre-existing code that the engine reached because round 1 touched production code for the first time. Each cause was removed for the whole file, not only for the flagged line.
+
+    **Finding 1, missing documentation.** `safetensorWeightURLs` now holds a `///` comment in the file's own style. The same cause elsewhere in the file: `SafetensorsIndex` was undocumented and now is documented, and the new error type and its case are documented. `quantizationParameters` and `loadWeights` already were.
+
+    **Finding 2, the force unwrap.** The two options the finding gives are a throw or an empty array. The empty array swallows the failure, which the card forbids, thus the throw. The file reports every other failure by `throws` and held no error type of its own, so a file-local one was added:
+
+    `package enum WeightLoadingError: LocalizedError, Equatable { case unreadableModelDirectory(URL) }`
+
+    That matches the pattern already in this module -- `KVCacheError` in `KVCache.swift`, `UserInputError` in `UserInput.swift`, `ModelConversionError` in `ModelConversion.swift`. `package` matches `safetensorWeightURLs` beside it.
+
+    **The `nil` branch cannot be reached from a real call.** A probe program gives a non-nil enumerator for an absent directory, a plain file and an `https:` URL alike:
+
+    ```
+    missing dir non-nil / a plain file non-nil / http url non-nil / real dir non-nil
+    ```
+
+    `FileManager.enumerator(at:)` declares an Optional result, thus the guard is correct and necessary, but no test can drive it without a `FileManager` parameter on the production signature. That would put test-only surface on the load path of every model in the repository, so it was not added. **No test for the throw. This is stated openly rather than hidden.**
+
+    **What is tested instead is the behaviour the card asks to preserve.** Three new tests in `Tests/MLXLMTests/LoadWeightsTests.swift`:
+
+    - `testSafetensorWeightURLsFindsEverySafetensorsFileWhenNoIndexIsPresent` -- the branch that held the force unwrap, with a subdirectory, thus the recursive walk is held still.
+    - `testSafetensorWeightURLsGivesAnEmptyListForADirectoryWithNoWeightFiles` -- an empty result is not an error.
+    - `testSafetensorWeightURLsGivesAnEmptyListForADirectoryThatIsAbsent` -- an absent directory is still an empty list, thus the guard did not turn a quiet case into a throw.
+
+    All three were written first and run against the file **before** the edit: 4 of 4 passed. They passed again after it. That is the evidence that the change is behaviour preserving, which is what a refactor of a shared path needs; a red-first test was not available, because the change adds no reachable behaviour.
+
+    **Finding 3, the empty-collection form.** `var weights = [String: MLXArray]()` and the line below it, `var metadata = [String: String]()`, both take the annotated literal form. No other call form is left in the file.
+
+    ### Discovery worth keeping
+
+    `FileManager.enumerator(at:)` does not fail for an absent directory. Anyone who later reads the new guard and expects a missing model directory to throw will be wrong: that case still gives an empty weight list, and the load fails later at `model.update(parameters:verify:)` instead. The third test records this so the next reader does not have to run the probe again.
+  timestamp: 2026-08-10T17:49:55.160790+00:00
+- actor: claude-code
+  id: 01kzpcqmgp4yzgm3nr8736ee4d
+  text: |
+    ### Mutation proof, round 3 -- all three mutations still FAIL
+
+    Each was applied alone against the corrected tree, run, and reverted.
+
+    1. `BaseConfiguration.swift` -- `public var mode: QuantizationMode { _mode ?? .affine }` to `{ .affine }`. **FAILS**: 136 issues, 13 tests in 1 suite.
+    2. `SwitchLayers.swift` -- `MLX.quantized(other.weight, groupSize:bits:mode: mode)` to `mode: .affine`. **FAILS**: `loadFilterAppliesMxfp4ToExpertsAndAffineToEverythingElse` 3 issues on `layer.biases == nil`, then MLX aborts with `[gather_qmm] Scale type must be uint8 but received type float32`.
+    3. `BaseConfiguration.swift` -- the whole `else` branch of `quantization(layer:)` to `return nil`. **FAILS**: `loadFilterGivesTheDefaultToAPathThePlanDoesNotName`, 1 issue at `DeepseekV4QuantizationPlanTests.swift:386`.
+
+    After the three reverts, `git status --porcelain -- Libraries/ Tests/` gives exactly two lines, ` M Libraries/MLXLMCommon/Load.swift` and ` M Tests/MLXLMTests/LoadWeightsTests.swift`. `BaseConfiguration.swift` and `SwitchLayers.swift` are clean.
+
+    ### Verification
+
+    - `swift build` -- exit 0. The only warnings are the pre-existing ones in `Qwen2VL.swift`, `Qwen25VL.swift` and `Gemma4.swift`, untouched.
+    - `swift test --filter DeepseekV4QuantizationPlanTests` -- 13 tests in 1 suite passed.
+    - `swift test --filter LoadWeightsTests` -- 4 tests passed, 0 failures.
+    - `swift test --filter Quantiz` -- 18 tests in 2 suites passed.
+    - `swift test` -- exit 0, zero failures. Swift Testing: 383 + 282 + 80 + 7 tests passed. XCTest: 210 executed, 0 failures, the 2 pre-existing `CompiledDecodeCorrectnessTests` skips only (kanban 01KYD3ZCWTZ414Y79RSAKVQXXZ). The XCTest count went from 207 to 210, which is the three new `LoadWeightsTests` cases.
+    - `swift format --in-place --configuration .swift-format` on the two touched files only. No tree-wide format run.
+  timestamp: 2026-08-10T17:50:08.406818+00:00
+- actor: claude-code
+  id: 01kzpcqy634cf701jjd3r66xhh
+  text: |
+    ### implement — changed
+    - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/Load.swift (+38/-4: doc comments on `safetensorWeightURLs` and `SafetensorsIndex`, new `package enum WeightLoadingError`, the `enumerator(...)!` force unwrap replaced by `guard ... else { throw }`, both empty-dictionary call forms changed to the annotated literal), /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Tests/MLXLMTests/LoadWeightsTests.swift (+43: three behaviour-preservation tests). All 3 round-2 findings closed and flipped to `- [x]`. No test drives the new throw, because `FileManager.enumerator(at:)` gives a non-nil enumerator for an absent directory, a plain file and a non-file URL alike; a seam for it would put test-only surface on the load path of every model. Mutation proof: all three round-2 mutations still fail (136 issues; the `[gather_qmm] Scale type must be uint8` abort; 1 issue at DeepseekV4QuantizationPlanTests.swift:386), each reverted, tree clean. `swift build` exit 0; `swift test --filter DeepseekV4QuantizationPlanTests` 13/13; `--filter LoadWeightsTests` 4/4; `--filter Quantiz` 18/18; full `swift test` exit 0, zero failures, 2 pre-existing skips.
+    - next: /review round 3
+  timestamp: 2026-08-10T17:50:18.307237+00:00
 depends_on:
 - 01KZGMPECN4FA7T3BFX6F6QMF7
 position_column: doing
@@ -226,3 +325,23 @@ So the generic path should already work. What this task must prove:
   - Resolved. A comment now sits on each of `^tty95f4`, `^r92pjcr` and `^ag7ant0`. The `^tty95f4` comment states that the submodule must be absent on layers 0 and 1, and names the optional-submodule pattern. The `^r92pjcr` comment states the even-layer rule and asks for a `hasIndexer(layer:)` beside `hasCompressor(layer:)`. `DeepseekV4Configuration.swift` is unchanged.
 - [x] `Libraries/MLXLLM/Models/DeepseekV4Configuration.swift:298` — `compress_ratios` holds 44 entries, `num_hidden_layers` is 43, and entry 43 is 0. `hasCompressor(layer:)` guards the bound, thus it is correct today. Any downstream code that reads `compressRatios.count` as the layer count gets 44. Write this fact beside the layers 0 and 1 fact on the same downstream tasks.
   - Resolved. Each of the three comments states the 44-against-43 fact and says to read `numHiddenLayers` for a layer count.
+
+## Review Findings (2026-08-10 12:26)
+
+- [x] `Libraries/MLXLMCommon/Load.swift:15` — Public package function `safetensorWeightURLs` lacks documentation. It has no doc comment explaining what it does, its parameters, or its return value. This makes the API harder to understand and use. Add a documentation comment above the function explaining its purpose, parameters, and return value. For example:
+
+```swift
+/// Collects the URLs of all safetensor weight files in the model directory.
+///
+/// This function checks for a safetensors index file and uses it if present;
+/// otherwise, it enumerates all .safetensors files in the directory.
+///
+/// - Parameter modelDirectory: The directory containing model weights.
+/// - Returns: An array of URLs to safetensor weight files.
+package func safetensorWeightURLs(in modelDirectory: URL) throws -> [URL] {
+```.
+  - Resolved. `safetensorWeightURLs` now holds a `///` comment in the style the rest of the file uses: a one-sentence summary, a paragraph that names both branches (index file, or every `.safetensors` file in the directory and its subdirectories), and `- Parameter`, `- Returns` and `- Throws` entries. The same cause was removed for the whole file: the private `SafetensorsIndex` struct, which held no comment either, now holds one, and the new `WeightLoadingError` and its case are documented. Every other `package`/`public` declaration in the file (`quantizationParameters`, `loadWeights`) was already documented.
+- [x] `Libraries/MLXLMCommon/Load.swift:26` — Force unwrap on non-guaranteed result: FileManager.default.enumerator() can return nil, so the force unwrap `!` will crash if it does. Use optional binding or provide a fallback instead. Replace the force unwrap with proper error handling: `guard let enumerator = FileManager.default.enumerator(at: modelDirectory, includingPropertiesForKeys: nil) else { throw /* appropriate error */ }` or return an empty array.
+  - Resolved with the throwing form, not the empty-array fallback, because an empty array would swallow the failure. The file reports every other failure by `throws` (`Data(contentsOf:)`, `JSONDecoder.decode`, `loadArraysAndMetadata`, `model.update`), and it held no error type of its own, thus a `package enum WeightLoadingError: LocalizedError, Equatable` with one case, `unreadableModelDirectory(URL)`, now sits beside the function. This matches the file-local error pattern that `KVCacheError`, `UserInputError` and `ModelConversionError` already use in this module. The success path is unchanged term for term. Three new tests in `Tests/MLXLMTests/LoadWeightsTests.swift` hold the behaviour still: the recursive `.safetensors` discovery, a directory with no weight file, and an absent directory. All three passed against the file before the edit and after it, thus the change is behaviour preserving. The `nil` branch itself cannot be reached from a real call: a probe program shows that `FileManager.enumerator(at:includingPropertiesForKeys:)` gives a non-nil enumerator for an absent directory, a plain file and a non-file URL alike. A test for the throw would need a `FileManager` seam in the production signature, which would put test-only surface on the load path of every model, thus none was added. The guard keeps the `nil` case honest for the platforms and sandboxes where Foundation does give `nil`.
+- [x] `Libraries/MLXLMCommon/Load.swift:81` — Empty dictionary initialization uses the call form `()` instead of the idiomatic literal with type annotation. This is inconsistent with Swift conventions for empty collections. Change to `var weights: [String: MLXArray] = [:]` — the annotated literal is the idiomatic Swift form for empty collections.
+  - Resolved, and the same cause was removed for the whole file. `var weights = [String: MLXArray]()` is now `var weights: [String: MLXArray] = [:]`, and the line below it, `var metadata = [String: String]()`, is now `var metadata: [String: String] = [:]`. No other empty-collection call form is left in the file.
