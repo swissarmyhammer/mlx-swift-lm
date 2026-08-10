@@ -375,6 +375,158 @@ comments:
     - evidence: 3 files — CONTRIBUTING.md, THIRD-PARTY-NOTICES.md, Tests/MLXLMTests/LicenseNoticeTests.swift. The round 2 finding (THIRD-PARTY-NOTICES.md:55) is closed, and the same cause is removed from 7 more lines in the two Markdown files. `swift build` complete; `swift test --filter LicenseNoticeTests` 5/5 passed; `swift-format lint` exit 0.
     - next: /review
   timestamp: 2026-08-10T13:09:40.241880+00:00
+- actor: claude-code
+  id: 01kznx9h95nsyd5f47hgvpv59t
+  text: |
+    ### review — findings
+    - evidence: 5 findings — THIRD-PARTY-NOTICES.md:57, CONTRIBUTING.md:90-91, CONTRIBUTING.md:102, Tests/MLXLMTests/LicenseNoticeTests.swift:92-93, Tests/MLXLMTests/LicenseNoticeTests.swift:98
+    - scope: `167663d~1..167663d`. Round 3. Engine attempted 0 files for the third time, thus all checks are by hand.
+    - closed: all 8 items from round 1 and round 2 are correct and have the mark `- [x]`.
+    - verified: the MIT blocks did not change; the 7 not-approved STE words have 0 matches; `thus` and `sufficient` stay and are approved; the new test is not vacuous and fails when a person breaks the rule.
+    - new: the round 2 correction went too far. The claim "only the DeepSeek-V4 files have the Osaurus AI header" is also not true. 112 files in `osaurus-ai/vmlx-swift-lm` give the name `Osaurus AI`, and most are not DeepSeek-V4 files.
+    - next: write a claim that is true in both directions in both documents, correct the test docstring and its rule, and then decide the scope of the rule.
+  timestamp: 2026-08-10T13:20:17.701447+00:00
+- actor: claude-code
+  id: 01kznxaw4394v7hy8ed2nq5s0j
+  text: |
+    ### finish iteration 3 — findings
+    - implement: changed — round-2 finding closed; overstatement removed from 8 lines; new 5th test added
+    - test: green — `swift test` exit 0; XCTest 199+13, 0 failures, 2 pre-existing skips; swift-testing 358/80/282/7
+    - commit: 167663d fix(docs): limit the Osaurus AI name to DeepSeek-V4 files; 9470f8b (kanban chore, out of scope)
+    - review: findings — THIRD-PARTY-NOTICES.md:57, CONTRIBUTING.md:90-91, CONTRIBUTING.md:102, LicenseNoticeTests.swift:92-93, LicenseNoticeTests.swift:98 (5 new). All 8 prior findings verified truly closed. The new test was proved non-vacuous by mutation.
+    - note: round 2 removed a false universal ("every file has the header"). Round 3 put in the opposite false universal ("only DeepSeek-V4 files have it"). Upstream has 112 files with the `Osaurus AI` header. The task is guessing a rule about the file headers of a different repository, and each guess is wrong.
+    - note: the review engine attempted 0 files for the third round. Every check in all 3 rounds is manual. This is a real coverage gap in the validator fleet, not a pass.
+    - next: implement — delete the universal claims. Do not guess a third rule.
+  timestamp: 2026-08-10T13:21:01.571315+00:00
+- actor: claude-code
+  id: 01kzny3d70637988vzaza91g64
+  text: |
+    ## Fourth implement pass — the 5 round 3 findings
+
+    ### The cause: three rounds of guessing a rule about a different repository
+
+    Round 2 removed the false universal "each source file in `osaurus-ai/vmlx-swift-lm`
+    has the `Osaurus AI` header". Round 3 put in the opposite false universal: "only
+    the DeepSeek-V4 files have it; the other source files give a different name". A
+    code search of that repository for `Osaurus AI` gives 112 files, and most of them
+    are not DeepSeek-V4 files.
+
+    This pass does not write a third rule. It deletes the rule. Our documents do not
+    need a statement about which files in a different repository have which header,
+    and each version of that statement was not correct.
+
+    ### What the two documents say now
+
+    1. The header block template for our own new ported DeepSeek-V4 files. It did not
+       change. `Osaurus AI` stays in it.
+    2. `Osaurus AI` and `Osaurus contributors` are two different names, and each name
+       comes from a different file. `Osaurus AI` comes from the header of a source
+       file. `Osaurus contributors` comes from the LICENSE. Do not change one name
+       into the other.
+    3. Before you port a file, read the header in that file and find its commit SHA.
+       Write those two items in the header block of the new file.
+
+    Item 3 is what makes the rule unnecessary. A person reads the file that the person
+    ports, and does not trust a statement about the other files in that project.
+
+    ### The sentences I deleted
+
+    - `THIRD-PARTY-NOTICES.md` — "The header of each DeepSeek-V4 source file in that
+      project gives the name `Osaurus AI`. The other source files in that project give
+      a different name. The headers of `DeepseekV3.swift` and `Llama.swift` give the
+      name `Apple Inc.`" All three sentences are gone.
+    - `CONTRIBUTING.md` — "The DeepSeek-V4 files in `scouzi1966/mlx-swift-lm` have the
+      Osaurus AI header." Gone. `Libraries/MLXLMCommon/DeepseekV4ActivationQuant.swift`
+      in that repository has no copyright header. I read it again with `gh api`: its
+      first line is `import Foundation`.
+    - `CONTRIBUTING.md` — "The other source files in that project give a different name
+      in their headers." Gone.
+    - `THIRD-PARTY-NOTICES.md` — "Some DeepSeek-V4 files in that repository have this
+      header" became a record of one file that a person read:
+      "A person read `Libraries/MLXLLM/Models/DeepseekV4.swift` in that repository, and
+      found this header at the top of it". I verified that first line with `gh api`. One
+      named file is verifiable; a count of files is not, and it was the cause of three
+      rounds of findings. The provenance conclusion after it did not change.
+
+    ### The test rule (findings 4 and 5)
+
+    The old rule was "each prose sentence in the notice that gives the name `Osaurus AI`
+    must also name DeepSeek-V4". That rule came from the false premise, so I removed the
+    rule and the test. The `review` skill allows this: "Tests can be deleted entirely if
+    they are no longer relevant or valid."
+
+    The remaining prose does not support a mechanical rule about upstream headers,
+    because the documents make no such claim any more. I say that in the docstring of
+    the new test, and I do not keep a test built on the old premise.
+
+    What does stay true, and is worth a guard, is the hazard the documents warn about:
+    a later reader can see one of the two names as an error and change it into the
+    other. `bothDocumentsKeepTheTwoOsaurusNamesSeparate` reads the prose of BOTH
+    documents and asserts that each one keeps `Osaurus AI`, keeps
+    `Osaurus contributors`, and keeps the instruction "Do not change one name into the
+    other."
+
+    This answers the scope item: the rule applies to both files, thus `CONTRIBUTING.md`
+    is no longer out of scope, and the gap the reviewer named is closed by the rule and
+    not by prose.
+
+    ### Why the test reads prose only
+
+    Both names are also in the verbatim blocks: `Copyright (c) 2026 Osaurus contributors`
+    in the LICENSE, and `Osaurus AI` in the quoted file header. A check of the full text
+    of the notice file would pass after a person changed all the prose, thus it would be
+    close to vacuous. The test removes the fenced blocks first. It also makes each run of
+    whitespace one space, because both documents wrap their lines and a sentence can go
+    across two lines.
+
+    ### TDD and the mutation proof
+
+    The first run of the new test was RED for a true cause: `contains` on the raw text
+    does not find "Do not change one name into the other." because both files wrap that
+    sentence. Both files failed. I then added the whitespace step, and the test passed.
+
+    I proved the test is not vacuous with the hazard mutation, one file at a time:
+
+    | Mutation | Result |
+    |---|---|
+    | Each prose `Osaurus contributors` in the notice becomes `Osaurus AI` | FAIL — "THIRD-PARTY-NOTICES.md does not have the name `Osaurus contributors`" |
+    | Each prose `Osaurus AI` in `CONTRIBUTING.md` becomes `Osaurus contributors` | FAIL — "CONTRIBUTING.md does not have the name `Osaurus AI`" |
+    | The notice loses the instruction sentence | FAIL — "THIRD-PARTY-NOTICES.md does not have the instruction that keeps the two names separate" |
+    | `CONTRIBUTING.md` loses the instruction sentence | FAIL — same message for that file |
+
+    I put each file back after each mutation, and the suite passed again.
+
+    Note for the next agent: two earlier mutation attempts (one name changed in one
+    bullet only) did NOT fail, and that is correct behavior, not a hole. The name was
+    still in the prose at a different place. Only a full removal of a name from the prose
+    breaks the assertion, which is what the assertion says.
+
+    ### Constraints I kept
+
+    - The verbatim MIT blocks did not change. `git diff` has no added or removed line
+      with `MIT License`, `Copyright (c)`, `Permission is hereby`, `THE SOFTWARE IS`, or
+      `WITHOUT WARRANTY`.
+    - The header block template did not change. `Osaurus AI` stays in it.
+    - The user decision did not change.
+    - The 7 not-approved words `sometimes`, `carry`, `product`, `cover`,
+      `for this reason`, `goes away`, `therefore` give 0 matches in the three files.
+      `thus` and `sufficient` stay.
+    - Both files have 8 fence markers, an even count, thus the prose reader does not
+      lose prose.
+
+    ### Evidence
+
+    - `swift build` — `Build complete!`
+    - `swift test --filter LicenseNoticeTests` — 5 tests in 1 suite passed
+    - `swift-format lint --configuration .swift-format Tests/MLXLMTests/LicenseNoticeTests.swift` — exit 0
+  timestamp: 2026-08-10T13:34:25.504779+00:00
+- actor: claude-code
+  id: 01kzny3hz1pkj2zfv3t3zjjd09
+  text: |
+    ### implement — changed
+    - evidence: 3 files — CONTRIBUTING.md, THIRD-PARTY-NOTICES.md, Tests/MLXLMTests/LicenseNoticeTests.swift. All 5 round 3 findings closed, thus all 13 findings from rounds 1 to 3 have the mark `- [x]`. `swift build` complete; `swift test --filter LicenseNoticeTests` 5/5 passed; `swift-format lint` exit 0; the verbatim MIT blocks did not change.
+    - next: /review
+  timestamp: 2026-08-10T13:34:30.369913+00:00
 position_column: doing
 position_ordinal: '80'
 title: Decide attribution/licensing approach for ported DeepSeek-V4 code
@@ -557,3 +709,113 @@ change it. The STE rules below do not apply to it.
       already uses this correct form at `THIRD-PARTY-NOTICES.md:96`: "Some
       DeepSeek-V4 files in that repository have this header". Make the two
       statements agree.
+
+## Review Findings (2026-08-10 08:31)
+
+Scope: `167663d~1..167663d`. Round 3. The change is two documentation files and
+one test file. Commit `9470f8b` is a different kanban chore, and this review does
+not include it.
+
+Engine result: `Nothing in scope to review` (0 findings, 0 files attempted).
+This is the third round with 0 attempted files. No validator has a match glob for
+`*.md`, and the engine also did not attempt
+`Tests/MLXLMTests/LicenseNoticeTests.swift`. All the checks below are by hand.
+
+The verbatim MIT license text in `THIRD-PARTY-NOTICES.md` is a quotation. Do not
+change it. The STE rules below do not apply to it.
+
+### The round 1 and round 2 items are correct now
+
+- All 8 items from round 1 and round 2 have the mark `- [x]`, and each one is
+  correct in the files.
+- The round 2 item is closed. `THIRD-PARTY-NOTICES.md:55-56` now reads "The
+  header of each DeepSeek-V4 source file in that project gives the name
+  `Osaurus AI`". This half of the claim is true. I read the first lines of ten
+  DeepSeek-V4 files in `osaurus-ai/vmlx-swift-lm` with `gh api`: the six library
+  files and the test files `DeepseekV4ChatEncoderTests.swift` and
+  `DeepseekV4ModelSmokeTests.swift` all start with
+  `// Copyright © 2026 Osaurus AI. All rights reserved.`
+
+### The verbatim MIT blocks did not change
+
+- The commit does not touch one line of the three MIT blocks. A search of the
+  diff for `Permission is hereby`, `THE SOFTWARE IS`, `WITHOUT WARRANTY`, and
+  `Copyright (c)` finds no added or removed line. The blocks stay byte-identical
+  to upstream, as round 1 and round 2 measured them.
+
+### The ASD-STE100 words are correct
+
+- The seven not-approved words `sometimes`, `carry`, `product`, `cover`,
+  `for this reason`, `goes away`, and `therefore` have 0 matches in all three
+  files. A case-insensitive search gives 0 for each word in each file.
+- `thus` stays at `CONTRIBUTING.md:66` and `THIRD-PARTY-NOTICES.md:107`.
+  `sufficient` stays at `CONTRIBUTING.md:113` and `CONTRIBUTING.md:118`. Both
+  words are approved: `THUS (adv)` page 2-1-T6, `SUFFICIENT (adj)` page 2-1-S28.
+
+### The new test is not vacuous
+
+- `swift test --filter LicenseNoticeTests` gives "Test run with 5 tests in 1
+  suite passed".
+- The function `noticeSentences()` removes the fenced blocks correctly. The
+  notice file has 8 fence markers, which is an even count, thus no prose goes
+  into a block by accident.
+- The test reads 3 real sentences. After the fenced blocks go away, 22 prose
+  sentences stay, and 3 of them give the name `Osaurus AI`.
+- The test fails when a person breaks the rule. I removed the two words
+  `DeepSeek-V4 ` from the claim, and then ran the test. The result was
+  "Test run with 5 tests in 1 suite failed after 0.001 seconds with 1 issue",
+  with the message "This sentence does not limit the name `Osaurus AI` to
+  DeepSeek-V4: The header of each source file in that project gives the name
+  `Osaurus AI`". I then put the file back, and `git diff` shows no change.
+
+### Open items
+
+- [x] `THIRD-PARTY-NOTICES.md:57` — The new sentence "The other source files in
+      that project give a different name" is not true. The round 2 correction
+      went too far. A GitHub code search of `osaurus-ai/vmlx-swift-lm` for
+      `Osaurus AI` gives 112 files, and most of them are not DeepSeek-V4 files.
+      I read the first lines of six of these files with `gh api`:
+      `Libraries/MLXLMCommon/HardwareInfo.swift` starts with
+      `// Copyright © 2026 Osaurus AI`, and `Libraries/MLXLLM/Models/Zaya.swift`,
+      `Libraries/MLXLMCommon/StopStringMatcher.swift`,
+      `Libraries/MLXLLM/Models/Hy3.swift`,
+      `Libraries/MLXLMCommon/BatchEngine/BucketHandle.swift`, and
+      `Libraries/MLXLMCommon/SpecDec/TreeBuilder.swift` each start with
+      `// Copyright 2025 Osaurus AI. All rights reserved.` or
+      `// Copyright 2026 Osaurus AI. All rights reserved.` The two files that
+      the same sentence names, `DeepseekV3.swift` and `Llama.swift`, do give
+      `Apple Inc.`, but they are two examples and not the rule. Round 2 removed
+      the false claim "each source file has the Osaurus AI header". Round 3 put
+      the opposite false claim in its place. Write a sentence that is true in
+      both directions: the DeepSeek-V4 files have the `Osaurus AI` header, and
+      some other files in that project have an `Apple Inc.` header.
+- [x] `CONTRIBUTING.md:102` — The same untrue claim: "The other source files in
+      that project give a different name in their headers." Correct it with the
+      same true sentence as the item above.
+- [x] `CONTRIBUTING.md:90-91` — The sentence "The DeepSeek-V4 files in
+      `scouzi1966/mlx-swift-lm` have the Osaurus AI header" is not true for each
+      file. That repository has six DeepSeek-V4 files. Five of them start with
+      `// Copyright © 2026 Osaurus AI. All rights reserved.`, but
+      `Libraries/MLXLMCommon/DeepseekV4ActivationQuant.swift` has no copyright
+      header. Its first line is `import Foundation`. Write "Most of the
+      DeepSeek-V4 files ... have the Osaurus AI header", or name the one file
+      that does not have it.
+- [x] `Tests/MLXLMTests/LicenseNoticeTests.swift:92-93` — The docstring gives
+      the same untrue claim two times: "Only the DeepSeek-V4 files in
+      `osaurus-ai/vmlx-swift-lm` have the `Osaurus AI` header. The other files
+      in that project have an Apple Inc. header." The data in the first item
+      above shows that both sentences are not true. The rule that this test
+      makes true comes from this premise, thus the test now makes the notice
+      file agree with a claim that is not correct. Correct the docstring and the
+      rule together.
+- [x] `Tests/MLXLMTests/LicenseNoticeTests.swift:98` — The test reads only
+      `THIRD-PARTY-NOTICES.md`, but `CONTRIBUTING.md` makes the same claims and
+      no test reads it. The stated cause for this exemption is correct as far as
+      it goes: I ran the same algorithm on `CONTRIBUTING.md`, and the sentence
+      "Keep the name `Osaurus AI` in the block above" does break the rule,
+      because that sentence is an instruction and not a claim. But the gap is
+      real, and it is not only a possibility: the third item above is a false
+      claim in a `CONTRIBUTING.md` sentence that no test reads. After you correct
+      the premise in the item above, decide what rule to make true, and then
+      either apply that rule to both files, or write in the test why one file
+      stays out of scope and how a person checks that file instead.
