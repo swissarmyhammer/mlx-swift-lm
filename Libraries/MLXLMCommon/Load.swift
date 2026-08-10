@@ -4,6 +4,8 @@ import Foundation
 import MLX
 import MLXNN
 
+/// The `model.safetensors.index.json` file, which maps each checkpoint key to
+/// the weight file that holds it.
 private struct SafetensorsIndex: Decodable {
     let weightMap: [String: String]
 
@@ -12,6 +14,31 @@ private struct SafetensorsIndex: Decodable {
     }
 }
 
+/// A failure that stops the weight files of a model from being read.
+package enum WeightLoadingError: LocalizedError, Equatable {
+    /// The contents of the model directory cannot be listed.
+    case unreadableModelDirectory(URL)
+
+    package var errorDescription: String? {
+        switch self {
+        case .unreadableModelDirectory(let modelDirectory):
+            return "Cannot list the contents of the model directory '\(modelDirectory.path)'."
+        }
+    }
+}
+
+/// Collects the URLs of the safetensor weight files of a model.
+///
+/// A directory that holds a `model.safetensors.index.json` file gives the file
+/// names that the index names, with no repeat, in sorted order. A directory
+/// with no such index file gives every `.safetensors` file in it and in its
+/// subdirectories instead.
+///
+/// - Parameter modelDirectory: The directory that holds the model files.
+/// - Returns: The URL of each weight file to load.
+/// - Throws: An error when the index file cannot be read or decoded, or
+///   ``WeightLoadingError/unreadableModelDirectory(_:)`` when the directory
+///   cannot be listed.
 package func safetensorWeightURLs(in modelDirectory: URL) throws -> [URL] {
     let indexURL = modelDirectory.appendingPathComponent("model.safetensors.index.json")
     if FileManager.default.fileExists(atPath: indexURL.path) {
@@ -22,8 +49,15 @@ package func safetensorWeightURLs(in modelDirectory: URL) throws -> [URL] {
             .map { modelDirectory.appendingPathComponent($0) }
     }
 
-    let enumerator = FileManager.default.enumerator(
-        at: modelDirectory, includingPropertiesForKeys: nil)!
+    // A directory that does not exist still gives an enumerator, and that
+    // enumerator gives no item. `nil` thus keeps its own meaning: Foundation
+    // cannot make an enumerator for this URL at all.
+    guard
+        let enumerator = FileManager.default.enumerator(
+            at: modelDirectory, includingPropertiesForKeys: nil)
+    else {
+        throw WeightLoadingError.unreadableModelDirectory(modelDirectory)
+    }
     return enumerator.compactMap { item -> URL? in
         guard let url = item as? URL, url.pathExtension == "safetensors" else {
             return nil
@@ -78,8 +112,8 @@ public func loadWeights(
     perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil
 ) throws {
     // load the weights and collect metadata from the first safetensor file
-    var weights = [String: MLXArray]()
-    var metadata = [String: String]()
+    var weights: [String: MLXArray] = [:]
+    var metadata: [String: String] = [:]
     for url in try safetensorWeightURLs(in: modelDirectory) {
         let (w, m) = try loadArraysAndMetadata(url: url)
         for (key, value) in w {
