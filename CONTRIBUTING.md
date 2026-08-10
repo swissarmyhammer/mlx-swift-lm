@@ -87,22 +87,27 @@ Do these three steps:
 3. Keep the other lines exactly as they are.
 
 Give the copyright of each ported DeepSeek-V4 file to Osaurus AI. Do not give
-the copyright to `scouzi1966`. The DeepSeek-V4 files in
-`scouzi1966/mlx-swift-lm` have the Osaurus AI header, which shows that the code
-comes from `osaurus-ai/vmlx-swift-lm`.
+the copyright to `scouzi1966`. The DeepSeek-V4 code comes from
+`osaurus-ai/vmlx-swift-lm`. `THIRD-PARTY-NOTICES.md` names the file that shows
+this.
 
-Keep the name `Osaurus AI` in the block above. It is a true transcription of the
-header of each DeepSeek-V4 source file. The LICENSE of
-`osaurus-ai/vmlx-swift-lm` gives a different name, `Osaurus contributors`, and
+Keep the name `Osaurus AI` in the block above. `Osaurus AI` and `Osaurus
+contributors` are two different names, and each name comes from a different
+file. `Osaurus AI` comes from the header of a source file.
+`Osaurus contributors` comes from the LICENSE of `osaurus-ai/vmlx-swift-lm`, and
 `THIRD-PARTY-NOTICES.md` keeps that name because a notice must agree with the
 LICENSE. Both names are correct where they are. Do not change one name into the
 other.
 
+Before you port a file, read the header in that file, and find its commit SHA.
+Write those two items in the header block of the new file. This document does
+not tell you about the headers of the other files in that project, thus do not
+use a statement about them.
+
 This block is only for a DeepSeek-V4 file that you port from
-`osaurus-ai/vmlx-swift-lm`. The other source files in that project give a
-different name in their headers. A file that you port from a different source
-keeps the name in the header of that source file. A file that you write yourself
-keeps the usual `// Copyright © <year> Apple Inc.` header.
+`osaurus-ai/vmlx-swift-lm`. A file that you port from a different source keeps
+the name in the header of that source file. A file that you write yourself keeps
+the usual `// Copyright © <year> Apple Inc.` header.
 
 ### Notice file
 

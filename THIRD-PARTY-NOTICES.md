@@ -52,20 +52,20 @@ SOFTWARE.
 
 ### Two different names, and both are correct
 
-The LICENSE above gives the name `Osaurus contributors`. The header of each
-DeepSeek-V4 source file in that project gives the name `Osaurus AI`. The other
-source files in that project give a different name. The headers of
-`Libraries/MLXLLM/Models/DeepseekV3.swift` and
-`Libraries/MLXLLM/Models/Llama.swift` give the name `Apple Inc.`
-
-Each name is a true transcription of the file it comes from:
+`Osaurus AI` and `Osaurus contributors` are two different names. Each name comes
+from a different file:
 
 - This notice keeps `Osaurus contributors`, because that is the name in the
-  LICENSE.
+  LICENSE above.
 - The header block in `CONTRIBUTING.md` keeps `Osaurus AI`, because that is the
-  name in the header of each DeepSeek-V4 source file.
+  name in the header of the source file that a person read.
 
-Do not change one name into the other.
+Each name is a true transcription of the file it comes from. Do not change one
+name into the other.
+
+This notice does not tell you about the headers of the other files in that
+project. Before you port a file, read the header of that file and find the
+commit SHA. Write those two items in the header block of the new file.
 
 ---
 
@@ -97,7 +97,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-Some DeepSeek-V4 files in that repository have this header:
+A person read `Libraries/MLXLLM/Models/DeepseekV4.swift` in that repository, and
+found this header at the top of it:
 
 ```
 // Copyright © 2026 Osaurus AI. All rights reserved.
