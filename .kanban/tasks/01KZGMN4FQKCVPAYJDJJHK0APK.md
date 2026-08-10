@@ -239,6 +239,142 @@ comments:
     - evidence: 3 files — CONTRIBUTING.md, THIRD-PARTY-NOTICES.md, Tests/MLXLMTests/LicenseNoticeTests.swift. All 7 review findings closed. `swift build` complete; `swift test --filter LicenseNoticeTests` 4/4 passed; `swift-format lint` exit 0; new MIT block byte-identical to the upstream LICENSE.
     - next: /review
   timestamp: 2026-08-10T12:51:40.912834+00:00
+- actor: claude-code
+  id: 01kznw8zbhbmgghjj0c8batr43
+  text: |-
+    ### review — findings
+    - evidence: round 2, scope `d647975~1..d647975`. Engine gave 0 findings and attempted 0 files. Hand review gives 1 new finding — THIRD-PARTY-NOTICES.md:55. All 7 round 1 items are correct now.
+    - next: correct the over-broad statement about the source file headers in `osaurus-ai/vmlx-swift-lm`, then run review again.
+  timestamp: 2026-08-10T13:02:30.769303+00:00
+- actor: claude-code
+  id: 01kznw9wvj85zbbpgq69h9jk9k
+  text: |
+    ### finish iteration 2 — findings
+    - implement: changed — all 7 round-1 findings closed; added osaurus-ai/vmlx-swift-lm MIT block, byte-identical to upstream (md5 89e08e092e9bed6dea46d52063d03b0d, 1107 bytes)
+    - test: green — `swift test` exit 0; XCTest 199+13, 0 failures, 2 pre-existing skips; swift-testing 357/80/282/7, 0 failures. The +1 delta (356 to 357) is this task's own new test.
+    - commit: d647975 fix(license): close all review findings for third-party notices
+    - review: findings — THIRD-PARTY-NOTICES.md:55 (1 new). All 7 round-1 findings independently verified as truly fixed, not only checked off.
+    - note: the review engine again attempted 0 files. It has no `*.md` validator glob, and this round it also did not attempt the Swift test file. Every check in rounds 1 and 2 is a manual check.
+    - next: implement — correct the overstatement at THIRD-PARTY-NOTICES.md:55
+  timestamp: 2026-08-10T13:03:00.978540+00:00
+- actor: claude-code
+  id: 01kznwnv64evnmzm7k6g90p4fx
+  text: |
+    ## Third implement pass — round 2 finding
+
+    ### The facts I verified first
+
+    I read the true first line of each file with `gh api ... | base64 -d | head -1`.
+    I did not trust memory.
+
+    `osaurus-ai/vmlx-swift-lm`, `Libraries/MLXLLM/Models`:
+
+    | File | First line |
+    |---|---|
+    | DeepseekV4.swift | `// Copyright © 2026 Osaurus AI. All rights reserved.` |
+    | DeepseekV4Compressor.swift | `// Copyright © 2026 Osaurus AI. All rights reserved.` |
+    | DeepseekV4Configuration.swift | `// Copyright © 2026 Osaurus AI. All rights reserved.` |
+    | DeepseekV4JANGTQ.swift | `// Copyright © 2026 Osaurus AI. All rights reserved.` |
+    | DeepseekV4MathHelpers.swift | `// Copyright © 2026 Osaurus AI. All rights reserved.` |
+    | DeepseekV3.swift | `// Copyright © 2025 Apple Inc.` |
+    | Llama.swift | `// Copyright © 2024 Apple Inc.` |
+
+    So each DeepSeek-V4 file has the Osaurus AI name, and the other files do not.
+    The sentence the finding names was not true. The corrected sentence is true.
+
+    I also checked `scouzi1966/mlx-swift-lm`: its four `DeepseekV4*.swift` files all
+    have the Osaurus AI header, and `DeepseekV3.swift` has the Apple Inc. header.
+    Thus `CONTRIBUTING.md` is correct when it says the DeepSeek-V4 files there have
+    that header.
+
+    ### The cause, removed from both files
+
+    The cause is one statement pattern: prose that gives the name `Osaurus AI` to
+    more files than the DeepSeek-V4 files. The finding names one line. The new test
+    found two more lines with the same cause.
+
+    `THIRD-PARTY-NOTICES.md`:
+
+    1. "The header of each source file in that project gives the name `Osaurus AI`"
+       → "The header of each **DeepSeek-V4** source file in that project gives the
+       name `Osaurus AI`". I also added the two counter-examples that make the
+       limit clear: the headers of `DeepseekV3.swift` and `Llama.swift` give the
+       name `Apple Inc.`
+    2. "...because that is the name in the header of the source file" → "...in the
+       header of each **DeepSeek-V4** source file".
+    3. "Thus the ported files in this repository give the copyright to Osaurus AI"
+       → "Thus the ported **DeepSeek-V4** files in this repository...".
+
+    `CONTRIBUTING.md`:
+
+    4. Heading "Header block for each new ported file" → "...each new ported
+       **DeepSeek-V4** file". This also gives back the exact scope of the user
+       decision, which says "every new DeepSeek-V4 file".
+    5. "Put this block at the top of each new file you port" → "each new
+       **DeepSeek-V4** file you port".
+    6. "Give the copyright to Osaurus AI" → "Give the copyright of each ported
+       **DeepSeek-V4** file to Osaurus AI".
+    7. "It is a true transcription of the header of the source file" → "...of each
+       **DeepSeek-V4** source file".
+    8. "This block is only for a file you port" → "This block is only for a
+       DeepSeek-V4 file that you port from `osaurus-ai/vmlx-swift-lm`", with the
+       consequence: a file you port from a different source keeps the name in the
+       header of that source file.
+
+    I did not change `THIRD-PARTY-NOTICES.md:100` ("Some DeepSeek-V4 files in that
+    repository have this header"). The review calls that form correct, and it is
+    true. It is about a different repository from the sentence at line 55, thus the
+    two quantifiers do not need to be the same word. Both statements now limit the
+    name to the DeepSeek-V4 files, which is what the finding asks for.
+
+    I did not change the header block template. `Osaurus AI` stays there. I did not
+    change the verbatim MIT blocks.
+
+    ### The test
+
+    A test can assert the corrected claim, so I wrote one. It is not a check of one
+    string. It is the invariant behind the finding:
+
+    `thirdPartyNoticesLimitsTheOsaurusAiNameToDeepSeekV4Files` reads the notice
+    file, removes the fenced blocks (they are quotations, not statements of this
+    repository), splits the prose into sentences, and asserts that each sentence
+    that gives the name `Osaurus AI` also names `DeepSeek-V4`.
+
+    TDD: I wrote the test first and I saw it fail. It failed for the correct cause,
+    and it found three sentences, not one:
+
+    ```
+    ✘ ... The header of each source file in that project gives the name `Osaurus AI`
+    ✘ ... The header block in `CONTRIBUTING.md` keeps `Osaurus AI`, because that is the name in the header of the source file
+    ✘ ... Thus the ported files in this repository give the copyright to Osaurus AI
+    ```
+
+    The test found the two lines the finding did not name. Then I corrected the
+    prose, and all five tests passed.
+
+    I did not write the same test for `CONTRIBUTING.md`. That file gives an
+    instruction about the block ("Keep the name `Osaurus AI` in the block above"),
+    and the same rule would give a false failure on an instruction that is not a
+    statement about which files have the header. The finding gives the cause for
+    the notice file: "A notice file is a legal record, thus each statement in it
+    must be true."
+
+    ### Evidence
+
+    - `swift build` → `Build complete!`
+    - `swift test --filter LicenseNoticeTests` → 5 tests in 1 suite passed, 0 failures
+    - `swift-format lint --configuration .swift-format Tests/MLXLMTests/LicenseNoticeTests.swift` → exit 0
+    - grep for `sometimes|carry|product|cover|for this reason|goes away|therefore`
+      over the three files → no result
+    - `thus` and `sufficient` stay in both Markdown files
+  timestamp: 2026-08-10T13:09:32.484090+00:00
+- actor: claude-code
+  id: 01kznwp2rh2pqqqhwb11cs09e3
+  text: |
+    ### implement — changed
+    - evidence: 3 files — CONTRIBUTING.md, THIRD-PARTY-NOTICES.md, Tests/MLXLMTests/LicenseNoticeTests.swift. The round 2 finding (THIRD-PARTY-NOTICES.md:55) is closed, and the same cause is removed from 7 more lines in the two Markdown files. `swift build` complete; `swift test --filter LicenseNoticeTests` 5/5 passed; `swift-format lint` exit 0.
+    - next: /review
+  timestamp: 2026-08-10T13:09:40.241880+00:00
 position_column: doing
 position_ordinal: '80'
 title: Decide attribution/licensing approach for ported DeepSeek-V4 code
@@ -352,3 +488,72 @@ change it. The STE rules below do not apply to it.
       make phrasal verbs"). `GO (v)` has the restricted approved meaning "To
       move to or from something", which this sentence does not use. Write "if a
       person removes that notice file", or "if that notice file does not exist".
+
+## Review Findings (2026-08-10 08:01)
+
+Scope: `d647975~1..d647975`. Round 2. The change is documentation and one test
+file.
+
+Engine result: `Nothing in scope to review` (0 findings, 0 files attempted).
+The engine did not attempt the two Markdown files, because no validator has a
+match glob for `*.md`. The engine also did not attempt
+`Tests/MLXLMTests/LicenseNoticeTests.swift`. All the checks below are by hand.
+
+The verbatim MIT license text in `THIRD-PARTY-NOTICES.md` is a quotation. Do not
+change it. The STE rules below do not apply to it.
+
+### The round 1 items are correct now
+
+- `CONTRIBUTING.md:57` — `Sometimes` is gone. The sentence is now "This section
+  is the decision about how to attribute code that we port into this repository
+  from a different project."
+- `CONTRIBUTING.md:90` — `carry` became `have`.
+- `THIRD-PARTY-NOTICES.md:3` — `This product` became
+  "The `mlx-swift-lm` repository".
+- `THIRD-PARTY-NOTICES.md:24` — The new section for `osaurus-ai/vmlx-swift-lm`
+  is a faithful copy of the upstream LICENSE. I read the upstream file with
+  `gh api repos/osaurus-ai/vmlx-swift-lm/contents/LICENSE`. The block at
+  `THIRD-PARTY-NOTICES.md:29-50` and the upstream file are byte-identical: both
+  are 1107 bytes with md5 `89e08e092e9bed6dea46d52063d03b0d`, and `diff` shows
+  no difference. Both copyright lines are correct:
+  `Copyright (c) 2024 ml-explore` and `Copyright (c) 2026 Osaurus contributors`.
+- `THIRD-PARTY-NOTICES.md:103` — `For this reason` became `Thus`.
+- `Tests/MLXLMTests/LicenseNoticeTests.swift:5` — `covered by` became the active
+  clause "give the attribution for ported DeepSeek-V4 code".
+- `Tests/MLXLMTests/LicenseNoticeTests.swift:6` — `goes away` became
+  "does not exist".
+- The six not-approved words `sometimes`, `carry`, `product`, `cover`,
+  `for this reason`, and `goes away` are not in any of the three files. A
+  case-insensitive search of all three files finds none of them.
+- `thus` and `sufficient` stay, and this is correct. `THUS (adv)` is approved
+  (page 2-1-T6) and `SUFFICIENT (adj)` is approved (page 2-1-S28). The
+  not-approved word `therefore` is not in any of the three files.
+
+### The tests are correct
+
+- The four tests pass: `swift test --filter LicenseNoticeTests` gives
+  "Test run with 4 tests in 1 suite passed".
+- The new assertions are not vacuous. Each of the three heading strings
+  `## osaurus-ai/vmlx-swift-lm`, `## scouzi1966/mlx-swift-lm`, and
+  `## scouzi1966/maclocal-api` is in the notice file one time only, at its
+  section heading. `Copyright (c) 2026 Osaurus contributors` is in the file one
+  time only, in the new block. If a person removes the new section, both new
+  tests fail.
+
+### Open items
+
+- [x] `THIRD-PARTY-NOTICES.md:55` — The sentence "The header of each source file
+      in that project gives the name `Osaurus AI`" is not true. Only the
+      DeepSeek-V4 files in `osaurus-ai/vmlx-swift-lm` have that header. I read
+      three files from that repository with `gh api`:
+      `Libraries/MLXLLM/Models/DeepseekV4.swift` starts with
+      `// Copyright © 2026 Osaurus AI. All rights reserved.`, but
+      `Libraries/MLXLLM/Models/DeepseekV3.swift` starts with
+      `// Copyright © 2025 Apple Inc.` and
+      `Libraries/MLXLLM/Models/Llama.swift` starts with
+      `// Copyright © 2024 Apple Inc.`. A notice file is a legal record, thus
+      each statement in it must be true. Write "The header of each DeepSeek-V4
+      source file in that project gives the name `Osaurus AI`". The same file
+      already uses this correct form at `THIRD-PARTY-NOTICES.md:96`: "Some
+      DeepSeek-V4 files in that repository have this header". Make the two
+      statements agree.
