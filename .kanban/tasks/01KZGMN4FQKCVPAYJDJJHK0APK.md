@@ -527,8 +527,45 @@ comments:
     - evidence: 3 files — CONTRIBUTING.md, THIRD-PARTY-NOTICES.md, Tests/MLXLMTests/LicenseNoticeTests.swift. All 5 round 3 findings closed, thus all 13 findings from rounds 1 to 3 have the mark `- [x]`. `swift build` complete; `swift test --filter LicenseNoticeTests` 5/5 passed; `swift-format lint` exit 0; the verbatim MIT blocks did not change.
     - next: /review
   timestamp: 2026-08-10T13:34:30.369913+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01kznyd1xc5pta6167zs2qj5dp
+  text: |-
+    ### commit — changed
+    - evidence: dc77371 docs(license): remove false claims about upstream header coverage; 07ae31d chore(kanban): record round-3 findings fix on task jhk0apk
+    - next: none. Working tree is clean. No push done.
+  timestamp: 2026-08-10T13:39:41.612020+00:00
+- actor: claude-code
+  id: 01kznyqm1wzhqk28b4z2wn2cm0
+  text: |-
+    ### review — clean
+
+    - scope: `review sha dc77371~1..dc77371`. Round 4. Commit `07ae31d` is a different kanban chore, and this review does not include it.
+    - engine: `Nothing in scope to review`. 0 findings, 0 attempted files, 0 failed, 0 skipped. This is the fourth round with 0 attempted files. No validator has a match glob for `*.md`, and the engine also does not attempt `Tests/MLXLMTests/LicenseNoticeTests.swift`. All the checks below are by hand.
+    - prior findings: all 13 items from rounds 1, 2, and 3 have the mark `- [x]`, and each one is correct in the files.
+    - the false claims are gone: a search of both documents for a general statement about upstream headers finds none. The two occurrences of `the other files in that project` (`CONTRIBUTING.md:104`, `THIRD-PARTY-NOTICES.md:66`) are disclaimers that give no rule, and each one tells the reader to read the header of the file that the reader ports.
+    - the narrowed claim is true: `THIRD-PARTY-NOTICES.md:100-105` says that a person read `Libraries/MLXLLM/Models/DeepseekV4.swift` in `scouzi1966/mlx-swift-lm` and found `// Copyright © 2026 Osaurus AI. All rights reserved.` and `// SPDX-License-Identifier: MIT`. I read that file upstream with `gh api`. The first two lines agree, character for character.
+    - the removed test was correct to remove: `thirdPartyNoticesLimitsTheOsaurusAiNameToDeepSeekV4Files` came into the repository in `167663d`, which is the round 3 commit of this same task. It is not a test that was already in the repository, thus the exception for existing tests does not apply. Round 3 said to correct the docstring and the rule together, and the premise of the test was not true.
+    - the new test is not vacuous: 6 mutations, and each one fails. I removed the prose `Osaurus AI` from `CONTRIBUTING.md`, the prose `Osaurus AI` from `THIRD-PARTY-NOTICES.md`, the prose `Osaurus contributors` from each document, and the sentence `Do not change one name into the other.` from each document. Each mutation gave `Test run with 1 test in 1 suite failed`. Three of the mutations kept the same name in a verbatim block, and the test failed for each one, thus the code that removes the fenced blocks is correct. `git diff` shows no change to the three files after the mutations.
+    - tests: `swift test --filter LicenseNoticeTests` gives `Test run with 5 tests in 1 suite passed`.
+    - ASD-STE100: the 7 not-approved words `sometimes`, `carry`, `product`, `cover`, `for this reason`, `goes away`, and `therefore` have 0 matches in the three files. `thus` stays at `CONTRIBUTING.md:66`, `CONTRIBUTING.md:104`, and `THIRD-PARTY-NOTICES.md:108`. `sufficient` stays at `CONTRIBUTING.md:118` and `CONTRIBUTING.md:123`. `THUS (adv)` page 2-1-T6 and `SUFFICIENT (adj)` page 2-1-S28 are approved.
+    - MIT blocks: the block for `osaurus-ai/vmlx-swift-lm` and the block for `scouzi1966/mlx-swift-lm` are byte-identical to upstream (md5 `89e08e092e9bed6dea46d52063d03b0d` and `fd75e95d656151ace036b5ae71caa83f`). The block for `scouzi1966/maclocal-api` differs from upstream by one trailing newline only, as round 1 measured it. This commit changes no line of the three blocks.
+    - provenance: all three repositories still give `fork=false`, `parent=none`, and `license=MIT`.
+    - evidence: zero new findings
+    - next: none. Task moves to `done`.
+  timestamp: 2026-08-10T13:45:27.868747+00:00
+- actor: claude-code
+  id: 01kznyrzsp0fb8at7afq0an76d
+  text: |
+    ### finish iteration 4 — clean
+    - implement: changed — the 5 round-3 findings closed. The general claims about upstream file headers are deleted, not changed again.
+    - test: green — `swift test` exit 0; XCTest 199+13, 0 failures, 2 pre-existing skips; swift-testing 358/80/282/7 (727 tests, 91 suites)
+    - commit: dc77371 docs(license): remove false claims about upstream header coverage; 07ae31d (kanban chore, out of scope)
+    - review: clean — zero new findings. All 13 findings from rounds 1 to 3 verified closed. Task moved to `done`.
+    - verification: the new test was proved by 6 mutations, 3 of which kept the string alive in a verbatim block and still failed. This shows the fence-stripping is correct. MIT blocks stay byte-identical to upstream.
+    - note: the review engine attempted 0 files in all 4 rounds. No validator has a match glob for `*.md`, and the fleet also does not attempt the Swift test file. This is a standing gap in the validator fleet. A person did every check on this task.
+  timestamp: 2026-08-10T13:46:12.662460+00:00
+position_column: done
+position_ordinal: dc80
 title: Decide attribution/licensing approach for ported DeepSeek-V4 code
 ---
 ## What
