@@ -95,10 +95,41 @@ comments:
     - evidence: 1 file — `Tests/MLXLMTests/DeepseekV4ConfigurationTests.swift`. 5 of 5 review findings closed. Mutation proof: 37 of 37 key strings and 36 of 36 defaults now make a test fail; an encoder that drops keys makes the round-trip test fail. `swift build` clean; `swift test --filter DeepseekV4ConfigurationTests` 8 tests 0 failures; full `swift test` exit 0, 0 failures, 2 pre-existing documented skips.
     - next: `/review`
   timestamp: 2026-08-10T14:28:26.861632+00:00
+- actor: claude-code
+  id: 01kzp1zv8fc07n62bgeb44akc7
+  text: |-
+    ### review — clean (round 2)
+
+    - scope: `review sha 67f02f3~1..67f02f3`. Commit `67f02f3` changes one file only: `Tests/MLXLMTests/DeepseekV4ConfigurationTests.swift` (312 added, 61 deleted).
+    - engine result: 0 findings, **0 attempted files**. The engine does not read test files. A direct `review file` on the test path also gives 0 attempted, while `review file` on `Libraries/MLXLLM/Models/DeepseekV4Configuration.swift` gives 9 attempted. Thus the engine gives no signal on a test-only commit, and the checks below are the evidence.
+    - source untouched: `git diff --quiet 67f02f3~1 67f02f3 -- Libraries/MLXLLM/Models/DeepseekV4Configuration.swift` exits 0. The 37 keys and 36 defaults from round 1 stay valid.
+    - mutation tests, run again by hand, each one reverted:
+      - 3 misspelled `CodingKeys` strings (`qk_rope_head_dim`, `norm_topk_prob`, `routed_scaling_factor`): each gives 2 failures in `testDistinctJSONDecodesEveryKey` and `testDistinctJSONSurvivesEncodeAndDecode`.
+      - 3 corrupted defaults (`oGroups`, `indexTopk`, `dsparkMarkovRank`): each gives a failure in `testMinimalJSONDecodesToFlashDefaults`.
+      - an `encode(to:)` that writes 2 of 37 keys gives 35 failures, all in `testDistinctJSONSurvivesEncodeAndDecode`. The shipped encoder is synthesized; the file has no hand-written `encode(to:)`.
+    - `ExpectedValues`: 37 stored properties, and `assertMatches(_:)` compares all 37. No property is declared and left out of the comparison. The memberwise initializer has no default values; removal of one field from a table gives `error: missing argument for parameter 'swigluLimit'`.
+    - `testFixtureDecodesEveryKey` compares `ropeScaling` as a whole dictionary (5 entries) and `compressRatios` as a whole 44-element array. Neither is a count or a prefix.
+    - exact `Float` equality is safe. All 6 float properties are `Float`. The distinct values are dyadic (0.25, 0.5, 0.75, 0.125, 3.5, 4.5). `1e-6` is not exact in binary32, but the JSON text and the Swift literal give the same bits, and the narrowing from `Double` adds no second rounding.
+    - test count 9 to 8 is a deliberate merge. 4 tests removed, 3 added. All 20 assertions of the 3 removed `testFixtureDecodes*` tests are inside the 37 comparisons of `testFixtureDecodesEveryKey`; `testDsparkKeysDecode` is replaced by `distinctJSON`. No test loses its checks.
+    - `swift test --filter DeepseekV4ConfigurationTests`: 8 tests, 0 failures. Working tree clean after all mutation tests.
+    - next: none for this task. See the note on out-of-scope naming findings in the review reply.
+  timestamp: 2026-08-10T14:42:23.119749+00:00
+- actor: claude-code
+  id: 01kzp21kxjnp9cre2x10a318v8
+  text: |
+    ### finish iteration 2 — clean
+    - implement: changed — DeepseekV4ConfigurationTests.swift only. No source file changed.
+    - test: green — `swift build` clean; filter 8 tests 0 failures; full `swift test` exit 0
+    - commit: 67f02f3 test(mlx-lm): fix vacuous DeepseekV4Configuration tests; 8118e0b (kanban chore)
+    - review: clean — zero new findings. All 5 findings closed. Task moved to `done`.
+    - verification: the reviewer re-ran the mutations independently. 3 misspelled keys give 2 failures each; 3 corrupted defaults each fail `testMinimalJSONDecodesToFlashDefaults`; a broken `encode(to:)` gives exactly 35 failures. `ExpectedValues` has 37 properties and 37 comparisons, with a compile-time guard that a missing field breaks the build. `rope_scaling` and the 44 compress ratios compare deeply. Exact `Float` equality is safe, because all values are dyadic and the type has no `Double`.
+    - note: 9 tests became 8 by a deliberate merge. 4 removed, 3 added, and no check was lost.
+    - note: the review engine excludes test files. A commit that changes only test files always gives 0 attempted files. This is not a pass.
+  timestamp: 2026-08-10T14:43:21.138930+00:00
 depends_on:
 - 01KZGMN4FQKCVPAYJDJJHK0APK
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: dd80
 title: Port DeepseekV4Configuration (deepseek_v4 config decoding)
 ---
 ## What
