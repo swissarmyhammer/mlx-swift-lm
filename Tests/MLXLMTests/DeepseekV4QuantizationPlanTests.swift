@@ -10,7 +10,11 @@
 // published `config.json`. Its `quantization` block holds three scalar keys
 // (`group_size`, `bits`, `mode`) and 641 per-layer keys: 129 mxfp4 keys, which
 // are `model.layers.N.ffn.switch_mlp.{gate,up,down}_proj` for N in 0...42, and
-// 512 affine keys.
+// 512 affine keys. Among the affine keys the block names a compressor on the 41
+// layers 2 to 42 -- 82 keys, `wgate` and `wkv` on each -- and an indexer on the
+// 21 even layers 2 to 42 -- 84 keys, `wq_b`, `weights_proj`, `compressor.wgate`
+// and `compressor.wkv` on each. Layers 0 and 1 hold a compress ratio of 0, thus
+// the block names neither a compressor nor an indexer for them.
 //
 // Vacuity. The affine per-layer keys hold the same three values as the
 // default, thus a resolver that dropped every per-layer key would still give
@@ -34,20 +38,24 @@ import Testing
 // the tests below read all three, thus the import is `@testable`.
 @testable import MLXLMCommon
 
-/// A stand-in for the checkpoint keys that carry a `scales` array.
+/// Builds a stand-in weight dictionary holding a `scales` array for each path.
 ///
 /// ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:)``
-/// quantizes a layer only when the weight file holds `<path>.scales` for it,
-/// and DeepSeek-V4-Flash-4bit stores those arrays for exactly the layers its
-/// `quantization` block names. The probe run below reproduces that gate, thus
-/// the router -- which the block does not name -- stays in high precision
-/// rather than picking up the affine default.
-private func quantizationTuple(
-    for path: String,
-    plan: BaseConfiguration.PerLayerQuantization
-) -> (Int, Int, QuantizationMode)? {
-    guard plan.perLayerQuantization[path] != nil else { return nil }
-    return plan.quantization(layer: path)?.asTuple
+/// quantizes a layer only when the weight files hold `<path>.scales` for it,
+/// and ``quantizationParameters(forPath:weights:quantization:perLayerQuantization:)``
+/// is the gate that decides it. The tests below run that same function, thus
+/// they need a weight dictionary to run it against. Only the presence of a key
+/// counts, thus the arrays hold nothing of interest.
+///
+/// This repository holds no DeepSeek-V4 weight file, thus which paths the
+/// published checkpoint truly holds a `scales` array for is an assumption. The
+/// tests state their results as "given these scales, the filter gives this",
+/// and never as a statement about the published weight file.
+///
+/// - Parameter paths: The layer paths whose weights are quantized.
+/// - Returns: A weight dictionary holding one `scales` array for each path.
+private func stubScales(for paths: [String]) -> [String: MLXArray] {
+    Dictionary(uniqueKeysWithValues: paths.map { ("\($0).scales", MLXArray.zeros([1])) })
 }
 
 @Suite(.serialized)
@@ -63,9 +71,25 @@ struct DeepseekV4QuantizationPlanTests {
     /// the `quantization` block gives mxfp4 expert projections.
     private static let layerCount = 43
 
+    /// First layer the block names a compressor for. Layers 0 and 1 hold a
+    /// compress ratio of 0, thus they hold no compressor.
+    private static let firstCompressorLayer = 2
+
+    /// Compressor keys the block holds: `wgate` and `wkv` on each of the 41
+    /// layers 2 to 42.
+    private static let compressorKeyCount = 82
+
+    /// Indexer keys the block holds: `wq_b`, `weights_proj`,
+    /// `compressor.wgate` and `compressor.wkv` on each of the 21 even layers
+    /// 2 to 42, which are the layers whose compress ratio is 4.
+    private static let indexerKeyCount = 84
+
     /// The three routed expert projections `SwitchGLU` carries, named as the
     /// DeepSeek-V4 checkpoint names them.
     private static let expertProjections = ["gate_proj", "up_proj", "down_proj"]
+
+    /// The two projections a compressor carries.
+    private static let compressorProjections = ["wgate", "wkv"]
 
     /// Group size of the affine default, and of every affine per-layer entry.
     private static let affineGroupSize = 64
@@ -93,6 +117,11 @@ struct DeepseekV4QuantizationPlanTests {
     /// Vocabulary size of the probe tree.
     private static let probeVocabularySize = 8
 
+    /// Decoder layers the probe tree holds. Three, so that the tree reaches
+    /// layer ``firstCompressorLayer`` -- the first layer the block names a
+    /// compressor for.
+    private static let probeLayerCount = 3
+
     /// Tokens fed through the forward-pass layers below.
     private static let forwardTokenCount = 2
 
@@ -118,6 +147,39 @@ struct DeepseekV4QuantizationPlanTests {
         (0 ..< layerCount).flatMap { layer in
             expertProjections.map { "model.layers.\(layer).ffn.switch_mlp.\($0)" }
         }
+    }
+
+    /// Quantizes a probe tree through the production load-time filter and gives
+    /// its flattened leaf modules.
+    ///
+    /// The filter is
+    /// ``quantizationParameters(forPath:weights:quantization:perLayerQuantization:)``
+    /// itself, which is what `loadWeights` runs, thus these tests pin the gate
+    /// the load path takes rather than a stand-in for it.
+    ///
+    /// - Parameters:
+    ///   - plan: The per-layer plan the filter resolves paths against.
+    ///   - scalePaths: The layer paths whose weights hold a `scales` array.
+    /// - Returns: The leaf modules of the quantized probe tree, by path.
+    private func leavesAfterLoadFilter(
+        plan: BaseConfiguration.PerLayerQuantization, scalePaths: [String]
+    ) -> [String: Module] {
+        let probe = ProbeModel(
+            hiddenSize: Self.probeHiddenSize,
+            expertHiddenSize: Self.probeExpertHiddenSize,
+            expertCount: Self.probeExpertCount,
+            vocabularySize: Self.probeVocabularySize,
+            layerCount: Self.probeLayerCount,
+            firstCompressorLayer: Self.firstCompressorLayer)
+        let weights = stubScales(for: scalePaths)
+
+        quantize(model: probe) { path, _ in
+            quantizationParameters(
+                forPath: path, weights: weights, quantization: nil,
+                perLayerQuantization: plan)
+        }
+
+        return Dictionary(uniqueKeysWithValues: probe.leafModules().flattened())
     }
 
     /// Builds a quantized switch layer of the given mode, plus the input and
@@ -218,21 +280,48 @@ struct DeepseekV4QuantizationPlanTests {
         #expect(plan.perLayerQuantization["model.layers.0.ffn.gate"] == nil)
     }
 
-    // MARK: - Plan application over the checkpoint's own key paths
-
-    @Test func planAppliesMxfp4ToExpertsAndAffineToEverythingElse() throws {
+    @Test func fixtureNamesCompressorKeysFromLayerTwoUp() throws {
         let plan = try decodeFixturePlan()
-        let probe = ProbeModel(
-            hiddenSize: Self.probeHiddenSize,
-            expertHiddenSize: Self.probeExpertHiddenSize,
-            expertCount: Self.probeExpertCount,
-            vocabularySize: Self.probeVocabularySize)
 
-        quantize(model: probe) { path, _ in
-            quantizationTuple(for: path, plan: plan)
+        for layer in 0 ..< Self.layerCount {
+            let named = layer >= Self.firstCompressorLayer
+            for projection in Self.compressorProjections {
+                let path = "model.layers.\(layer).attn.compressor.\(projection)"
+                #expect(
+                    (plan.perLayerQuantization[path] != nil) == named,
+                    "\(path) named: \(named)")
+            }
         }
 
-        let leaves = Dictionary(uniqueKeysWithValues: probe.leafModules().flattened())
+        let compressorKeys = plan.perLayerQuantization.keys.filter {
+            $0.contains(".attn.compressor.")
+        }
+        #expect(compressorKeys.count == Self.compressorKeyCount)
+    }
+
+    @Test func fixtureNamesIndexerKeysOnTheEvenLayersFromTwoUp() throws {
+        let plan = try decodeFixturePlan()
+
+        for layer in 0 ..< Self.layerCount {
+            let named = layer >= Self.firstCompressorLayer && layer.isMultiple(of: 2)
+            let path = "model.layers.\(layer).attn.indexer.wq_b"
+            #expect(
+                (plan.perLayerQuantization[path] != nil) == named,
+                "\(path) named: \(named)")
+        }
+
+        let indexerKeys = plan.perLayerQuantization.keys.filter {
+            $0.contains(".attn.indexer.")
+        }
+        #expect(indexerKeys.count == Self.indexerKeyCount)
+    }
+
+    // MARK: - Plan application through the production load-time filter
+
+    @Test func loadFilterAppliesMxfp4ToExpertsAndAffineToEverythingElse() throws {
+        let plan = try decodeFixturePlan()
+        let leaves = leavesAfterLoadFilter(
+            plan: plan, scalePaths: Array(plan.perLayerQuantization.keys))
 
         for projection in Self.expertProjections {
             let path = "model.layers.0.ffn.switch_mlp.\(projection)"
@@ -241,24 +330,74 @@ struct DeepseekV4QuantizationPlanTests {
             #expect(layer.mode == .mxfp4, "\(path) mode")
             #expect(layer.groupSize == Self.mxfp4GroupSize, "\(path) group size")
             #expect(layer.bits == Self.quantizationBits, "\(path) bits")
-            #expect(layer.biases == nil, "\(path) carries scales but no biases")
+            #expect(layer.biases == nil, "\(path) holds scales and no biases")
         }
 
-        for path in ["model.layers.0.attn.wq_a", "model.layers.0.ffn.shared_experts.gate_proj"] {
+        let affinePaths = [
+            "model.layers.0.attn.wq_a",
+            "model.layers.0.ffn.shared_experts.gate_proj",
+            "model.layers.\(Self.firstCompressorLayer).attn.compressor.wkv",
+        ]
+        for path in affinePaths {
             let layer = try #require(
                 leaves[path] as? QuantizedLinear, "\(path) is quantized")
             #expect(layer.mode == .affine, "\(path) mode")
             #expect(layer.groupSize == Self.affineGroupSize, "\(path) group size")
+            #expect(layer.bits == Self.quantizationBits, "\(path) bits")
         }
 
         let embedding = try #require(
             leaves["model.embed_tokens"] as? QuantizedEmbedding, "embeddings are quantized")
         #expect(embedding.mode == .affine)
         #expect(embedding.groupSize == Self.affineGroupSize)
+    }
 
-        let router = try #require(leaves["model.layers.0.ffn.gate"], "the router survives")
+    @Test func loadFilterLeavesAPathWhoseWeightsHoldNoScalesAlone() throws {
+        let plan = try decodeFixturePlan()
+        let routerPath = "model.layers.0.ffn.gate"
+        #expect(
+            plan.perLayerQuantization[routerPath] == nil,
+            "the premise: the plan names no entry for the router")
+
+        // The plan names every path that holds a `scales` array here, and the
+        // router is not among them, thus the first part of the gate keeps the
+        // router in high precision.
+        let leaves = leavesAfterLoadFilter(
+            plan: plan, scalePaths: Array(plan.perLayerQuantization.keys))
+
+        let router = try #require(leaves[routerPath], "the router survives")
         #expect(router is Linear)
-        #expect(!(router is QuantizedLinear), "the router stays in high precision")
+        #expect(!(router is QuantizedLinear), "no scales, thus no quantization")
+    }
+
+    @Test func loadFilterGivesTheDefaultToAPathThePlanDoesNotName() throws {
+        let plan = try decodeFixturePlan()
+        let routerPath = "model.layers.0.ffn.gate"
+        #expect(
+            plan.perLayerQuantization[routerPath] == nil,
+            "the premise: the plan names no entry for the router")
+
+        // Add a `scales` array for the router. The first part of the gate now
+        // passes, and the second part gives it the plan's own default, because
+        // the plan names no entry of its own for that path.
+        let leaves = leavesAfterLoadFilter(
+            plan: plan, scalePaths: Array(plan.perLayerQuantization.keys) + [routerPath])
+
+        let router = try #require(
+            leaves[routerPath] as? QuantizedLinear,
+            "a path the plan does not name takes the default when its weights hold scales")
+        #expect(router.mode == .affine)
+        #expect(router.groupSize == Self.affineGroupSize)
+        #expect(router.bits == Self.quantizationBits)
+    }
+
+    @Test func loadFilterQuantizesNothingWhenNoWeightsHoldScales() throws {
+        let plan = try decodeFixturePlan()
+        let leaves = leavesAfterLoadFilter(plan: plan, scalePaths: [])
+
+        for (path, module) in leaves {
+            #expect(!(module is Quantized), "\(path) stays in high precision")
+        }
     }
 
     // MARK: - mxfp4 forward pass
@@ -270,7 +409,7 @@ struct DeepseekV4QuantizationPlanTests {
         #expect(layer.mode == .mxfp4)
         #expect(layer.groupSize == Self.mxfp4GroupSize)
         #expect(layer.bits == Self.quantizationBits)
-        #expect(layer.biases == nil, "mxfp4 carries scales but no biases")
+        #expect(layer.biases == nil, "mxfp4 holds scales and no biases")
 
         let out = layer(x, indices)
         eval(out)
@@ -311,7 +450,7 @@ struct DeepseekV4QuantizationPlanTests {
             mode: .affine, groupSize: Self.mxfp4GroupSize)
 
         #expect(layer.mode == .affine)
-        #expect(layer.biases != nil, "affine carries both scales and biases")
+        #expect(layer.biases != nil, "affine holds both scales and biases")
 
         let out = layer(x, indices)
         eval(out)
@@ -358,15 +497,19 @@ private final class ProbeSharedExperts: Module {
 
 /// The low-rank query and key/value projections of one DeepSeek-V4 attention
 /// block, named as the checkpoint names them.
+///
+/// The compressor is present only on a layer the `quantization` block names one
+/// for, which is a layer whose compress ratio is more than 0.
 private final class ProbeAttention: Module {
     @ModuleInfo(key: "wq_a") var wqA: Linear
     @ModuleInfo(key: "wkv") var wkv: Linear
-    @ModuleInfo(key: "compressor") var compressor: ProbeCompressor
+    @ModuleInfo(key: "compressor") var compressor: ProbeCompressor?
 
-    init(hiddenSize: Int) {
+    init(hiddenSize: Int, hasCompressor: Bool) {
         self._wqA.wrappedValue = Linear(hiddenSize, hiddenSize, bias: false)
         self._wkv.wrappedValue = Linear(hiddenSize, hiddenSize, bias: false)
-        self._compressor.wrappedValue = ProbeCompressor(hiddenSize: hiddenSize)
+        self._compressor.wrappedValue =
+            hasCompressor ? ProbeCompressor(hiddenSize: hiddenSize) : nil
         super.init()
     }
 }
@@ -388,8 +531,9 @@ private final class ProbeLayer: Module {
     @ModuleInfo(key: "attn") var attn: ProbeAttention
     @ModuleInfo(key: "ffn") var ffn: ProbeFFN
 
-    init(hiddenSize: Int, expertHiddenSize: Int, expertCount: Int) {
-        self._attn.wrappedValue = ProbeAttention(hiddenSize: hiddenSize)
+    init(hiddenSize: Int, expertHiddenSize: Int, expertCount: Int, hasCompressor: Bool) {
+        self._attn.wrappedValue = ProbeAttention(
+            hiddenSize: hiddenSize, hasCompressor: hasCompressor)
         self._ffn.wrappedValue = ProbeFFN(
             hiddenSize: hiddenSize, expertHiddenSize: expertHiddenSize,
             expertCount: expertCount)
@@ -403,28 +547,35 @@ private final class ProbeInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo(key: "layers") var layers: [ProbeLayer]
 
-    init(hiddenSize: Int, expertHiddenSize: Int, expertCount: Int, vocabularySize: Int) {
+    init(
+        hiddenSize: Int, expertHiddenSize: Int, expertCount: Int, vocabularySize: Int,
+        layerCount: Int, firstCompressorLayer: Int
+    ) {
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: vocabularySize, dimensions: hiddenSize)
-        self._layers.wrappedValue = [
+        self._layers.wrappedValue = (0 ..< layerCount).map { layer in
             ProbeLayer(
                 hiddenSize: hiddenSize, expertHiddenSize: expertHiddenSize,
-                expertCount: expertCount)
-        ]
+                expertCount: expertCount, hasCompressor: layer >= firstCompressorLayer)
+        }
         super.init()
     }
 }
 
-/// A one-layer stand-in for the DeepSeek-V4 model whose flattened module paths
-/// equal the checkpoint key paths the published `quantization` block names.
+/// A stand-in for the DeepSeek-V4 model whose flattened module paths equal
+/// checkpoint key paths the published `quantization` block names.
 private final class ProbeModel: Module {
     @ModuleInfo(key: "model") var model: ProbeInner
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
-    init(hiddenSize: Int, expertHiddenSize: Int, expertCount: Int, vocabularySize: Int) {
+    init(
+        hiddenSize: Int, expertHiddenSize: Int, expertCount: Int, vocabularySize: Int,
+        layerCount: Int, firstCompressorLayer: Int
+    ) {
         self._model.wrappedValue = ProbeInner(
             hiddenSize: hiddenSize, expertHiddenSize: expertHiddenSize,
-            expertCount: expertCount, vocabularySize: vocabularySize)
+            expertCount: expertCount, vocabularySize: vocabularySize,
+            layerCount: layerCount, firstCompressorLayer: firstCompressorLayer)
         self._lmHead.wrappedValue = Linear(hiddenSize, vocabularySize, bias: false)
         super.init()
     }

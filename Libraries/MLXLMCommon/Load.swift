@@ -32,6 +32,39 @@ package func safetensorWeightURLs(in modelDirectory: URL) throws -> [URL] {
     }
 }
 
+/// Decides how ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:)``
+/// quantizes one layer.
+///
+/// This is the filter that function hands to `quantize(model:filter:)`, and it
+/// is a gate of two parts:
+///
+/// 1. The weight files must hold a `<path>.scales` array for the layer. A
+///    layer with no such array keeps its high precision, whatever the
+///    configuration states.
+/// 2. A layer that passes part 1 takes its parameters from the per-layer plan,
+///    which gives its own default to every path it does not name. A model with
+///    no per-layer plan takes the single default quantization instead.
+///
+/// - Parameters:
+///   - path: The flattened module path of the layer.
+///   - weights: The loaded and sanitized weights, keyed by checkpoint key.
+///   - quantization: The default quantization, when the configuration states one.
+///   - perLayerQuantization: The per-layer plan, when the configuration states one.
+/// - Returns: The group size, bit width and mode to quantize the layer with, or
+///   `nil` to leave the layer in high precision.
+package func quantizationParameters(
+    forPath path: String,
+    weights: [String: MLXArray],
+    quantization: BaseConfiguration.Quantization?,
+    perLayerQuantization: BaseConfiguration.PerLayerQuantization?
+) -> (groupSize: Int, bits: Int, mode: QuantizationMode)? {
+    guard weights["\(path).scales"] != nil else { return nil }
+    if let perLayerQuantization {
+        return perLayerQuantization.quantization(layer: path)?.asTuple
+    }
+    return quantization?.asTuple
+}
+
 /// Load model weights.
 ///
 /// This is typically called via ``GenericModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
@@ -62,16 +95,10 @@ public func loadWeights(
 
     // quantize if needed
     if quantization != nil || perLayerQuantization != nil {
-        quantize(model: model) { path, module in
-            if weights["\(path).scales"] != nil {
-                if let perLayerQuantization {
-                    return perLayerQuantization.quantization(layer: path)?.asTuple
-                } else {
-                    return quantization?.asTuple
-                }
-            } else {
-                return nil
-            }
+        quantize(model: model) { path, _ in
+            quantizationParameters(
+                forPath: path, weights: weights, quantization: quantization,
+                perLayerQuantization: perLayerQuantization)
         }
     }
 
