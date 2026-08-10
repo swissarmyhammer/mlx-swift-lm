@@ -1,6 +1,23 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kzp8tb6xh0hq04w94sj10ba2
+  text: |
+    ## Note carried from the math-helpers task `p34crp6` (review, 2026-08-10)
+
+    This card says of the Sinkhorn step: "call `hcSplitSinkhorn` from the math-helpers task (already tested there); this task wires it in, it does not reimplement it." That is correct with one qualification.
+
+    **The `eps` term is not pinned by any test on `p34crp6`.** `hcSplitSinkhorn` uses `eps` in three places -- `pre = sigmoid(...) + eps`, `comb = softmax(...) + eps`, and as the division guard inside each row and column normalization. The code holds all three and agrees with the Python. But the 3x3 fixture allows 1e-6 absolute, and removing the `+ eps` on `comb` moves the result by only 8.54e-7. The fixture thus stays green with the term deleted.
+
+    Nothing is wrong in the delivered code. The point for this card is narrower: **do not treat "eps is wired in correctly" as already proven.** The `p34crp6` mutation table lists eight mutations and none of them touches `eps`.
+
+    Two things follow.
+
+    - Pass `hc_eps` from the configuration, as `hcSplitSinkhorn` requires it as an argument with no default. It does not carry a copy of the value.
+    - If you want the term pinned, the robust detector is not a tighter tolerance. The measured float32 error on that fixture is 8.44e-8 against the 1e-6 limit, thus a 1e-7 limit would leave only about 1.2x headroom and would be fragile. Prefer a direct test: run `hcSplitSinkhorn` twice on the same input with `eps = 0` and with `eps = 1e-6` and assert the outputs differ. That detects the term itself rather than detecting it by coincidence.
+  timestamp: 2026-08-10T16:41:42.877735+00:00
 depends_on:
 - 01KZGMQCH9PFY25Y3QXP34CRP6
 position_column: todo

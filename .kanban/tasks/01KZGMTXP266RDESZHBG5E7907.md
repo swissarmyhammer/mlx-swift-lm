@@ -1,6 +1,75 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kzp8t1z0sh2w4tnm7y3t6ddd
+  text: |
+    ## Note carried from the math-helpers task `p34crp6` (review, 2026-08-10)
+
+    Two points this card must know before it wires in `clampedSwiGLU` and `reduceRoutedExpertsFP32`.
+
+    ### 1. The SwiGLU clamp is asymmetric. Do not write "±10" into a test.
+
+    The user decided this on `p34crp6` on 2026-08-10. The reference wins:
+
+    ```swift
+    gate = minimum(gate, limit)                // the high side only
+    up   = clip(up, min: -limit, max: limit)   // both sides
+    ```
+
+    The Python `_swiglu_limited`, the osaurus Swift copy and the scouzi Swift copy all agree. Reason the user gave: `silu()` falls to almost zero at a large negative gate, thus the low side cannot run away.
+
+    **This card carries the wording the user corrected.** "What" item 3 says "gate/up clamped to ±10", the acceptance criterion says "Expert SwiGLU clamps at ±10", and the test line says "expert output saturates for inputs beyond ±50 (clamp is active)". Read as written, a test that asserts a `gate` of -50 saturates will fail against the correct code. Correct these three lines to the asymmetric rule before you write the test: an `up` below -10 or above +10 saturates, a `gate` above +10 saturates, and a `gate` below -10 does not saturate. At `gate = -50` the reference output is `9.643749e-20`, not zero.
+
+    ### 2. `clampedSwiGLU` computes in float32 and casts back to the input dtype.
+
+    `Libraries/MLXLLM/Models/DeepseekV4MathHelpers.swift` casts `gate` and `up` to float32, clamps and applies silu there, then returns the input dtype. The Python computes in the input dtype throughout. This is not an error -- the float32 path is more accurate, and it is the same pattern item 7 of `p34crp6` asks for in `reduceRoutedExpertsFP32`.
+
+    It matters here because every test on `p34crp6` runs float32, where the round trip changes nothing. This card is the first place bfloat16 activations reach the function. **When you build the MoE parity fixtures, state whether the expected numbers come from a Python run in bfloat16 or in float32.** A bfloat16 fixture generated from the Python will differ from this Swift by about one bfloat16 unit in the last place. Choose the tolerance with that in mind rather than discovering it as a mystery failure.
+  timestamp: 2026-08-10T16:41:33.408327+00:00
+- actor: claude-code
+  id: 01kzp8w24mz5g6b9pq56m4z2cj
+  text: |
+    ## Correction from task ^p34crp6 — read before you start
+
+    ### 1. This card has the wrong SwiGLU clamp rule in three places
+
+    This card says "gate/up clamped to plus or minus 10". That is wrong, and the
+    user decided against it on 2026-08-10 while ^p34crp6 was in review.
+
+    The correct rule, which `DeepseekV4Math.clampedSwiGLU` already has:
+
+    ```swift
+    gate = minimum(gate, limit)                 // the high side only
+    up   = clip(up, min: -limit, max: limit)    // both sides
+    ```
+
+    `silu()` falls to almost zero at a large negative gate, thus the low side of the
+    gate cannot run away. Only `up` multiplies, thus only `up` needs both sides.
+    This agrees with the Python `_swiglu_limited` and with both Swift reference
+    copies.
+
+    The planned test on this card, "expert output saturates for inputs beyond plus
+    or minus 50", FAILS against correct code as written. A gate of -50 gives
+    9.64e-20 and a gate of -10 gives 4.54e-3; the two are not the same, and that
+    difference is correct. Correct this card's wording before you write the test.
+
+    ### 2. Say which dtype your parity fixtures use
+
+    `clampedSwiGLU` casts to float32, does the arithmetic, and casts back to the
+    dtype of `gate`. The Python computes in the input dtype. The two agree in
+    float32, thus every ^p34crp6 test passes.
+
+    This card is the first to send bfloat16 activations into that function. A
+    fixture from a Python run in bfloat16 differs from one in float32 by about one
+    unit in the last place. Write in the test which one you used.
+
+    ### 3. Reuse, do not copy
+
+    `DeepseekV4Math` already holds `clampedSwiGLU`, `sqrtSoftplus`, and
+    `reduceRoutedExpertsFP32`, and all three have parity tests. Call them.
+  timestamp: 2026-08-10T16:42:39.124357+00:00
 depends_on:
 - 01KZGMQCH9PFY25Y3QXP34CRP6
 - 01KZGMRCBJ4SPK7C26PWKV5J6F
