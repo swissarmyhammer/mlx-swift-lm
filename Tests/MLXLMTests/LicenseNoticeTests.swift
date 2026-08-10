@@ -32,6 +32,34 @@ struct LicenseNoticeTests {
         try String(contentsOf: noticeFile, encoding: .utf8)
     }
 
+    /// The marker that starts and ends a fenced block in Markdown.
+    private static let fenceMarker = "```"
+
+    /// The prose sentences of the notice file, without the fenced blocks.
+    ///
+    /// Each fenced block is a verbatim quotation of a LICENSE or of a file
+    /// header. A quotation is not a statement of this repository, so the checks
+    /// below must not read it.
+    private static func noticeSentences() throws -> [String] {
+        var prose: [String] = []
+        var insideFence = false
+        for line in try noticeContents().components(separatedBy: .newlines) {
+            if line.hasPrefix(fenceMarker) {
+                insideFence.toggle()
+                continue
+            }
+            if !insideFence {
+                prose.append(line)
+            }
+        }
+        return
+            prose
+            .joined(separator: " ")
+            .components(separatedBy: ". ")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
     @Test func thirdPartyNoticesFileExists() {
         #expect(FileManager.default.fileExists(atPath: Self.noticeFile.path))
     }
@@ -59,5 +87,18 @@ struct LicenseNoticeTests {
         #expect(contents.contains("Copyright (c) 2024 ml-explore"))
         #expect(contents.contains("Copyright (c) 2026 Osaurus contributors"))
         #expect(contents.contains("Copyright (c) 2025 MacLocalAPI Contributors"))
+    }
+
+    /// Only the DeepSeek-V4 files in `osaurus-ai/vmlx-swift-lm` have the
+    /// `Osaurus AI` header. The other files in that project have an Apple Inc.
+    /// header. A notice file is a legal record, thus each sentence that gives
+    /// the name `Osaurus AI` must also name the DeepSeek-V4 files that the
+    /// statement is about.
+    @Test func thirdPartyNoticesLimitsTheOsaurusAiNameToDeepSeekV4Files() throws {
+        for sentence in try Self.noticeSentences() where sentence.contains("Osaurus AI") {
+            #expect(
+                sentence.contains("DeepSeek-V4"),
+                "This sentence does not limit the name `Osaurus AI` to DeepSeek-V4: \(sentence)")
+        }
     }
 }

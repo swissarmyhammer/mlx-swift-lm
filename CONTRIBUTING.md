@@ -67,9 +67,9 @@ Thus each port is a manual transcription. A person reads the source file and
 writes the code again in this repository. That same person must add the
 attribution by hand. No tool does this for you.
 
-### Header block for each new ported file
+### Header block for each new ported DeepSeek-V4 file
 
-Put this block at the top of each new file you port:
+Put this block at the top of each new DeepSeek-V4 file you port:
 
 ```swift
 // Copyright © 2026 Osaurus AI. All rights reserved.
@@ -86,18 +86,23 @@ Do these three steps:
 2. Replace `<sha>` with the commit SHA that you read.
 3. Keep the other lines exactly as they are.
 
-Give the copyright to Osaurus AI. Do not give the copyright to `scouzi1966`.
-The DeepSeek-V4 files in `scouzi1966/mlx-swift-lm` have the Osaurus AI header,
-which shows that the code comes from `osaurus-ai/vmlx-swift-lm`.
+Give the copyright of each ported DeepSeek-V4 file to Osaurus AI. Do not give
+the copyright to `scouzi1966`. The DeepSeek-V4 files in
+`scouzi1966/mlx-swift-lm` have the Osaurus AI header, which shows that the code
+comes from `osaurus-ai/vmlx-swift-lm`.
 
 Keep the name `Osaurus AI` in the block above. It is a true transcription of the
-header of the source file. The LICENSE of `osaurus-ai/vmlx-swift-lm` gives a
-different name, `Osaurus contributors`, and `THIRD-PARTY-NOTICES.md` keeps that
-name because a notice must agree with the LICENSE. Both names are correct where
-they are. Do not change one name into the other.
+header of each DeepSeek-V4 source file. The LICENSE of
+`osaurus-ai/vmlx-swift-lm` gives a different name, `Osaurus contributors`, and
+`THIRD-PARTY-NOTICES.md` keeps that name because a notice must agree with the
+LICENSE. Both names are correct where they are. Do not change one name into the
+other.
 
-This block is only for a file you port. A file that you write yourself keeps the
-usual `// Copyright © <year> Apple Inc.` header.
+This block is only for a DeepSeek-V4 file that you port from
+`osaurus-ai/vmlx-swift-lm`. The other source files in that project give a
+different name in their headers. A file that you port from a different source
+keeps the name in the header of that source file. A file that you write yourself
+keeps the usual `// Copyright © <year> Apple Inc.` header.
 
 ### Notice file
 

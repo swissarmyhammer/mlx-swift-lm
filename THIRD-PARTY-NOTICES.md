@@ -53,13 +53,17 @@ SOFTWARE.
 ### Two different names, and both are correct
 
 The LICENSE above gives the name `Osaurus contributors`. The header of each
-source file in that project gives the name `Osaurus AI`. Each name is a true
-transcription of the file it comes from:
+DeepSeek-V4 source file in that project gives the name `Osaurus AI`. The other
+source files in that project give a different name. The headers of
+`Libraries/MLXLLM/Models/DeepseekV3.swift` and
+`Libraries/MLXLLM/Models/Llama.swift` give the name `Apple Inc.`
+
+Each name is a true transcription of the file it comes from:
 
 - This notice keeps `Osaurus contributors`, because that is the name in the
   LICENSE.
 - The header block in `CONTRIBUTING.md` keeps `Osaurus AI`, because that is the
-  name in the header of the source file.
+  name in the header of each DeepSeek-V4 source file.
 
 Do not change one name into the other.
 
@@ -101,7 +105,7 @@ Some DeepSeek-V4 files in that repository have this header:
 ```
 
 That header shows that the code comes from `osaurus-ai/vmlx-swift-lm`. Thus the
-ported files in this repository give the copyright to Osaurus AI.
+ported DeepSeek-V4 files in this repository give the copyright to Osaurus AI.
 
 ---
 
