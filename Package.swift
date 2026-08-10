@@ -162,7 +162,10 @@ let package = Package(
             exclude: [
                 "README.md"
             ],
-            resources: [.process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov")]
+            resources: [
+                .process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov"),
+                .process("Resources/DeepSeek-V4-Flash-4bit-config.json"),
+            ]
         ),
         .macro(
             name: "MLXHuggingFaceMacros",
