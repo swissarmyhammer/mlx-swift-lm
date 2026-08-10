@@ -1,10 +1,10 @@
 // Copyright © 2026 Apple Inc.
 //
 // Guards the third-party notice file the attribution decision in
-// CONTRIBUTING.md depends on. The decision says ported DeepSeek-V4 code is
-// covered by per-file headers plus one notice file at the root of the
-// repository. If that notice file goes away, the attribution is incomplete,
-// and these tests fail.
+// CONTRIBUTING.md depends on. The decision says that per-file headers and one
+// notice file at the root of the repository give the attribution for ported
+// DeepSeek-V4 code. If that notice file does not exist, the attribution is
+// incomplete, and these tests fail.
 
 import Foundation
 import Testing
@@ -41,12 +41,23 @@ struct LicenseNoticeTests {
         #expect(!contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
-    /// Both reference repositories the decision names must appear in the notice,
-    /// each with the MIT license text that covers it.
-    @Test func thirdPartyNoticesNamesBothReferenceRepositories() throws {
+    /// Each repository the attribution decision names must have its own section
+    /// in the notice. `osaurus-ai/vmlx-swift-lm` is the source of each ported
+    /// file, so the notice must name it too.
+    @Test func thirdPartyNoticesHasOneSectionForEachRepository() throws {
         let contents = try Self.noticeContents()
-        #expect(contents.contains("scouzi1966/mlx-swift-lm"))
-        #expect(contents.contains("scouzi1966/maclocal-api"))
+        #expect(contents.contains("## osaurus-ai/vmlx-swift-lm"))
+        #expect(contents.contains("## scouzi1966/mlx-swift-lm"))
+        #expect(contents.contains("## scouzi1966/maclocal-api"))
+    }
+
+    /// The MIT license makes the copyright notice necessary, so the notice must
+    /// give the MIT text and the copyright line of each repository.
+    @Test func thirdPartyNoticesHasTheCopyrightLineOfEachRepository() throws {
+        let contents = try Self.noticeContents()
         #expect(contents.contains("MIT License"))
+        #expect(contents.contains("Copyright (c) 2024 ml-explore"))
+        #expect(contents.contains("Copyright (c) 2026 Osaurus contributors"))
+        #expect(contents.contains("Copyright (c) 2025 MacLocalAPI Contributors"))
     }
 }

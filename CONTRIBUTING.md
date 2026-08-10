@@ -54,9 +54,8 @@ See [Libraries/IntegrationTestHelpers/README.md](Libraries/IntegrationTestHelper
 
 ## Attribution for Ported Code
 
-Sometimes we port code into this repository from a different project. This
-section is the decision about how to attribute that code. Obey it. Do not make
-the decision again.
+This section is the decision about how to attribute code that we port into this
+repository from a different project. Obey it. Do not make the decision again.
 
 ### There is no git ancestry
 
@@ -88,8 +87,14 @@ Do these three steps:
 3. Keep the other lines exactly as they are.
 
 Give the copyright to Osaurus AI. Do not give the copyright to `scouzi1966`.
-The DeepSeek-V4 files in `scouzi1966/mlx-swift-lm` carry the Osaurus AI header,
+The DeepSeek-V4 files in `scouzi1966/mlx-swift-lm` have the Osaurus AI header,
 which shows that the code comes from `osaurus-ai/vmlx-swift-lm`.
+
+Keep the name `Osaurus AI` in the block above. It is a true transcription of the
+header of the source file. The LICENSE of `osaurus-ai/vmlx-swift-lm` gives a
+different name, `Osaurus contributors`, and `THIRD-PARTY-NOTICES.md` keeps that
+name because a notice must agree with the LICENSE. Both names are correct where
+they are. Do not change one name into the other.
 
 This block is only for a file you port. A file that you write yourself keeps the
 usual `// Copyright © <year> Apple Inc.` header.
