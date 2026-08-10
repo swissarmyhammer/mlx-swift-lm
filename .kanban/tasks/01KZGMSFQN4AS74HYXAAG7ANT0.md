@@ -1,6 +1,19 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kzpb3s51ctfzk9nm87a53yvn
+  text: |-
+    ### Two facts about `compress_ratios`, from task `^wkv5j6f`
+
+    This card holds the rule for the RoPE theta. Two related facts, measured on `Tests/MLXLMTests/Resources/DeepSeek-V4-Flash-4bit-config.json`:
+
+    - `compress_ratios` gives 0 to layer 0 and to layer 1. These two layers hold no compressor, thus `ropeTheta(forLayer:)` gives them the plain `rope_theta`. The published `quantization` block names compressor keys for the 41 layers 2 to 42 only, and indexer keys for the 21 even layers 2 to 42 only.
+    - `compress_ratios` holds **44** entries while `num_hidden_layers` is **43**, and entry 43 is 0. `hasCompressor(layer:)` guards the bound, thus `ropeTheta(forLayer:)` is correct today. Any code that reads `compressRatios.count` as a layer count gets 44. Read `numHiddenLayers` for a layer count.
+
+    The per-layer-theta test on this card must thus pick its compressed layer from 2 to 42, and its plain layer from 0 or 1.
+  timestamp: 2026-08-10T17:21:49.217879+00:00
 depends_on:
 - 01KZGMQCH9PFY25Y3QXP34CRP6
 position_column: todo

@@ -1,6 +1,22 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kzpb3e58265x2m297j3q3yvz
+  text: |-
+    ### Layer rule for the compressor -- read this before you build the module
+
+    From task `^wkv5j6f`, measured on `Tests/MLXLMTests/Resources/DeepSeek-V4-Flash-4bit-config.json`:
+
+    - `compress_ratios` gives 0 to layer 0 and to layer 1. These two layers hold no compressor. Layer 2 is the first layer that holds one.
+    - The published `quantization` block names compressor keys for the 41 layers 2 to 42 only -- 82 keys, `wgate` and `wkv` on each.
+    - The compressor submodule must be **absent** on layers 0 and 1, not present and unused. A compressor built on all 43 layers fails the weight load, because the checkpoint holds no `model.layers.0.attn.compressor.*` and no `model.layers.1.attn.compressor.*` arrays. Make the submodule optional, as `AfMoE` and `BailingMoe` make `shared_experts` optional.
+    - `hasCompressor(layer:)` in `Libraries/MLXLLM/Models/DeepseekV4Configuration.swift` already holds this rule. Use it, and do not write the rule again.
+    - `compress_ratios` holds **44** entries while `num_hidden_layers` is **43**, and entry 43 is 0. `hasCompressor(layer:)` guards the bound, thus it is correct today. Any code that reads `compressRatios.count` as a layer count gets 44. Read `numHiddenLayers` for a layer count.
+
+    `Tests/MLXLMTests/DeepseekV4QuantizationPlanTests.swift` pins the layer rule in `fixtureNamesCompressorKeysFromLayerTwoUp`.
+  timestamp: 2026-08-10T17:21:37.960809+00:00
 depends_on:
 - 01KZGMZ34SVP6FRPF89R92PJCR
 position_column: todo

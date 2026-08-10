@@ -24,9 +24,11 @@ comments:
   text: |-
     ### Result: the generic path already resolves the mixed plan -- no production change
 
-    Eight new tests in `Tests/MLXLMTests/DeepseekV4QuantizationPlanTests.swift`. Seven passed on the first run against unchanged production code, which is the finding the card asked for. `Libraries/` holds no diff.
+    (Key counts corrected in review round 1: the two numbers below were layer counts with a key-count label.)
 
-    **One test went red first, and it was a fixture fact, not a code gap.** The first draft examined `model.layers.0.attn.compressor.wkv`. That key is absent: layers 0 and 1 hold a compress ratio of 0 and thus carry no compressor, and layer 2 is the first that does. The block names a compressor for layers 2 to 42 (41 keys) and an indexer for the even layers 2, 4, ... 42 (21 keys), which is where `compress_ratios` holds 4. The test now names layer 2 and passes. The MoE and attention tasks must build the compressor and the indexer conditionally on the same rule.
+    Eight new tests in `Tests/MLXLMTests/DeepseekV4QuantizationPlanTests.swift`. Seven passed on the first run against unchanged production code, which is the finding the card asked for. `Libraries/` held no diff at this point.
+
+    **One test went red first, and it was a fixture fact, not a code gap.** The first draft examined `model.layers.0.attn.compressor.wkv`. That key is absent: layers 0 and 1 hold a compress ratio of 0 and thus hold no compressor, and layer 2 is the first that does. The block names a compressor for the 41 layers 2 to 42 -- **82 keys**, `wgate` and `wkv` on each -- and an indexer for the 21 even layers 2, 4, ... 42 -- **84 keys**, `wq_b`, `weights_proj`, `compressor.wgate` and `compressor.wkv` on each -- which is where `compress_ratios` holds 4. The test now names layer 2 and passes. The MoE and attention tasks must build the compressor and the indexer conditionally on the same rule; the fact now sits on `^tty95f4`, `^r92pjcr` and `^ag7ant0` as well.
 
     **No reference conflict.** The card, the fixture and the code agree on every point examined. Nothing needed adjudication against the Python.
 
@@ -71,6 +73,92 @@ comments:
     - evidence: 1 file — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Tests/MLXLMTests/DeepseekV4QuantizationPlanTests.swift (new, 8 tests). No production change; `git diff --stat -- Libraries/` is empty. Mutation proof: BaseConfiguration `mode` forced to `.affine` killed 2 tests with 136 issues; SwitchLayers `MLX.quantized(mode:)` forced to `.affine` killed 3 tests (one through an mlx `[gather_qmm] Scale type must be uint8` abort). Both reverted, tree clean. `swift build` exit 0; `swift test --filter DeepseekV4QuantizationPlanTests` 8/8 pass; `swift test --filter Quantiz` 13/13 pass; full `swift test` exit 0, zero failures.
     - next: /review
   timestamp: 2026-08-10T16:57:49.597527+00:00
+- actor: claude-code
+  id: 01kzpa85tz5v5sn377f8qnmwkc
+  text: |-
+    ### review — findings
+
+    - evidence: 6 findings — Tests/MLXLMTests/DeepseekV4QuantizationPlanTests.swift:45, :261, :364; Tests/MLXLMTests/Resources/DeepSeek-V4-Flash-4bit-config.json; Libraries/MLXLLM/Models/DeepseekV4Configuration.swift:297, :298. Engine `review sha 8bb4936~1..8bb4936` gave 0 findings on 0 attempted files, because the commit adds a test file only and the engine leaves test files out. Thus every point below was examined by hand.
+
+    **Round 1, hand examination.**
+
+    1. The central claim holds. The existing `BaseConfiguration` and `SwitchLayers` machinery does resolve the mixed plan, and the two mutations reproduce exactly. Mutation A, `mode` forced to `.affine` in `BaseConfiguration.swift`: 2 tests failed with 136 issues, 130 in `fixtureGivesEveryExpertProjectionMxfp4` and 6 in `planAppliesMxfp4ToExpertsAndAffineToEverythingElse`. Mutation B, `MLX.quantized(mode:)` forced to `.affine` in `SwitchLayers.swift`: 3 issues in `planApplies...`, then `layer.biases == nil` failed and mlx aborted the run with `[gather_qmm] Scale type must be uint8 but received type float32`. Both reverted. `git status --porcelain -- Libraries/` and `git diff --stat -- Libraries/` are both empty, and the suite is 8/8 green again.
+
+    2. A third mutation shows one gap. The whole `else` branch of `PerLayerQuantization.quantization(layer:)` changed to `return nil` keeps all 8 tests green. The suite thus pins no part of the production filter in `Load.swift`, and the "router stays in high precision" result comes from the test's own helper, not from the code that runs at load time.
+
+    3. Every fixture fact is correct. Counted directly: default `(64, 4, affine)`; 641 per-layer keys; exactly 2 distinct tuples, `(32, 4, mxfp4)` on 129 keys and `(64, 4, affine)` on 512; the 129 mxfp4 keys equal the set `model.layers.N.ffn.switch_mlp.{gate,up,down}_proj` for N in 0 to 42, with none missing and none extra; no `model.layers.N.ffn.gate` key.
+
+    4. The layers 0 and 1 result is correct and is under-recorded. `compress_ratios` gives 0 to layers 0, 1 and to entry 43, and the compressor keys equal the nonzero-ratio layers exactly, and the indexer keys equal the ratio-4 layers exactly. `hasCompressor(layer:)` already holds the rule. The recorded key counts are wrong, and the downstream cards do not hold the fact. See the findings.
+
+    5. The probe `@ModuleInfo` keys are real checkpoint key paths, with one exception: `model.layers.0.attn.compressor.*`, which the fixture does not name. See the findings.
+
+    6. The deferral of the fused mxfp4 Metal kernels is genuine. The card states it under "Explicitly out of scope", it names both kernels and the three env knobs, and acceptance criterion 6 asks only for a note. This is not a silent narrowing.
+
+    - next: /implement — resolve the 6 findings, then /review round 2.
+  timestamp: 2026-08-10T17:06:44.703494+00:00
+- actor: claude-code
+  id: 01kzpa9egeaf5jv9h3r3fj4hn5
+  text: |
+    ### finish iteration 1 — findings
+    - implement: changed — DeepseekV4QuantizationPlanTests.swift (8 tests). No production change.
+    - test: green — `swift build` exit 0; filter 8/8; `--filter Quantiz` 13/13; full `swift test` exit 0
+    - commit: 8bb4936 test(mlx-lm): lock in mixed affine+mxfp4 quantization plan for deepseek_v4; b62711c (kanban chore)
+    - review: findings — DeepseekV4QuantizationPlanTests.swift:45, :261, :364; DeepSeek-V4-Flash-4bit-config.json; DeepseekV4Configuration.swift:297, :298 (6 findings)
+    - CONFIRMED GOOD: the central claim holds. The existing machinery does resolve the mixed plan. The reviewer reproduced both mutations exactly (136 issues, and the `[gather_qmm] Scale type must be uint8` abort), and the tree is clean after the revert. Every fixture fact is exact: 641 per-layer keys, 129 mxfp4, 512 affine, no router key. The kernel deferral is a real scope-out on the card.
+    - MAIN FINDING: the test helper puts plan membership in place of the production gate. Production gates on `weights["<path>.scales"] != nil` in `Load.swift:38`, then falls back to the default in `BaseConfiguration.swift:97`. A third mutation, which changed the whole `else` branch to `return nil`, keeps all 8 tests green. The suite pins no part of the production filter.
+    - note: the engine attempted 0 files, because the commit adds only a test file. This is not a pass.
+    - next: implement — fix all 6 findings
+  timestamp: 2026-08-10T17:07:26.350192+00:00
+- actor: claude-code
+  id: 01kzpb6mxbpgbqf8c7fweqj9s8
+  text: |-
+    ### Review round 1 -- all 6 findings closed, and one production change was genuinely needed
+
+    **Finding 1 needed production code, and this is stated openly rather than hidden in a test.** The gate the review asked the tests to run lived inside the body of `loadWeights`, thus no test could reach it. It moved out, unchanged, into a package function:
+
+    `Libraries/MLXLMCommon/Load.swift` -- `package func quantizationParameters(forPath:weights:quantization:perLayerQuantization:) -> (groupSize: Int, bits: Int, mode: QuantizationMode)?`
+
+    `loadWeights` now hands that function to `quantize(model:filter:)`, thus the tests and the load path run one body and cannot drift. The behaviour is the same, term for term: no `<path>.scales` array gives `nil`; a plan gives `plan.quantization(layer: path)?.asTuple`; no plan gives `quantization?.asTuple`. `package` matches `safetensorWeightURLs` beside it, which `LoadWeightsTests` already reads.
+
+    **Test changes.** The helper `quantizationTuple(for:plan:)` is deleted. `stubScales(for:)` builds the stand-in weight dictionary, and `leavesAfterLoadFilter(plan:scalePaths:)` is the one place that calls the production filter. Five tests are new or reworked:
+
+    - `loadFilterAppliesMxfp4ToExpertsAndAffineToEverythingElse` -- expert projections mxfp4 at group size 32 with `biases == nil`; `wq_a`, `shared_experts.gate_proj` and `layers.2.attn.compressor.wkv` affine at group size 64; embeddings affine.
+    - `loadFilterLeavesAPathWhoseWeightsHoldNoScalesAlone` -- the router holds no `scales` array, thus the first part of the gate leaves it a plain `Linear`.
+    - `loadFilterGivesTheDefaultToAPathThePlanDoesNotName` -- give the router a `scales` array and it quantizes at the plan's own `(64, 4, affine)` default. This test is what kills the reviewer's third mutation.
+    - `loadFilterQuantizesNothingWhenNoWeightsHoldScales` -- an empty weight dictionary leaves every leaf in high precision.
+    - `fixtureNamesCompressorKeysFromLayerTwoUp` and `fixtureNamesIndexerKeysOnTheEvenLayersFromTwoUp` -- measure the 82 and 84 key counts and the layer sets, thus the corrected numbers are checked by a run and not by a reader.
+
+    **Probe tree.** Three layers now, with `ProbeAttention.compressor` optional and present only from layer 2 up, which is what the fixture names. An assertion reads it.
+
+    **Discovery worth keeping.** The mxfp4 forward tests and the plan tests were already sharp, but nothing in the suite reached `Load.swift` at all. A filter written inline in a function body is unreachable by a test, and that is the whole cause behind findings 1 and 2. The extraction is the fix for the cause, not for the one line.
+  timestamp: 2026-08-10T17:23:23.179529+00:00
+- actor: claude-code
+  id: 01kzpb76fk6a4mvnqqnzz7km8c
+  text: |-
+    ### Mutation proof, round 2 -- all three mutations now FAIL
+
+    Each mutation was applied alone, run, and reverted.
+
+    1. `Libraries/MLXLMCommon/BaseConfiguration.swift` -- `public var mode: QuantizationMode { _mode ?? .affine }` changed to `{ .affine }`. **FAILS**: 2 tests, 136 issues -- `fixtureGivesEveryExpertProjectionMxfp4` 130 issues, `loadFilterAppliesMxfp4ToExpertsAndAffineToEverythingElse` 6 issues.
+    2. `Libraries/MLXLMCommon/SwitchLayers.swift` -- `MLX.quantized(other.weight, groupSize: groupSize, bits: bits, mode: mode)` changed to `mode: .affine`. **FAILS**: `loadFilterAppliesMxfp4ToExpertsAndAffineToEverythingElse` 3 issues on `layer.biases == nil`, then `mxfp4SwitchLinearRunsWithScalesAndNoBiases` failed the same expectation and mlx aborted the run with `[gather_qmm] Scale type must be uint8 but received type float32`.
+    3. `Libraries/MLXLMCommon/BaseConfiguration.swift` -- the whole `else` branch of `PerLayerQuantization.quantization(layer:)` changed to `return nil`. **FAILS**: `loadFilterGivesTheDefaultToAPathThePlanDoesNotName`, 1 issue -- `leaves[routerPath] as? QuantizedLinear` gave nil. This mutation kept all 8 of the round-1 tests green.
+
+    After the three reverts, `git status --porcelain -- Libraries/` gives one line, ` M Libraries/MLXLMCommon/Load.swift`, which is the intended extraction. `BaseConfiguration.swift` and `SwitchLayers.swift` are clean.
+
+    ### Verification
+
+    - `swift build` -- exit 0. The only warnings are the pre-existing ones in `Qwen2VL.swift`, `Qwen25VL.swift` and `Gemma4.swift`, untouched.
+    - `swift test --filter DeepseekV4QuantizationPlanTests` -- 13 tests in 1 suite passed.
+    - `swift test` -- exit 0, zero failures. Swift Testing: 383 + 282 + 80 + 7 tests passed. XCTest: 0 failures in every suite. The only 2 skips are the pre-existing `CompiledDecodeCorrectnessTests` skips (kanban 01KYD3ZCWTZ414Y79RSAKVQXXZ), untouched.
+    - `swift format --in-place --configuration .swift-format` on the two touched files only. No tree-wide format run.
+  timestamp: 2026-08-10T17:23:41.171284+00:00
+- actor: claude-code
+  id: 01kzpb7f356g3dgex5kvrd0vx6
+  text: |-
+    ### implement — changed
+    - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/Load.swift (load-time filter extracted to `package func quantizationParameters(forPath:weights:quantization:perLayerQuantization:)`, +37/-10), /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Tests/MLXLMTests/DeepseekV4QuantizationPlanTests.swift (13 tests, +230/-52 across both files). All 6 review findings closed. 3-mutation proof: BaseConfiguration `mode` -> `.affine` FAILS (2 tests, 136 issues); SwitchLayers `MLX.quantized(mode:)` -> `.affine` FAILS (3 issues plus the `[gather_qmm] Scale type must be uint8` abort); BaseConfiguration `quantization(layer:)` `else` -> `return nil` FAILS (1 issue). All three reverted; `git status --porcelain -- Libraries/` then shows only the intended `Load.swift` change. `swift build` exit 0; `swift test --filter DeepseekV4QuantizationPlanTests` 13/13; full `swift test` exit 0, zero failures, 2 pre-existing skips.
+    - next: /review round 2
+  timestamp: 2026-08-10T17:23:49.989437+00:00
 depends_on:
 - 01KZGMPECN4FA7T3BFX6F6QMF7
 position_column: doing
@@ -106,7 +194,7 @@ So the generic path should already work. What this task must prove:
 
 - [x] A test proves the real DSV4-Flash-4bit `config.json` quantization block decodes to a `PerLayerQuantization` with at least one `.mxfp4` layer and a `(64, 4, .affine)` default.
 - [x] A test proves `QuantizedSwitchLinear(mode: .mxfp4)` returns finite output of the expected shape with `biases == nil`.
-- [x] If any gap is found, it is fixed in the smallest possible diff and the fix is covered by a test. (No gap was found: seven of the eight tests passed against unchanged production code. The one red test named a layer the fixture does not hold -- see the comments.)
+- [x] If any gap is found, it is fixed in the smallest possible diff and the fix is covered by a test. (No gap was found: seven of the eight tests passed against unchanged production code. The one red test named a layer the fixture does not hold -- see the comments. Review round 1 added one production refactor: the load-time filter moved out of `loadWeights` into `quantizationParameters(forPath:weights:quantization:perLayerQuantization:)` so the tests run the real gate.)
 - [x] `Libraries/MLXLMCommon/SwitchLayers.swift` is either unmodified or changed by fewer than ~40 lines; no Metal kernel source added. (Unmodified.)
 - [x] Existing SwitchLayers/quantization tests still pass (no regression to other models).
 - [x] A note is recorded (in the task or a follow-up) stating that fused mxfp4 kernels were deliberately deferred.
@@ -123,3 +211,18 @@ So the generic path should already work. What this task must prove:
 ## Workflow
 - Use `/tdd` — write the plan-resolution and mxfp4 forward tests first; they may pass immediately, which is itself the finding. Only write code for gaps the tests actually expose.
 #deepseek-v4
+
+## Review Findings (2026-08-10 12:05)
+
+- [x] `Tests/MLXLMTests/DeepseekV4QuantizationPlanTests.swift:45` — `quantizationTuple(for:plan:)` puts plan membership in place of the production gate, thus no test pins the filter that `loadWeights` runs. Production gates on `weights["\(path).scales"] != nil` (`Libraries/MLXLMCommon/Load.swift:38`) and then calls `perLayerQuantization.quantization(layer: path)`, which gives the `(64, 4, affine)` default to every path the plan does not name (`Libraries/MLXLMCommon/BaseConfiguration.swift:97`). The helper gives `nil` to those paths instead. Proof by mutation: the whole `else` branch of `quantization(layer:)` changed to `return nil` keeps all 8 tests green. Remove this cause for the whole file — drive the probe through the same two-part gate the production code uses, with a stand-in weights dictionary that holds `<path>.scales`, and not through a plan-membership substitute.
+  - Resolved. The gate moved out of `loadWeights` into the package function `quantizationParameters(forPath:weights:quantization:perLayerQuantization:)` in `Load.swift`, and `loadWeights` now calls it. The helper `quantizationTuple(for:plan:)` is deleted. `leavesAfterLoadFilter(plan:scalePaths:)` runs that same production function over the probe tree with a stand-in weights dictionary from `stubScales(for:)`. Three tests now read the gate: `loadFilterAppliesMxfp4ToExpertsAndAffineToEverythingElse`, `loadFilterLeavesAPathWhoseWeightsHoldNoScalesAlone` and `loadFilterGivesTheDefaultToAPathThePlanDoesNotName`, plus `loadFilterQuantizesNothingWhenNoWeightsHoldScales` for the first part of the gate. The reviewer's third mutation now fails.
+- [x] `Tests/MLXLMTests/DeepseekV4QuantizationPlanTests.swift:261` — `#expect(!(router is QuantizedLinear), "the router stays in high precision")` states a result about production that this test cannot reach. In `loadWeights` an unnamed path still takes the `(64, 4, affine)` default when the checkpoint holds `<path>.scales`; only the absence of that array keeps the router in high precision. The document comment at lines 37-44 states that the checkpoint holds those arrays for exactly the layers the block names, and the repository holds no evidence for that statement. Same cause as the finding above.
+  - Resolved. The document comment on `stubScales(for:)` now states the assumption in as many words: the repository holds no DeepSeek-V4 weight file, thus which paths the published checkpoint truly holds a `scales` array for is an assumption, and the tests state their results as "given these scales, the filter gives this". The router assertion now reads "no scales, thus no quantization", and the companion test shows the other half: a router with a `scales` array does take the plan's default.
+- [x] `Tests/MLXLMTests/DeepseekV4QuantizationPlanTests.swift:364` — `ProbeAttention` gives layer 0 a `compressor` submodule, thus the probe tree holds `model.layers.0.attn.compressor.wgate` and `model.layers.0.attn.compressor.wkv`. The fixture names a compressor for layers 2 to 42 only, because `compress_ratios[0]` is 0. This does not agree with the file's own comment at lines 193-195, nor with the document comment at lines 418-419, which states that the probe paths equal the checkpoint key paths the block names. No assertion reads the probe compressor. Delete `ProbeCompressor` from the probe tree, or move it to a layer index the fixture names, and correct the document comment.
+  - Resolved by the second option. `ProbeAttention` takes `hasCompressor:` and holds the submodule as `ProbeCompressor?`, the probe tree holds three layers, and only layer 2 holds a compressor. `loadFilterAppliesMxfp4ToExpertsAndAffineToEverythingElse` now reads `model.layers.2.attn.compressor.wkv` and asserts it quantizes affine at group size 64.
+- [x] `Tests/MLXLMTests/Resources/DeepSeek-V4-Flash-4bit-config.json` — the key counts written in the result comment on this card are wrong. The block holds 82 compressor keys across the 41 layers 2 to 42 (`wgate` and `wkv` on each), not 41 keys. It holds 84 indexer keys across the 21 even layers 2 to 42 (`wq_b`, `weights_proj`, `compressor.wgate`, `compressor.wkv` on each), not 21 keys. Both numbers given are layer counts with a key-count label. Correct the comment, because the downstream tasks read it.
+  - Resolved. The result comment now reads 82 compressor keys across 41 layers and 84 indexer keys across 21 layers, and it names the four indexer key suffixes. The same counts sit in the test file header, and two new tests measure them: `fixtureNamesCompressorKeysFromLayerTwoUp` and `fixtureNamesIndexerKeysOnTheEvenLayersFromTwoUp`.
+- [x] `Libraries/MLXLLM/Models/DeepseekV4Configuration.swift:297` — the layers 0 and 1 result is not written where the downstream tasks read it. Task `^r92pjcr` (Indexer) names `index_n_heads`, `index_head_dim` and `index_topk` only, and states nothing about which layers hold indexer weights. The checkpoint holds them for the 21 even layers 2 to 42, which are the `compress_ratios == 4` layers. `hasCompressor(layer:)` exists, and no `hasIndexer(layer:)` exists beside it. An indexer built on all 43 layers, or on all 41 compressor layers, fails the weight load. Task `^tty95f4` (Compressor) states the general rule but names neither layer 0 nor layer 1, and does not state that the submodule itself must be absent. Task `^ag7ant0` holds the rule for the RoPE theta only. The result comment on this card sends the fact to "the MoE and attention tasks", and the compressor and the indexer belong to `^tty95f4` and `^r92pjcr`, which that comment does not name. Write the fact on `^tty95f4`, `^r92pjcr` and `^ag7ant0`.
+  - Resolved. A comment now sits on each of `^tty95f4`, `^r92pjcr` and `^ag7ant0`. The `^tty95f4` comment states that the submodule must be absent on layers 0 and 1, and names the optional-submodule pattern. The `^r92pjcr` comment states the even-layer rule and asks for a `hasIndexer(layer:)` beside `hasCompressor(layer:)`. `DeepseekV4Configuration.swift` is unchanged.
+- [x] `Libraries/MLXLLM/Models/DeepseekV4Configuration.swift:298` — `compress_ratios` holds 44 entries, `num_hidden_layers` is 43, and entry 43 is 0. `hasCompressor(layer:)` guards the bound, thus it is correct today. Any downstream code that reads `compressRatios.count` as the layer count gets 44. Write this fact beside the layers 0 and 1 fact on the same downstream tasks.
+  - Resolved. Each of the three comments states the 44-against-43 fact and says to read `numHiddenLayers` for a layer count.

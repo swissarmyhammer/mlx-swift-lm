@@ -1,6 +1,21 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kzpb3n0fqspjaq9ctst5dq5s
+  text: |-
+    ### Layer rule for the indexer -- this card does not state it yet
+
+    From task `^wkv5j6f`, measured on `Tests/MLXLMTests/Resources/DeepSeek-V4-Flash-4bit-config.json`:
+
+    - The published `quantization` block names indexer keys for the **21 even layers 2 to 42** only -- 84 keys: `wq_b`, `weights_proj`, `compressor.wgate` and `compressor.wkv` on each. These are the layers whose compress ratio is 4. The odd layers 3 to 41 hold a ratio of 128 and hold no indexer, and layers 0 and 1 hold a ratio of 0 and hold neither an indexer nor a compressor.
+    - This card names `index_n_heads`, `index_head_dim` and `index_topk` only, and states nothing about which layers hold indexer weights. An indexer built on all 43 layers, or on all 41 compressor layers, fails the weight load.
+    - `Libraries/MLXLLM/Models/DeepseekV4Configuration.swift` holds `hasCompressor(layer:)` and **no** `hasIndexer(layer:)` beside it. Add one -- `compressRatios[layer] == 4`, with the same bound guard -- and build the indexer submodule only where it gives true.
+    - `compress_ratios` holds **44** entries while `num_hidden_layers` is **43**, and entry 43 is 0. The bound guard makes `hasCompressor(layer:)` correct today. Any code that reads `compressRatios.count` as a layer count gets 44. Read `numHiddenLayers` for a layer count.
+
+    `Tests/MLXLMTests/DeepseekV4QuantizationPlanTests.swift` pins the layer rule in `fixtureNamesIndexerKeysOnTheEvenLayersFromTwoUp`.
+  timestamp: 2026-08-10T17:21:44.975894+00:00
 depends_on:
 - 01KZGMY5D5PRZ67GNK9E7B24WS
 position_column: todo
