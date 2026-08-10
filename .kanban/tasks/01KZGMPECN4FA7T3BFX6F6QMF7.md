@@ -34,6 +34,67 @@ comments:
     - Note: a full-tree `swift-format` run reformatted 50 unrelated files (the installed swift-format is 603.0.0 and disagrees with the version that formatted the repository). Those files were reverted. Format only the files you change.
     - next: `/review`
   timestamp: 2026-08-10T14:03:04.541638+00:00
+- actor: claude-code
+  id: 01kzp0d2pg275cmw1hz37v3mzt
+  text: |-
+    ### review — findings
+    - scope: `review sha 6abd9d5~1..6abd9d5` (round 1). Engine attempted 9 files, 0 failed, 0 skipped, 0 findings.
+    - engine result: clean. The 5 findings come from the directed checks that the engine does not do (upstream comparison, live fixture fetch, test mutation).
+    - field fidelity: PASS. 37 decoded keys, 0 mismatches. 33 keys match `osaurus-ai/vmlx-swift-lm` @ b1668963; the 4 `dspark_*` keys match `scouzi1966/mlx-swift-lm` @ e1852869. All 36 `Default` values match the reference. `rope_scaling` is the one optional, with no default, as in the reference.
+    - cited SHAs: both are real commits. b1668963 = "fix(dsv4): preserve jangtq-k routed bit plan" (2026-05-12). e1852869 = "Optimize DeepSeek V4 MLX execution" (2026-08-03).
+    - helpers: `isHashLayer(_:)`, `hasCompressor(layer:)`, `ropeTheta(forLayer:)` match the reference logic exactly, with the same out-of-bounds guard. The name `hasCompressor(layer:)` is correct and better than the `hasCompressor(_:)` on the card.
+    - fixture: real. Live fetch from HuggingFace gave HTTP 200. All 48 top-level keys match with 0 differences.
+    - attribution header: matches the block that `CONTRIBUTING.md` requires, word for word.
+    - scope hygiene: exactly the 4 expected files. No unrelated reformatted file.
+    - swift-format 603.0.0 gives a 0-byte diff on all 4 files of this commit.
+    - evidence: Tests/MLXLMTests/DeepseekV4ConfigurationTests.swift:38, :104, :114, Libraries/MLXLLM/Models/DeepseekV4Configuration.swift:23, :236
+    - next: strengthen the 9 new tests so a wrong default or a wrong key string makes them fail. Task stays in `review`.
+  timestamp: 2026-08-10T14:14:39.568125+00:00
+- actor: claude-code
+  id: 01kzp0ee3nn3bqhrxfd5sth9bh
+  text: |
+    ### finish iteration 1 — findings
+    - implement: changed — DeepseekV4Configuration.swift (37 keys, `Default` enum, 3 helpers), DeepseekV4ConfigurationTests.swift, DeepSeek-V4-Flash-4bit-config.json, Package.swift
+    - test: green — `swift build` clean; `swift test --filter DeepseekV4ConfigurationTests` 9/9; full `swift test` exit 0
+    - commit: 6abd9d5 feat(mlx-lm): add the DeepSeek-V4 configuration type; b6f585a (kanban chore, out of scope)
+    - review: findings — DeepseekV4ConfigurationTests.swift:38, :104, :114; DeepseekV4Configuration.swift:23, :236 (5 findings)
+    - PASSED, verified exhaustively: all 37 decoded keys and all 36 `Default` values match the references, 0 mismatches. The fixture is the real published config (live fetch, 48 keys, 0 differences). Both cited SHAs are real commits. The attribution header matches CONTRIBUTING.md.
+    - MAIN FINDING: the 9 tests are vacuous. The `Default` table holds DeepSeek-V4-Flash values and the fixture is DeepSeek-V4-Flash, thus a broken decoder falls back to the same number the test asserts. Proof by mutation: 3 misspelled JSON keys gave 9 tests 0 failures; 3 corrupted defaults gave 9 tests 0 failures. 32 of 37 keys and 29 of 36 defaults have no protection. Only `compress_ratios` is truly covered, because its default `[]` differs from the fixture.
+    - note: the review engine attempted 9 files here (0 failed, 0 skipped). The 0-file gap on the earlier task was specific to Markdown-only commits.
+    - next: implement — make the tests discriminate
+  timestamp: 2026-08-10T14:15:24.021890+00:00
+- actor: claude-code
+  id: 01kzp164n42228pdycct15fq0h
+  text: |-
+    Review round 1 findings closed. Notes for the next agent.
+
+    What changed: only `Tests/MLXLMTests/DeepseekV4ConfigurationTests.swift`. No source file changed. `git diff --quiet Libraries/MLXLLM/Models/DeepseekV4Configuration.swift` passes, thus all 37 decoded keys and all 36 `Default` values keep the values the reviewer verified against the references. `hasCompressor(layer:)` keeps its spelling.
+
+    Shape of the new test file:
+    - `ExpectedValues` — a private struct with one property for each of the 37 decoded keys, and one `assertMatches(_:)` that makes all 37 comparisons. No property has a default value, thus the memberwise initializer asks for all 37 and a table that forgets a key does not compile.
+    - Three tables read that one method: `flashDefaults` (the 36 defaults), `distinctValues` (a value for each key that is different from the default of that key), and `publishedFixture` (`flashDefaults` plus the 44 compress ratios and the YaRN rope scaling, which are the only two keys where the real file is different from the defaults).
+    - Tests: `testDistinctJSONDecodesEveryKey`, `testDistinctJSONSurvivesEncodeAndDecode`, `testMinimalJSONDecodesToFlashDefaults`, `testFixtureDecodesEveryKey`, plus the four helper tests. 8 tests in place of 9. `testDsparkKeysDecode` went out because `distinctJSON` gives all four `dspark_*` keys and reads them back.
+
+    Why one `assertMatches` and three data tables, and not three blocks of assertions: three parallel blocks of 37 `XCTAssertEqual` lines that are different in their literals only are a near-verbatim duplicate, which the duplication rule calls a blocker. One method plus three tables is the data-driven shape.
+
+    Mutation proof, run before this report. Each mutation was reverted and `git diff --quiet` confirmed clean after each one.
+    1. The reviewer's three misspelled keys (`hidden_size_TYPO`, `num_attention_heads_TYPO`, `rope_theta_TYPO`): 8 tests, 6 failures (3 in the distinct test, 3 in the round-trip test). Round 1 gave 0.
+    2. All 37 key strings misspelled at one time: 37 distinct failed assertion lines in `testDistinctJSONDecodesEveryKey` — one for each key. No key string is unprotected.
+    3. The reviewer's three corrupted defaults (`numAttentionHeads = 999`, `ropeTheta = 777.0`, `indexTopk = 4242`): 8 tests, 3 failures, all in `testMinimalJSONDecodesToFlashDefaults`. Round 1 gave 0.
+    4. All 36 defaults corrupted at one time: 36 distinct failed assertion lines in that same test. No default is unprotected.
+    5. An `encode(to:)` that writes 2 of the 37 keys: 35 failures in `testDistinctJSONSurvivesEncodeAndDecode`. The encode path is real.
+
+    Discovery worth keeping: exact `Float` equality is sufficient for every number in the tables. `1e-6` from the file and `1e-6` as a Swift `Float` literal compare equal, thus the earlier `accuracy: 1e-12` is not needed. The distinct floats (0.125, 0.25, 0.5, 0.75, 3.5, 4.5) are all exact in binary.
+
+    Verification: `swift build` complete, no compiler warning. `swift test --filter DeepseekV4ConfigurationTests` gives 8 tests, 0 failures. Full `swift test` exits 0 with 0 failures; the 2 skips are the pre-existing documented skips in `CompiledDecodeCorrectnessTests`. `swift-format lint --configuration .swift-format` is clean on the one changed file and a format run makes no further change. No tree-wide format run was made.
+  timestamp: 2026-08-10T14:28:20.772555+00:00
+- actor: claude-code
+  id: 01kzp16akdqavzxtat3ve7bdvx
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — `Tests/MLXLMTests/DeepseekV4ConfigurationTests.swift`. 5 of 5 review findings closed. Mutation proof: 37 of 37 key strings and 36 of 36 defaults now make a test fail; an encoder that drops keys makes the round-trip test fail. `swift build` clean; `swift test --filter DeepseekV4ConfigurationTests` 8 tests 0 failures; full `swift test` exit 0, 0 failures, 2 pre-existing documented skips.
+    - next: `/review`
+  timestamp: 2026-08-10T14:28:26.861632+00:00
 depends_on:
 - 01KZGMN4FQKCVPAYJDJJHK0APK
 position_column: doing
@@ -81,3 +142,16 @@ Scope decisions for this task:
 ## Workflow
 - Use `/tdd` — write the failing decode tests against the real fixture first, then implement the struct.
 #deepseek-v4
+
+## Review Findings (2026-08-10 09:14)
+
+- [x] `Tests/MLXLMTests/DeepseekV4ConfigurationTests.swift:38` — The 9 new tests do not fail when a JSON key string in `CodingKeys` is wrong. Proof by mutation: a change of `hidden_size` to `hidden_size_TYPO`, `num_attention_heads` to `num_attention_heads_TYPO`, and `rope_theta` to `rope_theta_TYPO` kept all 9 tests green. The cause is that each `Default` constant holds the same number as the fixture, thus `decodeIfPresent` gives nil, the default applies, and the default equals the number the test asserts. Remove this cause for the whole file: assert each value against the number read from the fixture JSON, not against a number that the `Default` table also holds.
+  - Closed: the file now holds `distinctJSON`, which gives each of the 37 keys a value that is different from the default of that key. `testDistinctJSONDecodesEveryKey` reads all 37 values back, thus no assertion can pass through a default. Proof by mutation: the reviewer's three misspelled keys give 6 failures. A run with all 37 key strings misspelled gives 37 distinct failed assertion lines in that one test — one for each key.
+- [x] `Libraries/MLXLLM/Models/DeepseekV4Configuration.swift:236` — The 9 new tests do not fail when a `Default` constant is wrong. Proof by mutation: `numAttentionHeads = 999`, `ropeTheta = 777.0`, and `indexTopk = 4242` kept all 9 tests green. 29 of the 36 `Default` constants have no test that pins them. Only `testMinimalJSONDecodesToFlashDefaults` pins a default, and it pins 7.
+  - Closed: `testMinimalJSONDecodesToFlashDefaults` now reads the `ExpectedValues.flashDefaults` table, which holds all 36 defaults, and asserts `nil` for `ropeScaling`, which has no default. Proof by mutation: the reviewer's three corrupted defaults give 3 failures. A run with all 36 defaults corrupted gives 36 distinct failed assertion lines in that one test.
+- [x] `Tests/MLXLMTests/DeepseekV4ConfigurationTests.swift:104` — 32 of the 37 decoded keys have no assertion that can fail on a wrong key string. Only `compress_ratios` is truly protected, because it is the one key whose `Default` (`[]`) differs from the fixture value. These 5 keys have no reference in any test: `qk_rope_head_dim`, `rms_norm_eps`, `o_groups`, `norm_topk_prob`, `routed_scaling_factor`. Add an assertion for each decoded key.
+  - Closed: `ExpectedValues` holds one property for each of the 37 decoded keys, and `assertMatches(_:)` compares all 37. Three tables read it: the distinct values, the 36 defaults, and the published fixture. The memberwise initializer takes no default value, thus a table that forgets a key does not compile.
+- [x] `Tests/MLXLMTests/DeepseekV4ConfigurationTests.swift:114` — `rope_scaling` is present in the fixture, but the only assertion on it is `XCTAssertNil` from the minimal JSON. No test asserts that it decodes to a non-nil value with the expected content from the fixture. Add that assertion.
+  - Closed: `ExpectedValues.publishedRopeScaling` holds the five entries of the fixture (`beta_fast` 32, `beta_slow` 1, `factor` 16, `original_max_position_embeddings` 65536, `type` "yarn"), and `testFixtureDecodesEveryKey` compares the whole dictionary. `distinctValues` also gives `rope_scaling` a non-nil value of its own.
+- [x] `Libraries/MLXLLM/Models/DeepseekV4Configuration.swift:23` — The type declares `Codable`, but no test runs `encode(to:)`. The synthesized encoder is never exercised. Add an encode-and-decode test that shows a round trip keeps every value.
+  - Closed: `testDistinctJSONSurvivesEncodeAndDecode` encodes the distinct configuration, decodes the result, and compares all 37 values. Proof by mutation: an `encode(to:)` that writes 2 of the 37 keys gives 35 failures in that test.
