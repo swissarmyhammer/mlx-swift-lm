@@ -89,6 +89,14 @@ comments:
     - evidence: 5 files — new `Libraries/MLXLLM/Models/DeepseekV4Attention.swift`, new `Tests/MLXLMTests/DeepseekV4AttentionTests.swift`, changed `Libraries/MLXLMCommon/AttentionUtils.swift`, `Libraries/MLXLMCommon/KVCache.swift`, `Tests/MLXLMTests/KVCacheTests.swift`. `swift build` clean, no warning in any touched file. `swift test --filter DeepseekV4AttentionTests` 11 of 11 pass. Full `swift test` 764 tests pass across 94 suites, zero failures; `Gemma4ChunkedPrefillTests` passed, thus the known flake did not appear. Eight mutations A through H each turned the suite red, every one reverted, `git status` shows only the five files above. `Libraries/MLXLLM/Models/DeepseekV3.swift` untouched.
     - next: `/review`
   timestamp: 2026-08-11T03:40:10.534445+00:00
+- actor: claude-code
+  id: 01kzqemme7a80nj04xxbzffn52
+  text: |-
+    ### commit — changed
+    - evidence: 54e4770 feat(mlx-lm): add DeepSeek-V4 attention port
+    - evidence: dfc930a chore(kanban): record DeepSeek-V4 attention port result
+    - next: none
+  timestamp: 2026-08-11T03:42:41.607706+00:00
 depends_on:
 - 01KZGMQCH9PFY25Y3QXP34CRP6
 position_column: doing
