@@ -498,10 +498,43 @@ comments:
     - evidence: 1 file — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/Load.swift (+8, every line a `///` comment: the doc comment on `errorDescription` that the finding asks for, plus `SafetensorsIndex.weightMap`, its `CodingKeys` enum and that enum's `weightMap` case, which held the same cause). The round-4 finding `Load.swift:29` is closed and flipped to `- [x]`; 0 open findings on the card. No logic changed, thus the round-3 path validation stays as the reviewer examined it. `swift build` exit 0; `swift test --filter LoadWeightsTests` 9/9; `--filter DeepseekV4QuantizationPlanTests` 13/13; full `swift test` exit 0, zero failures, 2 pre-existing skips. `git status --porcelain -- Libraries/ Tests/ IntegrationTesting/` gives one line, ` M Libraries/MLXLMCommon/Load.swift`.
     - next: /review round 5
   timestamp: 2026-08-11T01:53:38.399120+00:00
+- actor: claude-code
+  id: 01kzq8e99ws7f66j6tf04myk7r
+  text: |-
+    ### commit — changed
+    - evidence: bc561fc docs(mlx-lm): document WeightLoadingError.errorDescription and SafetensorsIndex; 74e50d0 chore(kanban): record round-4 doc fix on task wkv5j6f
+    - next: none. Local commits only, not pushed.
+  timestamp: 2026-08-11T01:54:22.140306+00:00
+- actor: claude-code
+  id: 01kzq8zp3pm40aw2fzz4w1qh7k
+  text: |-
+    ### review — clean
+
+    - scope: `review sha bc561fc~1..bc561fc` (round 5). Commit `74e50d0` is a kanban chore and was not read.
+    - evidence: zero new findings in scope. `git show bc561fc --numstat` gives `8 0 Libraries/MLXLMCommon/Load.swift`. A grep of the added lines for a line that is not a `///` comment gives nothing, and a grep for a removed line gives nothing, thus the commit changes no executable line.
+    - the four new comments read true against the code they sit on. `errorDescription` names the `LocalizedError` conformance and states that each case gives one sentence that names the directory or the index entry; the three case bodies do exactly that. `SafetensorsIndex.weightMap` reads "the name of the weight file that holds each checkpoint key", which matches the `[String: String]` shape and the header comment of the struct. The `CodingKeys` comment and the `weightMap` case comment name the `weight_map` object, which is the raw value.
+    - all 11 findings of rounds 1 to 4 stay `- [x]`, each with its resolution note. 6 acceptance items and 6 test items stay `- [x]`.
+    - tests: `swift test` exit code 0. Zero failures, zero errors, zero warnings.
+    - the implementer's question on `CodingKeys`: not a finding here. A documented declaration is never a defect, and a file that holds more documentation than its neighbours does no harm. Documentation for the `CodingKeys` enums of the other files of `MLXLMCommon` belongs to a task of its own, and the comments this commit added stay.
+    - out of this commit's scope, for a separate task, and **not an open finding on this card**: the engine reports that `loadWeights` throws and its document comment holds no `- Throws:` entry (`Libraries/MLXLMCommon/Load.swift`). That comment is upstream text, last changed by `f5f18ed` and `826fbc9`. No commit of this card touched it, and `bc561fc` added no line near it.
+    - next: none. The card is done.
+  timestamp: 2026-08-11T02:03:52.310308+00:00
+- actor: claude-code
+  id: 01kzq90nw383c7730v12tzmbg1
+  text: |
+    ### finish iteration 5 — clean
+    - implement: changed — Load.swift, 8 lines, each one a `///` comment. No executable line changed.
+    - test: green — `swift build` exit 0; LoadWeightsTests 9/9; DeepseekV4QuantizationPlanTests 13/13; full `swift test` exit 0, zero failures, 2 pre-existing skips
+    - commit: bc561fc docs(mlx-lm): document WeightLoadingError.errorDescription and SafetensorsIndex; 74e50d0 (kanban chore)
+    - review: clean — zero new findings. All 11 findings of rounds 1 to 4 stay closed. Task moved to `done`.
+    - verification: `git show bc561fc --numstat` gives `8 0`, and a search of the added lines finds no line that is not a `///` comment. The `errorDescription` comment agrees with what each of the three cases truly gives.
+    - note: the engine reported that `loadWeights` has no `- Throws:` entry in its doc comment. That comment is upstream text that no commit of this card touched, thus the reviewer recorded it for a separate task and did not open it here.
+    - note: `CodingKeys` enums have no comment in six other files of `MLXLMCommon`. This file is now stricter than the module. The reviewer judged that this is not a defect.
+  timestamp: 2026-08-11T02:04:24.835024+00:00
 depends_on:
 - 01KZGMPECN4FA7T3BFX6F6QMF7
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: df80
 title: Verify mixed affine+mxfp4 per-layer quantization resolves for deepseek_v4
 ---
 ## What

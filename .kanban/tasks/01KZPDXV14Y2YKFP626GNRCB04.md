@@ -21,8 +21,51 @@ comments:
 
     This card needs a decision from the user: close it as done by that change, or keep it for a wider examination of `Load.swift`. No agent closed it.
   timestamp: 2026-08-11T01:30:53.137525+00:00
-position_column: todo
-position_ordinal: '9080'
+- actor: claude-code
+  id: 01kzq910yqpa0jjpperm21pmc5
+  text: |
+    ## Closed — the work landed under ^wkv5j6f
+
+    This card was made to hold the path-traversal fix in `Load.swift`. The finding
+    that made it was recorded on ^wkv5j6f, and the `finish` skill states that a
+    review finding belongs to the task that holds it. The work thus landed on
+    ^wkv5j6f and not here.
+
+    **What is done**, in commit `638dde5`:
+
+    - A new private `weightFileURL(forIndexEntry:in:)` reads each entry of
+      `model.safetensors.index.json` before it maps the entry onto the model
+      directory. It rejects an empty entry, an entry that starts with `/`, and an
+      entry that holds a `..` component. It splits on `/` and reads the components,
+      thus `shards/../../outside.safetensors` is rejected and not only
+      `../outside.safetensors`.
+    - A `guard modelDirectory.isFileURL` sits above both branches. `FileManager`
+      reads only the path of a URL and ignores the scheme, thus an `https:` URL
+      walked the root of the local file system before this guard.
+    - `WeightLoadingError` gained `modelDirectoryIsNotAFileURL` and
+      `weightFileOutsideModelDirectory(entry:modelDirectory:)`. Nothing is dropped
+      without a word.
+    - `Tests/MLXLMTests/LoadWeightsTests.swift` holds five new tests. The four
+      rejection tests each went red first.
+
+    **The review verified it.** The reviewer of ^wkv5j6f round 4 tried 28 attack
+    strings, and none went out of the model directory: percent-encoding (which
+    cannot work, because `appendingPathComponent` encodes and never decodes),
+    backslash, UNC, `C:\`, Unicode near-copies of `..`, `~`, a leading `./`, and
+    nested `..`. `Gemma4KVSharedLoadTests`, `GLM4LmHeadTiedLoadTests`,
+    `BaseConfigurationTests` and `MiniMaxM3Tests` all stay green, thus no other
+    model changed how it loads.
+
+    Each acceptance criterion of this card is met by that commit.
+
+    **One item stays open, and it is deliberate.** A symlink inside the model
+    directory that points outside is NOT rejected. The check reads the text of the
+    entry alone. No code on the load path makes a symlink, and a check that followed
+    symlinks would break a download layout that uses one. A person who wants that
+    must open a new card.
+  timestamp: 2026-08-11T02:04:36.183458+00:00
+position_column: done
+position_ordinal: e080
 title: Validate safetensors index paths against path traversal in Load.swift
 ---
 ## What
