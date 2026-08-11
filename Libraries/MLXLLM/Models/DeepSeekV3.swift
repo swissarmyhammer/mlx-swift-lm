@@ -7,6 +7,10 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+/// The configuration for a DeepSeek-V3 checkpoint.
+///
+/// The fields mirror the `config.json` of the checkpoint. The decoder reads
+/// the values with the snake_case keys in `CodingKeys`.
 public struct DeepSeekV3Configuration: Codable, Sendable {
     var vocabSize: Int
     var hiddenSize: Int
@@ -91,7 +95,6 @@ private func clippedSilu(_ x: MLXArray) -> MLXArray {
 }
 
 class DeepSeekV3Attention: Module {
-    var config: DeepSeekV3Configuration
     var hiddenSize: Int
     var numHeads: Int
     var maxPositionEmbeddings: Int
@@ -115,7 +118,6 @@ class DeepSeekV3Attention: Module {
     @ModuleInfo(key: "kv_b_proj") var kvBProj: Linear
 
     init(config: DeepSeekV3Configuration) {
-        self.config = config
         self.hiddenSize = config.hiddenSize
         self.numHeads = config.numAttentionHeads
         self.maxPositionEmbeddings = config.maxPositionEmbeddings
@@ -228,7 +230,6 @@ class DeepSeekV3Attention: Module {
 }
 
 class DeepSeekV3MLP: Module, UnaryLayer {
-    var config: DeepSeekV3Configuration
     var hiddenSize: Int
     var intermediateSize: Int
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
@@ -236,7 +237,6 @@ class DeepSeekV3MLP: Module, UnaryLayer {
     @ModuleInfo(key: "down_proj") var downProj: Linear
 
     init(config: DeepSeekV3Configuration, hiddenSize: Int? = nil, intermediateSize: Int? = nil) {
-        self.config = config
         self.hiddenSize = hiddenSize ?? config.hiddenSize
         self.intermediateSize = intermediateSize ?? config.intermediateSize
         self._gateProj.wrappedValue = Linear(self.hiddenSize, self.intermediateSize, bias: false)
@@ -250,7 +250,6 @@ class DeepSeekV3MLP: Module, UnaryLayer {
 }
 
 class MoEGate: Module {
-    var config: DeepSeekV3Configuration
     var topK: Int?
     var normTopkProb: Bool
     var nRoutedExperts: Int?
@@ -262,7 +261,6 @@ class MoEGate: Module {
     var e_score_correction_bias: MLXArray
 
     init(config: DeepSeekV3Configuration) {
-        self.config = config
         self.topK = config.numExpertsPerTok
         self.normTopkProb = config.normTopkProb
         self.nRoutedExperts = config.nRoutedExperts
@@ -301,14 +299,12 @@ class MoEGate: Module {
 }
 
 class DeepSeekV3MoE: Module, UnaryLayer {
-    var config: DeepSeekV3Configuration
     var numExpertsPerTok: Int
     @ModuleInfo(key: "switch_mlp") var switchMLP: SwitchGLU
     var gate: MoEGate
     @ModuleInfo(key: "shared_experts") var sharedExperts: DeepSeekV3MLP?
 
     init(config: DeepSeekV3Configuration) {
-        self.config = config
         self.numExpertsPerTok = config.numExpertsPerTok ?? 1
 
         self._switchMLP.wrappedValue = SwitchGLU(
@@ -373,8 +369,12 @@ class DeepSeekV3DecoderLayer: Module {
     }
 }
 
+/// The decoder stack of a DeepSeek-V3 model.
+///
+/// The stack holds the token embedding, the decoder layers, and the final
+/// RMS norm. `DeepSeekV3Model` wraps this stack and applies the `lm_head`
+/// projection to its output.
 public class DeepSeekV3ModelInner: Module {
-    var config: DeepSeekV3Configuration
     var vocabSize: Int
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     var layers: [DeepSeekV3DecoderLayer]
@@ -386,7 +386,6 @@ public class DeepSeekV3ModelInner: Module {
     var pipelineSize: Int
 
     init(config: DeepSeekV3Configuration) {
-        self.config = config
         self.vocabSize = config.vocabSize
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: config.vocabSize, dimensions: config.hiddenSize)
@@ -414,13 +413,25 @@ public class DeepSeekV3ModelInner: Module {
     }
 }
 
+/// A DeepSeek-V3 language model.
+///
+/// The class conforms to `LLMModel` and the related protocols. It runs the
+/// decoder stack in `model` and applies the `lm_head` projection to get the
+/// logits.
 public class DeepSeekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     public var kvHeads: [Int] = []
 
     var args: DeepSeekV3Configuration
+
+    /// The decoder stack: the token embedding, the decoder layers, and the
+    /// final normalization.
     public var model: DeepSeekV3ModelInner
+
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
+    /// Creates a DeepSeek-V3 model from a configuration.
+    ///
+    /// - Parameter args: The configuration of the checkpoint.
     public init(_ args: DeepSeekV3Configuration) {
         self.args = args
         self.model = DeepSeekV3ModelInner(config: args)
