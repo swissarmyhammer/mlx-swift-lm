@@ -67,8 +67,24 @@ comments:
     - evidence: 1 file — Libraries/MLXLLM/Models/DeepseekV4MoE.swift. The two findings named `DeepseekV4SwitchGLU` and `DeepseekV4MoE`. The finding shows one example of a cause, thus I removed the cause from the whole file: all four concrete classes are now `final` (`DeepseekV4MLP`, `DeepseekV4SwitchGLU`, `DeepseekV4MoEGate`, `DeepseekV4MoE`). A repository grep found no subclass of any of the four. Build clean — the one `missing creator for mutated node` line is the known SwiftPM diagnostic that is independent of this source. `swift test --filter DeepseekV4MoETests`: 15 tests, 0 failures. Both findings are checked on the card.
     - next: /review
   timestamp: 2026-08-11T19:16:47.928046+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01kzs4cnq7w3rzw8r0bxkx2qjk
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (f4c2214) — 0 findings, 8 attempted, 0 failed, 0 skipped; the two prior findings from 2026-08-11 14:10 are checked
+    - next: none — the task is done
+  timestamp: 2026-08-11T19:22:03.879941+00:00
+- actor: claude-code
+  id: 01kzs4d6pay34a4gdjasd58hy4
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 1 file (Libraries/MLXLLM/Models/DeepseekV4MoE.swift, four classes now final)
+    - test: green — swift test, exit 0, 0 failures
+    - commit: f4c2214
+    - review: clean — 0 findings, 2 prior findings checked; task moved to done
+  timestamp: 2026-08-11T19:22:21.258617+00:00
+position_column: done
+position_ordinal: e980
 title: Decide whether the DeepSeek-V4 shared expert reads the SwiGLU clamp
 ---
 ## What

@@ -1,8 +1,26 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '9680'
+comments:
+- actor: claude-code
+  id: 01kzs4r8c96pzx8z8p48gdszqk
+  text: |-
+    Research done. Discoveries:
+    - The test target uses `#hubDownloader()` and `#huggingFaceTokenizerLoader()` from MLXHuggingFace. The `Downloader.download(id:revision:matching:useLatest:progressHandler:)` call with patterns `["*.json", "*.jinja"]` gets the tokenizer files and not the weights. This is the same pattern set as `tokenizerDownloadPatterns` in `Libraries/MLXLMCommon/ModelFactory.swift` (that constant is `package`, thus the test declares its own copy).
+    - `DeepSeekV4ChatEncoder.SpecialToken` makes the marker strings public. The test uses these constants, and the downloaded tokenizer is the independent oracle. Thus the test also proves the encoder constants against the published tokenizer.
+    - `NaiveStreamingDetokenizer` is public in `Libraries/MLXLMCommon/Tokenizer.swift`. `Tokenizer.eosTokenId` is `tokenId(of: eosToken)` in the same file.
+    - The Xcode project uses `PBXFileSystemSynchronizedRootGroup`, thus a new file in `IntegrationTestingTests/` joins the test target with no project edit.
+    - Plan for the TDD proof: the tests examine behavior that already exists, thus the red step is a mutation run. Flip one expected id, see both tests fail, restore, see both tests pass.
+  timestamp: 2026-08-11T19:28:23.433191+00:00
+- actor: claude-code
+  id: 01kzs4zeka84ewmz95mgwn18f9
+  text: |-
+    ### implement — changed
+    - evidence: 1 new file — `IntegrationTesting/IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests.swift`. Two tests: `markersSurviveStreamingDetokenizationWhole` (each of the 8 marker ids streams whole through `NaiveStreamingDetokenizer`; a mixed stream keeps markers complete and text in order; a skip-specials decode removes only the two `special: true` sentence markers and keeps the turn markers) and `endOfSentenceTokenIdIsOne` (`eosTokenId == 1`, and id 1 decodes to the end-of-sentence marker). Marker strings come from `DeepSeekV4ChatEncoder.SpecialToken`, thus the downloaded tokenizer also proves the encoder constants. Tokenizer source: `deepseek-ai/DeepSeek-V4-Flash` @ `60d8d70770c6776ff598c94bb586a859a38244f1`, patterns `["*.json", "*.jinja"]` (no weights). Test run: `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests` — 2 tests passed, 0 failures, no compiler warnings. TDD proof: a mutation run (end-of-sentence id 1 -> 2) made both tests fail with 5 issues, then the restore made both pass. One build fix on the way: `Tokenizer` is ambiguous between `MLXLMCommon` and `Tokenizers` in this target, thus the shared task is typed `Task<any MLXLMCommon.Tokenizer, any Error>`.
+    - next: /review
+  timestamp: 2026-08-11T19:32:19.178594+00:00
+position_column: doing
+position_ordinal: '8180'
 title: 'DeepSeek-V4 tokenizer integration tests: marker round trip and eos token id'
 ---
 ## What
@@ -44,18 +62,18 @@ The ids come from the `added_tokens` array of the published `tokenizer.json`:
 
 The test must assert:
 
-- [ ] Each id above decodes to its marker string, complete, with no split.
-- [ ] A stream that mixes markers and ordinary text gives the markers complete
+- [x] Each id above decodes to its marker string, complete, with no split.
+- [x] A stream that mixes markers and ordinary text gives the markers complete
       and the text in the correct order.
-- [ ] The turn markers stay in the output. They are not special, thus a
+- [x] The turn markers stay in the output. They are not special, thus a
       "skip specials" path must not remove them.
 
 ## Test 2: the end-of-sentence token id is 1
 
 The test must assert:
 
-- [ ] `Tokenizer.eosTokenId` is `1` for the DeepSeek-V4 tokenizer.
-- [ ] Token id `1` decodes to `<｜end▁of▁sentence｜>`.
+- [x] `Tokenizer.eosTokenId` is `1` for the DeepSeek-V4 tokenizer.
+- [x] Token id `1` decodes to `<｜end▁of▁sentence｜>`.
 
 ## A fact this work established — the card `^gbsaqc2` named the wrong file
 
