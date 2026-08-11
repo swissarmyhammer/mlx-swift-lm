@@ -7,9 +7,12 @@ import MLXNN
 /// The `model.safetensors.index.json` file, which maps each checkpoint key to
 /// the weight file that holds it.
 private struct SafetensorsIndex: Decodable {
+    /// The name of the weight file that holds each checkpoint key.
     let weightMap: [String: String]
 
+    /// The name each property has in the index file.
     enum CodingKeys: String, CodingKey {
+        /// The `weight_map` object of the index file.
         case weightMap = "weight_map"
     }
 }
@@ -26,6 +29,11 @@ package enum WeightLoadingError: LocalizedError, Equatable {
     /// directory.
     case weightFileOutsideModelDirectory(entry: String, modelDirectory: URL)
 
+    /// The localized description of the error, which this type gives through
+    /// its `LocalizedError` conformance.
+    ///
+    /// Each case gives one sentence that names the directory, or the index
+    /// entry, in the failure.
     package var errorDescription: String? {
         switch self {
         case .unreadableModelDirectory(let modelDirectory):
