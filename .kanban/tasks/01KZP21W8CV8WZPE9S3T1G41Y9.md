@@ -127,8 +127,32 @@ comments:
     - evidence: 2 files, 8 lines, each one a rename — Libraries/MLXLLM/Models/DeepseekV4Configuration.swift, Tests/MLXLMTests/DeepseekV4ConfigurationTests.swift. Finding at DeepseekV4Configuration.swift:78 closed and flipped to `- [x]`. `swift build` clean. `swift test --filter DeepseekV4` = 25 tests in 2 suites passed, plus 8 XCTest cases with 0 failures. Full `swift test` passed: 383 + 80 + 282 + 7 tests in four runs, 0 failures, 0 errors. Mutation proof held for a misspelled key string (2 tests failed) and for a corrupted default (1 test failed); both were put back and the tree is clean apart from the two intended files.
     - next: /review
   timestamp: 2026-08-11T02:41:30.902213+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01kzqb6txwggmysmpf9kvpwyd3
+  text: |-
+    ### commit — changed
+    - evidence: 9a106c8 refactor(mlx-lm): rename normTopkProb to normalizeTopkProb
+    - evidence: 64e2062 chore(kanban): update t1g41y9 with commit result
+    - next: none
+  timestamp: 2026-08-11T02:42:43.772953+00:00
+- actor: claude-code
+  id: 01kzqcantb536ej6bpwhvc1g61
+  text: |
+    ### review — clean
+
+    - scope: `review sha 9a106c8~1..9a106c8` (round 2). Commit `64e2062` is a kanban chore and stayed out of the scope.
+    - engine: 9 attempted pairs, 0 findings, 0 confirmed, 0 refuted.
+    - evidence: zero new findings.
+    - verification:
+      - The `CodingKeys` raw string `"norm_topk_prob"` is the same on both sides of the diff (`DeepseekV4Configuration.swift:160`). `Default.normalizeTopkProb` stays `true`.
+      - The rename is complete: no `normTopkProb` stays in `DeepseekV4Configuration.swift` or `DeepseekV4ConfigurationTests.swift`. DeepseekV3, GLM4MOE, MiMoV2Flash, NemotronH, Qwen3MoE, Qwen3Next, Qwen35 (LLM and VLM), LFM2MoE, BailingMoe and OlmoE keep their own `normTopkProb`. The commit changed 8 lines in 2 files.
+      - Mutation proof holds: `Default.normalizeTopkProb` set to `false` failed `DeepseekV4ConfigurationTests.testMinimalJSONDecodesToFlashDefaults` at `DeepseekV4ConfigurationTests.swift:106`. Reverted; `git status` on `Libraries` and `Tests` is clean.
+      - `swift test` is green: 0 failures, 0 errors, 0 warnings.
+      - The round-1 finding is closed. The property now reads `normalizeTopkProb`, which is the imperative verb style of `useAttnSink` in the same file.
+    - next: none. The card is done.
+  timestamp: 2026-08-11T03:02:18.187726+00:00
+position_column: done
+position_ordinal: e180
 title: Rename three DeepseekV4Configuration properties to match Swift naming
 ---
 ## What
