@@ -33,6 +33,10 @@ import MLX
 ///   - cache: Cache instance (any type)
 ///   - scale: Attention scale factor
 ///   - mask: Attention mask
+///   - sinks: Optional learned per-head sink logit, shape [nHeads]. The sink
+///     joins the softmax denominator ahead of the keys and leaves again
+///     afterwards, so a head can hold weight back from every key it sees.
+///     DeepSeek-V4 uses this; most models pass `nil`.
 /// - Returns: Attention output [B, nHeads, L, D]
 public func attentionWithCacheUpdate(
     queries: MLXArray,
@@ -40,7 +44,8 @@ public func attentionWithCacheUpdate(
     values: MLXArray,
     cache: KVCache?,
     scale: Float,
-    mask: MLXFast.ScaledDotProductAttentionMaskMode = .none
+    mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+    sinks: MLXArray? = nil
 ) -> MLXArray {
     guard let cache else {
         return MLXFast.scaledDotProductAttention(
@@ -48,7 +53,8 @@ public func attentionWithCacheUpdate(
             keys: keys,
             values: values,
             scale: scale,
-            mask: mask
+            mask: mask,
+            sinks: sinks
         )
     }
     if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
@@ -62,7 +68,8 @@ public func attentionWithCacheUpdate(
             mask: mask,
             groupSize: quantizedKVCache.groupSize,
             bits: quantizedKVCache.bits,
-            mode: quantizedKVCache.mode
+            mode: quantizedKVCache.mode,
+            sinks: sinks
         )
     } else {
         let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
@@ -71,7 +78,8 @@ public func attentionWithCacheUpdate(
             keys: cachedKeys,
             values: cachedValues,
             scale: scale,
-            mask: mask
+            mask: mask,
+            sinks: sinks
         )
     }
 }

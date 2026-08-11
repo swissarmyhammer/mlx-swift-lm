@@ -790,3 +790,86 @@ func testCacheListCopyIsIndependent() async throws {
         #expect(allClose(orig, saved).item(Bool.self))
     }
 }
+
+// MARK: - Attention sinks on the quantized path
+
+/// The number of query heads the attention-sink tests read.
+private let sinkQueryHeads = 2
+
+/// The number of key/value heads the attention-sink tests read.
+private let sinkKeyValueHeads = 1
+
+/// The number of tokens the attention-sink tests read.
+private let sinkTokenCount = 3
+
+/// The head width the attention-sink tests read. A quantized cache needs a
+/// head width divisible by one of the supported group sizes.
+private let sinkHeadDim = 64
+
+/// The bit width the attention-sink tests quantize with.
+private let sinkBits = 8
+
+/// The group size the attention-sink tests quantize with.
+private let sinkGroupSize = 64
+
+/// The learned sink logit of each query head. The first head holds most of
+/// its weight back; the second head gives some of it away.
+private let sinkLogits: [Float] = [2, -1]
+
+/// The largest gap allowed between the quantized path and mlx's own
+/// attention. Eight-bit affine quantization of values inside -1 through 1
+/// carries about 0.004 of error, thus this limit sits well above it and well
+/// below the effect the sink itself has.
+private let sinkQuantizationTolerance: Float = 0.02
+
+/// `quantizedScaledDotProductAttention` must give the same answer as mlx's
+/// own attention when both read the same sink logits, and a materially
+/// different one when the sink is left out.
+@Test func quantizedAttentionReadsTheLearnedSink() {
+    MLXRandom.seed(0)
+    let queryShape = [1, sinkQueryHeads, sinkTokenCount, sinkHeadDim]
+    let keyShape = [1, sinkKeyValueHeads, sinkTokenCount, sinkHeadDim]
+    let queries = MLXRandom.normal(queryShape)
+    let keys = MLXRandom.normal(keyShape)
+    let values = MLXRandom.normal(keyShape)
+    let scale = 1 / sqrt(Float(sinkHeadDim))
+    let sinks = MLXArray(sinkLogits)
+
+    let quantizedKeys = quantized(keys, groupSize: sinkGroupSize, bits: sinkBits)
+    let quantizedValues = quantized(values, groupSize: sinkGroupSize, bits: sinkBits)
+    let roundTripKeys = dequantized(
+        quantizedKeys.wq, scales: quantizedKeys.scales, biases: quantizedKeys.biases,
+        groupSize: sinkGroupSize, bits: sinkBits)
+    let roundTripValues = dequantized(
+        quantizedValues.wq, scales: quantizedValues.scales, biases: quantizedValues.biases,
+        groupSize: sinkGroupSize, bits: sinkBits)
+
+    func quantizedAttention(sinks: MLXArray?) -> [Float] {
+        quantizedScaledDotProductAttention(
+            queries: queries,
+            quantizedKeys: quantizedKeys,
+            quantizedValues: quantizedValues,
+            scale: scale,
+            mask: .none,
+            groupSize: sinkGroupSize,
+            bits: sinkBits,
+            sinks: sinks
+        ).asType(.float32).asArray(Float.self)
+    }
+
+    let expected = MLXFast.scaledDotProductAttention(
+        queries: queries, keys: roundTripKeys, values: roundTripValues,
+        scale: scale, mask: .none, sinks: sinks
+    ).asType(.float32).asArray(Float.self)
+    let withSink = quantizedAttention(sinks: sinks)
+    let withoutSink = quantizedAttention(sinks: nil)
+
+    #expect(withSink.count == expected.count)
+    for (index, pair) in zip(withSink, expected).enumerated() {
+        #expect(
+            abs(pair.0 - pair.1) <= sinkQuantizationTolerance,
+            "sink weight [\(index)]: got \(pair.0), expected \(pair.1)")
+    }
+    let sinkEffect = zip(withSink, withoutSink).map { abs($0 - $1) }.max() ?? 0
+    #expect(sinkEffect > sinkQuantizationTolerance, "the sink must change the answer")
+}

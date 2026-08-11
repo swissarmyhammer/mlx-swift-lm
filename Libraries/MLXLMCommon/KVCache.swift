@@ -1948,6 +1948,42 @@ public typealias StandardKVCache = KVCacheSimple
 
 // MARK: - Quantized Attention Operations
 
+/// The extra score column a learned attention sink adds.
+private let attentionSinkColumnCount = 1
+
+/// Softmax attention scores, with an optional learned per-head sink logit.
+///
+/// This mirrors what mlx's own fast attention does (`mlx/fast.cpp`): the sink
+/// logit is prepended as one extra score column, after the mask and before
+/// the softmax, and that column is dropped from the weights afterwards. The
+/// sink therefore enters the softmax denominator only, and it does not take
+/// the attention scale.
+///
+/// - Parameters:
+///   - scores: Attention scores, `[B, nQHeads, L, S]`, or
+///     `[B, nKVHeads, nRepeats, L, S]` when GQA split the head axis.
+///   - sinks: One logit per query head, or `nil` for a plain softmax.
+///   - keyValueHeads: The number of key/value heads.
+///   - repeats: The number of query heads per key/value head.
+/// - Returns: Attention weights of the shape of `scores`.
+private func softmaxWithSinks(
+    _ scores: MLXArray, sinks: MLXArray?, keyValueHeads: Int, repeats: Int
+) -> MLXArray {
+    guard let sinks else { return softmax(scores, axis: -1) }
+
+    let headShape =
+        repeats > 1
+        ? [1, keyValueHeads, repeats, 1, 1]
+        : [1, keyValueHeads * repeats, 1, 1]
+    var columnShape = scores.shape
+    columnShape[columnShape.count - 1] = attentionSinkColumnCount
+    let column = broadcast(
+        sinks.asType(scores.dtype).reshaped(headShape), to: columnShape)
+
+    let widened = softmax(concatenated([column, scores], axis: -1), axis: -1)
+    return widened[.ellipsis, attentionSinkColumnCount...]
+}
+
 public func quantizedScaledDotProductAttention(
     queries: MLXArray,
     quantizedKeys: (MLXArray, MLXArray, MLXArray?),
@@ -1956,7 +1992,8 @@ public func quantizedScaledDotProductAttention(
     mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
     groupSize: Int = 64,
     bits: Int = 8,
-    mode: QuantizationMode = .affine
+    mode: QuantizationMode = .affine,
+    sinks: MLXArray? = nil
 ) -> MLXArray {
 
     let (B, nQHeads, L, D) = (queries.dim(0), queries.dim(1), queries.dim(2), queries.dim(3))
@@ -2021,7 +2058,8 @@ public func quantizedScaledDotProductAttention(
         break
     }
 
-    let attentionWeights = softmax(scores, axis: -1)
+    let attentionWeights = softmaxWithSinks(
+        scores, sinks: sinks, keyValueHeads: nKVHeads, repeats: nRepeats)
 
     // Compute output using quantized matmul
     var output = quantizedMM(
