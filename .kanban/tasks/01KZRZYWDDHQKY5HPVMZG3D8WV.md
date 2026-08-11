@@ -19,6 +19,29 @@ comments:
     - evidence: 1 new file — `IntegrationTesting/IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests.swift`. Two tests: `markersSurviveStreamingDetokenizationWhole` (each of the 8 marker ids streams whole through `NaiveStreamingDetokenizer`; a mixed stream keeps markers complete and text in order; a skip-specials decode removes only the two `special: true` sentence markers and keeps the turn markers) and `endOfSentenceTokenIdIsOne` (`eosTokenId == 1`, and id 1 decodes to the end-of-sentence marker). Marker strings come from `DeepSeekV4ChatEncoder.SpecialToken`, thus the downloaded tokenizer also proves the encoder constants. Tokenizer source: `deepseek-ai/DeepSeek-V4-Flash` @ `60d8d70770c6776ff598c94bb586a859a38244f1`, patterns `["*.json", "*.jinja"]` (no weights). Test run: `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests` — 2 tests passed, 0 failures, no compiler warnings. TDD proof: a mutation run (end-of-sentence id 1 -> 2) made both tests fail with 5 issues, then the restore made both pass. One build fix on the way: `Tokenizer` is ambiguous between `MLXLMCommon` and `Tokenizers` in this target, thus the shared task is typed `Task<any MLXLMCommon.Tokenizer, any Error>`.
     - next: /review
   timestamp: 2026-08-11T19:32:19.178594+00:00
+- actor: claude-code
+  id: 01kzs59qjhv95z0fh865k7sq7m
+  text: |-
+    ### review — stuck
+    - evidence: `review sha HEAD~1..HEAD` gave attempted 0; `review file IntegrationTesting/IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests.swift` gave attempted 0. The only code file in the delta is a test file, and the engine does not examine test files. No agent examined the file, thus the result is not clean.
+    - next: a person must decide. Accept the checkpoint without an engine review, or supply a different proof for the new test file (for example, a mutation proof). The task stays in review.
+  timestamp: 2026-08-11T19:37:56.049923+00:00
+- actor: claude-code
+  id: 01kzs5byyght5kvwvmcdcvqy4p
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 1 new file (IntegrationTesting/IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests.swift), 2 tests pass with a mutation proof
+    - test: green — swift test, exit 0, 0 failures
+    - commit: 8c3c45c
+    - review: findings — engine attempted 0 files (the delta holds only a test file, which the engine does not examine); 1 open BLOCKER item that accepts a mutation proof as the alternative
+  timestamp: 2026-08-11T19:39:09.136785+00:00
+- actor: claude-code
+  id: 01kzs5gsqm6ytkzrznec6hat61
+  text: |-
+    ### implement — changed
+    - evidence: Fresh mutation proof for the open BLOCKER finding. Mutation: in `Libraries/MLXLMCommon/DeepseekV4ChatEncoder.swift`, `SpecialToken.endOfSentence` got the marker name `end▁of▁sentenceX` in place of `end▁of▁sentence`. Red run: `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests` failed — `markersSurviveStreamingDetokenizationWhole()` with 3 issues, `endOfSentenceTokenIdIsOne()` with 1 issue, 4 issues in total. Restore: `git checkout -- Libraries/MLXLMCommon/DeepseekV4ChatEncoder.swift`. Green run: the same command passed — 2 tests, 0 issues, `** TEST SUCCEEDED **`. `git status --porcelain` shows only the kanban board files, thus no mutation stays in the tree. The proof text is now in the "## Review Findings (2026-08-11 14:36)" section, and the BLOCKER item is checked, because the finding permits this proof as the alternative to an engine review. No production or test code changed.
+    - next: the task stays in doing; a person decides the next step.
+  timestamp: 2026-08-11T19:41:47.636385+00:00
 position_column: doing
 position_ordinal: '8180'
 title: 'DeepSeek-V4 tokenizer integration tests: marker round trip and eos token id'
@@ -100,3 +123,38 @@ not there.
 - Run the new tests from the `IntegrationTesting` Xcode project, as the other
   tests in that directory do.
 #deepseek-v4
+
+## Review Findings (2026-08-11 14:36)
+
+Scope: `HEAD~1..HEAD` (commit `8c3c45c`, this checkpoint only).
+
+The review engine gave no result. The engine output was "Nothing in scope to
+review" with `attempted: 0` for two runs:
+
+- `review sha HEAD~1..HEAD` — attempted 0 files.
+- `review file IntegrationTesting/IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests.swift` — attempted 0 files.
+
+The only code file in the delta is the new test file. The engine does not
+examine test files. Thus no agent examined the file. This is not a clean
+verdict.
+
+- [x] BLOCKER: The review engine examined 0 files for this checkpoint. A person
+      must decide: accept the checkpoint without an engine review, or supply a
+      different proof for the new test file (for example, a mutation proof that
+      shows the tests can find a fault).
+
+      Mutation proof (2026-08-11 14:40, fresh run): We changed the
+      production constant `SpecialToken.endOfSentence` in
+      `Libraries/MLXLMCommon/DeepseekV4ChatEncoder.swift`. The mutated line
+      makes the marker name `end▁of▁sentenceX` in place of
+      `end▁of▁sentence`. With this fault, the run
+      `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests`
+      failed: `markersSurviveStreamingDetokenizationWhole()` failed with 3
+      issues, and `endOfSentenceTokenIdIsOne()` failed with 1 issue — 4
+      issues in total. We then restored the file with
+      `git checkout -- Libraries/MLXLMCommon/DeepseekV4ChatEncoder.swift`
+      and ran the same command again: 2 tests passed, 0 issues,
+      `** TEST SUCCEEDED **`. `git status --porcelain` shows no change in
+      the source tree after the restore. Thus the tests can find a fault in
+      the production code, and this proof replaces the engine review, as
+      this finding permits.
