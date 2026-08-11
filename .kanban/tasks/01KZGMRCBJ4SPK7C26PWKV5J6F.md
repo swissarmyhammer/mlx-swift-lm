@@ -400,6 +400,13 @@ comments:
     - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/Load.swift (+56/-3: new private `weightFileURL(forIndexEntry:in:)` that rejects an empty, absolute or `..`-holding index entry; `guard modelDirectory.isFileURL` before both branches; two new `WeightLoadingError` cases with their `errorDescription`), /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Tests/MLXLMTests/LoadWeightsTests.swift (+77: five tests). The one round-3 finding, `Load.swift:49`, is closed and flipped to `- [x]`; 0 open findings on the card. The four rejection tests each failed with "did not throw an error" before the fix; the subdirectory preservation test passed on both sides. `swift build` exit 0; `swift test --filter LoadWeightsTests` 9/9; `--filter DeepseekV4QuantizationPlanTests` 13/13; Gemma4 2/2, GLM4 6/6, BaseConfiguration 2/2, MiniMaxM3 47/47; full `swift test` exit 0, zero failures, 2 pre-existing skips. Standing mutation (`quantization(layer:)` `else` -> `return nil`) still FAILS 1 test, reverted, shasum unchanged, tree holds only the two intended files.
     - next: /review round 4
   timestamp: 2026-08-11T01:31:01.858048+00:00
+- actor: claude-code
+  id: 01kzq76eggpd384v7g4y8nn38n
+  text: |-
+    ### commit — changed
+    - evidence: 638dde5 fix(mlx-lm): reject unsafe safetensors index paths and non-file URLs; 5cfd48e chore(kanban): record round-3 fix and close ^wkv5j6f review findings
+    - next: none, all 10 review findings across three rounds are closed
+  timestamp: 2026-08-11T01:32:36.752585+00:00
 depends_on:
 - 01KZGMPECN4FA7T3BFX6F6QMF7
 position_column: doing
