@@ -258,6 +258,148 @@ comments:
     - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/Load.swift (+38/-4: doc comments on `safetensorWeightURLs` and `SafetensorsIndex`, new `package enum WeightLoadingError`, the `enumerator(...)!` force unwrap replaced by `guard ... else { throw }`, both empty-dictionary call forms changed to the annotated literal), /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Tests/MLXLMTests/LoadWeightsTests.swift (+43: three behaviour-preservation tests). All 3 round-2 findings closed and flipped to `- [x]`. No test drives the new throw, because `FileManager.enumerator(at:)` gives a non-nil enumerator for an absent directory, a plain file and a non-file URL alike; a seam for it would put test-only surface on the load path of every model. Mutation proof: all three round-2 mutations still fail (136 issues; the `[gather_qmm] Scale type must be uint8` abort; 1 issue at DeepseekV4QuantizationPlanTests.swift:386), each reverted, tree clean. `swift build` exit 0; `swift test --filter DeepseekV4QuantizationPlanTests` 13/13; `--filter LoadWeightsTests` 4/4; `--filter Quantiz` 18/18; full `swift test` exit 0, zero failures, 2 pre-existing skips.
     - next: /review round 3
   timestamp: 2026-08-10T17:50:18.307237+00:00
+- actor: claude-code
+  id: 01kzpdvm426wx7ysnzsfnra2ck
+  text: |
+    ### review — findings
+
+    - scope: `review sha b93de22~1..b93de22` (round 3). Commit `7503469` was left out, because it is a kanban chore.
+    - engine: 9 attempted files, 0 skipped, 0 failed. Counts: 1 finding, 1 confirmed, 0 refuted.
+    - evidence: `Libraries/MLXLMCommon/Load.swift:49`.
+
+    #### The one finding is new, not a repeat
+
+    It is not substantively the same as any finding of round 1 or round 2. Round 2 named `Load.swift:15` (missing document comment), `:26` (the force unwrap) and `:81` (the empty-collection call form). This one names the index branch at `:49`, which the commit did not touch. No stop-and-escalate is armed.
+
+    Like the three round-2 findings, it sits on code that already existed. The engine reached it because the commit touches this file.
+
+    #### Round-2 findings: all three confirmed closed
+
+    Read the file at HEAD.
+
+    - Document comments. `safetensorWeightURLs` holds a summary, both branches, and `- Parameter`, `- Returns` and `- Throws`. `SafetensorsIndex`, `WeightLoadingError` and its case are documented as well. One `package` declaration holds no `///`: `package var errorDescription` at line 22. This matches the module: `ModelConversionError.errorDescription` and `UserInputError.errorDescription` hold none either.
+    - Force unwrap. `grep '!'` over the file gives two hits, lines 95 and 131, and both are the `!=` operator. No force unwrap is left in the file.
+    - Empty collections. Lines 115 and 116 both read `= [:]`. No `Type()` call form is left in the file.
+
+    #### Behaviour preservation on the shared load path: the claim holds
+
+    `git checkout b93de22~1 -- Libraries/MLXLMCommon/Load.swift` compiles, and `swift test --filter LoadWeightsTests` gives 4 tests, 0 failures. Restoring the `b93de22` file gives 4 tests, 0 failures again. Nothing outside `Load.swift` names `WeightLoadingError` -- its only three references are its declaration, its document link and its throw -- so the revert breaks no other file.
+
+    One correction to the wording: the suite is 4 tests, not 3, because `testLoadWeightsUsesSafetensorsIndexWeightMapWhenPresent` already existed. The tests do pass on both sides, and that is exactly because they reach only paths the edit did not change. Not one of the four reaches the new `guard` `else` branch.
+
+    #### The untested throw: the claim is TRUE
+
+    A probe program on this machine gives a NON-NIL enumerator for all three inputs:
+
+    ```
+    (a) absent directory   NON-NIL  items=0
+    (b) plain file         NON-NIL  items=0
+    (c) https URL          NON-NIL  items=0
+    ```
+
+    The `else` branch is unreachable from these inputs, thus no test can drive the throw. The commit message states this openly.
+
+    The guard is still the right call. `FileManager.enumerator(at:includingPropertiesForKeys:)` declares an Optional result, thus the force unwrap was a crash the type system already warned about, and a `guard` that throws costs nothing on the success path.
+
+    New fact the probe found, beyond the claim: an `https:` URL whose path is `/` gives an enumerator that walks the LOCAL filesystem root. `https://example.com/` gave `file:///home`, `file:///usr/` and `file:///usr/bin/`. `FileManager` reads the URL path and ignores the scheme and the host. No caller does this today. It is the same cause as the finding above -- an unvalidated path reaching `FileManager`.
+
+    #### The new error type: the scope is consistent, the named precedent is wrong
+
+    `package` agrees with `safetensorWeightURLs` beside it, which is the only function that throws it, thus the level is internally consistent. `safetensorWeightURLs` already declared `throws` at `b93de22~1`, and the commit added a `throw` inside it without touching the signature. Every call site is `Libraries/MLXLMCommon/Load.swift:117` and four cases in `Tests/MLXLMTests/LoadWeightsTests.swift`; all already hold `try`. No call site newly needs a `try`.
+
+    The commit message names the wrong precedent. It says the new error is "in the same style as `KVCacheError` and `UserInputError`". Read at HEAD:
+
+    - `KVCacheError` (`KVCache.swift:1574`) -- internal, a `struct`, plain `Error`, not `Equatable`.
+    - `UserInputError` (`UserInput.swift:454`) -- internal, `LocalizedError`, not `Equatable`.
+    - `ModelConversionError` (`ModelConversion.swift:148`) -- public, `LocalizedError`, `Equatable`.
+
+    The shape `LocalizedError, Equatable` matches `ModelConversionError`, not the two named. `grep '^package \(enum\|struct\) .*Error' Libraries/` gives one hit in the whole tree, `WeightLoadingError` itself. The file-local placement is right; every error type in the module sits beside its user and no dedicated errors file exists.
+
+    `ModelConversionError` earns its `Equatable` -- eight test assertions read it, for example `Tests/MLXLMTests/ModelConversionTests.swift:178`. `WeightLoadingError` has no such user, and per the probe it can have none.
+
+    #### Standing mutation re-run
+
+    `BaseConfiguration.swift`, the whole `else` branch of `quantization(layer:)` changed to `return nil`. Clean run: 13 tests, 0 failures. Mutated run: 13 tests, 1 failure -- `loadFilterGivesTheDefaultToAPathThePlanDoesNotName` at `DeepseekV4QuantizationPlanTests.swift:386:26`, `leaves[routerPath]` gave `Linear(inputDimensions=64, outputDimensions=4, bias=false)`. The round-1 gap stays closed. Reverted; `shasum` before and after are both `7a745b5b00e72faec87a85bbbf4e2b220a3a7aa5`, and the clean re-run is 13 tests, 0 failures.
+
+    #### No other model's loading changed
+
+    - `Gemma4KVSharedLoadTests` -- 2 tests, 0 failures.
+    - `GLM4LmHeadTiedLoadTests` -- 6 tests, 0 failures.
+    - `BaseConfigurationTests` -- 2 tests, 0 failures.
+    - `MiniMaxM3Tests` -- 47 tests, 0 failures.
+
+    - next: /implement -- validate the index path components in `safetensorWeightURLs`, then /review round 4.
+  timestamp: 2026-08-10T18:09:47.650060+00:00
+- actor: claude-code
+  id: 01kzpdy6yrdhn4wxsvn5ptbqjw
+  text: |
+    ### finish iteration 3 — findings, loop stopped by the operator
+
+    - implement: changed — Load.swift doc comments, force unwrap removed, empty-dictionary form; LoadWeightsTests.swift +3 behaviour-preservation tests
+    - test: green — `swift build` exit 0; DeepseekV4QuantizationPlanTests 13/13; LoadWeightsTests 4/4; Quantiz 18/18; full `swift test` exit 0
+    - commit: b93de22 fix(mlx-lm): remove force-unwrap in safetensorWeightURLs; 7503469 (kanban chore)
+    - review: findings — Load.swift:49, a path traversal. 9 files attempted this round.
+    - CONFIRMED GOOD: the round-2 fixes are real. The shared load path did not change: `Load.swift` reverted to `b93de22~1` still compiles and `LoadWeightsTests` gives 4/0 on both sides. No caller newly needs `try`. The standing mutation still bites. Gemma4, GLM4, BaseConfiguration and MiniMaxM3 load tests all pass.
+    - correction from the reviewer: the commit message names `KVCacheError` and `UserInputError` as the precedent for `WeightLoadingError`. Neither matches. The `LocalizedError, Equatable` shape is `ModelConversionError`'s.
+
+    ### The operator stopped the loop here
+
+    The new finding is real, and the reviewer is right that it is not a repeat. It
+    is also outside what this card is about. This card asks whether the mixed
+    affine and mxfp4 plan resolves for `deepseek_v4`. That question is answered, and
+    the answer held through three rounds of review.
+
+    Rounds 2 and 3 each found a defect that was already in `Load.swift` before this
+    work started. `Load.swift` is on the load path of every model in the repository.
+    A security change there needs its own card, its own tests, and its own review.
+
+    The path traversal is now task ^gnrcb04. This card does not hold that work.
+  timestamp: 2026-08-10T18:11:12.472180+00:00
+- actor: claude-code
+  id: 01kzq72mnqg33d9zy1vjz12ek3
+  text: |-
+    ### Review round 3 -- the one finding is closed, and the cause is removed from the whole function
+
+    **Both branches of `safetensorWeightURLs` took an unchecked path into `FileManager`, thus both are closed.**
+
+    1. `weightFileURL(forIndexEntry:in:)`, a new private function, maps one index entry onto the model directory. It rejects an empty entry, an entry that starts with `/`, and an entry that holds a `..` component. The examination reads the text of the entry alone: no file is opened, thus no good entry can change. The index branch calls it in place of the bare `appendingPathComponent`.
+    2. `guard modelDirectory.isFileURL` now sits at the top of the function, before both branches. This closes the second face the reviewer found. `FileManager` reads the path of a URL and gives no attention to the scheme or the host, thus `https://example.com/` gave an enumerator that walked the local file system root.
+
+    **Why the components and not a prefix.** A check on the prefix alone lets `shards/../../outside.safetensors` through. The split on `/` finds `..` wherever it sits. `testSafetensorWeightURLsRejectsAnIndexEntryThatClimbsOutFromASubdirectory` is the test that holds this still.
+
+    **Why two new error cases and not the one the finding named.** The finding's example threw `unreadableModelDirectory`, which names a different failure -- the directory cannot be listed. `WeightLoadingError` is thus extended, which is what the card asked for: `modelDirectoryIsNotAFileURL(URL)` and `weightFileOutsideModelDirectory(entry:modelDirectory:)`, each with its own `errorDescription`. A bad entry is reported and never dropped without a word.
+
+    **Why an absolute entry is rejected although it cannot escape.** `appendingPathComponent("/etc/passwd")` nests rather than replaces, thus an absolute entry gives a path inside the model directory today. It is still not a name the index may hold, and the card asks for it to be reported. The rejection is deliberate, not incidental.
+
+    **TDD.** The five new tests were written first. The four rejection tests each failed with "did not throw an error" against the file before the fix, which is the correct red. `testSafetensorWeightURLsKeepsAnIndexEntryInASubdirectory` passed on both sides -- that is a preservation test, and its passing before the fix is the evidence that the good path did not change.
+
+    **Correction carried from the reviewer.** The round-2 commit message named `KVCacheError` and `UserInputError` as the precedent for the shape of `WeightLoadingError`. Neither matches. `ModelConversionError` is the `LocalizedError, Equatable` precedent, and this record does not repeat the wrong claim.
+
+    ### A note on scope
+
+    The comment of 2026-08-10 18:11 states that the operator moved this work to task `^gnrcb04`. This run was dispatched to close the finding on this card, thus the work landed here. `^gnrcb04` now holds the same requirements and needs a decision from the user: close it as done by this change, or keep it for a wider examination of `Load.swift`.
+  timestamp: 2026-08-11T01:30:31.991295+00:00
+- actor: claude-code
+  id: 01kzq7312hpzkr1z4rfmy1ww67
+  text: |-
+    ### Verification, round 3
+
+    - `swift build` -- exit 0. The only warnings are the pre-existing ones, untouched.
+    - `swift test --filter LoadWeightsTests` -- 9 tests, 0 failures (4 pre-existing, 5 new).
+    - `swift test --filter DeepseekV4QuantizationPlanTests` -- 13 tests in 1 suite passed.
+    - `swift test --filter Gemma4KVSharedLoadTests` 2/2, `GLM4LmHeadTiedLoadTests` 6/6, `BaseConfigurationTests` 2/2, `MiniMaxM3Tests` 47/47.
+    - `swift test` -- exit 0, zero failures. Swift Testing: 383 + 80 + 282 + 7. XCTest: 215 executed, 0 failures, the 2 pre-existing `CompiledDecodeCorrectnessTests` skips only (kanban 01KYD3ZCWTZ414Y79RSAKVQXXZ). The XCTest count went from 210 to 215, which is the five new `LoadWeightsTests` cases.
+    - Standing mutation re-run: `BaseConfiguration.quantization(layer:)`, the whole `else` branch changed to `return nil`. **FAILS** -- `loadFilterGivesTheDefaultToAPathThePlanDoesNotName`, 1 issue. The DeepSeek-V4 coverage still bites. Reverted; `shasum` of `BaseConfiguration.swift` is `7a745b5b00e72faec87a85bbbf4e2b220a3a7aa5` before and after, and the clean re-run is 13 tests, 0 failures.
+    - `git status --porcelain -- Libraries/ Tests/` gives exactly two lines, ` M Libraries/MLXLMCommon/Load.swift` and ` M Tests/MLXLMTests/LoadWeightsTests.swift`.
+    - `swift format --in-place --configuration .swift-format` on the two touched files only. No tree-wide format run.
+  timestamp: 2026-08-11T01:30:44.689335+00:00
+- actor: claude-code
+  id: 01kzq73hv229jkd4v249bxfxkf
+  text: |-
+    ### implement — changed
+    - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/Load.swift (+56/-3: new private `weightFileURL(forIndexEntry:in:)` that rejects an empty, absolute or `..`-holding index entry; `guard modelDirectory.isFileURL` before both branches; two new `WeightLoadingError` cases with their `errorDescription`), /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Tests/MLXLMTests/LoadWeightsTests.swift (+77: five tests). The one round-3 finding, `Load.swift:49`, is closed and flipped to `- [x]`; 0 open findings on the card. The four rejection tests each failed with "did not throw an error" before the fix; the subdirectory preservation test passed on both sides. `swift build` exit 0; `swift test --filter LoadWeightsTests` 9/9; `--filter DeepseekV4QuantizationPlanTests` 13/13; Gemma4 2/2, GLM4 6/6, BaseConfiguration 2/2, MiniMaxM3 47/47; full `swift test` exit 0, zero failures, 2 pre-existing skips. Standing mutation (`quantization(layer:)` `else` -> `return nil`) still FAILS 1 test, reverted, shasum unchanged, tree holds only the two intended files.
+    - next: /review round 4
+  timestamp: 2026-08-11T01:31:01.858048+00:00
 depends_on:
 - 01KZGMPECN4FA7T3BFX6F6QMF7
 position_column: doing
@@ -345,3 +487,9 @@ package func safetensorWeightURLs(in modelDirectory: URL) throws -> [URL] {
   - Resolved with the throwing form, not the empty-array fallback, because an empty array would swallow the failure. The file reports every other failure by `throws` (`Data(contentsOf:)`, `JSONDecoder.decode`, `loadArraysAndMetadata`, `model.update`), and it held no error type of its own, thus a `package enum WeightLoadingError: LocalizedError, Equatable` with one case, `unreadableModelDirectory(URL)`, now sits beside the function. This matches the file-local error pattern that `KVCacheError`, `UserInputError` and `ModelConversionError` already use in this module. The success path is unchanged term for term. Three new tests in `Tests/MLXLMTests/LoadWeightsTests.swift` hold the behaviour still: the recursive `.safetensors` discovery, a directory with no weight file, and an absent directory. All three passed against the file before the edit and after it, thus the change is behaviour preserving. The `nil` branch itself cannot be reached from a real call: a probe program shows that `FileManager.enumerator(at:includingPropertiesForKeys:)` gives a non-nil enumerator for an absent directory, a plain file and a non-file URL alike. A test for the throw would need a `FileManager` seam in the production signature, which would put test-only surface on the load path of every model, thus none was added. The guard keeps the `nil` case honest for the platforms and sandboxes where Foundation does give `nil`.
 - [x] `Libraries/MLXLMCommon/Load.swift:81` — Empty dictionary initialization uses the call form `()` instead of the idiomatic literal with type annotation. This is inconsistent with Swift conventions for empty collections. Change to `var weights: [String: MLXArray] = [:]` — the annotated literal is the idiomatic Swift form for empty collections.
   - Resolved, and the same cause was removed for the whole file. `var weights = [String: MLXArray]()` is now `var weights: [String: MLXArray] = [:]`, and the line below it, `var metadata = [String: String]()`, is now `var metadata: [String: String] = [:]`. No other empty-collection call form is left in the file.
+
+## Review Findings (2026-08-10 12:52)
+
+- [x] `Libraries/MLXLMCommon/Load.swift:49` — Path traversal vulnerability—file paths are constructed from model index entries without validation, allowing `..` sequences to access files outside the model directory. Validate path components before appending them. Reject any containing `..`, starting with `/`, or otherwise escaping the model directory. Example: `guard !$0.contains("..") && !$0.hasPrefix("/") else { throw WeightLoadingError.unreadableModelDirectory(modelDirectory) }`.
+  - Resolved, and the cause was removed for the whole function rather than for the one line. Both branches gave an unchecked path to `FileManager`, thus both are now closed. (1) A new private function, `weightFileURL(forIndexEntry:in:)`, maps one index entry onto the model directory. It rejects an empty entry, an entry that starts with `/`, and an entry that holds a `..` component. The examination is of the text of the entry alone, thus it reads no file and it changes no good entry: a plain name and a name in a subdirectory both keep the URL they had. (2) `safetensorWeightURLs` now starts with `guard modelDirectory.isFileURL`, which closes the second face the reviewer found — `FileManager` reads only the path of a URL and gives no attention to the scheme or the host, thus `https://example.com/` gave an enumerator that walked the local file system root. This one guard sits before both branches. A bad entry is reported and not dropped without a word: `WeightLoadingError` is extended with `modelDirectoryIsNotAFileURL(URL)` and `weightFileOutsideModelDirectory(entry:modelDirectory:)`, each with its own `errorDescription`. The reviewer's example threw `unreadableModelDirectory`, which names a different failure, thus a case of its own is more exact. Five new tests in `Tests/MLXLMTests/LoadWeightsTests.swift` cover a `../` entry, a `..` entry from a subdirectory (a check on the prefix alone would let this one through), an absolute-path entry, a `https:` URL, and — for the success path — an entry in a subdirectory. The four rejection tests each failed with "did not throw an error" before the fix and pass after it; the subdirectory test passes on both sides, which is the evidence that the good path did not change. `LoadWeightsTests` is 9 of 9, `DeepseekV4QuantizationPlanTests` 13 of 13, and `Gemma4KVSharedLoadTests` (2), `GLM4LmHeadTiedLoadTests` (6), `BaseConfigurationTests` (2) and `MiniMaxM3Tests` (47) all stay green.
+  - One correction to the round-2 record, which the reviewer made: the commit message named `KVCacheError` and `UserInputError` as the precedent for the shape of `WeightLoadingError`. Neither matches. `ModelConversionError` (`Libraries/MLXLMCommon/ModelConversion.swift`) is the `LocalizedError, Equatable` precedent.
