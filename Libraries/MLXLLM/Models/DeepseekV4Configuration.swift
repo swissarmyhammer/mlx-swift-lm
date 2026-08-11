@@ -48,6 +48,9 @@ public struct DeepseekV4Configuration: Codable, Sendable {
     public var rmsNormEps: Float
     /// The largest context length the checkpoint accepts.
     public var maxPositionEmbeddings: Int
+    /// True when the checkpoint ties the language-model head to the embedding
+    /// table, and thus ships no `head` tensor of its own.
+    public var tieWordEmbeddings: Bool
 
     // MARK: - Grouped low-rank output projection
 
@@ -149,6 +152,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         case qLoraRank = "q_lora_rank"
         case rmsNormEps = "rms_norm_eps"
         case maxPositionEmbeddings = "max_position_embeddings"
+        case tieWordEmbeddings = "tie_word_embeddings"
         case oGroups = "o_groups"
         case oLoraRank = "o_lora_rank"
         case nRoutedExperts = "n_routed_experts"
@@ -201,6 +205,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         self.rmsNormEps = try value(.rmsNormEps, or: Default.rmsNormEps)
         self.maxPositionEmbeddings = try value(
             .maxPositionEmbeddings, or: Default.maxPositionEmbeddings)
+        self.tieWordEmbeddings = try value(.tieWordEmbeddings, or: Default.tieWordEmbeddings)
         self.oGroups = try value(.oGroups, or: Default.oGroups)
         self.oLoraRank = try value(.oLoraRank, or: Default.oLoraRank)
         self.nRoutedExperts = try value(.nRoutedExperts, or: Default.nRoutedExperts)
@@ -245,6 +250,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         static let qLoraRank = 1024
         static let rmsNormEps: Float = 1e-6
         static let maxPositionEmbeddings = 1_048_576
+        static let tieWordEmbeddings = false
         static let oGroups = 8
         static let oLoraRank = 1024
         static let nRoutedExperts = 256

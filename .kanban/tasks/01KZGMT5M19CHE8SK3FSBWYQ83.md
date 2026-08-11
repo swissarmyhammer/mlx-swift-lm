@@ -233,10 +233,37 @@ comments:
     - swift-format: ran on the two changed files alone and made no change; the rename holds the same line widths.
     - next: `/review`
   timestamp: 2026-08-11T13:28:54.374874+00:00
+- actor: claude-code
+  id: 01kzrgnfvgbvrtqn548ktwmzyv
+  text: |-
+    ### review — clean
+
+    - evidence: `review sha HEAD~1..HEAD` (d90a235) — 0 findings, 0 confirmed, 0 refuted. The prior finding of 2026-08-11 07:57 is answered and its checklist item is `- [x]`.
+    - The two types of `Libraries/MLXLLM/Models/DeepseekV4HyperConnection.swift` now read `DeepSeekV4HyperConnection` (line 166) and `DeepSeekV4HyperHead` (line 313).
+    - Files the engine could read: only `Libraries/MLXLLM/Models/DeepseekV4HyperConnection.swift`. The commit holds 4 files; the engine excludes the test file, and no validator has a glob for `*.md` or `*.jsonl`. Do not read the `attempted: 9` count as a file count.
+    - The rename is textual. Each removed line of the Swift diff has an added line that is the same after the two type names are made equal.
+    - Mutation proof, each mutation made and then undone:
+      1. Transpose of `comb` in `expand` — `theExpandAgreesWithThePythonReference` and `theExpandTakesTheRowOfTheMixingMatrixForEachAnswerCopy` failed. No other test failed.
+      2. `+ eps` removed from the `comb` softmax in `Libraries/MLXLLM/Models/DeepseekV4MathHelpers.swift` — `theSinkhornEpsilonLiftsAClosedColumnOfTheMixingMatrix` failed. No other test failed.
+    - After the two mutations were undone, `git status --porcelain -- '*.swift'` gave no output, and `swift test --filter DeepseekV4HyperConnectionTests` passed 16 tests with 0 failures.
+    - Out of scope, as the card set: the file still names `DeepseekV4Configuration` and `DeepseekV4Math`, which other files declare. 16 type declarations under `Libraries/` keep the `Deepseek` spelling. Task `^7x3dq7e` holds that repo-wide rename. The engine raised no finding against those references this round.
+    - next: none. The card moves to `done`.
+  timestamp: 2026-08-11T13:37:21.264173+00:00
+- actor: claude-code
+  id: 01kzrgp9trdh7sfffrh23wffjk
+  text: |
+    ### finish iteration 2 — clean
+    - implement: changed — 2 files, 14 insertions and 14 deletions; the two types this file declares now read `DeepSeekV4HyperConnection` and `DeepSeekV4HyperHead`
+    - test: green — swift test full suite, 1009 tests, 0 failures, 0 warnings, 2 known skips
+    - commit: d90a235
+    - review: clean — 0 findings, the prior finding is answered and checked, card moved to done
+    - note: the scope boundary was a decision, not an oversight. The repo holds 16 more type declarations that spell `Deepseek`, and this card's acceptance criteria say "No changes to existing files". Task `^7x3dq7e` holds the repo-wide rename and must run before the model assembly task `^pwr8r3h`.
+    - note: the review re-ran both mutations after the rename. The rename changed no behavior.
+  timestamp: 2026-08-11T13:37:47.864459+00:00
 depends_on:
 - 01KZGMQCH9PFY25Y3QXP34CRP6
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: e480
 title: Port DeepseekV4 mHC hyper-connections (HyperConnection, HyperHead, head reduce)
 ---
 ## What
