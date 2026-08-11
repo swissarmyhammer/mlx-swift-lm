@@ -66,8 +66,8 @@ private enum StreamAxis {
     static let count = 4
 }
 
-/// The two steps the collapse of ``DeepseekV4HyperConnection`` and the
-/// reduction of ``DeepseekV4HyperHead`` both take.
+/// The two steps the collapse of ``DeepSeekV4HyperConnection`` and the
+/// reduction of ``DeepSeekV4HyperHead`` both take.
 ///
 /// The two layers read one mixes projection and one weighted sum over the
 /// copies. They differ only in what they do with the mixes vector, thus the
@@ -163,7 +163,7 @@ private enum ManifoldStream {
 /// that look reasonable and are wrong.
 /// ``expand(blockOutput:residual:post:comb:)`` states the reading it makes,
 /// and the tests hold it to values rather than to shapes.
-class DeepseekV4HyperConnection: Module {
+class DeepSeekV4HyperConnection: Module {
 
     /// The number of one-value-for-each-copy fields the mixes vector holds
     /// ahead of the flattened mixing matrix: one `pre` weight and one `post`
@@ -307,10 +307,10 @@ class DeepseekV4HyperConnection: Module {
 /// reduction weighs each copy by a sigmoid of its own mixes value and adds the
 /// copies up.
 ///
-/// It is the simpler half of ``DeepseekV4HyperConnection``: it reads the same
+/// It is the simpler half of ``DeepSeekV4HyperConnection``: it reads the same
 /// mixes projection, and it takes no Sinkhorn step, because it collapses the
 /// copies one time and never expands them again.
-class DeepseekV4HyperHead: Module {
+class DeepSeekV4HyperHead: Module {
 
     /// The number of learned scales. The head holds one scale, where a
     /// hyper-connection holds one for each of its three fields.
@@ -344,7 +344,7 @@ class DeepseekV4HyperHead: Module {
     ///
     /// The leading underscore keeps mlx-swift from collecting this constant as
     /// a checkpoint parameter, the same way it does in
-    /// ``DeepseekV4HyperConnection``.
+    /// ``DeepSeekV4HyperConnection``.
     private let _normWeight: MLXArray
 
     /// Builds the reduction at the top of the stack.

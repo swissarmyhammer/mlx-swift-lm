@@ -227,8 +227,8 @@ struct DeepseekV4HyperConnectionTests {
     /// - Returns: The layer.
     private static func fixtureHyperConnection(
         configuration: DeepseekV4Configuration
-    ) throws -> DeepseekV4HyperConnection {
-        let hyperConnection = DeepseekV4HyperConnection(configuration: configuration)
+    ) throws -> DeepSeekV4HyperConnection {
+        let hyperConnection = DeepSeekV4HyperConnection(configuration: configuration)
         try hyperConnection.update(
             parameters: ModuleParameters.unflattened([
                 ("fn", projectionFixture(rows: mixWidth)),
@@ -245,8 +245,8 @@ struct DeepseekV4HyperConnectionTests {
     /// - Returns: The head.
     private static func fixtureHyperHead(
         configuration: DeepseekV4Configuration
-    ) throws -> DeepseekV4HyperHead {
-        let head = DeepseekV4HyperHead(configuration: configuration)
+    ) throws -> DeepSeekV4HyperHead {
+        let head = DeepSeekV4HyperHead(configuration: configuration)
         try head.update(
             parameters: ModuleParameters.unflattened([
                 ("fn", headProjectionFixture()),
@@ -264,9 +264,9 @@ struct DeepseekV4HyperConnectionTests {
 
     /// Builds a hyper-connection of the wide checkpoint with repeatable random
     /// weights.
-    private static func wideHyperConnection() throws -> DeepseekV4HyperConnection {
+    private static func wideHyperConnection() throws -> DeepSeekV4HyperConnection {
         let configuration = try configuration(hiddenSize: wideHiddenSize)
-        let hyperConnection = DeepseekV4HyperConnection(configuration: configuration)
+        let hyperConnection = DeepSeekV4HyperConnection(configuration: configuration)
         let wideHcDim = hcMult * wideHiddenSize
         try hyperConnection.update(
             parameters: ModuleParameters.unflattened([
@@ -475,7 +475,7 @@ struct DeepseekV4HyperConnectionTests {
         // expand then answers the residual stream it was given.
         let configuration = try Self.configuration(
             hiddenSize: Self.roundTripHiddenSize, normEps: Self.hcEps)
-        let hyperConnection = DeepseekV4HyperConnection(configuration: configuration)
+        let hyperConnection = DeepSeekV4HyperConnection(configuration: configuration)
         var bias = [Float](repeating: 0, count: Self.mixWidth)
         let postStart = Self.hcMult
         let combStart = Self.splitFieldCount * Self.hcMult
@@ -539,7 +539,7 @@ struct DeepseekV4HyperConnectionTests {
     @Test
     func theHeadReduceAnswersOneFiniteStreamOfTheWideCheckpoint() throws {
         let configuration = try Self.configuration(hiddenSize: Self.wideHiddenSize)
-        let head = DeepseekV4HyperHead(configuration: configuration)
+        let head = DeepSeekV4HyperHead(configuration: configuration)
         try head.update(
             parameters: ModuleParameters.unflattened([
                 (

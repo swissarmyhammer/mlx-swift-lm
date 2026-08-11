@@ -94,6 +94,145 @@ comments:
     - evidence: 2 new files, no existing file touched. `Libraries/MLXLLM/Models/DeepseekV4HyperConnection.swift` (`DeepseekV4HyperConnection`, `DeepseekV4HyperHead`, and the shared `ManifoldStream` steps). `Tests/MLXLMTests/DeepseekV4HyperConnectionTests.swift` (16 tests). `swift test --filter DeepseekV4HyperConnectionTests`: 16 tests, 0 failures. Full `swift test`: 794 tests over 5 targets, 0 failures, 0 warnings. Mutation battery: 11 mutations, 11 killed, each with the named test recorded in the comment above. swiftlint `no_magic_numbers`, `missing_docs`, `cyclomatic_complexity` and `function_body_length` on the two new files: 0 violations. `swift-format` ran on the two new files alone.
     - next: `/review`
   timestamp: 2026-08-11T12:51:53.642345+00:00
+- actor: claude-code
+  id: 01kzrfape3fef1dr6jgseh1a9a
+  text: |-
+    ### review — findings
+    - scope: `review sha HEAD~1..HEAD` (b4d3cf4)
+    - evidence: 1 finding — Libraries/MLXLLM/Models/DeepseekV4HyperConnection.swift:313 (counts: findings 1, confirmed 1, refuted 16)
+    - out of scope: none. The one finding is on a line this commit adds.
+    - next: decide the width of the `Deepseek` to `DeepSeek` rename, then make it.
+  timestamp: 2026-08-11T13:13:58.979638+00:00
+- actor: claude-code
+  id: 01kzrfbcbbweargx3v3b2wwaxe
+  text: |-
+    ### review — mutation proof of the three claims
+
+    The review engine leaves out test files, thus it cannot say whether a test
+    holds. These three checks run the mutation and read which test dies. Baseline
+    before each one: `swift test --filter DeepseekV4HyperConnectionTests`, 16 tests,
+    0 failures.
+
+    **1. Axis alignment (Bug 1) — the guard holds.**
+    Mutation: `comb.asType(.float32).transposed(0, 1, 3, 2).matmul(...)` in
+    `expand`. Two named tests died:
+    - `theExpandAgreesWithThePythonReference` (DeepseekV4HyperConnectionTests.swift:389)
+    - `theExpandTakesTheRowOfTheMixingMatrixForEachAnswerCopy` (DeepseekV4HyperConnectionTests.swift:432)
+
+    The unmutated `comb.matmul(residual)` reads `(b,s,i,j) x (b,s,j,d)` to
+    `(b,s,i,d)`, which is `sum over j of comb[i][j] * residual[j]`, the reading of
+    `einsum("bsij,bsjd->bsid", comb, residual)`.
+
+    **2. The epsilon test — the new test closes the hole.**
+    Mutation: cut `+ eps` from the `comb` softmax in
+    `Libraries/MLXLLM/Models/DeepseekV4MathHelpers.swift`. Exactly one test died:
+    - `theSinkhornEpsilonLiftsAClosedColumnOfTheMixingMatrix` (DeepseekV4HyperConnectionTests.swift:623)
+
+    `theSinkhornEpsilonChangesTheMixingMatrix`, which is the test this card's own
+    comment prescribed, passed through the mutation. The report of the implementer
+    is correct: the prescribed test is empty against this mutation, and the new
+    test is the one that holds the line.
+
+    `DeepseekV4MathHelpers.swift` went back with `git checkout`;
+    `git diff --stat` on it is empty, and `git status --porcelain -- '*.swift'` is
+    empty. The suite is 16 of 16 again.
+
+    **3. The two divergences — the port follows the Python.**
+    Read from Thump604/mlx-lm @ deepseek-v4-support-fixes,
+    `mlx_lm/models/deepseek_v4.py`:
+    - `hc_pre` and `HyperHead.__call__` both read `self.norm_eps` in the `rsqrt`,
+      and `hc_pre` hands `self.hc_eps` to `hc_split_sinkhorn`, while
+      `HyperHead.__call__` adds `self.hc_eps` to the sigmoid. The Swift `collapse`
+      passes `normEps` (from `rmsNormEps`) to `MLXFast.rmsNorm` and `hcEps` to
+      `hcSplitSinkhorn`; the Swift head passes `normEps` to the reduction and adds
+      `hcEps` to the sigmoid. Each epsilon sits where the Python puts it, thus the
+      swap of the Swift reference is not in this file.
+    - The Python casts to float32 one time at the top and back to the dtype one
+      time at the end, in `hc_pre`, in `hc_post` and in `HyperHead.__call__`. The
+      Swift does the same: `collapse` casts at `stream.asType(.float32)` and back
+      at `collapsed.asType(stream.dtype)`; `expand` holds both terms in float32 and
+      casts at `(newTerm + residualTerm).asType(outputDType)`; the head casts back
+      at the end of `callAsFunction`. No cast down in the middle.
+
+    One more point, which is not a divergence. The Python reads
+    `mixes = (xf @ self.fn.T) * inv`, and the Swift normalizes first and projects
+    after. `inv` is one number for each row, thus the two orders give the same
+    answer.
+
+    **Acceptance criterion "No changes to existing files" holds.**
+    `git show --stat b4d3cf4` lists 6 files: the two new files
+    (`Libraries/MLXLLM/Models/DeepseekV4HyperConnection.swift`,
+    `Tests/MLXLMTests/DeepseekV4HyperConnectionTests.swift`) and 4 kanban files. No
+    existing source file is in the commit.
+  timestamp: 2026-08-11T13:14:21.419602+00:00
+- actor: claude-code
+  id: 01kzrfddfvzbcbvsz54qdzx4cr
+  text: |
+    ### finish iteration 1 — findings
+    - implement: changed — 2 new files, DeepseekV4HyperConnection.swift and DeepseekV4HyperConnectionTests.swift (16 tests); 11 mutations applied, 11 killed
+    - test: green — swift test full suite, 1022 tests, 0 failures, 2 known skips
+    - commit: b4d3cf4
+    - review: findings — Libraries/MLXLLM/Models/DeepseekV4HyperConnection.swift:313 (type name must use the canonical spelling `DeepSeek`)
+    - note: the review proved the Bug 1 guard. A transposed `comb` killed `theExpandAgreesWithThePythonReference` and `theExpandTakesTheRowOfTheMixingMatrixForEachAnswerCopy`.
+    - note: the eps test this card prescribed is EMPTY against a dropped `+ eps` on the `comb` softmax, because `eps` also guards the divisions of the Sinkhorn steps. The new test `theSinkhornEpsilonLiftsAClosedColumnOfTheMixingMatrix` catches that fault. Both tests stay; each one catches a different fault.
+    - note: the review read the Python and confirmed the two divergences from the Swift reference. The reference swaps the two epsilons and casts down mid-path; this port follows the Python on both.
+  timestamp: 2026-08-11T13:15:28.123076+00:00
+- actor: claude-code
+  id: 01kzrg5dgac4jwd51rhhzs9fvp
+  text: |
+    ## The rename, and where it stops
+
+    The finding is corrected. Both types this file declares now carry the canonical
+    spelling:
+
+    - `DeepseekV4HyperConnection` is now `DeepSeekV4HyperConnection`.
+    - `DeepseekV4HyperHead` is now `DeepSeekV4HyperHead`.
+
+    The finding named the second one alone. The first one holds the same cause,
+    thus the rename removes the cause from the whole file. The three doc-comment
+    references (```` ``DeepSeekV4HyperConnection`` ```` twice and
+    ```` ``DeepSeekV4HyperHead`` ```` once) follow the declarations, and the eight
+    references in `Tests/MLXLMTests/DeepseekV4HyperConnectionTests.swift` follow
+    them as well. 14 lines changed in each direction, in 2 files, and nothing else.
+
+    ### The mixed reading is expected, and it is temporary
+
+    This file now declares canonical names while it still READS
+    `DeepseekV4Configuration` and `DeepseekV4Math`, which other files declare. Two
+    things hold that boundary:
+
+    1. The acceptance criterion of this card says "No changes to existing files".
+       The commit `b4d3cf4` touches none, and this correction touches none either.
+    2. Task `^7x3dq7e` holds the repository-wide rename of the 16 remaining
+       declarations under `Libraries/`, and it is ordered to run BEFORE the model
+       assembly task `^pwr8r3h`. That task closes the mixed reading.
+
+    No note about this went into the source. The source states the correct names
+    and nothing more.
+
+    ### One name this card did not authorize
+
+    The test suite type is still `struct DeepseekV4HyperConnectionTests`, and the
+    two file names still spell `Deepseek`. The card names two types and says "Stop
+    there", thus this work did not touch them. Neither reason for the boundary
+    covers them, however: they are in NEW files of this commit, and `^7x3dq7e`
+    scopes its rename to declarations "under `Libraries/`". A comment on `^7x3dq7e`
+    records the gap so that a person decides it.
+  timestamp: 2026-08-11T13:28:34.570093+00:00
+- actor: claude-code
+  id: 01kzrg60v6c5mknhs865y2c7sz
+  text: |
+    ### implement — changed
+    - evidence: 2 files, 14 insertions and 14 deletions. `Libraries/MLXLLM/Models/DeepseekV4HyperConnection.swift` (12 lines: 2 declarations and 3 doc-comment references), `Tests/MLXLMTests/DeepseekV4HyperConnectionTests.swift` (16 lines: 8 references). No other file changed; `git status --porcelain -- '*.swift'` lists these two alone.
+    - the finding became: `class DeepSeekV4HyperConnection: Module` and `class DeepSeekV4HyperHead: Module`. The finding named the second one; the first one held the same cause and is corrected as well.
+    - tests: full `swift test`, 5 targets — 215 + 425 + 80 + 282 + 7 = 1009 tests, 0 failures, 0 compiler warnings, 2 documented skips (`CompiledDecodeCorrectnessTests`, kanban `akvqxxz`).
+    - mutation re-run 1: transpose `comb` in `expand` (`comb.asType(.float32).transposed(0, 1, 3, 2).matmul(...)`). Two tests died, the two the earlier run named: `theExpandAgreesWithThePythonReference` (:389) and `theExpandTakesTheRowOfTheMixingMatrixForEachAnswerCopy` (:432). The rename did not weaken the axis guard.
+    - mutation re-run 2: drop `+ eps` from the `comb` softmax in `Libraries/MLXLLM/Models/DeepseekV4MathHelpers.swift`. Exactly one test died: `theSinkhornEpsilonLiftsAClosedColumnOfTheMixingMatrix` (:623).
+    - restore: both mutated files went back. `git diff --stat` on `DeepseekV4MathHelpers.swift` is empty, and the file is byte-identical to the copy taken before the mutation.
+    - swiftlint on the two changed files: the output is line-for-line identical before and after the rename (15 violations of the swiftlint DEFAULT rules — the repository holds no `.swiftlint.yml`, and the untouched `DeepseekV4MoE.swift` and `DeepseekV4MoETests.swift` trip the same defaults). The rename added none.
+    - swift-format: ran on the two changed files alone and made no change; the rename holds the same line widths.
+    - next: `/review`
+  timestamp: 2026-08-11T13:28:54.374874+00:00
 depends_on:
 - 01KZGMQCH9PFY25Y3QXP34CRP6
 position_column: doing
@@ -102,7 +241,7 @@ title: Port DeepseekV4 mHC hyper-connections (HyperConnection, HyperHead, head r
 ---
 ## What
 
-Create `Libraries/MLXLLM/Models/DeepseekV4HyperConnection.swift` with `DeepseekV4HyperConnection` and `DeepseekV4HyperHead`. This implements DSV4's **mHC (manifold-constrained hyper-connections)** residual stream — a `hc_mult=4` set of parallel residual copies that are collapsed and expanded per block using a Sinkhorn-normalized mixing matrix. Nothing analogous exists in this repo.
+Create `Libraries/MLXLLM/Models/DeepseekV4HyperConnection.swift` with `DeepSeekV4HyperConnection` and `DeepSeekV4HyperHead`. This implements DSV4's **mHC (manifold-constrained hyper-connections)** residual stream — a `hc_mult=4` set of parallel residual copies that are collapsed and expanded per block using a Sinkhorn-normalized mixing matrix. Nothing analogous exists in this repo.
 
 Port from `scouzi1966/mlx-swift-lm` @ `main`, `Libraries/MLXLLM/Models/DeepseekV4.swift` — `DeepseekV4HyperConnection` at line 1361, `DeepseekV4HyperHead` at line 1514.
 
@@ -140,3 +279,38 @@ Uses `MLXFast.rmsNorm` (reference lines 912, 1554), already reachable from this 
 ## Workflow
 - Use `/tdd` — write the fixture-based value test first; it is the only thing that catches a transposed axis.
 #deepseek-v4
+
+## Review Findings (2026-08-11 07:57)
+
+> tool rule 'code-hygiene/no-commented-code-parsed' is unavailable (tool missing: error: unrecognized subcommand 'commented_code'
+
+Usage: sah tool code_context [OPTIONS] [COMMAND]
+
+For more information, try '--help'.); prompt rule 'no-commented-code' ran instead.
+
+> tool rule 'duplication/duplication-parsed' is unavailable (tool missing: error: unrecognized subcommand 'duplication'
+
+  tip: some similar subcommands exist: 'diagnostics', 'duplicates'
+
+Usage: sah tool code_context [OPTIONS] [COMMAND]
+
+For more information, try '--help'.); prompt rules 'duplication', 'rust', 'swift' ran instead.
+
+- [x] `Libraries/MLXLLM/Models/DeepseekV4HyperConnection.swift:313` — Type name should use canonical spelling 'DeepSeek' (not 'Deepseek'); established mixed-case terms keep their canonical spelling per the casing rule. Rename class from `DeepseekV4HyperHead` to `DeepSeekV4HyperHead`.
+
+### Context for the finding above
+
+The finding names one line. The same cause is in the whole file and in the
+files around it. Before you make the rename, read these facts:
+
+- The same file declares `DeepseekV4HyperConnection` with the same spelling.
+  The engine did not name that line.
+- 16 type declarations under `Libraries/` carry the `Deepseek` spelling, among
+  them `DeepseekV4Configuration`, which the two initializers of this file take
+  as their argument, and `DeepseekV4Math`, which `collapse` calls.
+- A rename of only `DeepseekV4HyperHead` makes that one type the single
+  outlier of the family.
+
+The rename crosses files that this commit does not touch, and the card holds
+the criterion "No changes to existing files". Decide the width of the rename
+before you start it.
