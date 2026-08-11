@@ -1,6 +1,32 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kzs00mdvg3cjrk0kny0sqyaw
+  text: |
+    ### Work arrived from `^gbsaqc2` on 2026-08-11 — the encoder wiring
+
+    The section `## Added Work: wire the DeepSeek-V4 chat encoder into the chat path`
+    came from the card `^gbsaqc2` (Port DeepseekV4ChatEncoder core rendering).
+
+    **What arrived.** Call `DeepSeekV4ChatEncoder` from `Libraries/MLXLMCommon/Chat.swift`,
+    `Libraries/MLXLMCommon/Tokenizer.swift` and `Libraries/MLXLMCommon/ChatSession.swift`.
+    The type is already written and proved; it is in
+    `Libraries/MLXLMCommon/DeepseekV4ChatEncoder.swift`. Nothing calls it yet.
+
+    **Why it moved.** The wiring needs a rule that tells a caller that the loaded
+    model is DeepSeek-V4. This card makes that rule. `^gbsaqc2` cannot make it.
+
+    The plan had a circle: `^gbsaqc2` blocks `^35aw7vy`, and `^35aw7vy` blocks this
+    card, but the wiring item on `^gbsaqc2` waited for this card. A card cannot wait
+    for a card that waits for it. The orchestrator moved the item to the card that
+    can do it. No work is dropped.
+
+    **Do not start this section before item 1 of `## What`.** Make the
+    `deepseek_v4` registry entry and the detection rule first, then wire the encoder
+    to that rule.
+  timestamp: 2026-08-11T18:05:35.035921+00:00
 depends_on:
 - 01KZGMVSEEHGCCG1W8CPWR8R3H
 - 01KZGN95NRBQ3PEBHPN35AW7VY
@@ -23,6 +49,38 @@ Changes:
 5. **`Libraries/MLXLMCommon/Tool/ToolCallFormat.swift`** — add a DSML case for DeepSeek-V4's native tool format and map `deepseek_v4` to it, plus a parser under `Libraries/MLXLMCommon/Tool/Parsers/`. Follow the shape of the existing `KimiK2ToolCallParser.swift`. Cross-reference `ml-explore/mlx-lm` PR 1337, which adds the equivalent `deepseek_dsml` parser upstream.
 
 Sizing note: if the DSML tool parser turns out to be more than ~150 lines, split it into its own task rather than growing this one past the file/subtask limits.
+
+## Added Work: wire the DeepSeek-V4 chat encoder into the chat path (moved from `^gbsaqc2` on 2026-08-11)
+
+The encoder is already written and proved. `Libraries/MLXLMCommon/DeepseekV4ChatEncoder.swift`
+gives the public type `DeepSeekV4ChatEncoder`. Its output is byte-identical to
+DeepSeek's own Python, `encoding/encoding_dsv4.py`. But no code calls it.
+
+Call it from these three files:
+
+- `Libraries/MLXLMCommon/Chat.swift`
+- `Libraries/MLXLMCommon/Tokenizer.swift`
+- `Libraries/MLXLMCommon/ChatSession.swift`
+
+**Why this item is on this card.** A caller must first know that the loaded
+model is DeepSeek-V4. That model-detection rule is the work of this card, item 1
+above. The card `^gbsaqc2` cannot make the rule, thus it cannot do the wiring.
+`^gbsaqc2` blocks `^35aw7vy`, and `^35aw7vy` blocks this card. The item could
+not stay on `^gbsaqc2`, because a card cannot wait for a card that waits for it.
+The orchestrator moved the item here to break that circle. No work is dropped.
+
+DeepSeek-V4 ships **no** `chat_template`, neither in `tokenizer_config.json` nor
+in `tokenizer.json`. Thus the encoder is the only way to make a correct
+DeepSeek-V4 prompt. A DeepSeek-V4 model that goes through the usual chat-template
+path gets a wrong prompt.
+
+- [ ] `Chat.swift`, `Tokenizer.swift` and `ChatSession.swift` use
+      `DeepSeekV4ChatEncoder` for a model that the detection rule of this card
+      identifies as `deepseek_v4`.
+- [ ] Every other model keeps its present path. No behavior changes for a model
+      that is not DeepSeek-V4.
+- [ ] Test: a `deepseek_v4` model gets the encoder output; a different model does
+      not.
 
 ## Provenance
 - Registration pattern: `scouzi1966/mlx-swift-lm` @ `main` — `Libraries/MLXLLM/LLMModelFactory.swift:50` (MIT).
