@@ -58,7 +58,7 @@ private struct ExpectedValues {
     var moeIntermediateSize: Int
     var numHashLayers: Int
     var scoringFunction: String
-    var normTopkProb: Bool
+    var normalizeTopkProb: Bool
     var routedScalingFactor: Float
     var swigluLimit: Float
     var hcMult: Int
@@ -103,7 +103,7 @@ private struct ExpectedValues {
         XCTAssertEqual(config.moeIntermediateSize, moeIntermediateSize)
         XCTAssertEqual(config.numHashLayers, numHashLayers)
         XCTAssertEqual(config.scoringFunction, scoringFunction)
-        XCTAssertEqual(config.normTopkProb, normTopkProb)
+        XCTAssertEqual(config.normalizeTopkProb, normalizeTopkProb)
         XCTAssertEqual(config.routedScalingFactor, routedScalingFactor)
         XCTAssertEqual(config.swigluLimit, swigluLimit)
         XCTAssertEqual(config.hcMult, hcMult)
@@ -151,7 +151,7 @@ extension ExpectedValues {
         moeIntermediateSize: 2048,
         numHashLayers: 3,
         scoringFunction: "sqrtsoftplus",
-        normTopkProb: true,
+        normalizeTopkProb: true,
         routedScalingFactor: 1.5,
         swigluLimit: 10.0,
         hcMult: 4,
@@ -234,7 +234,7 @@ extension ExpectedValues {
         moeIntermediateSize: 25,
         numHashLayers: 26,
         scoringFunction: "distinct-scoring-func",
-        normTopkProb: false,
+        normalizeTopkProb: false,
         routedScalingFactor: 0.5,
         swigluLimit: 0.75,
         hcMult: 27,

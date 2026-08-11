@@ -75,7 +75,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
     /// The name of the function that makes the gate scores.
     public var scoringFunction: String
     /// True when the gate divides the top-k weights by their sum.
-    public var normTopkProb: Bool
+    public var normalizeTopkProb: Bool
     /// The factor that multiplies the output of the routed experts.
     public var routedScalingFactor: Float
     /// The limit of the DeepSeek-V4 SwiGLU. The gate and the up value stay
@@ -157,7 +157,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         case moeIntermediateSize = "moe_intermediate_size"
         case numHashLayers = "num_hash_layers"
         case scoringFunction = "scoring_func"
-        case normTopkProb = "norm_topk_prob"
+        case normalizeTopkProb = "norm_topk_prob"
         case routedScalingFactor = "routed_scaling_factor"
         case swigluLimit = "swiglu_limit"
         case hcMult = "hc_mult"
@@ -209,7 +209,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         self.moeIntermediateSize = try value(.moeIntermediateSize, or: Default.moeIntermediateSize)
         self.numHashLayers = try value(.numHashLayers, or: Default.numHashLayers)
         self.scoringFunction = try value(.scoringFunction, or: Default.scoringFunction)
-        self.normTopkProb = try value(.normTopkProb, or: Default.normTopkProb)
+        self.normalizeTopkProb = try value(.normalizeTopkProb, or: Default.normalizeTopkProb)
         self.routedScalingFactor = try value(.routedScalingFactor, or: Default.routedScalingFactor)
         self.swigluLimit = try value(.swigluLimit, or: Default.swigluLimit)
         self.hcMult = try value(.hcMult, or: Default.hcMult)
@@ -253,7 +253,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         static let moeIntermediateSize = 2048
         static let numHashLayers = 3
         static let scoringFunction = "sqrtsoftplus"
-        static let normTopkProb = true
+        static let normalizeTopkProb = true
         static let routedScalingFactor: Float = 1.5
         static let swigluLimit: Float = 10.0
         static let hcMult = 4
