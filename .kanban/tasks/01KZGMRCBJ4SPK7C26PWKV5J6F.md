@@ -407,6 +407,97 @@ comments:
     - evidence: 638dde5 fix(mlx-lm): reject unsafe safetensors index paths and non-file URLs; 5cfd48e chore(kanban): record round-3 fix and close ^wkv5j6f review findings
     - next: none, all 10 review findings across three rounds are closed
   timestamp: 2026-08-11T01:32:36.752585+00:00
+- actor: claude-code
+  id: 01kzq7z4php57rxntb4m56m1mc
+  text: |
+    ### review — findings
+
+    - scope: `review sha 638dde5~1..638dde5` (round 4). 9 files attempted, 0 failed, 0 skipped. 1 finding, 1 confirmed, 0 refuted.
+    - evidence: `Libraries/MLXLMCommon/Load.swift:29`
+
+    #### Round-3 path-traversal fix: examined and sound
+
+    The reviewer tried to get past `weightFileURL(forIndexEntry:in:)` with 28 entry strings. Every one was rejected, or it stayed under the model directory. No bypass survived.
+
+    - Rejected: `../outside.safetensors`, `shards/../../outside.safetensors`, `..`, `./../x`, `shards/./../../x`, `a/b/../../../x`, `x.safetensors/../../../etc/passwd`, `/etc/passwd`, the empty entry.
+    - Allowed and contained: `%2e%2e/x`, `%2E%2E%2Fx`, `..%2Fx`, `%252e%252e/x`. `URL.appendingPathComponent` percent-**encodes**; it does not decode. A percent-encoded entry is thus the literal name of a directory, and it names no parent.
+    - Allowed and contained: `..\..\x`, `C:\Windows\x`, `\\server\share\x`. On Darwin the backslash is an ordinary filename character, not a separator.
+    - Allowed and contained: `․․/x` (one dot leader), `．．/x` (fullwidth full stop), `.̣./x` (combining mark), `..\0/x`, `....//x`, `..;/x`, ` ../x`. Each is a different filename from `..`. Unicode normalization does not turn any of them into `..`.
+    - Allowed and contained: `https://example.com/x`, `file:///etc/passwd`, `~/x`, `~root/x`. `appendingPathComponent` does no tilde expansion and reads no scheme.
+    - A symlink inside the model directory that points outside is **not** closed by this check, and closing it would be wrong. The check reads the text of the entry alone. `Libraries/` and the `swift-transformers` Hub hold no `createSymbolicLink` call, thus the load path never makes one, and a check that resolved symlinks would break any download layout that does.
+
+    `isFileURL` rejects no legitimate caller input. Every `URL(fileURLWithPath:)` form gives true, absolute or relative, with or without `isDirectory:`; so do `URL(string: "file:///...")`, `homeDirectoryForCurrentUser` and `temporaryDirectory`. The two callers pass either a downloader result or a `.directory(URL)` from `ModelConfiguration` (`Libraries/MLXLMCommon/ModelFactory.swift`).
+
+    #### The success path is unchanged — verified by mutation, not by assertion
+
+    A straight revert of `Load.swift` to `638dde5~1` **does not compile**: `LoadWeightsTests` names `WeightLoadingError.weightFileOutsideModelDirectory` and `.modelDirectoryIsNotAFileURL`, which the parent does not hold. The round-3 record's wording ("failed with 'did not throw an error' against the code before this fix") is thus not reproducible by a straight revert. It is reproducible when the two error cases stay and only the two guards are neutered, and the reviewer ran that:
+
+    - Guards disabled (never reject): 9 tests, 4 failures — exactly the four rejection tests, each "did not throw an error". The five success tests stayed green. The good path is thus unchanged.
+    - Guard inverted (always reject): 9 tests, 3 failures — `testLoadWeightsUsesSafetensorsIndexWeightMapWhenPresent` and `testSafetensorWeightURLsKeepsAnIndexEntryInASubdirectory` went red. The success tests do reach the new function; they are not vacuous.
+
+    #### Standing mutation re-run
+
+    `BaseConfiguration.quantization(layer:)` `else` branch → `return nil`: `DeepseekV4QuantizationPlanTests` goes red at `loadFilterGivesTheDefaultToAPathThePlanDoesNotName()`. The round-1 coverage holds. Reverted; `git diff HEAD -- Libraries/ Tests/ IntegrationTesting/` is empty.
+
+    #### Suites, on the restored tree
+
+    `LoadWeightsTests` 9/9. `DeepseekV4QuantizationPlanTests` 13/13. `Gemma4KVSharedLoadTests` 2/2. `GLM4LmHeadTiedLoadTests` 6/6. `BaseConfigurationTests` 2/2. `MiniMaxM3Tests` green. No other model's loading changed.
+
+    #### All 10 prior findings
+
+    Checked one by one, not taken on trust. Round 1: the mutation is now caught; the probe compressor sits on layer 2 and `loadFilterAppliesMxfp4ToExpertsAndAffineToEverythingElse` reads `model.layers.2.attn.compressor.wkv`; the 82/84 counts sit in the test header with two tests that measure them; and the three downstream cards `^tty95f4`, `^r92pjcr` and `^ag7ant0` each hold the comment with the layers 0/1 rule and the 44-against-43 fact. Round 2: the doc comment, the `guard let enumerator`, and both `[:]` literals are in the file. Round 3: verified above. All 10 are genuinely closed.
+
+    - next: add the `///` comment on `errorDescription` in `Libraries/MLXLMCommon/Load.swift`, then re-review.
+  timestamp: 2026-08-11T01:46:05.905613+00:00
+- actor: claude-code
+  id: 01kzq8157ptjm463g03h1dnq06
+  text: |
+    ### finish iteration 4 — findings
+    - implement: changed — Load.swift path validation (`weightFileURL(forIndexEntry:in:)`, `isFileURL` guard, two new error cases); LoadWeightsTests.swift +5 tests
+    - test: green — `swift build` exit 0; LoadWeightsTests 9/9; DeepseekV4QuantizationPlanTests 13/13; Gemma4 2/2; GLM4 6/6; BaseConfiguration 2/2; MiniMaxM3 47/47; full `swift test` exit 0
+    - commit: 638dde5 fix(mlx-lm): reject unsafe safetensors index paths and non-file URLs; 5cfd48e and cc00c0f (kanban chores)
+    - review: findings — Load.swift:29 (1 finding). 9 files attempted.
+    - SECURITY VERIFIED: the reviewer tried 28 attack strings and none went out of the model directory. Percent-encoding does not work, because `appendingPathComponent` encodes and never decodes. Backslash, UNC and `C:\` do not work on Darwin. Unicode near-copies of `..` do not work, because each is a different file name. `~` does not expand. The symlink case is correctly left open: the check reads the text of the entry alone, no code on the load path makes a symlink, and a check that followed symlinks would break a download layout that uses them.
+    - CORRECTION to the round-3 evidence: a straight revert of `Load.swift` to the parent commit does not compile, because the test file names the two new error cases. The claim "the four rejection tests failed against the code before the fix" thus cannot come from a revert. The reviewer produced it another way, by keeping the error cases and turning off the guards alone: 4 failures, and the 5 success tests stayed green. An inverted guard turns 3 tests red, thus the success tests do reach the new function and are not vacuous.
+    - next: implement — add the missing doc comment at Load.swift:29
+  timestamp: 2026-08-11T01:47:11.990187+00:00
+- actor: claude-code
+  id: 01kzq8chbh3w5m239j4yz74226
+  text: |-
+    ### Review round 4 -- the one finding is closed, documentation only
+
+    **The change touches no logic.** `git diff -- Libraries/` is 8 lines and every one of them starts with `///`. The round-3 path validation, which the reviewer examined with 28 attack strings, is untouched.
+
+    **The cause was removed for the whole file, not for the one line.** The finding names `errorDescription`. Three more declarations in `Load.swift` held no doc comment either, and each now holds one:
+
+    - `SafetensorsIndex.weightMap`
+    - the `CodingKeys` enum of that struct
+    - the `weightMap` case of that enum
+
+    Every declaration in `Load.swift` -- private, package and public alike -- is now documented.
+
+    **The comment on `errorDescription`** follows the style of the rest of the file: a one-sentence summary that names the `LocalizedError` conformance, a blank `///` line, then a paragraph that states what each case gives.
+
+    **No test, and this is stated openly.** The change adds no behaviour, thus no test can go red first. The suites that read this file all stay green, which is the evidence that nothing moved.
+
+    **One note for the reader.** `CodingKeys` enums are not documented anywhere else in `MLXLMCommon` -- six other files hold an undocumented one. The comment here is thus stricter than the prevailing pattern of the module. It sits inside the one file the finding names, and no other file was touched.
+
+    ### Verification
+
+    - `swift build` -- exit 0.
+    - `swift test --filter LoadWeightsTests` -- 9 tests, 0 failures.
+    - `swift test --filter DeepseekV4QuantizationPlanTests` -- 13 tests in 1 suite passed.
+    - `swift test` -- exit 0. Swift Testing: 383 + 80 + 282 + 7 tests passed. XCTest: 215 executed, 0 failures, and only the 2 pre-existing `CompiledDecodeCorrectnessTests` skips (kanban 01KYD3ZCWTZ414Y79RSAKVQXXZ).
+    - `git status --porcelain -- Libraries/ Tests/ IntegrationTesting/` gives one line, ` M Libraries/MLXLMCommon/Load.swift`.
+    - `swift format --in-place --configuration .swift-format` on that one file only. It made no change. No tree-wide format run.
+  timestamp: 2026-08-11T01:53:24.849424+00:00
+- actor: claude-code
+  id: 01kzq8cyjzt7x1s1sz6vne5g9n
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/Load.swift (+8, every line a `///` comment: the doc comment on `errorDescription` that the finding asks for, plus `SafetensorsIndex.weightMap`, its `CodingKeys` enum and that enum's `weightMap` case, which held the same cause). The round-4 finding `Load.swift:29` is closed and flipped to `- [x]`; 0 open findings on the card. No logic changed, thus the round-3 path validation stays as the reviewer examined it. `swift build` exit 0; `swift test --filter LoadWeightsTests` 9/9; `--filter DeepseekV4QuantizationPlanTests` 13/13; full `swift test` exit 0, zero failures, 2 pre-existing skips. `git status --porcelain -- Libraries/ Tests/ IntegrationTesting/` gives one line, ` M Libraries/MLXLMCommon/Load.swift`.
+    - next: /review round 5
+  timestamp: 2026-08-11T01:53:38.399120+00:00
 depends_on:
 - 01KZGMPECN4FA7T3BFX6F6QMF7
 position_column: doing
@@ -500,3 +591,8 @@ package func safetensorWeightURLs(in modelDirectory: URL) throws -> [URL] {
 - [x] `Libraries/MLXLMCommon/Load.swift:49` — Path traversal vulnerability—file paths are constructed from model index entries without validation, allowing `..` sequences to access files outside the model directory. Validate path components before appending them. Reject any containing `..`, starting with `/`, or otherwise escaping the model directory. Example: `guard !$0.contains("..") && !$0.hasPrefix("/") else { throw WeightLoadingError.unreadableModelDirectory(modelDirectory) }`.
   - Resolved, and the cause was removed for the whole function rather than for the one line. Both branches gave an unchecked path to `FileManager`, thus both are now closed. (1) A new private function, `weightFileURL(forIndexEntry:in:)`, maps one index entry onto the model directory. It rejects an empty entry, an entry that starts with `/`, and an entry that holds a `..` component. The examination is of the text of the entry alone, thus it reads no file and it changes no good entry: a plain name and a name in a subdirectory both keep the URL they had. (2) `safetensorWeightURLs` now starts with `guard modelDirectory.isFileURL`, which closes the second face the reviewer found — `FileManager` reads only the path of a URL and gives no attention to the scheme or the host, thus `https://example.com/` gave an enumerator that walked the local file system root. This one guard sits before both branches. A bad entry is reported and not dropped without a word: `WeightLoadingError` is extended with `modelDirectoryIsNotAFileURL(URL)` and `weightFileOutsideModelDirectory(entry:modelDirectory:)`, each with its own `errorDescription`. The reviewer's example threw `unreadableModelDirectory`, which names a different failure, thus a case of its own is more exact. Five new tests in `Tests/MLXLMTests/LoadWeightsTests.swift` cover a `../` entry, a `..` entry from a subdirectory (a check on the prefix alone would let this one through), an absolute-path entry, a `https:` URL, and — for the success path — an entry in a subdirectory. The four rejection tests each failed with "did not throw an error" before the fix and pass after it; the subdirectory test passes on both sides, which is the evidence that the good path did not change. `LoadWeightsTests` is 9 of 9, `DeepseekV4QuantizationPlanTests` 13 of 13, and `Gemma4KVSharedLoadTests` (2), `GLM4LmHeadTiedLoadTests` (6), `BaseConfigurationTests` (2) and `MiniMaxM3Tests` (47) all stay green.
   - One correction to the round-2 record, which the reviewer made: the commit message named `KVCacheError` and `UserInputError` as the precedent for the shape of `WeightLoadingError`. Neither matches. `ModelConversionError` (`Libraries/MLXLMCommon/ModelConversion.swift`) is the `LocalizedError, Equatable` precedent.
+
+## Review Findings (2026-08-10 20:33)
+
+- [x] `Libraries/MLXLMCommon/Load.swift:29` — Public computed property `errorDescription` lacks documentation comment, inconsistent with documented enum cases above it. Add a documentation comment explaining that this property provides localized error descriptions for the `LocalizedError` protocol conformance.
+  - Resolved, and the cause was removed for the whole file. `errorDescription` now holds a `///` comment in the style the rest of the file uses: a one-sentence summary that names the `LocalizedError` conformance, then a paragraph that states what each case gives. The same cause elsewhere in the file: `SafetensorsIndex.weightMap`, its `CodingKeys` enum and the `weightMap` case of that enum held no comment either, and each now holds one. Every declaration in `Load.swift` is thus documented. No logic changed — `git diff -- Libraries/` is 8 lines, all of them `///` comments — thus the round-3 path validation stays as the reviewer examined it.
