@@ -53,11 +53,11 @@ private struct ExpectedValues {
     var oGroups: Int
     var oLoraRank: Int
     var nRoutedExperts: Int
-    var nSharedExperts: Int
+    var numSharedExperts: Int
     var numExpertsPerTok: Int
     var moeIntermediateSize: Int
     var numHashLayers: Int
-    var scoringFunc: String
+    var scoringFunction: String
     var normTopkProb: Bool
     var routedScalingFactor: Float
     var swigluLimit: Float
@@ -71,7 +71,7 @@ private struct ExpectedValues {
     var compressRatios: [Int]
     var indexNHeads: Int
     var indexHeadDim: Int
-    var indexTopk: Int
+    var indexTopK: Int
     var useAttnSink: Bool
     var dsparkBlockSize: Int
     var dsparkNoiseTokenId: Int
@@ -98,11 +98,11 @@ private struct ExpectedValues {
         XCTAssertEqual(config.oGroups, oGroups)
         XCTAssertEqual(config.oLoraRank, oLoraRank)
         XCTAssertEqual(config.nRoutedExperts, nRoutedExperts)
-        XCTAssertEqual(config.nSharedExperts, nSharedExperts)
+        XCTAssertEqual(config.numSharedExperts, numSharedExperts)
         XCTAssertEqual(config.numExpertsPerTok, numExpertsPerTok)
         XCTAssertEqual(config.moeIntermediateSize, moeIntermediateSize)
         XCTAssertEqual(config.numHashLayers, numHashLayers)
-        XCTAssertEqual(config.scoringFunc, scoringFunc)
+        XCTAssertEqual(config.scoringFunction, scoringFunction)
         XCTAssertEqual(config.normTopkProb, normTopkProb)
         XCTAssertEqual(config.routedScalingFactor, routedScalingFactor)
         XCTAssertEqual(config.swigluLimit, swigluLimit)
@@ -116,7 +116,7 @@ private struct ExpectedValues {
         XCTAssertEqual(config.compressRatios, compressRatios)
         XCTAssertEqual(config.indexNHeads, indexNHeads)
         XCTAssertEqual(config.indexHeadDim, indexHeadDim)
-        XCTAssertEqual(config.indexTopk, indexTopk)
+        XCTAssertEqual(config.indexTopK, indexTopK)
         XCTAssertEqual(config.useAttnSink, useAttnSink)
         XCTAssertEqual(config.dsparkBlockSize, dsparkBlockSize)
         XCTAssertEqual(config.dsparkNoiseTokenId, dsparkNoiseTokenId)
@@ -146,11 +146,11 @@ extension ExpectedValues {
         oGroups: 8,
         oLoraRank: 1024,
         nRoutedExperts: 256,
-        nSharedExperts: 1,
+        numSharedExperts: 1,
         numExpertsPerTok: 6,
         moeIntermediateSize: 2048,
         numHashLayers: 3,
-        scoringFunc: "sqrtsoftplus",
+        scoringFunction: "sqrtsoftplus",
         normTopkProb: true,
         routedScalingFactor: 1.5,
         swigluLimit: 10.0,
@@ -164,7 +164,7 @@ extension ExpectedValues {
         compressRatios: [],
         indexNHeads: 64,
         indexHeadDim: 128,
-        indexTopk: 512,
+        indexTopK: 512,
         useAttnSink: true,
         dsparkBlockSize: 0,
         dsparkNoiseTokenId: 0,
@@ -229,11 +229,11 @@ extension ExpectedValues {
         oGroups: 20,
         oLoraRank: 21,
         nRoutedExperts: 22,
-        nSharedExperts: 23,
+        numSharedExperts: 23,
         numExpertsPerTok: 24,
         moeIntermediateSize: 25,
         numHashLayers: 26,
-        scoringFunc: "distinct-scoring-func",
+        scoringFunction: "distinct-scoring-func",
         normTopkProb: false,
         routedScalingFactor: 0.5,
         swigluLimit: 0.75,
@@ -247,7 +247,7 @@ extension ExpectedValues {
         compressRatios: [0, 31],
         indexNHeads: 32,
         indexHeadDim: 33,
-        indexTopk: 34,
+        indexTopK: 34,
         useAttnSink: false,
         dsparkBlockSize: 35,
         dsparkNoiseTokenId: 36,

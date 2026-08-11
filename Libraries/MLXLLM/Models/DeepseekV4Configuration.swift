@@ -63,7 +63,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
     public var nRoutedExperts: Int
     /// The number of shared experts in a layer. A shared expert reads every
     /// token.
-    public var nSharedExperts: Int
+    public var numSharedExperts: Int
     /// The number of routed experts one token reads.
     public var numExpertsPerTok: Int
     /// The width of one expert.
@@ -73,7 +73,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
     /// top-k gate.
     public var numHashLayers: Int
     /// The name of the function that makes the gate scores.
-    public var scoringFunc: String
+    public var scoringFunction: String
     /// True when the gate divides the top-k weights by their sum.
     public var normTopkProb: Bool
     /// The factor that multiplies the output of the routed experts.
@@ -116,7 +116,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
     /// The width of one indexer head.
     public var indexHeadDim: Int
     /// The number of keys the indexer keeps for each query.
-    public var indexTopk: Int
+    public var indexTopK: Int
 
     // MARK: - Attention sink
 
@@ -152,11 +152,11 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         case oGroups = "o_groups"
         case oLoraRank = "o_lora_rank"
         case nRoutedExperts = "n_routed_experts"
-        case nSharedExperts = "n_shared_experts"
+        case numSharedExperts = "n_shared_experts"
         case numExpertsPerTok = "num_experts_per_tok"
         case moeIntermediateSize = "moe_intermediate_size"
         case numHashLayers = "num_hash_layers"
-        case scoringFunc = "scoring_func"
+        case scoringFunction = "scoring_func"
         case normTopkProb = "norm_topk_prob"
         case routedScalingFactor = "routed_scaling_factor"
         case swigluLimit = "swiglu_limit"
@@ -170,7 +170,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         case compressRatios = "compress_ratios"
         case indexNHeads = "index_n_heads"
         case indexHeadDim = "index_head_dim"
-        case indexTopk = "index_topk"
+        case indexTopK = "index_topk"
         case useAttnSink = "use_attn_sink"
         case dsparkBlockSize = "dspark_block_size"
         case dsparkNoiseTokenId = "dspark_noise_token_id"
@@ -204,11 +204,11 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         self.oGroups = try value(.oGroups, or: Default.oGroups)
         self.oLoraRank = try value(.oLoraRank, or: Default.oLoraRank)
         self.nRoutedExperts = try value(.nRoutedExperts, or: Default.nRoutedExperts)
-        self.nSharedExperts = try value(.nSharedExperts, or: Default.nSharedExperts)
+        self.numSharedExperts = try value(.numSharedExperts, or: Default.numSharedExperts)
         self.numExpertsPerTok = try value(.numExpertsPerTok, or: Default.numExpertsPerTok)
         self.moeIntermediateSize = try value(.moeIntermediateSize, or: Default.moeIntermediateSize)
         self.numHashLayers = try value(.numHashLayers, or: Default.numHashLayers)
-        self.scoringFunc = try value(.scoringFunc, or: Default.scoringFunc)
+        self.scoringFunction = try value(.scoringFunction, or: Default.scoringFunction)
         self.normTopkProb = try value(.normTopkProb, or: Default.normTopkProb)
         self.routedScalingFactor = try value(.routedScalingFactor, or: Default.routedScalingFactor)
         self.swigluLimit = try value(.swigluLimit, or: Default.swigluLimit)
@@ -223,7 +223,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         self.compressRatios = try value(.compressRatios, or: Default.compressRatios)
         self.indexNHeads = try value(.indexNHeads, or: Default.indexNHeads)
         self.indexHeadDim = try value(.indexHeadDim, or: Default.indexHeadDim)
-        self.indexTopk = try value(.indexTopk, or: Default.indexTopk)
+        self.indexTopK = try value(.indexTopK, or: Default.indexTopK)
         self.useAttnSink = try value(.useAttnSink, or: Default.useAttnSink)
         self.dsparkBlockSize = try value(.dsparkBlockSize, or: Default.dsparkBlockSize)
         self.dsparkNoiseTokenId = try value(.dsparkNoiseTokenId, or: Default.dsparkNoiseTokenId)
@@ -248,11 +248,11 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         static let oGroups = 8
         static let oLoraRank = 1024
         static let nRoutedExperts = 256
-        static let nSharedExperts = 1
+        static let numSharedExperts = 1
         static let numExpertsPerTok = 6
         static let moeIntermediateSize = 2048
         static let numHashLayers = 3
-        static let scoringFunc = "sqrtsoftplus"
+        static let scoringFunction = "sqrtsoftplus"
         static let normTopkProb = true
         static let routedScalingFactor: Float = 1.5
         static let swigluLimit: Float = 10.0
@@ -265,7 +265,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         static let compressRatios: [Int] = []
         static let indexNHeads = 64
         static let indexHeadDim = 128
-        static let indexTopk = 512
+        static let indexTopK = 512
         static let useAttnSink = true
         static let dsparkBlockSize = 0
         static let dsparkNoiseTokenId = 0
