@@ -172,10 +172,56 @@ comments:
     - evidence: 1 file — `Libraries/MLXLLM/Models/DeepseekV4Attention.swift`. 4 findings closed (lines 57, 249, 392, 396); 108 `KVCache.swift` findings marked out of scope on the card with the reason. `swift build` clean. `swift test --filter DeepseekV4AttentionTests` 11 of 11 pass. Full `swift test` 764 tests in 94 suites, 0 failures. `swiftlint no_magic_numbers` 6 violations before, 0 after. Mutation G (output transpose to the identity) fails the same 3 tests, reverted, tree clean.
     - next: `/review`
   timestamp: 2026-08-11T04:19:22.355049+00:00
+- actor: claude-code
+  id: 01kzqhjygktkcdyn1rs3taaddc
+  text: |
+    ### Review round 2 -- scope `cb5113c~1..cb5113c`
+
+    The engine attempted **9 files**. It gave 2 findings, 2 confirmed, 5 refuted, 0 failed, 0 skipped.
+
+    **The two findings sit outside this commit.** Both name `Libraries/MLXLLM/Models/DeepseekV4Attention.swift:234` and `:235`, and both say that `woA` and `woB` hold no documentation comment. Three measured facts put them outside the change:
+
+    - `git blame` gives commit `54e4770` for both lines, which is the round 1 commit and not `cb5113c`.
+    - `git show cb5113c --unified=0` touches new-file lines 30-35, 101, 246-267, 407-419, 423-425 and 429-431. Lines 234 and 235 are in no hunk. `git show cb5113c | grep -c "woA\|woB"` gives 0.
+    - Five neighbour declarations hold the same condition and the engine did not name them: `wqA` at 231, `wqB` at 232, `wkv` at 233, `qNorm` at 236 and `kvNorm` at 237. The findings also call the two properties public. The class is internal, thus both properties are internal.
+
+    The round 2 direction releases a style finding on a line this commit did not write. The findings are recorded here and are not silently dropped.
+
+    ### The five checks of round 2, each measured
+
+    **1. The removal of the stored `dim` changed no behaviour.** `DeepseekV4RoPE.init` still takes `dim:` and hands it to `DeepseekV4Math.yarnInvFreq`. A grep of `Libraries` and `Tests` found no reader of the property. The only `.dim` hits are `x.dim(0)`, `x.dim(1)`, `output.dim(0)`, `output.dim(1)` and `allKeys.dim(_:)`, which are the `MLXArray` method and not the removed property.
+
+    **2. The named axis tables give the same permutations, element by element.**
+
+    | Table | Before `cb5113c` | After, with the names put in | Equal |
+    |---|---|---|---|
+    | `headMajor` | `[0, 2, 1, 3]` | `BatchMajorAxis.batch(0), .head(2), .token(1), .width(3)` = `[0, 2, 1, 3]` | yes |
+    | `groupMajor` | `[2, 0, 1, 3]` | `BatchMajorAxis.head(2), .batch(0), .token(1), .width(3)` = `[2, 0, 1, 3]` | yes |
+    | `groupMinor` | `[1, 2, 0, 3]` | `GroupMajorAxis.batch(1), .token(2), .group(0), .width(3)` = `[1, 2, 0, 3]` | yes |
+
+    No permutation moved. No tensor takes a different transpose.
+
+    **3. Mutation G still kills the same 3 tests.** The output transpose at the flatten step was set to the identity `[0, 1, 2, 3]`. Three tests failed: `prefillMatchesThePythonReference`, `attentionSinkChangesTheOutput` and `compressedLayerReadsTheCompressRopeTheta`. That is the same 3 the record names, thus the refactor did not soften the tests. The mutation was reverted and `git status` on `Libraries`, `Tests` and `Package.swift` is empty.
+
+    **4. The suite is green.** `swift build` is clean. Full `swift test` gives 764 tests in 94 suites, zero failures: 395 in 29 suites, 0 in 0, 80 in 16, 282 in 44, and 7 in 5.
+
+    **5. The three corrections are accurate. Each was measured again.**
+
+    - **Mutation E fails 2 tests, not 1.** The cache update return was dropped and the block's own tensor was fed to SDPA. `decodeStepMatchesThePythonReference` and `attentionReadsTheArraysTheCacheReturned` both failed. The mutation was reverted.
+    - **The `mode:` motive.** The `quantization` block of `Tests/MLXLMTests/Resources/DeepSeek-V4-Flash-4bit-config.json` holds 644 keys, of which 641 name a mode: 512 affine and 129 mxfp4. There are 381 `attn.*` entries and all 381 are affine, thus the count of mxfp4 `attn.*` tensors is 0. Every mxfp4 key is an FFN expert tensor. An omission of `mode:` thus gives the same numbers on this checkpoint. The change stays right, because the Python passes `mode=self.wo_a.mode` and an attention tensor in another mode would give the wrong numbers.
+    - **The limit of `parameterKeysMatchTheCheckpoint`.** `q_norm`, `kv_norm` and `attn_sink` give 0 entries in the `quantization` block. The block names quantized tensors only, thus these three keys cannot be confirmed from it.
+  timestamp: 2026-08-11T04:34:12.115144+00:00
+- actor: claude-code
+  id: 01kzqhk97q9bng028gnhv30hqd
+  text: |
+    ### review — clean
+    - evidence: scope `cb5113c~1..cb5113c`. Engine attempted 9 files; 2 findings, both at `Libraries/MLXLLM/Models/DeepseekV4Attention.swift:234` and `:235`, both outside this commit's diff (`git blame` gives `54e4770`; `git show cb5113c | grep -c "woA\|woB"` gives 0). Zero new findings inside the diff. All 112 prior findings are checked. `headMajor`, `groupMajor` and `groupMinor` give `[0,2,1,3]`, `[2,0,1,3]` and `[1,2,0,3]`, the same as the literals they replaced. Mutation G fails the same 3 tests; reverted, tree clean. Mutation E fails 2 tests; reverted, tree clean. 0 mxfp4 `attn.*` tensors of 381; `q_norm`, `kv_norm` and `attn_sink` give 0 entries in the `quantization` block. Full `swift test` 764 tests in 94 suites, 0 failures.
+    - next: none. Task moved to `done`.
+  timestamp: 2026-08-11T04:34:23.095325+00:00
 depends_on:
 - 01KZGMQCH9PFY25Y3QXP34CRP6
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: e280
 title: 'Port DeepseekV4 attention: partial RoPE, attn_sink, inverse-RoPE output, grouped low-rank O'
 ---
 ## What
