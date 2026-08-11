@@ -873,3 +873,162 @@ private let sinkQuantizationTolerance: Float = 0.02
     let sinkEffect = zip(withSink, withoutSink).map { abs($0 - $1) }.max() ?? 0
     #expect(sinkEffect > sinkQuantizationTolerance, "the sink must change the answer")
 }
+
+// MARK: - Masked positions on the quantized path
+
+/// The number of tokens the masked-fill tests read. Two tokens let a causal
+/// mask hold the second key back from the first query.
+private let maskedFillTokenCount = 2
+
+/// The head width the masked-fill tests read. A quantized cache needs a head
+/// width divisible by one of the supported group sizes.
+private let maskedFillHeadDim = 64
+
+/// The bit width the masked-fill tests quantize with.
+private let maskedFillBits = 8
+
+/// The group size the masked-fill tests quantize with.
+private let maskedFillGroupSize = 64
+
+/// The larger element of the key at the open position. It gives that position
+/// a small score, thus a fill near zero would win a large part of the weight.
+private let maskedFillOpenKeyPeak: Float = 0.5
+
+/// The larger element of the key at the masked position. It gives that
+/// position a score far above the open one, thus only the mask holds it back.
+private let maskedFillMaskedKeyPeak: Float = 10
+
+/// The two elements of the value at the open position. The first element is
+/// zero, thus the first element of the answer carries no weight from here.
+private let maskedFillOpenValue: (low: Float, high: Float) = (0, 1)
+
+/// The two elements of the value at the masked position. The first element is
+/// one, thus the first element of the answer is the weight this position kept.
+private let maskedFillMaskedValue: (low: Float, high: Float) = (1, 2)
+
+/// The largest weight a masked position may keep after the softmax.
+private let maskedFillWeightLimit: Float = 1e-6
+
+/// The smallest weight the large key must win when no mask holds it back.
+private let maskedFillOpenWeightFloor: Float = 0.99
+
+/// The mask forms that `quantizedScaledDotProductAttention` fills by itself.
+enum MaskedFillCase: String, CaseIterable, Sendable {
+    case causal
+    case boolArray
+}
+
+/// Build one key or value row, the first half `low` and the second half `high`.
+///
+/// Two distinct elements keep the affine quantization exact: `low` and `high`
+/// sit on the ends of the eight-bit grid, thus the round trip loses nothing.
+private func maskedFillRow(low: Float, high: Float) -> [Float] {
+    let half = maskedFillHeadDim / 2
+    return [Float](repeating: low, count: half)
+        + [Float](repeating: high, count: maskedFillHeadDim - half)
+}
+
+/// The queries, keys and values the masked-fill tests read.
+///
+/// Every query element is one, thus the score of a key is the scaled sum of
+/// its elements. The key at the last position is far larger than the key at
+/// the first, thus it wins nearly all of the weight unless a mask stops it.
+private struct MaskedFillFixture {
+    let queries: MLXArray
+    let keys: MLXArray
+    let values: MLXArray
+    let scale: Float
+
+    init() {
+        let shape = [1, 1, maskedFillTokenCount, maskedFillHeadDim]
+        queries = MLXArray(
+            [Float](repeating: 1, count: maskedFillTokenCount * maskedFillHeadDim)
+        ).reshaped(shape)
+        keys = MLXArray(
+            maskedFillRow(low: 0, high: maskedFillOpenKeyPeak)
+                + maskedFillRow(low: 0, high: maskedFillMaskedKeyPeak)
+        ).reshaped(shape)
+        values = MLXArray(
+            maskedFillRow(low: maskedFillOpenValue.low, high: maskedFillOpenValue.high)
+                + maskedFillRow(low: maskedFillMaskedValue.low, high: maskedFillMaskedValue.high)
+        ).reshaped(shape)
+        scale = 1 / sqrt(Float(maskedFillHeadDim))
+    }
+
+    /// The answer of the quantized path for the given mask.
+    func attend(mask: MLXFast.ScaledDotProductAttentionMaskMode) -> MLXArray {
+        quantizedScaledDotProductAttention(
+            queries: queries,
+            quantizedKeys: quantized(keys, groupSize: maskedFillGroupSize, bits: maskedFillBits),
+            quantizedValues: quantized(
+                values, groupSize: maskedFillGroupSize, bits: maskedFillBits),
+            scale: scale,
+            mask: mask,
+            groupSize: maskedFillGroupSize,
+            bits: maskedFillBits
+        )
+    }
+
+    /// The weight the first query gave to the last key.
+    ///
+    /// The first element of the value at the open position is zero and the
+    /// first element of the value at the last position is one, thus the first
+    /// element of the answer is that weight and nothing else.
+    func weightOfLastKey(mask: MLXFast.ScaledDotProductAttentionMaskMode) -> Float {
+        attend(mask: mask)[0, 0, 0, 0].item(Float.self)
+    }
+}
+
+/// The mask mode of the given case. Every case holds the last key back from
+/// the first query, thus the three cases must give the same answer.
+private func maskedFillMode(for maskedFillCase: MaskedFillCase)
+    -> MLXFast.ScaledDotProductAttentionMaskMode
+{
+    let causalMask = createCausalMask(n: maskedFillTokenCount, offset: 0)
+    switch maskedFillCase {
+    case .causal: return .causal
+    case .boolArray: return .array(causalMask)
+    }
+}
+
+/// A masked position must lose all of its weight, even when its key is large
+/// enough to win every open position.
+@Test(arguments: MaskedFillCase.allCases)
+func quantizedAttentionGivesAMaskedPositionNoWeight(maskedFillCase: MaskedFillCase) {
+    let weight = MaskedFillFixture().weightOfLastKey(mask: maskedFillMode(for: maskedFillCase))
+    #expect(
+        weight < maskedFillWeightLimit,
+        "masked weight for \(maskedFillCase.rawValue): got \(weight)")
+}
+
+/// The deprecated list form of the mask must hold a masked position back the
+/// same way. This test carries the same deprecation as the mask mode it reads,
+/// thus it builds without a warning.
+@available(*, deprecated, message: "reads the deprecated .arrays mask mode")
+@Test func quantizedAttentionGivesAMaskedPositionNoWeightWithAListMask() {
+    let causalMask = createCausalMask(n: maskedFillTokenCount, offset: 0)
+    let weight = MaskedFillFixture().weightOfLastKey(mask: .arrays([causalMask]))
+    #expect(weight < maskedFillWeightLimit, "masked weight for a list mask: got \(weight)")
+}
+
+/// The large key wins nearly all of the weight when no mask holds it back,
+/// thus the test above measures the mask and not a small key.
+@Test func quantizedAttentionWithoutAMaskFollowsTheLargeKey() {
+    let weight = MaskedFillFixture().weightOfLastKey(mask: .none)
+    #expect(
+        weight > maskedFillOpenWeightFloor,
+        "unmasked weight of the large key: got \(weight)")
+}
+
+/// A query whose positions are all masked must still give a finite answer.
+///
+/// The fill is the most negative finite number of the score dtype, thus the
+/// softmax of a row that holds only fill values gives even weights. A fill of
+/// `-infinity` would give NaN here.
+@Test func quantizedAttentionKeepsAFullyMaskedRowFinite() {
+    let closedMask = (MLXArray(0 ..< Int32(maskedFillTokenCount)) .< Int32(0))
+        .reshaped([1, maskedFillTokenCount])
+    let answer = MaskedFillFixture().attend(mask: .array(closedMask))
+    let elements = answer.asType(.float32).asArray(Float.self)
+    #expect(elements.allSatisfy { $0.isFinite }, "a fully masked row must stay finite")
+}

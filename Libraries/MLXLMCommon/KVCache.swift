@@ -2027,7 +2027,12 @@ public func quantizedScaledDotProductAttention(
         mode: mode
     )
 
-    // Apply mask
+    // Apply mask. A masked position takes the most negative finite number of
+    // the score dtype -- the fill mlx itself uses on the path that is not
+    // quantized -- thus the softmax drives that position to zero. A finite
+    // number, and not `-infinity`, keeps a row whose positions are all masked
+    // from giving NaN.
+    let maskedFill = MLXArray.maskFill(for: scores.dtype)
     switch mask {
     case .causal:
         let (qL, kL) = (scores.dim(-2), scores.dim(-1))
@@ -2035,11 +2040,11 @@ public func quantizedScaledDotProductAttention(
         let kIndices = MLXArray(0 ..< kL)
         let causalMask = greaterEqual(
             expandedDimensions(qIndices, axis: -1), expandedDimensions(kIndices, axis: -2))
-        scores = MLX.where(causalMask, scores, MLXArray(Float.leastNormalMagnitude))
+        scores = MLX.where(causalMask, scores, maskedFill)
 
     case .array(let maskArray):
         if maskArray.dtype == .bool {
-            scores = MLX.where(maskArray, scores, MLXArray(Float.leastNormalMagnitude))
+            scores = MLX.where(maskArray, scores, maskedFill)
         } else {
             scores = scores + maskArray
         }
@@ -2048,7 +2053,7 @@ public func quantizedScaledDotProductAttention(
         // Handle multiple mask arrays - just use the first one for simplicity
         if let maskArray = maskArrays.first {
             if maskArray.dtype == .bool {
-                scores = MLX.where(maskArray, scores, MLXArray(Float.leastNormalMagnitude))
+                scores = MLX.where(maskArray, scores, maskedFill)
             } else {
                 scores = scores + maskArray
             }
