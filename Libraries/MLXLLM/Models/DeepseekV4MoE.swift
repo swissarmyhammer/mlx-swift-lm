@@ -39,12 +39,18 @@
 //     declared both could load no real checkpoint. Each parameter below is
 //     therefore an `Optional`, and a layer builds the one it holds.
 //
-// One divergence between the references is open. Both Swift copies give
-// `swiglu_limit` to the shared expert. The DeepSeek-V4 Python reference
-// (Thump604/mlx-lm @ deepseek-v4-support-fixes, mlx_lm/models/deepseek_v4.py,
-// `DeepseekV4MoE.__init__`) gives `swiglu_limit=0.0` there, which turns the
-// clamp off. This file follows the Swift copies, because they are the copies
-// it ports. Task `kp1pnj4` decides the point against the real checkpoint.
+// The shared expert READS the SwiGLU clamp. Task `^kp1pnj4` decided this
+// against the training-time reference of the checkpoint. The checkpoint
+// `deepseek-ai/DeepSeek-V4-Flash` publishes no modeling file of its own, and
+// its `config.json` (`"model_type": "deepseek_v4"`, no `auto_map`) binds to
+// the native `deepseek_v4` model of Hugging Face `transformers`. There,
+// `DeepseekV4SparseMoeBlock.__init__` builds the shared expert as
+// `DeepseekV4MLP(config)`, and that MLP clamps its gate and its up
+// projection with `config.swiglu_limit`. The `swiglu_limit=0.0` that
+// Thump604/mlx-lm @ deepseek-v4-support-fixes (`DeepseekV4MoE.__init__`)
+// gives the shared expert diverges from that reference. The test
+// `DeepseekV4MoETests/theSharedExpertReadsTheClampOfTheCheckpoint()` pins
+// this decision.
 
 import MLX
 import MLXLMCommon

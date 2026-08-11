@@ -213,10 +213,35 @@ comments:
       card. Card progress is now 1.0, 0 items open.
     - next: `/review`. The card can close.
   timestamp: 2026-08-11T18:06:41.237227+00:00
+- actor: claude-code
+  id: 01kzs07k9hwn49dsnc5tt7z47v
+  text: |
+    ### review — clean
+
+    - scope: `HEAD~1..HEAD`, commit `e3b492a`. Board bookkeeping only. `git status --porcelain -- '*.swift'` is empty, and `git show --stat HEAD` lists 8 `.kanban` files and no Swift file.
+    - engine: 0 findings, 0 confirmed, 0 refuted, 0 files attempted. No code file is in scope, thus there is nothing for a validator to read. The encoder code got its engine pass and its mutation proof in the round before, commit `086a5ec`.
+    - relocation check, read from the destination cards:
+      1. `Chat.swift` / `Tokenizer.swift` / `ChatSession.swift` wiring is on `^mjrzkgm`, section `## Added Work`. It names the three files and the type `DeepSeekV4ChatEncoder`, holds three unchecked items, and a comment records the source card and the wait circle that caused the move.
+      2. The detokenizer round trip and the `eos_token_id` tests are on `^zg3d8wv`, scoped to `IntegrationTesting/IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests.swift`. The card gives the eight token ids and five assertions.
+      3. The `DSV4Minimal.jinja` question is on `^f0ymw6b`, in `todo`. It states the two rules Jinja cannot express and gives a person the choice A or B.
+      4. This card still shows all four items, checked, each naming its destination. No item was deleted.
+    - next: none. The card is done.
+  timestamp: 2026-08-11T18:09:23.249813+00:00
+- actor: claude-code
+  id: 01kzs08e3gaq5wj4c674dy4ka3
+  text: |
+    ### finish iteration 2 — clean
+    - implement: changed — board only, 0 Swift files
+    - commit: e3b492a
+    - review: clean — all four relocations hold, card moved to done
+    - **The orchestrator made this call.** The card waited on `^mjrzkgm`, which waits on `^35aw7vy`, which waits on this card. That circle stopped every task behind it. Each open item moved to the card that can do it. No item was dropped, and the description of this card still shows all four with their destinations.
+    - destinations: wiring → `^mjrzkgm`; detokenizer round trip and `eos_token_id` test → `^zg3d8wv` (IntegrationTesting); `DSV4Minimal.jinja` question → `^f0ymw6b` (todo, waits for a person)
+    - The review read each destination card and confirmed the text is actionable and not a stub.
+  timestamp: 2026-08-11T18:09:50.704711+00:00
 depends_on:
 - 01KZGMN4FQKCVPAYJDJJHK0APK
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: e880
 title: Port DeepseekV4ChatEncoder core rendering (no chat_template ships with DSV4)
 ---
 ## What

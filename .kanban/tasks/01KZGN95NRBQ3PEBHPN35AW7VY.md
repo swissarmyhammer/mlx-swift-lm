@@ -135,6 +135,36 @@ comments:
       carries a tool answer as a `String`.
     - next: `/review`. The card stays in `doing`.
   timestamp: 2026-08-11T18:43:05.766113+00:00
+- actor: claude-code
+  id: 01kzs27syc8dqx13c9jmag4cxb
+  text: |
+    ### finish iteration 1 — changed, review NOT yet run
+    - implement: changed — 3 files; DeepseekV4ChatEncoder.swift extended, new PythonStyleJSON.swift, new DeepseekV4ToolEncodingTests.swift (11 tests)
+    - test: green — full swift test, 0 failed test cases, 2 pre-existing skips
+    - commit: bd9e201
+    - review: NOT RUN. The orchestrator reached its context limit after the commit.
+
+    **This card stays in `doing`. It is NOT done.** The next agent must run
+    `/review 01KZGN95NRBQ3PEBHPN35AW7VY HEAD~1..HEAD` before it can move.
+
+    Points the review must examine:
+
+    1. Both published tool fixtures render byte for byte — `test_output_1.txt` (2281
+       characters) and `test_output_3.txt` (3021 characters), from
+       `deepseek-ai/DeepSeek-V4-Flash`. Confirm every expected string in the test
+       file is a hand-written literal and NOT a value the encoder made.
+    2. `PythonStyleJSON.swift` is new and was not on the card. It exists because
+       `JSONSerialization` cannot make the published bytes: it gives an unordered
+       dictionary, and it writes `http:\/\/json-schema.org` where fixture 3 holds
+       `http://json-schema.org`. Confirm that reasoning holds.
+    3. 18 mutations, 18 dead. Re-apply one — ASCII `|` in place of U+FF5C — and
+       confirm `testDSMLTokenUsesFullwidthVerticalLine` dies.
+    4. Two divergences from the Python are recorded on the card and in the file
+       header. Arguments that parse to a non-object take the one-parameter path,
+       where the Python raises. A `tool_result` whose content is a LIST of blocks is
+       not ported, because this repository carries a tool answer as a `String`.
+       Confirm both are recorded and reasonable.
+  timestamp: 2026-08-11T18:44:27.212732+00:00
 depends_on:
 - 01KZGMWJPM4016GPFFVGBSAQC2
 position_column: doing

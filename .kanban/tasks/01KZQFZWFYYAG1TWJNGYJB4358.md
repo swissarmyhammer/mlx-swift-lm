@@ -32,8 +32,53 @@ comments:
     - note: the deprecated `.arrays` mask mode cannot be built without a deprecation warning, thus its test carries `@available(*, deprecated)`. The build is warning-free.
     - next: `/review`
   timestamp: 2026-08-11T16:29:40.541750+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01kzrvdz0q9tjxgwgswfczp7pz
+  text: |-
+    ### review — clean
+
+    - scope: `review sha HEAD~1..HEAD` (commit 2a6dd58), branch foundationmodels-fixes
+    - engine counts: 139 findings, 151 confirmed, 12 refuted, 8 validators attempted, 0 failed, 0 skipped files
+    - in-scope findings: 0
+
+    **Lines this commit changed** in `Libraries/MLXLMCommon/KVCache.swift`: 2030-2035 (comment and the hoisted `let maskedFill = MLXArray.maskFill(for: scores.dtype)`), 2043, 2047, 2056. No engine finding falls on these lines. The two findings nearest the change are `KVCache.swift:2038` and `KVCache.swift:2042`, both "Magic numbers should be replaced by named constants" against `scores.dim(-2)` and `axis: -2`. Both lines are unchanged by this commit.
+
+    **Out of scope — 139 findings, all on lines this commit did not touch.** Reason for each: the line is unchanged by commit 2a6dd58. No action taken.
+
+    - Missing doc comments on public/open declarations — 44 findings: lines 11, 12, 108, 112, 114, 116, 119, 184, 187, 191, 200, 209, 212, 214, 218, 220, 222, 242, 312, 371, 383, 520, 536, 777, 833, 834, 835, 837, 1123, 1128, 1218, 1305, 1314, 1423, 1438, 1987.
+    - Magic numbers should be replaced by named constants — 89 findings: lines 397 through 2153, including 1999, 2000, 2012, 2013, 2014, 2017, 2018, 2019, 2038, 2042, 2092, 2093, 2151, 2152, 2153.
+    - `KVCacheError` is internal but is thrown from public functions — line 1574.
+    - `var.instance message` is assignOnlyProperty — line 1575.
+    - Cognitive complexity 17 in `unflattenArrays` — line 1809.
+    - Cognitive complexity 26 in `unflattenMetadata` — line 1849.
+    - Scheme switch statement should be a dictionary — line 2090.
+
+    **Engine limits.** The engine read one file only: `Libraries/MLXLMCommon/KVCache.swift`. All 139 findings are against that file. The 159 added lines of `Tests/MLXLMTests/KVCacheTests.swift` got no validator, because the engine excludes test files. The `.kanban/*.md` and `.kanban/*.jsonl` files in the commit got no validator, because no validator globs those types. `attempted: 8` counts validators, not files.
+
+    **Independent checks — all three pass.**
+
+    1. `MLXArray.maskFill(for:)` truly gives `finfo(dtype).min`. Definition at `.build/checkouts/mlx-swift/Source/MLX/MLXArray+maskFill.swift:8`, body `return -dtype.greatestFiniteMagnitudeArray`. In `DType.swift`, `FInfo.min` is itself defined as `-max`, thus the two agree by construction. The value is built in the target dtype, thus float16 and bfloat16 get their own narrower minimum, not the float32 value. The checkout is clean and the code is upstream (mlx-swift commit bb0399d). The premise of the fix holds.
+    2. All three mask modes changed, and the non-bool branches did not. `.causal` at 2043, `.array` bool at 2047, `.arrays` bool at 2056 all read the hoisted `maskedFill`. The `else` branches at 2049 and 2058 keep `scores = scores + maskArray` unchanged. `KVCache.swift` shows 13 changed lines only; no other cache behaviour changed.
+    3. Mutation proof. `MLXArray(Float.leastNormalMagnitude)` put back at lines 2043, 2047, 2056 makes three tests fail at exactly 0.11920288: `quantizedAttentionGivesAMaskedPositionNoWeight(.causal)`, `quantizedAttentionGivesAMaskedPositionNoWeight(.boolArray)`, and `quantizedAttentionGivesAMaskedPositionNoWeightWithAListMask()`. After `git checkout`, `git status --porcelain -- '*.swift'` gives no output, and `swift test --filter KVCacheTests` passes 39 tests plus 1.
+
+    - next: none. The change is confined to the masked-fill defect. Task moves to done.
+  timestamp: 2026-08-11T16:45:28.983707+00:00
+- actor: claude-code
+  id: 01kzrvf13116f30xhp0627jhbg
+  text: |
+    ### finish iteration 1 — clean
+    - implement: changed — KVCache.swift (13 lines) and KVCacheTests.swift (+159); all three mask sites now share `MLXArray.maskFill(for: scores.dtype)`
+    - test: green — swift test full suite, 822 tests in 98 suites, 0 failures
+    - commit: 2a6dd58
+    - review: clean — 0 in-scope findings, card moved to done
+    - measurement: a masked position held **0.11920288** of the softmax weight before, and **0.0** after. The control with no mask gives 1.0, thus the fixture measures the mask and not a small key.
+    - note: `-Float.infinity` is WRONG here and the test proves it. That mutant kills `quantizedAttentionKeepsAFullyMaskedRowFinite` with NaN. mlx uses the finite dtype minimum for the same reason.
+    - note: the review confirmed the premise from the vendored source. `MLXArray+maskFill.swift:8` gives `-dtype.greatestFiniteMagnitudeArray`, and `FInfo.min` is `-max`, thus the two agree. The array takes the target dtype, thus float16 and bfloat16 each get their own narrower minimum.
+    - note: 139 engine findings all landed on untouched lines of this shared file. Each one is recorded as out of scope. This matches the 108 out-of-scope findings the same file gave on `^ag7ant0`.
+    - follow-on: `Libraries/MLXLLM/Models/Gemma3nText.swift` holds the same defect in its sliding-window mask. Filed as `^9spp7b9`. Line 834 of that file uses the same constant as a real epsilon and is correct.
+  timestamp: 2026-08-11T16:46:03.873222+00:00
+position_column: done
+position_ordinal: e780
 title: Fix masked-position fill value in quantized KV cache attention
 ---
 ## What

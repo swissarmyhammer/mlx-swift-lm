@@ -487,6 +487,49 @@ struct DeepseekV4MoETests {
         }
     }
 
+    // MARK: - The shared expert
+
+    /// A mixture-of-experts layer whose routed path answers zero, and whose
+    /// shared expert answers `clampedSwiGLU(gate: x[0], up: x[1])` in its
+    /// first output. The routed `down_proj` holds zeros, thus the layer
+    /// output IS the shared-expert output.
+    private static func sharedExpertOnlyLayer() throws -> DeepseekV4MoE {
+        let configuration = try configuration(hiddenSize: 2, expertWidth: 1)
+        let moe = DeepseekV4MoE(configuration: configuration, layer: topKLayer)
+        try moe.update(
+            parameters: ModuleParameters.unflattened([
+                ("gate.weight", zeros([routedExpertCount, 2])),
+                ("gate.bias", zeros([routedExpertCount])),
+                ("switch_mlp.gate_proj.weight", zeros([routedExpertCount, 1, 2])),
+                ("switch_mlp.up_proj.weight", zeros([routedExpertCount, 1, 2])),
+                ("switch_mlp.down_proj.weight", zeros([routedExpertCount, 2, 1])),
+                ("shared_experts.gate_proj.weight", array([1, 0], [1, 2])),
+                ("shared_experts.up_proj.weight", array([0, 1], [1, 2])),
+                ("shared_experts.down_proj.weight", array([1, 0], [2, 1])),
+            ]),
+            verify: [.all])
+        return moe
+    }
+
+    @Test
+    func theSharedExpertReadsTheClampOfTheCheckpoint() throws {
+        // The training-time reference of the checkpoint decides this point.
+        // The checkpoint binds to the `deepseek_v4` model of Hugging Face
+        // `transformers`, whose `DeepseekV4SparseMoeBlock.__init__` builds
+        // the shared expert as `DeepseekV4MLP(config)`, and that MLP clamps
+        // with `config.swiglu_limit`. A shared expert built with a limit of
+        // zero would answer silu(50), which is almost 50, in place of
+        // silu(10) here. Task `^kp1pnj4` records the decision.
+        let moe = try Self.sharedExpertOnlyLayer()
+        let tokens = MLXArray([Int32(0)], [1, 1])
+
+        let saturated = moe(Self.array([50, 1], [1, 1, 2]), inputIds: tokens)
+        let atTheLimit = moe(Self.array([10, 1], [1, 1, 2]), inputIds: tokens)
+
+        #expect(floats(saturated) == floats(atTheLimit))
+        expectClose(saturated[0, 0, 0], [9.999546021313], "a shared gate over the limit")
+    }
+
     // MARK: - The whole layer
 
     /// Builds a whole mixture-of-experts layer with repeatable random
