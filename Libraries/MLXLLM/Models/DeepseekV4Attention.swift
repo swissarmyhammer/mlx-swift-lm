@@ -27,8 +27,12 @@
 //     `YarnRoPE._freqs` does in Libraries/MLXLMCommon/RoPEUtils.swift.
 //  3. The quantization mode of the grouped output projection. The file
 //     above calls `quantizedMatmul` without a `mode:`, thus it reads the
-//     affine mode for every checkpoint. The Python passes
-//     `mode=self.wo_a.mode`. This file passes the mode of the layer.
+//     affine mode whatever mode the checkpoint gives. The Python passes
+//     `mode=self.wo_a.mode`. Every `attn.*` tensor of the published
+//     DeepSeek-V4 checkpoint is affine, thus an omission gives the same
+//     numbers on that checkpoint. An attention tensor in another mode
+//     would give the wrong numbers. This file passes the mode of the
+//     layer.
 //
 // The compressor and the indexer of a layer whose compress ratio is more
 // than 0 are not in this file. They are their own work.
@@ -52,9 +56,6 @@ import MLXNN
 /// block: forward on the queries, forward on the keys, and backward on the
 /// attention output.
 class DeepseekV4RoPE: Module {
-
-    /// The number of trailing head dimensions this table turns.
-    let dim: Int
 
     /// The inverse frequency of each rotary pair, in float32.
     ///
@@ -98,7 +99,6 @@ class DeepseekV4RoPE: Module {
         betaFast: Float,
         betaSlow: Float
     ) {
-        self.dim = dim
         self._inverseFrequency = DeepseekV4Math.yarnInvFreq(
             dim: dim,
             base: base,
@@ -243,10 +243,28 @@ class DeepseekV4Attention: Module {
     /// query head, thus `wkv` gives one head of `head_dim` numbers.
     private static let latentHeadCount = 1
 
-    /// The axis of a `(batch, tokens, heads, width)` tensor that holds the
-    /// heads, and of a `(batch, heads, tokens, width)` tensor that holds the
-    /// tokens. Swapping the two is what `transposed(0, 2, 1, 3)` does.
-    private static let headMajor = [0, 2, 1, 3]
+    /// The axis positions of a `(batch, tokens, heads, width)` tensor.
+    ///
+    /// The grouped output projection reads the same layout, with one head
+    /// group on the head axis and the numbers of one group on the width
+    /// axis.
+    private enum BatchMajorAxis {
+        /// The axis that holds the batch.
+        static let batch = 0
+        /// The axis that holds the tokens.
+        static let token = 1
+        /// The axis that holds the heads, or the head groups.
+        static let head = 2
+        /// The axis that holds the numbers of one head, or of one group.
+        static let width = 3
+    }
+
+    /// The axis order that swaps the head axis and the token axis of a
+    /// `(batch, tokens, heads, width)` tensor. The swap is its own inverse,
+    /// thus the same order takes the result back again.
+    private static let headMajor = [
+        BatchMajorAxis.batch, BatchMajorAxis.head, BatchMajorAxis.token, BatchMajorAxis.width,
+    ]
 
     /// Builds one attention layer.
     ///
@@ -386,14 +404,31 @@ class DeepseekV4Attention: Module {
         ).reshaped(batch, length, outputGroups * outputLoraRank)
     }
 
+    /// The axis positions of a `(groups, batch, tokens, width)` tensor, the
+    /// layout one batched quantized matrix multiply reads.
+    private enum GroupMajorAxis {
+        /// The axis that holds the head groups.
+        static let group = 0
+        /// The axis that holds the batch.
+        static let batch = 1
+        /// The axis that holds the tokens.
+        static let token = 2
+        /// The axis that holds the numbers of one group.
+        static let width = 3
+    }
+
     /// The axis order that puts the group axis of a
     /// `(batch, tokens, groups, features)` tensor first, so that one batched
     /// quantized matrix multiply reads every group at once.
-    private static let groupMajor = [2, 0, 1, 3]
+    private static let groupMajor = [
+        BatchMajorAxis.head, BatchMajorAxis.batch, BatchMajorAxis.token, BatchMajorAxis.width,
+    ]
 
     /// The axis order that takes a `(groups, batch, tokens, rank)` result
     /// back to `(batch, tokens, groups, rank)`.
-    private static let groupMinor = [1, 2, 0, 3]
+    private static let groupMinor = [
+        GroupMajorAxis.batch, GroupMajorAxis.token, GroupMajorAxis.group, GroupMajorAxis.width,
+    ]
 
     /// Runs the grouped projection against a packed `wo_a`.
     ///
