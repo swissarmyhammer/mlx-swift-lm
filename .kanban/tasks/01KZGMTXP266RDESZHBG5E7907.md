@@ -354,11 +354,104 @@ comments:
     - evidence: 1 file — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLLM/Models/DeepseekV4MoE.swift (+36 -17). Finding `:117` became `private enum RoutedAxis` (`width`, `row`, `route`) plus `expertScoreAxis`, `widthAxis` and the local `lastSelectedPosition`; `expertAxis` is gone. Finding `:203` became a deletion of `routedExpertCount`, its assignment and the doc line that named it. swiftlint `no_magic_numbers` on the file: 2 violations before, 0 after. `swift test` 409+0+80+282+7, 0 failures; `swift test --filter DeepseekV4` 50/50. 8 mutations, 7 killed, 1 equivalent mutant proved equivalent by a throwaway test on `expandedDimensions` axis order.
     - next: /review
   timestamp: 2026-08-11T11:58:18.794851+00:00
+- actor: claude-code
+  id: 01kzrc3z8nkw6rvfgy0v4gbh8r
+  text: |
+    ### review — clean
+
+    - evidence: `review sha HEAD~1..HEAD` (commit `29613e4`) gives 0 findings, 0 confirmed, 0 refuted. Both findings of the pass of 2026-08-11 06:34 are marked `- [x]`.
+    - next: none. The card moves to done.
+
+    #### Which files the engine read
+
+    The range holds three files:
+
+    - `Libraries/MLXLLM/Models/DeepseekV4MoE.swift` — the one file a validator can read.
+    - `.kanban/tasks/01KZGMTXP266RDESZHBG5E7907.md`
+    - `.kanban/tasks/01KZGMTXP266RDESZHBG5E7907.jsonl`
+
+    No validator has a glob for `.md` or for `.jsonl`. Thus no validator read the last
+    two files. This commit adds no test file, thus the exclusion of test files removed
+    nothing on this pass.
+
+    Two limits of the engine came out of this pass. Do not trust these two fields:
+
+    - The `attempted` field gives 8 for this range of 3 files, 8 for the range of the
+      prior pass of 8 files, and 8 for a probe of 1 file with 2 validators. The number
+      does not follow the count of files. Do not read `attempted` as a count of files.
+    - The `validators` filter did not hold. A probe that asked for `duplication` and
+      `complexity` gave back a missing-documentation finding, which is the subject of a
+      different validator.
+
+    #### Spot-check 1 — the surviving mutant is a true equivalent mutant
+
+    The claim of the implementer is correct. The review did not accept it. It read the
+    source.
+
+    `MLX.expandedDimensions(x, axes:)` calls `mlx_expand_dims_axes`, which calls
+    `expand_dims` in `.build/checkouts/mlx-swift/Source/Cmlx/mlx/mlx/ops.cpp`. That
+    function makes each axis positive against the rank of the output, puts the axes in a
+    `std::set`, and then sends `sorted_axes` to the implementation. The order that the
+    caller writes is not kept.
+
+    Thus `axes: [-2, -3]` and `axes: [-3, -2]` build the same tensor. `routeAxes` has one
+    user only, the `expandedDimensions` call at line 158. No test can see the difference,
+    because there is no difference. This is not a hole in the tests.
+
+    #### Spot-check 2 — the axis values did not move
+
+    Each named constant has the same value as the literal it replaced:
+
+    - `RoutedAxis.width = -1`, `row = width - 1 = -2`, `route = row - 1 = -3`.
+    - `routeAxes = [RoutedAxis.row, RoutedAxis.route] = [-2, -3]`. The old code had
+      `[-2, -3]`. Same values, same order.
+    - The two `MLX.squeezed(outputs, axis: RoutedAxis.row)` calls give -2. The old
+      `expertAxis` was -2.
+    - `expertScoreAxis = -1` replaces the -1 of `argPartition`, of `takeAlong`, and of
+      `weights.sum`.
+    - `widthAxis = -1` replaces the -1 of `expandedDimensions(weights, axis:)`.
+
+    The names also agree with the shape that the doc comment gives,
+    `(batch, tokens, routes, rows, width)`.
+
+    No bare axis literal is left in the file. The only match of a search for one is a line
+    of prose in a comment.
+
+    #### Spot-check 3 — the clamp is still asymmetric
+
+    `DeepseekV4Math.clampedSwiGLU` in
+    `Libraries/MLXLLM/Models/DeepseekV4MathHelpers.swift:341` holds:
+
+    - `gateF32 = minimum(gateF32, limit)` — the high side only.
+    - `upF32 = clip(upF32, min: -limit, max: limit)` — both sides.
+
+    Commit `29613e4` does not touch that file. This pass gives no finding, thus no finding
+    asks for a symmetric clamp. There is no conflict with the decision of the user of
+    2026-08-10.
+
+    #### Out of scope — no action
+
+    - `Libraries/MLXLLM/Models/DeepseekV4MoE.swift:52` — a diagnostic full-file probe asked
+      for a doc comment on `gateProj`. Reason it is out of scope: commit `29613e4` does not
+      touch line 52. The first hunk of the commit starts at line 114. The review of record,
+      `review sha HEAD~1..HEAD`, gives no finding at all. This pass does not act on it.
+  timestamp: 2026-08-11T12:17:52.917517+00:00
+- actor: claude-code
+  id: 01kzrc56tkrwj4nv503p60j83k
+  text: |
+    ### finish iteration 2 — clean
+    - implement: changed — Libraries/MLXLLM/Models/DeepseekV4MoE.swift (+36 -17); enum RoutedAxis, expertScoreAxis, widthAxis replace every axis literal; routedExpertCount deleted
+    - test: green — swift test full suite, 215+13+778 tests in 95 suites, 0 failures
+    - commit: 29613e4
+    - review: clean — 0 findings, both prior findings marked done, card moved to done
+    - note: the review proved the one surviving mutant (routeAxes order) is a true equivalent mutant. mlx `expand_dims` sorts its axes into a set, thus the order of the caller has no effect.
+    - note: the review engine `attempted` field is not reliable. It gave 8 for a range of 3 files, 8 for a range of 8 files, and 8 for a probe of 1 file. The `validators` filter also did not hold.
+  timestamp: 2026-08-11T12:18:33.427500+00:00
 depends_on:
 - 01KZGMQCH9PFY25Y3QXP34CRP6
 - 01KZGMRCBJ4SPK7C26PWKV5J6F
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: e380
 title: 'Port DeepseekV4 MoE: sqrtsoftplus gate, hash routing, clamped-SwiGLU experts'
 ---
 ## What
