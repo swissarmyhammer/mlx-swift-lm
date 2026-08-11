@@ -111,13 +111,24 @@ class DeepseekV4SwitchGLU: Module {
     /// paths of this repository start to sort at the same point.
     private static let sortThreshold = 64
 
-    /// The two axes a token gains before it reaches the experts: one axis for
-    /// the routes of that token, and one axis the gathered matrix multiply
-    /// reads as a row.
-    private static let routeAxes = [-2, -3]
+    /// The axis positions of a `(batch, tokens, routes, rows, width)` tensor,
+    /// counted from the end.
+    ///
+    /// A token carries the width axis alone when it reaches this layer. It
+    /// gains two more axes before the experts read it, and it loses the row
+    /// axis again when they give their answer back.
+    private enum RoutedAxis {
+        /// The last axis, which holds the numbers of one token.
+        static let width = -1
+        /// The axis before ``width``, which the gathered matrix multiply
+        /// reads as the one row of a matrix.
+        static let row = width - 1
+        /// The axis before ``row``, which holds one route of a token.
+        static let route = row - 1
+    }
 
-    /// The axis that holds one expert of a routed stack.
-    private static let expertAxis = -2
+    /// The two axes a token gains before it reaches the experts.
+    private static let routeAxes = [RoutedAxis.row, RoutedAxis.route]
 
     /// Builds the routed experts of one layer.
     ///
@@ -147,13 +158,13 @@ class DeepseekV4SwitchGLU: Module {
         let routed = MLX.expandedDimensions(x, axes: Self.routeAxes)
         guard indices.size >= Self.sortThreshold else {
             let outputs = expertOutputs(routed, indices, sortedByExpert: false)
-            return MLX.squeezed(outputs, axis: Self.expertAxis)
+            return MLX.squeezed(outputs, axis: RoutedAxis.row)
         }
         let (sortedInput, sortedIndices, inverseOrder) = gatherSort(x: routed, indices: indices)
         let sortedOutputs = expertOutputs(sortedInput, sortedIndices, sortedByExpert: true)
         let outputs = scatterUnsort(
             x: sortedOutputs, invOrder: inverseOrder, shape: indices.shape)
-        return MLX.squeezed(outputs, axis: Self.expertAxis)
+        return MLX.squeezed(outputs, axis: RoutedAxis.row)
     }
 
     /// Reads the three projections of the selected experts.
@@ -199,9 +210,6 @@ class DeepseekV4MoEGate: Module {
     /// The number of routed experts one token reads.
     let expertsPerToken: Int
 
-    /// The number of routed experts in this layer.
-    let routedExpertCount: Int
-
     /// The factor the selected weights take.
     let routedScalingFactor: Float
 
@@ -211,7 +219,7 @@ class DeepseekV4MoEGate: Module {
     /// True when this layer routes through the hash table.
     let isHashLayer: Bool
 
-    /// The gate projection, shape `(routedExpertCount, hiddenSize)`. It is a
+    /// The gate projection, shape `(routed experts, hiddenSize)`. It is a
     /// raw parameter and not a `Linear`, because the projection runs in
     /// float32 whatever the activation dtype is.
     @ParameterInfo(key: "weight") var weight: MLXArray
@@ -235,6 +243,10 @@ class DeepseekV4MoEGate: Module {
     /// up to zero cannot divide by zero.
     private static let normalizeEpsilon: Float = 1e-20
 
+    /// The axis of a `(batch, tokens, experts)` score tensor that holds one
+    /// score for each routed expert. It is the last axis.
+    private static let expertScoreAxis = -1
+
     /// Builds the gate of one layer.
     ///
     /// - Parameters:
@@ -243,7 +255,6 @@ class DeepseekV4MoEGate: Module {
     init(configuration: DeepseekV4Configuration, layer: Int) {
         let hashLayer = configuration.isHashLayer(layer)
         self.expertsPerToken = configuration.numExpertsPerTok
-        self.routedExpertCount = configuration.nRoutedExperts
         self.routedScalingFactor = configuration.routedScalingFactor
         self.normalizesTopkProbabilities = configuration.normalizeTopkProb
         self.isHashLayer = hashLayer
@@ -282,7 +293,8 @@ class DeepseekV4MoEGate: Module {
     private func selectedExperts(scores: MLXArray, inputIds: MLXArray) -> MLXArray {
         guard isHashLayer else {
             let biased = scores + bias.asType(.float32)
-            return argPartition(-biased, kth: expertsPerToken - 1, axis: -1)[
+            let lastSelectedPosition = expertsPerToken - 1
+            return argPartition(-biased, kth: lastSelectedPosition, axis: Self.expertScoreAxis)[
                 .ellipsis, ..<expertsPerToken]
         }
         return tokenToExpert[inputIds].asType(.int32)
@@ -290,9 +302,11 @@ class DeepseekV4MoEGate: Module {
 
     /// Reads the weight of each selected expert out of the UNBIASED scores.
     private func routedWeights(gatheredFrom scores: MLXArray, at indices: MLXArray) -> MLXArray {
-        var weights = takeAlong(scores, indices, axis: -1)
+        var weights = takeAlong(scores, indices, axis: Self.expertScoreAxis)
         if normalizesTopkProbabilities {
-            weights = weights / (weights.sum(axis: -1, keepDims: true) + Self.normalizeEpsilon)
+            weights =
+                weights
+                / (weights.sum(axis: Self.expertScoreAxis, keepDims: true) + Self.normalizeEpsilon)
         }
         return weights * routedScalingFactor
     }
@@ -310,6 +324,10 @@ class DeepseekV4MoE: Module {
     @ModuleInfo(key: "switch_mlp") var switchMLP: DeepseekV4SwitchGLU
     @ModuleInfo(key: "gate") var gate: DeepseekV4MoEGate
     @ModuleInfo(key: "shared_experts") var sharedExperts: DeepseekV4MLP?
+
+    /// The axis a routed weight gains, so that one weight broadcasts against
+    /// every number of the expert output it weighs. It is the last axis.
+    private static let widthAxis = -1
 
     /// Builds one mixture-of-experts layer.
     ///
@@ -342,7 +360,8 @@ class DeepseekV4MoE: Module {
     func callAsFunction(_ x: MLXArray, inputIds: MLXArray) -> MLXArray {
         let (indices, weights) = gate(x, inputIds: inputIds)
         let weighted =
-            switchMLP(x, indices).asType(.float32) * MLX.expandedDimensions(weights, axis: -1)
+            switchMLP(x, indices).asType(.float32)
+            * MLX.expandedDimensions(weights, axis: Self.widthAxis)
         var y = DeepseekV4Math.reduceRoutedExpertsFP32(weighted)
         if let sharedExperts {
             y = y + sharedExperts(x).asType(.float32)

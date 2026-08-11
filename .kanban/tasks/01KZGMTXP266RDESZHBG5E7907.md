@@ -216,6 +216,144 @@ comments:
     - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLLM/Models/DeepseekV4MoE.swift (352 lines, new), /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Tests/MLXLMTests/DeepseekV4MoETests.swift (599 lines, new). `swift test --filter DeepseekV4MoETests` 14/14; `swift test --filter DeepseekV4` 50/50; `swift test` 409+80+282+7, 0 failures, 0 warnings. 9 of 9 mutations killed, 0 survivors. `SwitchLayers.swift` untouched. `swift-format` on the two new files changed nothing.
     - next: /review
   timestamp: 2026-08-11T11:24:20.699489+00:00
+- actor: claude-code
+  id: 01kzr9z41ymqy79dkwm9475y8h
+  text: |-
+    ### review — findings
+    - evidence: 2 findings — Libraries/MLXLLM/Models/DeepseekV4MoE.swift:117, Libraries/MLXLLM/Models/DeepseekV4MoE.swift:203. Scope `review sha HEAD~2..HEAD`; 8 files attempted, 0 skipped, 0 failed. No out-of-scope finding.
+    - verified: SwitchLayers.swift unmodified; attribution header agrees with CONTRIBUTING.md; the SwiGLU clamp is asymmetric, thus there is no conflict with the ruling of 2026-08-10.
+    - mutation spot-check: a gate that gathers biased weights kills `gateWeightsAreTheUnbiasedScoresOfTheBiasedSelection` (got 10.832555, expected 0.83255464) and `gateNormalizesAndScalesTheSelectedWeights`. Mutation reverted; 14 of 14 tests pass.
+    - next: correct the two findings in the new file, then review again.
+  timestamp: 2026-08-11T11:40:16.830246+00:00
+- actor: claude-code
+  id: 01kzra0fakz2kyn7egbvr7kj8n
+  text: |
+    ### finish iteration 1 — findings
+    - implement: changed — 2 new files, DeepseekV4MoE.swift (352 lines) and DeepseekV4MoETests.swift (599 lines, 14 tests); 9 mutations applied, 9 killed, 0 survivors
+    - test: green — swift test full suite, 215+409+282+7 tests, 0 failures, 0 warnings
+    - commit: b9c43d1 source, 698afb5 kanban
+    - review: findings — Libraries/MLXLLM/Models/DeepseekV4MoE.swift:117 (magic numbers), Libraries/MLXLLM/Models/DeepseekV4MoE.swift:203 (routedExpertCount is assign-only)
+    - note: the review independently applied the bias-vs-weight mutation and two named tests died, thus the highest-value guard is not vacuous
+  timestamp: 2026-08-11T11:41:01.139135+00:00
+- actor: claude-code
+  id: 01kzrazvsjs8t07n6x6hvmcwd3
+  text: |
+    ## The two review findings are corrected
+
+    ### Finding 1 — `DeepseekV4MoE.swift:117` — Magic numbers should be replaced by named constants
+
+    The cause is a bare numeric literal that carries meaning. I removed the cause
+    from the whole file, not from the one line.
+
+    First I measured what the rule reads. `magic-numbers-swift` is swiftlint
+    `no_magic_numbers` with `allowed_numbers: [0, 1, -1, 100]`. A probe file shows
+    that swiftlint stays silent on a literal a declaration names directly
+    (`static let sortThreshold = 64`, `static let plainNegative = -2`) and reports
+    each ELEMENT of an array literal. That is why line 117 reported twice, at
+    column 38 and column 42, and no other line reported.
+
+    `DeepseekV4SwitchGLU` now holds an axis enumeration, which is the idiom
+    `DeepseekV4Attention.swift` already uses for `BatchMajorAxis` and
+    `GroupMajorAxis`. The negative axes count from the end, thus each one states
+    its distance from the one after it, and `-1` is the only literal left:
+
+    ```swift
+    private enum RoutedAxis {
+        static let width = -1
+        static let row = width - 1
+        static let route = row - 1
+    }
+
+    private static let routeAxes = [RoutedAxis.row, RoutedAxis.route]
+    ```
+
+    `routeAxes` keeps the order `[-2, -3]` that `SwitchLayers.swift` uses.
+    `expertAxis` is gone; the two squeeze calls now read `RoutedAxis.row`, which is
+    the true name of that axis -- the gathered matrix multiply reads it as the one
+    row of a matrix, and it is not an expert axis.
+
+    Three more axis literals in the same file carried meaning, and each now has a
+    name:
+
+    - `DeepseekV4MoEGate.expertScoreAxis` replaces the three bare `-1` axes in
+      `selectedExperts` and `routedWeights`.
+    - `DeepseekV4MoE.widthAxis` replaces the bare `-1` in the routed-weight
+      broadcast.
+    - `kth: expertsPerToken - 1` is now the named local `lastSelectedPosition`.
+
+    Two numbers stay as they are, and both are inside the allow-list the rule
+    states: `unusedHashTableShape = [1, 1]`, whose own name states the meaning, and
+    `configuration.numSharedExperts > 0`, which is an emptiness test.
+
+    `swiftlint --config <the rule config> Libraries/MLXLLM/Models/DeepseekV4MoE.swift`
+    gave 2 violations before and gives 0 after.
+
+    ### Finding 2 — `DeepseekV4MoE.swift:203` — var.instance `routedExpertCount` is assignOnlyProperty
+
+    `grep -rn routedExpertCount` over the whole repository gives 24 lines. Twenty
+    of them are `DeepseekV4MoETests.swift`, which declares a static constant of its
+    own name; three are the declaration, the assignment and one doc line of the
+    production file; one is this card. Nothing reads the production property.
+
+    `DeepseekV4MoEGate` is a `Module` class, thus it has no synthesized `==` or
+    `hash(into:)` that could read the property where periphery cannot see. The
+    `periphery:ignore` recourse the rule describes is for that case only, thus it
+    does not apply. I deleted the property and its assignment, and corrected the
+    one doc line that named it to `(routed experts, hiddenSize)`.
+
+    ### Mutation proof of every axis I moved
+
+    The findings moved axis constants, thus each one needs a proof that a test
+    still dies when the axis breaks. Eight mutations, each run against
+    `swift test --filter DeepseekV4`:
+
+    | Mutation | Result |
+    |---|---|
+    | `RoutedAxis.row = width - 2` | DIED |
+    | `RoutedAxis.route = row - 2` | DIED |
+    | `routeAxes` in the other order | LIVED -- see below |
+    | the unsorted path squeezes `route` | DIED |
+    | the sorted path squeezes `route` | DIED |
+    | `expertScoreAxis = -2` | DIED |
+    | `widthAxis = -2` | DIED |
+    | the gate gathers the BIASED score | DIED -- `gateWeightsAreTheUnbiasedScoresOfTheBiasedSelection`, `gateNormalizesAndScalesTheSelectedWeights` |
+
+    The axis mutations die with an MLX shape error that aborts the run, which is
+    still a death: the suite cannot report green. One example, for
+    `expertScoreAxis = -2`:
+
+    ```
+    Fatal error: [argpartition] Received invalid kth 1 along axis -2 for array with shape: (1,1,8)
+    ```
+
+    **The one survivor is an equivalent mutant, not a hole in the tests.**
+    `MLX.expandedDimensions` sorts its axis list, thus `[-2, -3]` and `[-3, -2]`
+    build the identical tensor. I did not take that from memory: a throwaway test
+    asserted `expandedDimensions(x, axes: [-2, -3])` and
+    `expandedDimensions(x, axes: [-3, -2])` give the same shape `[1, 2, 1, 1, 3]`
+    and the same values, it passed, and I deleted it. The seven other mutations
+    show the tests do reach these axes.
+
+    ### Tests and format
+
+    - `swift test --filter DeepseekV4`: 50 of 50 pass in 4 suites.
+    - `swift test` (full suite): 409 + 0 + 80 + 282 + 7 pass, 0 failures.
+    - The only `warning:` in the build is
+      `missing creator for mutated node: ... mlx-swift_Cmlx.bundle/Contents/MacOS`.
+      It is a SwiftPM build-graph warning about the vendored MLX bundle, not a
+      compiler warning. I proved it is not mine: `swift build --build-tests` gives
+      the same one line with the change stashed and with the change applied.
+    - `swift-format format --in-place` on the one changed file only.
+      `swift-format lint --strict` exits 0, and a second format run changes
+      nothing. I did not run `swift-format` over the tree.
+  timestamp: 2026-08-11T11:58:09.714411+00:00
+- actor: claude-code
+  id: 01kzrb04nacbm1za8jzc5eh2m3
+  text: |
+    ### implement — changed
+    - evidence: 1 file — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLLM/Models/DeepseekV4MoE.swift (+36 -17). Finding `:117` became `private enum RoutedAxis` (`width`, `row`, `route`) plus `expertScoreAxis`, `widthAxis` and the local `lastSelectedPosition`; `expertAxis` is gone. Finding `:203` became a deletion of `routedExpertCount`, its assignment and the doc line that named it. swiftlint `no_magic_numbers` on the file: 2 violations before, 0 after. `swift test` 409+0+80+282+7, 0 failures; `swift test --filter DeepseekV4` 50/50. 8 mutations, 7 killed, 1 equivalent mutant proved equivalent by a throwaway test on `expandedDimensions` axis order.
+    - next: /review
+  timestamp: 2026-08-11T11:58:18.794851+00:00
 depends_on:
 - 01KZGMQCH9PFY25Y3QXP34CRP6
 - 01KZGMRCBJ4SPK7C26PWKV5J6F
@@ -270,3 +408,47 @@ Build the routed experts on this repo's existing `SwitchGLU` / `SwitchLinear` / 
 ## Workflow
 - Use `/tdd` — the biased-selection/unbiased-weight test is the highest-value assertion; write it first.
 #deepseek-v4
+
+## Review Findings (2026-08-11 06:34)
+
+- [x] `Libraries/MLXLLM/Models/DeepseekV4MoE.swift:117` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLLM/Models/DeepseekV4MoE.swift:203` — var.instance `routedExpertCount` is assignOnlyProperty.
+
+### Scope of this pass
+
+Scope: `HEAD~2..HEAD` (`b9c43d1` source change, `698afb5` kanban record). The
+engine attempted 8 files, skipped 0, and failed 0. Both findings are in the new
+file `Libraries/MLXLLM/Models/DeepseekV4MoE.swift`. The engine gave no finding
+on a line of a file that this range did not touch, thus this pass records no
+out-of-scope finding.
+
+### Verification of the acceptance criteria
+
+- `Libraries/MLXLMCommon/SwitchLayers.swift` is unmodified. `git diff
+  --name-only HEAD~2..HEAD -- Libraries/MLXLMCommon/SwitchLayers.swift` gives no
+  line.
+- The attribution header agrees with `CONTRIBUTING.md`. Lines 1 through 6 of the
+  new file hold the six template lines, with the source path
+  `Libraries/MLXLLM/Models/DeepseekV4.swift` and the SHA
+  `b166896353b9c95d773de993990c20a0b5ba6905` in place of the two placeholders.
+- The clamp is asymmetric, as the user decided on 2026-08-10.
+  `DeepseekV4Math.clampedSwiGLU` (`Libraries/MLXLLM/Models/DeepseekV4MathHelpers.swift:340`)
+  holds `gateF32 = minimum(gateF32, limit)` on the high side only, and
+  `upF32 = clip(upF32, min: -limit, max: limit)` on both sides. No finding of
+  this pass asks for a symmetric clamp, thus there is no conflict.
+
+### Mutation spot-check of the bias-vs-weight guard
+
+The gate adds the bias in `selectedExperts` only, and gathers the weights from
+the unbiased `scores`. To prove the guard is not vacuous, the review changed the
+call to `routedWeights(gatheredFrom: scores + bias.asType(.float32), ...)` and
+ran the suite. Two named tests died:
+
+- `gateWeightsAreTheUnbiasedScoresOfTheBiasedSelection` — got
+  `[10.832555, 1.878763]`, expected `[0.83255464, 1.878763]`. These are the two
+  numbers the test comment predicts.
+- `gateNormalizesAndScalesTheSelectedWeights` — got `[1.2782964, 0.22170356]`,
+  expected `[0.46059963, 1.0394003]`.
+
+The review then reverted the mutation. `git status` gives a clean file, and
+`swift test --filter DeepseekV4MoETests` passes 14 of 14 again.
