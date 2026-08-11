@@ -190,12 +190,61 @@ comments:
     - evidence: 3 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLLM/Models/DeepseekV4.swift (528 lines, new), /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Tests/MLXLMTests/DeepseekV4ModelTests.swift (626 lines, new, 20 tests), /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLLM/Models/DeepseekV4Configuration.swift (+6, `tie_word_embeddings`). `swift test --filter DeepseekV4ModelTests` 20/20; `swift test --filter DeepseekV4` 86/86; `swift test` 445+0+80+282+7, 0 failures, 0 compiler warnings. 13 of 13 mutations killed, 0 survivors. swiftlint `no_magic_numbers`, `cyclomatic_complexity`, `function_body_length` and `missing_docs` each report 0 over the three files. `DeepseekV3.swift` untouched. New defect filed as `^3zest44`.
     - next: /review
   timestamp: 2026-08-11T15:01:26.937207+00:00
+- actor: claude-code
+  id: 01kzrnmzj0ewmx42eg4kpapam0
+  text: |
+    ### finish iteration 1 — changed, review NOT yet run
+    - implement: changed — 3 files; DeepseekV4.swift (new, 528 lines), DeepseekV4ModelTests.swift (new, 626 lines, 20 tests), DeepseekV4Configuration.swift (+6, decodes `tie_word_embeddings`)
+    - test: green — swift test full suite, 445+0+80+282+7, 0 failures, 0 compiler warnings
+    - commit: 2624f89
+    - review: NOT RUN. The orchestrator reached its context limit after the commit.
+
+    **This card stays in `doing`. It is NOT done.** The next agent must run
+    `/review 01KZGMVSEEHGCCG1W8CPWR8R3H HEAD~1..HEAD` before this card can move.
+
+    Points the review must examine:
+
+    1. The module names of a decoder layer are `attn`, `ffn`, `attn_norm`,
+       `ffn_norm`, `hc_attn`, `hc_ffn`, `hc_head`, and NOT the `self_attn` / `mlp`
+       names of the Swift reference. The reason is the published `quantization`
+       block: `quantize(model:filter:)` matches the flattened module path, thus the
+       reference names would leave every routed expert on the affine default in
+       place of mxfp4. `theModulePathsAreTheCheckpointKeyPaths` pins the names.
+    2. 13 mutations, 13 killed. The `hc_mult`-to-1 mutation stops on a shape
+       precondition and does not kill a named test; the implementer recorded that
+       honestly rather than counting it.
+    3. The casing rule will probably give a finding on `DeepseekV4Model` and the
+       other new type names. Task `^7x3dq7e` holds the repository-wide rename.
+  timestamp: 2026-08-11T15:04:27.456707+00:00
+- actor: claude-code
+  id: 01kzrpfd24gqs676envczx42vr
+  text: |
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (commit 2624f89). counts: 0 findings, 0 confirmed, 1 refuted, 0 failed, 0 skipped. Zero open findings.
+    - engine coverage: the engine reads production Swift only. In this range it could read `/Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLLM/Models/DeepseekV4.swift` and `/Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLLM/Models/DeepseekV4Configuration.swift`. It did NOT read `Tests/MLXLMTests/DeepseekV4ModelTests.swift` (test files are excluded) and it did NOT read the 8 `.kanban` `*.md` / `*.jsonl` files (no validator takes those globs). The `attempted: 8` number is the count of validators whose globs take `*.swift`; it is not a file count.
+    - independent check 1 — the module names hold. `Tests/MLXLMTests/Resources/DeepSeek-V4-Flash-4bit-config.json` carries 644 quantization entries, 639 of them per layer. They name `model.layers.N.attn.*` and `model.layers.N.ffn.switch_mlp.*`. The file holds ZERO `self_attn`, ZERO `.mlp.`, ZERO `input_layernorm`. `switch_mlp.{gate,up,down}_proj` ask for mxfp4 at group size 32; every `attn.*` entry asks for affine at group size 64. The declarations at `Libraries/MLXLLM/Models/DeepseekV4.swift:155-160` (`attn`, `ffn`, `attn_norm`, `ffn_norm`, `hc_attn`, `hc_ffn`) and `:250` (`hc_head`) agree with the fixture key for key. A finding that asks for the reference's `self_attn` / `mlp` names would lose the mxfp4 plan on every routed expert. No such finding came.
+    - independent check 2 — mutation M1 reproduced. The two halves of `DeepseekV4DecoderLayer.callAsFunction` were swapped so the mixture half runs first. It compiled clean. `swift test --filter DeepseekV4ModelTests`: 1 failed, 19 passed; the only failure is `theDecoderLayerRunsTheAttentionHalfBeforeTheMixtureHalf`, 256 issues, all at `Tests/MLXLMTests/DeepseekV4ModelTests.swift:301`. No other test moved. The file was restored: SHA-256 `2487c92cff05432da1fd2bf262203031a1ab38e84e395c25c139a183d9b9be2c` before and after, and `git status --porcelain -- '*.swift'` gives zero lines.
+    - independent check 3 — `^3zest44` (`01KZRN58J8J9NNV66F43ZEST44`, "DeepseekV4MoEGate declares tid2eid and bias on every layer, thus no real checkpoint loads") is filed and sits in `todo`. Its defect lives in `DeepseekV4MoE.swift`, which this range does not touch. Out of scope here, and not fixed.
+    - scope: `DeepseekV3.swift` is not in the range. `git diff --name-only HEAD~1..HEAD -- '*DeepseekV3*'` gives zero lines.
+    - out of scope, recorded and NOT acted on: none. The engine raised no finding on an untouched line, and no casing finding came. The repository-wide rename stays with `^7x3dq7e`.
+    - next: the card moves to done.
+  timestamp: 2026-08-11T15:18:53.252366+00:00
+- actor: claude-code
+  id: 01kzrpg8hprrkq77bkwxfbtadp
+  text: |
+    ### finish iteration 2 — clean
+    - implement: (iteration 1) changed — 3 files, commit 2624f89
+    - test: green — swift test full suite, 445+0+80+282+7, 0 failures
+    - review: clean — 0 findings, card moved to done
+    - note: the review confirmed the module-name decision against the checked-in fixture. `DeepSeek-V4-Flash-4bit-config.json` holds 644 quantization entries, 639 of them per layer, and every one names `model.layers.N.attn.*` or `model.layers.N.ffn.switch_mlp.*`. It holds zero `self_attn`, zero `.mlp.` and zero `input_layernorm`. The reference names would drop every routed expert from mxfp4 to affine.
+    - note: the review reproduced mutation M1. A swap of the two halves of the decoder layer killed `theDecoderLayerRunsTheAttentionHalfBeforeTheMixtureHalf` and no other test. The tree was restored and proved clean by hash.
+  timestamp: 2026-08-11T15:19:21.398913+00:00
 depends_on:
 - 01KZGMSFQN4AS74HYXAAG7ANT0
 - 01KZGMT5M19CHE8SK3FSBWYQ83
 - 01KZGMTXP266RDESZHBG5E7907
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: e580
 title: Assemble DeepseekV4 decoder layer, model, and weight sanitize
 ---
 ## What

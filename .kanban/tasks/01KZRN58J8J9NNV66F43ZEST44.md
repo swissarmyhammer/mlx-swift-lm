@@ -26,8 +26,31 @@ comments:
     - format: `swift-format format --in-place` and `swift-format lint` on the four changed files alone; lint exits 0.
     - next: `/review`
   timestamp: 2026-08-11T15:36:28.269854+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01kzrqt309cnyz5b2n9pccvbz5
+  text: |-
+    ### review — clean
+    - scope: `review sha HEAD~1..HEAD` (commit 6213e71), 8 validators attempted, 0 findings, 0 skipped files.
+    - engine coverage: the engine could read `Libraries/MLXLLM/Models/DeepseekV4MoE.swift` alone. It excludes test files, thus the three test files of the commit were not read by it, and no validator reads `.md` or `.jsonl`, thus the two kanban files were not read. The three checks below were made by hand.
+    - check 1 (the new test is end to end): PASS. `Tests/MLXLMTests/DeepseekV4GateCheckpointLoadTests.swift` `publishedCheckpoint()` filters the routing tensors out of the donor tree with `isRoutingTensor(_:)` and then states them BY RULE -- `ffn.gate.tid2eid` on layers below `hashLayerCount` and `ffn.gate.bias` on every later layer. It loads with `try model.update(parameters: ModuleParameters.unflattened(...), verify: [.all])`, the call the production loader makes.
+    - check 2 (the reversal is recorded): PASS. The file header note 4 and the doc comment of `tokenToExpert` both state the reversal by task `^3zest44`, and give the reason: the Swift reference builds a load path of its own, and `.allModelKeysSet` throws for a parameter no checkpoint tensor fills. No line still asserts the old decision.
+    - check 3 (mutation): PASS. With the gate made to build BOTH parameters again, `aCheckpointThatSplitsTheRoutingTensorsByLayerLoads` failed with `.keyNotFound(path: ["model","layers","0","ffn","gate","bias"])`, and 3 other tests of the suite failed too. After the restore `git status --porcelain -- '*.swift'` gave an empty answer and all 4 tests passed.
+    - out of scope: none found.
+    - next: move to done.
+  timestamp: 2026-08-11T15:42:11.977391+00:00
+- actor: claude-code
+  id: 01kzrqtzfnsh2sqfd5pajk77p5
+  text: |
+    ### finish iteration 1 — clean
+    - implement: changed — 4 files; DeepseekV4MoE.swift makes `bias` and `tid2eid` `MLXArray?`; new DeepseekV4GateCheckpointLoadTests.swift
+    - test: green — swift test full suite, 449+80+282+7, 0 failures
+    - commit: 6213e71
+    - review: clean — 0 findings, card moved to done
+    - note: this reverses a decision the file header had recorded. The old reason named the Swift reference, which builds its own load path and thus never meets `.allModelKeysSet`. The header now states the reversal and names this task.
+    - note: the review confirmed the new test builds its checkpoint BY RULE and loads it through `model.update(parameters:verify:[.all])`, the call the production loader makes. A checkpoint read out of `model.parameters()` would match by construction and prove nothing.
+  timestamp: 2026-08-11T15:42:41.141860+00:00
+position_column: done
+position_ordinal: e680
 title: DeepseekV4MoEGate declares tid2eid and bias on every layer, thus no real checkpoint loads
 ---
 ## What
