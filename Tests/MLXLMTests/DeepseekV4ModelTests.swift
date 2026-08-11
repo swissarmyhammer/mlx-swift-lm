@@ -69,6 +69,10 @@ struct DeepseekV4ModelTests {
     /// The index of a layer that routes through the hash table.
     private static let hashLayer = 0
 
+    /// The index of a layer that routes through the top-k gate. It is the
+    /// first layer past the hash layers.
+    private static let topKLayer = hashLayerCount
+
     /// The number of tokens one prefill block carries.
     private static let promptLength = 8
 
@@ -248,7 +252,9 @@ struct DeepseekV4ModelTests {
             "model.layers.0.hc_ffn.scale",
             "model.layers.0.attn.attn_sink",
             "model.layers.0.ffn.gate.weight",
-            "model.layers.0.ffn.gate.bias",
+            // A hash layer holds the table alone and a later layer holds the
+            // bias alone, which is the set the published checkpoint carries.
+            "model.layers.\(Self.topKLayer).ffn.gate.bias",
             "model.layers.\(Self.hashLayer).ffn.gate.tid2eid",
         ] {
             #expect(parameterPaths.contains(path), "parameter path \(path)")

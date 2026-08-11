@@ -170,22 +170,29 @@ struct DeepseekV4MoETests {
 
     /// Builds a gate and loads the routing fixture into it.
     ///
+    /// A hash layer declares the hash table alone and every later layer
+    /// declares the routing bias alone, thus the fixture carries the one
+    /// parameter the layer holds. The load verifies with `[.all]`, which is
+    /// the verification `MLXLMCommon.loadWeights` applies, thus a fixture that
+    /// filled the other parameter would fail here.
+    ///
     /// - Parameters:
     ///   - layer: The index of the decoder layer.
-    ///   - bias: The routing bias, one value for each routed expert.
+    ///   - bias: The routing bias, one value for each routed expert. A hash
+    ///     layer holds no bias and passes over this value.
     ///   - configuration: The configuration to build the gate from.
     /// - Returns: The gate.
     private static func routingGate(
         layer: Int, bias: [Float], configuration: DeepseekV4Configuration
     ) throws -> DeepseekV4MoEGate {
         let gate = DeepseekV4MoEGate(configuration: configuration, layer: layer)
-        try gate.update(
-            parameters: ModuleParameters.unflattened([
-                ("weight", routingGateWeight()),
-                ("bias", array(bias, [routedExpertCount])),
-                ("tid2eid", hashTableArray()),
-            ]),
-            verify: [])
+        var fixture: [(String, MLXArray)] = [("weight", routingGateWeight())]
+        if configuration.isHashLayer(layer) {
+            fixture.append(("tid2eid", hashTableArray()))
+        } else {
+            fixture.append(("bias", array(bias, [routedExpertCount])))
+        }
+        try gate.update(parameters: ModuleParameters.unflattened(fixture), verify: [.all])
         return gate
     }
 
@@ -485,18 +492,29 @@ struct DeepseekV4MoETests {
     /// Builds a whole mixture-of-experts layer with repeatable random
     /// weights.
     ///
+    /// The gate of a hash layer declares the hash table alone and the gate of
+    /// every later layer declares the routing bias alone, thus the fixture
+    /// carries the one parameter the layer holds. The load verifies with
+    /// `[.all]`, which is the verification `MLXLMCommon.loadWeights` applies.
+    ///
     /// - Parameters:
     ///   - layer: The index of the decoder layer.
     ///   - sharedScale: The factor every shared-expert weight takes. A scale
     ///     of zero turns the shared expert off.
     /// - Returns: The layer.
     private static func randomLayer(layer: Int, sharedScale: Float = 1) throws -> DeepseekV4MoE {
-        let moe = DeepseekV4MoE(configuration: try configuration(), layer: layer)
-        try moe.update(
-            parameters: ModuleParameters.unflattened([
-                ("gate.weight", randomArray([routedExpertCount, hiddenSize], seed: 31)),
-                ("gate.bias", randomArray([routedExpertCount], seed: 32)),
-                ("gate.tid2eid", hashTableArray()),
+        let checkpointConfiguration = try configuration()
+        let moe = DeepseekV4MoE(configuration: checkpointConfiguration, layer: layer)
+        var fixture: [(String, MLXArray)] = [
+            ("gate.weight", randomArray([routedExpertCount, hiddenSize], seed: 31))
+        ]
+        if checkpointConfiguration.isHashLayer(layer) {
+            fixture.append(("gate.tid2eid", hashTableArray()))
+        } else {
+            fixture.append(("gate.bias", randomArray([routedExpertCount], seed: 32)))
+        }
+        fixture.append(
+            contentsOf: [
                 (
                     "switch_mlp.gate_proj.weight",
                     randomArray([routedExpertCount, expertWidth, hiddenSize], seed: 33)
@@ -521,8 +539,8 @@ struct DeepseekV4MoETests {
                     "shared_experts.down_proj.weight",
                     randomArray([hiddenSize, expertWidth], seed: 38) * sharedScale
                 ),
-            ]),
-            verify: [])
+            ])
+        try moe.update(parameters: ModuleParameters.unflattened(fixture), verify: [.all])
         return moe
     }
 

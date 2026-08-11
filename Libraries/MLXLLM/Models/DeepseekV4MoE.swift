@@ -5,7 +5,7 @@
 //   Libraries/MLXLLM/Models/DeepseekV4.swift @ b166896353b9c95d773de993990c20a0b5ba6905
 // Manual transcription; no git ancestry.
 //
-// Three details do not come from that file:
+// Four details do not come from that file:
 //
 //  1. The routed experts. The file above calls a `SwitchGLU` of its own that
 //     takes a two-argument activation, and it carries fused Metal kernels for
@@ -26,6 +26,18 @@
 //     experts, thus a decoder layer can hold this type itself and hand the
 //     identifiers over as an argument. This file takes them as an argument
 //     and holds no state.
+//  4. The routing parameters of the gate. The file above declares `tid2eid`
+//     AND `bias` on every layer, and this file did the same until task
+//     `^3zest44`. That decision is REVERSED here, and the doc comments below
+//     record the reversal. The DeepSeek-V4 Python reference (Thump604/mlx-lm
+//     @ deepseek-v4-support-fixes, mlx_lm/models/deepseek_v4.py,
+//     `MoEGate.__init__`) declares one of the two on each layer and never
+//     both, and the published checkpoint carries that set: `tid2eid` on the
+//     hash layers alone, and `bias` on every layer after them.
+//     `MLXLMCommon.loadWeights` verifies with `.allModelKeysSet`, which
+//     throws for a module parameter no weight fills, thus a gate that
+//     declared both could load no real checkpoint. Each parameter below is
+//     therefore an `Optional`, and a layer builds the one it holds.
 //
 // One divergence between the references is open. Both Swift copies give
 // `swiglu_limit` to the shared expert. The DeepSeek-V4 Python reference
@@ -217,7 +229,11 @@ class DeepseekV4MoEGate: Module {
     let normalizesTopkProbabilities: Bool
 
     /// True when this layer routes through the hash table.
-    let isHashLayer: Bool
+    ///
+    /// The table is the one parameter a hash layer holds and a later layer
+    /// does not, thus its presence answers the question on its own and the
+    /// gate keeps no second copy of the answer.
+    var isHashLayer: Bool { tokenToExpert != nil }
 
     /// The gate projection, shape `(routed experts, hiddenSize)`. It is a
     /// raw parameter and not a `Linear`, because the projection runs in
@@ -226,18 +242,25 @@ class DeepseekV4MoEGate: Module {
 
     /// The routing bias, one value for each routed expert. It joins the
     /// scores for the selection only.
-    @ParameterInfo(key: "bias") var bias: MLXArray
+    ///
+    /// A hash layer selects its experts from the table and scores none of
+    /// them, thus it holds no bias and this parameter is `nil` there. The
+    /// checkpoint carries the tensor on the later layers alone.
+    @ParameterInfo(key: "bias") var bias: MLXArray?
 
     /// The hash table, from token identifier to expert identifier, shape
     /// `(vocabSize, expertsPerToken)`.
     ///
-    /// A layer that does not route through the hash table still holds this
-    /// parameter, at the placeholder shape below, because the reference does
-    /// and because a checkpoint that carries the tensor then loads.
-    @ParameterInfo(key: "tid2eid") var tokenToExpert: MLXArray
-
-    /// The shape the hash table takes on a layer that never reads it.
-    private static let unusedHashTableShape = [1, 1]
+    /// A layer that does not route through the hash table holds no table, and
+    /// this parameter is `nil` there. An earlier version of this file gave
+    /// such a layer a placeholder table, because the Swift reference declares
+    /// one on every layer. Task `^3zest44` REVERSED that decision: the Swift
+    /// reference builds a load path of its own, the DeepSeek-V4 Python
+    /// reference the checkpoint was written for declares the table on a hash
+    /// layer alone, and `MLXLMCommon.loadWeights` verifies with
+    /// `.allModelKeysSet`, which throws for a parameter no checkpoint tensor
+    /// fills.
+    @ParameterInfo(key: "tid2eid") var tokenToExpert: MLXArray?
 
     /// The epsilon the normalization adds, so that a row of scores that adds
     /// up to zero cannot divide by zero.
@@ -257,15 +280,16 @@ class DeepseekV4MoEGate: Module {
         self.expertsPerToken = configuration.numExpertsPerTok
         self.routedScalingFactor = configuration.routedScalingFactor
         self.normalizesTopkProbabilities = configuration.normalizeTopkProb
-        self.isHashLayer = hashLayer
         self._weight.wrappedValue = zeros([
             configuration.nRoutedExperts, configuration.hiddenSize,
         ])
-        self._bias.wrappedValue = zeros([configuration.nRoutedExperts])
-        self._tokenToExpert.wrappedValue = zeros(
-            hashLayer
-                ? [configuration.vocabSize, configuration.numExpertsPerTok]
-                : Self.unusedHashTableShape)
+        if hashLayer {
+            self._tokenToExpert.wrappedValue = zeros([
+                configuration.vocabSize, configuration.numExpertsPerTok,
+            ])
+        } else {
+            self._bias.wrappedValue = zeros([configuration.nRoutedExperts])
+        }
     }
 
     /// Routes one block of tokens.
@@ -287,17 +311,21 @@ class DeepseekV4MoEGate: Module {
 
     /// Names the experts one block of tokens reads.
     ///
+    /// Each layer holds one routing parameter alone, thus this function reads
+    /// the one the layer has: a hash layer reads its table, and every later
+    /// layer scores the experts and adds its bias.
+    ///
     /// This is the only place the routing bias reaches. The scores this
     /// function reads leave it unchanged, thus the caller cannot gather a
     /// biased weight by mistake.
     private func selectedExperts(scores: MLXArray, inputIds: MLXArray) -> MLXArray {
-        guard isHashLayer else {
-            let biased = scores + bias.asType(.float32)
-            let lastSelectedPosition = expertsPerToken - 1
-            return argPartition(-biased, kth: lastSelectedPosition, axis: Self.expertScoreAxis)[
-                .ellipsis, ..<expertsPerToken]
+        if let tokenToExpert {
+            return tokenToExpert[inputIds].asType(.int32)
         }
-        return tokenToExpert[inputIds].asType(.int32)
+        let biased = bias.map { scores + $0.asType(.float32) } ?? scores
+        let lastSelectedPosition = expertsPerToken - 1
+        return argPartition(-biased, kth: lastSelectedPosition, axis: Self.expertScoreAxis)[
+            .ellipsis, ..<expertsPerToken]
     }
 
     /// Reads the weight of each selected expert out of the UNBIASED scores.
