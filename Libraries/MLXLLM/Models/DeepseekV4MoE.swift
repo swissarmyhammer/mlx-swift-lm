@@ -65,7 +65,7 @@ import MLXNN
 ///
 /// The activation is the DeepSeek-V4 clamped SwiGLU, thus it is not the plain
 /// `silu(gate) * up` of the earlier DeepSeek families.
-class DeepseekV4MLP: Module, UnaryLayer {
+final class DeepseekV4MLP: Module, UnaryLayer {
 
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
@@ -115,7 +115,7 @@ class DeepseekV4MLP: Module, UnaryLayer {
 /// and it reads one fused `gate_up_proj` tensor, which this checkpoint does
 /// not ship. The sort this layer runs, and the point it starts to sort at,
 /// are the ones ``SwitchGLU`` runs.
-class DeepseekV4SwitchGLU: Module {
+final class DeepseekV4SwitchGLU: Module {
 
     @ModuleInfo(key: "gate_proj") var gateProj: SwitchLinear
     @ModuleInfo(key: "up_proj") var upProj: SwitchLinear
@@ -223,7 +223,7 @@ class DeepseekV4SwitchGLU: Module {
 /// before it picks the experts and gathers the UNBIASED score of each expert
 /// it picked. A gate that gathered the biased score would run, and would
 /// weigh a lifted expert far too heavily.
-class DeepseekV4MoEGate: Module {
+final class DeepseekV4MoEGate: Module {
 
     /// The number of routed experts one token reads.
     let expertsPerToken: Int
@@ -353,7 +353,7 @@ class DeepseekV4MoEGate: Module {
 /// The layer sends each token through the routed experts its gate selected,
 /// adds those outputs up in float32, and adds the shared expert, which every
 /// token reads.
-class DeepseekV4MoE: Module {
+final class DeepseekV4MoE: Module {
 
     @ModuleInfo(key: "switch_mlp") var switchMLP: DeepseekV4SwitchGLU
     @ModuleInfo(key: "gate") var gate: DeepseekV4MoEGate

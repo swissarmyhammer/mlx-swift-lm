@@ -44,6 +44,29 @@ comments:
     - The 1 warning (`missing creator for mutated node: ... mlx-swift_Cmlx.bundle/Contents/MacOS`) is a SwiftPM build-graph diagnostic about the vendored mlx-swift dependency's resource bundle, not a compiler warning. It was already proven independent of this repository's source in task 01KZGMTXP266RDESZHBG5E7907 (same single line with and without the change stashed). Confirmed again here: no other `warning:` line in the full log.
     - No code changes were made. No failures needed fixing.
   timestamp: 2026-08-11T19:08:58.665545+00:00
+- actor: claude-code
+  id: 01kzs3zmf67mew529x0hv4kfv9
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (commit 55582c9); 2 findings, 2 confirmed, 8 files attempted, 0 skipped — Libraries/MLXLLM/Models/DeepseekV4MoE.swift:118, Libraries/MLXLLM/Models/DeepseekV4MoE.swift:356
+    - next: the implementer must mark `DeepseekV4SwitchGLU` and `DeepseekV4MoE` as `final`, then request a new review pass
+  timestamp: 2026-08-11T19:14:56.614077+00:00
+- actor: claude-code
+  id: 01kzs40bez103rfv8crax0t6fz
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 2 files (Libraries/MLXLLM/Models/DeepseekV4MoE.swift, Tests/MLXLMTests/DeepseekV4MoETests.swift)
+    - test: green — swift test, 1081 tests run, 0 failures
+    - commit: 55582c9
+    - review: findings — Libraries/MLXLLM/Models/DeepseekV4MoE.swift:118, Libraries/MLXLLM/Models/DeepseekV4MoE.swift:356
+  timestamp: 2026-08-11T19:15:20.159005+00:00
+- actor: claude-code
+  id: 01kzs4315ragkgf435pssypphv
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Libraries/MLXLLM/Models/DeepseekV4MoE.swift. The two findings named `DeepseekV4SwitchGLU` and `DeepseekV4MoE`. The finding shows one example of a cause, thus I removed the cause from the whole file: all four concrete classes are now `final` (`DeepseekV4MLP`, `DeepseekV4SwitchGLU`, `DeepseekV4MoEGate`, `DeepseekV4MoE`). A repository grep found no subclass of any of the four. Build clean — the one `missing creator for mutated node` line is the known SwiftPM diagnostic that is independent of this source. `swift test --filter DeepseekV4MoETests`: 15 tests, 0 failures. Both findings are checked on the card.
+    - next: /review
+  timestamp: 2026-08-11T19:16:47.928046+00:00
 position_column: doing
 position_ordinal: '8180'
 title: Decide whether the DeepSeek-V4 shared expert reads the SwiGLU clamp
@@ -89,3 +112,8 @@ model. One of these gives the answer:
 - [x] The header of that file states the decision instead of the divergence.
 - [x] A test pins the choice, so a later edit cannot flip it without a red run.
 #deepseek-v4
+
+## Review Findings (2026-08-11 14:10)
+
+- [x] `Libraries/MLXLLM/Models/DeepseekV4MoE.swift:118` — Concrete classes not designed for subclassing must be marked `final`. This routed-experts implementation has no overrideable methods or extension points. Mark as `final class DeepseekV4SwitchGLU: Module`.
+- [x] `Libraries/MLXLLM/Models/DeepseekV4MoE.swift:356` — Concrete classes not designed for subclassing must be marked `final`. This mixture-of-experts-layer implementation has no overrideable methods or extension points. Mark as `final class DeepseekV4MoE: Module`.
