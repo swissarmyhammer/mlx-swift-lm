@@ -1,6 +1,6 @@
 // Copyright © 2026 Apple Inc.
 //
-// Numeric parity tests for `DeepseekV4RoPE` and `DeepseekV4Attention`.
+// Numeric parity tests for `DeepSeekV4RoPE` and `DeepSeekV4Attention`.
 //
 // Every expected number below comes from the DeepSeek-V4 Python reference,
 // `Thump604/mlx-lm` @ `deepseek-v4-support-fixes`,
@@ -16,7 +16,7 @@
 // number below was read out of this repository.
 //
 // The weights and the inputs are not random. Both the NumPy transcription
-// and ``DeepseekV4AttentionTests/fixtureValues(count:seed:)`` below fill an
+// and ``DeepSeekV4AttentionTests/fixtureValues(count:seed:)`` below fill an
 // array with `(((i + seed) * 37) % 17 - 8) / 8`, which lands on multiples of
 // an eighth and is thus exact in both float32 and float64.
 //
@@ -35,7 +35,7 @@ import Testing
 @testable import MLXLMCommon
 
 @Suite(.serialized)
-struct DeepseekV4AttentionTests {
+struct DeepSeekV4AttentionTests {
 
     init() {
         _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
@@ -133,7 +133,7 @@ struct DeepseekV4AttentionTests {
     }
 
     /// The `config.json` of the synthetic checkpoint.
-    private static func configuration(useAttnSink: Bool) throws -> DeepseekV4Configuration {
+    private static func configuration(useAttnSink: Bool) throws -> DeepSeekV4Configuration {
         let json = """
             {
               "hidden_size": \(hiddenSize),
@@ -159,13 +159,13 @@ struct DeepseekV4AttentionTests {
               "use_attn_sink": \(useAttnSink)
             }
             """
-        return try JSONDecoder().decode(DeepseekV4Configuration.self, from: Data(json.utf8))
+        return try JSONDecoder().decode(DeepSeekV4Configuration.self, from: Data(json.utf8))
     }
 
     /// Builds one attention layer of the synthetic checkpoint and loads the
     /// fixture weights into it.
-    private static func attention(layer: Int, useAttnSink: Bool) throws -> DeepseekV4Attention {
-        let block = DeepseekV4Attention(
+    private static func attention(layer: Int, useAttnSink: Bool) throws -> DeepSeekV4Attention {
+        let block = DeepSeekV4Attention(
             configuration: try configuration(useAttnSink: useAttnSink), layer: layer)
         try block.update(
             parameters: ModuleParameters.unflattened(fixtureWeights()), verify: [])
@@ -393,7 +393,7 @@ struct DeepseekV4AttentionTests {
 
     @Test
     func groupedOutputProjectionReachesTheFullHiddenSize() throws {
-        let block = DeepseekV4Attention(
+        let block = DeepSeekV4Attention(
             configuration: try Self.wideConfiguration(), layer: Self.plainLayer)
 
         let prefill = block(
@@ -418,7 +418,7 @@ struct DeepseekV4AttentionTests {
 
     /// A checkpoint that keeps the real `hidden_size` and the real
     /// `o_groups`, and shrinks everything else so the test stays small.
-    private static func wideConfiguration() throws -> DeepseekV4Configuration {
+    private static func wideConfiguration() throws -> DeepSeekV4Configuration {
         let json = """
             {
               "hidden_size": \(wideHiddenSize),
@@ -433,7 +433,7 @@ struct DeepseekV4AttentionTests {
               "compress_ratios": [0, 0, 4, 128]
             }
             """
-        return try JSONDecoder().decode(DeepseekV4Configuration.self, from: Data(json.utf8))
+        return try JSONDecoder().decode(DeepSeekV4Configuration.self, from: Data(json.utf8))
     }
 
     // MARK: - Rotary position
@@ -441,8 +441,8 @@ struct DeepseekV4AttentionTests {
     @Test
     func perLayerThetaSplitsThePlainLayerFromTheCompressedLayer() throws {
         let config = try Self.configuration(useAttnSink: true)
-        let plain = DeepseekV4RoPE(configuration: config, layer: Self.plainLayer)
-        let compressed = DeepseekV4RoPE(configuration: config, layer: Self.compressedLayer)
+        let plain = DeepSeekV4RoPE(configuration: config, layer: Self.plainLayer)
+        let compressed = DeepSeekV4RoPE(configuration: config, layer: Self.compressedLayer)
         let position = 1
         let length = 1
 
@@ -493,14 +493,14 @@ struct DeepseekV4AttentionTests {
     @Test
     func rotationReachesOnlyTheTrailingHeadDimensions() throws {
         let config = try JSONDecoder().decode(
-            DeepseekV4Configuration.self, from: Data("{}".utf8))
-        let rope = DeepseekV4RoPE(configuration: config, layer: Self.plainLayer)
+            DeepSeekV4Configuration.self, from: Data("{}".utf8))
+        let rope = DeepSeekV4RoPE(configuration: config, layer: Self.plainLayer)
         let head = MLXArray.ones([
             Self.batchSize, Self.singleHead, Self.decodeLength, Self.realHeadDim,
         ])
 
         let angles = rope.cosSin(offset: Self.rotationPosition, length: Self.decodeLength)
-        let rotated = DeepseekV4Math.applyPartialRoPE(
+        let rotated = DeepSeekV4Math.applyPartialRoPE(
             head,
             cos: angles.cos.expandedDimensions(axes: [0, 1]),
             sin: angles.sin.expandedDimensions(axes: [0, 1]),

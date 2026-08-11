@@ -5,7 +5,7 @@
 //   Libraries/MLXLLM/Models/DeepseekV4MathHelpers.swift @ b166896353b9c95d773de993990c20a0b5ba6905
 // Manual transcription; no git ancestry.
 //
-// Two details of ``DeepseekV4Math/yarnInvFreq(dim:base:originalMaxPositionEmbeddings:factor:betaFast:betaSlow:)``
+// Two details of ``DeepSeekV4Math/yarnInvFreq(dim:base:originalMaxPositionEmbeddings:factor:betaFast:betaSlow:)``
 // do not come from that file, because a later transcription of it in
 // scouzi1966/mlx-swift-lm,
 // Libraries/MLXLLM/Models/DeepseekV4MathHelpers.swift @ e1852869ce61ded0d23b76df3757e9b75c77c1f5,
@@ -32,7 +32,7 @@ import MLXNN
 /// Every function here reads its arguments and returns a value. None of them
 /// holds state, reads a cache, or owns a weight, thus a test gives each one a
 /// synthetic tensor and needs no checkpoint.
-enum DeepseekV4Math {
+enum DeepSeekV4Math {
 
     // MARK: - Manifold hyper-connections
 

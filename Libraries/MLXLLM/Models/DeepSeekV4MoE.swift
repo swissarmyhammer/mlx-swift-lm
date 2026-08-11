@@ -13,12 +13,12 @@
 //     `Libraries/MLXLMCommon/SwitchLayers.swift`, whose `SwitchGLU` takes a
 //     one-argument activation and thus cannot state the asymmetric DeepSeek-V4
 //     clamp, and whose `FusedGateUpSwitchGLU` reads one fused `gate_up_proj`
-//     tensor that this checkpoint does not ship. ``DeepseekV4SwitchGLU`` below
+//     tensor that this checkpoint does not ship. ``DeepSeekV4SwitchGLU`` below
 //     therefore builds on `SwitchLinear`, `gatherSort` and `scatterUnsort`.
 //     The fused kernels stay out of scope.
 //  2. The float32 reduction. The file above sums the weighted expert outputs
 //     with `(y * scores[..., .newAxis]).sum(axis: -2)`. This file calls
-//     `DeepseekV4Math.reduceRoutedExpertsFP32`, which states the float32
+//     `DeepSeekV4Math.reduceRoutedExpertsFP32`, which states the float32
 //     contract in one place, and casts back one time at the end.
 //  3. The token identifiers. The file above threads them into the gate
 //     through a mutable `currentInputIds` property, so that the layer can
@@ -49,7 +49,7 @@
 // projection with `config.swiglu_limit`. The `swiglu_limit=0.0` that
 // Thump604/mlx-lm @ deepseek-v4-support-fixes (`DeepseekV4MoE.__init__`)
 // gives the shared expert diverges from that reference. The test
-// `DeepseekV4MoETests/theSharedExpertReadsTheClampOfTheCheckpoint()` pins
+// `DeepSeekV4MoETests/theSharedExpertReadsTheClampOfTheCheckpoint()` pins
 // this decision.
 
 import MLX
@@ -65,7 +65,7 @@ import MLXNN
 ///
 /// The activation is the DeepSeek-V4 clamped SwiGLU, thus it is not the plain
 /// `silu(gate) * up` of the earlier DeepSeek families.
-final class DeepseekV4MLP: Module, UnaryLayer {
+final class DeepSeekV4MLP: Module, UnaryLayer {
 
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
@@ -94,7 +94,7 @@ final class DeepseekV4MLP: Module, UnaryLayer {
     /// - Returns: The block output, of the shape of `x`.
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         downProj(
-            DeepseekV4Math.clampedSwiGLU(gate: gateProj(x), up: upProj(x), limit: swigluLimit))
+            DeepSeekV4Math.clampedSwiGLU(gate: gateProj(x), up: upProj(x), limit: swigluLimit))
     }
 }
 
@@ -115,7 +115,7 @@ final class DeepseekV4MLP: Module, UnaryLayer {
 /// and it reads one fused `gate_up_proj` tensor, which this checkpoint does
 /// not ship. The sort this layer runs, and the point it starts to sort at,
 /// are the ones ``SwitchGLU`` runs.
-final class DeepseekV4SwitchGLU: Module {
+final class DeepSeekV4SwitchGLU: Module {
 
     @ModuleInfo(key: "gate_proj") var gateProj: SwitchLinear
     @ModuleInfo(key: "up_proj") var upProj: SwitchLinear
@@ -198,7 +198,7 @@ final class DeepseekV4SwitchGLU: Module {
     ) -> MLXArray {
         let gate = gateProj(x, indices, sortedIndices: sortedByExpert)
         let up = upProj(x, indices, sortedIndices: sortedByExpert)
-        let activated = DeepseekV4Math.clampedSwiGLU(gate: gate, up: up, limit: swigluLimit)
+        let activated = DeepSeekV4Math.clampedSwiGLU(gate: gate, up: up, limit: swigluLimit)
         return downProj(activated, indices, sortedIndices: sortedByExpert)
     }
 }
@@ -223,7 +223,7 @@ final class DeepseekV4SwitchGLU: Module {
 /// before it picks the experts and gathers the UNBIASED score of each expert
 /// it picked. A gate that gathered the biased score would run, and would
 /// weigh a lifted expert far too heavily.
-final class DeepseekV4MoEGate: Module {
+final class DeepSeekV4MoEGate: Module {
 
     /// The number of routed experts one token reads.
     let expertsPerToken: Int
@@ -281,7 +281,7 @@ final class DeepseekV4MoEGate: Module {
     /// - Parameters:
     ///   - configuration: The configuration of the checkpoint.
     ///   - layer: The index of the decoder layer this gate belongs to.
-    init(configuration: DeepseekV4Configuration, layer: Int) {
+    init(configuration: DeepSeekV4Configuration, layer: Int) {
         let hashLayer = configuration.isHashLayer(layer)
         self.expertsPerToken = configuration.numExpertsPerTok
         self.routedScalingFactor = configuration.routedScalingFactor
@@ -310,7 +310,7 @@ final class DeepseekV4MoEGate: Module {
         _ x: MLXArray, inputIds: MLXArray
     ) -> (indices: MLXArray, weights: MLXArray) {
         let logits = x.asType(.float32).matmul(weight.asType(.float32).transposed())
-        let scores = DeepseekV4Math.sqrtSoftplus(logits)
+        let scores = DeepSeekV4Math.sqrtSoftplus(logits)
         let indices = selectedExperts(scores: scores, inputIds: inputIds)
         return (indices.asType(.uint32), routedWeights(gatheredFrom: scores, at: indices))
     }
@@ -353,11 +353,11 @@ final class DeepseekV4MoEGate: Module {
 /// The layer sends each token through the routed experts its gate selected,
 /// adds those outputs up in float32, and adds the shared expert, which every
 /// token reads.
-final class DeepseekV4MoE: Module {
+final class DeepSeekV4MoE: Module {
 
-    @ModuleInfo(key: "switch_mlp") var switchMLP: DeepseekV4SwitchGLU
-    @ModuleInfo(key: "gate") var gate: DeepseekV4MoEGate
-    @ModuleInfo(key: "shared_experts") var sharedExperts: DeepseekV4MLP?
+    @ModuleInfo(key: "switch_mlp") var switchMLP: DeepSeekV4SwitchGLU
+    @ModuleInfo(key: "gate") var gate: DeepSeekV4MoEGate
+    @ModuleInfo(key: "shared_experts") var sharedExperts: DeepSeekV4MLP?
 
     /// The axis a routed weight gains, so that one weight broadcasts against
     /// every number of the expert output it weighs. It is the last axis.
@@ -368,15 +368,15 @@ final class DeepseekV4MoE: Module {
     /// - Parameters:
     ///   - configuration: The configuration of the checkpoint.
     ///   - layer: The index of the decoder layer this mixture belongs to.
-    init(configuration: DeepseekV4Configuration, layer: Int) {
-        self._switchMLP.wrappedValue = DeepseekV4SwitchGLU(
+    init(configuration: DeepSeekV4Configuration, layer: Int) {
+        self._switchMLP.wrappedValue = DeepSeekV4SwitchGLU(
             inputDims: configuration.hiddenSize,
             hiddenDims: configuration.moeIntermediateSize,
             expertCount: configuration.nRoutedExperts,
             swigluLimit: configuration.swigluLimit)
-        self._gate.wrappedValue = DeepseekV4MoEGate(configuration: configuration, layer: layer)
+        self._gate.wrappedValue = DeepSeekV4MoEGate(configuration: configuration, layer: layer)
         if configuration.numSharedExperts > 0 {
-            self._sharedExperts.wrappedValue = DeepseekV4MLP(
+            self._sharedExperts.wrappedValue = DeepSeekV4MLP(
                 hiddenSize: configuration.hiddenSize,
                 intermediateSize: configuration.moeIntermediateSize
                     * configuration.numSharedExperts,
@@ -396,7 +396,7 @@ final class DeepseekV4MoE: Module {
         let weighted =
             switchMLP(x, indices).asType(.float32)
             * MLX.expandedDimensions(weights, axis: Self.widthAxis)
-        var y = DeepseekV4Math.reduceRoutedExpertsFP32(weighted)
+        var y = DeepSeekV4Math.reduceRoutedExpertsFP32(weighted)
         if let sharedExperts {
             y = y + sharedExperts(x).asType(.float32)
         }

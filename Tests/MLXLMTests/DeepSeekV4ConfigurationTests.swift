@@ -1,6 +1,6 @@
 // Copyright © 2026 Apple Inc.
 //
-// Verifies `DeepseekV4Configuration` against the `config.json` that
+// Verifies `DeepSeekV4Configuration` against the `config.json` that
 // `mlx-community/DeepSeek-V4-Flash-4bit` publishes. The fixture in
 // `Resources/DeepSeek-V4-Flash-4bit-config.json` is a copy of that file.
 //
@@ -32,7 +32,7 @@ import XCTest
 
 /// The value each property of one decoded configuration must hold.
 ///
-/// Three tables use this type: the values ``DeepseekV4ConfigurationTests``
+/// Three tables use this type: the values ``DeepSeekV4ConfigurationTests``
 /// writes into its distinct JSON, the values a file with no key falls back to,
 /// and the values the published fixture gives. One ``assertMatches(_:)`` reads
 /// all three, thus the 37 comparisons are written one time.
@@ -84,7 +84,7 @@ private struct ExpectedValues {
     /// the report names the property without a message of its own.
     ///
     /// - Parameter config: The decoded configuration.
-    func assertMatches(_ config: DeepseekV4Configuration) {
+    func assertMatches(_ config: DeepSeekV4Configuration) {
         XCTAssertEqual(config.vocabSize, vocabSize)
         XCTAssertEqual(config.hiddenSize, hiddenSize)
         XCTAssertEqual(config.numHiddenLayers, numHiddenLayers)
@@ -129,7 +129,7 @@ extension ExpectedValues {
 
     /// The value of each key for a file that gives no key at all.
     ///
-    /// This table pins all 36 defaults of `DeepseekV4Configuration`. A wrong
+    /// This table pins all 36 defaults of `DeepSeekV4Configuration`. A wrong
     /// default makes `testMinimalJSONDecodesToFlashDefaults` fail. `ropeScaling`
     /// has no default, thus the table gives `nil` for it.
     static let flashDefaults = ExpectedValues(
@@ -210,7 +210,7 @@ extension ExpectedValues {
         "type": .string("yarn"),
     ]
 
-    /// The value of each key in `DeepseekV4ConfigurationTests.distinctJSON`.
+    /// The value of each key in `DeepSeekV4ConfigurationTests.distinctJSON`.
     ///
     /// Each value is different from the default of that key, and no two keys
     /// share a value. A wrong key string, or a `CodingKeys` entry that points at
@@ -256,7 +256,7 @@ extension ExpectedValues {
     )
 }
 
-final class DeepseekV4ConfigurationTests: XCTestCase {
+final class DeepSeekV4ConfigurationTests: XCTestCase {
 
     /// The fixture gives layer 0 a compress ratio of 0, and layers 2, 3 and 42
     /// a compress ratio of more than 0.
@@ -315,18 +315,18 @@ final class DeepseekV4ConfigurationTests: XCTestCase {
         }
         """
 
-    private func decodeFixture() throws -> DeepseekV4Configuration {
+    private func decodeFixture() throws -> DeepSeekV4Configuration {
         let name = "DeepSeek-V4-Flash-4bit-config"
         guard let url = Bundle.module.url(forResource: name, withExtension: "json") else {
             XCTFail("Missing fixture: \(name).json")
             throw CocoaError(.fileNoSuchFile)
         }
         return try JSONDecoder().decode(
-            DeepseekV4Configuration.self, from: Data(contentsOf: url))
+            DeepSeekV4Configuration.self, from: Data(contentsOf: url))
     }
 
-    private func decode(_ json: String) throws -> DeepseekV4Configuration {
-        try JSONDecoder().decode(DeepseekV4Configuration.self, from: Data(json.utf8))
+    private func decode(_ json: String) throws -> DeepSeekV4Configuration {
+        try JSONDecoder().decode(DeepSeekV4Configuration.self, from: Data(json.utf8))
     }
 
     func testDistinctJSONDecodesEveryKey() throws {
@@ -339,7 +339,7 @@ final class DeepseekV4ConfigurationTests: XCTestCase {
         let config = try decode(Self.distinctJSON)
 
         let written = try JSONEncoder().encode(config)
-        let readBack = try JSONDecoder().decode(DeepseekV4Configuration.self, from: written)
+        let readBack = try JSONDecoder().decode(DeepSeekV4Configuration.self, from: written)
 
         ExpectedValues.distinctValues.assertMatches(readBack)
     }

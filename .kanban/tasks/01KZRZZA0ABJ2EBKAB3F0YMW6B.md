@@ -1,6 +1,14 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kzs5nq1sa4tmenb37dxxxcd2
+  text: |-
+    ### finish — stuck
+    - evidence: The card requires a person to write the choice, A or B. The agent must not make this choice. The /finish batch on 2026-08-11 skipped this card for that reason.
+    - next: The user writes the choice on this card. Then a new /finish or /implement run can do the follow-up work.
+  timestamp: 2026-08-11T19:44:28.729269+00:00
 position_column: todo
 position_ordinal: '9780'
 title: 'Decision needed: keep or drop the DSV4Minimal.jinja fallback template'

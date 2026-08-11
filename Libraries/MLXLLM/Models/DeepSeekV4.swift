@@ -29,7 +29,7 @@
 //  3. **The compressor and the indexer are dropped.** The file above keeps
 //     `attn.compressor.*` and `attn.indexer.*` and wires them into its
 //     attention. Sparse attention is its own work in this repository, and
-//     ``DeepseekV4Attention`` holds neither submodule, thus the load filter
+//     ``DeepSeekV4Attention`` holds neither submodule, thus the load filter
 //     drops those keys. Remove the filter when sparse attention lands.
 //  4. **The language-model head is optional.** The file above declares a
 //     non-optional `lm_head`. `MLXLMCommon.loadWeights` verifies with
@@ -73,10 +73,10 @@ import MLXNN
 /// debugger.
 ///
 /// The trace is off unless the environment names
-/// ``DeepseekV4NumericTrace/environmentName``, and each function returns at
+/// ``DeepSeekV4NumericTrace/environmentName``, and each function returns at
 /// once when it is off, thus a production run pays one Boolean test for each
 /// stage.
-enum DeepseekV4NumericTrace {
+enum DeepSeekV4NumericTrace {
 
     /// The environment variable that turns the trace on.
     static let environmentName = "MLX_DSV4_NUMERIC_TRACE"
@@ -150,10 +150,10 @@ private enum ResidualStreamAxis {
 ///
 /// Every DeepSeek-V4 layer holds a mixture of experts. There is no dense
 /// prefix, and the configuration names no layer count for one.
-class DeepseekV4DecoderLayer: Module {
+class DeepSeekV4DecoderLayer: Module {
 
-    @ModuleInfo(key: "attn") var attention: DeepseekV4Attention
-    @ModuleInfo(key: "ffn") var ffn: DeepseekV4MoE
+    @ModuleInfo(key: "attn") var attention: DeepSeekV4Attention
+    @ModuleInfo(key: "ffn") var ffn: DeepSeekV4MoE
     @ModuleInfo(key: "attn_norm") var attentionNorm: RMSNorm
     @ModuleInfo(key: "ffn_norm") var ffnNorm: RMSNorm
     @ModuleInfo(key: "hc_attn") var attentionConnection: DeepSeekV4HyperConnection
@@ -167,11 +167,11 @@ class DeepseekV4DecoderLayer: Module {
     /// - Parameters:
     ///   - configuration: The configuration of the checkpoint.
     ///   - layer: The index of this decoder layer.
-    init(configuration: DeepseekV4Configuration, layer: Int) {
+    init(configuration: DeepSeekV4Configuration, layer: Int) {
         self.layerIndex = layer
-        self._attention.wrappedValue = DeepseekV4Attention(
+        self._attention.wrappedValue = DeepSeekV4Attention(
             configuration: configuration, layer: layer)
-        self._ffn.wrappedValue = DeepseekV4MoE(configuration: configuration, layer: layer)
+        self._ffn.wrappedValue = DeepSeekV4MoE(configuration: configuration, layer: layer)
         self._attentionNorm.wrappedValue = RMSNorm(
             dimensions: configuration.hiddenSize, eps: configuration.rmsNormEps)
         self._ffnNorm.wrappedValue = RMSNorm(
@@ -230,12 +230,12 @@ class DeepseekV4DecoderLayer: Module {
     ) -> MLXArray {
         let label = "layer.\(layerIndex).\(half)"
         let (collapsed, post, comb) = connection.collapse(stream)
-        DeepseekV4NumericTrace.tensor("\(label).collapse", collapsed)
+        DeepSeekV4NumericTrace.tensor("\(label).collapse", collapsed)
         let output = block(norm(collapsed))
-        DeepseekV4NumericTrace.tensor("\(label).block", output)
+        DeepSeekV4NumericTrace.tensor("\(label).block", output)
         let expanded = connection.expand(
             blockOutput: output, residual: stream, post: post, comb: comb)
-        DeepseekV4NumericTrace.tensor("\(label).expand", expanded)
+        DeepSeekV4NumericTrace.tensor("\(label).expand", expanded)
         return expanded
     }
 }
@@ -244,14 +244,14 @@ class DeepseekV4DecoderLayer: Module {
 
 /// The embedding table, the decoder layers, and the reduction and the norm at
 /// the top of a DeepSeek-V4 stack.
-public class DeepseekV4ModelInner: Module {
+public class DeepSeekV4ModelInner: Module {
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo(key: "hc_head") var hcHead: DeepSeekV4HyperHead
     @ModuleInfo(key: "norm") var norm: RMSNorm
 
     /// The decoder layers, in order.
-    let layers: [DeepseekV4DecoderLayer]
+    let layers: [DeepSeekV4DecoderLayer]
 
     /// The number of parallel copies of the residual stream.
     private let hcMult: Int
@@ -259,12 +259,12 @@ public class DeepseekV4ModelInner: Module {
     /// Builds the decoder stack of one checkpoint.
     ///
     /// - Parameter configuration: The configuration of the checkpoint.
-    init(configuration: DeepseekV4Configuration) {
+    init(configuration: DeepSeekV4Configuration) {
         self.hcMult = configuration.hcMult
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: configuration.vocabSize, dimensions: configuration.hiddenSize)
         self.layers = (0 ..< configuration.numHiddenLayers).map {
-            DeepseekV4DecoderLayer(configuration: configuration, layer: $0)
+            DeepSeekV4DecoderLayer(configuration: configuration, layer: $0)
         }
         self._hcHead.wrappedValue = DeepSeekV4HyperHead(configuration: configuration)
         self._norm.wrappedValue = RMSNorm(
@@ -283,9 +283,9 @@ public class DeepseekV4ModelInner: Module {
     ///     keeps no history.
     /// - Returns: The hidden states, shape `(batch, tokens, hiddenSize)`.
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        DeepseekV4NumericTrace.tokens(inputs)
+        DeepSeekV4NumericTrace.tokens(inputs)
         let embedded = embedTokens(inputs)
-        DeepseekV4NumericTrace.tensor("embedding", embedded)
+        DeepSeekV4NumericTrace.tensor("embedding", embedded)
 
         // The mask reads one copy of the stream, which is the embedding itself.
         let mask = createAttentionMask(h: embedded, cache: cache?.first)
@@ -298,9 +298,9 @@ public class DeepseekV4ModelInner: Module {
         }
 
         let reduced = hcHead(stream)
-        DeepseekV4NumericTrace.tensor("hc_head", reduced)
+        DeepSeekV4NumericTrace.tensor("hc_head", reduced)
         let normalized = norm(reduced)
-        DeepseekV4NumericTrace.tensor("norm", normalized)
+        DeepSeekV4NumericTrace.tensor("norm", normalized)
         return normalized
     }
 }
@@ -308,30 +308,30 @@ public class DeepseekV4ModelInner: Module {
 // MARK: - Model
 
 /// A DeepSeek-V4 language model.
-public class DeepseekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
+public class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
 
     /// The number of latent key/value heads of each layer. DeepSeek-V4 keeps
     /// one, and sends it to every query head.
     public let kvHeads: [Int]
 
     /// The decoder stack.
-    public let model: DeepseekV4ModelInner
+    public let model: DeepSeekV4ModelInner
 
     /// The language-model head, or `nil` when the checkpoint ties it to the
     /// embedding table.
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     /// The configuration the load filter reads.
-    private let configuration: DeepseekV4Configuration
+    private let configuration: DeepSeekV4Configuration
 
     /// Builds a DeepSeek-V4 model.
     ///
     /// - Parameter configuration: The configuration of the checkpoint.
-    public init(_ configuration: DeepseekV4Configuration) {
+    public init(_ configuration: DeepSeekV4Configuration) {
         self.configuration = configuration
         self.kvHeads = Array(
             repeating: configuration.numKeyValueHeads, count: configuration.numHiddenLayers)
-        self.model = DeepseekV4ModelInner(configuration: configuration)
+        self.model = DeepSeekV4ModelInner(configuration: configuration)
         if !configuration.tieWordEmbeddings {
             self._lmHead.wrappedValue = Linear(
                 configuration.hiddenSize, configuration.vocabSize, bias: false)
@@ -348,7 +348,7 @@ public class DeepseekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         let hidden = model(inputs, cache: cache)
         let logits = lmHead.map { $0(hidden) } ?? model.embedTokens.asLinear(hidden)
-        DeepseekV4NumericTrace.tensor("logits", logits)
+        DeepSeekV4NumericTrace.tensor("logits", logits)
         return logits
     }
 
@@ -449,7 +449,7 @@ public class DeepseekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
 
         // The compressor and the indexer belong to DeepSeek-V4 sparse
         // attention, which task `^tty95f4` and task `^r92pjcr` land.
-        // `DeepseekV4Attention` holds neither submodule today, thus their
+        // `DeepSeekV4Attention` holds neither submodule today, thus their
         // tensors have no place to go. Remove this test with those tasks.
         if sparseAttentionSegments.contains(where: key.contains) { return false }
 
@@ -498,7 +498,7 @@ public class DeepseekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
     }
 
     /// Stacks the per-expert tensors of each layer into the one tensor
-    /// ``DeepseekV4SwitchGLU`` reads.
+    /// ``DeepSeekV4SwitchGLU`` reads.
     ///
     /// A checkpoint an earlier conversion already stacked carries no
     /// per-expert key, thus this pass finds nothing and changes nothing.

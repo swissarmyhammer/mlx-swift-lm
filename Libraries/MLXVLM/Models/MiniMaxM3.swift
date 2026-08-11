@@ -2012,7 +2012,7 @@ final class MiniMaxM3MLP: Module {
 /// A single decoder layer: dense `MiniMaxM3MLP` for layers 0..<3, MoE
 /// `MiniMaxM3SparseMoeBlock` from layer 3 on, per `config.moeLayerFreq`.
 ///
-/// Unlike `DeepseekV3DecoderLayer` (`Libraries/MLXLLM/Models/DeepseekV3.swift`),
+/// Unlike `DeepSeekV3DecoderLayer` (`Libraries/MLXLLM/Models/DeepSeekV3.swift`),
 /// which reuses a single `mlp`-keyed property for both variants, M3's two
 /// variants are exposed through two separate optional `@ModuleInfo`-wrapped
 /// properties (`denseMLP`/`blockSparseMoe`) -- verified directly against the

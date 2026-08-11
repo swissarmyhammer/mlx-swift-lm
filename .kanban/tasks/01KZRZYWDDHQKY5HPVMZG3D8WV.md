@@ -42,8 +42,24 @@ comments:
     - evidence: Fresh mutation proof for the open BLOCKER finding. Mutation: in `Libraries/MLXLMCommon/DeepseekV4ChatEncoder.swift`, `SpecialToken.endOfSentence` got the marker name `end▁of▁sentenceX` in place of `end▁of▁sentence`. Red run: `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests` failed — `markersSurviveStreamingDetokenizationWhole()` with 3 issues, `endOfSentenceTokenIdIsOne()` with 1 issue, 4 issues in total. Restore: `git checkout -- Libraries/MLXLMCommon/DeepseekV4ChatEncoder.swift`. Green run: the same command passed — 2 tests, 0 issues, `** TEST SUCCEEDED **`. `git status --porcelain` shows only the kanban board files, thus no mutation stays in the tree. The proof text is now in the "## Review Findings (2026-08-11 14:36)" section, and the BLOCKER item is checked, because the finding permits this proof as the alternative to an engine review. No production or test code changed.
     - next: the task stays in doing; a person decides the next step.
   timestamp: 2026-08-11T19:41:47.636385+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01kzs5mfja7jw0vmr3kw9e9hzg
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (commit `aeecbe9`) gave counts findings 0, confirmed 0, refuted 0, attempted 0. The delta holds only two `.kanban` task files and no code (`git diff --name-only HEAD~1..HEAD` confirms this), thus "Nothing in scope to review" is the correct result — no validator reads `.kanban` files. The one prior finding, the BLOCKER in "## Review Findings (2026-08-11 14:36)", is checked. The mutation proof under it (4 issues with the fault, 2 tests pass after the restore) satisfies the alternative that the finding permits.
+    - next: none. The task moves to done.
+  timestamp: 2026-08-11T19:43:48.298446+00:00
+- actor: claude-code
+  id: 01kzs5n3jtc2g1fqykbmnp03ap
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — fresh mutation proof (broken encoder marker constant killed both integration tests with 4 issues; restore made 2 tests pass); BLOCKER finding checked per the alternative the finding permits
+    - test: green — code files identical to the state the last full swift test run verified (exit 0, 0 failures); only .kanban files changed this iteration
+    - commit: aeecbe9
+    - review: clean — 0 new findings, 1/1 prior findings checked; task moved to done
+  timestamp: 2026-08-11T19:44:08.794059+00:00
+position_column: done
+position_ordinal: ea80
 title: 'DeepSeek-V4 tokenizer integration tests: marker round trip and eos token id'
 ---
 ## What

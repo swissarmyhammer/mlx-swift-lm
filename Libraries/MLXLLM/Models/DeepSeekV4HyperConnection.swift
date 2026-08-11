@@ -30,8 +30,8 @@
 //     numbers, which is 16384 on DeepSeek-V4-Flash, and bfloat16 loses that
 //     sum.
 //  3. The Sinkhorn split. The file above and this file both call one shared
-//     routine. This file calls `DeepseekV4Math.hcSplitSinkhorn`, from
-//     Libraries/MLXLLM/Models/DeepseekV4MathHelpers.swift, which is the
+//     routine. This file calls `DeepSeekV4Math.hcSplitSinkhorn`, from
+//     Libraries/MLXLLM/Models/DeepSeekV4MathHelpers.swift, which is the
 //     transcription of the Python `hc_split_sinkhorn`, and it hands that
 //     routine the `hc_eps` of the checkpoint. The routine holds no epsilon
 //     of its own.
@@ -152,7 +152,7 @@ private enum ManifoldStream {
 ///
 /// The collapse and the expand share one projection. The collapse reads the
 /// flattened copies, normalizes them, and projects them onto a mixes vector of
-/// `(2 + hcMult) * hcMult` numbers. `DeepseekV4Math.hcSplitSinkhorn` splits
+/// `(2 + hcMult) * hcMult` numbers. `DeepSeekV4Math.hcSplitSinkhorn` splits
 /// that vector into three fields: `pre`, which weighs each copy on the way in,
 /// `post`, which weighs the block output on the way out, and `comb`, a doubly
 /// stochastic mixing matrix that carries the copies across.
@@ -216,7 +216,7 @@ class DeepSeekV4HyperConnection: Module {
     /// Builds the hyper-connection of one sub-layer.
     ///
     /// - Parameter configuration: The configuration of the checkpoint.
-    init(configuration: DeepseekV4Configuration) {
+    init(configuration: DeepSeekV4Configuration) {
         self.hcMult = configuration.hcMult
         self.hiddenSize = configuration.hiddenSize
         self.sinkhornIterations = configuration.hcSinkhornIters
@@ -252,7 +252,7 @@ class DeepSeekV4HyperConnection: Module {
             of: streamF32, projection: mixProjection, normWeight: _normWeight,
             normEps: normEps)
 
-        let (pre, post, comb) = DeepseekV4Math.hcSplitSinkhorn(
+        let (pre, post, comb) = DeepSeekV4Math.hcSplitSinkhorn(
             mixes: mixes, scale: mixScale, base: mixBias,
             hcMult: hcMult, iters: sinkhornIterations, eps: hcEps)
 
@@ -350,7 +350,7 @@ class DeepSeekV4HyperHead: Module {
     /// Builds the reduction at the top of the stack.
     ///
     /// - Parameter configuration: The configuration of the checkpoint.
-    init(configuration: DeepseekV4Configuration) {
+    init(configuration: DeepSeekV4Configuration) {
         self.hcMult = configuration.hcMult
         self.hiddenSize = configuration.hiddenSize
         self.hcEps = configuration.hcEps

@@ -1,6 +1,6 @@
 // Copyright © 2026 Apple Inc.
 //
-// Numeric parity tests for `DeepseekV4Math`.
+// Numeric parity tests for `DeepSeekV4Math`.
 //
 // Every expected number below comes from the DeepSeek-V4 Python reference,
 // `Thump604/mlx-lm` @ `deepseek-v4-support-fixes`,
@@ -29,7 +29,7 @@ import Testing
 @testable import MLXLLM
 
 @Suite(.serialized)
-struct DeepseekV4MathHelpersTests {
+struct DeepSeekV4MathHelpersTests {
 
     init() {
         _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
@@ -136,7 +136,7 @@ struct DeepseekV4MathHelpersTests {
         let scale = MLXArray(Self.sinkhornScale)
         let base = MLXArray(Self.sinkhornBase)
 
-        let (pre, post, comb) = DeepseekV4Math.hcSplitSinkhorn(
+        let (pre, post, comb) = DeepSeekV4Math.hcSplitSinkhorn(
             mixes: mixes, scale: scale, base: base, hcMult: hcMult,
             iters: Self.sinkhornIterations, eps: Self.sinkhornEps)
         eval(pre, post, comb)
@@ -157,7 +157,7 @@ struct DeepseekV4MathHelpersTests {
 
     @Test func hcSplitSinkhornCombIsDoublyStochastic() {
         let hcMult = Self.fixtureHCMult
-        let (_, _, comb) = DeepseekV4Math.hcSplitSinkhorn(
+        let (_, _, comb) = DeepSeekV4Math.hcSplitSinkhorn(
             mixes: MLXArray(Self.sinkhornMixes, [1, Self.sinkhornMixes.count]),
             scale: MLXArray(Self.sinkhornScale),
             base: MLXArray(Self.sinkhornBase),
@@ -226,7 +226,7 @@ struct DeepseekV4MathHelpersTests {
 
     @Test func applyPartialRoPEMatchesPythonReference() {
         let (x, cos, sin) = ropeFixtureArrays()
-        let rotated = DeepseekV4Math.applyPartialRoPE(
+        let rotated = DeepSeekV4Math.applyPartialRoPE(
             x, cos: cos, sin: sin, ropeDim: Self.fixtureRopeDim)
         eval(rotated)
 
@@ -260,7 +260,7 @@ struct DeepseekV4MathHelpersTests {
         let (x, cosine, sine) = deepseekV4Rotation()
         let noPositionDim = Self.deepseekV4HeadDim - Self.deepseekV4RopeDim
 
-        let rotated = DeepseekV4Math.applyPartialRoPE(
+        let rotated = DeepSeekV4Math.applyPartialRoPE(
             x, cos: cosine, sin: sine, ropeDim: Self.deepseekV4RopeDim)
         eval(rotated)
 
@@ -282,9 +282,9 @@ struct DeepseekV4MathHelpersTests {
     @Test func inversePartialRoPEUndoesTheForwardRotation() {
         let (x, cosine, sine) = deepseekV4Rotation()
 
-        let rotated = DeepseekV4Math.applyPartialRoPE(
+        let rotated = DeepSeekV4Math.applyPartialRoPE(
             x, cos: cosine, sin: sine, ropeDim: Self.deepseekV4RopeDim)
-        let restored = DeepseekV4Math.applyInversePartialRoPE(
+        let restored = DeepSeekV4Math.applyInversePartialRoPE(
             rotated, cos: cosine, sin: sine, ropeDim: Self.deepseekV4RopeDim)
         eval(rotated, restored)
 
@@ -312,7 +312,7 @@ struct DeepseekV4MathHelpersTests {
     ]
 
     @Test func yarnInvFreqMatchesPythonReference() {
-        let invFreq = DeepseekV4Math.yarnInvFreq(
+        let invFreq = DeepSeekV4Math.yarnInvFreq(
             dim: Self.deepseekV4RopeDim,
             base: 160_000,
             originalMaxPositionEmbeddings: 65536,
@@ -344,7 +344,7 @@ struct DeepseekV4MathHelpersTests {
     ]
 
     @Test func yarnInvFreqClampsTheCorrectionRangeToTheTable() {
-        let invFreq = DeepseekV4Math.yarnInvFreq(
+        let invFreq = DeepSeekV4Math.yarnInvFreq(
             dim: 8,
             base: 10,
             originalMaxPositionEmbeddings: 1_000_000_000,
@@ -370,7 +370,7 @@ struct DeepseekV4MathHelpersTests {
     ]
 
     @Test func sqrtSoftplusMatchesPythonReference() {
-        let scores = DeepseekV4Math.sqrtSoftplus(MLXArray(Self.sqrtSoftplusInput))
+        let scores = DeepSeekV4Math.sqrtSoftplus(MLXArray(Self.sqrtSoftplusInput))
         eval(scores)
 
         expectCloseRelative(
@@ -384,7 +384,7 @@ struct DeepseekV4MathHelpersTests {
     private static let sqrtSoftplusUnderflowLimit: Float = 1e-20
 
     @Test func sqrtSoftplusStaysFiniteAtTheExtremes() {
-        let scores = DeepseekV4Math.sqrtSoftplus(MLXArray([Float(-100), 0, 100]))
+        let scores = DeepSeekV4Math.sqrtSoftplus(MLXArray([Float(-100), 0, 100]))
         eval(scores)
         let got = floats(scores)
 
@@ -432,7 +432,7 @@ struct DeepseekV4MathHelpersTests {
     ]
 
     @Test func clampedSwiGLUMatchesPythonReference() {
-        let output = DeepseekV4Math.clampedSwiGLU(
+        let output = DeepSeekV4Math.clampedSwiGLU(
             gate: MLXArray(Self.swiGLUGate), up: MLXArray(Self.swiGLUUp),
             limit: Self.swiGLULimit)
         eval(output)
@@ -443,7 +443,7 @@ struct DeepseekV4MathHelpersTests {
 
     @Test func clampedSwiGLUSaturatesBeyondTheLimit() {
         let output = floats(
-            DeepseekV4Math.clampedSwiGLU(
+            DeepSeekV4Math.clampedSwiGLU(
                 gate: MLXArray(Self.swiGLUGate), up: MLXArray(Self.swiGLUUp),
                 limit: Self.swiGLULimit))
 
@@ -472,7 +472,7 @@ struct DeepseekV4MathHelpersTests {
         let expertCount = Self.fixtureExpertCount
         let routed = MLXArray(Self.routedExpertValues, [1, expertCount, 1]).asType(.bfloat16)
 
-        let reduced = DeepseekV4Math.reduceRoutedExpertsFP32(routed)
+        let reduced = DeepSeekV4Math.reduceRoutedExpertsFP32(routed)
         eval(reduced)
         #expect(reduced.shape == [1, 1])
         #expect(reduced.dtype == .float32)

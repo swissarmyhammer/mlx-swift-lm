@@ -21,7 +21,7 @@ import MLXLMCommon
 ///
 /// Every key of `config.json` is optional. A key that the file does not give
 /// gets the DeepSeek-V4-Flash value, thus a short file decodes without an error.
-public struct DeepseekV4Configuration: Codable, Sendable {
+public struct DeepSeekV4Configuration: Codable, Sendable {
 
     // MARK: - Core transformer
 
@@ -280,7 +280,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
     }
 }
 
-extension DeepseekV4Configuration {
+extension DeepSeekV4Configuration {
 
     /// Tells whether a layer routes its tokens through the hash table.
     ///

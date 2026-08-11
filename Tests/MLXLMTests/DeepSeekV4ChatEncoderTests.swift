@@ -32,7 +32,7 @@ import XCTest
 
 /// Examines ``DeepSeekV4ChatEncoder`` against the output of the Python encoder
 /// that DeepSeek ships in the DeepSeek-V4-Flash model repository.
-final class DeepseekV4ChatEncoderTests: XCTestCase {
+final class DeepSeekV4ChatEncoderTests: XCTestCase {
 
     private let encoder = DeepSeekV4ChatEncoder()
 

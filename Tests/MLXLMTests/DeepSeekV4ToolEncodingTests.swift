@@ -36,7 +36,7 @@ import XCTest
 /// Examines the tool half of ``DeepSeekV4ChatEncoder`` against the output of
 /// the Python encoder that DeepSeek ships in the DeepSeek-V4-Flash model
 /// repository.
-final class DeepseekV4ToolEncodingTests: XCTestCase {
+final class DeepSeekV4ToolEncodingTests: XCTestCase {
 
     private let encoder = DeepSeekV4ChatEncoder()
 

@@ -31,7 +31,7 @@ import Testing
 @testable import MLXLMCommon
 
 @Suite(.serialized)
-struct DeepseekV4GateCheckpointLoadTests {
+struct DeepSeekV4GateCheckpointLoadTests {
 
     init() {
         _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
@@ -87,7 +87,7 @@ struct DeepseekV4GateCheckpointLoadTests {
     private static let hashTableSuffix = "ffn.gate.tid2eid"
 
     /// The `config.json` of the synthetic checkpoint.
-    private static func configuration() throws -> DeepseekV4Configuration {
+    private static func configuration() throws -> DeepSeekV4Configuration {
         let json = """
             {
               "vocab_size": \(vocabSize),
@@ -119,7 +119,7 @@ struct DeepseekV4GateCheckpointLoadTests {
               "tie_word_embeddings": false
             }
             """
-        return try JSONDecoder().decode(DeepseekV4Configuration.self, from: Data(json.utf8))
+        return try JSONDecoder().decode(DeepSeekV4Configuration.self, from: Data(json.utf8))
     }
 
     /// The expert the hash table names for one token on one route.
@@ -156,7 +156,7 @@ struct DeepseekV4GateCheckpointLoadTests {
     ///
     /// - Returns: The tensors, by module path.
     private static func publishedCheckpoint() throws -> [String: MLXArray] {
-        let donor = DeepseekV4Model(try configuration())
+        let donor = DeepSeekV4Model(try configuration())
         var checkpoint = [String: MLXArray]()
         var seed = weightSeed
         for (path, value) in donor.parameters().flattened().sorted(by: { $0.0 < $1.0 })
@@ -199,7 +199,7 @@ struct DeepseekV4GateCheckpointLoadTests {
     /// threw `keyNotFound`, because every gate declared both.
     @Test("A checkpoint that splits the routing tensors by layer loads")
     func aCheckpointThatSplitsTheRoutingTensorsByLayerLoads() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
 
         try model.update(
             parameters: ModuleParameters.unflattened(try Self.publishedCheckpoint()),
@@ -209,7 +209,7 @@ struct DeepseekV4GateCheckpointLoadTests {
 
     @Test("A hash gate declares the table alone and a top-k gate the bias alone")
     func eachGateDeclaresTheRoutingTensorOfItsOwnKind() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
         let paths = Set(model.parameters().flattened().map(\.0))
 
         for layer in 0 ..< Self.layerCount {
@@ -226,7 +226,7 @@ struct DeepseekV4GateCheckpointLoadTests {
 
     @Test("The loaded hash layer routes each token to its own table row")
     func theLoadedHashLayerRoutesEachTokenToItsTableRow() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
         try model.update(
             parameters: ModuleParameters.unflattened(try Self.publishedCheckpoint()),
             verify: [.all])
@@ -248,7 +248,7 @@ struct DeepseekV4GateCheckpointLoadTests {
 
     @Test("The loaded top-k layer selects the highest biased scores")
     func theLoadedTopKLayerSelectsTheHighestBiasedScores() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
         try model.update(
             parameters: ModuleParameters.unflattened(try Self.publishedCheckpoint()),
             verify: [.all])

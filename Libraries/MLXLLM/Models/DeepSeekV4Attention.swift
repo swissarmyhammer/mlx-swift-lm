@@ -15,7 +15,7 @@
 //     layer take 0, and the layers between alternate 4 and 128. The Python
 //     reads `ratios[layer_idx] if layer_idx < len(ratios) else 0` and
 //     invents nothing. This file reads `hasCompressor(layer:)` and
-//     `ropeTheta(forLayer:)` from ``DeepseekV4Configuration``, which give
+//     `ropeTheta(forLayer:)` from ``DeepSeekV4Configuration``, which give
 //     the Python answer.
 //  2. The inverse-frequency table is not a checkpoint tensor. The Python
 //     hides it behind a tuple and says so: "This is derived from config,
@@ -55,7 +55,7 @@ import MLXNN
 /// tensor, because DeepSeek-V4 reads the same tables three times in one
 /// block: forward on the queries, forward on the keys, and backward on the
 /// attention output.
-class DeepseekV4RoPE: Module {
+class DeepSeekV4RoPE: Module {
 
     /// The inverse frequency of each rotary pair, in float32.
     ///
@@ -99,7 +99,7 @@ class DeepseekV4RoPE: Module {
         betaFast: Float,
         betaSlow: Float
     ) {
-        self._inverseFrequency = DeepseekV4Math.yarnInvFreq(
+        self._inverseFrequency = DeepSeekV4Math.yarnInvFreq(
             dim: dim,
             base: base,
             originalMaxPositionEmbeddings: originalMaxPositionEmbeddings,
@@ -122,7 +122,7 @@ class DeepseekV4RoPE: Module {
     /// - Parameters:
     ///   - configuration: The configuration of the checkpoint.
     ///   - layer: The index of the decoder layer.
-    convenience init(configuration: DeepseekV4Configuration, layer: Int) {
+    convenience init(configuration: DeepSeekV4Configuration, layer: Int) {
         let scaling =
             configuration.hasCompressor(layer: layer)
             ? Self.yarnScaling(from: configuration.ropeScaling) : nil
@@ -199,7 +199,7 @@ class DeepseekV4RoPE: Module {
 ///
 /// One latent key/value head serves all query heads, thus the keys and the
 /// values are one and the same tensor.
-class DeepseekV4Attention: Module {
+class DeepSeekV4Attention: Module {
 
     /// The number of query heads.
     let headCount: Int
@@ -226,7 +226,7 @@ class DeepseekV4Attention: Module {
     let scale: Float
 
     /// The rotary position of this layer.
-    let rope: DeepseekV4RoPE
+    let rope: DeepSeekV4RoPE
 
     @ModuleInfo(key: "wq_a") var wqA: Linear
     @ModuleInfo(key: "wq_b") var wqB: Linear
@@ -271,7 +271,7 @@ class DeepseekV4Attention: Module {
     /// - Parameters:
     ///   - configuration: The configuration of the checkpoint.
     ///   - layer: The index of the decoder layer this attention belongs to.
-    init(configuration: DeepseekV4Configuration, layer: Int) {
+    init(configuration: DeepSeekV4Configuration, layer: Int) {
         self.headCount = configuration.numAttentionHeads
         self.headDim = configuration.headDim
         self.ropeDim = configuration.qkRopeHeadDim
@@ -280,7 +280,7 @@ class DeepseekV4Attention: Module {
         self.normEps = configuration.rmsNormEps
         self.useAttnSink = configuration.useAttnSink
         self.scale = 1 / sqrt(Float(configuration.headDim))
-        self.rope = DeepseekV4RoPE(configuration: configuration, layer: layer)
+        self.rope = DeepSeekV4RoPE(configuration: configuration, layer: layer)
 
         let hidden = configuration.hiddenSize
         let queryLoraRank = configuration.qLoraRank
@@ -339,7 +339,7 @@ class DeepseekV4Attention: Module {
         // The keys carried the position into the scores. Turning the output
         // backward takes it out again, thus the residual stream reads a
         // result with no position in it.
-        let straightened = DeepseekV4Math.applyInversePartialRoPE(
+        let straightened = DeepSeekV4Math.applyInversePartialRoPE(
             attended, cos: cosTable, sin: sinTable, ropeDim: ropeDim)
         let flattened =
             straightened
@@ -360,7 +360,7 @@ class DeepseekV4Attention: Module {
         let projected = wqB(qNorm(wqA(x))).reshaped(batch, length, headCount, headDim)
         let wide = projected.asType(.float32)
         let normed = wide * rsqrt((wide * wide).mean(axis: -1, keepDims: true) + normEps)
-        return DeepseekV4Math.applyPartialRoPE(
+        return DeepSeekV4Math.applyPartialRoPE(
             normed.asType(projected.dtype).transposed(axes: Self.headMajor),
             cos: cos, sin: sin, ropeDim: ropeDim)
     }
@@ -373,7 +373,7 @@ class DeepseekV4Attention: Module {
         let projected = kvNorm(wkv(x))
             .reshaped(batch, length, Self.latentHeadCount, headDim)
             .transposed(axes: Self.headMajor)
-        return DeepseekV4Math.applyPartialRoPE(projected, cos: cos, sin: sin, ropeDim: ropeDim)
+        return DeepSeekV4Math.applyPartialRoPE(projected, cos: cos, sin: sin, ropeDim: ropeDim)
     }
 
     /// Reads the grouped low-rank half of the output projection.

@@ -13,7 +13,7 @@
 // number below was read out of this repository.
 //
 // The dtype of each fixture. Every fixture runs in float32, with one
-// exception: ``DeepseekV4MoETests/theRoutedReductionRunsInFloat32()`` runs in
+// exception: ``DeepSeekV4MoETests/theRoutedReductionRunsInFloat32()`` runs in
 // bfloat16, because the float32 reduction it measures cannot be seen in
 // float32 activations. That test states the bfloat16 rounding of each step
 // beside the number it asserts.
@@ -30,7 +30,7 @@ import Testing
 @testable import MLXLMCommon
 
 @Suite(.serialized)
-struct DeepseekV4MoETests {
+struct DeepSeekV4MoETests {
 
     init() {
         _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
@@ -91,7 +91,7 @@ struct DeepseekV4MoETests {
         expertsPerToken: Int = expertsPerToken,
         hiddenSize: Int = hiddenSize,
         expertWidth: Int = expertWidth
-    ) throws -> DeepseekV4Configuration {
+    ) throws -> DeepSeekV4Configuration {
         let json = """
             {
               "vocab_size": \(vocabSize),
@@ -107,7 +107,7 @@ struct DeepseekV4MoETests {
               "swiglu_limit": \(swigluLimit)
             }
             """
-        return try JSONDecoder().decode(DeepseekV4Configuration.self, from: Data(json.utf8))
+        return try JSONDecoder().decode(DeepSeekV4Configuration.self, from: Data(json.utf8))
     }
 
     // MARK: - Fixture builders
@@ -183,9 +183,9 @@ struct DeepseekV4MoETests {
     ///   - configuration: The configuration to build the gate from.
     /// - Returns: The gate.
     private static func routingGate(
-        layer: Int, bias: [Float], configuration: DeepseekV4Configuration
-    ) throws -> DeepseekV4MoEGate {
-        let gate = DeepseekV4MoEGate(configuration: configuration, layer: layer)
+        layer: Int, bias: [Float], configuration: DeepSeekV4Configuration
+    ) throws -> DeepSeekV4MoEGate {
+        let gate = DeepSeekV4MoEGate(configuration: configuration, layer: layer)
         var fixture: [(String, MLXArray)] = [("weight", routingGateWeight())]
         if configuration.isHashLayer(layer) {
             fixture.append(("tid2eid", hashTableArray()))
@@ -354,8 +354,8 @@ struct DeepseekV4MoETests {
 
     /// A dense MLP that answers `clampedSwiGLU(gate: x[0], up: x[1])` in its
     /// first output, thus a test can drive the two projections apart.
-    private static func splitProjectionMLP() throws -> DeepseekV4MLP {
-        let mlp = DeepseekV4MLP(hiddenSize: 2, intermediateSize: 1, swigluLimit: swigluLimit)
+    private static func splitProjectionMLP() throws -> DeepSeekV4MLP {
+        let mlp = DeepSeekV4MLP(hiddenSize: 2, intermediateSize: 1, swigluLimit: swigluLimit)
         try mlp.update(
             parameters: ModuleParameters.unflattened([
                 ("gate_proj.weight", array([1, 0], [1, 2])),
@@ -367,7 +367,7 @@ struct DeepseekV4MoETests {
     }
 
     /// Runs ``splitProjectionMLP()`` and reads back the clamped activation.
-    private func activation(_ mlp: DeepseekV4MLP, gate: Float, up: Float) -> Float {
+    private func activation(_ mlp: DeepSeekV4MLP, gate: Float, up: Float) -> Float {
         floats(mlp(Self.array([gate, up], [1, 1, 2])))[0]
     }
 
@@ -412,8 +412,8 @@ struct DeepseekV4MoETests {
 
     /// A `switch_mlp` whose every expert answers
     /// `clampedSwiGLU(gate: x[0], up: x[1])` in its first output.
-    private static func splitProjectionExperts() throws -> DeepseekV4SwitchGLU {
-        let experts = DeepseekV4SwitchGLU(
+    private static func splitProjectionExperts() throws -> DeepSeekV4SwitchGLU {
+        let experts = DeepSeekV4SwitchGLU(
             inputDims: 2, hiddenDims: 1, expertCount: 2, swigluLimit: swigluLimit)
         try experts.update(
             parameters: ModuleParameters.unflattened([
@@ -447,7 +447,7 @@ struct DeepseekV4MoETests {
         // unsorted path. A wrong `scatterUnsort` gives one token the answer
         // of another, and the two paths then disagree.
         let tokenCount = 32
-        let experts = DeepseekV4SwitchGLU(
+        let experts = DeepSeekV4SwitchGLU(
             inputDims: Self.hiddenSize, hiddenDims: Self.expertWidth,
             expertCount: Self.routedExpertCount, swigluLimit: Self.swigluLimit)
         try experts.update(
@@ -493,9 +493,9 @@ struct DeepseekV4MoETests {
     /// shared expert answers `clampedSwiGLU(gate: x[0], up: x[1])` in its
     /// first output. The routed `down_proj` holds zeros, thus the layer
     /// output IS the shared-expert output.
-    private static func sharedExpertOnlyLayer() throws -> DeepseekV4MoE {
+    private static func sharedExpertOnlyLayer() throws -> DeepSeekV4MoE {
         let configuration = try configuration(hiddenSize: 2, expertWidth: 1)
-        let moe = DeepseekV4MoE(configuration: configuration, layer: topKLayer)
+        let moe = DeepSeekV4MoE(configuration: configuration, layer: topKLayer)
         try moe.update(
             parameters: ModuleParameters.unflattened([
                 ("gate.weight", zeros([routedExpertCount, 2])),
@@ -545,9 +545,9 @@ struct DeepseekV4MoETests {
     ///   - sharedScale: The factor every shared-expert weight takes. A scale
     ///     of zero turns the shared expert off.
     /// - Returns: The layer.
-    private static func randomLayer(layer: Int, sharedScale: Float = 1) throws -> DeepseekV4MoE {
+    private static func randomLayer(layer: Int, sharedScale: Float = 1) throws -> DeepSeekV4MoE {
         let checkpointConfiguration = try configuration()
-        let moe = DeepseekV4MoE(configuration: checkpointConfiguration, layer: layer)
+        let moe = DeepSeekV4MoE(configuration: checkpointConfiguration, layer: layer)
         var fixture: [(String, MLXArray)] = [
             ("gate.weight", randomArray([routedExpertCount, hiddenSize], seed: 31))
         ]
@@ -632,7 +632,7 @@ struct DeepseekV4MoETests {
         // output to 0.609375 first and answers exactly zero.
         let configuration = try Self.configuration(
             hashLayers: 0, routedExperts: 2, expertsPerToken: 2, hiddenSize: 1, expertWidth: 1)
-        let moe = DeepseekV4MoE(configuration: configuration, layer: 0)
+        let moe = DeepSeekV4MoE(configuration: configuration, layer: 0)
         func bfloat16(_ values: [Float], _ shape: [Int]) -> MLXArray {
             Self.array(values, shape).asType(.bfloat16)
         }

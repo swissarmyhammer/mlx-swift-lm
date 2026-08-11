@@ -40,7 +40,7 @@ import Testing
 @testable import MLXLMCommon
 
 @Suite(.serialized)
-struct DeepseekV4HyperConnectionTests {
+struct DeepSeekV4HyperConnectionTests {
 
     init() {
         _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
@@ -109,7 +109,7 @@ struct DeepseekV4HyperConnectionTests {
         sinkhornIterations: Int = sinkhornIterations,
         normEps: Float = normEps,
         hcEps: Float = hcEps
-    ) throws -> DeepseekV4Configuration {
+    ) throws -> DeepSeekV4Configuration {
         let json = """
             {
               "hidden_size": \(hiddenSize),
@@ -119,7 +119,7 @@ struct DeepseekV4HyperConnectionTests {
               "rms_norm_eps": \(normEps)
             }
             """
-        return try JSONDecoder().decode(DeepseekV4Configuration.self, from: Data(json.utf8))
+        return try JSONDecoder().decode(DeepSeekV4Configuration.self, from: Data(json.utf8))
     }
 
     // MARK: - Fixture builders
@@ -226,7 +226,7 @@ struct DeepseekV4HyperConnectionTests {
     /// - Parameter configuration: The configuration to build the layer from.
     /// - Returns: The layer.
     private static func fixtureHyperConnection(
-        configuration: DeepseekV4Configuration
+        configuration: DeepSeekV4Configuration
     ) throws -> DeepSeekV4HyperConnection {
         let hyperConnection = DeepSeekV4HyperConnection(configuration: configuration)
         try hyperConnection.update(
@@ -244,7 +244,7 @@ struct DeepseekV4HyperConnectionTests {
     /// - Parameter configuration: The configuration to build the head from.
     /// - Returns: The head.
     private static func fixtureHyperHead(
-        configuration: DeepseekV4Configuration
+        configuration: DeepSeekV4Configuration
     ) throws -> DeepSeekV4HyperHead {
         let head = DeepSeekV4HyperHead(configuration: configuration)
         try head.update(
@@ -572,10 +572,10 @@ struct DeepseekV4HyperConnectionTests {
         let scale = Self.array(Self.scales, [Self.scales.count])
         let bias = Self.biasFixture(count: Self.mixWidth)
 
-        let withoutEps = DeepseekV4Math.hcSplitSinkhorn(
+        let withoutEps = DeepSeekV4Math.hcSplitSinkhorn(
             mixes: mixes, scale: scale, base: bias,
             hcMult: Self.hcMult, iters: Self.sinkhornIterations, eps: 0)
-        let withEps = DeepseekV4Math.hcSplitSinkhorn(
+        let withEps = DeepSeekV4Math.hcSplitSinkhorn(
             mixes: mixes, scale: scale, base: bias,
             hcMult: Self.hcMult, iters: Self.sinkhornIterations, eps: Self.hcEps)
 
@@ -614,7 +614,7 @@ struct DeepseekV4HyperConnectionTests {
             (Self.splitFieldCount * Self.hcMult) ..< Self.mixWidth,
             with: Self.closedColumnBias)
 
-        let split = DeepseekV4Math.hcSplitSinkhorn(
+        let split = DeepSeekV4Math.hcSplitSinkhorn(
             mixes: MLXArray.zeros([1, Self.mixWidth]),
             scale: Self.array([1, 1, 1], [Self.scales.count]),
             base: Self.array(bias, [Self.mixWidth]),

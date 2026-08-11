@@ -33,7 +33,7 @@ import Testing
 @testable import MLXLMCommon
 
 @Suite(.serialized)
-struct DeepseekV4ModelTests {
+struct DeepSeekV4ModelTests {
 
     init() {
         _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
@@ -99,7 +99,7 @@ struct DeepseekV4ModelTests {
     /// - Returns: The decoded configuration.
     private static func configuration(
         tieWordEmbeddings: Bool = false
-    ) throws -> DeepseekV4Configuration {
+    ) throws -> DeepSeekV4Configuration {
         let json = """
             {
               "vocab_size": \(vocabSize),
@@ -131,7 +131,7 @@ struct DeepseekV4ModelTests {
               "tie_word_embeddings": \(tieWordEmbeddings)
             }
             """
-        return try JSONDecoder().decode(DeepseekV4Configuration.self, from: Data(json.utf8))
+        return try JSONDecoder().decode(DeepSeekV4Configuration.self, from: Data(json.utf8))
     }
 
     // MARK: - Fixture builders
@@ -163,8 +163,8 @@ struct DeepseekV4ModelTests {
     /// - Returns: The loaded model.
     private static func loadedModel(
         tieWordEmbeddings: Bool = false
-    ) throws -> DeepseekV4Model {
-        let model = DeepseekV4Model(try configuration(tieWordEmbeddings: tieWordEmbeddings))
+    ) throws -> DeepSeekV4Model {
+        let model = DeepSeekV4Model(try configuration(tieWordEmbeddings: tieWordEmbeddings))
         var checkpoint: [String: MLXArray] = [:]
         var seed = weightSeed
         for (key, value) in model.parameters().flattened().sorted(by: { $0.0 < $1.0 }) {
@@ -211,13 +211,13 @@ struct DeepseekV4ModelTests {
     // MARK: - Module paths
 
     @Test func theModulePathsAreTheCheckpointKeyPaths() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
         let modulePaths = Set(model.leafModules().flattened().map(\.0))
         let parameterPaths = Set(model.parameters().flattened().map(\.0))
 
         // The `quantization` block of the published checkpoint names these
         // module paths, and `quantize(model:filter:)` matches against the
-        // flattened module path. `DeepseekV4QuantizationPlanTests` pins the
+        // flattened module path. `DeepSeekV4QuantizationPlanTests` pins the
         // same names from the plan's side.
         for path in [
             "model.embed_tokens",
@@ -262,7 +262,7 @@ struct DeepseekV4ModelTests {
     }
 
     @Test func theStackHoldsOneLayerAndOneCacheEntryForEachConfiguredLayer() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
 
         #expect(model.model.layers.count == Self.layerCount)
         #expect(model.kvHeads.count == Self.layerCount)
@@ -392,8 +392,8 @@ struct DeepseekV4ModelTests {
     // MARK: - Tied word embeddings
 
     @Test func aTiedCheckpointDeclaresNoLanguageModelHead() throws {
-        let tied = DeepseekV4Model(try Self.configuration(tieWordEmbeddings: true))
-        let untied = DeepseekV4Model(try Self.configuration(tieWordEmbeddings: false))
+        let tied = DeepSeekV4Model(try Self.configuration(tieWordEmbeddings: true))
+        let untied = DeepSeekV4Model(try Self.configuration(tieWordEmbeddings: false))
 
         #expect(tied.lmHead == nil)
         #expect(untied.lmHead != nil)
@@ -412,10 +412,10 @@ struct DeepseekV4ModelTests {
             }
             """
         let configuration = try JSONDecoder().decode(
-            DeepseekV4Configuration.self, from: Data(json.utf8))
+            DeepSeekV4Configuration.self, from: Data(json.utf8))
 
         #expect(!configuration.tieWordEmbeddings)
-        #expect(DeepseekV4Model(configuration).lmHead != nil)
+        #expect(DeepSeekV4Model(configuration).lmHead != nil)
     }
 
     @Test func aTiedCheckpointProjectsThroughItsEmbeddingTable() throws {
@@ -460,7 +460,7 @@ struct DeepseekV4ModelTests {
             checkpoint[key] = value
         }
 
-        let tied = DeepseekV4Model(try Self.configuration(tieWordEmbeddings: true))
+        let tied = DeepSeekV4Model(try Self.configuration(tieWordEmbeddings: true))
         try tied.update(parameters: ModuleParameters.unflattened(checkpoint), verify: [.all])
         eval(tied)
     }
@@ -474,7 +474,7 @@ struct DeepseekV4ModelTests {
     }
 
     @Test func sanitizeDropsTheMultiTokenPredictionHead() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
         let sanitized = model.sanitize(weights: [
             "mtp.0.attn.wq_a.weight": Self.marker(1),
             "mtp.0.hc_head_fn": Self.marker(2),
@@ -487,7 +487,7 @@ struct DeepseekV4ModelTests {
     }
 
     @Test func sanitizeDropsTheCompressorAndTheIndexerUntilSparseAttentionLands() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
         let sanitized = model.sanitize(weights: [
             "layers.2.attn.compressor.wkv.weight": Self.marker(1),
             "layers.2.attn.compressor.wgate.weight": Self.marker(2),
@@ -503,7 +503,7 @@ struct DeepseekV4ModelTests {
     }
 
     @Test func sanitizeDropsALayerTheConfigurationDoesNotDeclare() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
         let beyond = Self.layerCount
         let sanitized = model.sanitize(weights: [
             "layers.\(beyond).attn.wq_a.weight": Self.marker(1),
@@ -515,7 +515,7 @@ struct DeepseekV4ModelTests {
     }
 
     @Test func sanitizeGivesEveryCheckpointKeyItsModulePath() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
         let sanitized = model.sanitize(weights: [
             "embed.weight": Self.marker(1),
             "norm.weight": Self.marker(2),
@@ -559,7 +559,7 @@ struct DeepseekV4ModelTests {
     }
 
     @Test func sanitizeStacksThePerExpertWeightsIntoTheSwitchLayer() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
         var weights: [String: MLXArray] = [:]
         for expert in 0 ..< Self.routedExpertCount {
             weights["layers.0.ffn.experts.\(expert).w1.weight"] = Self.marker(Float(expert))
@@ -590,7 +590,7 @@ struct DeepseekV4ModelTests {
     }
 
     @Test func sanitizeKeepsTheHashTableOfARoutingLayer() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
         let table = MLXArray(
             (0 ..< (Self.vocabSize * Self.expertsPerToken)).map {
                 Int64($0 % Self.routedExpertCount)
@@ -608,8 +608,8 @@ struct DeepseekV4ModelTests {
     }
 
     @Test func sanitizeDropsTheLanguageModelHeadOfATiedCheckpoint() throws {
-        let tied = DeepseekV4Model(try Self.configuration(tieWordEmbeddings: true))
-        let untied = DeepseekV4Model(try Self.configuration(tieWordEmbeddings: false))
+        let tied = DeepSeekV4Model(try Self.configuration(tieWordEmbeddings: true))
+        let untied = DeepSeekV4Model(try Self.configuration(tieWordEmbeddings: false))
         let weights = [
             "embed.weight": Self.marker(1),
             "head.weight": Self.marker(2),
@@ -621,7 +621,7 @@ struct DeepseekV4ModelTests {
     }
 
     @Test func sanitizeLeavesAnAlreadyConvertedCheckpointAlone() throws {
-        let model = DeepseekV4Model(try Self.configuration())
+        let model = DeepSeekV4Model(try Self.configuration())
         let converted = Dictionary(
             uniqueKeysWithValues: model.parameters().flattened())
 

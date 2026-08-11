@@ -188,7 +188,14 @@ public class ParoQuantTests: XCTestCase {
     /// isolation in between. Mixes batch=1 and batch=4 so both tile sizes
     /// race into the kernel cache on the first iteration.
     func testRotateQuantizedLinearConcurrentSafe() throws {
-        let layer = try makeTestLayer(hasBias: true)
+        // `RotateQuantizedLinear` does not conform to `Sendable` (it is an `open`
+        // subclass of `QuantizedLinear`, so the compiler cannot verify every
+        // possible subclass stays immutable after `prepareDerivedRotationState()`).
+        // This test's whole purpose is to prove concurrent calls are safe in
+        // practice for the state this class actually holds — see the doc
+        // comment above. `nonisolated(unsafe)` records that the safety here is
+        // manually verified rather than compiler-checked.
+        nonisolated(unsafe) let layer = try makeTestLayer(hasBias: true)
         let numTasks = 8
         let buffer = SynchronizedShapeBuffer()
 

@@ -59,7 +59,7 @@ private func stubScales(for paths: [String]) -> [String: MLXArray] {
 }
 
 @Suite(.serialized)
-struct DeepseekV4QuantizationPlanTests {
+struct DeepSeekV4QuantizationPlanTests {
 
     init() {
         _ = MetalLibraryTestBootstrap.ensureColocatedMetallib

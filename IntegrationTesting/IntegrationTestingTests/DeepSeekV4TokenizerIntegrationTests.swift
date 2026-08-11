@@ -73,7 +73,7 @@ private enum DeepSeekV4TokenizerLoad {
     /// The repository that publishes the DeepSeek-V4 tokenizer.
     static let repositoryID = "deepseek-ai/DeepSeek-V4-Flash"
     /// The pinned revision. It is the revision the encoder port names in
-    /// `Libraries/MLXLMCommon/DeepseekV4ChatEncoder.swift`.
+    /// `Libraries/MLXLMCommon/DeepSeekV4ChatEncoder.swift`.
     static let revision = "60d8d70770c6776ff598c94bb586a859a38244f1"
     /// The file patterns that get the tokenizer files and not the weights.
     /// This is the same set as `tokenizerDownloadPatterns` in
@@ -98,9 +98,9 @@ private enum DeepSeekV4TokenizerLoad {
 /// The first run downloads the tokenizer files from Hugging Face Hub.
 ///
 /// Run explicitly via:
-/// `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/DeepseekV4TokenizerIntegrationTests`
+/// `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/DeepSeekV4TokenizerIntegrationTests`
 @Suite(.serialized, .timeLimit(.minutes(60)))
-struct DeepseekV4TokenizerIntegrationTests {
+struct DeepSeekV4TokenizerIntegrationTests {
 
     /// Each marker is one token that the streaming detokenizer emits whole,
     /// a mixed stream keeps the markers complete and the text in order, and

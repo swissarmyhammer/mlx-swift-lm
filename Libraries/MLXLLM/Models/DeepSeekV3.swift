@@ -7,7 +7,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-public struct DeepseekV3Configuration: Codable, Sendable {
+public struct DeepSeekV3Configuration: Codable, Sendable {
     var vocabSize: Int
     var hiddenSize: Int
     var intermediateSize: Int
@@ -90,8 +90,8 @@ private func clippedSilu(_ x: MLXArray) -> MLXArray {
     clip(x * sigmoid(x), min: -100, max: 100)
 }
 
-class DeepseekV3Attention: Module {
-    var config: DeepseekV3Configuration
+class DeepSeekV3Attention: Module {
+    var config: DeepSeekV3Configuration
     var hiddenSize: Int
     var numHeads: Int
     var maxPositionEmbeddings: Int
@@ -114,7 +114,7 @@ class DeepseekV3Attention: Module {
     @ModuleInfo(key: "kv_a_layernorm") var kvALayerNorm: RMSNorm
     @ModuleInfo(key: "kv_b_proj") var kvBProj: Linear
 
-    init(config: DeepseekV3Configuration) {
+    init(config: DeepSeekV3Configuration) {
         self.config = config
         self.hiddenSize = config.hiddenSize
         self.numHeads = config.numAttentionHeads
@@ -227,15 +227,15 @@ class DeepseekV3Attention: Module {
     }
 }
 
-class DeepseekV3MLP: Module, UnaryLayer {
-    var config: DeepseekV3Configuration
+class DeepSeekV3MLP: Module, UnaryLayer {
+    var config: DeepSeekV3Configuration
     var hiddenSize: Int
     var intermediateSize: Int
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
 
-    init(config: DeepseekV3Configuration, hiddenSize: Int? = nil, intermediateSize: Int? = nil) {
+    init(config: DeepSeekV3Configuration, hiddenSize: Int? = nil, intermediateSize: Int? = nil) {
         self.config = config
         self.hiddenSize = hiddenSize ?? config.hiddenSize
         self.intermediateSize = intermediateSize ?? config.intermediateSize
@@ -250,7 +250,7 @@ class DeepseekV3MLP: Module, UnaryLayer {
 }
 
 class MoEGate: Module {
-    var config: DeepseekV3Configuration
+    var config: DeepSeekV3Configuration
     var topK: Int?
     var normTopkProb: Bool
     var nRoutedExperts: Int?
@@ -261,7 +261,7 @@ class MoEGate: Module {
     var weight: MLXArray
     var e_score_correction_bias: MLXArray
 
-    init(config: DeepseekV3Configuration) {
+    init(config: DeepSeekV3Configuration) {
         self.config = config
         self.topK = config.numExpertsPerTok
         self.normTopkProb = config.normTopkProb
@@ -300,14 +300,14 @@ class MoEGate: Module {
     }
 }
 
-class DeepseekV3MoE: Module, UnaryLayer {
-    var config: DeepseekV3Configuration
+class DeepSeekV3MoE: Module, UnaryLayer {
+    var config: DeepSeekV3Configuration
     var numExpertsPerTok: Int
     @ModuleInfo(key: "switch_mlp") var switchMLP: SwitchGLU
     var gate: MoEGate
-    @ModuleInfo(key: "shared_experts") var sharedExperts: DeepseekV3MLP?
+    @ModuleInfo(key: "shared_experts") var sharedExperts: DeepSeekV3MLP?
 
-    init(config: DeepseekV3Configuration) {
+    init(config: DeepSeekV3Configuration) {
         self.config = config
         self.numExpertsPerTok = config.numExpertsPerTok ?? 1
 
@@ -322,7 +322,7 @@ class DeepseekV3MoE: Module, UnaryLayer {
 
         if let sharedExpertCount = config.nSharedExperts {
             let intermediateSize = config.moeIntermediateSize * sharedExpertCount
-            self._sharedExperts.wrappedValue = DeepseekV3MLP(
+            self._sharedExperts.wrappedValue = DeepSeekV3MLP(
                 config: config, intermediateSize: intermediateSize)
         }
     }
@@ -339,22 +339,22 @@ class DeepseekV3MoE: Module, UnaryLayer {
     }
 }
 
-class DeepseekV3DecoderLayer: Module {
-    @ModuleInfo(key: "self_attn") var selfAttn: DeepseekV3Attention
+class DeepSeekV3DecoderLayer: Module {
+    @ModuleInfo(key: "self_attn") var selfAttn: DeepSeekV3Attention
     var mlp: UnaryLayer
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
-    init(config: DeepseekV3Configuration, layerIdx: Int) {
-        self._selfAttn.wrappedValue = DeepseekV3Attention(config: config)
+    init(config: DeepSeekV3Configuration, layerIdx: Int) {
+        self._selfAttn.wrappedValue = DeepSeekV3Attention(config: config)
 
         if config.nRoutedExperts != nil,
             layerIdx >= config.firstKDenseReplace,
             layerIdx % config.moeLayerFreq == 0
         {
-            self.mlp = DeepseekV3MoE(config: config)
+            self.mlp = DeepSeekV3MoE(config: config)
         } else {
-            self.mlp = DeepseekV3MLP(config: config)
+            self.mlp = DeepSeekV3MLP(config: config)
         }
 
         self._inputLayerNorm.wrappedValue = RMSNorm(
@@ -373,11 +373,11 @@ class DeepseekV3DecoderLayer: Module {
     }
 }
 
-public class DeepseekV3ModelInner: Module {
-    var config: DeepseekV3Configuration
+public class DeepSeekV3ModelInner: Module {
+    var config: DeepSeekV3Configuration
     var vocabSize: Int
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
-    var layers: [DeepseekV3DecoderLayer]
+    var layers: [DeepSeekV3DecoderLayer]
     var startIdx: Int
     var endIdx: Int
     var numLayers: Int
@@ -385,13 +385,13 @@ public class DeepseekV3ModelInner: Module {
     var pipelineRank: Int
     var pipelineSize: Int
 
-    init(config: DeepseekV3Configuration) {
+    init(config: DeepSeekV3Configuration) {
         self.config = config
         self.vocabSize = config.vocabSize
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: config.vocabSize, dimensions: config.hiddenSize)
         self.layers = (0 ..< config.numHiddenLayers).map {
-            DeepseekV3DecoderLayer(config: config, layerIdx: $0)
+            DeepSeekV3DecoderLayer(config: config, layerIdx: $0)
         }
         self.startIdx = 0
         self.endIdx = layers.count
@@ -414,16 +414,16 @@ public class DeepseekV3ModelInner: Module {
     }
 }
 
-public class DeepseekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
+public class DeepSeekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     public var kvHeads: [Int] = []
 
-    var args: DeepseekV3Configuration
-    public var model: DeepseekV3ModelInner
+    var args: DeepSeekV3Configuration
+    public var model: DeepSeekV3ModelInner
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
-    public init(_ args: DeepseekV3Configuration) {
+    public init(_ args: DeepSeekV3Configuration) {
         self.args = args
-        self.model = DeepseekV3ModelInner(config: args)
+        self.model = DeepSeekV3ModelInner(config: args)
         self._lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabSize, bias: false)
     }
 
