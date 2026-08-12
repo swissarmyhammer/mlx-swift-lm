@@ -357,6 +357,19 @@ public class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
         model.layers
     }
 
+    /// The refusal that keeps DeepSeek-V4 off the plain-text prompt fallback.
+    ///
+    /// DeepSeek-V4 has no chat template, and `DeepSeekV4ChatEncoder` is the
+    /// only correct prompt builder for this model family (card ^f0ymw6b,
+    /// decision B). The plain-text fallback makes a prompt that looks correct
+    /// and is wrong, thus the prompt path must throw this message instead.
+    public var missingChatTemplateRefusal: String? {
+        "DeepSeek-V4 has no chat template. Build the prompt with "
+            + "DeepSeekV4ChatEncoder. The plain-text prompt fallback is not "
+            + "permitted for this model, because it makes a wrong prompt and "
+            + "gives no error."
+    }
+
     // MARK: - The load filter
 
     /// Maps a DeepSeek-V4 checkpoint onto the module paths of this file.

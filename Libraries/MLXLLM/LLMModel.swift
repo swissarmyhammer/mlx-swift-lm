@@ -10,6 +10,17 @@ public protocol LLMModel: LanguageModel, LoRAModel {
     ///
     /// The default implementation returns `DefaultMessageGenerator`.
     func messageGenerator(tokenizer: Tokenizer) -> MessageGenerator
+
+    /// The message the prompt path throws when the tokenizer has no chat
+    /// template and this model forbids the plain-text prompt fallback.
+    ///
+    /// The default is `nil`: the model permits the fallback. A model family
+    /// that ships no chat template, and whose prompts a dedicated encoder
+    /// must build, returns a message that names that encoder. The prompt
+    /// path then throws
+    /// ``PromptPreparationError/plainTextFallbackForbidden(_:)`` with this
+    /// message instead of a silent, wrong plain-text prompt.
+    var missingChatTemplateRefusal: String? { get }
 }
 
 extension LLMModel {
@@ -56,5 +67,11 @@ extension LLMModel {
 
     public func messageGenerator(tokenizer: Tokenizer) -> MessageGenerator {
         DefaultMessageGenerator()
+    }
+
+    /// The default refusal: `nil`, which permits the plain-text prompt
+    /// fallback for models whose tokenizer has no chat template.
+    public var missingChatTemplateRefusal: String? {
+        nil
     }
 }

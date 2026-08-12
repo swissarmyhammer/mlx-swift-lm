@@ -165,8 +165,25 @@ comments:
     - no other warnings, errors, or skips found; no fixes needed.
     - next: none — build is clean.
   timestamp: 2026-08-11T21:10:14.064857+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01kzsb83jn3sv2n37z7v4cj96v
+  text: |-
+    ### review — clean
+    - evidence: The engine examined the range HEAD~1..HEAD (commit 33b8c44). It attempted 8 files and reported 37 findings, all in DeepSeekV3.swift. Zero findings are on lines that commit 33b8c44 changed. The commit changed only the new doc comment lines and the removed config properties. 24 findings match items that already have a disposition in the section of 2026-08-11 15:06, at moved line numbers. 13 findings (access modifiers at 14, boolean names at 40 and 254, force unwraps at 183 and 185, final class at 232, 252, 338, 377, and 421, doc comments at 422, 441, and 446) have no prior match, but each one is on a line that the commit did not change. The standing rule from task ^ag7ant0 puts untouched-line findings from whole-file sweeps out of scope for this card. All 541 prior findings have a check and a disposition. The 3 open boxes in the description are Acceptance Criteria subtasks, not review findings.
+    - next: The task moves to done. The 13 unmatched untouched-line findings stay available in this comment for a future cleanup card.
+  timestamp: 2026-08-11T21:21:54.261815+00:00
+- actor: claude-code
+  id: 01kzsb9vp7k24ewy7b822bsbdj
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — 15 findings fixed in Libraries/MLXLLM/Models/DeepSeekV3.swift; 526 findings recorded out of scope per the standing rule from ^ag7ant0
+    - test: green — swift test full suite, exit 0, 0 failures
+    - commit: 33b8c44
+    - review: clean — 37 engine findings on the delta, 0 on changed lines (24 re-emitted dispositioned items, 13 new-but-untouched-line items recorded for a future cleanup card); 541/541 prior findings checked; task moved to done
+    - acceptance criteria stand verified by the evidence on this card: no `Deepseek` type declaration remains under Libraries/ (grep proof), build and full test suite green, no checkpoint-facing string changed (configuration and quantization-plan tests pass with unchanged fixtures)
+  timestamp: 2026-08-11T21:22:51.719081+00:00
+position_column: done
+position_ordinal: eb80
 title: Use the canonical DeepSeek spelling for every DeepSeek type name
 ---
 ## Why
