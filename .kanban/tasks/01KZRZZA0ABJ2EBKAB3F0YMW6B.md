@@ -39,8 +39,24 @@ comments:
       - `swift build` clean. Full `swift test`: 457+80+282+7 Swift Testing tests passed, 245 XCTest tests with 0 failures. The 2 skipped tests are pre-existing, documented, and belong to kanban 01KYD3ZCWTZ414Y79RSAKVQXXZ.
     - next: /review. Note for `^mjrzkgm` (registry wiring): when `deepseek_v4` lands in `LLMTypeRegistry`, the refusal makes generation fail loudly until the encoder path is wired into the input processor.
   timestamp: 2026-08-12T01:24:29.222885+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01kzssny631q2qdc8xqn420v2j
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (commit 2b66c8b); engine counts: 5 findings, 5 confirmed, 1 refuted, 8 files attempted, 0 failed, 0 skipped. All 5 findings are on untouched lines in Libraries/MLXLLM/LLMModel.swift (37, 68) and Libraries/MLXLLM/LLMModelFactory.swift (600, 678, 681). Zero findings are on the lines that commit 2b66c8b changed. The standing rule from ^ag7ant0 puts untouched-line findings out of scope for this card. Each finding is recorded word for word on the card, with the out-of-scope annotation. No prior open findings were on the card.
+    - next: none. The card is done. A future card can take the recorded untouched-line findings.
+  timestamp: 2026-08-12T01:34:07.555075+00:00
+- actor: claude-code
+  id: 01kzsspsm49cd900j05z1d51ye
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — decision B recorded with evidence; 4 files (LLMModel.swift, LLMModelFactory.swift, Models/DeepSeekV4.swift, Tests/MLXLMTests/DeepSeekV4PromptFallbackTests.swift); TDD red-then-green
+    - test: green — full swift test run by the implement step, 0 failures (457+80+282+7 Swift Testing, 245 XCTest, 2 pre-approved skips)
+    - commit: 2b66c8b
+    - review: clean — 5 engine findings, 0 on changed lines; all 5 recorded and annotated out of scope per the standing rule from ^ag7ant0; task moved to done
+  timestamp: 2026-08-12T01:34:35.652624+00:00
+position_column: done
+position_ordinal: ec80
 title: 'Decision needed: keep or drop the DSV4Minimal.jinja fallback template'
 ---
 ## What
@@ -139,3 +155,21 @@ The evidence chain:
 - Source of truth: `deepseek-ai/DeepSeek-V4-Flash` — `encoding/encoding_dsv4.py`.
 - Moved from `^gbsaqc2` on 2026-08-11.
 #deepseek-v4
+
+## Review Findings (2026-08-11 20:28)
+
+Scope: commit 2b66c8b (HEAD~1..HEAD). The engine examines whole files. The
+standing rule from `^ag7ant0` applies: only a finding on a line that this
+commit changed keeps this card in review. Each finding below is on a line that
+commit 2b66c8b did not change. Thus each finding is out of scope for this card.
+The findings stay recorded here for a future card. Zero findings are on
+changed lines.
+
+- [x] `Libraries/MLXLLM/LLMModel.swift:37` — Magic numbers should be replaced by named constants. (untouched-line — out of scope for this card per the standing rule from `^ag7ant0`)
+- [x] `Libraries/MLXLLM/LLMModel.swift:68` — public declarations should be documented. (untouched-line — out of scope for this card per the standing rule from `^ag7ant0`)
+- [x] `Libraries/MLXLLM/LLMModelFactory.swift:600` — var.instance `configuration` is assignOnlyProperty. (untouched-line — out of scope for this card per the standing rule from `^ag7ant0`)
+- [x] `Libraries/MLXLLM/LLMModelFactory.swift:678` — Doc comment for public property `typeRegistry` is not a complete sentence and does not end with a period. Doc comments must begin with a single-sentence summary ending in a period. Change to: `/// Registry of model types, mapping names like `llama` to code that decodes their configuration and instantiates the model.`. (untouched-line — out of scope for this card per the standing rule from `^ag7ant0`)
+- [x] `Libraries/MLXLLM/LLMModelFactory.swift:681` — Doc comment for public property `modelRegistry` is not a complete sentence and does not end with a period. Doc comments must begin with a single-sentence summary ending in a period. Change to: `/// Registry of model identifiers to their configurations, e.g. `mlx-community/Llama-3.2-3B-Instruct-4bit`.`. (untouched-line — out of scope for this card per the standing rule from `^ag7ant0`)
+
+Note: the engine does not examine test files. The implement step carries the
+TDD red-then-green proof for `Tests/MLXLMTests/DeepSeekV4PromptFallbackTests.swift`.

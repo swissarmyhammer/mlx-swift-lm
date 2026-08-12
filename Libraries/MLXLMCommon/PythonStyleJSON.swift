@@ -287,26 +287,29 @@ extension PythonStyleJSON {
         return out + "\""
     }
 
+    /// The escape Python writes for each scalar that has a short escape.
+    private static let escapeMap: [Unicode.Scalar: String] = [
+        "\"": "\\\"",
+        "\\": "\\\\",
+        "\u{08}": "\\b",
+        "\u{09}": "\\t",
+        "\u{0A}": "\\n",
+        "\u{0C}": "\\f",
+        "\u{0D}": "\\r",
+    ]
+
     /// Writes one scalar the way Python writes it inside a string.
     ///
     /// `ensure_ascii=False` leaves every scalar at or above the space as
     /// itself, the quotation mark and the reverse solidus excepted. The
     /// solidus is NOT escaped, which is where Foundation and Python differ.
+    /// A control character without a short escape takes the `\u00XX` form.
     ///
     /// - Parameter scalar: the scalar to write.
     /// - Returns: the text that stands for it.
     private static func escaped(_ scalar: Unicode.Scalar) -> String {
-        switch scalar {
-        case "\"": return "\\\""
-        case "\\": return "\\\\"
-        case "\u{08}": return "\\b"
-        case "\u{09}": return "\\t"
-        case "\u{0A}": return "\\n"
-        case "\u{0C}": return "\\f"
-        case "\u{0D}": return "\\r"
-        default:
-            guard scalar.value < firstPrintableScalarValue else { return String(scalar) }
-            return String(format: "\\u%04x", scalar.value)
-        }
+        if let escape = escapeMap[scalar] { return escape }
+        guard scalar.value < firstPrintableScalarValue else { return String(scalar) }
+        return String(format: "\\u%04x", scalar.value)
     }
 }
