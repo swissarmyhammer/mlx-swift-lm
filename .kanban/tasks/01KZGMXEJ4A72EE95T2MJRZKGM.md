@@ -70,11 +70,27 @@ comments:
     - evidence: 11 files — Libraries/MLXLLM/LLMModelFactory.swift, Libraries/MLXLLM/LLMModel.swift, Libraries/MLXLLM/Models/DeepSeekV4.swift, Libraries/MLXLMCommon/ReasoningConfig.swift, Libraries/MLXLMCommon/ReasoningHeuristics.swift, Libraries/MLXLMCommon/Tool/ToolCallFormat.swift, Libraries/MLXLMCommon/Tool/Parsers/DSMLToolCallParser.swift (new), Libraries/MLXLMCommon/Tokenizer.swift, Libraries/MLXLMCommon/Chat.swift, Tests: DeepSeekV4RegistryTests.swift (new), DSMLToolCallParserTests.swift (new), DeepSeekV4EncoderWiringTests.swift (new), DeepSeekV4SyntheticCheckpoint.swift (new), plus edits to LLMRegistryTests.swift, ReasoningConfigTests.swift, ReasoningHeuristicsTests.swift, DeepSeekV4PromptFallbackTests.swift. Filter run: 255 + 28 tests, 0 failures, 0 compiler warnings. No task split — the parser stayed at the ~150-line bound.
     - next: /review
   timestamp: 2026-08-12T08:05:57.555802+00:00
+- actor: claude-code
+  id: 01kztgwvzywtmy33xtnspmdapz
+  text: |-
+    ### review — clean
+    - evidence: engine op `review sha HEAD~1..HEAD` (commit fdfdecf). Counts: 8 files attempted, 5 findings, 5 confirmed, 1 refuted, 0 failed, 0 skipped. All 5 findings are on lines that fdfdecf did not change: LLMModel.swift:50, LLMModel.swift:81, Chat.swift:19, ToolCallFormat.swift:219, ToolCallFormat.swift:344. Zero findings on changed lines. Each untouched-line item is recorded out of scope in the dated section, per the standing rule of ^ag7ant0. No prior findings section was open. The recorded deviation is correct: ChatSession.swift needed no edit, because ChatSession reaches the encoder through processor.prepare, and DeepSeekV4EncoderWiringTests/chatSessionUsesTheEncoder shows the full path.
+    - next: none. The task moved to done.
+  timestamp: 2026-08-12T08:19:51.934745+00:00
+- actor: claude-code
+  id: 01kztgxp1v4cp8bwgx776t7syp
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 9 library files (1 new: DSMLToolCallParser.swift), 8 test files (4 new); registries, reasoning row, ToolCallFormat.dsml, promptTokenizer(wrapping:) encoder wiring; all test-first
+    - test: green — swift test, exit 0, 246 XCTests + 845 Swift Testing tests, 0 failures
+    - commit: fdfdecf
+    - review: clean — 5 engine findings, 0 on changed lines; all 5 recorded out of scope per the standing rule from ^ag7ant0; task moved to done
+  timestamp: 2026-08-12T08:20:18.619621+00:00
 depends_on:
 - 01KZGMVSEEHGCCG1W8CPWR8R3H
 - 01KZGN95NRBQ3PEBHPN35AW7VY
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ee80
 title: 'Wire deepseek_v4 into the registries: type, reasoning, tool format'
 ---
 ## What
@@ -154,3 +170,13 @@ path gets a wrong prompt.
 ## Workflow
 - Use `/tdd` — the registry `contains`/`createModel` test fails today for the right reason; start there.
 #deepseek-v4
+
+## Review Findings (2026-08-12 03:13)
+
+Scope: `HEAD~1..HEAD` (commit `fdfdecf`). The engine examines full files. The standing rule of `^ag7ant0` applies: only a finding on a changed line keeps the task in review. Each item below was compared with the diff of `fdfdecf`. All five items are on lines that `fdfdecf` did not change, thus each item is out of scope for this task.
+
+- [x] `Libraries/MLXLLM/LLMModel.swift:50` — Magic numbers should be replaced by named constants. — Out of scope: untouched line. The line is in the pre-existing `prepare` step. The changed lines of this file are 24-36 and 90-97.
+- [x] `Libraries/MLXLLM/LLMModel.swift:81` — public declarations should be documented. — Out of scope: untouched line. The declaration is the pre-existing `messageGenerator(tokenizer:)`. The new `promptTokenizer(wrapping:)` hook at lines 91-97 has documentation.
+- [x] `Libraries/MLXLMCommon/Chat.swift:19` — type `Message` is a near-duplicate of `Chat` at Libraries/MLXLMCommon/Chat.swift:11 (414 tokens, 99% alike). — Out of scope: untouched line. `Chat.Message` is a pre-existing type. The changed lines of this file are 3-4 and 346-447.
+- [x] `Libraries/MLXLMCommon/Tool/ToolCallFormat.swift:219` — Magic numbers should be replaced by named constants. — Out of scope: untouched line. The line is in the pre-existing `generateToolCallID`. The changed lines of this file are 157-161, 206-207 and 298-305.
+- [x] `Libraries/MLXLMCommon/Tool/ToolCallFormat.swift:344` — Magic numbers should be replaced by named constants. — Out of scope: untouched line. The line is in the pre-existing `inferLlamaFormat`.
