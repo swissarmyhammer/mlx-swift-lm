@@ -24,6 +24,16 @@ comments:
     - unverified for lack of weights: real load (weight-key completeness, model type, 43 layers), greedy parity against a Python fixture (no fixture exists; none was invented), chat/thinking real generation, the >12k-token issue-1662 run, and the real two-round recall. Each stays gated and runs when a checkpoint is local.
     - next: /review. When someone places the checkpoint locally (or sets MLX_DEEPSEEK_V4_CHECKPOINT) and checks in the Python parity fixture at IntegrationTesting/IntegrationTestingTests/Fixtures/deepseek-v4-flash-4bit-greedy-parity.json, re-run the suite and record the real numbers.
   timestamp: 2026-08-12T08:40:36.430529+00:00
+- actor: claude-code
+  id: 01kztjb4jv261ahbdajrvf8p0v
+  text: |-
+    ### finish iteration 1 — stuck
+    - implement: changed — 1 new file, IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift (7 tests; 5 gated real-weights tests skip cleanly with reasons, 2 encoder cache tests pass with a mutation proof)
+    - test: green — swift test, exit 0, 0 failures
+    - commit: b98cac9
+    - review: not run — the card cannot reach done in this state
+    - stuck: five acceptance criteria need the real mlx-community/DeepSeek-V4-Flash-4bit checkpoint (~91 GB installed, plus a 160 GiB memory gate). The weights are not on this machine, and the agent must not start that download without the user's decision. The user has two options: (1) download the checkpoint (or point MLX_DEEPSEEK_V4_CHECKPOINT at a copy) and run `swift test` from the IntegrationTesting project — the gated tests then run for real; (2) accept the gated suite as the deliverable and defer the real-weights run. The greedy-parity fixture also needs one Python reference run; the fixture gate message names the script.
+  timestamp: 2026-08-12T08:45:08.059225+00:00
 depends_on:
 - 01KZGMXEJ4A72EE95T2MJRZKGM
 position_column: doing
