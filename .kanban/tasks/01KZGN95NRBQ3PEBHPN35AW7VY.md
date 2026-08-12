@@ -188,10 +188,26 @@ comments:
     - evidence: 1 file — `Libraries/MLXLMCommon/PythonStyleJSON.swift`. The switch in `escaped(_:)` is now a static dictionary `escapeMap: [Unicode.Scalar: String]` with the seven escapes; `escaped(_:)` reads the dictionary first and keeps the computed `\u00XX` path for the control characters that have no short escape. A search of the whole file found no other switch with the same lookup-table shape: the switch in `readValue()` sends control to a different reader method in each arm, and the switch in `pythonStyleText` reads the associated values of the enum cases. `swift test --filter 'DeepSeekV4ChatEncoderTests|DeepSeekV4ToolEncodingTests'`: 30 tests, 0 failures (19 + 11) — the golden-fixture proof that the bytes did not change. `swift-format lint --strict` on the file exits 0. No test names `PythonStyleJSON` directly; the encoder fixtures cover it. The finding is set to checked on the card.
     - next: `/review`. The card stays in `doing`. No commit was made, per the step rules.
   timestamp: 2026-08-12T07:29:58.609901+00:00
+- actor: claude-code
+  id: 01kztegtkzmn04yjzvchg3vhrm
+  text: |-
+    ### review — clean
+    - evidence: engine `review sha HEAD~1..HEAD` (checkpoint ea7fbd6) — counts: 1 finding, 1 confirmed, 1 refuted; 8 files examined, 0 skipped. The one finding (`Libraries/MLXLMCommon/PythonStyleJSON.swift:32`, explicit `public` modifier) is on an untouched line: commit ea7fbd6 changed lines 287 through 315 of the file and four kanban card files, and no other line. The standing rule from ^ag7ant0 puts an untouched-line item out of scope for this card; the card records it with that annotation. Zero new findings on changed lines. The prior finding (`PythonStyleJSON.swift:298`, switch to dictionary) is corrected and checked.
+    - next: none. The card moves to `done`.
+  timestamp: 2026-08-12T07:38:20.159790+00:00
+- actor: claude-code
+  id: 01kztehg2qf27ev2d2zpjms5wb
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — Libraries/MLXLMCommon/PythonStyleJSON.swift, escaped(_:) switch replaced by the escapeMap dictionary; the control-character fallback stays
+    - test: green — swift test full suite, exit 0, 0 failures
+    - commit: ea7fbd6
+    - review: clean — 0 findings on changed lines; 1 untouched-line finding (PythonStyleJSON.swift:32) recorded out of scope per the standing rule from ^ag7ant0; prior finding checked; task moved to done
+  timestamp: 2026-08-12T07:38:42.135714+00:00
 depends_on:
 - 01KZGMWJPM4016GPFFVGBSAQC2
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ed80
 title: Port DeepseekV4 DSML tool-call encoding and tool_result merging
 ---
 ## What
@@ -260,3 +276,9 @@ it. A caller that needs it must join the parts before it makes the message.
 - [x] `Libraries/MLXLMCommon/PythonStyleJSON.swift:298` — The `escaped(_:)` function uses a switch statement over a known, closed set of Unicode scalar characters. Each of the 7 explicit cases maps one scalar to exactly one escape sequence string (the constants differ, but the *structure* of each arm is identical). This is a lookup table written out as parallel switch arms. A data structure — a dictionary mapping scalars to escape strings — would be more maintainable, easier to verify, and eliminate the manual keep-in-sync burden. Replace with a static dictionary: `private static let escapeMap: [Unicode.Scalar: String] = ["\"":  "\\\"", "\\": "\\\\", …]`. Then return `escapeMap[scalar] ?? (handle default)` instead of the switch.
 
 Scope note: commit bd9e201 made the whole of `PythonStyleJSON.swift`, thus the finding is on a changed line and is in scope. The review found zero findings on untouched lines. The engine examined 8 files and skipped 0.
+
+## Review Findings (2026-08-12 02:34)
+
+- [x] `Libraries/MLXLMCommon/PythonStyleJSON.swift:32` — Library type `PythonStyleJSON` lacks explicit `public` modifier. The rule requires library declarations with API-shaping intent to spell access control explicitly rather than relying on the implicit `internal` default. Change line 32 to: `public enum PythonStyleJSON: Equatable, Sendable {`. — **Out of scope for this card, untouched line.** Commit ea7fbd6 changed lines 287 through 315 of the file and no other line. Line 32 is not a changed line. The standing rule from ^ag7ant0 applies: an item on an untouched line does not hold this card in review.
+
+Scope note: commit ea7fbd6 (the checkpoint of this pass, HEAD~1..HEAD) changed only the `escapeMap` table and the `escaped(_:)` function of `PythonStyleJSON.swift`, plus four kanban card files. The engine found zero new findings on the changed lines. The prior finding (`PythonStyleJSON.swift:298`, switch to dictionary) is corrected and checked. The engine examined 8 files and skipped 0.

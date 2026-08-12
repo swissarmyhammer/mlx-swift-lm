@@ -248,6 +248,102 @@ extension Tokenizer {
     }
 }
 
+/// A tokenizer that builds DeepSeek-V4 prompts with ``DeepSeekV4ChatEncoder``.
+///
+/// DeepSeek-V4 ships no chat template, thus the wrapped tokenizer cannot
+/// render a conversation: its `applyChatTemplate` throws
+/// ``TokenizerError/missingChatTemplate``, and the plain-text fallback makes
+/// a wrong prompt. This wrapper renders the conversation with the encoder
+/// instead, and encodes the rendered text with the wrapped tokenizer. Every
+/// other operation forwards to the wrapped tokenizer unchanged.
+///
+/// `LLMModel.promptTokenizer(wrapping:)` installs the wrapper at load time
+/// for a checkpoint that the type registry identifies as `deepseek_v4`, thus
+/// every consumer of the loaded context — the prompt processor, `ChatSession`
+/// and direct `applyChatTemplate` callers — reaches the encoder through it.
+public struct DeepSeekV4EncodingTokenizer: Tokenizer {
+
+    /// The `additionalContext` key that selects between the two DeepSeek-V4
+    /// generation modes. It is the same key the family's `ReasoningConfig`
+    /// row injects, and the same default: absent means `thinking`.
+    private static let thinkingKey = "thinking"
+
+    /// The tokenizer that encodes the rendered prompt text.
+    private let base: any Tokenizer
+
+    /// Creates the wrapper.
+    /// - Parameter base: the loaded tokenizer of the model.
+    public init(wrapping base: any Tokenizer) {
+        self.base = base
+    }
+
+    /// Forwards to the wrapped tokenizer.
+    /// - Parameters:
+    ///   - text: the text to tokenize.
+    ///   - addSpecialTokens: whether to add the tokenizer's special tokens.
+    /// - Returns: the token IDs representing the text.
+    public func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        base.encode(text: text, addSpecialTokens: addSpecialTokens)
+    }
+
+    /// Forwards to the wrapped tokenizer.
+    /// - Parameters:
+    ///   - tokenIds: the token IDs to decode.
+    ///   - skipSpecialTokens: whether to omit special tokens.
+    /// - Returns: the decoded text.
+    public func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        base.decode(tokenIds: tokenIds, skipSpecialTokens: skipSpecialTokens)
+    }
+
+    /// Forwards to the wrapped tokenizer.
+    /// - Parameter token: the token text.
+    /// - Returns: the token's ID, or `nil` when the token is unknown.
+    public func convertTokenToId(_ token: String) -> Int? {
+        base.convertTokenToId(token)
+    }
+
+    /// Forwards to the wrapped tokenizer.
+    /// - Parameter id: the token ID.
+    /// - Returns: the token text, or `nil` when the ID is unknown.
+    public func convertIdToToken(_ id: Int) -> String? {
+        base.convertIdToToken(id)
+    }
+
+    /// The beginning-of-sequence token of the wrapped tokenizer.
+    public var bosToken: String? { base.bosToken }
+
+    /// The end-of-sequence token of the wrapped tokenizer.
+    public var eosToken: String? { base.eosToken }
+
+    /// The unknown token of the wrapped tokenizer.
+    public var unknownToken: String? { base.unknownToken }
+
+    /// Renders the conversation with ``DeepSeekV4ChatEncoder`` and encodes
+    /// the rendered text.
+    ///
+    /// The rendered text already opens with the begin-of-sentence marker,
+    /// thus the encode step adds no special tokens of its own: the marker is
+    /// in the text, and the tokenizer maps it to its single token id.
+    ///
+    /// - Parameters:
+    ///   - messages: array of message dictionaries representing the conversation.
+    ///   - tools: optional array of tool specifications available to the model.
+    ///   - additionalContext: optional extra template variables. The
+    ///     `thinking` boolean selects the generation mode.
+    /// - Returns: token IDs for the rendered conversation.
+    public func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] {
+        let thinking = additionalContext?[Self.thinkingKey] as? Bool ?? true
+        let prompt = DeepSeekV4ChatEncoder().encode(
+            messages: DeepSeekV4ChatEncoder.Message.messages(from: messages, tools: tools),
+            thinkingMode: thinking ? .thinking : .chat)
+        return base.encode(text: prompt, addSpecialTokens: false)
+    }
+}
+
 /// Errors thrown by ``Tokenizer`` chat-template rendering.
 public enum TokenizerError: LocalizedError {
     /// The tokenizer has no chat template configured, so a conversation

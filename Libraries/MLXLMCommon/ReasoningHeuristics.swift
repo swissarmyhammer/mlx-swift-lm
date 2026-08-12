@@ -22,6 +22,7 @@ public enum ReasoningHeuristics {
         "qwen3",  // Qwen3 family
         "deepseek-r1",  // DeepSeek-R1 and R1-Distill
         "r1-distill",  // R1-Distill re-uploads not prefixed "deepseek-"
+        "deepseek-v4",  // DeepSeek-V4: toggleable thinking, resolved by model_type in infer
     ]
 
     /// Whether the model identifier looks like a reasoning-capable model.

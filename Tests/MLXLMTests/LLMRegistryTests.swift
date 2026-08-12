@@ -5,6 +5,14 @@ import XCTest
 
 final class LLMRegistryTests: XCTestCase {
 
+    func testDeepSeekV4FlashModelConfigurationIsRegistered() {
+        XCTAssertTrue(LLMRegistry.shared.contains(id: "mlx-community/DeepSeek-V4-Flash-4bit"))
+
+        let configuration = LLMRegistry.deepseekV4Flash4bit
+        XCTAssertEqual(configuration.name, "mlx-community/DeepSeek-V4-Flash-4bit")
+        XCTAssertEqual(configuration.defaultPrompt, "Why is the sky blue?")
+    }
+
     func testFalconH1RModelConfigurationIsRegistered() {
         XCTAssertTrue(LLMRegistry.shared.contains(id: "tiiuae/Falcon-H1R-7B"))
 

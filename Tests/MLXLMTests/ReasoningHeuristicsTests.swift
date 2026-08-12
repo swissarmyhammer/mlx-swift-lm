@@ -14,6 +14,8 @@ struct ReasoningHeuristicsTests {
             ReasoningHeuristics.isLikelyReasoningModel(
                 "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit"))
         #expect(ReasoningHeuristics.isLikelyReasoningModel("mlx-community/DeepSeek-R1-4bit"))
+        #expect(
+            ReasoningHeuristics.isLikelyReasoningModel("mlx-community/DeepSeek-V4-Flash-4bit"))
     }
 
     /// QwQ is a `<think>`-delimiter reasoning model, but until its mechanism is verified
@@ -43,6 +45,7 @@ struct ReasoningHeuristicsTests {
             ("qwen3", "mlx-community/Qwen3-4B-4bit"),
             ("qwen2", "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit"),
             ("deepseek_v3", "mlx-community/DeepSeek-R1-4bit"),
+            ("deepseek_v4", "mlx-community/DeepSeek-V4-Flash-4bit"),
         ]
         for pair in reasoningPairs {
             #expect(

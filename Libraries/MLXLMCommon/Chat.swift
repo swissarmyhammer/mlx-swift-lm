@@ -1,5 +1,7 @@
 // Copyright © 2025 Apple Inc.
 
+import Foundation
+
 /// Namespace for structured chat message types used to represent
 /// conversations independent of any specific model's raw message format.
 ///
@@ -338,6 +340,108 @@ extension MessageGenerator {
         case .chat(let messages):
             generate(messages: messages)
         }
+    }
+}
+
+// MARK: - DeepSeek-V4 message mapping
+
+extension DeepSeekV4ChatEncoder.Message {
+
+    /// Builds the encoder messages for one render of the DeepSeek-V4 prompt
+    /// path.
+    ///
+    /// The input is the raw dictionary form that ``MessageGenerator`` writes:
+    /// the `role`/`content` pair plus the `tool_calls`, `tool_call_id` and
+    /// `reasoning_content` keys of ``MessageGenerator/addToolMetadata(to:for:)``
+    /// and ``MessageGenerator/addReasoningMetadata(to:for:)``. This mapping
+    /// lives beside those writers so the two key sets cannot drift apart.
+    ///
+    /// Tool specifications attach to the first system or developer turn,
+    /// because the reference renders its `## Tools` section there. A
+    /// conversation that carries tools and has no such turn gets one empty
+    /// system turn to hold them.
+    ///
+    /// - Parameters:
+    ///   - rawMessages: the conversation, one dictionary per turn.
+    ///   - tools: the OpenAI tool specifications offered to the model.
+    /// - Returns: the messages for ``DeepSeekV4ChatEncoder``.
+    public static func messages(
+        from rawMessages: [Message], tools: [ToolSpec]? = nil
+    ) -> [DeepSeekV4ChatEncoder.Message] {
+        var messages = rawMessages.map(message(from:))
+        let encoderTools = (tools ?? []).compactMap(tool(from:))
+        guard !encoderTools.isEmpty else { return messages }
+        if let index = messages.firstIndex(where: { $0.role == .system || $0.role == .developer })
+        {
+            messages[index].tools = encoderTools
+        } else {
+            messages.insert(.system(content: "", tools: encoderTools), at: 0)
+        }
+        return messages
+    }
+
+    /// Maps one raw message dictionary onto one encoder message.
+    private static func message(from raw: Message) -> DeepSeekV4ChatEncoder.Message {
+        let content = raw["content"] as? String ?? ""
+        switch raw["role"] as? String {
+        case "system":
+            return .system(content: content)
+        case "developer":
+            return .developer(content: content)
+        case "assistant":
+            return .assistant(
+                content: content,
+                reasoning: raw["reasoning_content"] as? String,
+                toolCalls: toolCalls(from: raw))
+        case "tool":
+            return .toolResult(
+                content: content, toolCallID: raw["tool_call_id"] as? String ?? "")
+        default:
+            // "user", and every role this mapping does not know. The encoder
+            // merges consecutive user turns, thus an unknown role degrades
+            // to readable user text instead of a silent drop.
+            return .user(content: content)
+        }
+    }
+
+    /// Maps the `tool_calls` entries of one assistant dictionary.
+    private static func toolCalls(from raw: Message) -> [DeepSeekV4ChatEncoder.ToolCall] {
+        guard let entries = raw["tool_calls"] as? [[String: any Sendable]] else { return [] }
+        return entries.compactMap { entry in
+            guard let function = entry["function"] as? [String: any Sendable],
+                let name = function["name"] as? String
+            else { return nil }
+            return DeepSeekV4ChatEncoder.ToolCall(
+                id: entry["id"] as? String ?? "",
+                name: name,
+                argumentsJSON: argumentsJSON(of: function))
+        }
+    }
+
+    /// The arguments of one call, as JSON text for the encoder.
+    ///
+    /// ``MessageGenerator/addToolMetadata(to:for:)`` writes the arguments as
+    /// an object; a raw `.messages` caller may write JSON text instead, and
+    /// that text passes through as it is.
+    private static func argumentsJSON(of function: [String: any Sendable]) -> String {
+        if let text = function["arguments"] as? String {
+            return text
+        }
+        return jsonText(of: function["arguments"] ?? [String: any Sendable]())
+    }
+
+    /// Maps one OpenAI tool specification onto one encoder tool.
+    private static func tool(from spec: ToolSpec) -> DeepSeekV4ChatEncoder.Tool? {
+        guard let function = spec["function"] else { return nil }
+        return DeepSeekV4ChatEncoder.Tool(functionSchemaJSON: jsonText(of: function))
+    }
+
+    /// Writes one JSON value as text for the encoder to render again.
+    private static func jsonText(of value: any Sendable) -> String {
+        guard JSONSerialization.isValidJSONObject(value),
+            let data = try? JSONSerialization.data(withJSONObject: value)
+        else { return "{}" }
+        return String(decoding: data, as: UTF8.self)
     }
 }
 

@@ -225,6 +225,28 @@ public struct ReasoningConfig: Sendable, Equatable {
             key: "thinking_mode", onValue: "enabled", offValue: "disabled",
             defaultValue: "adaptive"))
 
+    /// DeepSeek-V4 (model_type "deepseek_v4", e.g.
+    /// mlx-community/DeepSeek-V4-Flash-4bit): `<think>` delimiters, thinking
+    /// toggled via a `thinking` boolean.
+    ///
+    /// The strategy is NOT the always-on row of V3/R1, and that choice is
+    /// deliberate. DeepSeek-V4 ships no chat template; its reference prompt
+    /// builder (`encoding/encoding_dsv4.py`, transcribed as
+    /// `DeepSeekV4ChatEncoder`) takes a REQUIRED `thinking_mode` argument
+    /// with the two explicit values `chat` and `thinking`. Thus the caller
+    /// can turn thinking off, and `.alwaysOn` would wrongly reject that
+    /// request with `cannotDisableReasoning`. The `thinking` key is the same
+    /// boolean kwarg the DeepSeek-V3.1+ chat templates use, and the encoder
+    /// wiring reads it to select the mode. `defaultOn: true` keeps the
+    /// family precedent: a caller with no preference gets the reasoning
+    /// behavior that the V3/R1 rows always give, and unlike them can opt
+    /// out. The start delimiter is one entry of the published
+    /// `tokenizer.json` `added_tokens` (id 128821), thus `isSpecialToken`.
+    private static let deepSeekV4ThinkConfig = ReasoningConfig(
+        startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
+        promptStrategy: .templateFlag(key: "thinking", defaultOn: true),
+        isSpecialToken: true)
+
     /// How an ``inferenceTable`` entry's `value` is compared against the
     /// model's lowercased `model_type` or repo id.
     private enum ReasoningMatch {
@@ -285,6 +307,11 @@ public struct ReasoningConfig: Sendable, Equatable {
             (.exact, "deepseek_r1", alwaysOnThinkConfig),
             (.idContains, "deepseek-r1", alwaysOnThinkConfig),
             (.idContains, "r1-distill", alwaysOnThinkConfig),
+
+            // DeepSeek-V4 (model_type "deepseek_v4"): toggleable, unlike the
+            // always-on V3/R1 rows above — see ``deepSeekV4ThinkConfig`` for
+            // the recorded decision. Exact match, mirroring "deepseek_v3".
+            (.exact, "deepseek_v4", deepSeekV4ThinkConfig),
 
             // MiniMax-M2 (model_type "minimax", e.g. mlx-community/MiniMax-M2-4bit):
             // interleaved thinking, always on. Its chat template has no thinking

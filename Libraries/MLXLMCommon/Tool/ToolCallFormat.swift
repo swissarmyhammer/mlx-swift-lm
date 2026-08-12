@@ -154,6 +154,11 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<|python_tag|>{ "name": "func", "parameters": {...} }`
     case llama3
 
+    /// DeepSeek-V4 DSML format. The `｜DSML｜` marker uses FULLWIDTH
+    /// VERTICAL LINE U+FF5C, and `string="true|false"` types each value.
+    /// Example: `<｜DSML｜invoke name="f"><｜DSML｜parameter name="k" string="true">v</｜DSML｜parameter></｜DSML｜invoke>`
+    case dsml
+
     // MARK: - Factory Methods
 
     /// The opening wrapper tag shared by the ``json`` and ``xmlFunction``
@@ -198,6 +203,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return MistralToolCallParser()
         case .llama3:
             return Llama3ToolCallParser()
+        case .dsml:
+            return DSMLToolCallParser()
         }
     }
 
@@ -288,6 +295,14 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             // children rather than `<parameter name="k">v</parameter>` -- see
             // ``MiniMaxM3ToolCallParser``.
             (.prefix, "minimax_m3", .minimaxM3),
+
+            // DeepSeek-V4 (model_type "deepseek_v4", e.g.
+            // mlx-community/DeepSeek-V4-Flash-4bit): the native DSML format
+            // that ``DeepSeekV4ChatEncoder`` writes and
+            // ``DSMLToolCallParser`` reads. Exact match, mirroring the dense
+            // GLM4 style above; DeepSeek-V3 has no row, thus it keeps the
+            // default format.
+            (.exact, "deepseek_v4", .dsml),
         ]
 
     /// Infer the tool call format based on model type from config.json.

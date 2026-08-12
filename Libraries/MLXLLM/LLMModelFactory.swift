@@ -51,6 +51,7 @@ public enum LLMTypeRegistry {
         "openelm": create(OpenElmConfiguration.self, OpenELMModel.init),
         "internlm2": create(InternLM2Configuration.self, InternLM2Model.init),
         "deepseek_v3": create(DeepSeekV3Configuration.self, DeepSeekV3Model.init),
+        "deepseek_v4": create(DeepSeekV4Configuration.self, DeepSeekV4Model.init),
         "granite": create(GraniteConfiguration.self, GraniteModel.init),
         "granitemoehybrid": create(
             GraniteMoeHybridConfiguration.self, GraniteMoeHybridModel.init),
@@ -387,6 +388,12 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: defaultPromptHistoryOfSpain
     )
 
+    /// Model configuration for `mlx-community/DeepSeek-V4-Flash-4bit`.
+    static public let deepseekV4Flash4bit = ModelConfiguration(
+        id: "mlx-community/DeepSeek-V4-Flash-4bit",
+        defaultPrompt: defaultPromptSkyBlue
+    )
+
     /// Model configuration for `mlx-community/granite-3.3-2b-instruct-4bit`.
     static public let granite332b4bit = ModelConfiguration(
         id: "mlx-community/granite-3.3-2b-instruct-4bit",
@@ -549,6 +556,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             qwen3627b4bit,
             smollm135m4bit,
             deepseekR14bit,
+            deepseekV4Flash4bit,
             mimo7bSFT4bit,
             glm49b4bit,
             acereason7b4bit,
@@ -765,7 +773,12 @@ public final class LLMModelFactory: GenericModelFactory {
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization)
 
-        let tokenizer = try await tokenizerTask
+        let loadedTokenizer = try await tokenizerTask
+        // The model may wrap the loaded tokenizer with its own prompt
+        // encoder — DeepSeek-V4 does, because its checkpoint ships no chat
+        // template. Every consumer below speaks through the result.
+        let tokenizer =
+            (model as? LLMModel)?.promptTokenizer(wrapping: loadedTokenizer) ?? loadedTokenizer
 
         let messageGenerator =
             if let model = model as? LLMModel {

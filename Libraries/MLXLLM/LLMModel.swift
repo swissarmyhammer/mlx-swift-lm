@@ -21,6 +21,19 @@ public protocol LLMModel: LanguageModel, LoRAModel {
     /// ``PromptPreparationError/plainTextFallbackForbidden(_:)`` with this
     /// message instead of a silent, wrong plain-text prompt.
     var missingChatTemplateRefusal: String? { get }
+
+    /// The tokenizer that the prompt path must use for this model.
+    ///
+    /// The default returns `tokenizer` unchanged. A model family whose
+    /// prompts a dedicated encoder must build wraps the loaded tokenizer
+    /// here — DeepSeek-V4 returns a `DeepSeekV4EncodingTokenizer`, because
+    /// its checkpoint ships no chat template. `LLMModelFactory._load` calls
+    /// this once, thus every consumer of the loaded context speaks through
+    /// the returned tokenizer.
+    ///
+    /// - Parameter tokenizer: the tokenizer loaded from the checkpoint.
+    /// - Returns: the tokenizer for the prompt path.
+    func promptTokenizer(wrapping tokenizer: any Tokenizer) -> any Tokenizer
 }
 
 extension LLMModel {
@@ -73,5 +86,13 @@ extension LLMModel {
     /// fallback for models whose tokenizer has no chat template.
     public var missingChatTemplateRefusal: String? {
         nil
+    }
+
+    /// The default prompt tokenizer: the loaded tokenizer itself, unchanged.
+    ///
+    /// - Parameter tokenizer: the tokenizer loaded from the checkpoint.
+    /// - Returns: the same tokenizer.
+    public func promptTokenizer(wrapping tokenizer: any Tokenizer) -> any Tokenizer {
+        tokenizer
     }
 }

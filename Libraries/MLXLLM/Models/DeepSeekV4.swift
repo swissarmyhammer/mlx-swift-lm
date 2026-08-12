@@ -370,6 +370,22 @@ public class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
             + "gives no error."
     }
 
+    /// The prompt path of DeepSeek-V4: the loaded tokenizer wrapped by
+    /// ``DeepSeekV4EncodingTokenizer``.
+    ///
+    /// The `deepseek_v4` entry of the type registry is the detection rule
+    /// that routes a checkpoint to this model, and this hook is where that
+    /// rule turns into the encoder path: the wrapper renders every
+    /// conversation with `DeepSeekV4ChatEncoder`, because the checkpoint
+    /// ships no chat template. The refusal above stays as the guard of the
+    /// non-encoder path.
+    ///
+    /// - Parameter tokenizer: the tokenizer loaded from the checkpoint.
+    /// - Returns: the wrapping tokenizer.
+    public func promptTokenizer(wrapping tokenizer: any Tokenizer) -> any Tokenizer {
+        DeepSeekV4EncodingTokenizer(wrapping: tokenizer)
+    }
+
     // MARK: - The load filter
 
     /// Maps a DeepSeek-V4 checkpoint onto the module paths of this file.

@@ -25,6 +25,18 @@ struct ReasoningConfigTests {
         #expect(config?.endDelimiter == "</think>")
     }
 
+    /// DeepSeek-V4 has two explicit generation modes, `chat` and `thinking`
+    /// (the reference `encoding/encoding_dsv4.py` requires an explicit
+    /// `thinking_mode` argument). Thus its row is toggleable, unlike the
+    /// always-on V3/R1 rows.
+    @Test func inferDeepSeekV4IsToggleable() {
+        let config = ReasoningConfig.infer(
+            from: "deepseek_v4", modelID: "mlx-community/DeepSeek-V4-Flash-4bit")
+        #expect(config?.startDelimiter == "<think>")
+        #expect(config?.endDelimiter == "</think>")
+        #expect(config?.promptStrategy == .templateFlag(key: "thinking", defaultOn: true))
+    }
+
     /// R1-Distill reports `model_type == "qwen2"` — indistinguishable from plain
     /// Qwen2.5 by type alone. It must be recognized by repo id (the load-bearing
     /// `modelID` parameter).
