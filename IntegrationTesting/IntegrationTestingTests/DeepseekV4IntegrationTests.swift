@@ -59,6 +59,17 @@ private let longGenerationMinimumTokenCount = 12_288
 /// The number of tokens each short generation asks for.
 private let shortGenerationTokenCount = 48
 
+/// The number of leading fixture tokens the parity test compares.
+///
+/// The user pinned this window to 32 on 2026-08-12. The measured stable
+/// window on these weights is 36 tokens: at generation step 36 the Python
+/// reference holds an exact bf16 tie between its top two candidates
+/// (both at logit 29.75, the Swift pick 0.375 below), thus every token
+/// from there on is a coin flip that floating-point noise decides. An
+/// exact 64-token match is not a stable target across two
+/// implementations; the first 32 tokens are.
+private let parityTokenCount = 32
+
 /// The number of tokens each turn of the two-round test asks for.
 private let recallGenerationTokenCount = 60
 
@@ -124,20 +135,30 @@ private enum DeepseekV4Load {
 // MARK: - Parity fixture
 
 /// The greedy-parity fixture, produced by the Python reference
-/// (`Thump604/mlx-lm` @ `deepseek-v4-support-fixes`, or `ml-explore/mlx-lm`
-/// PR 1189) against the same checkpoint:
+/// (`ml-explore/mlx-lm` PR 1189) against the same checkpoint, with one full
+/// forward over the growing sequence for each step:
 ///
 /// ```python
 /// from mlx_lm import load
-/// from mlx_lm.generate import generate_step
 /// import json, mlx.core as mx
 /// model, tokenizer = load("mlx-community/DeepSeek-V4-Flash-4bit")
 /// prompt = tokenizer.encode("<|user|>Write one sentence about the sea.<|assistant|><think>")
-/// ids = [t for t, _ in zip(
-///     (tok for tok, _ in generate_step(mx.array(prompt), model)), range(64))]
+/// sequence, ids = list(prompt), []
+/// for _ in range(64):
+///     logits = model(mx.array(sequence)[None], cache=model.make_cache())
+///     token = int(mx.argmax(logits[0, -1].astype(mx.float32)))
+///     ids.append(token)
+///     sequence.append(token)
 /// json.dump({"prompt_token_ids": prompt, "generated_token_ids": ids},
 ///           open("deepseek-v4-flash-4bit-greedy-parity.json", "w"))
 /// ```
+///
+/// Do NOT produce the fixture with `mlx_lm.generate.generate_step`. Its
+/// cached S=1 decode path diverges from the model's own full-prompt
+/// forward (measured 2026-08-12 on these weights: step-0 argmax 671
+/// against 455, with a 2.0-logit margin in the full forward). The
+/// full-forward stream is self-consistent, and the Swift `TokenIterator`
+/// reproduces it token for token.
 private struct DeepseekV4ParityFixture: Decodable {
     /// The prompt token identifiers the reference fed the model.
     let promptTokenIDs: [Int]
@@ -234,44 +255,46 @@ struct DeepseekV4IntegrationTests {
 
     // MARK: Greedy parity
 
-    /// The first N greedy token identifiers match the Python reference
-    /// exactly. Greedy decode is deterministic, thus an exact match is a
-    /// real parity check. The fixture feeds the reference's own prompt token
-    /// identifiers, thus this test isolates model parity from prompt
-    /// encoding.
+    /// The first ``parityTokenCount`` greedy token identifiers match the
+    /// Python reference exactly. Greedy decode is deterministic inside the
+    /// stable window, thus an exact match there is a real parity check.
+    /// The fixture feeds the reference's own prompt token identifiers, thus
+    /// this test isolates model parity from prompt encoding.
     @Test func greedyFirstTokensMatchThePythonFixture() async throws {
         let fixtureURL = deepseekV4ParityFixtureURL
         guard let fixtureData = try? Data(contentsOf: fixtureURL) else {
             print(
                 "Skipping greedyFirstTokensMatchThePythonFixture: no fixture at "
                     + "\(fixtureURL.path). Generate it with the Python reference "
-                    + "(Thump604/mlx-lm @ deepseek-v4-support-fixes, or "
-                    + "ml-explore/mlx-lm PR 1189) — see DeepseekV4ParityFixture "
+                    + "(ml-explore/mlx-lm PR 1189) — see DeepseekV4ParityFixture "
                     + "in this file for the exact script and schema.")
             return
         }
         let fixture = try JSONDecoder().decode(DeepseekV4ParityFixture.self, from: fixtureData)
+        let expected = Array(fixture.generatedTokenIDs.prefix(parityTokenCount))
+        #expect(
+            expected.count == parityTokenCount,
+            "the fixture must carry at least \(parityTokenCount) generated ids")
         guard
             let container = await loadContainerOrSkip(
                 testName: "greedyFirstTokensMatchThePythonFixture")
         else { return }
 
         let promptTokenIDs = fixture.promptTokenIDs
-        let expectedCount = fixture.generatedTokenIDs.count
         let generated = try await container.perform { context in
             let input = LMInput(tokens: MLXArray(promptTokenIDs.map(Int32.init)))
             var iterator = try TokenIterator(
                 input: input, model: context.model,
-                parameters: GenerateParameters(maxTokens: expectedCount, temperature: 0))
+                parameters: GenerateParameters(maxTokens: parityTokenCount, temperature: 0))
             var tokens: [Int] = []
-            while tokens.count < expectedCount, let token = iterator.next() {
+            while tokens.count < parityTokenCount, let token = iterator.next() {
                 tokens.append(token)
             }
             return tokens
         }
 
         #expect(
-            generated == fixture.generatedTokenIDs,
+            generated == expected,
             "greedy decode must reproduce the Python reference token for token")
     }
 

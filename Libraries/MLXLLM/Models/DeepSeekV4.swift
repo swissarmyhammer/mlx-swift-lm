@@ -451,6 +451,14 @@ public class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
     /// projection carries the first alone.
     private static let projectionTensors = ["weight", "scales", "biases"]
 
+    /// The name the mlx-community conversion gives the routing bias of a
+    /// top-k gate. It is the score-correction name of the DeepSeek-V3
+    /// lineage.
+    private static let scoreCorrectionBiasPath = ".ffn.gate.e_score_correction_bias"
+
+    /// The path ``DeepSeekV4MoEGate`` gives the same tensor.
+    private static let gateBiasPath = ".ffn.gate.bias"
+
     /// The path of each top-level checkpoint tensor, by checkpoint key.
     private static let topLevelPaths = [
         "embed.weight": "model.embed_tokens.weight",
@@ -523,6 +531,19 @@ public class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
                     of: ".hc_\(half)_\(field)", with: ".hc_\(half).\(field)")
             }
         }
+        // The mlx-community conversion spells the same hyper-connection
+        // `<half>_hc.<field>`. The Python reference renames that order after
+        // the rename above, thus the two spellings converge on the one
+        // submodule.
+        for half in hyperConnectionHalves {
+            path = path.replacingOccurrences(of: ".\(half)_hc.", with: ".hc_\(half).")
+        }
+        // The mlx-community conversion gives the routing bias of a top-k gate
+        // the score-correction name of the DeepSeek-V3 lineage.
+        // ``DeepSeekV4MoEGate`` holds that tensor under `bias`, and adds it to
+        // the expert scores only for the top-k selection, which is the place
+        // the Python reference adds its `e_score_correction_bias`.
+        path = path.replacingOccurrences(of: scoreCorrectionBiasPath, with: gateBiasPath)
         return path.hasPrefix(layersPrefix) ? stackPrefix + path : path
     }
 

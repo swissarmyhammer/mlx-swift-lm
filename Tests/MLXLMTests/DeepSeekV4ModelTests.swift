@@ -558,6 +558,67 @@ struct DeepSeekV4ModelTests {
         }
     }
 
+    @Test func sanitizeConvergesBothHyperConnectionSpellings() throws {
+        // The mlx-community `DeepSeek-V4-Flash-4bit` checkpoint spells each
+        // per-layer hyper-connection `<half>_hc.<field>` and writes the
+        // `model.` prefix, where the raw checkpoint spells it
+        // `hc_<half>_<field>` without the prefix. The Python reference,
+        // `ml-explore/mlx-lm` PR 1189 `Model.sanitize`, sends the two
+        // spellings to the one module path `hc_<half>.<field>`.
+        let model = DeepSeekV4Model(try Self.configuration())
+        let sanitized = model.sanitize(weights: [
+            "model.layers.0.attn_hc.base": Self.marker(1),
+            "model.layers.0.attn_hc.fn": Self.marker(2),
+            "model.layers.0.attn_hc.scale": Self.marker(3),
+            "model.layers.2.ffn_hc.base": Self.marker(4),
+            "model.layers.2.ffn_hc.fn": Self.marker(5),
+            "model.layers.2.ffn_hc.scale": Self.marker(6),
+            "layers.1.hc_attn_fn": Self.marker(7),
+            "layers.1.hc_ffn_base": Self.marker(8),
+        ])
+
+        let expected: [String: Float] = [
+            "model.layers.0.hc_attn.base": 1,
+            "model.layers.0.hc_attn.fn": 2,
+            "model.layers.0.hc_attn.scale": 3,
+            "model.layers.2.hc_ffn.base": 4,
+            "model.layers.2.hc_ffn.fn": 5,
+            "model.layers.2.hc_ffn.scale": 6,
+            "model.layers.1.hc_attn.fn": 7,
+            "model.layers.1.hc_ffn.base": 8,
+        ]
+        #expect(Set(sanitized.keys) == Set(expected.keys))
+        for (key, value) in expected {
+            let tensor = try #require(sanitized[key], Comment(rawValue: key))
+            #expect(Self.floats(tensor) == [value], Comment(rawValue: key))
+        }
+    }
+
+    @Test func sanitizeMapsTheScoreCorrectionBiasOntoTheGateBias() throws {
+        // The mlx-community checkpoint spells the routing bias of a top-k
+        // gate `ffn.gate.e_score_correction_bias`, the score-correction name
+        // of the DeepSeek-V3 lineage. `DeepSeekV4MoEGate` holds that tensor
+        // under the key `bias` and adds it to the expert scores only for the
+        // top-k selection, which is the place the Python reference adds its
+        // `e_score_correction_bias`. Each spelling goes through its own
+        // `sanitize` call, because the two names converge on one module path.
+        let model = DeepSeekV4Model(try Self.configuration())
+        let checkpointSpelling = model.sanitize(weights: [
+            "model.layers.\(Self.topKLayer).ffn.gate.e_score_correction_bias":
+                Self.marker(1)
+        ])
+        let rawSpelling = model.sanitize(weights: [
+            "layers.\(Self.topKLayer).ffn.gate.bias": Self.marker(2)
+        ])
+
+        let modulePath = "model.layers.\(Self.topKLayer).ffn.gate.bias"
+        #expect(Set(checkpointSpelling.keys) == [modulePath])
+        let mapped = try #require(checkpointSpelling[modulePath])
+        #expect(Self.floats(mapped) == [1])
+        let unchanged = try #require(rawSpelling[modulePath])
+        #expect(Self.floats(unchanged) == [2])
+    }
+
     @Test func sanitizeStacksThePerExpertWeightsIntoTheSwitchLayer() throws {
         let model = DeepSeekV4Model(try Self.configuration())
         var weights: [String: MLXArray] = [:]
