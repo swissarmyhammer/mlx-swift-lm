@@ -97,7 +97,7 @@ private final class ScriptedPreferenceModel: Module, MLXLMCommon.LanguageModel,
     }
 
     func prepare(
-        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws -> PrepareResult {
         .tokens(input.text)
     }
@@ -128,7 +128,7 @@ struct GuidedLoopDegenerationTests {
         return try GrammarTokenizer(
             vocab: vocab,
             vocabType: .byteFallback,
-            eosTokenID: Int32(DegenerationByteTokenizer.eosTokenID)
+            eosTokenId: Int32(DegenerationByteTokenizer.eosTokenID)
         )
     }
 
@@ -180,7 +180,7 @@ struct GuidedLoopDegenerationTests {
             hostTokenizer: hostTokenizer
         )
         let closingBias = ClosingTokenBias.compute(
-            tokenizer: hostTokenizer, eosTokenID: DegenerationByteTokenizer.eosTokenID)
+            tokenizer: hostTokenizer, eosTokenId: DegenerationByteTokenizer.eosTokenID)
 
         var emittedText = ""
         let maxTokens = 64
@@ -246,7 +246,7 @@ struct GuidedLoopDegenerationTests {
             hostTokenizer: hostTokenizer
         )
         let closingBias = ClosingTokenBias.compute(
-            tokenizer: hostTokenizer, eosTokenID: DegenerationByteTokenizer.eosTokenID)
+            tokenizer: hostTokenizer, eosTokenId: DegenerationByteTokenizer.eosTokenID)
 
         var emittedText = ""
         let maxTokens = 64
@@ -266,8 +266,8 @@ struct GuidedLoopDegenerationTests {
         }
 
         #expect(
-            result.tokenCount < maxTokens,
-            "the cycle must be broken well before the budget, got \(result.tokenCount)"
+            result < maxTokens,
+            "the cycle must be broken well before the budget, got \(result)"
         )
         #expect(
             emittedText.hasSuffix("\""),
@@ -313,7 +313,7 @@ struct GuidedLoopDegenerationTests {
             hostTokenizer: hostTokenizer
         )
         let closingBias = ClosingTokenBias.compute(
-            tokenizer: hostTokenizer, eosTokenID: DegenerationByteTokenizer.eosTokenID)
+            tokenizer: hostTokenizer, eosTokenId: DegenerationByteTokenizer.eosTokenID)
 
         var emittedText = ""
         let maxTokens = 64
@@ -383,7 +383,7 @@ struct GuidedLoopDegenerationTests {
             hostTokenizer: hostTokenizer
         )
         let closingBias = ClosingTokenBias.compute(
-            tokenizer: hostTokenizer, eosTokenID: DegenerationByteTokenizer.eosTokenID)
+            tokenizer: hostTokenizer, eosTokenId: DegenerationByteTokenizer.eosTokenID)
 
         var emittedText = ""
         let maxTokens = 64
@@ -425,7 +425,7 @@ struct GuidedLoopDegenerationTests {
             emittedText.hasSuffix("\""),
             "the string must complete instead of truncating at a stop token, got \(emittedText)"
         )
-        #expect(result.tokenCount < maxTokens)
+        #expect(result < maxTokens)
     }
 
     /// - Throws: Rethrows setup/generation errors as test failures.
@@ -454,7 +454,7 @@ struct GuidedLoopDegenerationTests {
             hostTokenizer: hostTokenizer
         )
         let closingBias = ClosingTokenBias.compute(
-            tokenizer: hostTokenizer, eosTokenID: DegenerationByteTokenizer.eosTokenID)
+            tokenizer: hostTokenizer, eosTokenId: DegenerationByteTokenizer.eosTokenID)
 
         var emittedText = ""
         let maxTokens = 64
@@ -472,8 +472,8 @@ struct GuidedLoopDegenerationTests {
         }
 
         #expect(
-            result.tokenCount <= 3,
-            "the EOS boost must stop a digit-degenerate integer immediately, got \(result.tokenCount) tokens: \(emittedText)"
+            result <= 3,
+            "the EOS boost must stop a digit-degenerate integer immediately, got \(result) tokens: \(emittedText)"
         )
     }
 }
