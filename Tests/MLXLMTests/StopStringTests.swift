@@ -191,15 +191,15 @@ final class StopStringTests: XCTestCase {
     }
 
     func testKnownRegistryEntriesExposeFamilyStopDefaults() {
-        assertStops(LLMRegistry.gemma31bQAT4bit, "<end_of_turn>")
-        assertStops(LLMRegistry.gemma3nE4bITLM4bit, "<end_of_turn>")
-        assertStops(LLMRegistry.gemma4E2bIT4bit, "<turn|>")
-        assertStops(LLMRegistry.qwen306b4bit, "<|im_end|>")
-        assertStops(LLMRegistry.qwen352b4bit, "<|im_end|>")
-        assertStops(LLMRegistry.phi354bit, "<|end|>")
-        assertStops(LLMRegistry.phi35MoE, "<|end|>")
-        assertStops(LLMRegistry.llama38b4bit, "<|eot_id|>")
-        assertStops(LLMRegistry.llama323b4bit, "<|eot_id|>")
+        assertStops(LLMRegistry.gemma3_1B_qat_4bit, "<end_of_turn>")
+        assertStops(LLMRegistry.gemma3n_E4B_it_lm_4bit, "<end_of_turn>")
+        assertStops(LLMRegistry.gemma4_e2b_it_4bit, "<turn|>")
+        assertStops(LLMRegistry.qwen3_0_6b_4bit, "<|im_end|>")
+        assertStops(LLMRegistry.qwen3_5_2b_4bit, "<|im_end|>")
+        assertStops(LLMRegistry.phi3_5_4bit, "<|end|>")
+        assertStops(LLMRegistry.phi3_5MoE, "<|end|>")
+        assertStops(LLMRegistry.llama3_8B_4bit, "<|eot_id|>")
+        assertStops(LLMRegistry.llama3_2_3B_4bit, "<|eot_id|>")
 
         assertStops(VLMRegistry.gemma3_4B_qat_4bit, "<end_of_turn>")
         assertStops(VLMRegistry.qwen2VL2BInstruct4Bit, "<|im_end|>")
