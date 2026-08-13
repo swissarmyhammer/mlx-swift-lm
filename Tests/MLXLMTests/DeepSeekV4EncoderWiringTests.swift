@@ -99,7 +99,7 @@ struct DeepSeekV4EncoderWiringTests {
         let processor = try makeDeepSeekV4Processor()
 
         let input = try processor.prepare(
-            input: UserInput(chat: [.system(content: "Be brief."), .user(content: "Hello")]))
+            input: UserInput(chat: [.system("Be brief."), .user("Hello")]))
 
         let expected = DeepSeekV4ChatEncoder().encode(
             messages: [.system(content: "Be brief."), .user(content: "Hello")],
@@ -112,7 +112,7 @@ struct DeepSeekV4EncoderWiringTests {
         let processor = try makeDeepSeekV4Processor()
 
         let input = try processor.prepare(
-            input: UserInput(chat: [.user(content: "Hello")], additionalContext: ["thinking": false]))
+            input: UserInput(chat: [.user("Hello")], additionalContext: ["thinking": false]))
 
         let expected = DeepSeekV4ChatEncoder().encode(
             messages: [.user(content: "Hello")], thinkingMode: .chat)
@@ -139,7 +139,7 @@ struct DeepSeekV4EncoderWiringTests {
         ]
 
         let input = try processor.prepare(
-            input: UserInput(chat: [.system(content: "Be brief."), .user(content: "Hello")], tools: [weatherTool]))
+            input: UserInput(chat: [.system("Be brief."), .user("Hello")], tools: [weatherTool]))
 
         let text = renderedText(of: input)
         #expect(text.contains("## Tools"))
@@ -157,8 +157,8 @@ struct DeepSeekV4EncoderWiringTests {
         let input = try processor.prepare(
             input: UserInput(
                 chat: [
-                    .user(content: "Weather in Paris?"),
-                    .assistant(content: "", toolCalls: [call]),
+                    .user("Weather in Paris?"),
+                    .assistant("", toolCalls: [call]),
                     .tool(#"{"forecast": "sunny"}"#, id: "call_1"),
                 ]))
 
