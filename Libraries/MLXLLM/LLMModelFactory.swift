@@ -156,7 +156,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let gemma2bQuantized = ModelConfiguration(
         id: "mlx-community/quantized-gemma-2b-it",
         // https://www.promptingguide.ai/models/gemma
-        defaultPrompt: "what is the difference between lettuce and cabbage?"
+        defaultPrompt: "What is the difference between lettuce and cabbage?"
     )
 
     static public let gemma_2_9b_it_4bit = ModelConfiguration(
