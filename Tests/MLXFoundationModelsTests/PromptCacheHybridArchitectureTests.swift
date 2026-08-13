@@ -443,10 +443,10 @@ struct PromptCacheHybridArchitectureTests {
     private func checkpointRestoredSuffixLogits(
         promptCache: PromptCache, modelID: String,
         model: any MLXLMCommon.LanguageModel, allTokens: [Int], prefixLen: Int
-    ) async -> MLXArray {
+    ) async throws -> MLXArray {
         let prefixTokens = Array(allTokens.prefix(prefixLen))
 
-        let round1 = await resolveOnce(
+        let round1 = try await resolveOnce(
             cache: promptCache, modelID: modelID, newTokens: prefixTokens, model: model)
         #expect(round1.tokensToFeed == prefixTokens, "first round: nothing stored yet, feed everything")
         let round1Input = MLXArray(round1.tokensToFeed).expandedDimensions(axis: 0)
@@ -454,7 +454,7 @@ struct PromptCacheHybridArchitectureTests {
         await promptCache.store(
             modelID: modelID, tokens: prefixTokens, cache: SendableBox(round1.cache))
 
-        let round2 = await resolveOnce(
+        let round2 = try await resolveOnce(
             cache: promptCache, modelID: modelID, newTokens: allTokens, model: model)
         let expectedSuffix = Array(allTokens.suffix(allTokens.count - prefixLen))
         #expect(
@@ -493,7 +493,7 @@ struct PromptCacheHybridArchitectureTests {
 
         let promptCache = PromptCache()
         let modelID = "\(modelIDPrefix)-\(UUID().uuidString)"
-        let restored = await checkpointRestoredSuffixLogits(
+        let restored = try await checkpointRestoredSuffixLogits(
             promptCache: promptCache, modelID: modelID, model: model, allTokens: allTokens,
             prefixLen: prefixLen)
 
@@ -551,7 +551,7 @@ struct PromptCacheHybridArchitectureTests {
 
         // Round 1: prefix only.
         let firstPrefix = Array(allTokens.prefix(firstPrefixLen))
-        let round1 = await resolveOnce(
+        let round1 = try await resolveOnce(
             cache: promptCache, modelID: modelID, newTokens: firstPrefix, model: model)
         _ = model.callAsFunction(
             MLXArray(round1.tokensToFeed).expandedDimensions(axis: 0), cache: round1.cache)
@@ -560,7 +560,7 @@ struct PromptCacheHybridArchitectureTests {
 
         // Round 2: extend to the second prefix, restoring round 1's checkpoint.
         let secondPrefix = Array(allTokens.prefix(secondPrefixLen))
-        let round2 = await resolveOnce(
+        let round2 = try await resolveOnce(
             cache: promptCache, modelID: modelID, newTokens: secondPrefix, model: model)
         #expect(round2.tokensToFeed == Array(secondPrefix.suffix(secondPrefixLen - firstPrefixLen)))
         _ = model.callAsFunction(
@@ -569,7 +569,7 @@ struct PromptCacheHybridArchitectureTests {
             modelID: modelID, tokens: secondPrefix, cache: SendableBox(round2.cache))
 
         // Round 3: the full sequence, restoring round 2's (longer) checkpoint.
-        let round3 = await resolveOnce(
+        let round3 = try await resolveOnce(
             cache: promptCache, modelID: modelID, newTokens: allTokens, model: model)
         #expect(round3.tokensToFeed == Array(allTokens.suffix(allTokens.count - secondPrefixLen)))
         let round3Logits = model.callAsFunction(
@@ -595,381 +595,6 @@ struct PromptCacheHybridArchitectureTests {
             tokenFormula: { ($0 * 3 + 2) % 32 }, modelIDPrefix: "qwen3next-hybrid-chain")
     }
 
-    // MARK: - Transcript-stable boundary (kanban er33v06)
-
-    @Test("commonPrefixLength counts the shared leading run, and nothing else")
-    func commonPrefixLengthBasics() {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        #expect(MLXLanguageModel.Executor.commonPrefixLength([1, 2, 3], [1, 2, 3]) == 3)
-        #expect(MLXLanguageModel.Executor.commonPrefixLength([1, 2, 3, 4], [1, 2, 9, 4]) == 2)
-        #expect(MLXLanguageModel.Executor.commonPrefixLength([1, 2], [1, 2, 3, 4]) == 2)
-        #expect(MLXLanguageModel.Executor.commonPrefixLength([1, 2, 3, 4], [1, 2]) == 2)
-        #expect(MLXLanguageModel.Executor.commonPrefixLength([], [1, 2]) == 0)
-        #expect(MLXLanguageModel.Executor.commonPrefixLength([9, 1], [1, 9]) == 0)
-    }
-
-    @Test("transcriptStableLength is the prompt's common prefix with the past-turns render")
-    func transcriptStableLengthUsesPastTurnsRender() throws {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let tokenizer = StableBoundaryProbeTokenizer()
-        let messages: [[String: any Sendable]] = [
-            ["role": "user", "content": "ab"]
-        ]
-        // The live prompt renders WITH the generation-priming region; the
-        // base render (addGenerationPrompt: false) stops at the
-        // transcript-stable boundary, so the stable length is exactly the
-        // base render's full length.
-        let promptTokens = try #require(
-            try tokenizer.applyChatTemplate(messages: messages, addGenerationPrompt: true))
-        let baseTokens = try #require(
-            try tokenizer.applyChatTemplate(messages: messages, addGenerationPrompt: false))
-        #expect(promptTokens.count > baseTokens.count, "sanity: priming region must add tokens")
-
-        let stableLength = MLXLanguageModel.Executor.transcriptStableLength(
-            promptTokens: promptTokens, messages: messages, tools: nil,
-            additionalContext: nil, tokenizer: tokenizer)
-        #expect(stableLength == baseTokens.count)
-    }
-
-    @Test("transcriptStableLength renders the past-turns baseline with the history context")
-    func transcriptStableLengthCarriesHistoryContext() throws {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let tokenizer = StableBoundaryProbeTokenizer()
-        let messages: [[String: any Sendable]] = [
-            ["role": "user", "content": "ab"],
-            ["role": "assistant", "content": "cd"],
-            ["role": "user", "content": "ef"],
-        ]
-        let historyContext: [String: any Sendable] = ["preserve_thinking": true]
-        // The live prompt renders WITH the history-preservation context (its
-        // history region carries the preserved-thinking markers) plus the
-        // generation-priming region.
-        let promptTokens = try #require(
-            try tokenizer.applyChatTemplate(
-                messages: messages, tools: nil, additionalContext: historyContext,
-                addGenerationPrompt: true))
-        let baseWithContext = try #require(
-            try tokenizer.applyChatTemplate(
-                messages: messages, tools: nil, additionalContext: historyContext,
-                addGenerationPrompt: false))
-        let baseWithout = try #require(
-            try tokenizer.applyChatTemplate(messages: messages, addGenerationPrompt: false))
-        #expect(
-            baseWithContext.count > baseWithout.count,
-            "sanity: the history context must change the past-turns render")
-
-        // The baseline must carry the SAME history-affecting context the
-        // live render used — a context-free baseline diverges from the live
-        // prompt at the first history marker, collapsing the stable prefix.
-        let stableLength = MLXLanguageModel.Executor.transcriptStableLength(
-            promptTokens: promptTokens, messages: messages, tools: nil,
-            additionalContext: historyContext, tokenizer: tokenizer)
-        #expect(stableLength == baseWithContext.count)
-    }
-
-    @Test("mergedAdditionalContext keeps nil renders nil and merges present fragments")
-    func mergedAdditionalContextMergesFragments() throws {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        // nil + nil must stay nil: renders that never carried a context must
-        // remain byte-identical to before (UserInput treats nil and [:]
-        // differently only in intent, but nil is the historical shape).
-        #expect(MLXLanguageModel.Executor.mergedAdditionalContext(nil, nil) == nil)
-
-        let strategy: [String: any Sendable] = ["enable_thinking": false]
-        let history: [String: any Sendable] = ["preserve_thinking": true]
-
-        let strategyOnly = try #require(
-            MLXLanguageModel.Executor.mergedAdditionalContext(strategy, nil))
-        #expect(strategyOnly.count == 1)
-        #expect(strategyOnly["enable_thinking"] as? Bool == false)
-
-        let historyOnly = try #require(
-            MLXLanguageModel.Executor.mergedAdditionalContext(nil, history))
-        #expect(historyOnly.count == 1)
-        #expect(historyOnly["preserve_thinking"] as? Bool == true)
-
-        let merged = try #require(
-            MLXLanguageModel.Executor.mergedAdditionalContext(strategy, history))
-        #expect(merged.count == 2)
-        #expect(merged["enable_thinking"] as? Bool == false)
-        #expect(merged["preserve_thinking"] as? Bool == true)
-    }
-
-    @Test("transcriptStableLength is nil when the tokenizer opts out of generation-prompt control")
-    func transcriptStableLengthNilForOptedOutTokenizer() {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let stableLength = MLXLanguageModel.Executor.transcriptStableLength(
-            promptTokens: [1, 2, 3],
-            messages: [["role": "user", "content": "x"]],
-            tools: nil,
-            additionalContext: nil,
-            tokenizer: OptedOutProbeTokenizer())
-        #expect(stableLength == nil)
-    }
-
-    @Test("makeGuidedRender threads ONE history context to both the live render and the stable-boundary baseline")
-    func makeGuidedRenderAgreesOnHistoryContext() throws {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let messages: [Chat.Message] = [
-            .user("ab"), .assistant("cd"), .user("ef"),
-        ]
-        // The context exactly as the guided path derives it: from the
-        // resolved family's `ReasoningConfig.historyPreservationContext`.
-        let historyContext = ReasoningConfig(
-            startDelimiter: "<think>", endDelimiter: "</think>",
-            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
-            historyPreservationKey: "preserve_thinking"
-        ).historyPreservationContext
-
-        let render = MLXLanguageModel.Executor.makeGuidedRender(
-            messages: messages, historyContext: historyContext)
-        #expect(render.userInput.additionalContext?["preserve_thinking"] as? Bool == true)
-        #expect(render.stableBoundary.historyContext?["preserve_thinking"] as? Bool == true)
-        #expect(render.stableBoundary.tools == nil)
-        #expect(render.stableBoundary.messages.count == messages.count)
-
-        // A family with no history-preservation key stays context-free on
-        // BOTH sides -- the guided render is byte-identical to before.
-        let contextFree = MLXLanguageModel.Executor.makeGuidedRender(
-            messages: messages, historyContext: nil)
-        #expect(contextFree.userInput.additionalContext == nil)
-        #expect(contextFree.stableBoundary.historyContext == nil)
-    }
-
-    @Test("a guided round's stable boundary recovers the full past-turns prefix because live and baseline renders agree")
-    func guidedStableBoundaryCarriesHistoryContext() throws {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let tokenizer = StableBoundaryProbeTokenizer()
-        let chat: [Chat.Message] = [
-            .user("ab"), .assistant("cd"), .user("ef"),
-        ]
-        let messages: [[String: any Sendable]] = [
-            ["role": "user", "content": "ab"],
-            ["role": "assistant", "content": "cd"],
-            ["role": "user", "content": "ef"],
-        ]
-        let render = MLXLanguageModel.Executor.makeGuidedRender(
-            messages: chat, historyContext: ["preserve_thinking": true])
-
-        // The guided LIVE prompt renders with the pair's user-input
-        // context (its history region carries the preserved-thinking
-        // markers) plus the generation-priming region...
-        let promptTokens = try #require(
-            try tokenizer.applyChatTemplate(
-                messages: messages, tools: render.stableBoundary.tools,
-                additionalContext: render.userInput.additionalContext,
-                addGenerationPrompt: true))
-        let baseWithContext = try #require(
-            try tokenizer.applyChatTemplate(
-                messages: messages, tools: render.stableBoundary.tools,
-                additionalContext: render.stableBoundary.historyContext,
-                addGenerationPrompt: false))
-
-        // ...and the boundary baseline renders with the SAME context
-        // (both halves come from `makeGuidedRender`'s single
-        // `historyContext`), so the stable prefix spans the full
-        // past-turns render instead of collapsing at the first history
-        // marker -- the agreement the old context-free guided baseline
-        // could not provide for a history-preserving family.
-        let stableLength = MLXLanguageModel.Executor.transcriptStableLength(
-            promptTokens: promptTokens, messages: messages,
-            tools: render.stableBoundary.tools,
-            additionalContext: render.stableBoundary.historyContext,
-            tokenizer: tokenizer)
-        #expect(stableLength == baseWithContext.count)
-    }
-
-    /// Shared body for `qwen35StableBoundaryCheckpointMatchesFullForwardPass`/
-    /// `qwen3NextStableBoundaryCheckpointMatchesFullForwardPass`: proves the
-    /// SPLIT-PREFILL flow `Executor.makePromptCacheSlot` runs for a hybrid
-    /// stack is numerically sound. Round 1's prompt is a stable prefix plus a
-    /// generation-priming suffix that later rounds re-render WITHOUT (the
-    /// Qwen3.6 template shape from kanban er33v06). The round prefills up to
-    /// the stable boundary via `prefillPromptCache`, snapshots a checkpoint
-    /// THERE (pre-generation), then keeps feeding the same live cache through
-    /// the priming region and stores the usual post-round checkpoint too.
-    /// Round 2 diverges from round 1's fed sequence exactly at the boundary:
-    /// the post-round checkpoint must miss, the stable-boundary checkpoint
-    /// must win, and feeding only the continuation through the restored cache
-    /// must reproduce a full fresh forward pass's logits within 1e-3.
-    ///
-    /// - Parameters:
-    ///   - seed: The `MLXRandom` seed for this model's weights.
-    ///   - modelFactory: Builds the real, tiny hybrid model under test.
-    ///   - tokenFormula: Maps a position `0..<14` to a stable-prefix token ID.
-    ///   - modelIDPrefix: A human-readable prefix for this run's unique model ID.
-    private func assertStableBoundaryCheckpointMatchesFullForwardPass(
-        seed: UInt64, modelFactory: () throws -> any MLXLMCommon.LanguageModel,
-        tokenFormula: (Int) -> Int, modelIDPrefix: String
-    ) async throws {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        MLXRandom.seed(seed)
-        let model = try modelFactory()
-        let stableLength = 14
-        let stableTokens = (0 ..< stableLength).map(tokenFormula)
-        // Round 1's fed prompt ends in a generation-priming region ([50, 51])
-        // that round 2's re-render of these turns as history will NOT contain.
-        let round1Prompt = stableTokens + [50, 51]
-        // Round 2 extends the STABLE prefix with different tokens -- it
-        // diverges from round 1's fed sequence exactly at the boundary.
-        let continuation = [40, 41, 42, 43, 44, 45]
-        let round2Tokens = stableTokens + continuation
-
-        let reference = try referenceSuffixLogits(
-            model: model, tokens: round2Tokens, suffixStart: stableLength)
-
-        let promptCache = PromptCache()
-        let modelID = "\(modelIDPrefix)-\(UUID().uuidString)"
-
-        // Round 1: nothing stored yet -- fresh cache, feed everything.
-        let round1 = await resolveOnce(
-            cache: promptCache, modelID: modelID, newTokens: round1Prompt, model: model)
-        #expect(round1.tokensToFeed == round1Prompt, "first round: nothing stored yet")
-
-        // Split prefill: advance the cache to the stable boundary and
-        // snapshot a checkpoint THERE, before any priming/generation tokens.
-        try MLXLanguageModel.Executor.prefillPromptCache(
-            tokens: stableTokens, model: model, cache: round1.cache)
-        await promptCache.store(
-            modelID: modelID, tokens: stableTokens, cache: SendableBox(round1.cache))
-        #expect(
-            await promptCache.hybridCheckpointCount(modelID: modelID) == 1,
-            "the pre-generation stable-boundary checkpoint must snapshot cleanly")
-
-        // The SAME live cache then continues through the priming region
-        // (generation's own prefill) -- the stored checkpoint must be
-        // unaffected by this later mutation (owned-copy independence).
-        _ = model.callAsFunction(
-            MLXArray(Array(round1Prompt[stableLength...])).expandedDimensions(axis: 0),
-            cache: round1.cache)
-        // The existing post-round store is KEPT: it snapshots the full fed
-        // sequence, which round 2's divergent re-render can never match.
-        await promptCache.store(
-            modelID: modelID, tokens: round1Prompt, cache: SendableBox(round1.cache))
-        #expect(await promptCache.hybridCheckpointCount(modelID: modelID) == 2)
-
-        // Round 2: the post-round checkpoint diverges at the boundary and
-        // must MISS; the stable-boundary checkpoint must win the
-        // longest-prefix scan, feeding only the continuation.
-        let round2 = await resolveOnce(
-            cache: promptCache, modelID: modelID, newTokens: round2Tokens, model: model)
-        #expect(
-            round2.tokensToFeed == continuation,
-            "the stable-boundary checkpoint must match; the post-round checkpoint cannot")
-
-        let round2Logits = model.callAsFunction(
-            MLXArray(round2.tokensToFeed).expandedDimensions(axis: 0), cache: round2.cache)
-        let diff = maxAbsDiff(round2Logits, reference)
-        #expect(
-            diff <= 1e-3,
-            "stable-boundary checkpoint restore diverged from a full forward pass (diff \(diff))")
-    }
-
-    @Test("a checkpoint snapshotted at the stable boundary mid-round restores and matches (Qwen35TextModel)")
-    func qwen35StableBoundaryCheckpointMatchesFullForwardPass() async throws {
-        try await assertStableBoundaryCheckpointMatchesFullForwardPass(
-            seed: 1005, modelFactory: { try self.makeHybridQwen35Model() },
-            tokenFormula: { ($0 * 7 + 3) % 32 },
-            modelIDPrefix: "qwen35-hybrid-stable-boundary")
-    }
-
-    @Test("a checkpoint snapshotted at the stable boundary mid-round restores and matches (Qwen3NextModel)")
-    func qwen3NextStableBoundaryCheckpointMatchesFullForwardPass() async throws {
-        try await assertStableBoundaryCheckpointMatchesFullForwardPass(
-            seed: 1006, modelFactory: { try self.makeHybridQwen3NextModel() },
-            tokenFormula: { ($0 * 11 + 5) % 32 },
-            modelIDPrefix: "qwen3next-hybrid-stable-boundary")
-    }
-}
-
-/// A minimal tokenizer implementing the OPTIONAL generation-prompt-controlled
-/// render: each message renders as `[90, roleToken, contentBytes..., 91]`,
-/// and `addGenerationPrompt: true` appends the priming region `[90, 7, 99]`
-/// -- so the `addGenerationPrompt: false` render is a strict prefix of the
-/// primed render, mirroring a real ChatML-style template.
-private struct StableBoundaryProbeTokenizer: MLXLMCommon.Tokenizer {
-    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
-        text.utf8.map(Int.init)
-    }
-    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
-        String(decoding: tokenIds.map(UInt8.init), as: UTF8.self)
-    }
-    func convertTokenToId(_ token: String) -> Int? { nil }
-    func convertIdToToken(_ id: Int) -> String? { nil }
-    var bosToken: String? { nil }
-    var eosToken: String? { nil }
-    var unknownToken: String? { nil }
-
-    private func render(
-        messages: [[String: any Sendable]], addGenerationPrompt: Bool,
-        additionalContext: [String: any Sendable]?
-    ) -> [Int] {
-        // Mirrors a history-preserving template (Qwen3.6's
-        // `preserve_thinking`): the context flag changes how HISTORY turns
-        // render (an extra marker token per message), so a stable-boundary
-        // baseline computed without the live render's context diverges from
-        // it at the first history turn.
-        let preservesHistory = additionalContext?["preserve_thinking"] as? Bool == true
-        var tokens: [Int] = []
-        for message in messages {
-            let role = message["role"] as? String ?? ""
-            let content = message["content"] as? String ?? ""
-            tokens += [90, role == "user" ? 1 : 2]
-            if preservesHistory {
-                tokens += [77]
-            }
-            tokens += encode(text: content, addSpecialTokens: false)
-            tokens += [91]
-        }
-        if addGenerationPrompt {
-            tokens += [90, 7, 99]
-        }
-        return tokens
-    }
-
-    func applyChatTemplate(
-        messages: [[String: any Sendable]],
-        tools: [[String: any Sendable]]?,
-        additionalContext: [String: any Sendable]?
-    ) throws -> [Int] {
-        render(messages: messages, addGenerationPrompt: true, additionalContext: additionalContext)
-    }
-
-    func applyChatTemplate(
-        messages: [[String: any Sendable]],
-        tools: [[String: any Sendable]]?,
-        additionalContext: [String: any Sendable]?,
-        addGenerationPrompt: Bool
-    ) throws -> [Int]? {
-        render(
-            messages: messages, addGenerationPrompt: addGenerationPrompt,
-            additionalContext: additionalContext)
-    }
-}
-
-/// A tokenizer that keeps the protocol's DEFAULT `nil` implementation of the
-/// generation-prompt-controlled render -- the opt-out shape callers must
-/// treat as "no stable boundary computable".
-private struct OptedOutProbeTokenizer: MLXLMCommon.Tokenizer {
-    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
-        text.utf8.map(Int.init)
-    }
-    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
-        String(decoding: tokenIds.map(UInt8.init), as: UTF8.self)
-    }
-    func convertTokenToId(_ token: String) -> Int? { nil }
-    func convertIdToToken(_ id: Int) -> String? { nil }
-    var bosToken: String? { nil }
-    var eosToken: String? { nil }
-    var unknownToken: String? { nil }
-
-    func applyChatTemplate(
-        messages: [[String: any Sendable]],
-        tools: [[String: any Sendable]]?,
-        additionalContext: [String: any Sendable]?
-    ) throws -> [Int] {
-        messages.flatMap { encode(text: $0["content"] as? String ?? "", addSpecialTokens: false) }
-    }
 }
 
 #endif
