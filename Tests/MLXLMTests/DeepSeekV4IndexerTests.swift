@@ -380,20 +380,17 @@ struct DeepSeekV4IndexerTests {
         MLXArray([value])
     }
 
-    @Test func sanitizeKeepsTheIndexerProjectionsAndStillDropsTheCompressor() throws {
+    @Test func sanitizeKeepsTheIndexerProjections() throws {
         let model = DeepSeekV4Model(try Self.configuration())
         let layer = Self.indexerLayer
         let sanitized = model.sanitize(weights: [
             "layers.\(layer).attn.indexer.wq_b.weight": Self.marker(1),
             "layers.\(layer).attn.indexer.weights_proj.weight": Self.marker(2),
-            "layers.\(layer).attn.indexer.compressor.wkv.weight": Self.marker(3),
-            "layers.\(layer).attn.compressor.wkv.weight": Self.marker(4),
-            "layers.\(layer).attn.wq_a.weight": Self.marker(5),
+            "layers.\(layer).attn.wq_a.weight": Self.marker(3),
         ])
 
         #expect(sanitized["model.layers.\(layer).attn.indexer.wq_b.weight"] != nil)
         #expect(sanitized["model.layers.\(layer).attn.indexer.weights_proj.weight"] != nil)
-        #expect(!sanitized.keys.contains { $0.contains("compressor") })
         #expect(sanitized["model.layers.\(layer).attn.wq_a.weight"] != nil)
     }
 }

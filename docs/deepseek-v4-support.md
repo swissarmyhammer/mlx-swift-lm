@@ -103,8 +103,20 @@ matrix multiply is not the cost. Refer to "Decode performance" below.
 
 This repository has no port of `deepseek_v32`, but upstream `mlx-lm` has one
 (`mlx_lm/models/deepseek_v32.py`). It is the closest relative of the sparse
-attention of DeepSeek-V4. The DeepSeek-V4 sparse-attention components have
-tasks of their own: `^r92pjcr` (Indexer) and `^tty95f4` (Compressor).
+attention of DeepSeek-V4.
+
+Both parts of the DeepSeek-V4 sparse attention now stand in the module tree,
+and every tensor of both loads from the published checkpoint:
+`Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift` (task `^r92pjcr`) picks the
+pooled chunks each query reads, and
+`Libraries/MLXLLM/Models/DeepSeekV4Compressor.swift` (task `^tty95f4`) pools
+those chunks.
+
+The attention path reads neither yet, thus a long prompt still runs dense
+attention over every key. The gap is the cache that keeps the pooled chunks
+across calls: a decode step carries one token, and a compressor with no such
+cache pools nothing out of one token. Task `^ab1eq0r` carries that cache and
+the sparse path that reads it.
 
 ### 7. Application-layer pieces from `scouzi1966/maclocal-api` — out of scope by design, unfiled
 

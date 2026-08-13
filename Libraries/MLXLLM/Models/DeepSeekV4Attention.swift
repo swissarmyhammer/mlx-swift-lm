@@ -34,10 +34,13 @@
 //     would give the wrong numbers. This file passes the mode of the
 //     layer.
 //
-// The compressor of a layer whose compress ratio is more than 0 is not in
-// this file. It is its own work, task `^tty95f4`. The indexer of a layer
-// whose compress ratio is 4 hangs below, because its tensors need a module
-// to load into, and the attention path does not read it yet.
+// The compressor of a layer whose compress ratio is more than 0 is
+// Libraries/MLXLLM/Models/DeepSeekV4Compressor.swift, and the indexer of a
+// layer whose compress ratio is 4 is
+// Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift. Both hang below, because
+// their tensors need a module to load into. The attention path does not read
+// either one yet: sparse attention needs the pooled cache that the header of
+// the compressor file records.
 
 import Foundation
 import MLX
@@ -172,9 +175,20 @@ class DeepSeekV4RoPE: Module {
     ///   - length: The number of tokens in the run.
     /// - Returns: Two tables, each of shape `(length, dim / 2)`, in float32.
     func cosSin(offset: Int, length: Int) -> (cos: MLXArray, sin: MLXArray) {
-        let positions = MLXArray(Int32(offset) ..< Int32(offset + length)).asType(.float32)
+        cosSin(positions: MLXArray(Int32(offset) ..< Int32(offset + length)))
+    }
+
+    /// Gives the cosine and the sine of each angle of the given positions.
+    ///
+    /// The positions need not stand in a run. ``DeepSeekV4Compressor`` reads
+    /// one position for each pooled chunk, and two neighbouring chunks stand a
+    /// whole compress ratio apart.
+    ///
+    /// - Parameter positions: The positions, shape `(count)`.
+    /// - Returns: Two tables, each of shape `(count, dim / 2)`, in float32.
+    func cosSin(positions: MLXArray) -> (cos: MLXArray, sin: MLXArray) {
         let angles =
-            positions.expandedDimensions(axis: -1)
+            positions.asType(.float32).expandedDimensions(axis: -1)
             * _inverseFrequency.expandedDimensions(axis: 0)
         return (cos: MLX.cos(angles), sin: MLX.sin(angles))
     }
@@ -244,11 +258,22 @@ class DeepSeekV4Attention: Module {
     /// The top-k chunk selector of this layer, or `nil` on a layer that holds
     /// no indexer.
     ///
-    /// The selector holds the `attn.indexer.*` tensors of the checkpoint. The
-    /// block above does not call it yet: it picks pooled chunks, and the
-    /// compressor that pools them is task `^tty95f4`. Sparse attention lands
-    /// with that task and reads the selection this module answers.
+    /// The selector holds the `attn.indexer.*` tensors of the checkpoint,
+    /// which include the `attn.indexer.compressor.*` tensors of the pooled
+    /// keys it scores. The block above does not call it yet: it picks the
+    /// pooled chunks that sparse attention reads, and sparse attention needs a
+    /// pooled cache this repository does not carry.
     @ModuleInfo(key: "indexer") var indexer: DeepSeekV4Indexer?
+
+    /// The key/value compressor of this layer, or `nil` on a layer whose
+    /// compress ratio is 0.
+    ///
+    /// The compressor holds the `attn.compressor.*` tensors of the checkpoint,
+    /// and it pools the chunks the global context is read through. The
+    /// published DeepSeek-V4-Flash checkpoint names those tensors on the 41
+    /// layers 2 to 42 alone, thus a compressor on layer 0 or layer 1 would
+    /// fail the weight load rather than sit unused.
+    @ModuleInfo(key: "compressor") var compressor: DeepSeekV4Compressor?
 
     /// DeepSeek-V4 keeps one latent key/value head and sends it to every
     /// query head, thus `wkv` gives one head of `head_dim` numbers.
@@ -315,6 +340,10 @@ class DeepSeekV4Attention: Module {
         if configuration.hasIndexer(layer: layer) {
             self._indexer.wrappedValue = DeepSeekV4Indexer(
                 configuration: configuration, layer: layer)
+        }
+        if configuration.hasCompressor(layer: layer) {
+            self._compressor.wrappedValue = DeepSeekV4Compressor(
+                configuration: configuration, layer: layer, headDim: configuration.headDim)
         }
     }
 

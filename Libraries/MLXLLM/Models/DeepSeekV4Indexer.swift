@@ -6,8 +6,8 @@
 // Manual transcription; no git ancestry.
 //
 // The `Indexer` half of DeepSeek-V4 compressed sparse attention. The
-// `Compressor` half, which pools the keys this file scores against, is task
-// `^tty95f4`.
+// `Compressor` half, which pools the keys this file scores against, is
+// Libraries/MLXLLM/Models/DeepSeekV4Compressor.swift.
 //
 // Four details do not come from that file.
 //
@@ -26,10 +26,12 @@
 //     take them back. This file answers a Boolean mask that already holds the
 //     causal rule, thus a row carries exactly the chunks its query may read
 //     and never more.
-//  3. **The pooled keys arrive as an argument.** The file above holds a
-//     private compressor and calls it. This repository lands the compressor
-//     with task `^tty95f4`, thus the keys arrive from the caller and this
-//     file holds no state.
+//  3. **The pooled keys arrive as an argument.** The file above calls its own
+//     compressor inside the score path, which ties the score path to the
+//     pooled cache that compressor reads. This file holds the compressor, so
+//     that the `attn.indexer.compressor.*` tensors of the checkpoint load,
+//     and takes the pooled keys as an argument, so that the score path holds
+//     no state.
 //  4. **No activation quantization-aware round trip.** The file above reads
 //     an `activationQATEnabled` flag of its own configuration. The published
 //     DeepSeek-V4-Flash `config.json` names no such key, thus this port
@@ -96,6 +98,19 @@ final class DeepSeekV4Indexer: Module {
     /// ranking reads.
     @ModuleInfo(key: "weights_proj") var weightsProj: Linear
 
+    /// The compressor that pools the keys this selector scores, from
+    /// `compressor`.
+    ///
+    /// It is a compressor of its own, beside the compressor of the attention
+    /// layer: this one pools to ``DeepSeekV4Configuration/indexHeadDim`` and
+    /// the other pools to `head_dim`. Both pool the same tokens at the same
+    /// compress ratio, thus the two answer the same number of chunks and a
+    /// chunk this selector picks names a chunk of the attention pool.
+    ///
+    /// The caller pools with this module and hands the answer to
+    /// ``callAsFunction(_:queryResidual:pooledKeys:cos:sin:offset:)``.
+    @ModuleInfo(key: "compressor") var compressor: DeepSeekV4Compressor
+
     /// The axis a `(batch, heads, tokens, width)` tensor holds its heads on.
     ///
     /// The selection mask keeps the same axis with one entry, because every
@@ -150,6 +165,9 @@ final class DeepSeekV4Indexer: Module {
             bias: false)
         self._weightsProj.wrappedValue = Linear(
             configuration.hiddenSize, configuration.indexNHeads, bias: false)
+        self._compressor.wrappedValue = DeepSeekV4Compressor(
+            configuration: configuration, layer: layer,
+            headDim: configuration.indexHeadDim)
     }
 
     /// The pooled chunks each query of one block reads.

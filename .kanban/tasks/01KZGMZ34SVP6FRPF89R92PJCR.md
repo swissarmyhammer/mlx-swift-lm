@@ -174,10 +174,37 @@ comments:
     - The 2 findings of `DeepSeekV4.swift` stay open, out of scope under the standing rule of `^ag7ant0`. New task `^dhv1ave` holds them.
     - next: `/review`.
   timestamp: 2026-08-13T15:15:16.408159+00:00
+- actor: claude-code
+  id: 01kzxv4hmdv9nhcy1pqrsnww8t
+  text: |-
+    ### commit — changed
+    - evidence: 4c18b75 fix(mlx-lm): close review findings on DeepSeekV4Indexer (^r92pjcr)
+    - next: none — commit is local only, not pushed
+  timestamp: 2026-08-13T15:16:32.525190+00:00
+- actor: claude-code
+  id: 01kzxvryyx74fv5eb39j5zaq23
+  text: |
+    ### review — clean
+    - evidence: `review file Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift` gave 0 findings, 4 candidates refuted, 8 validators attempted, 0 skipped. `review sha HEAD~1..HEAD` gave 0 findings, 1 candidate refuted. Scope: commit 4c18b75, one source file, +17/-3.
+    - coverage proof: the same `review file` command gave 5 confirmed findings at 09:59 and gives 0 now, thus the sweep does read this file. The clean answer is a result, not the silence of the range-mode defect.
+    - the five in-scope findings are closed, each one read from the file and not from a checkbox: line 56 `final class`; `wqB` (line 88) and `weightsProj` (line 97) each with a doc comment; `callAsFunction` (line 155), `chunkVisibility` (line 209) and `chunkScores` (line 229) each with a noun phrase. The initializer (line 125) keeps its verb phrase, because an initializer has an effect. That agrees with the rule.
+    - the two findings of `DeepSeekV4.swift` (:156, :581) stay unchecked. They sit on lines of earlier commits, thus the standing rule of `^ag7ant0` releases this task from them, and task `^dhv1ave` holds them. They are not a block against column `done`.
+    - the real-weights suite and the endurance test did not run. This commit changed the `final` keyword and doc text only, thus no code path moved.
+    - next: none. The task is in column `done`.
+  timestamp: 2026-08-13T15:27:41.533488+00:00
+- actor: claude-code
+  id: 01kzxvt768hx64dc7ry01qxjdh
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 1 file, `DeepSeekV4Indexer.swift` (+17/-3). The 5 in-scope findings are closed and each cause was swept over the whole file.
+    - test: green — the implement step ran `swift test` after the change: 489+80+282+7 tests pass, 0 failures, 0 warnings, 128.6 s. This iteration changed only the `final` keyword and doc text, thus no separate test run followed.
+    - commit: 4c18b75 fix(mlx-lm): close review findings on DeepSeekV4Indexer (^r92pjcr)
+    - review: clean — `review file` on `DeepSeekV4Indexer.swift` answers 0 findings now, where the same command answered 5 before the correction. That difference shows the command reads the file, thus the clean answer is a result and not the silence of the range-mode defect. The card moved to `done`. The 2 findings in `DeepSeekV4.swift` stay open and out of scope under the rule of `^ag7ant0`; task `^dhv1ave` holds them.
+  timestamp: 2026-08-13T15:28:22.728858+00:00
 depends_on:
 - 01KZGMY5D5PRZ67GNK9E7B24WS
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: f280
 title: Port DeepseekV4 Indexer (causal top-k selection for sparse attention)
 ---
 ## What
@@ -271,3 +298,27 @@ A later review of these three points must not read the clean range sweep as cove
 
 - `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift` — 0 findings, 7 candidates refuted.
 - `Libraries/MLXLLM/Models/DeepSeekV4Configuration.swift` — 0 findings, 1 candidate refuted.
+
+## Review Findings (2026-08-13 10:21)
+
+Scope: commit `4c18b75`, range `HEAD~1..HEAD`. That commit changed one source file, `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift`, by 17 added lines and 3 removed lines.
+
+No new finding. The board keeps this section for the record of the pass.
+
+### The engine gave a clean answer, and the answer has a proof of coverage
+
+- `review file Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift` — 0 findings, 4 candidates refuted, 8 validators attempted, 0 skipped.
+- `review sha HEAD~1..HEAD` — 0 findings, 1 candidate refuted, 8 validators attempted, 0 skipped.
+
+The same `review file` command gave 5 confirmed findings on the pass of 09:59 and gives 0 now. Thus the file sweep does look at this file, and the clean answer is a result and not the silence of the range-mode defect above.
+
+### The five findings of 09:59 are closed, each one read from the file
+
+- Line 56 reads `final class DeepSeekV4Indexer: Module {`.
+- `wqB` (line 88) and `weightsProj` (line 97) each hold a doc comment that states what the projection reads, what it answers, and where the score path uses it.
+- `callAsFunction` (line 155) reads "The pooled chunks each query of one block reads." `chunkVisibility` (line 209) reads "The block-causal visibility of each pooled chunk." `chunkScores` (line 229) reads "The score of each pooled chunk against each query of one block." Thus each of the three functions holds a noun phrase.
+- The initializer (line 125) keeps "Builds the selector of one layer." The rule asks for a verb phrase for a method that has an effect, and an initializer has an effect. Thus this line agrees with the rule and is not a miss.
+
+### The two open lines of `DeepSeekV4.swift` do not hold this task back
+
+The two unchecked items of the section "Out of scope" above stay unchecked on purpose. `git blame` gives an earlier commit for each line, thus the standing rule of task `^ag7ant0` releases this task from them. Task `^dhv1ave` holds the two findings word for word in column `todo`. They are not a block against column `done` for this task.

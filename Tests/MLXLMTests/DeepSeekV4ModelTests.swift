@@ -91,8 +91,8 @@ struct DeepSeekV4ModelTests {
     ///
     /// `compress_ratios` is empty, thus no layer holds a compressor and every
     /// layer turns its positions with `rope_theta`. The compressor and the
-    /// indexer are out of scope for this file, and the load filter drops
-    /// their tensors.
+    /// indexer are out of scope for this file, and
+    /// `DeepSeekV4CompressorTests` covers them.
     ///
     /// - Parameter tieWordEmbeddings: True when the checkpoint ties the
     ///   language-model head to the embedding table.
@@ -484,23 +484,6 @@ struct DeepSeekV4ModelTests {
 
         #expect(!sanitized.keys.contains { $0.contains("mtp") })
         #expect(sanitized["model.norm.weight"] != nil)
-    }
-
-    /// The index of the layer whose sparse-attention tensors this test names.
-    private static let sparseAttentionLayer = 2
-
-    @Test func sanitizeDropsTheCompressorUntilTheCompressorTaskLands() throws {
-        let model = DeepSeekV4Model(try Self.configuration())
-        let layer = Self.sparseAttentionLayer
-        let sanitized = model.sanitize(weights: [
-            "layers.\(layer).attn.compressor.wkv.weight": Self.marker(1),
-            "layers.\(layer).attn.compressor.wgate.weight": Self.marker(2),
-            "layers.\(layer).attn.indexer.compressor.wkv.weight": Self.marker(3),
-            "layers.\(layer).attn.wq_a.weight": Self.marker(4),
-        ])
-
-        #expect(!sanitized.keys.contains { $0.contains("compressor") })
-        #expect(sanitized["model.layers.\(layer).attn.wq_a.weight"] != nil)
     }
 
     @Test func sanitizeDropsALayerTheConfigurationDoesNotDeclare() throws {

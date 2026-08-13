@@ -26,14 +26,13 @@
 //     `mtp.*` and builds a DSpark drafter from it. The Python reference drops
 //     every `mtp.` key, and this repository carries no DSpark type, thus the
 //     load filter drops them here.
-//  3. **The compressor is dropped, and the indexer is not.** The file above
-//     keeps `attn.compressor.*` and `attn.indexer.*` and wires them into its
-//     attention. Sparse attention lands in two halves in this repository.
-//     ``DeepSeekV4Attention`` now holds the indexer, thus
-//     `attn.indexer.wq_b.*` and `attn.indexer.weights_proj.*` load. The
-//     compressor is task `^tty95f4`, and its name reaches the compressor of
-//     the attention and the compressor inside the indexer alike, thus the
-//     load filter still drops both. Remove the filter with that task.
+//  3. **The compressor and the indexer both load, and neither runs yet.** The
+//     file above keeps `attn.compressor.*` and `attn.indexer.*` and wires
+//     them into its attention. ``DeepSeekV4Attention`` holds the indexer and
+//     the compressor, thus every one of those tensors loads, and the
+//     attention path reads neither: sparse attention needs the pooled cache
+//     that Libraries/MLXLLM/Models/DeepSeekV4Compressor.swift records. No
+//     sparse-attention key is dropped.
 //  4. **The language-model head is optional.** The file above declares a
 //     non-optional `lm_head`. `MLXLMCommon.loadWeights` verifies with
 //     `.allModelKeysSet`, thus a checkpoint whose `tie_word_embeddings` is
@@ -60,9 +59,10 @@
 //  - **The cache is the one `KVCacheDimensionProvider` gives.** The file above
 //    allocates a `RotatingKVCache` for a layer whose compress ratio is 0 and a
 //    compressing cache for every other layer. A rotating window is correct
-//    only beside the compressor that carries the global context, and this file
-//    drops the compressor, thus a window here would silently lose context. A
-//    plain cache keeps every key until sparse attention lands.
+//    only where the attention path reads the pooled chunks of the compressor
+//    beside it, and this attention path reads no pooled chunk yet, thus a
+//    window here would silently lose context. A plain cache keeps every key
+//    until sparse attention lands.
 
 import Foundation
 import MLX
@@ -431,15 +431,6 @@ public class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
     /// does not carry.
     private static let languageModelHeadWeight = "lm_head.weight"
 
-    /// The submodule name of the compressor, which pools the keys of the
-    /// global context.
-    ///
-    /// The name reaches the compressor of an attention layer,
-    /// `attn.compressor.*`, and the compressor inside an indexer,
-    /// `attn.indexer.compressor.*`, because the indexer pools keys of its own.
-    /// No module of this repository holds either set yet.
-    private static let compressorSegment = ".compressor."
-
     /// The name each of the three expert projections carries in the
     /// checkpoint, beside the name the module tree gives it.
     private static let expertProjections = [
@@ -491,14 +482,6 @@ public class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
         // The multi-token-prediction head drafts tokens the generation loop of
         // this repository does not read.
         if key.hasPrefix(multiTokenPredictionPrefix) { return false }
-
-        // The compressor pools the keys of the global context, and task
-        // `^tty95f4` lands it. The name reaches the compressor of the
-        // attention and the compressor inside the indexer alike, thus neither
-        // set has a place to go today. Remove this test with that task. The
-        // two projections of the indexer itself, `attn.indexer.wq_b.*` and
-        // `attn.indexer.weights_proj.*`, load into ``DeepSeekV4Indexer``.
-        if key.contains(compressorSegment) { return false }
 
         guard let layer = layerIndex(of: key) else { return true }
         return layer < layerCount
