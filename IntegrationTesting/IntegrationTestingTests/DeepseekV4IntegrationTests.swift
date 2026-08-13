@@ -441,7 +441,7 @@ struct DeepseekV4IntegrationTests {
 
         let stepSeconds = try await container.perform { context in
             let input = try await context.processor.prepare(
-                input: UserInput(chat: [.user(content: "Count upward from one, forever.")]))
+                input: UserInput(chat: [.user("Count upward from one, forever.")]))
             var iterator = try TokenIterator(
                 input: input, model: context.model,
                 parameters: GenerateParameters(
@@ -529,12 +529,12 @@ struct DeepseekV4IntegrationTests {
         let prompt = "Write one short sentence about the sea."
         let thinkingOutput = try await generateText(
             container: container,
-            input: UserInput(chat: [.user(content: prompt)]),
+            input: UserInput(chat: [.user(prompt)]),
             maxTokens: shortGenerationTokenCount)
         let chatOutput = try await generateText(
             container: container,
             input: UserInput(
-                chat: [.user(content: prompt)], additionalContext: ["thinking": false]),
+                chat: [.user(prompt)], additionalContext: ["thinking": false]),
             maxTokens: shortGenerationTokenCount)
 
         print("Thinking output: \(thinkingOutput)")
@@ -562,7 +562,7 @@ struct DeepseekV4IntegrationTests {
 
         let generatedCount = try await container.perform { context in
             let input = try await context.processor.prepare(
-                input: UserInput(chat: [.user(content: "Count upward from one, forever.")]))
+                input: UserInput(chat: [.user("Count upward from one, forever.")]))
             var iterator = try TokenIterator(
                 input: input, model: context.model,
                 parameters: GenerateParameters(

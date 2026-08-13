@@ -73,6 +73,15 @@ private func sharedBoundDrafter() async throws -> Rung4BoundDrafter {
 private let rung4DrafterModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 private let rung4TargetModelId = "mlx-community/gemma-4-31b-it-8bit"
 
+/// Rung 4 needs two checkpoints of about 33 GB each: the bf16 drafter and
+/// the 8-bit target. Both must be on disk. This gates the whole suite
+/// through `.enabled(if:)`, so a machine without them reads as SKIPPED
+/// and not as FAILED when you triage a full run.
+private var rung4CheckpointsAvailable: Bool {
+    hfSnapshotDir(modelId: rung4DrafterModelId) != nil
+        && hfSnapshotDir(modelId: rung4TargetModelId) != nil
+}
+
 /// Pinned checkpoint revisions matching the weights that were live when the
 /// `drafter_block` fixtures were generated. Pinning keeps the bit-exact
 /// parity assertions reproducible as the published checkpoints move.

@@ -114,8 +114,8 @@ struct PromptCacheHybridReuseTests {
         // MLXLMCommon.LanguageModel`) is not `Sendable` and must not cross
         // the actor boundary itself.
         let container = try await model.loadContainer()
-        let supportsReuse = await container.perform { context in
-            MLXLanguageModel.supportsPromptCacheReuse(model: context.model)
+        let supportsReuse = try await container.perform { context in
+            try MLXLanguageModel.supportsPromptCacheReuse(model: context.model)
         }
         #expect(
             supportsReuse,

@@ -6,6 +6,7 @@ import HuggingFace
 import MLX
 import MLXHuggingFace
 import MLXLMCommon
+import Testing
 import Tokenizers
 
 @testable import MLXFoundationModels
@@ -315,6 +316,126 @@ func executeResponse(
         cancelProducerWhen: cancelProducerWhen)
 }
 
+/// Drains `executor.respond(...)`'s event stream, returning the concatenated
+/// response text plus the prompt/cached/output token counts from the last
+/// `.updateUsage` event -- last-write-wins (the framework's usage aggregator
+/// replaces totals wholesale on each event; see `UpdateUsageEmissionTests`'
+/// `collectFinalUsage`).
+///
+/// Shared by every `PromptCache*Tests` file that needs some subset of
+/// `(text, promptTokenCount, cachedTokenCount, outputTokenCount)` -- a
+/// caller that only cares about the text (or doesn't care about
+/// `cachedTokenCount`/`outputTokenCount`) simply ignores the fields it
+/// doesn't need, rather than each file hand-rolling its own near-identical
+/// stream-draining variant. `outputTokenCount` in particular lets a caller
+/// compute a PRIOR round's full stored slot length
+/// (`promptTokenCount + outputTokenCount`) to distinguish a later round's
+/// `.trimTo` (partial reuse: `0 < cachedTokenCount < priorFullLength`) from
+/// `.reuseSuffix` (full-prefix reuse: `cachedTokenCount == priorFullLength`)
+/// -- see `PromptCacheEquivalenceTests.editedEarlierTurnForcesTrimAndMatchesFreshRebuild`.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func respondCollectingTextAndUsage(
+    _ executor: MLXLanguageModel.Executor,
+    request: LanguageModelExecutorGenerationRequest,
+    model: MLXLanguageModel
+) async throws -> (
+    text: String, promptTokenCount: Int, cachedTokenCount: Int, outputTokenCount: Int
+) {
+    let collected = try await respondCollectingReasoningTextAndUsage(
+        executor, request: request, model: model)
+    return (
+        collected.text, collected.promptTokenCount, collected.cachedTokenCount,
+        collected.outputTokenCount
+    )
+}
+
+/// The reasoning-aware superset of `respondCollectingTextAndUsage`: also
+/// accumulates `.reasoning` appendText deltas, for tests that must replay a
+/// round's chain-of-thought into the next round's transcript (the
+/// history-preservation prompt-cache tests) or assert on it directly.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func respondCollectingReasoningTextAndUsage(
+    _ executor: MLXLanguageModel.Executor,
+    request: LanguageModelExecutorGenerationRequest,
+    model: MLXLanguageModel
+) async throws -> (
+    reasoning: String, text: String, promptTokenCount: Int, cachedTokenCount: Int,
+    outputTokenCount: Int
+) {
+    let stream = try await executeResponse(executor, request: request, model: model)
+    var reasoning = ""
+    var text = ""
+    var promptTokenCount: Int?
+    var cachedTokenCount = 0
+    var outputTokenCount = 0
+    for try await event in stream {
+        if let reasoningEvent = reflectedChannelPayload(
+            of: event, caseLabel: "reasoning",
+            as: LanguageModelExecutorGenerationChannel.Reasoning.self),
+            let fragment = reflectedChannelPayload(
+                of: reasoningEvent.action, caseLabel: "appendText",
+                as: LanguageModelExecutorGenerationChannel.TextFragment.self)
+        {
+            reasoning += fragment.content
+            continue
+        }
+        guard
+            let response = reflectedChannelPayload(
+                of: event, caseLabel: "response",
+                as: LanguageModelExecutorGenerationChannel.Response.self)
+        else {
+            continue
+        }
+        if let fragment = reflectedChannelPayload(
+            of: response.action, caseLabel: "appendText",
+            as: LanguageModelExecutorGenerationChannel.TextFragment.self)
+        {
+            text += fragment.content
+        }
+        if let usage = reflectedChannelPayload(
+            of: response.action, caseLabel: "updateUsage",
+            as: LanguageModelExecutorGenerationChannel.Usage.self)
+        {
+            promptTokenCount = usage.input.totalTokenCount
+            cachedTokenCount = usage.input.cachedTokenCount
+            outputTokenCount = usage.output.totalTokenCount
+        }
+    }
+    let count = try #require(
+        promptTokenCount, "Expected at least one .updateUsage event before stream completion")
+    return (reasoning, text, count, cachedTokenCount, outputTokenCount)
+}
+
+
+/// Reflectively extracts a channel event/action's associated value.
+///
+/// The macOS 27 SDK made `LanguageModelExecutorGenerationChannel`'s `Event`
+/// and `Action` types opaque on the consume side: each is a struct whose only
+/// public surface is static factory functions, with the discriminating enum
+/// held in an internal `kind` property — there is no public pattern-matching
+/// or accessor API for a test to observe what an executor emitted. The
+/// payload TYPES themselves (`Response`, `TextFragment`, `Usage`) remain
+/// public, so one `Mirror` hop through `kind` to the labeled case payload
+/// recovers a value we can cast back to its real public type. Runtime layout
+/// verified against the macOS 27 SDK (`kind:` → `.<caseLabel>: <payload>`);
+/// if Apple reshapes the internals this returns `nil` and the consuming
+/// test fails loudly at its `#require`/assertion rather than miscounting.
+///
+/// - Parameters:
+///   - value: The opaque `Event` or `Action` struct to inspect.
+///   - caseLabel: The internal enum case label to match (e.g. `"response"`,
+///     `"appendText"`, `"updateUsage"`).
+///   - type: The public payload type to cast the matched value to.
+/// - Returns: The payload when `value`'s kind matches `caseLabel`, else `nil`.
+func reflectedChannelPayload<T>(of value: Any, caseLabel: String, as type: T.Type) -> T? {
+    guard
+        let kind = Mirror(reflecting: value).children.first(where: { $0.label == "kind" })?.value,
+        let payload = Mirror(reflecting: kind).children.first,
+        payload.label == caseLabel
+    else { return nil }
+    return payload.value as? T
+}
+
 // MARK: - GPU Memory Management
 
 /// Releases all GPU memory: synchronizes pending GPU work, evicts cached models,
@@ -417,6 +538,14 @@ enum TestFixtures {
     /// but do need a model known to exercise the full guided-generation and
     /// tool-calling paths.
     static let defaultModelID = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+
+    /// A real hybrid Mamba/attention model (`model_type: qwen3_5` ->
+    /// `Qwen35Model`, per `Libraries/MLXLLM/LLMModelFactory.swift`), for tests
+    /// that need genuine hybrid-checkpoint behavior end-to-end -- unlike
+    /// `defaultModelID`, which is pure attention. Must already be present in
+    /// the local HuggingFace cache (`models--mlx-community--Qwen3.6-27B-mxfp4`);
+    /// this repo does not download it on demand for tests.
+    static let qwen36HybridModelID = "mlx-community/Qwen3.6-27B-mxfp4"
 }
 
 // MARK: - Test Tokenizers
