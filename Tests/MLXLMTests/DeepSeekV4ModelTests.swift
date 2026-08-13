@@ -267,7 +267,7 @@ struct DeepSeekV4ModelTests {
         #expect(model.model.layers.count == Self.layerCount)
         #expect(model.kvHeads.count == Self.layerCount)
         #expect(model.loraLayers.count == Self.layerCount)
-        #expect(model.newCache(parameters: nil).count == Self.layerCount)
+        #expect(try model.newCache(parameters: nil).count == Self.layerCount)
     }
 
     // MARK: - The decoder layer
@@ -374,7 +374,7 @@ struct DeepSeekV4ModelTests {
 
     @Test func decodeAdvancesTheCacheOneStepForEachToken() throws {
         let model = try Self.loadedModel()
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
 
         let prefill = model(Self.tokens(count: Self.promptLength), cache: cache)
         eval(prefill)
