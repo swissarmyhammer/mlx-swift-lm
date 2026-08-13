@@ -111,6 +111,34 @@ private func directoryHoldsSafetensors(_ directory: URL) -> Bool {
     return entries.contains { $0.pathExtension == "safetensors" }
 }
 
+// MARK: - The Metal wired limit
+
+/// Raises the Metal wired limit, and never lowers it again.
+///
+/// MLX gives its Metal residency set a capacity of zero unless the process
+/// raises the wired limit, and it takes only buffers of 1 MB or less from the
+/// one heap that set holds. Every weight tensor of this checkpoint is larger
+/// than that, thus each one sits outside the residency set, and Metal makes
+/// all 141 GB resident again for each command buffer. One command buffer is
+/// one decode step, thus each token pays for the whole checkpoint.
+///
+/// Measured on an M3 Ultra (512 GiB) with this checkpoint, card `^3gh7rb5`:
+/// one decode step takes 2.10 s with the default limit and 0.068 s with the
+/// limit raised, which is 31 times faster. The routed experts hold 147 GB of
+/// the 141 GB total and carry 2.04 s of the 2.10 s.
+///
+/// The order matters. A limit raised AFTER the load changes nothing (measured
+/// 2.10 s), because a buffer joins the residency set when it is made. The
+/// ticket therefore starts before the first weight is allocated, and it never
+/// ends, because a limit that falls again empties the set.
+private func raiseWiredMemoryLimit() async {
+    guard let recommended = GPU.maxRecommendedWorkingSetBytes() else { return }
+    let bytes = min(recommended, Int(deepseekV4RequiredMemoryBytes))
+    let ticket = WiredMemoryTicket(size: bytes, policy: WiredFixedPolicy(limit: bytes))
+    let applied = await ticket.start()
+    print("DeepSeek-V4 wired limit: asked \(bytes) bytes, applied \(applied) bytes")
+}
+
 // MARK: - One shared load
 
 /// One shared load of the checkpoint. Each test awaits the same load task,
@@ -123,6 +151,7 @@ private enum DeepseekV4Load {
     static let shared: Task<LLModelContainer, Error>? = {
         guard let directory = localDeepseekV4CheckpointDirectory() else { return nil }
         return Task {
+            await raiseWiredMemoryLimit()
             print("Loading DeepSeek-V4 from \(directory.path)")
             let container = try await LLMModelFactory.shared.loadContainer(
                 from: directory, using: #huggingFaceTokenizerLoader())

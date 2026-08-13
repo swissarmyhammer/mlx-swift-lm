@@ -1,8 +1,116 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '9680'
+comments:
+- actor: claude-code
+  id: 01kzxjab9ss39p61pc09fzy61t
+  text: |-
+    Picked up. Profile complete. Root cause found and a fix measured.
+
+    ## The profile (M3 Ultra, 512 GiB, release build, `mlx-community/DeepSeek-V4-Flash-4bit`, 141 GB on disk, 43 layers)
+
+    Method: load the checkpoint straight through `LLMTypeRegistry` + `loadWeights` (no tokenizer), then time one decode step and each stage of it. MLX is lazy, thus every stage measurement adds its result into the returned array; a sweep that only overwrote a variable measured the last layer alone and gave wrong numbers.
+
+    One decode step, 64-token context, steady state: **2.06-2.30 s**. This matches the 2.4-3.3 s/token the card records.
+
+    Stage split of one decode step, all 43 layers, one `eval`:
+
+    | stage | time | share |
+    |---|---|---|
+    | routed experts (`ffn.switch_mlp`, gathered mxfp4 over 256 experts) | **2039 ms** | **99%** |
+    | hyper-connections (`hc_attn` + `hc_ffn`, 20 Sinkhorn steps each) | 21.8 ms | 1% |
+    | attention | 14.0 ms | <1% |
+    | shared expert | 2.4 ms | <1% |
+
+    Two control measurements name the cause:
+
+    - The SAME layer chained 43 times, which has the same operation count and the same graph depth but only one layer's weights: **68 ms**, that is 30 times faster than 43 different layers (2060 ms). Thus the cost is not the number of operations.
+    - One layer alone, 43 separate evals: 2.2 ms each, 96 ms in total.
+
+    Arithmetic and memory bandwidth cannot explain 2 s. One token reads about 6.5 GB of 4-bit weights, which is 8 ms at 800 GB/s. The measured 2039 ms over the 147 GB the routed-expert tensors hold gives 72 GB/s, and 85% of the run is SYSTEM time.
+
+    ## Root cause
+
+    MLX gives its Metal residency set a capacity of ZERO unless the process raises the wired limit (`wired_limit_{0}` in `mlx/backend/metal/allocator.h`), and it takes only buffers of 1 MB or less from the one heap that set holds (`heap_size_ = 1 << 20`). Every weight tensor of this checkpoint is larger than 1 MB, and each routed-expert tensor is about 1.07 GB. Thus every weight buffer sits OUTSIDE the residency set, and Metal makes all 141 GB resident again for each command buffer. One command buffer is one decode step, thus each token pays for the whole checkpoint. The 284B-total MoE shape makes the effect large, because 147 GB of the 141 GB total is routed-expert weight that one token barely reads (6 of 256 experts).
+
+    ## The fix, measured
+
+    Raise the wired limit BEFORE the weights are allocated:
+
+    - default limit: **2087, 2103, 2087, 2095, 2055, 2126, 2061, 2096 ms** per decode step
+    - limit raised before the load: **73.7, 69.6, 68.2, 68.1, 67.3, 70.0, 66.0, 67.7 ms** per decode step
+
+    That is **31 times faster**, about 68 ms per token.
+
+    The ORDER matters. A limit raised AFTER the load changes nothing (measured 2040-2357 ms per step), because a buffer joins the residency set when it is made. The ticket must also never end, because a limit that falls again empties the set.
+
+    ## What this means for the >12k test
+
+    At 68 ms/token, 12,400 tokens take about 14 minutes, plus 22 s of load. The 240-minute per-test limit holds with a wide margin. Criterion 2 is met by a fix, not by a decision to drop the test.
+
+    Note for the next agent: the Python reference (mlx-lm PR 1189) is slow for the same reason. `mlx_lm` does not call `mx.set_wired_limit` either. The cause is not in the Swift port.
+  timestamp: 2026-08-13T12:42:25.466003+00:00
+- actor: claude-code
+  id: 01kzxjxe5rq56x2g6fd4bky74k
+  text: |-
+    Fix landed and verified end to end.
+
+    ## The change
+
+    - `IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift` — a new `raiseWiredMemoryLimit()` starts a `WiredMemoryTicket` sized to `deepseekV4RequiredMemoryBytes` (clamped to `GPU.maxRecommendedWorkingSetBytes()`) INSIDE the shared load task, before `LLMModelFactory.shared.loadContainer`. The ticket never ends. The doc comment states the mechanism and both measurements.
+    - `docs/deepseek-v4-support.md` — a new "Decode performance" section holds the stage split, the two control measurements, and the fix. Deferred item 5 now says NOT to start a decode-speed task with the fused mxfp4 kernels, because the profile shows the arithmetic is not the cost.
+
+    ## Measured, before and after
+
+    The suite reported `DeepSeek-V4 wired limit: asked 171798691840 bytes, applied 171798691840 bytes`, thus the limit takes hold.
+
+    | test | before (card) | after |
+    |---|---|---|
+    | `chatAndThinkingModesBothGenerate` (2 x 48 tokens) | 232 s | 36.8 s |
+
+    Whole suite, minus the >12k test, one process, six tests, ALL PASS in 72.3 s:
+
+    - `loadsTheRealCheckpointEndToEnd` 7.3 s (this test carries the weight load)
+    - `greedyFirstTokensMatchThePythonFixture` 19.2 s — the 32-token Python parity still matches token for token
+    - `chatAndThinkingModesBothGenerate` 36.8 s
+    - `twoRoundConversationRecallsTheFirstRound` 9.0 s for 120 tokens, that is **74.8 ms/token** in the steady state
+    - the two encoder cache tests 0.001 s each
+
+    Command:
+
+    ```
+    xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj \
+      -scheme IntegrationTesting -destination 'platform=macOS' \
+      -only-testing:IntegrationTestingTests/DeepseekV4IntegrationTests \
+      -skip-testing:"IntegrationTestingTests/DeepseekV4IntegrationTests/longGenerationPastTwelveThousandTokensCompletes()"
+    ```
+
+    Also green: `swift test --filter DeepSeekV4` — 111 tests in 13 suites, which includes `DeepSeekV4DocsTests` against the changed document. The integration target builds with no warning.
+
+    ## Criterion 2, answered
+
+    At the measured 74.8 ms/token through the full `generate` path, 12,400 tokens take about **15.5 minutes**, plus the load. The per-test limit is 240 minutes, thus `longGenerationPastTwelveThousandTokensCompletes` now fits with a wide margin, and the test needs no change of its own. The user skipped the endurance run itself for this card, thus it is not measured here.
+
+    ## The >12k run was NOT started
+
+    The user skipped that criterion. The projection above rests on the 74.8 ms/token of the 120-token two-round test and on the 68 ms/token of eight consecutive direct decode steps. Attention over a 12k context adds about 1.4 ms/token, and the KV cache of the run holds about 1.1 GB, which stays inside the 160 GB wired limit beside the 141 GB of weights.
+
+    ## New work raised
+
+    Card `^4kv2h0q` — "Wired memory: a ticket taken at generate time is too late, thus every large model pays a per-token residency cost". The library gap is real and it is a design decision for a person: `MLXLMCommon.generate(... wiredMemoryTicket:)` takes the ticket AFTER the load, and the measurement shows such a ticket gives no residency benefit. No load path of this repository raises the limit, thus every consumer of every large model pays this cost. I did NOT change the library here, because that changes global process state for every consumer.
+
+    ## Dead ends, so that the next agent does not repeat them
+
+    - The fused mxfp4 kernels of `docs/deepseek-v4-support.md` item 5 are NOT the answer for decode. The routed-expert gather over all 43 layers costs 1.04 s of arithmetic when the buffers are hot, and 2.04 s when they are cold.
+    - `MLX.Memory.withWiredLimit(_:_:)` in its SYNCHRONOUS form is a documented no-op. The first run of this experiment used it and measured no change. Use the `async` overload, or a `WiredMemoryTicket` directly.
+    - MLX is lazy. A stage sweep that writes `value = stage(...)` in a loop measures the LAST stage alone. Each result must join the returned array (`value = value + stage(...)`).
+
+    ### implement — changed
+    - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift, /Users/wballard/github/swissarmyhammer/mlx-swift-lm/docs/deepseek-v4-support.md. Decode 2.10 s/token -> 0.068 s/token (31x). Suite minus the >12k test: 6 tests pass in 72.3 s. `swift test --filter DeepSeekV4`: 111 tests pass.
+    - next: /review
+  timestamp: 2026-08-13T12:52:51.000582+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'DeepSeek-V4 decode performance: about 2.4 s/token blocks the >12k-token test'
 ---
 ## What
@@ -17,7 +125,7 @@ For contrast, the Python reference (mlx-lm PR 1189) also decodes slowly on this 
 
 ## Acceptance Criteria
 
-- [ ] A profile names the dominant cost of one decode step with numbers.
-- [ ] A decision or a fix: either decode gets fast enough that 12,400 tokens fit inside the 240-minute test limit, or the card records why not and what the >12k test should do instead.
+- [x] A profile names the dominant cost of one decode step with numbers. — The routed experts (`ffn.switch_mlp`) carry 2039 ms of a 2060 ms decode step, which is 99%. The cost is Metal residency of the 147 GB of routed-expert weight buffers, not arithmetic: the same layer chained 43 times, with the same operation count, takes 68 ms.
+- [x] A decision or a fix: either decode gets fast enough that 12,400 tokens fit inside the 240-minute test limit, or the card records why not and what the >12k test should do instead. — FIXED. A `WiredMemoryTicket` that starts before the weight load takes one decode step from 2.10 s to 0.068 s, which is 31 times faster. Measured through the full `generate` path: 74.8 ms/token, thus 12,400 tokens take about 15.5 minutes, well inside the 240-minute limit.
 
 #deepseek-v4

@@ -92,9 +92,12 @@ The reference's `SwitchLayers.swift` carries two hand-written Metal kernels:
 `deepseek_v4_native_mxfp4_down_sum6`. They are a throughput optimization, not
 a correctness requirement. Task `^wkv5j6f` (done) kept the generic
 `gatherQuantizedMM` path and deferred the kernels. The reference gates the
-kernels behind these environment knobs, which give a future performance task
-a start point: `VMLX_DSV4_NATIVE_MXFP4`, `VMLX_DSV4_MXFP4_ROWS_PER_SIMD`, and
-`VMLX_DSV4_MXFP4_SIMD_GROUPS`.
+kernels behind these environment knobs: `VMLX_DSV4_NATIVE_MXFP4`,
+`VMLX_DSV4_MXFP4_ROWS_PER_SIMD`, and `VMLX_DSV4_MXFP4_SIMD_GROUPS`.
+
+Do NOT start a decode-speed task with these kernels. Task `^3gh7rb5` measured
+the decode step on the real weights, and the arithmetic of the gathered
+matrix multiply is not the cost. Refer to "Decode performance" below.
 
 ### 6. `deepseek_v32` — unfiled
 
@@ -116,6 +119,45 @@ not library concerns:
 They are out of scope by design. Their checkpoint-conversion and
 Metal-scheduling logic is the best available reference if that function
 becomes necessary here.
+
+## Decode performance
+
+Task `^3gh7rb5` profiled one decode step against the real weights of
+`mlx-community/DeepSeek-V4-Flash-4bit` on an M3 Ultra (512 GiB), with a
+release build and a 64-token context.
+
+The cost is memory residency, not arithmetic. MLX gives its Metal residency
+set a capacity of zero unless the process raises the wired limit, and it takes
+only buffers of 1 MB or less from the one heap that set holds. Every weight
+tensor of this checkpoint is larger than 1 MB, and each routed-expert tensor
+holds about 1.07 GB. Thus every weight buffer sits outside the residency set,
+and Metal makes all 141 GB resident again for each command buffer. One command
+buffer is one decode step.
+
+Measured, one decode step over all 43 layers:
+
+| stage | time | share |
+|---|---|---|
+| routed experts (`ffn.switch_mlp`) | 2039 ms | 99% |
+| hyper-connections (`hc_attn`, `hc_ffn`) | 21.8 ms | 1% |
+| attention | 14.0 ms | below 1% |
+| shared expert | 2.4 ms | below 1% |
+
+The same layer chained 43 times, which runs the same number of operations
+against one layer's weights, takes 68 ms. Thus the number of operations is not
+the cost, and the fused mxfp4 kernels of deferred item 5 cannot answer this.
+
+The answer is to raise the Metal wired limit BEFORE the weights are
+allocated. Measured: 2.10 s for one decode step with the default limit, and
+0.068 s with the limit raised, which is 31 times faster. A limit raised AFTER
+the load changes nothing, because a buffer joins the residency set when it is
+made, and a limit that falls again empties the set.
+
+`IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift`
+raises the limit with a `WiredMemoryTicket` that starts before the shared load
+and never ends. A consumer of this library must do the same. The
+`wiredMemoryTicket` argument of `MLXLMCommon.generate` starts too late to
+help.
 
 ## Spelling note
 

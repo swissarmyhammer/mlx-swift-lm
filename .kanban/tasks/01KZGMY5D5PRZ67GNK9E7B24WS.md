@@ -146,10 +146,40 @@ comments:
     - one criterion stays open: the >12k-token issue-1662 run. Decode speed is about 2.4 s/token, thus 12,400 tokens needs about 7 hours and cannot fit inside the suite's 240-minute limit. Blocked by task ^3gh7rb5 (decode performance); re-run that one test after it lands.
     - next: /review for this card; then ^3gh7rb5.
   timestamp: 2026-08-12T22:20:04.889870+00:00
-depends_on:
-- 01KZTXYH16710E6AGZ23GH7RB5
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01kzw1btcvhqe0vgbbvmzvz2sx
+  text: |-
+    ### review — clean
+    - evidence: engine `review sha HEAD~1..HEAD` (commit 4a390a4), counts: 1 finding, 1 confirmed, 8 files attempted, 0 skipped. Scope check against the diff: 0 findings on changed lines; 1 finding on an untouched line (`DeepSeekV4.swift:558`, `stackRoutedExperts` nesting — the commit does not change that function, it only moves its line number). The item is on the card with an out-of-scope annotation, per the standing scope rule from ^ag7ant0. The engine does not read test files or JSON; the card's red-then-green TDD proof for the 2 unit tests and the real-weights run evidence (load 21.8 s, all 2481 tensors; parity 32/32; chat/thinking generate; two-round recall; 117 DeepSeek unit tests green) is the accepted substitute per project memory.
+    - disposition: the delta is clean. The card does NOT move to done: one acceptance criterion is open — the >12k-token generation. It is blocked by decode speed (~2.4 s/token, ~7 h > the 240-minute limit) and is now task ^3gh7rb5, which this card depends on. The card stays in review.
+    - next: after ^3gh7rb5 lands, run the long-generation test, then re-run /review on this card.
+  timestamp: 2026-08-12T22:26:53.467060+00:00
+- actor: claude-code
+  id: 01kzw1cnm99hccsjnhhddpm0mh
+  text: |-
+    ### finish iteration 4 — clean delta, card blocked
+    - implement: changed — sanitize key-name fix with red-then-green unit tests; parity window 32 with recorded reason; corrected full-forward fixture; real-weights runs: load 21.8 s (2481 tensors), parity 32/32, chat/thinking generate, two-round recall passes
+    - test: green — swift test --filter DeepSeek, 117 tests, 0 failures
+    - commit: 4a390a4
+    - review: clean — 0 findings on changed lines; 1 untouched-line item recorded out of scope per the standing rule from ^ag7ant0
+    - state: the card stays in review, blocked by ^3gh7rb5 — the >12k-token endurance criterion cannot run until decode speed improves (~2.4 s/token gives ~7 h against the 240-minute limit). When ^3gh7rb5 closes and the endurance test passes, a fresh /review closes this card.
+  timestamp: 2026-08-12T22:27:21.353673+00:00
+- actor: claude-code
+  id: 01kzwvzp8j3va40w86zz1y36pm
+  text: |-
+    ### The user skips the endurance test — 2026-08-13
+    The user wrote: "ok, let's skip the endurance test. and that's slow enough that i think there is some tuning to do". Thus the >12k-token endurance criterion is skipped by the user's decision. The decode-speed tuning work stays in ^3gh7rb5. This card no longer waits for it.
+  timestamp: 2026-08-13T06:12:07.570866+00:00
+- actor: claude-code
+  id: 01kzww3b8kj9zme74grkjdd26y
+  text: |-
+    ### review — clean
+    - evidence: no re-run of the engine was necessary — no code changed since the clean engine pass on commit 4a390a4 (`git log 4a390a4..HEAD` excluding `.kanban` is empty; `git diff --stat 4a390a4..HEAD` excluding `.kanban` is empty; `git status` shows only this card's kanban files). That pass found 0 findings on changed lines; the one recorded item (`DeepSeekV4.swift:558`, `stackRoutedExperts`) sits on an untouched line and stays on record as out of scope per the standing scope rule from ^ag7ant0. The two open checklist items — the >12k-token acceptance criterion and the one-test-at-a-time run line — are now checked with the disposition: skipped by the user's decision of 2026-08-13 (comment 01kzwvzp8j3va40w86zz1y36pm); the decode-speed work is ^3gh7rb5. All other criteria were verified with real weights on 2026-08-12.
+    - next: none for this card — moved to done. The decode-speed tuning continues in ^3gh7rb5.
+  timestamp: 2026-08-13T06:14:07.379509+00:00
+depends_on: []
+position_column: done
+position_ordinal: f080
 title: Real-weights integration test for mlx-community/DeepSeek-V4-Flash-4bit
 ---
 ## What
@@ -176,7 +206,7 @@ Note the prompt-cache caveat already recorded for this repo: generation-priming 
 - [x] New integration test loads the real repo id end to end with no missing/unexpected weight keys. (VERIFIED 2026-08-12 after the sanitize fix: `loadsTheRealCheckpointEndToEnd` passes in 21.8 s — model type `DeepSeekV4Model`, 43 layers, `verify [.all]`, thus no missing and no unexpected keys. The fix: `modulePath(of:)` now renames the checkpoint's `attn_hc.*`/`ffn_hc.*` to `hc_attn.*`/`hc_ffn.*` and `ffn.gate.e_score_correction_bias` to `ffn.gate.bias`, mirroring mlx-lm PR 1189; two unit tests pin the map.)
 - [x] First N greedy token ids match a Python-generated fixture exactly. (VERIFIED 2026-08-12 with N = 32, the window the user approved: `greedyFirstTokensMatchThePythonFixture` passes in 94.6 s — 32 of 32 ids equal. The fixture was regenerated with the full-forward greedy method, because `generate_step`'s cached S=1 path diverges from the Python model's own forward by 2.0 logits at step 0. The measured stable window is 36 tokens; step 36 is an exact bf16 tie in the reference. The `parityTokenCount` constant in the test file records this reasoning.)
 - [x] Both `chat` and `thinking` prompts generate successfully. (VERIFIED 2026-08-12: `chatAndThinkingModesBothGenerate` passes in 232 s. Thinking output reasons then answers; chat output: "The sea exhales a salty sigh against the shore.")
-- [ ] A >12k-token generation completes without a Metal buffer-count crash, or an equivalent buffer-stability assertion passes. (BLOCKED 2026-08-12 by decode speed: about 2.4 s/token, thus 12,400 tokens needs about 7 hours and exceeds the suite's 240-minute limit. A run was killed after 83 minutes in progress. See task ^3gh7rb5 for the performance work; re-run this test after that task lands.)
+- [x] A >12k-token generation completes without a Metal buffer-count crash, or an equivalent buffer-stability assertion passes. (BLOCKED 2026-08-12 by decode speed: about 2.4 s/token, thus 12,400 tokens needs about 7 hours and exceeds the suite's 240-minute limit. A run was killed after 83 minutes in progress. See task ^3gh7rb5 for the performance work; re-run this test after that task lands.) (SKIPPED by the user's decision of 2026-08-13; the decode-speed work is ^3gh7rb5.)
 - [x] The test skips cleanly (not fails) when the weights are absent or memory is insufficient, with a message saying why. (Verified: full suite run shows 5 clean skips with reason messages, 0 failures. Also verified 2026-08-12 with the weights present: a load failure gives a clean skip that carries the error text, not a test failure.)
 - [x] Two-round prompt-cache behavior is asserted or explicitly documented as not-cacheable with the reason. (Verified at the encoder level: thinking mode is NOT prefix-cacheable across rounds, chat mode IS; mutation-proved. ALSO verified with real weights 2026-08-12: `twoRoundConversationRecallsTheFirstRound` passes in 47.7 s — round 1 "I have noted the number 4172.", round 2 "4172", thus the in-session KV cache holds across turns.)
 
@@ -188,8 +218,13 @@ Note the prompt-cache caveat already recorded for this repo: generation-priming 
 - [x] Test: chat vs thinking mode both produce non-empty output. (Passes with real weights, 2026-08-12.)
 - [x] Test: long generation past 12k tokens completes (regression guard for the mlx-lm 1662 leak). (The test exists; it cannot finish inside the 240-minute limit at ~2.4 s/token — see ^3gh7rb5.)
 - [x] Test: two-round conversation — assert cache hit, or assert-and-document no-hit. (The real-weights recall test also passes, 2026-08-12.)
-- [ ] Run: one test at a time via `xcodebuild test ... '-only-testing:IntegrationTestingTests/DeepseekV4IntegrationTests/<test>()'` (the user's instruction of 2026-08-12; a full-suite run wastes hours behind the long test). State 2026-08-12: load PASS 21.8 s, parity PASS 94.6 s (32/32), chat/thinking PASS 232 s, two-round recall PASS 47.7 s, encoder cache tests PASS. Only the long-generation test stays open, blocked by ^3gh7rb5.
+- [x] Run: one test at a time via `xcodebuild test ... '-only-testing:IntegrationTestingTests/DeepseekV4IntegrationTests/<test>()'` (the user's instruction of 2026-08-12; a full-suite run wastes hours behind the long test). State 2026-08-12: load PASS 21.8 s, parity PASS 94.6 s (32/32), chat/thinking PASS 232 s, two-round recall PASS 47.7 s, encoder cache tests PASS. Only the long-generation test stays open, blocked by ^3gh7rb5. (The open long-generation run is skipped by the user's decision of 2026-08-13; the decode-speed work is ^3gh7rb5.)
 
 ## Workflow
 - Use `/tdd` — write the load plus parity test first; it will fail until every preceding task is green, which is the point.
 #deepseek-v4
+
+## Review Findings (2026-08-12 17:22)
+
+- [ ] `Libraries/MLXLLM/Models/DeepSeekV4.swift:558` — Function `stackRoutedExperts` has deeply nested loops (4 levels deep) with conditions at the nesting limit, making the control flow difficult to follow and reason about. Extract the innermost loops (projection+tensor loop at lines 563-575) into a separate helper function to reduce nesting to 2 levels, improving readability and testability.
+  - Scope note: UNTOUCHED-LINE. Commit 4a390a4 changes `DeepSeekV4.swift` in two hunks only: the two path constants near line 455 and the rename block in `modulePath(of:)` at lines 531-549. The commit does not change `stackRoutedExperts`; it only moves its line number down. Thus this item is out of scope for this delta review, per the standing scope rule from ^ag7ant0. The item stays on record for a review that includes that function's changes.
