@@ -192,7 +192,7 @@ public class UserInputTests: XCTestCase {
 
     public func testMistral3ConversionToolRole() {
         let chat: [Chat.Message] = [
-            .tool(content: "The weather is sunny, 14°C.")
+            .tool("The weather is sunny, 14°C.")
         ]
 
         let messages = Mistral3MessageGenerator().generate(messages: chat)
@@ -223,7 +223,7 @@ public class UserInputTests: XCTestCase {
             id: "call_custom_123"
         )
         let assistant = Chat.Message.assistant("Checking weather", toolCalls: [toolCall])
-        let toolResult = Chat.Message.tool(content: #"{"temperature":18}"#, id: "call_custom_123")
+        let toolResult = Chat.Message.tool(#"{"temperature":18}"#, id: "call_custom_123")
 
         let generators: [(String, (Chat.Message) -> MLXLMCommon.Message)] = [
             ("Qwen2VL", { Qwen2VLMessageGenerator().generate(message: $0) }),

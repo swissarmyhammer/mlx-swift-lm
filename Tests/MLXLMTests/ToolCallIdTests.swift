@@ -139,7 +139,7 @@ struct ToolCallIdTests {
 
         let messages: [Chat.Message] = [
             .assistant("", toolCalls: [toolCall]),
-            .tool(content: #"{"temperature":18}"#, id: id),
+            .tool(#"{"temperature":18}"#, id: id),
         ]
         let rawMessages = DefaultMessageGenerator().generate(messages: messages)
         let calls = try #require(rawMessages[0]["tool_calls"] as? [[String: any Sendable]])
@@ -195,7 +195,7 @@ struct ToolCallIdTests {
     @Test("Tool result continuations preserve explicit ids")
     func toolResultContinuationsPreserveExplicitIDs() {
         let messages: [Chat.Message] = [
-            .tool(content: #"{"temperature":18}"#, id: "call_123")
+            .tool(#"{"temperature":18}"#, id: "call_123")
         ]
 
         let rawMessages = DefaultMessageGenerator().generate(messages: messages)

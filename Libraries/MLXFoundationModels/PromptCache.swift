@@ -346,9 +346,9 @@ actor PromptCache {
     func resolve(
         modelID: String, newTokens: [Int], model: SendableBox<any LanguageModel>,
         parameters: GenerateParameters?
-    ) -> SendableBox<(cache: [KVCache], tokensToFeed: [Int])> {
+    ) throws -> SendableBox<(cache: [KVCache], tokensToFeed: [Int])> {
         let model = model.consume()
-        let freshCache = model.newCache(parameters: parameters)
+        let freshCache = try model.newCache(parameters: parameters)
 
         // Hybrid Mamba/attention stacks never satisfy `verifiedSimpleLayers`
         // (see `PromptCache.isChunkable`'s doc comment), so the chunk-store

@@ -551,8 +551,8 @@ public class ChatSessionTests: XCTestCase {
             ]
         }
         let continuations: [[Chat.Message]] = [
-            [.tool(content: "first tool result")],
-            [.tool(content: "second tool result")],
+            [.tool("first tool result")],
+            [.tool("second tool result")],
             [.user("final answer")],
         ]
         let session = ChatSession(

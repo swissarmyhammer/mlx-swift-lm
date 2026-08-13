@@ -463,7 +463,7 @@ public enum ChatSessionTests {
         if !toolCalls.isEmpty {
             let followUp = try await streamAndCollect(
                 session.streamResponse(to: [
-                    .tool(content: "Foggy with a high in the low 60s, clearing later in the day")
+                    .tool("Foggy with a high in the low 60s, clearing later in the day")
                 ]),
                 label: "Tool result")
             try check(

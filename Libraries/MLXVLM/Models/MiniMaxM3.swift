@@ -2163,7 +2163,7 @@ final class MiniMaxM3LanguageModel: Module, KVCacheDimensionProvider {
 /// `MiniMaxM3Indexer` (kanban ^8dbc476). Registered with the VLM factory
 /// under both `"minimax_m3_vl"` (VL-nested) and `"minimax_m3"` (flat) model
 /// types (kanban ^wz8y8qq) and conforms to `VLMModel` via the
-/// `prepare(_:cache:state:windowSize:)` implementation below -- but there is
+/// `prepare(_:cache:state:prefill:)` implementation below -- but there is
 /// still no vision tower here: `MiniMaxM3Processor` rejects image/video
 /// input with a descriptive error, and real vision support (a vision tower
 /// plus image-aware `prepare`) is a later task. This type was originally the
@@ -2250,7 +2250,7 @@ public final class MiniMaxM3Model: Module, BaseLanguageModel, KVCacheDimensionPr
     /// Runs the language model over already-computed input embeddings, used
     /// for vision-augmented prefill where image features have already been
     /// spliced into the embedding sequence -- see
-    /// `prepare(_:cache:state:windowSize:)`.
+    /// `prepare(_:cache:state:prefill:)`.
     func callAsFunction(
         _ inputs: MLXArray, cache: [KVCache]?, inputEmbeddings: MLXArray
     ) -> MLXArray {
@@ -2499,31 +2499,40 @@ extension MiniMaxM3Model: LoRAModel {
 extension MiniMaxM3Model: VLMModel {
     /// Prefills `input`'s tokens and returns either the remainder for the
     /// `TokenIterator` to consume one token at a time (text-only prompts,
-    /// `windowSize`-chunked) or already-computed logits (image prompts,
+    /// chunked through `prefill`) or already-computed logits (image prompts,
     /// prefilled in one shot since vision-augmented input embeddings can't be
     /// re-derived from a token-id chunk alone) -- mirrors `Qwen3VL.prepare`'s
     /// split between the two paths (`Qwen3VL.swift`).
     public func prepare(
-        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?
+        _ input: LMInput, cache: [any KVCache], state: LMOutput.State?, prefill: PrefillParameters
     ) throws -> PrepareResult {
         guard let image = input.image else {
-            let prefillStepSize = windowSize ?? 512
-            var y = input.text
+            let stepSize = prefill.resolvedStepSize()
+            let y = input.text
+            let total = y.tokens.size
 
+            // A prompt that fits in one chunk goes to the iterator whole, which
+            // keeps short prompts the same as they were before chunking.
+            guard total > stepSize else { return .tokens(y) }
+
+            var processed = 0
             try withPreparedCache(cache, lengths: y.sequenceLengths) {
                 var state: LMOutput.State? = state
-                while y.tokens.size > prefillStepSize {
-                    try Task.checkCancellation()
-                    let chunk = y[.newAxis, ..<prefillStepSize]
+                processed = try prefill.forEachChunk(
+                    total: total, reserving: prefill.chunking == .remainder ? stepSize : 1
+                ) { range in
+                    let chunk = y[.newAxis, range]
                     let output = self(chunk, cache: cache.isEmpty ? nil : cache, state: state)
                     state = output.state
                     asyncEval(cache)
-                    y = y[prefillStepSize...]
                 }
-                eval(cache)
+
+                if processed > 0 {
+                    eval(cache)
+                }
             }
 
-            return .tokens(y)
+            return .tokens(y[processed...])
         }
 
         guard visionTower != nil, multiModalProjector != nil, patchMergeMlp != nil else {

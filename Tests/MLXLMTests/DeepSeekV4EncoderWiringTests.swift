@@ -159,7 +159,7 @@ struct DeepSeekV4EncoderWiringTests {
                 chat: [
                     .user(content: "Weather in Paris?"),
                     .assistant(content: "", toolCalls: [call]),
-                    .tool(content: #"{"forecast": "sunny"}"#, id: "call_1"),
+                    .tool(#"{"forecast": "sunny"}"#, id: "call_1"),
                 ]))
 
         let text = renderedText(of: input)
