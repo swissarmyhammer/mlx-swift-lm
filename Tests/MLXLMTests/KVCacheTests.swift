@@ -21,6 +21,42 @@ private func tempURL() -> URL {
         .appendingPathExtension("safetensors")
 }
 
+private struct SerializedCacheFixture {
+    let className: String
+    let arrayCount: Int
+    let metadata: [String]
+    var arrayShape = [1, 1, 1, 1]
+}
+
+private func writePromptCacheFixture(_ fixture: SerializedCacheFixture) throws -> URL {
+    let url = tempURL()
+    let arrays: [String: MLXArray] = Dictionary(
+        uniqueKeysWithValues: (0 ..< fixture.arrayCount).map { index in
+            (
+                "0.\(index)",
+                MLXArray.zeros(fixture.arrayShape, dtype: .float32, stream: .cpu)
+            )
+        })
+    var metadata: [String: String] = Dictionary(
+        uniqueKeysWithValues: fixture.metadata.enumerated().map {
+            ("0.0.\($0.offset)", $0.element)
+        })
+    metadata["2.0"] = fixture.className
+    try save(arrays: arrays, metadata: metadata, url: url, stream: .cpu)
+    return url
+}
+
+private func expectPromptCacheLoadToFail(_ fixtures: [SerializedCacheFixture]) throws {
+    for fixture in fixtures {
+        let url = try writePromptCacheFixture(fixture)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(throws: KVCacheError.self) {
+            _ = try loadPromptCache(url: url)
+        }
+    }
+}
+
 /// Assert two arrays of MLXArray are element-wise close
 private func assertArraysClose(_ lhs: [MLXArray], _ rhs: [MLXArray], label: String = "") {
     #expect(lhs.count == rhs.count, "state count mismatch \(label)")
@@ -49,6 +85,102 @@ private final class LifecycleRecordingCache: BaseKVCache {
         new.finalizeCallCount = finalizeCallCount
         return new
     }
+}
+
+/// A direct protocol conformer that deliberately relies on the
+/// `KVCache.isTrimmable(after:)` extension default.
+private final class ProtocolDefaultTrimmabilityCache: KVCache {
+    var offset = 0
+    var maxSize: Int? { nil }
+
+    func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        (keys, values)
+    }
+
+    var state: [MLXArray] {
+        get { [] }
+        set {}
+    }
+
+    var metaState: [String] {
+        get { [] }
+        set {}
+    }
+
+    var isTrimmable: Bool { true }
+
+    @discardableResult
+    func trim(_ n: Int) -> Int {
+        let trimmed = min(offset, n)
+        offset -= trimmed
+        return trimmed
+    }
+
+    func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        .none
+    }
+
+    func copy() -> any KVCache {
+        let copy = ProtocolDefaultTrimmabilityCache()
+        copy.offset = offset
+        return copy
+    }
+
+    func innerState() -> [MLXArray] { [] }
+}
+
+// MARK: - Predictive trimmability
+
+@Test func testRotatingKVCachePredictsStrictTrimBoundary() {
+    let cache = RotatingKVCache(maxSize: 8)
+    cache.offset = 3
+
+    #expect(cache.isTrimmable(after: 4))
+    #expect(!cache.isTrimmable(after: 5))
+}
+
+@Test func testRotatingKVCacheIsNotTrimmableAtOrPastWindow() {
+    let cache = RotatingKVCache(maxSize: 8)
+
+    cache.offset = 8
+    #expect(!cache.isTrimmable)
+    #expect(!cache.isTrimmable(after: 0))
+
+    cache.offset = 9
+    #expect(!cache.isTrimmable)
+    #expect(!cache.isTrimmable(after: 0))
+}
+
+@Test func testRotatingPredictiveTrimOverrideDispatchesThroughKVCache() {
+    let rotating = RotatingKVCache(maxSize: 8)
+    rotating.offset = 3
+    let cache: any KVCache = rotating
+
+    #expect(cache.isTrimmable(after: 4))
+    #expect(!cache.isTrimmable(after: 5))
+}
+
+@Test func testUnboundedCacheRemainsTrimmableAfterPositiveLookAhead() {
+    let cache: any KVCache = KVCacheSimple()
+
+    #expect(cache.isTrimmable(after: 1_000))
+}
+
+@Test func testCacheListDelegatesPredictiveTrimmabilityToChildren() {
+    let rotating = RotatingKVCache(maxSize: 8)
+    rotating.offset = 3
+    let cache: any KVCache = CacheList(KVCacheSimple(), rotating)
+
+    #expect(cache.isTrimmable(after: 4))
+    #expect(!cache.isTrimmable(after: 5))
+}
+
+@Test func testDirectKVCacheConformerUsesPredictiveTrimDefault() {
+    let cache: any KVCache = ProtocolDefaultTrimmabilityCache()
+
+    #expect(cache.isTrimmable(after: 1_000))
 }
 
 // MARK: - Original parameterized test (updated with value assertions)
@@ -83,6 +215,263 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
         #expect(type(of: lhs) == type(of: rhs))
         #expect(lhs.metaState == rhs.metaState)
         assertArraysClose(lhs.state, rhs.state)
+    }
+}
+
+@Test func testPromptCacheStateRoundTrip() throws {
+    let cache = KVCacheSimple()
+    let keys = MLXArray.ones([1, 2, 4, 8], dtype: .bfloat16)
+    let values = MLXArray.zeros([1, 2, 4, 8], dtype: .bfloat16)
+    _ = cache.update(keys: keys, values: values)
+
+    let ropeDeltasKey = LMOutput.Key<MLXArray>("test.ropeDeltas")
+    let positionsKey = LMOutput.Key<MLXArray>("test.positionIds")
+    let ropeDeltas = MLXArray([Int32(3), 5, 7]).reshaped([1, 3])
+    let positions = MLXArray([Int32(11), 13, 17, 19]).reshaped([2, 2])
+    var state = LMOutput.State()
+    state[ropeDeltasKey] = ropeDeltas
+    state[positionsKey] = positions
+
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    try savePromptCache(
+        url: url, cache: [cache], metadata: ["source": "test"], state: state)
+
+    let snapshot = try loadPromptCacheSnapshot(url: url)
+    let restoredRopeDeltas = try #require(snapshot.state?[ropeDeltasKey])
+    let restoredPositions = try #require(snapshot.state?[positionsKey])
+
+    #expect(snapshot.metadata == ["source": "test"])
+    #expect(restoredRopeDeltas.dtype == ropeDeltas.dtype)
+    #expect(restoredRopeDeltas.shape == ropeDeltas.shape)
+    #expect(allClose(restoredRopeDeltas, ropeDeltas, rtol: 0, atol: 0).item(Bool.self))
+    #expect(restoredPositions.dtype == positions.dtype)
+    #expect(restoredPositions.shape == positions.shape)
+    #expect(allClose(restoredPositions, positions, rtol: 0, atol: 0).item(Bool.self))
+
+    let (storedArrays, storedMetadata) = try loadArraysAndMetadata(url: url)
+    #expect(storedArrays["__mlx_lm_state_tensor_0"] != nil)
+    #expect(storedArrays["__mlx_lm_state_tensor_1"] != nil)
+    #expect(
+        storedArrays.keys.allSatisfy {
+            Int($0.split(separator: ".")[0]) != nil
+                || $0.hasPrefix("__mlx_lm_state_tensor_")
+        })
+    #expect(storedMetadata["1.__mlx_lm_state_0_key"] == "test.positionIds")
+    #expect(storedMetadata["1.__mlx_lm_state_1_key"] == "test.ropeDeltas")
+    #expect(storedMetadata["2.0"] == "__mlx_lm_state_v1__:KVCache")
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCache(url: url)
+    }
+}
+
+@Test func testLegacyPromptCacheLoadsWithNilState() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache])
+    let snapshot = try loadPromptCacheSnapshot(url: url)
+    let (legacyCache, legacyMetadata) = try loadPromptCache(url: url)
+    let (arrays, metadata) = try loadArraysAndMetadata(url: url)
+
+    #expect(snapshot.cache.count == 1)
+    #expect(snapshot.state == nil)
+    #expect(legacyCache.count == 1)
+    #expect(legacyMetadata.isEmpty)
+    #expect(arrays.keys.allSatisfy { Int($0.split(separator: ".")[0]) != nil })
+    #expect(!metadata.keys.contains { $0.contains("__mlx_lm_state_") })
+    #expect(metadata["2.0"] == "KVCache")
+}
+
+@Test func testEmptyPromptCacheStateUsesTheLegacyFormat() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let legacyURL = tempURL()
+    let emptyStateURL = tempURL()
+    defer {
+        try? FileManager.default.removeItem(at: legacyURL)
+        try? FileManager.default.removeItem(at: emptyStateURL)
+    }
+
+    try savePromptCache(url: legacyURL, cache: [cache])
+    try savePromptCache(url: emptyStateURL, cache: [cache], state: LMOutput.State())
+    let snapshot = try loadPromptCacheSnapshot(url: emptyStateURL)
+    let (legacyCache, _) = try loadPromptCache(url: emptyStateURL)
+    let (legacyArrays, legacyMetadata) = try loadArraysAndMetadata(url: legacyURL)
+    let (emptyStateArrays, emptyStateMetadata) = try loadArraysAndMetadata(url: emptyStateURL)
+
+    #expect(snapshot.state == nil)
+    #expect(legacyCache.count == 1)
+    #expect(Set(emptyStateArrays.keys) == Set(legacyArrays.keys))
+    #expect(emptyStateMetadata == legacyMetadata)
+}
+
+@Test func testPromptCacheStateRejectsReservedUserMetadata() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    #expect(throws: KVCacheError.self) {
+        try savePromptCache(
+            url: url, cache: [cache],
+            metadata: ["__mlx_lm_state_version": "caller-owned"])
+    }
+}
+
+@Test func testPromptCacheStateRejectsUnsupportedValues() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let unsupportedKey = LMOutput.Key<Bool>("test.unsupported")
+    var state = LMOutput.State()
+    state[unsupportedKey] = true
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    #expect(throws: LMOutput.State.SerializationError.self) {
+        try savePromptCache(url: url, cache: [cache], state: state)
+    }
+    #expect(!FileManager.default.fileExists(atPath: url.path))
+}
+
+@Test func testPromptCacheStateRejectsMalformedEntries() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let key = LMOutput.Key<MLXArray>("test.state")
+    var state = LMOutput.State()
+    state[key] = MLXArray([Int32(1)])
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache], state: state)
+    let (arrays, savedMetadata) = try loadArraysAndMetadata(url: url)
+    var malformedMetadata = savedMetadata
+    malformedMetadata["1.__mlx_lm_state_count"] = "2"
+    try save(arrays: arrays, metadata: malformedMetadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
+    }
+}
+
+@Test func testPromptCacheStateRejectsUnknownVersions() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let key = LMOutput.Key<MLXArray>("test.state")
+    var state = LMOutput.State()
+    state[key] = MLXArray([Int32(1)])
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache], state: state)
+    let (arrays, savedMetadata) = try loadArraysAndMetadata(url: url)
+    var malformedMetadata = savedMetadata
+    malformedMetadata["1.__mlx_lm_state_version"] = "999"
+    try save(arrays: arrays, metadata: malformedMetadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
+    }
+}
+
+@Test func testPromptCacheStateRejectsDuplicateKeys() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let firstKey = LMOutput.Key<MLXArray>("test.first")
+    let secondKey = LMOutput.Key<MLXArray>("test.second")
+    var state = LMOutput.State()
+    state[firstKey] = MLXArray([Int32(1)])
+    state[secondKey] = MLXArray([Int32(2)])
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache], state: state)
+    let (arrays, savedMetadata) = try loadArraysAndMetadata(url: url)
+    var malformedMetadata = savedMetadata
+    malformedMetadata["1.__mlx_lm_state_1_key"] = "test.first"
+    try save(arrays: arrays, metadata: malformedMetadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
+    }
+}
+
+@Test func testPromptCacheStateRejectsUnexpectedTensors() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let key = LMOutput.Key<MLXArray>("test.state")
+    var state = LMOutput.State()
+    state[key] = MLXArray([Int32(1)])
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache], state: state)
+    let (storedArrays, metadata) = try loadArraysAndMetadata(url: url)
+    var malformedArrays = storedArrays
+    malformedArrays["__mlx_lm_state_tensor_99"] = MLXArray([Int32(99)])
+    try save(arrays: malformedArrays, metadata: metadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
+    }
+}
+
+@Test func testPromptCacheStateRequiresCompatibilityMarker() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let key = LMOutput.Key<MLXArray>("test.state")
+    var state = LMOutput.State()
+    state[key] = MLXArray([Int32(1)])
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache], state: state)
+    let (arrays, storedMetadata) = try loadArraysAndMetadata(url: url)
+    var malformedMetadata = storedMetadata
+    malformedMetadata["2.0"] = "KVCache"
+    try save(arrays: arrays, metadata: malformedMetadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
+    }
+}
+
+@Test func testPromptCacheCompatibilityMarkerRequiresState() throws {
+    let cache = KVCacheSimple()
+    _ = cache.update(
+        keys: MLXArray.ones([1, 1, 1, 4]),
+        values: MLXArray.zeros([1, 1, 1, 4]))
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: [cache])
+    let (arrays, storedMetadata) = try loadArraysAndMetadata(url: url)
+    var malformedMetadata = storedMetadata
+    malformedMetadata["2.0"] = "__mlx_lm_state_v1__:KVCache"
+    try save(arrays: arrays, metadata: malformedMetadata, url: url)
+
+    #expect(throws: KVCacheError.self) {
+        try loadPromptCacheSnapshot(url: url)
     }
 }
 
@@ -138,17 +527,114 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(copied.metaState == cache.metaState)
 }
 
-@Test func testEmptyKVCacheSimpleToQuantizedPreservesRequestedQuantizationMetadata() {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
+@Test func testEmptyKVCacheSimpleToQuantizedPreservesRequestedQuantizationMetadata() throws {
     let cache = KVCacheSimple()
     cache.offset = 7
 
-    let quantized = cache.toQuantized(groupSize: 128, bits: 4)
+    let quantized = try cache.toQuantized(groupSize: 128, bits: 4)
 
     #expect(quantized.offset == 7)
     #expect(quantized.groupSize == 128)
     #expect(quantized.bits == 4)
     #expect(quantized.metaState == ["256", "7", "128", "4"])
+}
+
+@Test func testDirectKVCacheQuantizationFailuresAreRecoverable() throws {
+    let incompatible = KVCacheSimple()
+    incompatible.state = [
+        MLXArray.zeros([1, 2, 4, 5], dtype: .float32, stream: .cpu),
+        MLXArray.zeros([1, 2, 4, 5], dtype: .float32, stream: .cpu),
+    ]
+
+    #expect(throws: KVCacheError.self) {
+        _ = try incompatible.toQuantized(groupSize: 64, bits: 4)
+    }
+    #expect(throws: KVCacheError.self) {
+        _ = try RotatingKVCache(maxSize: 32).toQuantized()
+    }
+}
+
+@Test func testPromptCacheRestorationRejectsIncompleteState() throws {
+    try expectPromptCacheLoadToFail([
+        .init(className: "KVCacheSimple", arrayCount: 1, metadata: [""]),
+        .init(
+            className: "RotatingKVCache", arrayCount: 1,
+            metadata: ["0", "32", "256", "0", "0", "modelNative"]),
+        .init(
+            className: "QuantizedKVCache", arrayCount: 3,
+            metadata: ["256", "0", "64", "4"]),
+        .init(className: "ChunkedKVCache", arrayCount: 1, metadata: ["None", "0"]),
+    ])
+}
+
+@Test func testPromptCacheRestorationRejectsInvalidMetadata() throws {
+    try expectPromptCacheLoadToFail([
+        .init(className: "KVCacheSimple", arrayCount: 0, metadata: ["unexpected"]),
+        .init(
+            className: "RotatingKVCache", arrayCount: 0,
+            metadata: ["0", "32", "invalid", "0", "0", "modelNative"]),
+        .init(
+            className: "RotatingKVCache", arrayCount: 0,
+            metadata: ["0", "32", "256", "0", "0", "invalid-origin"]),
+        .init(
+            className: "QuantizedKVCache", arrayCount: 0,
+            metadata: ["256", "invalid", "64", "4"]),
+        .init(className: "ChunkedKVCache", arrayCount: 0, metadata: ["invalid", "0"]),
+    ])
+}
+
+@Test func testPromptCacheRestorationRejectsInvalidStateRank() throws {
+    try expectPromptCacheLoadToFail([
+        .init(
+            className: "KVCacheSimple", arrayCount: 2, metadata: [""],
+            arrayShape: [1, 1])
+    ])
+}
+
+@Test func testPromptCacheRestorationAcceptsLegacyRotatingMetadata() throws {
+    let fixture = SerializedCacheFixture(
+        className: "RotatingKVCache",
+        arrayCount: 2,
+        metadata: ["0", "32", "256", "1", "1"])
+    let url = try writePromptCacheFixture(fixture)
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    let (restored, _) = try loadPromptCache(url: url)
+    let rotating = try #require(restored.first as? RotatingKVCache)
+
+    #expect(rotating.capacityOrigin == .modelNative)
+    #expect(rotating.metaState == ["0", "32", "256", "1", "1", "modelNative"])
+}
+
+@Test func testPromptCacheRoundTripPreservesEmptyCaches() throws {
+    let populated = KVCacheSimple()
+    populated.state = [
+        MLXArray.ones([1, 1, 1, 32], stream: .cpu),
+        MLXArray.ones([1, 1, 1, 32], stream: .cpu),
+    ]
+    let caches: [KVCache] = [
+        KVCacheSimple(),
+        populated,
+        RotatingKVCache(maxSize: 32),
+        QuantizedKVCache(),
+        ChunkedKVCache(chunkSize: 16),
+    ]
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    try savePromptCache(url: url, cache: caches)
+    let (restored, _) = try loadPromptCache(url: url)
+
+    #expect(restored.count == caches.count)
+    #expect(restored[0] is KVCacheSimple)
+    #expect(restored[0].state.isEmpty)
+    #expect(restored[1].state.count == 2)
+    #expect(restored[2] is RotatingKVCache)
+    #expect(restored[2].state.isEmpty)
+    #expect(restored[3] is QuantizedKVCache)
+    #expect(restored[3].state.isEmpty)
+    #expect(restored[4] is ChunkedKVCache)
+    #expect(restored[4].state.isEmpty)
 }
 
 // MARK: - ArraysCache sparse slot round-trip
@@ -791,244 +1277,313 @@ func testCacheListCopyIsIndependent() async throws {
     }
 }
 
-// MARK: - Attention sinks on the quantized path
+// MARK: - Quantized attention causal masking
+// Regression for the finfo.min mistranslation (masked fill was Float.leastNormalMagnitude ≈ 0).
 
-/// The number of query heads the attention-sink tests read.
-private let sinkQueryHeads = 2
-
-/// The number of key/value heads the attention-sink tests read.
-private let sinkKeyValueHeads = 1
-
-/// The number of tokens the attention-sink tests read.
-private let sinkTokenCount = 3
-
-/// The head width the attention-sink tests read. A quantized cache needs a
-/// head width divisible by one of the supported group sizes.
-private let sinkHeadDim = 64
-
-/// The bit width the attention-sink tests quantize with.
-private let sinkBits = 8
-
-/// The group size the attention-sink tests quantize with.
-private let sinkGroupSize = 64
-
-/// The learned sink logit of each query head. The first head holds most of
-/// its weight back; the second head gives some of it away.
-private let sinkLogits: [Float] = [2, -1]
-
-/// The largest gap allowed between the quantized path and mlx's own
-/// attention. Eight-bit affine quantization of values inside -1 through 1
-/// carries about 0.004 of error, thus this limit sits well above it and well
-/// below the effect the sink itself has.
-private let sinkQuantizationTolerance: Float = 0.02
-
-/// `quantizedScaledDotProductAttention` must give the same answer as mlx's
-/// own attention when both read the same sink logits, and a materially
-/// different one when the sink is left out.
-@Test func quantizedAttentionReadsTheLearnedSink() {
+@Test
+func testQuantizedAttentionCausalMaskMatchesFullPrecision() throws {
     MLXRandom.seed(0)
-    let queryShape = [1, sinkQueryHeads, sinkTokenCount, sinkHeadDim]
-    let keyShape = [1, sinkKeyValueHeads, sinkTokenCount, sinkHeadDim]
-    let queries = MLXRandom.normal(queryShape)
-    let keys = MLXRandom.normal(keyShape)
-    let values = MLXRandom.normal(keyShape)
-    let scale = 1 / sqrt(Float(sinkHeadDim))
-    let sinks = MLXArray(sinkLogits)
 
-    let quantizedKeys = quantized(keys, groupSize: sinkGroupSize, bits: sinkBits)
-    let quantizedValues = quantized(values, groupSize: sinkGroupSize, bits: sinkBits)
-    let roundTripKeys = dequantized(
-        quantizedKeys.wq, scales: quantizedKeys.scales, biases: quantizedKeys.biases,
-        groupSize: sinkGroupSize, bits: sinkBits)
-    let roundTripValues = dequantized(
-        quantizedValues.wq, scales: quantizedValues.scales, biases: quantizedValues.biases,
-        groupSize: sinkGroupSize, bits: sinkBits)
+    let (B, nKVHeads, L, D) = (1, 2, 4, 64)
+    let scale = 1.0 / Float(D).squareRoot()
 
-    func quantizedAttention(sinks: MLXArray?) -> [Float] {
-        quantizedScaledDotProductAttention(
-            queries: queries,
-            quantizedKeys: quantizedKeys,
-            quantizedValues: quantizedValues,
-            scale: scale,
-            mask: .none,
-            groupSize: sinkGroupSize,
-            bits: sinkBits,
-            sinks: sinks
-        ).asType(.float32).asArray(Float.self)
-    }
+    // nRepeats 1 = MHA, 2 = GQA (exercises the 5-D reshape + .causal path that silently corrupts).
+    for nRepeats in [1, 2] {
+        let nQHeads = nKVHeads * nRepeats
+        let q = MLXRandom.normal([B, nQHeads, L, D])
+        let k = MLXRandom.normal([B, nKVHeads, L, D])
+        let v = MLXRandom.normal([B, nKVHeads, L, D])
 
-    let expected = MLXFast.scaledDotProductAttention(
-        queries: queries, keys: roundTripKeys, values: roundTripValues,
-        scale: scale, mask: .none, sinks: sinks
-    ).asType(.float32).asArray(Float.self)
-    let withSink = quantizedAttention(sinks: sinks)
-    let withoutSink = quantizedAttention(sinks: nil)
+        // Reference: full-precision causal attention.
+        let reference = MLXFast.scaledDotProductAttention(
+            queries: q, keys: k, values: v, scale: scale, mask: .causal)
 
-    #expect(withSink.count == expected.count)
-    for (index, pair) in zip(withSink, expected).enumerated() {
+        // Path under test: quantized cache + .causal.
+        let cache = QuantizedKVCache(groupSize: 64, bits: 8)
+        let (qK, qV) = cache.updateQuantized(keys: k, values: v)
+        let out = quantizedScaledDotProductAttention(
+            queries: q, quantizedKeys: qK, quantizedValues: qV,
+            scale: scale, mask: .causal,
+            groupSize: cache.groupSize, bits: cache.bits, mode: cache.mode)
+
+        #expect(out.shape == reference.shape)
+        // 8-bit quant error is << 0.1; the bug diverges by O(1).
+        let close = allClose(out, reference, rtol: 0.05, atol: 0.1).item(Bool.self)
         #expect(
-            abs(pair.0 - pair.1) <= sinkQuantizationTolerance,
-            "sink weight [\(index)]: got \(pair.0), expected \(pair.1)")
-    }
-    let sinkEffect = zip(withSink, withoutSink).map { abs($0 - $1) }.max() ?? 0
-    #expect(sinkEffect > sinkQuantizationTolerance, "the sink must change the answer")
-}
-
-// MARK: - Masked positions on the quantized path
-
-/// The number of tokens the masked-fill tests read. Two tokens let a causal
-/// mask hold the second key back from the first query.
-private let maskedFillTokenCount = 2
-
-/// The head width the masked-fill tests read. A quantized cache needs a head
-/// width divisible by one of the supported group sizes.
-private let maskedFillHeadDim = 64
-
-/// The bit width the masked-fill tests quantize with.
-private let maskedFillBits = 8
-
-/// The group size the masked-fill tests quantize with.
-private let maskedFillGroupSize = 64
-
-/// The larger element of the key at the open position. It gives that position
-/// a small score, thus a fill near zero would win a large part of the weight.
-private let maskedFillOpenKeyPeak: Float = 0.5
-
-/// The larger element of the key at the masked position. It gives that
-/// position a score far above the open one, thus only the mask holds it back.
-private let maskedFillMaskedKeyPeak: Float = 10
-
-/// The two elements of the value at the open position. The first element is
-/// zero, thus the first element of the answer carries no weight from here.
-private let maskedFillOpenValue: (low: Float, high: Float) = (0, 1)
-
-/// The two elements of the value at the masked position. The first element is
-/// one, thus the first element of the answer is the weight this position kept.
-private let maskedFillMaskedValue: (low: Float, high: Float) = (1, 2)
-
-/// The largest weight a masked position may keep after the softmax.
-private let maskedFillWeightLimit: Float = 1e-6
-
-/// The smallest weight the large key must win when no mask holds it back.
-private let maskedFillOpenWeightFloor: Float = 0.99
-
-/// The mask forms that `quantizedScaledDotProductAttention` fills by itself.
-enum MaskedFillCase: String, CaseIterable, Sendable {
-    case causal
-    case boolArray
-}
-
-/// Build one key or value row, the first half `low` and the second half `high`.
-///
-/// Two distinct elements keep the affine quantization exact: `low` and `high`
-/// sit on the ends of the eight-bit grid, thus the round trip loses nothing.
-private func maskedFillRow(low: Float, high: Float) -> [Float] {
-    let half = maskedFillHeadDim / 2
-    return [Float](repeating: low, count: half)
-        + [Float](repeating: high, count: maskedFillHeadDim - half)
-}
-
-/// The queries, keys and values the masked-fill tests read.
-///
-/// Every query element is one, thus the score of a key is the scaled sum of
-/// its elements. The key at the last position is far larger than the key at
-/// the first, thus it wins nearly all of the weight unless a mask stops it.
-private struct MaskedFillFixture {
-    let queries: MLXArray
-    let keys: MLXArray
-    let values: MLXArray
-    let scale: Float
-
-    init() {
-        let shape = [1, 1, maskedFillTokenCount, maskedFillHeadDim]
-        queries = MLXArray(
-            [Float](repeating: 1, count: maskedFillTokenCount * maskedFillHeadDim)
-        ).reshaped(shape)
-        keys = MLXArray(
-            maskedFillRow(low: 0, high: maskedFillOpenKeyPeak)
-                + maskedFillRow(low: 0, high: maskedFillMaskedKeyPeak)
-        ).reshaped(shape)
-        values = MLXArray(
-            maskedFillRow(low: maskedFillOpenValue.low, high: maskedFillOpenValue.high)
-                + maskedFillRow(low: maskedFillMaskedValue.low, high: maskedFillMaskedValue.high)
-        ).reshaped(shape)
-        scale = 1 / sqrt(Float(maskedFillHeadDim))
-    }
-
-    /// The answer of the quantized path for the given mask.
-    func attend(mask: MLXFast.ScaledDotProductAttentionMaskMode) -> MLXArray {
-        quantizedScaledDotProductAttention(
-            queries: queries,
-            quantizedKeys: quantized(keys, groupSize: maskedFillGroupSize, bits: maskedFillBits),
-            quantizedValues: quantized(
-                values, groupSize: maskedFillGroupSize, bits: maskedFillBits),
-            scale: scale,
-            mask: mask,
-            groupSize: maskedFillGroupSize,
-            bits: maskedFillBits
-        )
-    }
-
-    /// The weight the first query gave to the last key.
-    ///
-    /// The first element of the value at the open position is zero and the
-    /// first element of the value at the last position is one, thus the first
-    /// element of the answer is that weight and nothing else.
-    func weightOfLastKey(mask: MLXFast.ScaledDotProductAttentionMaskMode) -> Float {
-        attend(mask: mask)[0, 0, 0, 0].item(Float.self)
+            close, "quantized causal attention diverges from full precision (nRepeats=\(nRepeats))")
     }
 }
 
-/// The mask mode of the given case. Every case holds the last key back from
-/// the first query, thus the three cases must give the same answer.
-private func maskedFillMode(for maskedFillCase: MaskedFillCase)
-    -> MLXFast.ScaledDotProductAttentionMaskMode
-{
-    let causalMask = createCausalMask(n: maskedFillTokenCount, offset: 0)
-    switch maskedFillCase {
-    case .causal: return .causal
-    case .boolArray: return .array(causalMask)
+@Test("quantizedScaledDotProductAttention preserves the score dtype")
+func preservesScoreDtype() {
+    MLXRandom.seed(0)
+    let (B, H, L, D) = (1, 2, 4, 64)
+    let scale = 1.0 / Float(D).squareRoot()
+
+    // f32 passes even with a mis-typed fill; f16/bf16 are exactly what a
+    // float32 fill silently promotes — so assert the output keeps its dtype.
+    for dtype in [DType.float16, .bfloat16, .float32] {
+        let q = MLXRandom.normal([B, H, L, D]).asType(dtype)
+        let k = MLXRandom.normal([B, H, L, D]).asType(dtype)
+        let v = MLXRandom.normal([B, H, L, D]).asType(dtype)
+
+        let cache = QuantizedKVCache(groupSize: 64, bits: 8)
+        let (qK, qV) = cache.updateQuantized(keys: k, values: v)
+        let out = quantizedScaledDotProductAttention(
+            queries: q, quantizedKeys: qK, quantizedValues: qV,
+            scale: scale, mask: .causal,
+            groupSize: cache.groupSize, bits: cache.bits, mode: cache.mode)
+
+        #expect(out.dtype == dtype, "output promoted to \(out.dtype) for input \(dtype)")
+        #expect(out.asType(.float32).sum().item(Float.self).isFinite)  // no -inf → NaN
     }
 }
 
-/// A masked position must lose all of its weight, even when its key is large
-/// enough to win every open position.
-@Test(arguments: MaskedFillCase.allCases)
-func quantizedAttentionGivesAMaskedPositionNoWeight(maskedFillCase: MaskedFillCase) {
-    let weight = MaskedFillFixture().weightOfLastKey(mask: maskedFillMode(for: maskedFillCase))
+// MARK: - ropeOffset overridability
+
+/// A `BaseKVCache` subclass reporting a per-row RoPE offset, as a batched cache does.
+private final class BatchOffsetProbeCache: BaseKVCache {
+    override var ropeOffset: RoPEOffset { .batch(MLXArray([10, 20])) }
+
+    override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        (keys, values)
+    }
+}
+
+/// Models read `ropeOffset` through a `KVCache` reference, so a subclass override has to
+/// survive that dispatch. When `BaseKVCache` did not declare `ropeOffset`, the extension
+/// default was the witness and this resolved to `.scalar(0)`, silently ignoring the subclass.
+@Test func testSubclassRopeOffsetOverrideIsHonoredThroughKVCacheReference() {
+    let cache: any KVCache = BatchOffsetProbeCache()
+
+    guard case .batch(let offsets) = cache.ropeOffset else {
+        Issue.record(
+            "subclass ropeOffset override ignored — resolved to the .scalar extension default")
+        return
+    }
+    #expect(offsets.asArray(Int32.self) == [10, 20])
+}
+
+// MARK: - RotatingKVCache.logicalView
+//
+// `logicalView(tail:)` is the read-only counterpart to `update(keys:values:)`: it exposes the
+// ring's contents in chronological order without writing. Speculative decoding needs it to
+// present committed history alongside K/V it has not committed yet.
+//
+// Nothing in this repo drove a `RotatingKVCache` ring past its wrap before these tests, so the
+// rotation in `updateInPlace`, the linearization in `temporalOrder`, and the windowed mask that
+// `makeMask` builds over the multi-token presentation were all uncovered. They are the
+// foundation the view rests on, so they are pinned here too.
+
+/// K/V whose every element encodes its own sequence position: keys hold `+p`, values `-p`.
+/// Any reordering, duplication, or K/V mix-up changes the numbers.
+private func positionedKV(
+    _ positions: Range<Int>, headDim: Int = 2
+) -> (MLXArray, MLXArray) {
+    let count = positions.count
+    let keys = MLXArray(
+        positions.flatMap { Array(repeating: Float($0), count: headDim) },
+        [1, 1, count, headDim])
+    let values = MLXArray(
+        positions.flatMap { Array(repeating: Float(-$0), count: headDim) },
+        [1, 1, count, headDim])
+    return (keys, values)
+}
+
+/// Recover the sequence positions encoded by `positionedKV` from a `[B, H, S, D]` key array.
+private func encodedPositions(_ keys: MLXArray) -> [Int] {
+    keys[0, 0, 0..., 0].asArray(Float.self).map { Int($0) }
+}
+
+/// Drive `cache` through `count` single-token writes, so the ring actually rotates.
+private func fillOneAtATime(_ cache: RotatingKVCache, positions: Range<Int>) {
+    for p in positions {
+        let (k, v) = positionedKV(p ..< (p + 1))
+        _ = cache.update(keys: k, values: v)
+    }
+}
+
+@Test func testRotatingLogicalViewIsNilBeforeFirstWrite() {
+    #expect(RotatingKVCache(maxSize: 8, keep: 0).logicalView(tail: 8) == nil)
+}
+
+@Test func testRotatingLogicalViewReturnsChronologicalTailPastWrap() throws {
+    let cache = RotatingKVCache(maxSize: 8, keep: 0)
+    fillOneAtATime(cache, positions: 0 ..< 20)
+
+    // The ring has wrapped twice; physical order is rotated, chronological order is not.
+    #expect(cache.offset == 20)
+
+    let full = try #require(cache.logicalView(tail: 8))
     #expect(
-        weight < maskedFillWeightLimit,
-        "masked weight for \(maskedFillCase.rawValue): got \(weight)")
+        encodedPositions(full.0) == Array(12 ..< 20),
+        "logicalView did not linearize the rotated ring")
+    #expect(encodedPositions(full.1).map { -$0 } == Array(12 ..< 20), "values diverged from keys")
+
+    let short = try #require(cache.logicalView(tail: 3))
+    #expect(encodedPositions(short.0) == [17, 18, 19], "a short tail took the wrong end")
 }
 
-/// The deprecated list form of the mask must hold a masked position back the
-/// same way. This test carries the same deprecation as the mask mode it reads,
-/// thus it builds without a warning.
-@available(*, deprecated, message: "reads the deprecated .arrays mask mode")
-@Test func quantizedAttentionGivesAMaskedPositionNoWeightWithAListMask() {
-    let causalMask = createCausalMask(n: maskedFillTokenCount, offset: 0)
-    let weight = MaskedFillFixture().weightOfLastKey(mask: .arrays([causalMask]))
-    #expect(weight < maskedFillWeightLimit, "masked weight for a list mask: got \(weight)")
+@Test func testRotatingLogicalViewClampsTailToWhatTheCacheHolds() throws {
+    let cache = RotatingKVCache(maxSize: 8, keep: 0)
+    fillOneAtATime(cache, positions: 0 ..< 5)
+
+    #expect(encodedPositions(try #require(cache.logicalView(tail: 99)).0) == Array(0 ..< 5))
+    #expect(encodedPositions(try #require(cache.logicalView(tail: 5)).0) == Array(0 ..< 5))
+    #expect(try #require(cache.logicalView(tail: 0)).0.dim(2) == 0)
+    #expect(try #require(cache.logicalView(tail: -1)).0.dim(2) == 0, "negative tail must clamp")
 }
 
-/// The large key wins nearly all of the weight when no mask holds it back,
-/// thus the test above measures the mask and not a small key.
-@Test func quantizedAttentionWithoutAMaskFollowsTheLargeKey() {
-    let weight = MaskedFillFixture().weightOfLastKey(mask: .none)
+@Test func testRotatingLogicalViewLeavesTheRingUntouched() {
+    let cache = RotatingKVCache(maxSize: 8, keep: 0)
+    fillOneAtATime(cache, positions: 0 ..< 20)
+
+    let beforeState = cache.innerState().map { MLXArray($0.asArray(Float.self), $0.shape) }
+    let beforeOffset = cache.offset
+    let beforeMeta = cache.metaState
+
+    _ = cache.logicalView(tail: 7)
+    _ = cache.logicalView(tail: 3)
+
+    let afterState = cache.innerState()
+    #expect(afterState.count == beforeState.count)
+    for (index, (before, after)) in zip(beforeState, afterState).enumerated() {
+        #expect(before.shape == after.shape, "innerState[\(index)] was reshaped by a read")
+        #expect(
+            allClose(before, after, rtol: 0, atol: 0).item(Bool.self),
+            "innerState[\(index)] was mutated by a read")
+    }
+    #expect(cache.offset == beforeOffset, "logicalView moved the offset")
+    #expect(cache.metaState == beforeMeta, "logicalView disturbed idx/offset bookkeeping")
+}
+
+@Test func testRotatingLogicalViewPreservesPinnedPrefix() throws {
+    // `keep` pins the oldest entries; the write path front-trims *after* them, so a view must
+    // splice around the prefix rather than take a flat tail.
+    let cache = RotatingKVCache(maxSize: 8, keep: 2)
+    fillOneAtATime(cache, positions: 0 ..< 20)
+
+    let view = try #require(cache.logicalView(tail: 5))
+    let positions = encodedPositions(view.0)
+    #expect(positions.count == 5)
+    #expect(Array(positions.prefix(2)) == [0, 1], "pinned prefix was evicted by the view")
+    #expect(positions == [0, 1] + Array(positions.suffix(3)))
+    #expect(positions.suffix(3).sorted() == Array(positions.suffix(3)), "tail out of order")
+}
+
+@Test func testRotatingLogicalViewFloorsAtThePinnedPrefix() throws {
+    // A pinned entry is never evictable, so `keep` is a floor on the view and not just a
+    // splice point: a `tail` below it still returns the prefix. The alternative -- honouring
+    // `tail` exactly -- would hand back a context the ring itself can never present.
+    let cache = RotatingKVCache(maxSize: 8, keep: 2)
+    fillOneAtATime(cache, positions: 0 ..< 20)
+
+    for tail in 0 ... 2 {
+        let view = try #require(cache.logicalView(tail: tail))
+        #expect(
+            encodedPositions(view.0) == [0, 1],
+            "tail \(tail) below `keep` dropped the pinned prefix")
+        #expect(encodedPositions(view.1).map { -$0 } == [0, 1], "values diverged from keys")
+    }
+
+    // One past the floor is the first tail that actually selects anything.
+    let positions = encodedPositions(try #require(cache.logicalView(tail: 3)).0)
+    #expect(positions.count == 3)
+    #expect(Array(positions.prefix(2)) == [0, 1], "the prefix moved once the tail cleared it")
+}
+
+@Test func testRotatingLogicalViewFloorIsBoundedByWhatTheCacheHolds() throws {
+    // Fewer entries written than `keep` pins: the floor is what exists, not what is reserved.
+    let cache = RotatingKVCache(maxSize: 8, keep: 4)
+    fillOneAtATime(cache, positions: 0 ..< 2)
+
+    #expect(encodedPositions(try #require(cache.logicalView(tail: 0)).0) == [0, 1])
+    #expect(encodedPositions(try #require(cache.logicalView(tail: 9)).0) == [0, 1])
+}
+
+/// The property the speculative overlay rests on: for a multi-token write, the presentation the
+/// cache *would* return equals `logicalView(tail: maxSize - 1)` followed by the new rows. An
+/// adapter can therefore stage beside the ring and hand the model an identical view.
+@Test func testRotatingLogicalViewPlusNewRowsEqualsTheWritePresentation() throws {
+    let window = 8
+    let staged = 4
+
+    let cache = RotatingKVCache(maxSize: window, keep: 0)
+    fillOneAtATime(cache, positions: 0 ..< 20)
+
+    // Read the view and the mask *before* the write, exactly as an adapter would.
+    let view = try #require(cache.logicalView(tail: window - 1))
+    let mask = cache.makeMask(n: staged, windowSize: window, returnArray: false)
+
+    let (newKeys, newValues) = positionedKV(20 ..< (20 + staged))
+    let presented = cache.update(keys: newKeys, values: newValues)
+
+    let composedKeys = concatenated([view.0, newKeys], axis: 2)
+    let composedValues = concatenated([view.1, newValues], axis: 2)
+
     #expect(
-        weight > maskedFillOpenWeightFloor,
-        "unmasked weight of the large key: got \(weight)")
+        encodedPositions(presented.0) == encodedPositions(composedKeys),
+        "staged presentation diverged from the live write path")
+    #expect(
+        allClose(presented.0, composedKeys, rtol: 0, atol: 0).item(Bool.self),
+        "keys diverged from the live write path")
+    #expect(
+        allClose(presented.1, composedValues, rtol: 0, atol: 0).item(Bool.self),
+        "values diverged from the live write path")
+
+    // The mask the cache built before the write has to span exactly that presentation, or an
+    // adapter could not delegate mask construction to the live cache.
+    guard case .array(let maskArray) = mask else {
+        Issue.record("expected an array mask once offset + n exceeds the window, got \(mask)")
+        return
+    }
+    #expect(
+        maskArray.dim(-1) == composedKeys.dim(2),
+        "mask key axis \(maskArray.dim(-1)) != presented length \(composedKeys.dim(2))")
+    #expect(maskArray.dim(-2) == staged)
 }
 
-/// A query whose positions are all masked must still give a finite answer.
-///
-/// The fill is the most negative finite number of the score dtype, thus the
-/// softmax of a row that holds only fill values gives even weights. A fill of
-/// `-infinity` would give NaN here.
-@Test func quantizedAttentionKeepsAFullyMaskedRowFinite() {
-    let closedMask = (MLXArray(0 ..< Int32(maskedFillTokenCount)) .< Int32(0))
-        .reshaped([1, maskedFillTokenCount])
-    let answer = MaskedFillFixture().attend(mask: .array(closedMask))
-    let elements = answer.asType(.float32).asArray(Float.self)
-    #expect(elements.allSatisfy { $0.isFinite }, "a fully masked row must stay finite")
+/// Attention through the rotating cache's own presentation and mask, past a wrap, must equal a
+/// reference that never rotated: every position kept in a plain array under an explicit
+/// causal-intersect-window mask over absolute positions.
+@Test func testRotatingCacheAttentionPastWrapMatchesLogicalOrderReference() {
+    MLXRandom.seed(0)
+
+    let window = 8
+    let history = 20
+    let queries = 4
+    let heads = 2
+    let headDim = 4
+    let scale = 1.0 / Float(headDim).squareRoot()
+
+    let allKeys = MLXRandom.normal([1, heads, history + queries, headDim])
+    let allValues = MLXRandom.normal([1, heads, history + queries, headDim])
+    let q = MLXRandom.normal([1, heads, queries, headDim])
+
+    let cache = RotatingKVCache(maxSize: window, keep: 0)
+    for p in 0 ..< history {
+        _ = cache.update(
+            keys: allKeys[0..., 0..., p ..< (p + 1), 0...],
+            values: allValues[0..., 0..., p ..< (p + 1), 0...])
+    }
+
+    let mask = cache.makeMask(n: queries, windowSize: window, returnArray: false)
+    let (cachedKeys, cachedValues) = cache.update(
+        keys: allKeys[0..., 0..., history ..< (history + queries), 0...],
+        values: allValues[0..., 0..., history ..< (history + queries), 0...])
+    let out = MLXFast.scaledDotProductAttention(
+        queries: q, keys: cachedKeys, values: cachedValues, scale: scale, mask: mask)
+
+    // Reference: all history retained, masked by absolute position.
+    let queryPositions = MLXArray(Int32(history) ..< Int32(history + queries))[0..., .newAxis]
+    let keyPositions = MLXArray(Int32(0) ..< Int32(history + queries))[.newAxis]
+    let referenceMask =
+        (queryPositions .>= keyPositions) & (queryPositions .< keyPositions + Int32(window))
+    let reference = MLXFast.scaledDotProductAttention(
+        queries: q, keys: allKeys, values: allValues, scale: scale, mask: .array(referenceMask))
+
+    #expect(out.shape == reference.shape)
+    #expect(
+        allClose(out, reference, rtol: 1e-5, atol: 1e-5).item(Bool.self),
+        "post-wrap attention diverged from the logical-order reference")
 }

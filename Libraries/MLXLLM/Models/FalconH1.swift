@@ -796,18 +796,18 @@ public class FalconH1Model: Module, LLMModel, KVCacheDimensionProvider {
         return sanitizedWeights
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        let attentionCache = makeAttentionCache(parameters: parameters)
+    public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
+        let attentionCache = try makeAttentionCache(parameters: parameters)
         return model.layers.map { _ in CacheList(MambaCache(), attentionCache.copy()) }
     }
 
     /// Build the attention cache for a single layer, honoring ``GenerateParameters``
     /// memory controls while leaving the Mamba recurrent cache untouched.
-    private func makeAttentionCache(parameters: GenerateParameters?) -> any KVCache {
+    private func makeAttentionCache(parameters: GenerateParameters?) throws -> any KVCache {
         // Sliding-window attention: only the KV attention cache is bounded. The Mamba
         // recurrent state retains its full history because it cannot be safely windowed.
-        if let maxKVSize = parameters?.maxKVSize {
-            return RotatingKVCache(maxSize: maxKVSize, keep: 4)
+        if let capacity = try parameters?.effectiveKVCacheCapacity() {
+            return capacity.makeRotatingCache()
         }
 
         // Quantized attention cache. We create it eagerly when quantization starts at
@@ -825,6 +825,10 @@ public class FalconH1Model: Module, LLMModel, KVCacheDimensionProvider {
     private func resolveKVQuantizationParameters(_ parameters: GenerateParameters?)
         -> (bits: Int, groupSize: Int)?
     {
+        if case .affine(let configuration) = parameters?.kvCache?.strategy.storage {
+            guard configuration.compressionStart == 0 else { return nil }
+            return (configuration.bits, configuration.groupSize)
+        }
         if let scheme = parameters?.kvScheme, let resolved = resolveAffineScheme(scheme) {
             return resolved
         }

@@ -460,10 +460,6 @@ class BatchGrammarMatcher::Impl {
       bool debug_print
   );
 
-  static void BatchRollback(
-      std::vector<GrammarMatcher>* matchers, const std::vector<int>& num_tokens
-  );
-
  private:
   std::optional<ThreadPool> thread_pool_ = std::nullopt;
   int32_t max_threads_ = 1;
@@ -535,91 +531,25 @@ bool GrammarMatcher::Impl::AcceptToken(int32_t token_id, bool debug_print) {
   }
 
   const auto& token = tokenizer_info_.GetDecodedVocab()[token_id];
-
-  // Phase 1: Try atomic token path (from current state, before byte path)
-  std::vector<ParserState> atomic_states;
-  std::vector<std::pair<int32_t, ParserState>> atomic_completable;
-  bool atomic_completed = false;
-  bool atomic_success = AdvanceAtomicToken(token_id, debug_print);
-  if (atomic_success) {
-    atomic_states = GetLatestScanableStates();
-    auto row = rule_id_to_completable_states_.Back();
-    atomic_completable.assign(row.data, row.data + row.data_len);
-    atomic_completed = is_completed_.back();
-    PopLastStates(1);
-  }
-
-  // Phase 2: Try byte-by-byte path (from the same original state)
   int pos = 0;
-  bool byte_path_success = true;
   for (auto char_value : token) {
     if (!Advance(char_value, debug_print)) {
-      byte_path_success = false;
-      break;
+      if (debug_print) {
+        XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<" << EscapeString(token)
+                           << "> rejected at position " << pos << ", char "
+                           << EscapeString(char_value);
+      }
+      PopLastStates(pos);
+      return false;
     }
     ++pos;
   }
-
-  // Phase 3: Combine results (no priority — merge with deduplication)
-  if (!byte_path_success && !atomic_success) {
-    if (debug_print) {
-      XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<" << EscapeString(token)
-                         << "> rejected at position " << pos;
-    }
-    PopLastStates(pos);
-    return false;
-  }
-
-  if (atomic_success && !byte_path_success) {
-    PopLastStates(pos);
-    AdvanceAtomicToken(token_id, debug_print);
-    token_length_history.push_back(1);
-  } else if (byte_path_success && !atomic_success) {
-    token_length_history.push_back(token.size());
-  } else {
-    // Both paths succeeded — merge atomic token states into byte path
-    if (token.empty()) {
-      // Zero-length token: byte path created 0 timepoints, just push atomic states
-      scanable_state_history_.PushBack(atomic_states);
-      rule_id_to_completable_states_.PushBack(atomic_completable);
-      is_completed_.push_back(atomic_completed);
-      token_length_history.push_back(1);
-    } else {
-      auto byte_states = GetLatestScanableStates();
-      std::vector<ParserState> merged = byte_states;
-      StateEqualForParsing state_eq;
-      for (const auto& s : atomic_states) {
-        if (std::find_if(merged.begin(), merged.end(), [&](const auto& m) {
-              return state_eq(m, s);
-            }) == merged.end()) {
-          merged.push_back(s);
-        }
-      }
-
-      auto byte_row = rule_id_to_completable_states_.Back();
-      std::vector<std::pair<int32_t, ParserState>> merged_completable(
-          byte_row.data, byte_row.data + byte_row.data_len
-      );
-      bool byte_completed = is_completed_.back();
-      PopLastStates(1);
-
-      for (const auto& cs : atomic_completable) {
-        if (std::find_if(merged_completable.begin(), merged_completable.end(), [&](const auto& m) {
-              return m.first == cs.first && state_eq(m.second, cs.second);
-            }) == merged_completable.end()) {
-          merged_completable.push_back(cs);
-        }
-      }
-
-      scanable_state_history_.PushBack(merged);
-      rule_id_to_completable_states_.PushBack(merged_completable);
-      is_completed_.push_back(byte_completed || atomic_completed);
-      token_length_history.push_back(token.size());
-    }
-  }
+  token_length_history.push_back(token.size());
 
   if (debug_print) {
-    XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<" << EscapeString(token) << "> accepted.";
+    XGRAMMAR_LOG(INFO) << "Token #" << token_id << "<"
+                       << EscapeString(tokenizer_info_.GetDecodedVocab()[token_id])
+                       << "> accepted.";
   }
   return true;
 }
@@ -868,23 +798,68 @@ std::string GrammarMatcher::Impl::FindJumpForwardString() {
     // -1 means not found yet; 0~255 means the next char
     int next_char = -1;
     for (const auto& state : states) {
-      XGRAMMAR_DCHECK(state.rule_id != -1 && grammar_->per_rule_fsms[state.rule_id].has_value());
-      const auto& fsm = grammar_->per_rule_fsms[state.rule_id].value();
-      const auto& current_edges = fsm.GetFsm().GetEdges(state.element_id);
-      for (const auto& edge : current_edges) {
-        if (!edge.IsCharRange()) {
-          continue;
+      if (state.rule_id != -1 && grammar_->per_rule_fsms[state.rule_id].has_value()) {
+        const auto& fsm = grammar_->per_rule_fsms[state.rule_id].value();
+        const auto& current_edges = fsm.GetFsm().GetEdges(state.element_id);
+        for (const auto& edge : current_edges) {
+          if (!edge.IsCharRange()) {
+            continue;
+          }
+          if (edge.min != edge.max) {
+            can_find_next_char = false;
+            break;
+          }
+          if (next_char == -1) {
+            next_char = edge.min;
+          } else if (next_char != edge.min) {
+            can_find_next_char = false;
+            break;
+          }
         }
-        if (edge.min != edge.max) {
-          can_find_next_char = false;
-          break;
-        }
+        continue;
+      }
+
+      auto cur_sequence = grammar_->GetGrammarExpr(state.sequence_id);
+
+      // We cannot deduce the next char for tag dispatch
+      if (cur_sequence.type == GrammarExprType::kTagDispatch) {
+        can_find_next_char = false;
+        break;
+      }
+      // The ParserState comes to the end of the grammar
+      XGRAMMAR_DCHECK(state.element_id != cur_sequence.size());
+      XGRAMMAR_DCHECK(
+          cur_sequence.type != GrammarExprType::kChoices &&
+          cur_sequence.type != GrammarExprType::kEmptyStr
+      );
+      const auto& cur_element = grammar_->GetGrammarExpr(cur_sequence[state.element_id]);
+      if (cur_element.type == GrammarExprType::kByteString) {
+        XGRAMMAR_DCHECK(state.sub_element_id < cur_element.size());
         if (next_char == -1) {
-          next_char = edge.min;
-        } else if (next_char != edge.min) {
+          next_char = cur_element[state.sub_element_id];
+        } else if (next_char != cur_element[state.sub_element_id]) {
           can_find_next_char = false;
           break;
         }
+        continue;
+      }
+      if (cur_element.type == GrammarExprType::kRuleRef) {
+        continue;
+      }
+
+      XGRAMMAR_DCHECK(
+          cur_element.type == GrammarExprType::kCharacterClass ||
+          cur_element.type == GrammarExprType::kCharacterClassStar
+      );
+      if (state.sub_element_id > 0 || cur_element.size() != 3 || cur_element[0] != 0 ||
+          cur_element[1] != cur_element[2]) {
+        can_find_next_char = false;
+        break;
+      } else if (next_char == -1) {
+        next_char = cur_element[1];
+      } else if (next_char != cur_element[1]) {
+        can_find_next_char = false;
+        break;
       }
     }
 
@@ -1068,17 +1043,6 @@ std::vector<uint8_t> BatchGrammarMatcher::Impl::BatchAcceptToken(
   return accepted;
 }
 
-void BatchGrammarMatcher::Impl::BatchRollback(
-    std::vector<GrammarMatcher>* matchers, const std::vector<int>& num_tokens
-) {
-  XGRAMMAR_CHECK(matchers->size() == num_tokens.size())
-      << "The size of matchers (" << matchers->size() << ") and num_tokens (" << num_tokens.size()
-      << ") should be the same.";
-  for (int i = 0; i < static_cast<int32_t>(matchers->size()); i++) {
-    (*matchers)[i].Rollback(num_tokens[i]);
-  }
-}
-
 GrammarMatcher::GrammarMatcher(
     const CompiledGrammar& compiled_grammar,
     std::optional<std::vector<int>> override_stop_tokens,
@@ -1109,13 +1073,7 @@ void GrammarMatcher::Rollback(int num_tokens) { pimpl_->Rollback(num_tokens); }
 
 bool GrammarMatcher::IsTerminated() const { return pimpl_->IsTerminated(); }
 
-bool GrammarMatcher::IsCompleted() const { return pimpl_->IsCompleted(); }
-
 void GrammarMatcher::Reset() { pimpl_->Reset(); }
-
-GrammarMatcher GrammarMatcher::Fork() const {
-  return GrammarMatcher(std::make_shared<Impl>(*pimpl_));
-}
 
 int GrammarMatcher::GetMaxRollbackTokens() const { return pimpl_->GetMaxRollbackTokens(); }
 
@@ -1148,12 +1106,6 @@ std::vector<uint8_t> BatchGrammarMatcher::BatchAcceptToken(
     std::vector<GrammarMatcher>* matchers, const std::vector<int32_t>& token_ids, bool debug_print
 ) {
   return Impl::BatchAcceptToken(matchers, token_ids, debug_print);
-}
-
-void BatchGrammarMatcher::BatchRollback(
-    std::vector<GrammarMatcher>* matchers, const std::vector<int>& num_tokens
-) {
-  Impl::BatchRollback(matchers, num_tokens);
 }
 
 BatchGrammarMatcher::BatchGrammarMatcher(std::variant<std::string, int32_t> max_threads)

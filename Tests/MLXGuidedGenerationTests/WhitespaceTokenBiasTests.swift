@@ -72,10 +72,6 @@ private struct SmallTokenizer: MLXLMCommon.Tokenizer {
 @Suite
 struct WhitespaceTokenBiasTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     private let tokenizer = ByteTokenizer()
 
     // MARK: - Single-Byte Whitespace

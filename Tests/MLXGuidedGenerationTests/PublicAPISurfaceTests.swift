@@ -17,7 +17,7 @@ struct PublicAPISurfaceTests {
         let tokenizer = try GrammarTokenizer(
             vocab: vocab,
             vocabType: .byteFallback,
-            eosTokenID: 255
+            eosTokenId: 255
         )
 
         let constraint = try GrammarConstraint(
@@ -44,7 +44,7 @@ struct PublicAPISurfaceTests {
     func commitResultIsPublic() throws {
         let vocab: [String] = (0 ..< 256).map { String(format: "<0x%02X>", $0) }
         let tokenizer = try GrammarTokenizer(
-            vocab: vocab, vocabType: .byteFallback, eosTokenID: 255)
+            vocab: vocab, vocabType: .byteFallback, eosTokenId: 255)
         let constraint = try GrammarConstraint(
             tokenizer: tokenizer, jsonSchema: #"{ "type": "integer" }"#)
         _ = try constraint.computeMask()

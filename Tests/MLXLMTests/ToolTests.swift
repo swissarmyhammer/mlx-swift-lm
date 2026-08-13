@@ -3,6 +3,48 @@ import MLXLMCommon
 import Testing
 
 struct ToolTests {
+    @Test("ChatConventionsProviding defaults to nil for both properties")
+    func chatConventionsOptInDefaults() {
+        struct Bare: ChatConventionsProviding {}
+        #expect(Bare().toolCallFormat == nil)
+        #expect(Bare().reasoningConfig == nil)
+    }
+
+    @Test("ToolCallProcessor drains calls once in parse order")
+    func toolCallProcessorPublicDrain() {
+        let processor = ToolCallProcessor(format: .json)
+        _ = processor.processChunk(
+            #"<tool_call>{"name":"first","arguments":{}}</tool_call><tool_call>{"name":"second","arguments":{}}</tool_call>"#
+        )
+
+        #expect(processor.drainToolCalls().map(\.function.name) == ["first", "second"])
+        #expect(processor.drainToolCalls().isEmpty)
+    }
+
+    @Test("ToolCallProcessor ordered outputs retain split call-text-call order")
+    func toolCallProcessorOrderedSplitOutput() {
+        let processor = ToolCallProcessor(format: .json)
+        #expect(
+            processor.processChunkOutputs(
+                #"<tool_call>{"name":"first","arguments":{"#
+            ).isEmpty)
+
+        let outputs = processor.processChunkOutputs(
+            #"}}</tool_call>between<tool_call>{"name":"second","arguments":{}}</tool_call>"#)
+        #expect(outputs.count == 3)
+        guard case .toolCall(let first) = outputs[0] else {
+            Issue.record("Expected first call")
+            return
+        }
+        #expect(first.function.name == "first")
+        #expect(outputs[1] == .response("between"))
+        guard case .toolCall(let second) = outputs[2] else {
+            Issue.record("Expected second call")
+            return
+        }
+        #expect(second.function.name == "second")
+    }
+
     @Test("Test Weather Tool Schema Generation")
     func testWeatherToolSchemaGeneration() throws {
         struct WeatherInput: Codable {
@@ -479,6 +521,52 @@ struct ToolTests {
         #expect(toolCall.function.arguments["unit"] == .string("celsius"))
     }
 
+    @Test("Test Pythonic Tool Call Parser - Object Wrapper Argument (LFM2)")
+    func testPythonicParserObjectWrapperArgument() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        // LFM2 emits the full parameter object under a `properties` wrapper key.
+        // The object also contains a comma the old `[^,\)]+` value regex truncated on.
+        let content =
+            "<|tool_call_start|>[get_weather(properties={\"location\": \"Tokyo\", \"unit\": \"celsius\"})]<|tool_call_end|>"
+        let tools: [[String: any Sendable]] = [
+            [
+                "function": [
+                    "name": "get_weather",
+                    "parameters": [
+                        "properties": [
+                            "location": ["type": "string"],
+                            "unit": ["type": "string"],
+                        ]
+                    ],
+                ] as [String: any Sendable]
+            ]
+        ]
+
+        let toolCall = try #require(parser.parse(content: content, tools: tools))
+
+        #expect(toolCall.function.name == "get_weather")
+        #expect(toolCall.function.arguments["location"] == .string("Tokyo"))
+        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
+    }
+
+    @Test("Test Pythonic Tool Call Parser - Object-Valued Argument Preserved")
+    func testPythonicParserObjectValuedArgument() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        // A non-wrapper key is not unwrapped; the object value (with its inner
+        // comma) is parsed intact rather than truncated.
+        let content =
+            "<|tool_call_start|>[configure(settings={\"width\": 10, \"height\": 20})]<|tool_call_end|>"
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "configure")
+        #expect(
+            toolCall.function.arguments["settings"]
+                == .object(["width": .int(10), "height": .int(20)]))
+    }
+
     @Test("Test Pythonic Tool Call Parser - Double Quotes")
     func testPythonicParserDoubleQuotes() throws {
         let parser = PythonicToolCallParser(
@@ -693,7 +781,7 @@ struct ToolTests {
 
     @Test("Test Qwen3.5 XML Function Parser - With tool_call Tags")
     func testQwen35Parser() throws {
-        let parser = XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let parser = Qwen35ToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
         let content = """
             <tool_call>
             <function=get_weather>
@@ -716,7 +804,7 @@ struct ToolTests {
 
     @Test("Test Qwen3.5 Format via ToolCallProcessor")
     func testQwen35FormatProcessor() throws {
-        let processor = ToolCallProcessor(format: .xmlFunction)
+        let processor = ToolCallProcessor(format: .qwen35)
         let chunks: [String] = [
             "<tool", "_call>", "\n<function=get_weather>\n",
             "<parameter=location>\nTokyo\n</parameter>",
@@ -735,7 +823,7 @@ struct ToolTests {
 
     @Test("Test Qwen3.5 Format - No Arguments")
     func testQwen35FormatNoArgs() throws {
-        let processor = ToolCallProcessor(format: .xmlFunction)
+        let processor = ToolCallProcessor(format: .qwen35)
         let content = "<tool_call>\n<function=get_current_datetime>\n</function>\n</tool_call>"
 
         _ = processor.processChunk(content)
@@ -745,6 +833,99 @@ struct ToolTests {
         #expect(toolCall.function.name == "get_current_datetime")
         #expect(toolCall.function.arguments.isEmpty)
     }
+
+    @Test("Qwen3.5 accepts framed Qwen/Hermes JSON fallback")
+    func testQwen35JSONFallback() throws {
+        let processor = ToolCallProcessor(format: .qwen35, tools: Self.qwen35Tools)
+        let content =
+            #"<tool_call>{"name":"lampo_mcp_call_tool","arguments":{"action":"start","instructions":"Initialize interactive coding session","title":"filo server start","worker":"default"}}</tool_call>"#
+
+        #expect(processor.processChunk(content) == nil)
+        let call = try #require(processor.toolCalls.first)
+        #expect(processor.toolCalls.count == 1)
+        #expect(call.function.name == "lampo_mcp_call_tool")
+        #expect(call.function.arguments["action"] == .string("start"))
+        #expect(call.function.arguments["worker"] == .string("default"))
+    }
+
+    @Test("Qwen3.5 JSON fallback is streaming-boundary invariant")
+    func testQwen35JSONFallbackEverySplitBoundary() throws {
+        let content =
+            #"<tool_call>{"name":"lampo_mcp_call_tool","arguments":{"message":"a } brace, a quote: \"ok\", and <function=fake>"}}</tool_call>"#
+        let characters = Array(content)
+
+        for split in 1 ..< characters.count {
+            let processor = ToolCallProcessor(format: .qwen35, tools: Self.qwen35Tools)
+            let first = String(characters[..<split])
+            let second = String(characters[split...])
+
+            #expect(processor.processChunk(first) == nil, "split at \(split)")
+            #expect(processor.processChunk(second) == nil, "split at \(split)")
+            #expect(processor.toolCalls.count == 1, "split at \(split)")
+            #expect(
+                processor.toolCalls.first?.function.name == "lampo_mcp_call_tool",
+                "split at \(split)")
+        }
+    }
+
+    @Test("Qwen3.5 commits a complete JSON body at EOS without a closing frame")
+    func testQwen35JSONFallbackAtEOS() throws {
+        let processor = ToolCallProcessor(format: .qwen35, tools: Self.qwen35Tools)
+        let content =
+            #"<tool_call>{"name":"lampo_mcp_call_tool","arguments":{"action":"start"}}"#
+
+        #expect(processor.processChunk(content) == nil)
+        #expect(processor.toolCalls.isEmpty)
+        processor.processEOS()
+
+        let call = try #require(processor.toolCalls.first)
+        #expect(processor.toolCalls.count == 1)
+        #expect(call.function.name == "lampo_mcp_call_tool")
+        #expect(call.function.arguments["action"] == .string("start"))
+    }
+
+    @Test("Qwen3.5 applies the declared-tool boundary to canonical XML too")
+    func testQwen35XMLRejectsUndeclaredTool() {
+        let parser = Qwen35ToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let content =
+            "<tool_call><function=erase_everything></function></tool_call>"
+
+        #expect(parser.parse(content: content, tools: Self.qwen35Tools) == nil)
+    }
+
+    @Test("Qwen3.5 fallback never authorizes undeclared JSON tools")
+    func testQwen35JSONFallbackRejectsUndeclaredTool() {
+        let parser = Qwen35ToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let content = #"<tool_call>{"name":"erase_everything","arguments":{}}</tool_call>"#
+
+        #expect(parser.parse(content: content, tools: Self.qwen35Tools) == nil)
+    }
+
+    @Test("Qwen3.5 fallback rejects malformed and mixed-dialect payloads")
+    func testQwen35JSONFallbackRejectsMalformedPayloads() {
+        let parser = Qwen35ToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let malformed = [
+            #"<tool_call>{"name":"lampo_mcp_call_tool","arguments":{}</tool_call>"#,
+            #"<tool_call>prefix {"name":"lampo_mcp_call_tool","arguments":{}}</tool_call>"#,
+            #"<tool_call><function=lampo_mcp_call_tool>{"arguments":{}}</function></tool_call>"#,
+            "<tool_call><function=lampo_mcp_call_tool><parameter=action>start</parameter>garbage</function></tool_call>",
+            #"<tool_call>{"name":"lampo_mcp_call_tool","arguments":{}}</tool_call>trailing"#,
+        ]
+
+        for content in malformed {
+            #expect(parser.parse(content: content, tools: Self.qwen35Tools) == nil)
+        }
+    }
+
+    private static let qwen35Tools: [[String: any Sendable]] = [
+        [
+            "type": "function",
+            "function": [
+                "name": "lampo_mcp_call_tool",
+                "parameters": ["type": "object"],
+            ] as [String: any Sendable],
+        ]
+    ]
 
     // MARK: - GLM4 Format Tests
 
@@ -1241,13 +1422,15 @@ struct ToolTests {
         #expect(ToolCallFormat.json.rawValue == "json")
         #expect(ToolCallFormat.lfm2.rawValue == "lfm2")
         #expect(ToolCallFormat.xmlFunction.rawValue == "xml_function")
+        #expect(ToolCallFormat.qwen35.rawValue == "qwen3_5")
         #expect(ToolCallFormat.glm4.rawValue == "glm4")
         #expect(ToolCallFormat.glm4Bare.rawValue == "glm4_bare")
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
-        #expect(ToolCallFormat.minimaxM3.rawValue == "minimax_m3")
+        #expect(ToolCallFormat.atem.rawValue == "atem")
         #expect(ToolCallFormat.mistral.rawValue == "mistral")
+        #expect(ToolCallFormat.gptOSS.rawValue == "gpt_oss")
 
         // Test round-trip via raw value
         for format in ToolCallFormat.allCases {
@@ -1255,133 +1438,17 @@ struct ToolTests {
         }
     }
 
-    // MARK: - Tool Call ID Generation Tests
-
-    // Plain (non-@testable) import: this test also pins `generateToolCallID()`
-    // as public API — it fails to compile if the method regresses to internal.
-    @Test("Test ToolCallFormat Tool Call ID Generation")
-    func testToolCallFormatGenerateToolCallID() throws {
-        // Mistral's [TOOL_CALLS] syntax carries short 9-character ids.
-        let mistralID = ToolCallFormat.mistral.generateToolCallID()
-        #expect(mistralID.count == 9)
-
-        // Every other syntax uses OpenAI-style lowercase "call_" ids.
-        let jsonID = ToolCallFormat.json.generateToolCallID()
-        #expect(jsonID.hasPrefix("call_"))
-        #expect(jsonID == jsonID.lowercased())
-
-        // IDs are freshly generated per call.
-        #expect(
-            ToolCallFormat.json.generateToolCallID()
-                != ToolCallFormat.json.generateToolCallID())
-    }
-
-    // MARK: - Format Inference Tests
-
-    @Test("Test ToolCallFormat Inference from Model Type")
-    func testToolCallFormatInference() throws {
-        // LFM2 models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "lfm2") == .lfm2)
-        #expect(ToolCallFormat.infer(from: "LFM2") == .lfm2)
-        #expect(ToolCallFormat.infer(from: "lfm2_moe") == .lfm2)
-        #expect(ToolCallFormat.infer(from: "lfm2_5") == .lfm2)
-        #expect(ToolCallFormat.infer(from: "LFM2_5") == .lfm2)
-        #expect(ToolCallFormat.infer(from: "lfm25") == .lfm2)
-
-        // GLM4 dense/non-MoE model (exact match): the original, pre-4.7
-        // architecture (e.g. GLM-4-9B-0414) whose chat template never taught
-        // the GLM-4.7 envelope -- uses the bare name+JSON-args format instead.
-        #expect(ToolCallFormat.infer(from: "glm4") == .glm4Bare)
-        #expect(ToolCallFormat.infer(from: "GLM4") == .glm4Bare)
-
-        // GLM4 MoE family (prefix matching): GLM-4.5/4.6/4.7-descended
-        // checkpoints, which DO use the `<tool_call>`/`<arg_key>` envelope.
-        #expect(ToolCallFormat.infer(from: "glm4_moe") == .glm4)
-        #expect(ToolCallFormat.infer(from: "glm4_moe_lite") == .glm4)
-        #expect(ToolCallFormat.infer(from: "glm4_5") == .glm4)
-        #expect(ToolCallFormat.infer(from: "GLM4_5") == .glm4)
-
-        // Gemma models
-        #expect(ToolCallFormat.infer(from: "gemma") == .gemma)
-        #expect(ToolCallFormat.infer(from: "GEMMA") == .gemma)
-
-        // Gemma4 models (prefix matching): must win over the plain-gemma
-        // match despite sharing its leading characters.
-        #expect(ToolCallFormat.infer(from: "gemma4") == .gemma4)
-        #expect(ToolCallFormat.infer(from: "gemma4_text") == .gemma4)
-        #expect(ToolCallFormat.infer(from: "GEMMA4") == .gemma4)
-
-        // Nemotron models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "nemotron_h") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "NEMOTRON_H") == .xmlFunction)
-
-        // Qwen3.5 models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "qwen3_5") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "qwen3_5_moe") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "QWEN3_5") == .xmlFunction)
-
-        // Qwen3-Next models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "qwen3_next") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "qwen3_next_moe") == .xmlFunction)
-        #expect(ToolCallFormat.infer(from: "QWEN3_NEXT") == .xmlFunction)
-
-        // Mistral3 models (prefix matching)
-        #expect(ToolCallFormat.infer(from: "mistral3") == .mistral)
-        #expect(ToolCallFormat.infer(from: "Mistral3") == .mistral)
-        #expect(ToolCallFormat.infer(from: "mistral3_text") == .mistral)
-
-        // Ministral3 models (Devstral 2 family, e.g. Devstral-2-123B): a
-        // distinct model_type that does NOT share the "mistral3" prefix —
-        // the extra "ni" means it needs its own match.
-        #expect(ToolCallFormat.infer(from: "ministral3") == .mistral)
-        #expect(ToolCallFormat.infer(from: "Ministral3") == .mistral)
-
-        // MiniMax-M2 (model_type "minimax", e.g. mlx-community/MiniMax-M2-4bit):
-        // exact match, mirroring the dense-GLM4 style — the only registered
-        // minimax architecture is MiniMaxM2ForCausalLM, whose template
-        // consumes the `<minimax:tool_call>` invoke/parameter format.
-        #expect(ToolCallFormat.infer(from: "minimax") == .minimaxM2)
-        #expect(ToolCallFormat.infer(from: "MiniMax") == .minimaxM2)
-
-        // MiniMax-M3 (model_type "minimax_m3" / "minimax_m3_vl", e.g.
-        // mlx-community/MiniMax-M3-4bit): prefix match so both the flat text
-        // and VL model types resolve to the same namespaced-XML format.
-        #expect(ToolCallFormat.infer(from: "minimax_m3") == .minimaxM3)
-        #expect(ToolCallFormat.infer(from: "minimax_m3_vl") == .minimaxM3)
-        #expect(ToolCallFormat.infer(from: "MINIMAX_M3_VL") == .minimaxM3)
-
-        // Llama models - require secondary signals from configData
-        #expect(ToolCallFormat.infer(from: "llama") == nil)  // Should be nil without configData
-
-        let llama3RopeConfig = """
-            {
-                "model_type": "llama",
-                "rope_scaling": {
-                    "rope_type": "llama3"
-                }
-            }
-            """.data(using: .utf8)!
-        #expect(ToolCallFormat.infer(from: "llama", configData: llama3RopeConfig) == .llama3)
-
-        let llama3VocabConfig = """
-            {
-                "model_type": "llama",
-                "vocab_size": 128256
-            }
-            """.data(using: .utf8)!
-        #expect(ToolCallFormat.infer(from: "LLAMA", configData: llama3VocabConfig) == .llama3)
-
-        let llama2Config = """
-            {
-                "model_type": "llama",
-                "vocab_size": 32000
-            }
-            """.data(using: .utf8)!
-        #expect(ToolCallFormat.infer(from: "llama", configData: llama2Config) == nil)
-
-        // Unknown models should return nil (use default JSON format)
-        #expect(ToolCallFormat.infer(from: "qwen2") == nil)
-        #expect(ToolCallFormat.infer(from: "mistral") == nil)
+    @Test("gptOSS createParser is a non-fatal compatibility fallback")
+    func testGPTOSSCreateParserCompatibilityFallback() throws {
+        // Alternate callers (e.g. MLXFoundationModels ToolCallProcessor paths)
+        // must be able to construct a parser without trapping, even though
+        // Harmony tool calling is not text-parser based.
+        let parser = ToolCallFormat.gptOSS.createParser()
+        #expect(parser.startTag == "<tool_call>")
+        #expect(parser.endTag == "</tool_call>")
+        // Processor construction must likewise be non-fatal.
+        let processor = ToolCallProcessor(format: .gptOSS)
+        #expect(processor.toolCalls.isEmpty)
     }
 
     // MARK: - Mistral Format Tests

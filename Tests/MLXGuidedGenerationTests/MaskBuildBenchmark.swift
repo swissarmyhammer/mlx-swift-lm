@@ -31,10 +31,6 @@ import Testing
 @Suite(.serialized)
 struct MaskBuildBenchmark {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     /// Representative model logit dimensions: Qwen-small, Llama-3, Qwen-2.5, Gemma.
     static let vocabSizes = [32_000, 128_256, 151_936, 256_000]
 

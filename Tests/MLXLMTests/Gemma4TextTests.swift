@@ -14,7 +14,7 @@ struct Gemma4TextTests {
         let model = Gemma4TextModel(try Self.configuration(attentionKEqV: false))
         eval(model)
 
-        var cache: [KVCache] = model.newCache(parameters: nil)
+        var cache: [KVCache] = try model.newCache(parameters: nil)
         let promptLogits = model(MLXArray([1, 2, 3]).reshaped([1, 3]), cache: cache)
         eval(promptLogits)
         #expect(promptLogits.shape == [1, 3, 32])
@@ -34,7 +34,7 @@ struct Gemma4TextTests {
         let model = Gemma4TextModel(try Self.configuration(attentionKEqV: true))
         eval(model)
 
-        var cache: [KVCache] = model.newCache(parameters: nil)
+        var cache: [KVCache] = try model.newCache(parameters: nil)
         let promptLogits = model(MLXArray([1, 2, 3]).reshaped([1, 3]), cache: cache)
         eval(promptLogits)
         #expect(promptLogits.shape == [1, 3, 32])

@@ -1,4 +1,4 @@
-// swift-tools-version: 6.1
+// swift-tools-version: 6.2
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import CompilerPluginSupport
@@ -239,7 +239,9 @@ let package = Package(
                 .unsafeFlags(["-w"], .when(platforms: [.macOS, .iOS, .visionOS, .tvOS])),
             ],
             linkerSettings: [
-                .linkedLibrary("c++")
+                // Apple platforms only: on Linux the Swift toolchain links libstdc++,
+                // and there is no libc++ to link against.
+                .linkedLibrary("c++", .when(platforms: [.macOS, .iOS, .visionOS, .tvOS]))
             ]
         ),
         // Grammar-constrained ("guided") generation engine built on the
@@ -253,10 +255,7 @@ let package = Package(
                 "MLXCXGrammar",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
-            path: "Libraries/MLXGuidedGeneration",
-            exclude: [
-                "README.md"
-            ]
+            path: "Libraries/MLXGuidedGeneration"
         ),
         // Bridges Apple's FoundationModels framework to MLX-powered on-device
         // inference. Public surface is gated by @available(macOS 27 / iOS 27 /
@@ -276,10 +275,7 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
             ],
-            path: "Libraries/MLXFoundationModels",
-            exclude: [
-                "README.md"
-            ]
+            path: "Libraries/MLXFoundationModels"
         ),
         .testTarget(
             name: "MLXFoundationModelsTests",

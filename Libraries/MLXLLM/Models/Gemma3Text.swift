@@ -14,8 +14,8 @@ import MLXNN
 
 public struct Gemma3TextConfiguration: Codable {
     let modelType: String
-    let hiddenSize: Int
-    let hiddenLayers: Int
+    @_spi(GemmaEncoder) public let hiddenSize: Int
+    @_spi(GemmaEncoder) public let hiddenLayers: Int
     let intermediateSize: Int
     let attentionHeads: Int
     let headDim: Int
@@ -232,7 +232,13 @@ class Gemma3MLP: Module {
     }
 }
 
-class Gemma3TransformerBlock: Module {
+/// A single Gemma 3 transformer layer.
+///
+/// Exposed at `@_spi(GemmaEncoder)` scope so opted-in client code can drive the
+/// layer stack directly — e.g. encoder-style taps that collect every layer's
+/// hidden state — without this becoming advertised public API. Construction
+/// remains internal to ``Gemma3Model``.
+@_spi(GemmaEncoder) public class Gemma3TransformerBlock: Module {
     @ModuleInfo(key: "self_attn") var selfAttention: Gemma3Attention
     @ModuleInfo var mlp: Gemma3MLP
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: Gemma.RMSNorm
@@ -265,7 +271,7 @@ class Gemma3TransformerBlock: Module {
         super.init()
     }
 
-    func callAsFunction(
+    @_spi(GemmaEncoder) public func callAsFunction(
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache? = nil
@@ -283,11 +289,18 @@ class Gemma3TransformerBlock: Module {
 }
 
 public class Gemma3Model: Module {
-    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
-    @ModuleInfo var layers: [Gemma3TransformerBlock]
+    /// Token embedding table.
+    ///
+    /// Exposed at `@_spi(GemmaEncoder)` scope. Callers must scale its output by
+    /// `sqrt(hiddenSize)` (computed in bfloat16) to match Gemma 3 semantics, as
+    /// this type's own `callAsFunction(_:mask:cache:)` does.
+    @ModuleInfo(key: "embed_tokens") @_spi(GemmaEncoder) public var embedTokens: Embedding
+    /// The transformer layer stack, exposed at `@_spi(GemmaEncoder)` scope for
+    /// encoder-style client taps.
+    @ModuleInfo @_spi(GemmaEncoder) public var layers: [Gemma3TransformerBlock]
     @ModuleInfo var norm: Gemma.RMSNorm
 
-    let config: Gemma3TextConfiguration
+    @_spi(GemmaEncoder) public let config: Gemma3TextConfiguration
 
     init(_ config: Gemma3TextConfiguration) {
         self.config = config
@@ -393,34 +406,31 @@ public class Gemma3TextModel: Module, LLMModel {
         return processedWeights
     }
 
-    public func newCache(parameters: GenerateParameters? = nil) -> [KVCache] {
-        var caches = [KVCache]()
+    public func newCache(parameters: GenerateParameters? = nil) throws -> [KVCache] {
         let slidingWindow = config.slidingWindow
         let slidingWindowPattern = config.slidingWindowPattern
 
-        for i in 0 ..< config.hiddenLayers {
+        return try (0 ..< config.hiddenLayers).map { i in
             let isGlobalLayer = (i % slidingWindowPattern == slidingWindowPattern - 1)
-
             if isGlobalLayer {
-                // For global layers, use standard cache but with reasonable step size for long sequences
-                let cache = StandardKVCache()
-                cache.step = 1024  // Larger step size for efficiency with long sequences
-                caches.append(cache)
+                // Global (full-attention) layers honor maxKVSize. When unbounded,
+                // use a larger allocation step for long-context efficiency.
+                let cache = try makeAttentionKVCache(parameters: parameters)
+                if let simple = cache as? StandardKVCache {
+                    simple.step = 1024
+                }
+                return cache
             } else {
-                // For sliding window layers, use rotating cache
-                caches.append(
-                    RotatingKVCache(maxSize: slidingWindow, keep: 0)
-                )
+                return try makeSlidingWindowKVCache(
+                    parameters: parameters, window: slidingWindow)
             }
         }
-
-        return caches
     }
 
     /// Handles prompt processing for sequences
     public func prepare(
         _ input: LMInput, cache: [KVCache], state _: LMOutput.State? = nil,
-        windowSize: Int? = nil
+        prefill: PrefillParameters = .init()
     ) throws -> PrepareResult {
         let promptTokens = input.text.tokens
         let promptCount = promptTokens.dim(0)
@@ -433,17 +443,17 @@ public class Gemma3TextModel: Module, LLMModel {
 
         // Prefill through the inner model (no lm_head) to fill the KV cache, handing only
         // the last token to the TokenIterator — skipping the 262k-vocab lm_head over every
-        // prompt position is the speedup. Chunk = explicit windowSize, else a tuned 128.
-        let prefillStepSize = Swift.min(
-            windowSize ?? Self.defaultPrefillChunkSize, config.slidingWindow)
-        var y = input.text
-        while y.tokens.size > 1 {
-            let n = Swift.min(prefillStepSize, y.tokens.size - 1)
-            _ = model(y[.newAxis, ..<n].tokens, mask: nil, cache: cache)
+        // prompt position is the speedup. Tuned 128 default, capped at the sliding window.
+        let y = input.text
+        let processed = try prefill.forEachChunk(
+            total: y.tokens.size,
+            defaultStepSize: Self.defaultPrefillChunkSize,
+            maximumStepSize: config.slidingWindow
+        ) { range in
+            _ = model(y[.newAxis, range].tokens, mask: nil, cache: cache)
             asyncEval(cache)
-            y = y[n...]
         }
-        return .tokens(y)
+        return .tokens(y[processed...])
     }
 
     /// Prefill chunk size when the caller sets none, tuned for this path on Apple Silicon.

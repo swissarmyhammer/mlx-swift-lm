@@ -62,12 +62,12 @@ public enum Chat {
         public struct Tool: Sendable {
             fileprivate enum Storage: Sendable {
                 case calls([ToolCall])
-                case result(id: String)
+                case result(id: String?, name: String?)
             }
 
             fileprivate let storage: Storage
 
-            private init(storage: Storage) {
+            fileprivate init(storage: Storage) {
                 self.storage = storage
             }
 
@@ -76,9 +76,17 @@ public enum Chat {
                 Self(storage: .calls(toolCalls))
             }
 
-            /// Id of the assistant tool call answered by a tool message.
-            public static func result(id: String) -> Self {
-                Self(storage: .result(id: id))
+            /// Identifies the assistant tool call answered by a tool message.
+            ///
+            /// Some chat templates correlate results by `tool_call_id`, while
+            /// others (including Onyx) render the function `name` directly.
+            public static func result(id: String, name: String? = nil) -> Self {
+                Self(storage: .result(id: id, name: name))
+            }
+
+            package var calls: [ToolCall]? {
+                guard case .calls(let calls) = storage else { return nil }
+                return calls
             }
         }
 
@@ -181,16 +189,16 @@ public enum Chat {
             create(role: .user, content: content, images: images, videos: videos, audios: audios)
         }
 
-        /// Creates a tool-result message containing the output of an executed tool.
-        ///
-        /// - Parameters:
-        ///   - content: The tool's text (or JSON-rendered structured) result.
-        ///   - images: Image attachments the tool's result carried, if any.
-        ///   - id: Correlates this result with the tool call that produced it.
         public static func tool(
-            content: String, images: [UserInput.Image] = [], id: String? = nil
+            _ content: String, id: String? = nil, name: String? = nil
         ) -> Self {
-            create(role: .tool, content: content, images: images, tool: id.map { .result(id: $0) })
+            let metadata: Tool? =
+                if id != nil || name != nil {
+                    Tool(storage: .result(id: id, name: name))
+                } else {
+                    nil
+                }
+            return Self(role: .tool, content: content, tool: metadata)
         }
 
         /// The role of a message's sender within a chat conversation.
@@ -301,8 +309,9 @@ extension MessageGenerator {
                 }
                 return entry
             }
-        case .result(let id):
-            dictionary["tool_call_id"] = id
+        case .result(let id, let name):
+            if let id { dictionary["tool_call_id"] = id }
+            if let name { dictionary["name"] = name }
         case nil:
             break
         }
@@ -446,7 +455,7 @@ extension DeepSeekV4ChatEncoder.Message {
 }
 
 /// Default implementation of ``MessageGenerator`` that produces `role` and
-/// `content`, plus `tool_call_id` and `tool_calls` when present.
+/// `content`, plus `name`, `tool_call_id`, and `tool_calls` when present.
 ///
 /// ```swift
 /// [

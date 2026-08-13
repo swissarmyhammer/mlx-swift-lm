@@ -45,13 +45,14 @@ public enum LLMTypeRegistry {
         "qwen3_5": create(Qwen35Configuration.self, Qwen35Model.init),
         "qwen3_5_moe": create(Qwen35Configuration.self, Qwen35MoEModel.init),
         "qwen3_5_text": create(Qwen35TextConfiguration.self, Qwen35TextModel.init),
+        "nanbeige": create(NanbeigeConfiguration.self, NanbeigeModel.init),
         "minicpm": create(MiniCPMConfiguration.self, MiniCPMModel.init),
         "starcoder2": create(Starcoder2Configuration.self, Starcoder2Model.init),
         "cohere": create(CohereConfiguration.self, CohereModel.init),
         "openelm": create(OpenElmConfiguration.self, OpenELMModel.init),
         "internlm2": create(InternLM2Configuration.self, InternLM2Model.init),
-        "deepseek_v3": create(DeepSeekV3Configuration.self, DeepSeekV3Model.init),
-        "deepseek_v4": create(DeepSeekV4Configuration.self, DeepSeekV4Model.init),
+        "deepseek_v2": create(DeepseekV2Configuration.self, DeepseekV2Model.init),
+        "deepseek_v3": create(DeepseekV3Configuration.self, DeepseekV3Model.init),
         "granite": create(GraniteConfiguration.self, GraniteModel.init),
         "granitemoehybrid": create(
             GraniteMoeHybridConfiguration.self, GraniteMoeHybridModel.init),
@@ -86,6 +87,7 @@ public enum LLMTypeRegistry {
         // Mistral3Text.swift is the port of mlx-lm's ministral3.py.
         "ministral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
         "apertus": create(ApertusConfiguration.self, ApertusModel.init),
+        "hunyuan_v1_dense": create(HunyuanConfiguration.self, HunyuanModel.init),
         "nemotron_labs_diffusion": create(
             NemotronLabsDiffusionConfiguration.self, NemotronLabsDiffusionModel.init),
     ])
@@ -277,7 +279,26 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: [gemma4EOSToken]
     )
 
-    /// Model configuration for `mlx-community/Qwen1.5-0.5B-Chat-4bit`.
+    static public let hunyuan_mt_7b_4bit = ModelConfiguration(
+        id: "mlx-community/Hunyuan-MT-7B-4bit",
+        defaultPrompt: "Translate the following text into Chinese: Hello, how are you?"
+    )
+
+    static public let hunyuan_mt_7b_8bit = ModelConfiguration(
+        id: "mlx-community/Hunyuan-MT-7B-8bit",
+        defaultPrompt: "Translate the following text into Chinese: Hello, how are you?"
+    )
+
+    static public let hy_mt2_7b_4bit = ModelConfiguration(
+        id: "mlx-community/Hy-MT2-7B-4bit",
+        defaultPrompt: "Translate the following text into Chinese: Hello, how are you?"
+    )
+
+    static public let hy_mt2_7b_8bit = ModelConfiguration(
+        id: "mlx-community/Hy-MT2-7B-8bit",
+        defaultPrompt: "Translate the following text into Chinese: Hello, how are you?"
+    )
+
     static public let qwen205b4bit = ModelConfiguration(
         id: "mlx-community/Qwen1.5-0.5B-Chat-4bit",
         defaultPrompt: "why is the sky blue?",
@@ -523,23 +544,27 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             deepseekR17b4bit,
             falconH1r7b,
             gemma2bQuantized,
-            gemma22bIT4bit,
-            gemma29bIT4bit,
-            gemma31bQAT4bit,
-            gemma3nE4bITLMBF16,
-            gemma3nE2bITLMBF16,
-            gemma3nE4bITLM4bit,
-            gemma3nE2bITLM4bit,
-            gemma4E4bIT4bit,
-            gemma4E2bIT4bit,
-            granite332b4bit,
-            granite40hTiny4bitDWQ,
-            llama318b4bit,
-            llama321b4bit,
-            llama323b4bit,
-            llama38b4bit,
-            mistral7b4bit,
-            mistralNemo4bit,
+            gemma_2_2b_it_4bit,
+            gemma_2_9b_it_4bit,
+            gemma3_1B_qat_4bit,
+            gemma3n_E4B_it_lm_bf16,
+            gemma3n_E2B_it_lm_bf16,
+            gemma3n_E4B_it_lm_4bit,
+            gemma3n_E2B_it_lm_4bit,
+            gemma4_e4b_it_4bit,
+            gemma4_e2b_it_4bit,
+            hunyuan_mt_7b_4bit,
+            hunyuan_mt_7b_8bit,
+            hy_mt2_7b_4bit,
+            hy_mt2_7b_8bit,
+            granite3_3_2b_4bit,
+            granite_4_0_h_tiny_4bit_dwq,
+            llama3_1_8B_4bit,
+            llama3_2_1B_4bit,
+            llama3_2_3B_4bit,
+            llama3_8B_4bit,
+            mistral7B4bit,
+            mistralNeMo4bit,
             openelm270m4bit,
             phi35MoE,
             phi354bit,
@@ -673,10 +698,12 @@ public final class LLMModelFactory: GenericModelFactory {
     ///   - modelRegistry: registry of model id, e.g. `mlx-community/Llama-3.2-3B-Instruct-4bit`,
     ///     to ``ModelConfiguration``
     public init(
-        typeRegistry: ModelTypeRegistry<LanguageModel>, modelRegistry: AbstractModelRegistry
+        typeRegistry: ModelTypeRegistry<LanguageModel>, modelRegistry: AbstractModelRegistry,
+        conventionsRegistry: ChatConventionsRegistry = .shared
     ) {
         self.typeRegistry = typeRegistry
         self.modelRegistry = modelRegistry
+        self.conventionsRegistry = conventionsRegistry
     }
 
     /// Shared instance with default behavior.
@@ -689,21 +716,10 @@ public final class LLMModelFactory: GenericModelFactory {
     /// registry of model id to configuration, e.g. `mlx-community/Llama-3.2-3B-Instruct-4bit`
     public let modelRegistry: AbstractModelRegistry
 
-    /// Loads a model from the resolved configuration, assembling a ready-to-use ``ModelContext``.
-    ///
-    /// Decodes `config.json`, instantiates the model via the ``typeRegistry``, loads the
-    /// weights and tokenizer in parallel, and applies EOS token, stop string, tool call
-    /// format, and reasoning protocol overrides from the configuration files.
-    ///
-    /// This is the primitive used by the `load(...)` / `loadContainer(...)` family of
-    /// methods — callers typically use those instead of calling this directly.
-    ///
-    /// - Parameters:
-    ///   - configuration: the resolved model configuration, including the model directory
-    ///   - tokenizerLoader: loader used to produce the tokenizer for the model
-    /// - Returns: a ``ModelContext`` holding the model, tokenizer, and input processor
-    /// - Throws: ``ModelFactoryError`` if the configuration files cannot be read or decoded,
-    ///   or any error thrown while loading the weights or tokenizer
+    /// resolvers for chat conventions that are keyed on model id rather than declared
+    /// by the model itself, e.g. DeepSeek-R1
+    public let conventionsRegistry: ChatConventionsRegistry
+
     public func _load(
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader
@@ -737,7 +753,7 @@ public final class LLMModelFactory: GenericModelFactory {
         }
 
         // Load EOS token IDs from config.json, with optional override from generation_config.json
-        var eosTokenIDs = Set(baseConfig.eosTokenIds?.values ?? [])
+        var eosTokenIds = baseConfig.effectiveEOSTokenIds
         let generationConfigURL = modelDirectory.appending(component: "generation_config.json")
         let generationConfig: GenerationConfigFile? =
             if let generationData = try? Data(contentsOf: generationConfigURL) {
@@ -753,9 +769,21 @@ public final class LLMModelFactory: GenericModelFactory {
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIDs
         mutableConfiguration.stopStrings.formUnion(generationConfig?.stopStrings ?? [])
+        // Chat conventions. Precedence: an explicit value on the configuration
+        // (registry entry or caller) wins; then a registered resolver, which sees
+        // the repo id the model cannot; then the model's own declaration.
+        let modelId = configuration.name
         if mutableConfiguration.toolCallFormat == nil {
-            mutableConfiguration.toolCallFormat = ToolCallFormat.infer(
-                from: baseConfig.modelType, configData: configData)
+            mutableConfiguration.toolCallFormat =
+                conventionsRegistry.toolCallFormat(
+                    modelId: modelId, modelType: baseConfig.modelType)
+                ?? model.toolCallFormat
+        }
+        if mutableConfiguration.reasoningConfig == nil {
+            mutableConfiguration.reasoningConfig =
+                conventionsRegistry.reasoningConfig(
+                    modelId: modelId, modelType: baseConfig.modelType)
+                ?? model.reasoningConfig
         }
         // Reasoning protocol: registry override wins; otherwise infer from
         // model_type + repo id. `modelID` is load-bearing — R1-Distill reports a

@@ -43,7 +43,7 @@
 namespace {
 // The pinned upstream commit sha, kept in sync with
 // Libraries/MLXCXGrammar/xgrammar/VERSION by scripts/sync-xgrammar-source.sh.
-constexpr const char kXGrammarVersion[] = "v0.1.34";
+constexpr const char kXGrammarVersion[] = "v0.1.30";
 
 xgrammar::VocabType MapVocabType(XGVocabType type) {
     switch (type) {
@@ -495,11 +495,10 @@ XGStatus xg_matcher_find_jump_forward_string(
 XGStatus xg_matcher_fork(XGMatcher *matcher, XGMatcher **out_matcher) {
     if (matcher == nullptr) return XG_ERR_INTERNAL;
     if (out_matcher == nullptr) return XG_ERR_INTERNAL;
-
-    return WithExceptionBoundary(XG_ERR_INTERNAL, [&]() -> XGStatus {
-        *out_matcher = new XGMatcher{matcher->inner.Fork()};
-        return XG_OK;
-    });
+    // GrammarMatcher::Fork() was introduced in xgrammar v0.1.34.
+    // This build is pinned to v0.1.30 which does not have it.
+    SetLastErrorMessage("xg_matcher_fork: Fork() not available in xgrammar v0.1.30");
+    return XG_ERR_INTERNAL;
 }
 
 }  // extern "C"

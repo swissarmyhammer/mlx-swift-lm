@@ -6,7 +6,6 @@
 
 #include <xgrammar/xgrammar.h>
 
-#include <chrono>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -60,19 +59,14 @@ std::string _PrintGrammarFSMs(const Grammar& grammar) {
 
 namespace details {
 
-using Clock = std::chrono::steady_clock;
-using TimePoint = Clock::time_point;
-
-bool DFS(
+void DFS(
     int32_t curr,
     int32_t parent_pos,
     const int64_t* retrieve_next_token,
     const int64_t* retrieve_next_sibling,
     const int64_t* draft_tokens,
     GrammarMatcher& matcher,
-    DLTensor* bitmask,
-    double time_threshold,
-    const TimePoint& start_time
+    DLTensor* bitmask
 ) {
   int32_t* bitmask_data = reinterpret_cast<int32_t*>(bitmask->data);
   int32_t bitmask_size = static_cast<int32_t>(bitmask->shape[1]);
@@ -86,15 +80,6 @@ bool DFS(
     int32_t* parent_bitmask = bitmask_data + parent_pos * bitmask_size;
     // 32 boolean bitmask values are packed into 32-bit integers
     accepted = (parent_bitmask[curr_token_id / 32] & (1 << (curr_token_id % 32))) != 0;
-
-    // Check timeout for non-root nodes (so that it can at least compute vocab mask
-    // for the root node, matching the non-speculative-decoding overhead)
-    if (time_threshold > 0) {
-      auto elapsed = std::chrono::duration<double>(Clock::now() - start_time).count();
-      if (elapsed > time_threshold) {
-        return false;
-      }
-    }
   }
 
   if (accepted) {
@@ -106,22 +91,13 @@ bool DFS(
       matcher.FillNextTokenBitmask(bitmask, curr);
 
       if (retrieve_next_token[curr] != -1) {
-        bool success =
-            DFS(retrieve_next_token[curr],
-                curr,
-                retrieve_next_token,
-                retrieve_next_sibling,
-                draft_tokens,
-                matcher,
-                bitmask,
-                time_threshold,
-                start_time);
-        if (!success) {
-          if (curr != 0) {
-            matcher.Rollback(1);
-          }
-          return false;
-        }
+        DFS(retrieve_next_token[curr],
+            curr,
+            retrieve_next_token,
+            retrieve_next_sibling,
+            draft_tokens,
+            matcher,
+            bitmask);
       }
     }
 
@@ -131,33 +107,24 @@ bool DFS(
   }
 
   if (retrieve_next_sibling[curr] != -1) {
-    bool success =
-        DFS(retrieve_next_sibling[curr],
-            parent_pos,
-            retrieve_next_token,
-            retrieve_next_sibling,
-            draft_tokens,
-            matcher,
-            bitmask,
-            time_threshold,
-            start_time);
-    if (!success) {
-      return false;
-    }
+    DFS(retrieve_next_sibling[curr],
+        parent_pos,
+        retrieve_next_token,
+        retrieve_next_sibling,
+        draft_tokens,
+        matcher,
+        bitmask);
   }
-
-  return true;
 }
 
 }  // namespace details
 
-bool TraverseDraftTree(
+void TraverseDraftTree(
     const DLTensor* retrieve_next_token,
     const DLTensor* retrieve_next_sibling,
     const DLTensor* draft_tokens,
     GrammarMatcher& matcher,
-    DLTensor* bitmask,
-    double time_threshold
+    DLTensor* bitmask
 ) {
   // Check dtype
   XGRAMMAR_CHECK(retrieve_next_token->dtype.code == kDLInt && retrieve_next_token->dtype.bits == 64)
@@ -175,16 +142,14 @@ bool TraverseDraftTree(
   XGRAMMAR_CHECK(retrieve_next_token->shape[0] == draft_tokens->shape[0])
       << "The retrieve_next_token and draft_tokens tensors must have the same length";
 
-  return details::DFS(
+  details::DFS(
       0,
       -1,
       reinterpret_cast<const int64_t*>(retrieve_next_token->data),
       reinterpret_cast<const int64_t*>(retrieve_next_sibling->data),
       reinterpret_cast<const int64_t*>(draft_tokens->data),
       matcher,
-      bitmask,
-      time_threshold,
-      details::Clock::now()
+      bitmask
   );
 }
 

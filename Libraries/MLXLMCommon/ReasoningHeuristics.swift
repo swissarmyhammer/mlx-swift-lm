@@ -9,10 +9,10 @@
 /// is available). Callers that have a stronger signal, or that simply declare
 /// their capabilities explicitly, should not use it.
 ///
-/// It is intentionally NOT a provable superset of
-/// ``ReasoningConfig/infer(from:modelID:configData:)``: `infer` also keys on
-/// `model_type`, which this heuristic never sees. A community re-upload with a
-/// non-matching repo name but a reasoning `model_type` resolves a
+/// It is intentionally NOT a provable superset of what actually resolves at load
+/// time: a model's own ``ChatConventionsProviding`` declaration keys on the model
+/// type, which this heuristic never sees. A community re-upload with a
+/// non-matching repo name but a reasoning model type resolves a
 /// `ReasoningConfig` yet may not match here. Callers who need a stricter
 /// guarantee should declare `.reasoning` themselves.
 public enum ReasoningHeuristics {
@@ -22,7 +22,6 @@ public enum ReasoningHeuristics {
         "qwen3",  // Qwen3 family
         "deepseek-r1",  // DeepSeek-R1 and R1-Distill
         "r1-distill",  // R1-Distill re-uploads not prefixed "deepseek-"
-        "deepseek-v4",  // DeepSeek-V4: toggleable thinking, resolved by model_type in infer
     ]
 
     /// Whether the model identifier looks like a reasoning-capable model.

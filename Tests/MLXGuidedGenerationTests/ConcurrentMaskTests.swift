@@ -14,10 +14,6 @@ import Testing
 @Suite
 struct ConcurrentMaskTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     // MARK: - applyMaskAndSample Tests
 
     @Test

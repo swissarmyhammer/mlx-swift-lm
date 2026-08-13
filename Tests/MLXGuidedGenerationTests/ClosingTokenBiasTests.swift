@@ -39,10 +39,6 @@ private struct ListTokenizer: MLXLMCommon.Tokenizer {
 @Suite
 struct ClosingTokenBiasTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     @Test("Tier-2 closing characters get +100 bias")
     func tier2CharactersGetHundredBias() {
         let tok = ListTokenizer(tokens: [
@@ -54,39 +50,16 @@ struct ClosingTokenBiasTests {
             "9",  // 5
             "abc",  // 6 (not closing)
         ])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: nil)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: nil)
         let values = bias.asArray(Float.self)
 
         #expect(values[0] == 100.0)  // "
         #expect(values[1] == 100.0)  // }
         #expect(values[2] == 100.0)  // ]
-        // Digits must NOT be closing-tier: boosting them sustains digit
-        // runaways inside string/number content (kanban y4s0w2j -- the
-        // `tripCities202506041234...` / `10101010...` live failures), and
-        // they never need a boost to complete a numeric value: when digits
-        // are the only grammar-legal class, the hard zone's uniform
-        // suppression preserves their relative order anyway.
-        #expect(values[3] == 0.0)  // 0
-        #expect(values[4] == 0.0)  // 5
-        #expect(values[5] == 0.0)  // 9
+        #expect(values[3] == 100.0)  // 0
+        #expect(values[4] == 100.0)  // 5
+        #expect(values[5] == 100.0)  // 9
         #expect(values[6] == 0.0)  // abc
-    }
-
-    @Test("eosOnlyBoost boosts exactly the stop-token positions")
-    func eosOnlyBoostBoostsStopTokensOnly() {
-        let boost = ClosingTokenBias.eosOnlyBoost(stopTokenIDs: [1, 3], count: 5)
-        let values = boost.asArray(Float.self)
-
-        #expect(values == [0.0, 200.0, 0.0, 200.0, 0.0])
-    }
-
-    @Test("eosOnlyBoost ignores out-of-range stop ids and handles an empty set")
-    func eosOnlyBoostIgnoresOutOfRangeAndEmpty() {
-        let outOfRange = ClosingTokenBias.eosOnlyBoost(stopTokenIDs: [-1, 7], count: 3)
-        #expect(outOfRange.asArray(Float.self) == [0.0, 0.0, 0.0])
-
-        let empty = ClosingTokenBias.eosOnlyBoost(stopTokenIDs: [], count: 2)
-        #expect(empty.asArray(Float.self) == [0.0, 0.0])
     }
 
     @Test("EOS token gets +200 bias overriding any tier-2 setting")
@@ -96,7 +69,7 @@ struct ClosingTokenBiasTests {
             "<EOS>",  // 1 - EOS
             "abc",  // 2 - none
         ])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: 1)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 1)
         let values = bias.asArray(Float.self)
 
         #expect(values[0] == 100.0)  // tier 2 only
@@ -110,7 +83,7 @@ struct ClosingTokenBiasTests {
             "\"",  // 0 - tier 2 AND EOS
             "abc",  // 1
         ])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: 0)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 0)
         let values = bias.asArray(Float.self)
 
         // EOS bias overrides tier-2
@@ -127,7 +100,7 @@ struct ClosingTokenBiasTests {
             "{",  // opening - not in tier 2
             "[",  // opening - not in tier 2
         ])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: nil)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: nil)
         let values = bias.asArray(Float.self)
 
         #expect(values == [0.0, 0.0, 0.0, 0.0, 0.0])
@@ -136,7 +109,7 @@ struct ClosingTokenBiasTests {
     @Test("Vocab size discovery scans until convertIdToToken returns nil")
     func vocabSizeDiscoveryWorks() {
         let tok = ListTokenizer(tokens: ["a", "b", "}", "]", "\""])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: nil)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: nil)
 
         // Discovered vocab size should be 5
         #expect(bias.shape == [5])
@@ -145,7 +118,7 @@ struct ClosingTokenBiasTests {
     @Test("Out-of-range EOS id is ignored")
     func outOfRangeEOSIgnored() {
         let tok = ListTokenizer(tokens: ["a", "}"])
-        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenID: 999)
+        let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 999)
         let values = bias.asArray(Float.self)
 
         #expect(values[0] == 0.0)

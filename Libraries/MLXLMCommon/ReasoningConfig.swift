@@ -31,16 +31,6 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
     /// model's own template default.
     case templateFlag(key: String, defaultOn: Bool)
 
-    /// Toggleable via a chat-template keyword argument that takes one of
-    /// three string values rather than a boolean (e.g. MiniMax-M3's
-    /// `thinking_mode`: `"enabled"` / `"disabled"` / `"adaptive"`).
-    ///
-    /// The `key` is the kwarg name; `onValue`/`offValue` are the strings sent
-    /// when the caller forces thinking on/off; `defaultValue` is the string
-    /// sent when the caller expresses no preference, matching the model's own
-    /// template default.
-    case templateStringFlag(key: String, onValue: String, offValue: String, defaultValue: String)
-
     /// The model always reasons and cannot be turned off (e.g. DeepSeek-R1).
     case alwaysOn
 
@@ -62,20 +52,17 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
         switch self {
         case .templateFlag(let key, let defaultOn):
             return [key: thinkingEnabled ?? defaultOn]
-        case .templateStringFlag(let key, let onValue, let offValue, let defaultValue):
-            let value: String
-            switch thinkingEnabled {
-            case .some(true): value = onValue
-            case .some(false): value = offValue
-            case .none: value = defaultValue
+        case .alwaysOn:
+            if thinkingEnabled == false {
+                throw ReasoningError.cannotDisableReasoning
             }
-            return [key: value]
-        // .none is non-suppressible just like .alwaysOn: there is no
-        // prompt-level knob to turn thinking off, so asking to disable it
-        // raises the same typed error. The capability gate at
-        // MLXLanguageModel routes this to
-        // LanguageModelError.unsupportedCapability.
-        case .alwaysOn, .none:
+            return nil
+        case .none:
+            // .none is non-suppressible: there is no prompt-level knob to
+            // turn thinking off. Asking to disable it is identical in
+            // outcome to asking .alwaysOn to disable, so it raises the
+            // same typed error. The capability gate at MLXLanguageModel
+            // routes this to LanguageModelError.unsupportedCapability.
             if thinkingEnabled == false {
                 throw ReasoningError.cannotDisableReasoning
             }
@@ -104,252 +91,56 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// How a thinking on / off preference is expressed to the chat template.
     public var promptStrategy: ReasoningPromptStrategy
 
-    /// Diagnostic only: whether ``startDelimiter`` is a registered special token
-    /// for this model's tokenizer.
+    /// Markers that implicitly leave reasoning without emitting ``endDelimiter``.
     ///
-    /// Not load-bearing in v1 — detection is always string-scan based (the
-    /// decoded stream renders the delimiter as literal text whether or not it is
-    /// a special token, because `decode(tokenIds:)` defaults
-    /// `skipSpecialTokens: false`). Reserved for a future token-ID-stream
-    /// optimization.
+    /// These markers remain part of the generated stream. They are boundaries,
+    /// not replacements for the canonical closing delimiter. For example,
+    /// Qwen3.5 may begin `<tool_call>` directly from its thinking block.
+    public var implicitEndDelimiters: [String]
+
+    /// How this model safely transitions to its answer when a reasoning budget
+    /// is exhausted, or `nil` when hard budget enforcement is unsupported.
+    public var budgetTransition: ReasoningBudgetTransition?
+
+    /// Diagnostic only: whether ``startDelimiter`` is a registered special token
+    /// for this model's tokenizer. Budget enforcement compiles every boundary
+    /// with the active tokenizer and does not rely on this hint.
     public var isSpecialToken: Bool
 
-    /// The chat-template kwarg that makes past assistant turns re-render WITH
-    /// their reasoning (e.g. Qwen3.6's `preserve_thinking`), or `nil` for
-    /// families whose templates strip history reasoning unconditionally.
-    ///
-    /// When set, history-affecting renders merge ``historyPreservationContext``
-    /// into their `additionalContext`, and prior turns' reasoning is replayed
-    /// as `reasoning_content` on the corresponding assistant message — the two
-    /// halves that together keep a round's fed tokens byte-continuous with the
-    /// next round's history re-render (prompt-cache continuity through
-    /// responses). The tradeoff is context growth: preserved reasoning stays
-    /// in every later prompt.
-    public var historyPreservationKey: String? = nil
-
-    /// The single-entry `additionalContext` (`[historyPreservationKey: true]`)
-    /// that history-affecting renders merge in, or `nil` when the family has
-    /// no ``historyPreservationKey`` — leaving those renders exactly as before.
-    public var historyPreservationContext: [String: any Sendable]? {
-        historyPreservationKey.map { [$0: true] }
-    }
-
-    /// Creates a reasoning configuration with the given delimiters and prompt
-    /// strategy.
-    ///
-    /// - Parameters:
-    ///   - startDelimiter: the marker that opens a reasoning span (e.g. `<think>`).
-    ///   - endDelimiter: the marker that closes a reasoning span (e.g. `</think>`).
-    ///   - promptStrategy: how a thinking on / off preference is expressed to
-    ///     the chat template.
-    ///   - isSpecialToken: whether ``startDelimiter`` is a registered special
-    ///     token for this model's tokenizer (diagnostic only; defaults to `false`).
-    ///   - historyPreservationKey: the chat-template kwarg that makes past
-    ///     assistant turns re-render with their reasoning, or `nil` (the
-    ///     default) for families without one.
     public init(
         startDelimiter: String,
         endDelimiter: String,
         promptStrategy: ReasoningPromptStrategy,
         isSpecialToken: Bool = false,
-        historyPreservationKey: String? = nil
+        implicitEndDelimiters: [String] = [],
+        budgetTransition: ReasoningBudgetTransition? = nil
     ) {
         self.startDelimiter = startDelimiter
         self.endDelimiter = endDelimiter
         self.promptStrategy = promptStrategy
         self.isSpecialToken = isSpecialToken
-        self.historyPreservationKey = historyPreservationKey
+        self.implicitEndDelimiters = implicitEndDelimiters
+        self.budgetTransition = budgetTransition
     }
 
-    // MARK: - Inference
+    // MARK: - Presets
 
-    /// The delimiter that opens a `<think>`-style reasoning span, shared by
-    /// every reasoning family ``infer(from:modelID:configData:)`` recognizes.
-    private static let thinkStartDelimiter = "<think>"
-
-    /// The delimiter that closes a `<think>`-style reasoning span, shared by
-    /// every reasoning family ``infer(from:modelID:configData:)`` recognizes.
-    private static let thinkEndDelimiter = "</think>"
-
-    /// The configuration shared by the always-on `<think>` families in
-    /// ``inferenceTable`` (DeepSeek-R1 and MiniMax-M2): identical delimiters,
-    /// thinking cannot be turned off.
-    private static let alwaysOnThinkConfig = ReasoningConfig(
-        startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
-        promptStrategy: .alwaysOn)
-
-    /// Builds a Qwen3-family configuration: `<think>` delimiters, thinking
-    /// toggled via the `enable_thinking` template kwarg (the start delimiter
-    /// is a registered special token for Qwen3 tokenizers). The single
-    /// definition of the family protocol shared by ``qwen3ThinkConfig`` and
-    /// ``qwen35ThinkConfig``, which differ only in history preservation.
+    /// Generic `<think>`/`</think>` protocol toggled by the `enable_thinking`
+    /// chat-template flag (default on).
     ///
-    /// - Parameter historyPreservationKey: the chat-template kwarg that
-    ///   replays past turns' reasoning into history re-renders, or `nil`
-    ///   (the default) for families without one.
-    /// - Returns: the family configuration.
-    private static func makeQwen3Config(
-        historyPreservationKey: String? = nil
-    ) -> ReasoningConfig {
-        ReasoningConfig(
-            startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
-            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
-            isSpecialToken: true,
-            historyPreservationKey: historyPreservationKey)
-    }
-
-    /// The Qwen3-family configuration: `<think>` delimiters, thinking toggled
-    /// via the `enable_thinking` template kwarg (the start delimiter is a
-    /// registered special token for Qwen3 tokenizers).
-    private static let qwen3ThinkConfig = makeQwen3Config()
-
-    /// The Qwen3.6 (model_type "qwen3_5") configuration: the shared Qwen3
-    /// protocol plus the template's `preserve_thinking` kwarg, which replays
-    /// past turns' reasoning into history re-renders — the hook that lets
-    /// prompt-cache continuity extend through a round's own generated
-    /// response (see ``historyPreservationKey``). Pre-3.6 Qwen3 templates
-    /// have no such variable, so only this family's row carries the key.
-    private static let qwen35ThinkConfig = makeQwen3Config(
-        historyPreservationKey: "preserve_thinking")
-
-    /// MiniMax-M3 (model_type "minimax_m3"/"minimax_m3_vl", e.g.
-    /// mlx-community/MiniMax-M3-4bit): `<mm:think>` delimiters. Unlike M2's
-    /// `.alwaysOn`, M3's chat template exposes a toggleable `thinking_mode`
-    /// kwarg ("enabled" / "disabled" / "adaptive") that both drives the
-    /// system-prompt instructions and, when forced, pre-primes the generation
-    /// prompt with the opening/closing delimiter -- mirroring
-    /// `enable_thinking`'s toggle role for Qwen3 above, just string-valued.
-    private static let minimaxM3ThinkConfig = ReasoningConfig(
-        startDelimiter: "<mm:think>", endDelimiter: "</mm:think>",
-        promptStrategy: .templateStringFlag(
-            key: "thinking_mode", onValue: "enabled", offValue: "disabled",
-            defaultValue: "adaptive"))
-
-    /// DeepSeek-V4 (model_type "deepseek_v4", e.g.
-    /// mlx-community/DeepSeek-V4-Flash-4bit): `<think>` delimiters, thinking
-    /// toggled via a `thinking` boolean.
-    ///
-    /// The strategy is NOT the always-on row of V3/R1, and that choice is
-    /// deliberate. DeepSeek-V4 ships no chat template; its reference prompt
-    /// builder (`encoding/encoding_dsv4.py`, transcribed as
-    /// `DeepSeekV4ChatEncoder`) takes a REQUIRED `thinking_mode` argument
-    /// with the two explicit values `chat` and `thinking`. Thus the caller
-    /// can turn thinking off, and `.alwaysOn` would wrongly reject that
-    /// request with `cannotDisableReasoning`. The `thinking` key is the same
-    /// boolean kwarg the DeepSeek-V3.1+ chat templates use, and the encoder
-    /// wiring reads it to select the mode. `defaultOn: true` keeps the
-    /// family precedent: a caller with no preference gets the reasoning
-    /// behavior that the V3/R1 rows always give, and unlike them can opt
-    /// out. The start delimiter is one entry of the published
-    /// `tokenizer.json` `added_tokens` (id 128821), thus `isSpecialToken`.
-    private static let deepSeekV4ThinkConfig = ReasoningConfig(
-        startDelimiter: thinkStartDelimiter, endDelimiter: thinkEndDelimiter,
-        promptStrategy: .templateFlag(key: "thinking", defaultOn: true),
+    /// This deliberately declares no budget transition. Sharing delimiters and
+    /// a template flag does not imply that two model families were trained to
+    /// respond to the same forced early-stop sequence.
+    public static let thinkTagsWithEnableThinking = ReasoningConfig(
+        startDelimiter: "<think>", endDelimiter: "</think>",
+        promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
         isSpecialToken: true)
 
-    /// How an ``inferenceTable`` entry's `value` is compared against the
-    /// model's lowercased `model_type` or repo id.
-    private enum ReasoningMatch {
-        /// The lowercased `model_type` equals `value`.
-        case exact
-
-        /// The lowercased `model_type` starts with `value`.
-        case prefix
-
-        /// The lowercased repo id contains `value`. Used for families whose
-        /// `model_type` is indistinguishable from their base model (e.g.
-        /// R1-Distill reporting "qwen2"/"llama") and that must therefore be
-        /// recognized by repo id.
-        case idContains
-
-        /// Whether the model described by `type` / `id` satisfies this match
-        /// kind for `value`.
-        func matches(type: String, id: String, against value: String) -> Bool {
-            switch self {
-            case .exact:
-                return type == value
-            case .prefix:
-                return type.hasPrefix(value)
-            case .idContains:
-                return id.contains(value)
-            }
-        }
-    }
-
-    /// First-match model-signal → configuration lookup consumed by
-    /// ``infer(from:modelID:configData:)``, mirroring
-    /// ``ToolCallFormat/inferenceTable``.
-    ///
-    /// Entries are tried in order and the first matching entry wins, so a
-    /// family's `model_type` entries precede the repo-id fallbacks that
-    /// would otherwise also match it.
-    private static let inferenceTable:
-        [(match: ReasoningMatch, value: String, config: ReasoningConfig)] = [
-            // Qwen3.6 (model_type "qwen3_5" / "qwen3_5_moe" / "qwen3_5_text"):
-            // the shared Qwen3 protocol plus `preserve_thinking` history
-            // replay. Must precede the generic "qwen3" prefix row, which
-            // would otherwise claim the family first.
-            (.prefix, "qwen3_5", qwen35ThinkConfig),
-
-            // Qwen3 family: <think>/</think>, thinking toggled via `enable_thinking`.
-            //
-            // Keyed on the model_type prefix, so a non-thinking Qwen3 variant (e.g.
-            // a future Qwen3-Coder) could match. This is accepted today; on-device
-            // verification and registry overrides refine specific models.
-            (.prefix, "qwen3", qwen3ThinkConfig),
-
-            // DeepSeek-R1 (and R1-Distill): always-on <think>/</think>.
-            //
-            // R1-Distill reports its *base* model_type ("qwen2"/"llama"), so it must
-            // be recognized by repo id. (Plain DeepSeek-V3 shares R1's "deepseek_v3"
-            // model_type; this type is treated as reasoning, refined by registry overrides.)
-            (.exact, "deepseek_v3", alwaysOnThinkConfig),
-            (.exact, "deepseek_r1", alwaysOnThinkConfig),
-            (.idContains, "deepseek-r1", alwaysOnThinkConfig),
-            (.idContains, "r1-distill", alwaysOnThinkConfig),
-
-            // DeepSeek-V4 (model_type "deepseek_v4"): toggleable, unlike the
-            // always-on V3/R1 rows above — see ``deepSeekV4ThinkConfig`` for
-            // the recorded decision. Exact match, mirroring "deepseek_v3".
-            (.exact, "deepseek_v4", deepSeekV4ThinkConfig),
-
-            // MiniMax-M2 (model_type "minimax", e.g. mlx-community/MiniMax-M2-4bit):
-            // interleaved thinking, always on. Its chat template has no thinking
-            // kwarg and pre-opens `<think>\n` in every generation prompt, so the
-            // decoded stream begins inside an open reasoning span (detected by
-            // the prompt-tail primed-inside check, exactly like R1 above).
-            // Exact match: earlier MiniMax families (minimax_text_01,
-            // minimax_m1) do not share M2's protocol.
-            (.exact, "minimax", alwaysOnThinkConfig),
-
-            // MiniMax-M3 (model_type "minimax_m3" / "minimax_m3_vl", e.g.
-            // mlx-community/MiniMax-M3-4bit): unlike M2, thinking is
-            // toggleable via the template's `thinking_mode` kwarg, not
-            // always-on. Prefix match so both the flat text and VL model
-            // types resolve to the same row.
-            (.prefix, "minimax_m3", minimaxM3ThinkConfig),
-        ]
-
-    /// Infer a reasoning configuration from a model's `model_type` and repo id.
-    ///
-    /// Unlike ``ToolCallFormat/infer(from:configData:)``, `modelID` is
-    /// load-bearing: DeepSeek-R1-Distill models report `model_type == "qwen2"`
-    /// (or `"llama"`), indistinguishable from plain Qwen2.5/Llama by type alone,
-    /// and must be recognized by their repo id.
-    ///
-    /// - Parameters:
-    ///   - modelType: the `model_type` value from config.json.
-    ///   - modelID: the Hugging Face repo id (e.g. `mlx-community/Qwen3-4B-4bit`).
-    ///   - configData: raw config.json data for secondary signals (reserved; unused in v1).
-    /// - Returns: the inferred ``ReasoningConfig``, or `nil` for non-reasoning models.
-    public static func infer(
-        from modelType: String,
-        modelID: String? = nil,
-        configData: Data? = nil
-    ) -> ReasoningConfig? {
-        let type = modelType.lowercased()
-        let id = (modelID ?? "").lowercased()
-        return inferenceTable.first { $0.match.matches(type: type, id: id, against: $0.value) }?
-            .config
-    }
+    /// Always-on `<think>`/`</think>` with no prompt-level off switch
+    /// (DeepSeek-R1 and its distills). The protocol does not claim a known-safe
+    /// hard-budget transition; applications may opt into one explicitly after
+    /// validating it for their exact model and tokenizer.
+    public static let alwaysOnThinking = ReasoningConfig(
+        startDelimiter: "<think>", endDelimiter: "</think>",
+        promptStrategy: .alwaysOn)
 }
