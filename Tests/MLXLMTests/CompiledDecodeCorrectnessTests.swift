@@ -120,8 +120,8 @@ public class CompiledDecodeCorrectnessTests: XCTestCase {
     /// per generated token against a growing `KVCacheSimple`.
     private func uncompiledDecode(
         model: LlamaModel, promptTokens: [Int32], steps: Int
-    ) -> [Int] {
-        let cache = model.newCache(parameters: nil)
+    ) throws -> [Int] {
+        let cache = try model.newCache(parameters: nil)
         var tokens: [Int] = []
         var nextInput = MLXArray(promptTokens)[.newAxis, .ellipsis]
 
@@ -151,8 +151,8 @@ public class CompiledDecodeCorrectnessTests: XCTestCase {
     /// permanent CI gate.
     private func compiledDecode(
         model: LlamaModel, promptTokens: [Int32], steps: Int, shapeless: Bool
-    ) -> [Int] {
-        let cache = model.newCache(parameters: nil)
+    ) throws -> [Int] {
+        let cache = try model.newCache(parameters: nil)
         let stateArgs: [any Updatable] = [model as any Updatable] + cache.map { $0 as any Updatable }
 
         let compiledStep = compile(
