@@ -26,11 +26,14 @@
 //     `mtp.*` and builds a DSpark drafter from it. The Python reference drops
 //     every `mtp.` key, and this repository carries no DSpark type, thus the
 //     load filter drops them here.
-//  3. **The compressor and the indexer are dropped.** The file above keeps
-//     `attn.compressor.*` and `attn.indexer.*` and wires them into its
-//     attention. Sparse attention is its own work in this repository, and
-//     ``DeepSeekV4Attention`` holds neither submodule, thus the load filter
-//     drops those keys. Remove the filter when sparse attention lands.
+//  3. **The compressor is dropped, and the indexer is not.** The file above
+//     keeps `attn.compressor.*` and `attn.indexer.*` and wires them into its
+//     attention. Sparse attention lands in two halves in this repository.
+//     ``DeepSeekV4Attention`` now holds the indexer, thus
+//     `attn.indexer.wq_b.*` and `attn.indexer.weights_proj.*` load. The
+//     compressor is task `^tty95f4`, and its name reaches the compressor of
+//     the attention and the compressor inside the indexer alike, thus the
+//     load filter still drops both. Remove the filter with that task.
 //  4. **The language-model head is optional.** The file above declares a
 //     non-optional `lm_head`. `MLXLMCommon.loadWeights` verifies with
 //     `.allModelKeysSet`, thus a checkpoint whose `tie_word_embeddings` is
@@ -428,9 +431,14 @@ public class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
     /// does not carry.
     private static let languageModelHeadWeight = "lm_head.weight"
 
-    /// The submodule names of sparse attention. Their tensors carry no module
-    /// of their own in this repository yet.
-    private static let sparseAttentionSegments = [".compressor.", ".indexer."]
+    /// The submodule name of the compressor, which pools the keys of the
+    /// global context.
+    ///
+    /// The name reaches the compressor of an attention layer,
+    /// `attn.compressor.*`, and the compressor inside an indexer,
+    /// `attn.indexer.compressor.*`, because the indexer pools keys of its own.
+    /// No module of this repository holds either set yet.
+    private static let compressorSegment = ".compressor."
 
     /// The name each of the three expert projections carries in the
     /// checkpoint, beside the name the module tree gives it.
@@ -484,11 +492,13 @@ public class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
         // this repository does not read.
         if key.hasPrefix(multiTokenPredictionPrefix) { return false }
 
-        // The compressor and the indexer belong to DeepSeek-V4 sparse
-        // attention, which task `^tty95f4` and task `^r92pjcr` land.
-        // `DeepSeekV4Attention` holds neither submodule today, thus their
-        // tensors have no place to go. Remove this test with those tasks.
-        if sparseAttentionSegments.contains(where: key.contains) { return false }
+        // The compressor pools the keys of the global context, and task
+        // `^tty95f4` lands it. The name reaches the compressor of the
+        // attention and the compressor inside the indexer alike, thus neither
+        // set has a place to go today. Remove this test with that task. The
+        // two projections of the indexer itself, `attn.indexer.wq_b.*` and
+        // `attn.indexer.weights_proj.*`, load into ``DeepSeekV4Indexer``.
+        if key.contains(compressorSegment) { return false }
 
         guard let layer = layerIndex(of: key) else { return true }
         return layer < layerCount

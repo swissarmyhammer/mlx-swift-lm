@@ -293,6 +293,27 @@ extension DeepSeekV4Configuration {
         layer < numHashLayers
     }
 
+    /// The compress ratio a layer must hold to have an indexer.
+    ///
+    /// The published DeepSeek-V4-Flash checkpoint names indexer tensors on the
+    /// 21 even layers 2 through 42, which are the layers of this ratio. A layer
+    /// whose ratio is 128 holds a compressor and no indexer, and a layer whose
+    /// ratio is 0 holds neither.
+    static let indexerCompressRatio = 4
+
+    /// Gives the compress ratio of one layer.
+    ///
+    /// A layer that the ``compressRatios`` list does not reach takes 0. That
+    /// list holds one entry more than ``numHiddenLayers`` in the published
+    /// checkpoint, thus a layer count never comes from its length.
+    ///
+    /// - Parameter layer: The index of the decoder layer.
+    /// - Returns: The compress ratio of that layer, or 0.
+    public func compressRatio(ofLayer layer: Int) -> Int {
+        guard layer >= 0, layer < compressRatios.count else { return 0 }
+        return compressRatios[layer]
+    }
+
     /// Tells whether a layer has a compressor.
     ///
     /// A compressor sits on a layer whose compress ratio is more than 0. A
@@ -301,8 +322,19 @@ extension DeepSeekV4Configuration {
     /// - Parameter layer: The index of the decoder layer.
     /// - Returns: True when the layer has a compressor.
     public func hasCompressor(layer: Int) -> Bool {
-        guard layer < compressRatios.count else { return false }
-        return compressRatios[layer] > 0
+        compressRatio(ofLayer: layer) > 0
+    }
+
+    /// Tells whether a layer has an indexer.
+    ///
+    /// An indexer sits beside the compressor of a layer whose compress ratio is
+    /// ``indexerCompressRatio``, and nowhere else. The set of indexer layers is
+    /// thus narrower than the set of compressor layers.
+    ///
+    /// - Parameter layer: The index of the decoder layer.
+    /// - Returns: True when the layer has an indexer.
+    public func hasIndexer(layer: Int) -> Bool {
+        compressRatio(ofLayer: layer) == Self.indexerCompressRatio
     }
 
     /// Gives the rope theta of one layer.

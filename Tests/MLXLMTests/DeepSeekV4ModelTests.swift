@@ -486,20 +486,21 @@ struct DeepSeekV4ModelTests {
         #expect(sanitized["model.norm.weight"] != nil)
     }
 
-    @Test func sanitizeDropsTheCompressorAndTheIndexerUntilSparseAttentionLands() throws {
+    /// The index of the layer whose sparse-attention tensors this test names.
+    private static let sparseAttentionLayer = 2
+
+    @Test func sanitizeDropsTheCompressorUntilTheCompressorTaskLands() throws {
         let model = DeepSeekV4Model(try Self.configuration())
+        let layer = Self.sparseAttentionLayer
         let sanitized = model.sanitize(weights: [
-            "layers.2.attn.compressor.wkv.weight": Self.marker(1),
-            "layers.2.attn.compressor.wgate.weight": Self.marker(2),
-            "layers.2.attn.indexer.wq_b.weight": Self.marker(3),
-            "layers.2.attn.indexer.weights_proj.weight": Self.marker(4),
-            "layers.2.attn.indexer.compressor.wkv.weight": Self.marker(5),
-            "layers.2.attn.wq_a.weight": Self.marker(6),
+            "layers.\(layer).attn.compressor.wkv.weight": Self.marker(1),
+            "layers.\(layer).attn.compressor.wgate.weight": Self.marker(2),
+            "layers.\(layer).attn.indexer.compressor.wkv.weight": Self.marker(3),
+            "layers.\(layer).attn.wq_a.weight": Self.marker(4),
         ])
 
         #expect(!sanitized.keys.contains { $0.contains("compressor") })
-        #expect(!sanitized.keys.contains { $0.contains("indexer") })
-        #expect(sanitized["model.layers.2.attn.wq_a.weight"] != nil)
+        #expect(sanitized["model.layers.\(layer).attn.wq_a.weight"] != nil)
     }
 
     @Test func sanitizeDropsALayerTheConfigurationDoesNotDeclare() throws {

@@ -34,8 +34,10 @@
 //     would give the wrong numbers. This file passes the mode of the
 //     layer.
 //
-// The compressor and the indexer of a layer whose compress ratio is more
-// than 0 are not in this file. They are their own work.
+// The compressor of a layer whose compress ratio is more than 0 is not in
+// this file. It is its own work, task `^tty95f4`. The indexer of a layer
+// whose compress ratio is 4 hangs below, because its tensors need a module
+// to load into, and the attention path does not read it yet.
 
 import Foundation
 import MLX
@@ -239,6 +241,15 @@ class DeepSeekV4Attention: Module {
     /// One learned logit for each query head, shape `(headCount)`.
     @ParameterInfo(key: "attn_sink") var attnSink: MLXArray
 
+    /// The top-k chunk selector of this layer, or `nil` on a layer that holds
+    /// no indexer.
+    ///
+    /// The selector holds the `attn.indexer.*` tensors of the checkpoint. The
+    /// block above does not call it yet: it picks pooled chunks, and the
+    /// compressor that pools them is task `^tty95f4`. Sparse attention lands
+    /// with that task and reads the selection this module answers.
+    @ModuleInfo(key: "indexer") var indexer: DeepSeekV4Indexer?
+
     /// DeepSeek-V4 keeps one latent key/value head and sends it to every
     /// query head, thus `wkv` gives one head of `head_dim` numbers.
     private static let latentHeadCount = 1
@@ -300,6 +311,11 @@ class DeepSeekV4Attention: Module {
         self._kvNorm.wrappedValue = RMSNorm(
             dimensions: configuration.headDim, eps: configuration.rmsNormEps)
         self._attnSink.wrappedValue = zeros([configuration.numAttentionHeads])
+
+        if configuration.hasIndexer(layer: layer) {
+            self._indexer.wrappedValue = DeepSeekV4Indexer(
+                configuration: configuration, layer: layer)
+        }
     }
 
     /// Reads one block of tokens.
