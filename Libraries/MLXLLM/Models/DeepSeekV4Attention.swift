@@ -60,7 +60,7 @@ import MLXNN
 /// tensor, because DeepSeek-V4 reads the same tables three times in one
 /// block: forward on the queries, forward on the keys, and backward on the
 /// attention output.
-class DeepSeekV4RoPE: Module {
+final class DeepSeekV4RoPE: Module {
 
     /// The inverse frequency of each rotary pair, in float32.
     ///
@@ -142,9 +142,16 @@ class DeepSeekV4RoPE: Module {
 
     /// The four numbers a YaRN scaling needs.
     private struct YarnScaling {
+        /// The factor the scaling widens the context by.
         let factor: Float
+
+        /// The context the checkpoint trained on, before YaRN widened it.
         let originalMaxPositionEmbeddings: Int
+
+        /// The turn count that sets the low end of the YaRN ramp.
         let betaFast: Float
+
+        /// The turn count that sets the high end of the YaRN ramp.
         let betaSlow: Float
     }
 
@@ -215,7 +222,7 @@ class DeepSeekV4RoPE: Module {
 ///
 /// One latent key/value head serves all query heads, thus the keys and the
 /// values are one and the same tensor.
-class DeepSeekV4Attention: Module {
+final class DeepSeekV4Attention: Module {
 
     /// The number of query heads.
     let headCount: Int
@@ -244,12 +251,31 @@ class DeepSeekV4Attention: Module {
     /// The rotary position of this layer.
     let rope: DeepSeekV4RoPE
 
+    /// The first half of the low-rank query projection, which reads the block
+    /// input down to `q_lora_rank`.
     @ModuleInfo(key: "wq_a") var wqA: Linear
+
+    /// The second half of the low-rank query projection, which reads that rank
+    /// out to every query head.
     @ModuleInfo(key: "wq_b") var wqB: Linear
+
+    /// The projection of the one latent key/value head, which serves every
+    /// query head.
     @ModuleInfo(key: "wkv") var wkv: Linear
+
+    /// The grouped low-rank half of the output projection. Each head group
+    /// reads its own rows of this matrix and no other, thus the projection is
+    /// block diagonal.
     @ModuleInfo(key: "wo_a") var woA: Linear
+
+    /// The wide half of the output projection, which gives the residual width
+    /// back.
     @ModuleInfo(key: "wo_b") var woB: Linear
+
+    /// The norm between the two halves of the query projection.
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
+
+    /// The norm of the one latent key/value head.
     @ModuleInfo(key: "kv_norm") var kvNorm: RMSNorm
 
     /// One learned logit for each query head, shape `(headCount)`.

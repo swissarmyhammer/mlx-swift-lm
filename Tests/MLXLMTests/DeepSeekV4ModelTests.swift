@@ -634,6 +634,26 @@ struct DeepSeekV4ModelTests {
         }
     }
 
+    @Test func sanitizeLeavesAPartialSetOfPerExpertWeightsAlone() throws {
+        let model = DeepSeekV4Model(try Self.configuration())
+        // One expert short of the full set. `DeepSeekV4SwitchGLU` reads one row
+        // for each expert, thus a short set makes no stack and the per-expert
+        // tensors must stay as they are.
+        let shortCount = Self.routedExpertCount - 1
+        var weights: [String: MLXArray] = [:]
+        for expert in 0 ..< shortCount {
+            weights["layers.0.ffn.experts.\(expert).w1.weight"] = Self.marker(Float(expert))
+        }
+
+        let sanitized = model.sanitize(weights: weights)
+
+        #expect(sanitized["model.layers.0.ffn.switch_mlp.gate_proj.weight"] == nil)
+        let kept = (0 ..< shortCount).map {
+            "model.layers.0.ffn.experts.\($0).gate_proj.weight"
+        }
+        #expect(Set(sanitized.keys) == Set(kept))
+    }
+
     @Test func sanitizeKeepsTheHashTableOfARoutingLayer() throws {
         let model = DeepSeekV4Model(try Self.configuration())
         let table = MLXArray(

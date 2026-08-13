@@ -151,10 +151,26 @@ comments:
     - next: `/review`. New work opened as `^ab1eq0r` for the pooled cache and the
       sparse attention path.
   timestamp: 2026-08-13T15:58:02.919615+00:00
+- actor: claude-code
+  id: 01kzxyvcssnwqc61cs9xy4jqgd
+  text: |
+    ### review — clean
+    - evidence: `review file` on each of the four Swift source files of commit `d01df6c`. `DeepSeekV4Compressor.swift` 0 findings (run two times), `DeepSeekV4Indexer.swift` 0 findings, `DeepSeekV4Attention.swift` 4 findings (lines 248-251, blame `54e4770f`), `DeepSeekV4.swift` 2 findings (lines 449 and 551, blame `2624f899`). All 6 sit on lines this commit does not touch, thus the standing rule of `^ag7ant0` puts them out of scope. `Tests/MLXLMTests/DeepSeekV4CompressorTests.swift` gives "Nothing in scope to review" with `attempted: 0`; the engine reads no test file.
+    - next: none for this card. Task `^ab1eq0r` carries the pooled cache and the sparse read.
+  timestamp: 2026-08-13T16:21:26.969385+00:00
+- actor: claude-code
+  id: 01kzxywyz8t35sfm0cj3269arg
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 8 files. New `DeepSeekV4Compressor.swift` (256 lines) and `DeepSeekV4CompressorTests.swift` (12 tests). The `.compressor.` drop is gone from `sanitize`. Six mutation runs, each caught by a named test.
+    - test: green — `swift test`, 869 tests in 105 suites, 0 failures, 2 skips that were there before, 0 warnings. Real weights: `loadsTheRealCheckpointEndToEnd()` and `greedyFirstTokensMatchThePythonFixture()` pass in 41.3 s, thus all 496 compressor tensors found a module under `[.all]` verification.
+    - commit: d01df6c feat(mlx-lm): add DeepSeek-V4 Compressor for pooled-KV long-context attention
+    - review: clean — `review file` ran on each of the four changed Swift source files, because the range mode under-reports. The Compressor and the Indexer answer 0 findings; the Attention answers 4 and the model answers 2, and `git blame` puts all six on earlier commits (54e4770f, 2624f899) that this commit did not touch, thus they are out of scope under the rule of `^ag7ant0`. The card moved to `done`.
+  timestamp: 2026-08-13T16:22:18.344696+00:00
 depends_on:
 - 01KZGMZ34SVP6FRPF89R92PJCR
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: f380
 title: Port DeepseekV4 Compressor (pooled-KV long-context attention)
 ---
 ## What
@@ -221,3 +237,99 @@ thus a stateless compressor pools nothing and the global context would go away
 at the first decode step. The pooled cache and the sparse path that reads it
 are task `^ab1eq0r`.
 #deepseek-v4
+
+## Review Findings (2026-08-13 11:18)
+
+Scope: commit `d01df6c`, range `HEAD~1..HEAD`. The engine ran `review file` on
+each of the four Swift source files that the commit changed. The engine gives
+no finding that this commit must correct.
+
+| File | Findings |
+| --- | --- |
+| `Libraries/MLXLLM/Models/DeepSeekV4Compressor.swift` | 0 |
+| `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift` | 0 |
+| `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift` | 4, all out of scope |
+| `Libraries/MLXLLM/Models/DeepSeekV4.swift` | 2, all out of scope |
+
+The engine ran `DeepSeekV4Compressor.swift` two times and gave 0 findings both
+times. On the other two files the engine made candidates and refuted some of
+them (5 refuted and 3 refuted). The engine thus reads the files of this
+directory correctly, and the two clean results are true results.
+
+`Tests/MLXLMTests/DeepSeekV4CompressorTests.swift` gives "Nothing in scope to
+review" with `attempted: 0`. The engine reads no test file. This result says
+nothing about the quality of the tests.
+
+### Out of scope — this commit does not touch these lines
+
+The standing rule of task `^ag7ant0` says to record a finding on a line that
+this commit does not touch, and not to correct it here. `git blame` gives
+commit `54e4770f` for the four attention lines and commit `2624f899` for the
+two model lines. Commit `d01df6c` changes neither group: its hunks in
+`DeepSeekV4Attention.swift` cover the new lines 34-46, 175-194, 258-280 and
+341-350, and its hunks in `DeepSeekV4.swift` cover the new lines 26-38, 59-68,
+431-436 and 483-488.
+
+The six findings, word for word:
+
+- `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:248` — Public property `wqB` (query low-rank projection matrix) lacks documentation; its role in the attention mechanism is not self-evident. Add a doc comment explaining the purpose of this matrix, e.g., `/// The second projection matrix in the low-rank query pathway.`.
+- `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:249` — Public property `wkv` (key/value projection matrix) lacks documentation; its specific role is not apparent without architectural knowledge. Add a doc comment explaining this is the projection for the latent key/value head, e.g., `/// The projection matrix for the latent key/value head.`.
+- `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:250` — Public property `woA` (output low-rank projection matrix) lacks documentation; its role in the grouped output projection is unclear. Add a doc comment explaining this is the first part of the grouped low-rank output projection, e.g., `/// The first projection matrix in the grouped low-rank output pathway.`.
+- `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:251` — Public property `woB` (output projection matrix) lacks documentation; its role in the output projection pathway is unclear. Add a doc comment explaining this is the second part of the output projection, e.g., `/// The second projection matrix that returns the output to residual width.`.
+- `Libraries/MLXLLM/Models/DeepSeekV4.swift:449` — The doc comment contains two sentences before elaboration, but the rule requires a single-sentence summary on the first line. Merge into a single sentence: `/// The tensor names in a quantized projection; high-precision projections carry only the weight.`.
+- `Libraries/MLXLLM/Models/DeepSeekV4.swift:551` — The function has deeply nested conditions and loops (4 levels deep), making control flow difficult to follow. The guard statement at line 562 requires tracking context through four nested levels: function → layer loop → projection loop → tensor loop. This depth increases the mental overhead for understanding and modifying the logic. Extract the innermost logic into a separate helper function (e.g., `processExpertTensor` or `stackProjectionTensors`). This reduces nesting depth and allows readers to reason about each level independently. For example, move the guard check and the inner for-loop that processes perExpert into a helper to reduce the nesting from 4 to 2 levels.
+
+These six items belong to the files that hold them, not to this task. A later
+task that changes those lines must correct them.
+
+### The four rules of a pooled-KV port
+
+The review looked at the four places a pooled-KV port goes wrong. Each one is
+correct.
+
+1. **The chunk position is the first raw position of the chunk.** Point 3 of
+   the header of `DeepSeekV4Compressor.swift` records the defect of the
+   reference: the comment of the reference says "chunk centers", and the line
+   under it computes the first raw position. The header states that this port
+   follows the line. `callAsFunction` computes
+   `MLXArray(0 ..< chunkCount) * chunkWidth + offset`, which is that first raw
+   position. The doc of the `offset` parameter and the doc of the `rope`
+   parameter both state the same rule. The port is self-consistent, and the
+   header records the choice.
+2. **The overlap rule is right.** `poolsWithOverlap` is true only when the
+   ratio equals `DeepSeekV4Configuration.indexerCompressRatio`, which is 4. An
+   overlapping layer sets `projectionWidth` to `2 * headDim`, thus `wkv` and
+   `wgate` answer twice the pooled width and `ape` takes the shape
+   `(4, 2 * headDim)`. A ratio-128 layer keeps `projectionWidth` at `headDim`
+   and takes `ape` of shape `(128, headDim)`. These are the shapes the header
+   records for the published checkpoint.
+3. **The two layer sets stay apart.** `hasCompressor(layer:)` is
+   `compressRatio > 0`, which gives the 41 layers 2 to 42.
+   `hasIndexer(layer:)` is `compressRatio == 4`, which gives the 21 even
+   layers. `DeepSeekV4Attention` reads `hasIndexer` for the indexer and
+   `hasCompressor` for the compressor, thus it does not confuse the two sets.
+   The `init` of the compressor holds a `precondition(hasCompressor(layer:))`,
+   which stops a build on a plain layer.
+4. **The `compress_ratio == 0` path is bit-identical by construction.**
+   `ropeTheta(forLayer:)` calls `hasCompressor(layer:)` itself, thus the set
+   of compressed layers and the set of layers that take `compressRopeTheta`
+   cannot disagree. Layers 0 and 1 have a ratio of 0, thus they build no
+   compressor and take the plain rope theta.
+
+### The two judgement calls
+
+1. **The two filters that stay in `sanitize` are correct.** The acceptance
+   criterion asks that no drop filter for a **sparse-attention** key remains.
+   The commit removes `compressorSegment` and its test. The two tests that
+   stay are `mtp.`, which is a decision of an earlier task, and
+   `layer < layerCount`, which is a bounds guard. Neither one names a
+   sparse-attention key, thus the criterion is met as it is written. Keep
+   them.
+2. **The deferral of the pooled read is correct.** The attention path reads no
+   pooled chunk, thus the greedy parity fixture matches token for token. This
+   is the expected result, not a gap. The compressor modules are built and
+   their tensors load, which is what lets `sanitize` drop the filter — the
+   deliverable of this task. Task `^ab1eq0r` exists on the board, names the
+   pooled cache and the sparse read, and lists the tests for both. The header
+   of `DeepSeekV4Compressor.swift` records the same deferral in point 1 and in
+   its closing paragraph.

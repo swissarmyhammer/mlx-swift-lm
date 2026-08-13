@@ -153,13 +153,24 @@ private enum ResidualStreamAxis {
 ///
 /// Every DeepSeek-V4 layer holds a mixture of experts. There is no dense
 /// prefix, and the configuration names no layer count for one.
-class DeepSeekV4DecoderLayer: Module {
+final class DeepSeekV4DecoderLayer: Module {
 
+    /// The attention half of this layer.
     @ModuleInfo(key: "attn") var attention: DeepSeekV4Attention
+
+    /// The mixture-of-experts half of this layer.
     @ModuleInfo(key: "ffn") var ffn: DeepSeekV4MoE
+
+    /// The norm the attention half applies to the collapsed stream.
     @ModuleInfo(key: "attn_norm") var attentionNorm: RMSNorm
+
+    /// The norm the mixture-of-experts half applies to the collapsed stream.
     @ModuleInfo(key: "ffn_norm") var ffnNorm: RMSNorm
+
+    /// The manifold hyper-connection the attention half runs inside.
     @ModuleInfo(key: "hc_attn") var attentionConnection: DeepSeekV4HyperConnection
+
+    /// The manifold hyper-connection the mixture-of-experts half runs inside.
     @ModuleInfo(key: "hc_ffn") var ffnConnection: DeepSeekV4HyperConnection
 
     /// The index of this layer, which the trace lines name.
@@ -247,10 +258,16 @@ class DeepSeekV4DecoderLayer: Module {
 
 /// The embedding table, the decoder layers, and the reduction and the norm at
 /// the top of a DeepSeek-V4 stack.
-public class DeepSeekV4ModelInner: Module {
+public final class DeepSeekV4ModelInner: Module {
 
+    /// The embedding table of the vocabulary.
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+
+    /// The head that reads the parallel copies of the residual stream down to
+    /// one stream.
     @ModuleInfo(key: "hc_head") var hcHead: DeepSeekV4HyperHead
+
+    /// The norm at the top of the stack.
     @ModuleInfo(key: "norm") var norm: RMSNorm
 
     /// The decoder layers, in order.
@@ -311,7 +328,7 @@ public class DeepSeekV4ModelInner: Module {
 // MARK: - Model
 
 /// A DeepSeek-V4 language model.
-public class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
+public final class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
 
     /// The number of latent key/value heads of each layer. DeepSeek-V4 keeps
     /// one, and sends it to every query head.
@@ -558,14 +575,38 @@ public class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
                     let perExpert = (0 ..< expertCount).map {
                         "\(expertPrefix).\($0).\(projection.module).\(tensor)"
                     }
-                    let stack = perExpert.compactMap { weights[$0] }
-                    guard stack.count == expertCount else { continue }
-                    weights["\(switchPrefix).\(projection.module).\(tensor)"] = stacked(stack)
-                    for key in perExpert {
-                        weights[key] = nil
-                    }
+                    stackPerExpertWeights(
+                        at: perExpert,
+                        into: "\(switchPrefix).\(projection.module).\(tensor)",
+                        in: &weights)
                 }
             }
+        }
+    }
+
+    /// Stacks one tensor of every routed expert of one layer into the one
+    /// tensor ``DeepSeekV4SwitchGLU`` reads, and takes the per-expert tensors
+    /// away.
+    ///
+    /// The stacked tensor holds one row for each expert, thus the checkpoint
+    /// must carry that tensor for EVERY expert. A set that is short of one
+    /// tensor makes no stack and leaves every tensor it found where it is.
+    /// This is the set an already stacked checkpoint gives, which is empty,
+    /// and it is also the set a high-precision projection gives for the
+    /// `scales` name and the `biases` name.
+    ///
+    /// - Parameters:
+    ///   - perExpert: The path of that tensor of each expert, in expert order.
+    ///   - stackedPath: The path the stacked tensor takes.
+    ///   - weights: The tensors, by module path.
+    private func stackPerExpertWeights(
+        at perExpert: [String], into stackedPath: String, in weights: inout [String: MLXArray]
+    ) {
+        let stack = perExpert.compactMap { weights[$0] }
+        guard stack.count == perExpert.count else { return }
+        weights[stackedPath] = stacked(stack)
+        for key in perExpert {
+            weights[key] = nil
         }
     }
 }
