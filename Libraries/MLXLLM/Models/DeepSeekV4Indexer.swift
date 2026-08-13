@@ -53,7 +53,7 @@ import MLXNN
 /// absolute position `q` may read that chunk only when the whole chunk stands
 /// behind it. Each query keeps the ``topK`` visible chunks of the highest
 /// score, or every visible chunk when fewer than ``topK`` stand behind it.
-class DeepSeekV4Indexer: Module {
+final class DeepSeekV4Indexer: Module {
 
     /// The number of indexer heads, from `index_n_heads`.
     let headCount: Int
@@ -79,7 +79,21 @@ class DeepSeekV4Indexer: Module {
     /// at one size whatever the head count is.
     let headWeightScale: Float
 
+    /// The projection that opens the low-rank query into the indexer queries,
+    /// from `wq_b`.
+    ///
+    /// It reads the `qLoraRank` query residual of the layer and answers
+    /// `headCount * headDim` values, which the score path then cuts into one
+    /// query for each indexer head. These queries score the pooled chunks.
     @ModuleInfo(key: "wq_b") var wqB: Linear
+
+    /// The projection that gives each indexer head its weight, from
+    /// `weights_proj`.
+    ///
+    /// It reads the block input and answers one value for each of the
+    /// `headCount` heads. The score path multiplies the chunk scores of each
+    /// head by that value before it adds the heads into the one score the
+    /// ranking reads.
     @ModuleInfo(key: "weights_proj") var weightsProj: Linear
 
     /// The axis a `(batch, heads, tokens, width)` tensor holds its heads on.
@@ -138,7 +152,7 @@ class DeepSeekV4Indexer: Module {
             configuration.hiddenSize, configuration.indexNHeads, bias: false)
     }
 
-    /// Picks the pooled chunks each query of one block reads.
+    /// The pooled chunks each query of one block reads.
     ///
     /// The answer holds exactly the smaller of ``topK`` and the number of
     /// chunks that stand wholly behind the query, and it never holds a chunk
@@ -212,7 +226,7 @@ class DeepSeekV4Indexer: Module {
         return chunkEnds.reshaped(1, 1, chunkCount) .<= (positions + 1)
     }
 
-    /// Scores each pooled chunk against each query of one block.
+    /// The score of each pooled chunk against each query of one block.
     ///
     /// Each head scores the chunks on its own, the negative scores fall to
     /// zero, and one learned weight for each head then adds the heads into the

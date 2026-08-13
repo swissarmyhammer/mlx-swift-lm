@@ -98,6 +98,82 @@ comments:
     - `swiftlint` with the `no_magic_numbers`, `cyclomatic_complexity`, `function_body_length` and `missing_docs` rules of the review set: 0 findings in the 6 files.
     - next: `/review`.
   timestamp: 2026-08-13T14:37:42.950809+00:00
+- actor: claude-code
+  id: 01kzxtgf8f6trqtjftm9gyz7v2
+  text: |
+    ### review — findings
+    - evidence: 7 confirmed findings — DeepSeekV4Indexer.swift:56, :82, :83, :141, :215 (in scope); DeepSeekV4.swift:156, :581 (out of scope, earlier commits a75a043a and 2624f899)
+    - scope: commit 0a98e37, range HEAD~1..HEAD
+    - defect: `review sha HEAD~1..HEAD` gave 0 findings with `attempted: 8`, but a file sweep of the same commit gave 7. The range sweep did not examine the Swift source. `review file` of the new test file gave `attempted: 0`, thus the 399 new test lines got no review.
+    - next: correct the 5 findings of DeepSeekV4Indexer.swift, then run the review again. Leave the 2 findings of DeepSeekV4.swift for a later task.
+  timestamp: 2026-08-13T15:05:34.735565+00:00
+- actor: claude-code
+  id: 01kzxthm5b0sgks4d10m7z8vv9
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 6 files. New `DeepSeekV4Indexer.swift` and `DeepSeekV4IndexerTests.swift` (8 tests); new `hasIndexer(layer:)`; an optional indexer submodule on the 21 even layers 2 to 42; the `.indexer.` drop is gone from `sanitize`.
+    - test: green — `swift test`, 0 failures, 2 skips that were there before, 0 new warnings. Real weights: the load test and the greedy-parity test pass in 41.2 s.
+    - commit: 0a98e37 feat(mlx-lm): add DeepSeek-V4 Indexer for sparse attention chunk selection
+    - review: findings — 5 in scope in `DeepSeekV4Indexer.swift` (:56, :82, :83, :141, :215), 2 out of scope in `DeepSeekV4.swift` (:156, :581).
+    - ENGINE DEFECT found this round: `review sha HEAD~1..HEAD` answered 0 findings with `attempted: 8`, but `review file` on a file inside that same range answered 5 confirmed findings. The `attempted` count gives the number of validators, not the number of files, thus a count that is not zero does not show that the engine looked. Also `review file` on the new test file answered "Nothing in scope" with `attempted: 0`, thus the 399 new test lines got no review.
+  timestamp: 2026-08-13T15:06:12.523379+00:00
+- actor: claude-code
+  id: 01kzxv1mn2b77mm3zc63wtwtfb
+  text: |-
+    ### The five findings of `DeepSeekV4Indexer.swift` are corrected
+
+    One file changed: `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift`.
+
+    A finding gives one example of a cause, thus each correction went over the whole file first:
+
+    - **`final`** — `class DeepSeekV4Indexer: Module` became `final class DeepSeekV4Indexer: Module`. A sweep of the file gives one class only, thus no other class needs the keyword. `git ls-files '*.swift' | xargs grep -n DeepSeekV4Indexer` gives 9 hits outside the file, and each one builds the type, names it or tests it. Nothing subclasses it, thus `final` breaks no caller.
+    - **Doc comments** — `wqB` and `weightsProj` each take a doc comment that states what the projection reads, what it answers and where the score path uses it. A sweep of every member of the file shows these two were the only ones without one: the seven other stored properties, the five static constants, the initializer and the three functions each already had one.
+    - **Doc voice** — the rule is "Match voice to kind: imperative verb phrase for effectful methods, noun phrase for values/types." A sweep of the three functions of the file:
+      - `callAsFunction`: "Picks the pooled chunks each query of one block reads." became "The pooled chunks each query of one block reads."
+      - `chunkScores`: "Scores each pooled chunk against each query of one block." became "The score of each pooled chunk against each query of one block."
+      - `chunkVisibility`: "The block-causal visibility of each pooled chunk." — already a noun phrase, thus unchanged.
+      - `init`: "Builds the selector of one layer." — unchanged. An initializer has an effect, thus the rule asks for the verb phrase, and every other DeepSeek-V4 file of this repository writes its initializer the same way (`DeepSeekV4.swift:330`, `DeepSeekV4Attention.swift:86`, `:113`, `:280`, `DeepSeekV4HyperConnection.swift:216`, `:350`).
+
+    No code path changed. The change is the `final` keyword and doc text only, thus a real-weights run is not needed.
+
+    ### The two findings of `DeepSeekV4.swift` stay open here
+
+    The standing rule of task `^ag7ant0` makes them a record only, and this task does not correct them. Task `^dhv1ave` now holds them, so that they are not lost.
+
+    ### A note on swiftlint
+
+    This repository holds no `.swiftlint.yml`, thus a bare `swiftlint` run takes the default rule set, not the rule set of the review. That default set gives 3 findings on the file — one `function_parameter_count` and two `identifier_name` for the parameter `x`. The same 3 come from the file as `HEAD` holds it, word for word, thus this change adds none. The name `x` for the block input is the prevailing name of every model file of this repository.
+  timestamp: 2026-08-13T15:14:57.314443+00:00
+- actor: claude-code
+  id: 01kzxv1zekqrevvrbw818hb8qm
+  text: |-
+    ### The review engine under-reports in range mode — read this before the next review
+
+    The description now carries this under "Engine sweep defect". It is repeated here because it matters for every future review of this repository, not for this task alone.
+
+    - `review sha HEAD~1..HEAD` on commit `0a98e37` answered `findings: 0` with `attempted: 8`, `skipped: 0` and an empty `skipped_files`. A `review file` of `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift`, a Swift file inside that same range, answered 5 confirmed findings. Thus the range mode did not examine the Swift source of the commit, and it gave no sign of that.
+    - `attempted` counts validators, not files. The same count 8 comes back for a sweep of one file. A count that is not zero is therefore no proof that any file got read.
+    - `review file Tests/MLXLMTests/DeepSeekV4IndexerTests.swift` answered "Nothing in scope to review" with `attempted: 0`. The 399 new lines of test code got no review at all, and that includes the randomized causal property test.
+
+    **What rests on mutation proofs only, not on an engine verdict:**
+
+    - the causal off-by-one of `chunkVisibility`,
+    - the `argPartition(-masked, kth: topK - 1)` path and the `.&& visible` that follows it,
+    - the 44-entry `compress_ratios` against the 43 layers of `num_hidden_layers`.
+
+    The mutation proofs sit in the implement comment of 2026-08-13: `(k + 1) * chunkWidth` to `k * chunkWidth` made `everyPickedChunkStandsWhollyBehindItsQuery` fail with 348 issues, and the removal of `.&& visible` made three tests fail with 348, 180 and 5 issues. A later reviewer must not read the clean range sweep as coverage of these three points.
+  timestamp: 2026-08-13T15:15:08.371433+00:00
+- actor: claude-code
+  id: 01kzxv279rvcz0a7pf97mh5b02
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift`. The 5 in-scope findings are closed: `:56` `final class`, `:82` `wqB` doc comment, `:83` `weightsProj` doc comment, `:141` `callAsFunction` noun phrase, `:215` `chunkScores` noun phrase. Each cause was then swept over the whole file — one class, thirteen other members with a doc comment already, three functions with the voice rule.
+    - `swift test`: 489 + 80 + 282 + 7 tests pass, 0 failures, 0 compiler warnings. Duration 128.6 s. `DeepSeekV4IndexerTests` passed in 2.914 s.
+    - `swift format --configuration .swift-format`: the file comes back unchanged.
+    - `swiftlint`: 3 findings of the default rule set, and the file as `HEAD` holds it gives the same 3, thus this change adds none. This repository holds no `.swiftlint.yml`.
+    - The 2 findings of `DeepSeekV4.swift` stay open, out of scope under the standing rule of `^ag7ant0`. New task `^dhv1ave` holds them.
+    - next: `/review`.
+  timestamp: 2026-08-13T15:15:16.408159+00:00
 depends_on:
 - 01KZGMY5D5PRZ67GNK9E7B24WS
 position_column: doing
@@ -144,3 +220,54 @@ Second reference worth reading: upstream `mlx-lm`'s `mlx_lm/models/deepseek_v32.
 ## Workflow
 - Use `/tdd` — write the causal property test first; it is cheap and catches the classic off-by-one.
 #deepseek-v4
+
+## Review Findings (2026-08-13 09:59)
+
+Scope: commit `0a98e37`, range `HEAD~1..HEAD`.
+
+The command `review sha HEAD~1..HEAD` gave 0 findings. That result is not correct. A file sweep of the same commit gave 7 confirmed findings. Thus this pass records the file-sweep results. Read "Engine sweep defect" below.
+
+### In scope — `DeepSeekV4Indexer.swift`, a new file of this commit
+
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift:56` — Classes not designed for subclassing should be marked `final` to signal that they are not extension points. This class models a specific layer selector with no indication that subclassing is intended. Change `class DeepSeekV4Indexer: Module {` to `final class DeepSeekV4Indexer: Module {` to mark it as not designed for subclassing.
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift:82` — Public property `wqB` lacks documentation comment explaining its purpose and role in the indexer. Add a documentation comment above line 82 explaining what `wqB` represents and its role in the indexing pipeline.
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift:83` — Public property `weightsProj` lacks documentation comment explaining its purpose and role in the indexer. Add a documentation comment above line 83 explaining what `weightsProj` represents and its role in the scoring pipeline.
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift:141` — Documentation for a pure function (one that computes and returns values with no side effects) should use a noun phrase describing the result, not imperative voice describing the action. Per the rule: 'Match voice to kind: imperative verb phrase for effectful methods, noun phrase for values/types.'. Change to a noun phrase describing the result: '/// The pooled chunks each query of one block reads.' or '/// A selection mask indicating which pooled chunks each query reads.'.
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift:215` — Documentation for a pure function should use noun phrase, not imperative voice. The function `chunkScores` computes scores without side effects, so its documentation should describe what it returns, not what action it performs. Change to a noun phrase describing the result: '/// The scores of each pooled chunk against each query of one block.' or '/// Chunk scores for each query in this block.'.
+
+#### The correction of the five, 2026-08-13
+
+A finding gives one example of a cause, thus each correction went over the whole file:
+
+- `final`: `DeepSeekV4Indexer` is now `final class`. It is the only class of the file. Nothing subclasses it — `git ls-files '*.swift' | xargs grep -n DeepSeekV4Indexer` gives 9 hits, and each one is a build, a type or a test.
+- Doc comments: `wqB` and `weightsProj` each take one. They were the only two members of the file without a doc comment. The other seven stored properties, the five static constants, the initializer and the three functions each already had one.
+- Doc voice: `callAsFunction` and `chunkScores` each take a noun phrase now. `chunkVisibility` already had one, thus the three functions of the file agree. The initializer keeps "Builds the selector of one layer.", because an initializer has an effect and because every other DeepSeek-V4 file of this repository writes its initializer the same way.
+
+### Out of scope — lines that commit `0a98e37` did not touch
+
+Standing rule from task `^ag7ant0`: the engine sweeps a full file, thus a finding on a line of an earlier commit is a record only. Do not correct these two here. `git blame` gives commit `a75a043a` for line 156 and commit `2624f899` for lines 579 to 583. Commit `0a98e37` touched only the file header, `compressorSegment` near line 434, and the filter test near line 495.
+
+- [ ] `Libraries/MLXLLM/Models/DeepSeekV4.swift:156` — Class is not designed for subclassing and should be marked `final` to prevent accidental subclassing and enable compiler optimizations. Mark the class as final: `final class DeepSeekV4DecoderLayer: Module {`.
+- [ ] `Libraries/MLXLLM/Models/DeepSeekV4.swift:581` — The for-key loop sits at nesting depth 4 (inside three for-loops and a guard statement), exceeding the maximum recommended depth of 3, which impairs readability and makes control flow difficult to follow. Extract the guard and inner for-key loop (lines 579–583) into a separate helper function, e.g. `removePerExpertWeights(from:perExpert:)`, to reduce stackRoutedExperts nesting to 3 levels.
+
+### Engine sweep defect
+
+Report these two items to the person who keeps the review engine. They are not work for this task.
+
+- `review sha HEAD~1..HEAD` gave `findings: 0`, `attempted: 8`, `skipped: 0`, and an empty `skipped_files`. A `review file` of `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift`, a file of that same commit, gave 5 confirmed findings. Thus the range sweep did not examine the Swift source of the commit, and it gave no sign that it did not. The count `attempted` is also 8 for a sweep of one file, thus `attempted` does not count files and gives no proof of coverage.
+- `review file Tests/MLXLMTests/DeepSeekV4IndexerTests.swift` gave "Nothing in scope to review" with `attempted: 0`. Thus no agent examined the 399 new lines of test code. The randomized causal property test, which is the guard against the off-by-one of the causal rule, got no review.
+
+#### What the defect means for the correctness of this task
+
+The range mode under-reports, thus no engine verdict stands behind the three points below. Each one rests on the mutation proofs of the implement step only, which the comment thread records:
+
+- The causal off-by-one of `chunkVisibility`. The mutation `(k + 1) * chunkWidth` to `k * chunkWidth` made `everyPickedChunkStandsWhollyBehindItsQuery` fail with 348 issues.
+- The `argPartition(-masked, kth: topK - 1)` path and the `.&& visible` that follows it. The mutation that removed the final `.&& visible` made three tests fail, with 348, 180 and 5 issues.
+- The 44-entry `compress_ratios` against the 43 layers of `num_hidden_layers`. The bound guard of `compressRatio(ofLayer:)` covers it, and `fixtureNamesIndexerKeysOnTheEvenLayersFromTwoUp` pins the layer rule.
+
+A later review of these three points must not read the clean range sweep as coverage.
+
+### Files of this commit that the engine swept clean
+
+- `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift` — 0 findings, 7 candidates refuted.
+- `Libraries/MLXLLM/Models/DeepSeekV4Configuration.swift` — 0 findings, 1 candidate refuted.

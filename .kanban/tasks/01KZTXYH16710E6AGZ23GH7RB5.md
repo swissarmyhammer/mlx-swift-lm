@@ -170,8 +170,49 @@ comments:
     - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift, /Users/wballard/github/swissarmyhammer/mlx-swift-lm/docs/deepseek-v4-support.md. All 7 review findings closed. `xcodebuild build-for-testing -scheme IntegrationTesting`: exit 0, no warning. `xcodebuild test -only-testing:IntegrationTestingTests/DeepseekV4IntegrationTests -skip-testing:.../longGenerationPastTwelveThousandTokensCompletes()`: 8 tests pass in 100.4 s. Mutation proof of the two new tests: exit 65 with the wired-limit call removed (median step 2.1247 s against the 0.8710 s bound), exit 0 with it back (median 0.5917 s). `swift test`: 850 tests in 4 runs, 0 failures.
     - next: /review
   timestamp: 2026-08-13T13:55:32.554646+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01kzxq7tny1e4dp1sxy933vv8m
+  text: |-
+    ### review — clean
+
+    Scope: commit 2701212, range `HEAD~1..HEAD`.
+
+    - evidence: The review engine gave `findings: 0, confirmed: 0, refuted: 0, attempted: 0, failed: 0` and the text "Nothing in scope to review." `attempted: 0` means the engine opened no file. The commit changes only a test file and a Markdown file, and the engine reads neither. Thus the engine gave no verdict. This verdict is the reading of the reviewer, plus the recorded mutation proofs.
+    - compile evidence: `xcodebuild build-for-testing -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS'` gave exit 0, "TEST BUILD SUCCEEDED", 0 errors and 0 warnings, on the committed tree with no local change.
+    - mutation proof of the round before: a type error in the changed function left `swift build --build-tests` at exit 0, and gave `xcodebuild build-for-testing` exit 65.
+    - mutation proof of this round: removal of the wired-limit call makes both new tests fail. The median step went to 2.1247 s against the 0.8710 s budget, exit 65. With the call put back, exit 0 and a median of 0.5917 s.
+
+    #### The seven findings of 2026-08-13 08:06 are closed
+
+    1. Compile evidence. The file header now records that `swift test` is blind to this file, and it names the `xcodebuild build-for-testing` command as the compile evidence. `docs/deepseek-v4-support.md` records the same. CLOSED.
+    2. No assertion covers the fix. Two tests now guard it: `wiredMemoryLimitCoversTheWholeCheckpoint` and `decodeStepStaysInsideTheLongGenerationBudget`. CLOSED.
+    3. The function threw away its result. `raiseWiredMemoryLimit()` now gives back a `WiredMemoryOutcome?` that holds `requestedBytes` and `appliedBytes`, and `isFullyApplied` compares them. The test asserts it. CLOSED.
+    4. The guard gave no message. The guard now prints why it stopped, in the manner of the other gates of the file. CLOSED.
+    5. The wired limit rode on the skip gate. The limit now has `deepseekV4WiredMemoryBytes`, built from `deepseekV4CheckpointBytes` plus `deepseekV4WiredHeadroomBytes`. The doc of the skip gate says which question each constant answers. CLOSED.
+    6. "147 GB of the 141 GB total". The text now says the routed experts hold 137 GiB of the 141 GiB total, which is 97%. No "147" is left in the file. CLOSED.
+    7. The 91 GB and 141 GB disagreement. One value set is now used everywhere: 151,482,475,612 bytes, which is 141 GiB, with routed experts at 137 GiB. No "91 GB" is left in the test file or in `docs/deepseek-v4-support.md`. CLOSED.
+
+    #### Checks made against the new code
+
+    - The applied-bytes contract holds. `WiredMemoryTicket.start()` gives back the applied limit, and it gives back the baseline when the backend is not supported. `WiredFixedPolicy.limit()` gives back the asked bytes with no clamp. Thus `appliedBytes >= requestedBytes` truly detects a short apply.
+    - The step measurement is true. `TokenIterator.next()` calls `asyncEval` on the new token and gives back the previous token through `.item()`, which forces the previous step. Thus each measured interval is one decode step. The first call absorbs the prompt, and the test drops it.
+    - The token count is exact. `maxTokens` is 17, the test drops one step and measures 16, and `TokenIterator` honours `maxTokens`.
+    - The budget arithmetic holds. 240 min x 60 x 0.75 / 12,400 = 0.8710 s per step. At the measured 0.593 s the 12,400-token run takes 123 minutes, inside the 240-minute limit.
+    - The skip gate admits no machine that the new assertion then fails. Measured on this M3 Ultra, the recommended working set is 464 GiB of 512 GiB physical, a ratio of 0.906. A machine at the 160 GiB gate thus reports about 145 GiB, above the 141.08 GiB checkpoint, thus `requestedBytes >= deepseekV4CheckpointBytes` holds at the gate.
+
+    - next: the card goes to `done`.
+  timestamp: 2026-08-13T14:08:25.790236+00:00
+- actor: claude-code
+  id: 01kzxq946m9mg552n91e8y6ma2
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 2 files. All 7 findings closed. `raiseWiredMemoryLimit()` now returns a `WiredMemoryOutcome`, the wired limit has its own constants, and all size values agree (151,482,475,612 bytes = 141 GiB; routed experts 137 GiB). Two guard tests added.
+    - test: green — `swift test`, 0 failures, 2 skips that were there before. `xcodebuild build-for-testing` for IntegrationTesting: TEST BUILD SUCCEEDED, 0 errors, 0 warnings.
+    - commit: 2701212 fix(mlx-lm): close review findings on the DeepSeek-V4 wired-limit test
+    - review: clean — the engine attempted 0 files again, thus the verdict comes from a direct reading plus two mutation proofs. Behaviour proof: with the wired-limit call removed the two new tests fail (median step 2.1247 s against the 0.8710 s budget, exit 65); with it back they pass (median 0.5917 s, exit 0). The card moved to `done`.
+  timestamp: 2026-08-13T14:09:08.308205+00:00
+position_column: done
+position_ordinal: f180
 title: 'DeepSeek-V4 decode performance: about 2.4 s/token blocks the >12k-token test'
 ---
 ## What
