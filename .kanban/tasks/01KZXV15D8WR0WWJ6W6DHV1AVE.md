@@ -79,6 +79,17 @@ comments:
     - evidence: 3 files changed — Libraries/MLXLLM/Models/DeepSeekV4.swift, Tests/MLXLMTests/DeepSeekV4ModelTests.swift, Tests/MLXLMTests/DeepSeekV4GateCheckpointLoadTests.swift. Finding 1 of 2 closed: `DeepSeekV4.swift:162` `ffn` -> `mixtureOfExperts`, and the sweep took `ffnNorm` -> `mixtureOfExpertsNorm` and `ffnConnection` -> `mixtureOfExpertsConnection` with it; every `@ModuleInfo(key:)` string is unchanged. Finding 2 of 2 recorded as a TRUE CONFLICT, not corrected: `DeepSeekV4Attention.swift:462` `private func groupedOutputProjection` gives `Tests/MLXLMTests/DeepSeekV4AttentionTests.swift:385:31: error: 'groupedOutputProjection' is inaccessible due to 'private' protection level` and `error: Build failed` from `swift build --build-tests`; `DeepSeekV4Attention.swift` is unchanged. `swift test`: 870 tests in 105 suites (501 + 80 + 282 + 7), 0 failed, 135 s; the one `warning:` line of the log is the llbuild message `missing creator for mutated node: .../mlx-swift_Cmlx.bundle`, which is a build-system message and not a compiler warning. `swift format lint --strict --configuration .swift-format` on the 3 changed files: exit 0. `xcodebuild build-for-testing -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS'`: ** TEST BUILD SUCCEEDED **, 0 errors. No real-weights run: the change is a rename and moves no number.
     - next: a person must decide the `private` conflict. Three ways out: (a) drop the finding, because the method is the surface two parity tests read; (b) accept a different fix that the finding does not give; (c) permit the two tests to change, which throws the parity fixture of `V4Attention._grouped_output_projection` away. The pass will not choose one of these.
   timestamp: 2026-08-13T17:02:56.123477+00:00
+- actor: claude-code
+  id: 01kzy1af50sgtepckk694zxhfc
+  text: |-
+    ### finish iteration 2 — stuck
+    - implement: changed for one finding, stuck on the other. `ffn`, `ffnNorm` and `ffnConnection` became `mixtureOfExperts`, `mixtureOfExpertsNorm` and `mixtureOfExpertsConnection`; each `@ModuleInfo` key string stays as it was.
+    - test: green — `swift test`, 870 tests in 105 suites, 0 failures, 135 s. `xcodebuild build-for-testing`: TEST BUILD SUCCEEDED.
+    - commit: 465085d fix(mlx-lm): give the DeepSeekV4 ffn properties their full name
+    - STUCK on the second finding, and a person must decide. The finding asks for `private` on `DeepSeekV4Attention.groupedOutputProjection`. `Tests/MLXLMTests/DeepSeekV4AttentionTests.swift:385` calls that method in the numeric parity test of the Python `V4Attention._grouped_output_projection`. With `private` the build stops: "error: 'groupedOutputProjection' is inaccessible due to 'private' protection level". `@testable import` opens `internal` and never `private`, thus the finding cannot hold together with the test that is there now. The two ways out are (a) drop the finding under the written rule that releases a finding which asks to rewrite a test that already existed, or (b) keep the finding and delete or move the parity test. This agent took neither, because the choice is a person's.
+
+    The loop stops here. The card stays out of `done` with one finding open. Do not force it.
+  timestamp: 2026-08-13T17:04:38.048918+00:00
 position_column: doing
 position_ordinal: '80'
 title: Correct the two review findings of DeepSeekV4.swift that earlier commits left
