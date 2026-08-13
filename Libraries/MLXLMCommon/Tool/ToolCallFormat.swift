@@ -19,16 +19,9 @@ public protocol ToolCallParser: Sendable {
     /// Returns `nil` for inline formats that don't use wrapper tags.
     var endTag: String? { get }
 
-    /// Whether this format has no literal marker preceding its content and
-    /// must therefore have the *entire* response buffered before parsing.
-    ///
-    /// Tagged formats (`startTag != nil`) and inline JSON-envelope formats
-    /// (`startTag == nil` but the function name is embedded inside the JSON,
-    /// e.g. `Llama3ToolCallParser`) can both be detected incrementally as
-    /// text streams in. Formats where non-JSON content -- such as a bare
-    /// function name -- may precede the parseable payload with no marker at
-    /// all cannot be distinguished from ordinary prose mid-stream, so
-    /// ``ToolCallProcessor`` defers all parsing for them to end-of-sequence.
+    /// True when the format has no literal marker that shows a tool call
+    /// starts, so no chunk can be classified while the text streams.
+    /// ``ToolCallProcessor`` holds all parsing for them to end-of-sequence.
     /// Defaults to `false`.
     var buffersEntireResponse: Bool { get }
 
@@ -44,34 +37,16 @@ public protocol ToolCallParser: Sendable {
     /// Called when generation ends to extract any tool calls still in the buffer.
     /// The default implementation splits on `startTag` (if present) and parses
     /// each segment individually.
-    ///
-    /// - Parameters:
-    ///   - toolCallBuffer: The text remaining in the tool-call buffer when
-    ///     generation ended.
-    ///   - tools: Optional tool schemas for type-aware parsing.
-    /// - Returns: The tool calls recovered from `toolCallBuffer`, in the
-    ///   order they appear.
     func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall]
 }
 
 extension ToolCallParser {
     /// Default implementation: `false`, because most formats carry a literal
     /// marker (a start tag or a JSON envelope) that lets tool calls be
-    /// detected incrementally as text streams in. Only markerless formats
-    /// (e.g. ``GLM4BareToolCallParser``) override this to `true`.
+    /// found one chunk at a time as text comes in. Only formats with no
+    /// marker (e.g. ``GLM4BareToolCallParser``) set this to `true`.
     public var buffersEntireResponse: Bool { false }
 
-    /// Default implementation: for tagged formats, splits the buffer on
-    /// `startTag` and parses each non-empty segment individually (recovering
-    /// multiple calls left in the buffer); for untagged formats, parses the
-    /// whole buffer as a single call.
-    ///
-    /// - Parameters:
-    ///   - toolCallBuffer: The text remaining in the tool-call buffer when
-    ///     generation ended.
-    ///   - tools: Optional tool schemas for type-aware parsing.
-    /// - Returns: The tool calls recovered from `toolCallBuffer`, in the
-    ///   order they appear.
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         if let startTag {
             return
@@ -146,6 +121,14 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
     case minimaxM2 = "minimax_m2"
 
+    /// MiniMax M3 namespaced XML format: parameters are arbitrary
+    /// `<key>value</key>` children rather than M2's `<parameter name="k">v</parameter>`
+    /// attribute style. Every tag is prefixed with M3's literal namespace token.
+    ///
+    /// See ``MiniMaxM3ToolCallParser`` for the full format and parsing details.
+    /// Example: `]<]minimax[>[<invoke name="f">]<]minimax[>[<k>v]<]minimax[>[</k>]<]minimax[>[</invoke>`
+    case minimaxM3 = "minimax_m3"
+
     /// Muse Glimmer's Onyx ATEM invoke/parameter format.
     /// Example: `<atem:function_calls><atem:invoke name="f">...</atem:invoke></atem:function_calls>`
     case atem
@@ -158,6 +141,11 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// Example: `<|python_tag|>{ "name": "func", "parameters": {...} }`
     case llama3
 
+    /// DeepSeek-V4 DSML format. The `｜DSML｜` marker uses FULLWIDTH
+    /// VERTICAL LINE U+FF5C, and `string="true|false"` types each value.
+    /// Example: `<｜DSML｜invoke name="f"><｜DSML｜parameter name="k" string="true">v</｜DSML｜parameter></｜DSML｜invoke>`
+    case dsml
+
     /// GPT-OSS full Harmony response protocol.
     ///
     /// Not a tool-call JSON dialect: selects the Harmony frame parser + router
@@ -168,21 +156,12 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
 
     // MARK: - Factory Methods
 
-    /// The opening wrapper tag shared by the ``json`` and ``xmlFunction``
-    /// tool-call envelopes.
-    private static let toolCallStartTag = "<tool_call>"
-
-    /// The closing wrapper tag shared by the ``json`` and ``xmlFunction``
-    /// tool-call envelopes.
-    private static let toolCallEndTag = "</tool_call>"
-
     /// Create the appropriate parser for this format.
     /// - Returns: A parser instance configured for this format
-    public func makeParser() -> any ToolCallParser {
+    public func createParser() -> any ToolCallParser {
         switch self {
         case .json:
-            return JSONToolCallParser(
-                startTag: Self.toolCallStartTag, endTag: Self.toolCallEndTag)
+            return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
         case .lfm2:
             return PythonicToolCallParser(
                 startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
@@ -205,12 +184,16 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return KimiK2ToolCallParser()
         case .minimaxM2:
             return MiniMaxM2ToolCallParser()
+        case .minimaxM3:
+            return MiniMaxM3ToolCallParser()
         case .atem:
             return ATEMToolCallParser()
         case .mistral:
             return MistralToolCallParser()
         case .llama3:
             return Llama3ToolCallParser()
+        case .dsml:
+            return DSMLToolCallParser()
         case .gptOSS:
             return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
         }
@@ -253,8 +236,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return OnyxStreamAdapter(
                 tokenizer: tokenizer, tools: tools, stopStrings: stopStrings)
 
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .mistral, .llama3:
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .glm4Bare, .gemma, .gemma4, .kimiK2,
+            .minimaxM2, .minimaxM3, .mistral, .llama3, .dsml:
             return nil
         }
     }
@@ -275,9 +258,8 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return HarmonyToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
         case .atem:
             return OnyxToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .mistral,
-            .llama3:
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .glm4Bare, .gemma, .gemma4, .kimiK2,
+            .minimaxM2, .minimaxM3, .mistral, .llama3, .dsml:
             return []
         }
     }
@@ -297,16 +279,14 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
                     count += message.tool?.calls?.count ?? 0
                 }
             }
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .mistral, .llama3:
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .glm4Bare, .gemma, .gemma4, .kimiK2,
+            .minimaxM2, .minimaxM3, .mistral, .llama3, .dsml:
             0
         }
     }
 
     /// Generate an ID compatible with this tool-call syntax.
-    /// - Returns: A fresh unique ID (9 characters for ``mistral``, OpenAI-style
-    ///   `call_`-prefixed for all other formats)
-    public func generateToolCallID() -> String {
+    func generateToolCallID() -> String {
         let uuid = UUID().uuidString.replacingOccurrences(of: "-", with: "")
 
         switch self {

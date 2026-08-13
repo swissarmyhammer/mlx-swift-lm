@@ -70,7 +70,7 @@ struct ToolCallIdTests {
 
     @Test("Plain messages do not emit tool metadata")
     func plainMessageDoesNotEmitToolMetadata() throws {
-        let dictionary = DefaultMessageGenerator().generate(message: .user(content: "hi"))
+        let dictionary = DefaultMessageGenerator().generate(message: .user("hi"))
 
         #expect(dictionary["role"] as? String == "user")
         #expect(dictionary["content"] as? String == "hi")
@@ -138,7 +138,7 @@ struct ToolCallIdTests {
         #expect(id.hasPrefix("call_"))
 
         let messages: [Chat.Message] = [
-            .assistant(content: "", toolCalls: [toolCall]),
+            .assistant("", toolCalls: [toolCall]),
             .tool(content: #"{"temperature":18}"#, id: id),
         ]
         let rawMessages = DefaultMessageGenerator().generate(messages: messages)

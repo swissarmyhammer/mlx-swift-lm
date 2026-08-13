@@ -125,8 +125,8 @@ struct MiniMaxM3CacheIntegrationTests {
         let freshSession = ChatSession(
             container,
             history: [
-                .user(content: turn1Prompt),
-                .assistant(content: turn1Output),
+                .user(turn1Prompt),
+                .assistant(turn1Output),
             ],
             generateParameters: greedyParameters)
         let freshOutput = try await freshSession.respond(to: turn2Prompt)

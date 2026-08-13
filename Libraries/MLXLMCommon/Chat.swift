@@ -12,10 +12,11 @@ public enum Chat {
     /// A single structured chat message: a role, text content, optional
     /// media attachments, and optional tool-call metadata.
     ///
-    /// Use the ``system(content:images:videos:)``, ``assistant(content:images:videos:toolCalls:)``,
-    /// ``user(content:images:videos:audios:)``, and ``tool(content:images:id:)`` factory
+    /// Use the ``system(_:images:videos:)``,
+    /// ``assistant(_:images:videos:toolCalls:reasoning:)``,
+    /// ``user(_:images:videos:audios:)``, and ``tool(_:id:name:)`` factory
     /// methods to construct role-specific messages, or the memberwise
-    /// ``init(role:content:images:videos:audios:tool:)`` directly.
+    /// ``init(role:content:images:videos:audios:tool:reasoning:)`` directly.
     public struct Message {
         /// The role of the message sender.
         public var role: Role
@@ -120,8 +121,9 @@ public enum Chat {
         }
 
         /// Shared factory helper backing the role-specific factory methods
-        /// (``system(content:images:videos:)``, ``assistant(content:images:videos:toolCalls:)``,
-        /// ``user(content:images:videos:audios:)``, ``tool(content:images:id:)``). Each
+        /// (``system(_:images:videos:)``,
+        /// ``assistant(_:images:videos:toolCalls:reasoning:)``,
+        /// ``user(_:images:videos:audios:)``, ``tool(_:id:name:)``). Each
         /// public factory delegates here, passing only the parameters
         /// relevant to its own external signature.
         private static func create(
@@ -145,7 +147,7 @@ public enum Chat {
         ///   - videos: Video attachments associated with the message.
         /// - Returns: A new ``Message`` with the ``Role/system`` role.
         public static func system(
-            content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = []
+            _ content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = []
         ) -> Self {
             create(role: .system, content: content, images: images, videos: videos)
         }
@@ -161,7 +163,7 @@ public enum Chat {
         ///     should be replayed into history re-renders (see ``reasoning``).
         /// - Returns: A new ``Message`` with the ``Role/assistant`` role.
         public static func assistant(
-            content: String,
+            _ content: String,
             images: [UserInput.Image] = [],
             videos: [UserInput.Video] = [],
             toolCalls: [ToolCall]? = nil,
@@ -181,7 +183,7 @@ public enum Chat {
         ///   - audios: Audio attachments associated with the message.
         /// - Returns: A new ``Message`` with the ``Role/user`` role.
         public static func user(
-            content: String,
+            _ content: String,
             images: [UserInput.Image] = [],
             videos: [UserInput.Video] = [],
             audios: [UserInput.Audio] = []
@@ -343,7 +345,7 @@ extension MessageGenerator {
     public func generate(from input: UserInput) -> [Message] {
         switch input.prompt {
         case .text(let text):
-            generate(messages: [.user(content: text)])
+            generate(messages: [.user(text)])
         case .messages(let messages):
             messages
         case .chat(let messages):

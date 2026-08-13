@@ -288,7 +288,7 @@ public struct UserInput {
         additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = .chat([
-            .user(content: prompt, images: images, videos: videos, audios: audios)
+            .user(prompt, images: images, videos: videos, audios: audios)
         ])
         // note: prompt.didSet is not triggered in init
         self.images = images
@@ -355,8 +355,8 @@ public struct UserInput {
     ///
     /// ```
     /// let chat: [Chat.Message] = [
-    ///     .system(content: "You are a helpful photographic assistant."),
-    ///     .user(content: "Please describe the photo.", images: [image1]),
+    ///     .system("You are a helpful photographic assistant."),
+    ///     .user("Please describe the photo.", images: [image1]),
     /// ]
     /// let userInput = UserInput(chat: chat)
     /// ```

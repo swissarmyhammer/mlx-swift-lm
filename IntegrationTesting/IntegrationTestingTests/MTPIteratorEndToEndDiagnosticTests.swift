@@ -132,7 +132,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         )
 
         let userInput = UserInput(chat: [
-            .user(content: "Why is the sky blue? Explain in one paragraph.")
+            .user("Why is the sky blue? Explain in one paragraph.")
         ])
         let lmInput = try await loaded.context.processor.prepare(input: userInput)
 
@@ -219,7 +219,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         )
 
         let userInput = UserInput(chat: [
-            .user(content: "Why is the sky blue? Explain in one paragraph.")
+            .user("Why is the sky blue? Explain in one paragraph.")
         ])
         let lmInput = try await loaded.context.processor.prepare(input: userInput)
 
@@ -288,7 +288,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         )
 
         let userInput = UserInput(chat: [
-            .user(content: "Why is the sky blue? Explain in one paragraph.")
+            .user("Why is the sky blue? Explain in one paragraph.")
         ])
         let lmInput = try await loaded.context.processor.prepare(input: userInput)
 
@@ -354,7 +354,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         )
 
         let prompt = "Why is the sky blue? Explain in one paragraph."
-        let userInput = UserInput(chat: [.user(content: prompt)])
+        let userInput = UserInput(chat: [.user(prompt)])
         let lmInput = try await loaded.context.processor.prepare(input: userInput)
 
         // MTP run.
@@ -478,7 +478,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         )
 
         let prompt = "Why is the sky blue? Explain in one paragraph."
-        let userInput = UserInput(chat: [.user(content: prompt)])
+        let userInput = UserInput(chat: [.user(prompt)])
         let lmInput = try await loaded.context.processor.prepare(input: userInput)
 
         // MTP run.
@@ -607,7 +607,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         )
 
         let prompt = "Why is the sky blue? Explain in one paragraph."
-        let userInput = UserInput(chat: [.user(content: prompt)])
+        let userInput = UserInput(chat: [.user(prompt)])
         let lmInput = try await loaded.context.processor.prepare(input: userInput)
 
         // First baseline run.
@@ -668,7 +668,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         )
 
         let userInput = UserInput(chat: [
-            .user(content: "Why is the sky blue? Explain in one paragraph.")
+            .user("Why is the sky blue? Explain in one paragraph.")
         ])
         let lmInput = try await loaded.context.processor.prepare(input: userInput)
 
@@ -764,7 +764,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         )
 
         let userInput = UserInput(chat: [
-            .user(content: "Why is the sky blue? Explain in one paragraph.")
+            .user("Why is the sky blue? Explain in one paragraph.")
         ])
         let lmInput = try await loaded.context.processor.prepare(input: userInput)
 
@@ -908,7 +908,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
             drafterRevision: drafter31BRevision
         )
 
-        let userInput = UserInput(chat: [.user(content: prompt)])
+        let userInput = UserInput(chat: [.user(prompt)])
         let lmInput = try await loaded.context.processor.prepare(input: userInput)
 
         // MTP run.
@@ -985,7 +985,7 @@ struct MTPIteratorEndToEndDiagnosticTests {
         )
 
         let userInput = UserInput(chat: [
-            .user(content: "Why is the sky blue? Explain in one paragraph.")
+            .user("Why is the sky blue? Explain in one paragraph.")
         ])
         let lmInput = try await loaded.context.processor.prepare(input: userInput)
 

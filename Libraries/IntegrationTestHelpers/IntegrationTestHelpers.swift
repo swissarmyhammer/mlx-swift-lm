@@ -593,9 +593,9 @@ public enum ChatSessionTests {
 
     public static func promptRehydration(container: LLModelContainer) async throws {
         let history: [Chat.Message] = [
-            .system(content: "You are a helpful assistant."),
-            .user(content: "My name is Bob."),
-            .assistant(content: "Hello Bob! How can I help you today?"),
+            .system("You are a helpful assistant."),
+            .user("My name is Bob."),
+            .assistant("Hello Bob! How can I help you today?"),
         ]
 
         let session = ChatSession(
@@ -840,10 +840,9 @@ public enum ToolCallTests {
         let input = UserInput(
             chat: [
                 .system(
-                    content:
-                        "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
+                    "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
                 ),
-                .user(content: "What's the weather in Tokyo?"),
+                .user("What's the weather in Tokyo?"),
             ],
             tools: [weatherToolSchema]
         )
@@ -873,10 +872,9 @@ public enum ToolCallTests {
         let input = UserInput(
             chat: [
                 .system(
-                    content:
-                        "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
+                    "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
                 ),
-                .user(content: "What's the weather in Tokyo and what time is it there?"),
+                .user("What's the weather in Tokyo and what time is it there?"),
             ],
             tools: multiToolSchemas
         )
@@ -915,10 +913,9 @@ public enum ToolCallTests {
         let input = UserInput(
             chat: [
                 .system(
-                    content:
-                        "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
+                    "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
                 ),
-                .user(content: "What's the weather in Tokyo?"),
+                .user("What's the weather in Tokyo?"),
             ],
             tools: [weatherToolSchema],
             additionalContext: ["enable_thinking": false]
@@ -949,10 +946,9 @@ public enum ToolCallTests {
         let input = UserInput(
             chat: [
                 .system(
-                    content:
-                        "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
+                    "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
                 ),
-                .user(content: "What's the weather in Tokyo and what time is it there?"),
+                .user("What's the weather in Tokyo and what time is it there?"),
             ],
             tools: multiToolSchemas,
             additionalContext: ["enable_thinking": false]
@@ -992,10 +988,9 @@ public enum ToolCallTests {
         let input = UserInput(
             chat: [
                 .system(
-                    content:
-                        "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
+                    "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
                 ),
-                .user(content: "What's the weather in Tokyo?"),
+                .user("What's the weather in Tokyo?"),
             ],
             tools: [weatherToolSchema]
         )
@@ -1025,10 +1020,9 @@ public enum ToolCallTests {
         let input = UserInput(
             chat: [
                 .system(
-                    content:
-                        "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
+                    "You are a helpful assistant with access to tools. Always use the available tools to answer questions. Call multiple tools in parallel when needed."
                 ),
-                .user(content: "What's the weather in Tokyo and what time is it there?"),
+                .user("What's the weather in Tokyo and what time is it there?"),
             ],
             tools: multiToolSchemas,
             additionalContext: ["enable_thinking": true]
@@ -1095,10 +1089,9 @@ public enum ToolCallTests {
         let input = UserInput(
             chat: [
                 .system(
-                    content:
-                        "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
+                    "You are a helpful assistant with access to tools. When asked about weather, use the get_weather function."
                 ),
-                .user(content: userMessage),
+                .user(userMessage),
             ],
             tools: [weatherToolSchema]
         )

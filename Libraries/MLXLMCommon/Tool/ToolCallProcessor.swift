@@ -70,7 +70,7 @@ public final class ToolCallProcessor {
     ///   - tools: Optional tool schemas for type-aware parsing
     public init(format: ToolCallFormat = .json, tools: [[String: any Sendable]]? = nil) {
         self.format = format
-        self.parser = format.makeParser()
+        self.parser = format.createParser()
         self.tools = tools
         self.supportsBareJSONFallback = format == .json
     }

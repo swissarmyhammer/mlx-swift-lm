@@ -45,8 +45,8 @@ public class UserInputTests: XCTestCase {
 
     public func testStandardConversion() {
         let chat: [Chat.Message] = [
-            .system(content: "You are a useful agent."),
-            .user(content: "Tell me a story."),
+            .system("You are a useful agent."),
+            .user("Tell me a story."),
         ]
 
         let messages = DefaultMessageGenerator().generate(messages: chat)
@@ -67,8 +67,8 @@ public class UserInputTests: XCTestCase {
 
     public func testQwen2ConversionText() {
         let chat: [Chat.Message] = [
-            .system(content: "You are a useful agent."),
-            .user(content: "Tell me a story."),
+            .system("You are a useful agent."),
+            .user("Tell me a story."),
         ]
 
         let messages = Qwen2VLMessageGenerator().generate(messages: chat)
@@ -99,8 +99,8 @@ public class UserInputTests: XCTestCase {
 
     public func testGemma4ConversionText() {
         let chat: [Chat.Message] = [
-            .system(content: "You are a useful agent."),
-            .user(content: "Tell me a story."),
+            .system("You are a useful agent."),
+            .user("Tell me a story."),
         ]
 
         let messages = Gemma4MessageGenerator().generate(messages: chat)
@@ -128,8 +128,8 @@ public class UserInputTests: XCTestCase {
 
     public func testMistral3ConversionText() {
         let chat: [Chat.Message] = [
-            .system(content: "You are a useful agent."),
-            .user(content: "Tell me a story."),
+            .system("You are a useful agent."),
+            .user("Tell me a story."),
         ]
 
         let messages = Mistral3MessageGenerator().generate(messages: chat)
@@ -161,7 +161,7 @@ public class UserInputTests: XCTestCase {
     public func testMistral3ConversionWithImage() {
         let chat: [Chat.Message] = [
             .user(
-                content: "What is this?",
+                "What is this?",
                 images: [
                     .url(
                         URL(
@@ -222,7 +222,7 @@ public class UserInputTests: XCTestCase {
             ),
             id: "call_custom_123"
         )
-        let assistant = Chat.Message.assistant(content: "Checking weather", toolCalls: [toolCall])
+        let assistant = Chat.Message.assistant("Checking weather", toolCalls: [toolCall])
         let toolResult = Chat.Message.tool(content: #"{"temperature":18}"#, id: "call_custom_123")
 
         let generators: [(String, (Chat.Message) -> MLXLMCommon.Message)] = [
@@ -261,9 +261,9 @@ public class UserInputTests: XCTestCase {
 
     public func testQwen2ConversionImage() {
         let chat: [Chat.Message] = [
-            .system(content: "You are a useful agent."),
+            .system("You are a useful agent."),
             .user(
-                content: "What is this?",
+                "What is this?",
                 images: [
                     .url(
                         URL(
@@ -306,9 +306,9 @@ public class UserInputTests: XCTestCase {
 
     public func testGemma4ConversionImage() {
         let chat: [Chat.Message] = [
-            .system(content: "You are a useful agent."),
+            .system("You are a useful agent."),
             .user(
-                content: "What is this?",
+                "What is this?",
                 images: [
                     .url(
                         URL(
@@ -371,7 +371,7 @@ public class UserInputTests: XCTestCase {
         ).cropped(to: CGRect(x: 0, y: 0, width: 4, height: 4))
 
         let chat: [Chat.Message] = [
-            .user(content: "describe", images: [.ciImage(placeholder)])
+            .user("describe", images: [.ciImage(placeholder)])
         ]
         let input = UserInput(prompt: .chat(chat))
         XCTAssertEqual(

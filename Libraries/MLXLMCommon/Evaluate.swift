@@ -986,7 +986,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
     /// The main (verifier) model's current pending text -- paired with `draftY` below;
     /// the `main`/`draft` prefix disambiguates which model's token stream this is.
-    var mainY: LMInput.Text
+    var y: LMInput.Text
     var draftY: LMInput.Text
 
     let mainModel: any LanguageModel
@@ -1216,7 +1216,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         // Verification: main model processes proposals in one pass
-        let verifyTokens = [mainY.tokens] + draftTokens
+        let verifyTokens = [y.tokens] + draftTokens
         let verifyInput = LMInput.Text(tokens: concatenated(verifyTokens))
         let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
         let mainResult = mainModel(verifyInput[text: .newAxis], cache: mainCache, state: state)
@@ -1283,8 +1283,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         kvCachePlan.apply(to: mainCacheStorage)
         kvCachePlan.apply(to: draftCacheStorage)
 
-        // Set mainY/draftY for the next round
-        mainY = .init(tokens: finalToken)
+        // Set y/draftY for the next round
+        y = .init(tokens: finalToken)
         draftY = .init(tokens: finalToken)
 
         // If all draft tokens were accepted, the draft model hasn't processed

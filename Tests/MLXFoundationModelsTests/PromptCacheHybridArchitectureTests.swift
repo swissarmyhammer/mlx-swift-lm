@@ -711,7 +711,7 @@ struct PromptCacheHybridArchitectureTests {
     func makeGuidedRenderAgreesOnHistoryContext() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let messages: [Chat.Message] = [
-            .user(content: "ab"), .assistant(content: "cd"), .user(content: "ef"),
+            .user("ab"), .assistant("cd"), .user("ef"),
         ]
         // The context exactly as the guided path derives it: from the
         // resolved family's `ReasoningConfig.historyPreservationContext`.
@@ -741,7 +741,7 @@ struct PromptCacheHybridArchitectureTests {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let tokenizer = StableBoundaryProbeTokenizer()
         let chat: [Chat.Message] = [
-            .user(content: "ab"), .assistant(content: "cd"), .user(content: "ef"),
+            .user("ab"), .assistant("cd"), .user("ef"),
         ]
         let messages: [[String: any Sendable]] = [
             ["role": "user", "content": "ab"],
