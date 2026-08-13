@@ -49,4 +49,31 @@ public enum ClosingTokenBias {
 
         return MLXArray(biases)
     }
+
+    /// Returns an MLXArray of shape [count] with the tier-1 (+200) boost at
+    /// each stop-token position and 0.0 everywhere else.
+    ///
+    /// This is the *soft-zone* bias: near the token budget the model should
+    /// be nudged to stop as soon as the grammar makes stopping legal, but
+    /// its content must never be distorted -- a boost on a stop token that
+    /// the grammar mask holds at `-inf` is a no-op, so mid-string/mid-value
+    /// content decodes exactly as in the normal zone. Boosting content
+    /// characters instead (the old soft-zone behavior of applying the full
+    /// ``compute(tokenizer:eosTokenId:)`` array) is what corrupted long
+    /// tool-call arguments into `}7}7…`/digit runaways (kanban y4s0w2j).
+    ///
+    /// - Parameters:
+    ///   - stopTokenIDs: Token ids that terminate generation (see
+    ///     `GuidedGenerationLoop.buildStopTokenIDs`). Out-of-range ids are
+    ///     ignored.
+    ///   - count: The returned array's length (the closing-bias length, so
+    ///     the two zone arrays stay interchangeable downstream).
+    /// - Returns: The additive soft-zone bias array.
+    public static func eosOnlyBoost(stopTokenIDs: Set<Int>, count: Int) -> MLXArray {
+        var boost = [Float](repeating: 0.0, count: count)
+        for id in stopTokenIDs where id >= 0 && id < count {
+            boost[id] = tier1Bias
+        }
+        return MLXArray(boost)
+    }
 }

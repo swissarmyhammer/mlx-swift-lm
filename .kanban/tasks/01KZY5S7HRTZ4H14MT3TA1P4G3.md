@@ -21,6 +21,24 @@ comments:
 
     File: `Libraries/MLXGuidedGeneration/GuidedGenerationLoop.swift`. Test kept as-is (`Tests/MLXGuidedGenerationTests/FastForwardSampledTokenKVCacheTests.swift`), with only the `result.tokenCount` → `result` change (upstream returns bare `Int`, not a `RunResult`) — same adjustment was needed in `Tests/MLXGuidedGenerationTests/GuidedLoopDegenerationTests.swift`, which also asserts against this API and had the identical stale `.tokenCount` reference (that file was otherwise untouched by the merge, confirmed via diff against the pre-merge tag).
   timestamp: 2026-08-13T18:46:25.114589+00:00
+- actor: claude-code
+  id: 01kzycxn3ejgvtgad9x7m9xmk5
+  text: |-
+    ### test — additional restoration found and fixed
+
+    `onTokenCommitted` and the FF-triggering sampled-token feed (this card's original scope) were already fixed by commits f9d797f and d37bbb0.
+
+    Running the full suite (not narrowed) surfaced two more pieces of kanban `y4s0w2j`'s fix that the wholesale replacement also dropped, both now restored and green:
+
+    1. `ClosingTokenBias.eosOnlyBoost(stopTokenIDs:count:)` — was missing. The soft zone was applying the full `+100` closing-token bias to every sampled token, corrupting string content.
+    2. `RepetitionCycleTracker` wiring into `GuidedGenerationLoop.run` — the tracker type still shipped in the target but nothing called it. Restored: record every sampled token, rebuild a `-1000` suppression array on each new cycle detection, apply it every zone, clear the window on each fast-forward splice.
+
+    Also fixed a related, unrelated-to-the-merge bug found in the same run: `SchemaConverter.encodeToolCallingGrammar` never hoisted/namespaced a tool's `$defs` the way `encodeToolCallingEnvelopeJSON` does, so `ToolCallingSchemaTests.grammarBuilderHoistsNestedDefsInBothArms` failed. Fixed to match.
+
+    Commits: 27464a9 (SchemaConverter), f504f99 (ClosingTokenBias + GuidedGenerationLoop).
+
+    This card's own scope (onTokenCommitted) is done. Leaving the card open only if a person wants a final read-through of the diff; the build and tests are green.
+  timestamp: 2026-08-13T20:27:21.070153+00:00
 position_column: todo
 position_ordinal: 9b80
 title: Port onTokenCommitted onto the upstream GuidedGenerationLoop
