@@ -223,6 +223,5 @@ public struct BaseConfiguration: Codable, Sendable {
         case quantizationContainer = "quantization"
         case textConfiguration = "text_config"
         case eosTokenIds = "eos_token_id"
-        case contextLength = "max_position_embeddings"
     }
 }
