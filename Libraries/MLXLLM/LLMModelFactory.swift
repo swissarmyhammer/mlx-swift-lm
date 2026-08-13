@@ -510,19 +510,40 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 @available(*, deprecated, renamed: "LLMRegistry", message: "Please use LLMRegistry directly.")
 public typealias ModelRegistry = LLMRegistry
 
-private struct LLMUserInputProcessor: UserInputProcessor {
+/// Errors thrown by ``LLMModelFactory``'s prompt preparation.
+public enum PromptPreparationError: LocalizedError {
+    /// The tokenizer has no chat template, and the model forbids the
+    /// plain-text prompt fallback. The value is the model's refusal message
+    /// (``LLMModel/missingChatTemplateRefusal``).
+    case plainTextFallbackForbidden(String)
+
+    /// A human-readable description of the error.
+    public var errorDescription: String? {
+        switch self {
+        case .plainTextFallbackForbidden(let message):
+            message
+        }
+    }
+}
+
+/// Converts ``UserInput`` into an ``LMInput`` by rendering the tokenizer's
+/// chat template. `internal` so tests can pin the missing-template behavior.
+struct LLMUserInputProcessor: UserInputProcessor {
 
     let tokenizer: Tokenizer
     let configuration: ModelConfiguration
     let messageGenerator: MessageGenerator
+    let missingChatTemplateRefusal: String?
 
     internal init(
         tokenizer: any Tokenizer, configuration: ModelConfiguration,
-        messageGenerator: MessageGenerator
+        messageGenerator: MessageGenerator,
+        missingChatTemplateRefusal: String? = nil
     ) {
         self.tokenizer = tokenizer
         self.configuration = configuration
         self.messageGenerator = messageGenerator
+        self.missingChatTemplateRefusal = missingChatTemplateRefusal
     }
 
     func prepare(input: UserInput) throws -> LMInput {
@@ -533,6 +554,13 @@ private struct LLMUserInputProcessor: UserInputProcessor {
 
             return LMInput(tokens: MLXArray(promptTokens))
         } catch TokenizerError.missingChatTemplate {
+            // A model that forbids the fallback gets a loud error. For such
+            // a model the plain-text prompt below looks correct, gives no
+            // error, and is wrong (card ^f0ymw6b, decision B).
+            if let missingChatTemplateRefusal {
+                throw PromptPreparationError.plainTextFallbackForbidden(
+                    missingChatTemplateRefusal)
+            }
             print(
                 "No chat template was included or provided, so converting messages to simple text format. This is not optimal for model performance, so applications should provide a chat template if none is included with the model."
             )
@@ -683,7 +711,8 @@ public final class LLMModelFactory: GenericModelFactory {
 
         let processor = LLMUserInputProcessor(
             tokenizer: tokenizer, configuration: modelConfig,
-            messageGenerator: messageGenerator)
+            messageGenerator: messageGenerator,
+            missingChatTemplateRefusal: (model as? LLMModel)?.missingChatTemplateRefusal)
 
         return .init(
             configuration: modelConfig, model: model, processor: processor,

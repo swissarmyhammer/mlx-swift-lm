@@ -71,7 +71,9 @@ private final class HybridPromptCacheProbeModel: Module, MLXLMCommon.LanguageMod
     }
 
     /// Protocol conformance stub; not invoked by PromptCache and will trap if called.
-    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?)
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill: PrefillParameters
+    )
         throws -> PrepareResult
     {
         fatalError("not exercised by PromptCache tests")
@@ -174,7 +176,7 @@ struct PromptCacheHybridEvictionScopeTests {
         conversation B on a fresh same-model-id load resolves exactly as a cold cache
         """
     )
-    func evictedModelIDIsColdForTheNextConversation() async {
+    func evictedModelIDIsColdForTheNextConversation() async throws {
         let cache = PromptCache()
         let model = HybridPromptCacheProbeModel()
         let modelID = "hybrid-evict-cross-conversation-\(UUID().uuidString)"
@@ -192,7 +194,7 @@ struct PromptCacheHybridEvictionScopeTests {
         // cold-cache assertions below observe a signal this setup can
         // actually produce, not a vacuous always-full-feed.
         let continuationA = tokensA + [90, 91, 92]
-        let control = await resolveOnce(
+        let control = try await resolveOnce(
             cache: cache, modelID: modelID, newTokens: continuationA, model: model)
         #expect(
             control.tokensToFeed == [90, 91, 92],
@@ -208,7 +210,7 @@ struct PromptCacheHybridEvictionScopeTests {
             await cache.resolveHybridCheckpoint(modelID: modelID, newTokens: tokensB).consume()
                 == nil,
             "no checkpoint may match conversation B after eviction")
-        let resolvedB = await resolveOnce(
+        let resolvedB = try await resolveOnce(
             cache: cache, modelID: modelID, newTokens: tokensB, model: model)
         #expect(
             resolvedB.tokensToFeed == tokensB,
@@ -216,7 +218,7 @@ struct PromptCacheHybridEvictionScopeTests {
 
         // Even replaying conversation A's own continuation is cold now: the
         // eviction removed the checkpoint outright, not just B's view of it.
-        let replayedA = await resolveOnce(
+        let replayedA = try await resolveOnce(
             cache: cache, modelID: modelID, newTokens: continuationA, model: model)
         #expect(
             replayedA.tokensToFeed == continuationA,
@@ -229,7 +231,7 @@ struct PromptCacheHybridEvictionScopeTests {
         and structure -- the element-wise token-prefix guard, not the hash key, decides
         """
     )
-    func divergentConversationsNeverCrossMatch() async {
+    func divergentConversationsNeverCrossMatch() async throws {
         let cache = PromptCache()
         let model = HybridPromptCacheProbeModel()
         let modelID = "hybrid-divergent-no-cross-match-\(UUID().uuidString)"
@@ -249,7 +251,7 @@ struct PromptCacheHybridEvictionScopeTests {
             "a same-length, one-element-different prefix must never match")
 
         // And through the real resolve() surface: conversation B is fed in full.
-        let resolvedB = await resolveOnce(
+        let resolvedB = try await resolveOnce(
             cache: cache, modelID: modelID, newTokens: nearIdenticalB, model: model)
         #expect(resolvedB.tokensToFeed == nearIdenticalB)
 
