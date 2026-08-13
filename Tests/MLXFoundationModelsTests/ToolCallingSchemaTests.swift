@@ -277,10 +277,14 @@ struct ToolCallingSchemaTests {
         let elements = try #require(format["elements"] as? [[String: Any]])
         try #require(elements.count == 2)
 
-        let wrappedSchema = try #require(
-            (elements[0]["content"] as? [String: Any])?["json_schema"] as? [String: Any]
-        )
-        let bareSchema = try #require(elements[1]["json_schema"] as? [String: Any])
+        let wrappedDispatch = try #require(elements[0]["content"] as? [String: Any])
+        let wrappedTags = try #require(wrappedDispatch["elements"] as? [[String: Any]])
+        let wrappedTagContent = try #require(wrappedTags.first?["content"] as? [String: Any])
+        let wrappedSchema = try #require(wrappedTagContent["json_schema"] as? [String: Any])
+
+        let bareTags = try #require(elements[1]["elements"] as? [[String: Any]])
+        let bareTagContent = try #require(bareTags.first?["content"] as? [String: Any])
+        let bareSchema = try #require(bareTagContent["json_schema"] as? [String: Any])
         for schema in [wrappedSchema, bareSchema] {
             let defs = try #require(schema["$defs"] as? [String: Any])
             #expect(defs["book_trip__Traveler"] != nil)
