@@ -191,7 +191,7 @@ struct FastForwardSampledTokenKVCacheTests {
         )
 
         #expect(emittedText == "ABCD", "all four grammar-forced bytes must still reach the caller")
-        #expect(result.tokenCount == 4)
+        #expect(result == 4)
 
         // The bug: without the fix, `committedTokenIDs` is only [66, 67, 68]
         // ("B", "C", "D") -- the sampled token 'A' (65) that triggered the

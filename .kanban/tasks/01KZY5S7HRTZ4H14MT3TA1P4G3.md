@@ -1,6 +1,26 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01kzy74v2tk97gvdmnxj2ky3ja
+  text: |-
+    ## Finding: upstream still has the bug
+
+    Read upstream's current `GuidedGenerationLoop.run` in full. In the `if !ffTokens.isEmpty` branch, it feeds only `ffTokens` through the model (`for (i, ffToken) in ffTokens.enumerated() { ... model(...) ... }`). The sampled `token` that triggered the FF batch is never fed through the model in that branch — `CommitResult.tokens` never echoes the sampled token back, and the only other forward-pass site is the `else` branch (`advanceSingleSampledToken`-equivalent), which never runs when `ffTokens` is non-empty. This is the exact same bug our pre-merge fork's `onTokenCommitted`/`processFastForwardTokens` fix addressed: the sampled token's KV-cache entry is silently skipped.
+
+    ## Fix applied
+
+    Ported the fix onto upstream's (simpler, non-`LoopState`-struct) file as an additive change:
+
+    1. Restored `onTokenCommitted: ((Int) -> Void)? = nil` as the last parameter of `GuidedGenerationLoop.run`, documented as firing for every token actually fed through the model during generation (not prefill).
+    2. In the FF branch, added a forward pass for the sampled `token` FIRST (before the `ffTokens` loop), calling `onTokenCommitted?(tokenId)` after it — mirroring what `advanceSingleSampledToken` already did for the non-FF path.
+    3. Added `onTokenCommitted?(Int(ffToken))` inside the existing FF-token loop, and `onTokenCommitted?(tokenId)` in the non-FF `else` branch.
+
+    Kept upstream's simpler design otherwise (no `LoopState` struct, no `RunResult`/external-cache-passing — production call sites in `MLXLanguageModel.swift` already consume the bare `Int` return and upstream dropped the KV-cache pass-through feature, which nothing in this codebase's "must keep working" list depends on).
+
+    File: `Libraries/MLXGuidedGeneration/GuidedGenerationLoop.swift`. Test kept as-is (`Tests/MLXGuidedGenerationTests/FastForwardSampledTokenKVCacheTests.swift`), with only the `result.tokenCount` → `result` change (upstream returns bare `Int`, not a `RunResult`) — same adjustment was needed in `Tests/MLXGuidedGenerationTests/GuidedLoopDegenerationTests.swift`, which also asserts against this API and had the identical stale `.tokenCount` reference (that file was otherwise untouched by the merge, confirmed via diff against the pre-merge tag).
+  timestamp: 2026-08-13T18:46:25.114589+00:00
 position_column: todo
 position_ordinal: 9b80
 title: Port onTokenCommitted onto the upstream GuidedGenerationLoop

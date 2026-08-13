@@ -78,6 +78,11 @@ public enum GuidedGenerationLoop {
     ///   - prefill: Prompt prefill parameters (step size, chunking strategy,
     ///     progress callback). Defaults to a 512-token step with balanced
     ///     chunking.
+    ///   - onTokenCommitted: Called, in order, with the ID of every token
+    ///     actually fed through the model during generation (sampled tokens
+    ///     and fast-forward tokens alike). Not called for prompt tokens fed
+    ///     during prefill. `nil` is a no-op, so existing callers are
+    ///     unaffected.
     ///   - emit: Callback for each text delta. Return `false` to stop.
     /// - Returns: Total number of tokens generated (including FF tokens).
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
@@ -102,6 +107,7 @@ public enum GuidedGenerationLoop {
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
         prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
+        onTokenCommitted: ((Int) -> Void)? = nil,
         emit: (String) -> Bool
     ) throws -> Int {
         let model = context.model
@@ -380,6 +386,29 @@ public enum GuidedGenerationLoop {
 
                 if shouldStopAfterFF { break }
 
+                // Feed the sampled token through the model first. Commit-
+                // Result.tokens never echoes the sampled token back (see
+                // the comment above), so nothing upstream of this point has
+                // fed it through the model yet. It occupies the KV-cache
+                // position right after the prior forward pass and right
+                // before the first FF token's position -- the same single-
+                // token forward pass the non-FF branch below does. Its
+                // logits are not kept (the grammar, not a sample from these
+                // logits, forces every FF token that follows), so only the
+                // last FF token's logits matter, same as before this token
+                // was folded into a batch.
+                do {
+                    let tokenInput = LMInput.Text(tokens: MLXArray([Int32(token)]))
+                    let result = model(
+                        tokenInput[text: .newAxis],
+                        cache: cacheStorage.cache.isEmpty ? nil : cacheStorage.cache,
+                        state: modelState
+                    )
+                    cacheStorage.commitProcessedTokens(tokenInput.cacheSequenceLength)
+                    modelState = result.state
+                    onTokenCommitted?(tokenId)
+                }
+
                 // Process FF tokens one at a time to update KV cache.
                 // Batching (T_q > 1 with populated cache) triggers an MLX
                 // bug: scaledDotProductAttention in .causal mode creates a
@@ -396,6 +425,7 @@ public enum GuidedGenerationLoop {
                     )
                     cacheStorage.commitProcessedTokens(tokenInput.cacheSequenceLength)
                     modelState = result.state
+                    onTokenCommitted?(Int(ffToken))
                     // Only need logits from the last FF token
                     if i == ffTokens.count - 1 {
                         logits = result.logits
@@ -427,6 +457,7 @@ public enum GuidedGenerationLoop {
                 cacheStorage.commitProcessedTokens(nextInput.cacheSequenceLength)
                 modelState = result.state
                 logits = result.logits
+                onTokenCommitted?(tokenId)
 
                 // Quantize the KV cache after the forward pass, matching the
                 // unconstrained TokenIterator. No-op unless `kvBits` is set.
