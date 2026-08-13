@@ -230,7 +230,7 @@ struct DeepSeekV4GateCheckpointLoadTests {
         try model.update(
             parameters: ModuleParameters.unflattened(try Self.publishedCheckpoint()),
             verify: [.all])
-        let gate = model.model.layers[Self.hashLayer].ffn.gate
+        let gate = model.model.layers[Self.hashLayer].mixtureOfExperts.gate
 
         let inputIds = Self.tokens()
         let (indices, _) = gate(Self.hiddenState(seed: 101), inputIds: inputIds)
@@ -252,7 +252,7 @@ struct DeepSeekV4GateCheckpointLoadTests {
         try model.update(
             parameters: ModuleParameters.unflattened(try Self.publishedCheckpoint()),
             verify: [.all])
-        let gate = model.model.layers[Self.topKLayer].ffn.gate
+        let gate = model.model.layers[Self.topKLayer].mixtureOfExperts.gate
 
         // A top-k gate reads the hidden state, thus two different states give
         // two different selections. A gate that read a hash table instead

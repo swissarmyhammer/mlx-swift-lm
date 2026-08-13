@@ -159,19 +159,19 @@ final class DeepSeekV4DecoderLayer: Module {
     @ModuleInfo(key: "attn") var attention: DeepSeekV4Attention
 
     /// The mixture-of-experts half of this layer.
-    @ModuleInfo(key: "ffn") var ffn: DeepSeekV4MoE
+    @ModuleInfo(key: "ffn") var mixtureOfExperts: DeepSeekV4MoE
 
     /// The norm the attention half applies to the collapsed stream.
     @ModuleInfo(key: "attn_norm") var attentionNorm: RMSNorm
 
     /// The norm the mixture-of-experts half applies to the collapsed stream.
-    @ModuleInfo(key: "ffn_norm") var ffnNorm: RMSNorm
+    @ModuleInfo(key: "ffn_norm") var mixtureOfExpertsNorm: RMSNorm
 
     /// The manifold hyper-connection the attention half runs inside.
     @ModuleInfo(key: "hc_attn") var attentionConnection: DeepSeekV4HyperConnection
 
     /// The manifold hyper-connection the mixture-of-experts half runs inside.
-    @ModuleInfo(key: "hc_ffn") var ffnConnection: DeepSeekV4HyperConnection
+    @ModuleInfo(key: "hc_ffn") var mixtureOfExpertsConnection: DeepSeekV4HyperConnection
 
     /// The index of this layer, which the trace lines name.
     private let layerIndex: Int
@@ -185,14 +185,16 @@ final class DeepSeekV4DecoderLayer: Module {
         self.layerIndex = layer
         self._attention.wrappedValue = DeepSeekV4Attention(
             configuration: configuration, layer: layer)
-        self._ffn.wrappedValue = DeepSeekV4MoE(configuration: configuration, layer: layer)
+        self._mixtureOfExperts.wrappedValue = DeepSeekV4MoE(
+            configuration: configuration, layer: layer)
         self._attentionNorm.wrappedValue = RMSNorm(
             dimensions: configuration.hiddenSize, eps: configuration.rmsNormEps)
-        self._ffnNorm.wrappedValue = RMSNorm(
+        self._mixtureOfExpertsNorm.wrappedValue = RMSNorm(
             dimensions: configuration.hiddenSize, eps: configuration.rmsNormEps)
         self._attentionConnection.wrappedValue = DeepSeekV4HyperConnection(
             configuration: configuration)
-        self._ffnConnection.wrappedValue = DeepSeekV4HyperConnection(configuration: configuration)
+        self._mixtureOfExpertsConnection.wrappedValue = DeepSeekV4HyperConnection(
+            configuration: configuration)
     }
 
     /// Reads one block of tokens.
@@ -219,9 +221,10 @@ final class DeepSeekV4DecoderLayer: Module {
             attention(normalized, mask: mask, cache: cache)
         }
         return wrapped(
-            afterAttention, connection: ffnConnection, norm: ffnNorm, half: "ffn"
-        ) { [ffn] normalized in
-            ffn(normalized, inputIds: inputIds)
+            afterAttention, connection: mixtureOfExpertsConnection, norm: mixtureOfExpertsNorm,
+            half: "ffn"
+        ) { [mixtureOfExperts] normalized in
+            mixtureOfExperts(normalized, inputIds: inputIds)
         }
     }
 

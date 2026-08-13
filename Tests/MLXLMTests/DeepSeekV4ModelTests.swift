@@ -288,9 +288,10 @@ struct DeepSeekV4ModelTests {
         let afterAttention = layer.attentionConnection.expand(
             blockOutput: attended, residual: stream,
             post: attentionCollapse.post, comb: attentionCollapse.comb)
-        let mixtureCollapse = layer.ffnConnection.collapse(afterAttention)
-        let mixed = layer.ffn(layer.ffnNorm(mixtureCollapse.collapsed), inputIds: inputIds)
-        let expected = layer.ffnConnection.expand(
+        let mixtureCollapse = layer.mixtureOfExpertsConnection.collapse(afterAttention)
+        let mixed = layer.mixtureOfExperts(
+            layer.mixtureOfExpertsNorm(mixtureCollapse.collapsed), inputIds: inputIds)
+        let expected = layer.mixtureOfExpertsConnection.expand(
             blockOutput: mixed, residual: afterAttention,
             post: mixtureCollapse.post, comb: mixtureCollapse.comb)
 
@@ -311,7 +312,9 @@ struct DeepSeekV4ModelTests {
     @Test func theDecoderLayerHandsTheTokenIdentifiersToTheHashRoutingGate() throws {
         let model = try Self.loadedModel()
         let layer = model.model.layers[Self.hashLayer]
-        #expect(layer.ffn.gate.isHashLayer, "the premise: layer \(Self.hashLayer) routes by hash")
+        #expect(
+            layer.mixtureOfExperts.gate.isHashLayer,
+            "the premise: layer \(Self.hashLayer) routes by hash")
 
         // One stream, two runs of token identifiers. A hash layer names its
         // experts from the identifiers alone, thus the two answers differ only
