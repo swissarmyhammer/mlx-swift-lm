@@ -1120,7 +1120,7 @@ struct MiniMaxM3Tests {
             image: .init(pixels: pixelValues, frames: [grid]))
 
         let cache = model.newCache(parameters: nil)
-        let result = try model.prepare(input, cache: cache, state: nil, windowSize: nil)
+        let result = try model.prepare(input, cache: cache, state: nil, prefill: .init(stepSize: nil))
 
         guard case .logits(let output) = result else {
             Issue.record("expected .logits for an image prompt, got .tokens")
