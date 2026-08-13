@@ -113,6 +113,14 @@ public enum VLMTypeRegistry {
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "glm_ocr": create(GlmOcrConfiguration.self, GlmOcr.init),
         "muse_glimmer": create(MuseGlimmerConfiguration.self, MuseGlimmer.init),
+        // VL-nested `minimax_m3_vl` checkpoints decode the full VL config
+        // (text plus vision) and build a model that can do vision. See
+        // MiniMaxM3.swift.
+        "minimax_m3_vl": create(MiniMaxM3Configuration.self, MiniMaxM3Model.init),
+        // Flat `minimax_m3` conversions are text only. They decode straight
+        // into the text config, because they have no `text_config` or
+        // `vision_config` level to unwrap.
+        "minimax_m3": create(MiniMaxM3TextConfiguration.self, MiniMaxM3Model.init),
     ])
 }
 
@@ -150,6 +158,8 @@ public enum VLMProcessorTypeRegistry {
             GlmOcrProcessorConfiguration.self, GlmOcrProcessor.init),
         "MuseGlimmerProcessor": create(
             MuseGlimmerProcessorConfiguration.self, MuseGlimmerProcessor.init),
+        "MiniMaxM3VLProcessor": create(
+            MiniMaxM3ProcessorConfiguration.self, MiniMaxM3Processor.init),
     ])
 }
 
@@ -290,6 +300,13 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             isSpecialToken: true)
     )
 
+    /// Model configuration for the MiniMax-M3-4bit quantized checkpoint
+    /// (`mlx-community/MiniMax-M3-4bit`).
+    static public let minimaxM34bit = ModelConfiguration(
+        id: "mlx-community/MiniMax-M3-4bit",
+        defaultPrompt: ""
+    )
+
     static public func all() -> [ModelConfiguration] {
         [
             paligemma3bMix448_8bit,
@@ -310,6 +327,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             qwen3_5_27B_4bit,
             qwen3_5_35B_A3B_4bit,
             museGlimmer30B4bit,
+            minimaxM34bit,
         ]
     }
 

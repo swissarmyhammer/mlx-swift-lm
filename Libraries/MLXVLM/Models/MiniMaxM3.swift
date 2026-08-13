@@ -2907,3 +2907,14 @@ public struct MiniMaxM3Processor: UserInputProcessor {
             image: .init(pixels: pixels, frames: frames))
     }
 }
+
+// MARK: - Chat conventions
+
+// MiniMax-M3 writes its tool calls as namespaced XML, where each parameter
+// is a `<key>value</key>` child. This differs from M2, which writes
+// `<parameter name="k">v</parameter>`. See ``MiniMaxM3ToolCallParser``.
+// Both the VL-nested `minimax_m3_vl` type and the flat text-only
+// `minimax_m3` type build this class, so one declaration covers both.
+extension MiniMaxM3Model {
+    public var toolCallFormat: ToolCallFormat? { .minimaxM3 }
+}

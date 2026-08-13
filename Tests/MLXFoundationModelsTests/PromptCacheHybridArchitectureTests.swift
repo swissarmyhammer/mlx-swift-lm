@@ -169,7 +169,7 @@ struct PromptCacheHybridArchitectureTests {
         modelFactory: () throws -> any MLXLMCommon.LanguageModel
     ) throws {
         let model = try modelFactory()
-        let cache = model.newCache(parameters: nil)
+        let cache = try model.newCache(parameters: nil)
 
         #expect(cache.count == 4, "sanity: 4 layers, matching num_hidden_layers")
         #expect(
@@ -179,7 +179,7 @@ struct PromptCacheHybridArchitectureTests {
         #expect(PromptCache.isHybridMambaAttention(cache) == true)
 
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        #expect(MLXLanguageModel.supportsPromptCacheReuse(model: model) == true)
+        #expect(try MLXLanguageModel.supportsPromptCacheReuse(model: model) == true)
     }
 
     @Test("a real Qwen35TextModel's cache is not chunkable, but IS a hybrid checkpoint candidate")
@@ -193,28 +193,28 @@ struct PromptCacheHybridArchitectureTests {
     }
 
     @Test("a pure-attention model's cache is still chunkable (regression guard)")
-    func pureAttentionModelIsChunkable() {
+    func pureAttentionModelIsChunkable() throws {
         let model = PromptCacheProbeModel()
 
-        #expect(PromptCache.isChunkable(model.newCache(parameters: nil)) == true)
-        #expect(PromptCache.isHybridMambaAttention(model.newCache(parameters: nil)) == false)
+        #expect(PromptCache.isChunkable(try model.newCache(parameters: nil)) == true)
+        #expect(PromptCache.isHybridMambaAttention(try model.newCache(parameters: nil)) == false)
 
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        #expect(MLXLanguageModel.supportsPromptCacheReuse(model: model) == true)
+        #expect(try MLXLanguageModel.supportsPromptCacheReuse(model: model) == true)
     }
 
     @Test("a maxKVSize-driven RotatingKVCache stack is neither chunkable nor hybrid")
-    func rotatingCacheModelSupportsNeitherMechanism() {
+    func rotatingCacheModelSupportsNeitherMechanism() throws {
         let model = PromptCacheProbeModel()
         let parameters = GenerateParameters(maxKVSize: 16)
-        let cache = model.newCache(parameters: parameters)
+        let cache = try model.newCache(parameters: parameters)
 
         #expect(PromptCache.isChunkable(cache) == false)
         #expect(PromptCache.isHybridMambaAttention(cache) == false)
 
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         #expect(
-            MLXLanguageModel.supportsPromptCacheReuse(model: model, parameters: parameters)
+            try MLXLanguageModel.supportsPromptCacheReuse(model: model, parameters: parameters)
                 == false)
     }
 
@@ -428,8 +428,8 @@ struct PromptCacheHybridArchitectureTests {
     /// (the reference the checkpoint-restored path must match).
     private func referenceSuffixLogits(
         model: any MLXLMCommon.LanguageModel, tokens: [Int], suffixStart: Int
-    ) -> MLXArray {
-        let cache = model.newCache(parameters: nil)
+    ) throws -> MLXArray {
+        let cache = try model.newCache(parameters: nil)
         let input = MLXArray(tokens).expandedDimensions(axis: 0)
         let logits = model.callAsFunction(input, cache: cache)
         return logits[0..., suffixStart..., 0...]
@@ -488,7 +488,7 @@ struct PromptCacheHybridArchitectureTests {
         let model = try modelFactory()
         let allTokens = (0 ..< 24).map(tokenFormula)
 
-        let reference = referenceSuffixLogits(
+        let reference = try referenceSuffixLogits(
             model: model, tokens: allTokens, suffixStart: prefixLen)
 
         let promptCache = PromptCache()
@@ -543,7 +543,7 @@ struct PromptCacheHybridArchitectureTests {
         let firstPrefixLen = 8
         let secondPrefixLen = 18
 
-        let reference = referenceSuffixLogits(
+        let reference = try referenceSuffixLogits(
             model: model, tokens: allTokens, suffixStart: secondPrefixLen)
 
         let promptCache = PromptCache()
@@ -815,7 +815,7 @@ struct PromptCacheHybridArchitectureTests {
         let continuation = [40, 41, 42, 43, 44, 45]
         let round2Tokens = stableTokens + continuation
 
-        let reference = referenceSuffixLogits(
+        let reference = try referenceSuffixLogits(
             model: model, tokens: round2Tokens, suffixStart: stableLength)
 
         let promptCache = PromptCache()

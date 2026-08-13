@@ -99,7 +99,10 @@ private final class RecordingProbeModel: Module, MLXLMCommon.LanguageModel,
     var kvHeads: [Int] { [1] }
     private(set) var fedTokenIDs: [Int] = []
 
-    func prepare(_ input: LMInput, cache: [KVCache], state _: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
+    func prepare(
+        _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?,
+        prefill: PrefillParameters
+    ) throws -> PrepareResult {
         .tokens(input.text)
     }
 
@@ -123,7 +126,7 @@ struct FastForwardSampledTokenKVCacheTests {
         return try GrammarTokenizer(
             vocab: vocab,
             vocabType: .byteFallback,
-            eosTokenID: Int32(ByteTokenizer.eosTokenID)
+            eosTokenId: Int32(ByteTokenizer.eosTokenID)
         )
     }
 

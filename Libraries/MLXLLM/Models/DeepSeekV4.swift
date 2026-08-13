@@ -613,3 +613,17 @@ public final class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, 
         }
     }
 }
+
+// MARK: - Chat conventions
+
+// DeepSeek-V4 writes its tool calls in its own DSML syntax. The
+// `DeepSeekV4ChatEncoder` renders that syntax and `DSMLToolCallParser`
+// reads it back. The architecture, not the checkpoint, fixes the syntax,
+// so the model declares it here.
+//
+// It declares no `reasoningConfig`. V4 controls thinking through the
+// encoder's own thinking mode, which the chat template flag drives, and
+// not through a `<think>` delimiter pair in the token stream.
+extension DeepSeekV4Model {
+    public var toolCallFormat: ToolCallFormat? { .dsml }
+}
