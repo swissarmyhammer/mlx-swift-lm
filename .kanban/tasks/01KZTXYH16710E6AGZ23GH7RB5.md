@@ -109,6 +109,67 @@ comments:
     - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift, /Users/wballard/github/swissarmyhammer/mlx-swift-lm/docs/deepseek-v4-support.md. Decode 2.10 s/token -> 0.068 s/token (31x). Suite minus the >12k test: 6 tests pass in 72.3 s. `swift test --filter DeepSeekV4`: 111 tests pass.
     - next: /review
   timestamp: 2026-08-13T12:52:51.000582+00:00
+- actor: claude-code
+  id: 01kzxkqqb81msbaegqthcrat18
+  text: |
+    ### review — findings
+    - scope: commit f389c22, range HEAD~1..HEAD
+    - engine: `review sha HEAD~1..HEAD` gave "Nothing in scope to review", counts findings 0 / attempted 0. The engine does not read test files or Markdown, and this commit changes only those two kinds. Thus the result is not clean, because nobody looked.
+    - mutation proof: put a type error at DeepseekV4IntegrationTests.swift:137. `swift build --build-tests` gave exit 0 (blind). `xcodebuild build-for-testing -scheme IntegrationTesting` gave exit 65 with "cannot convert value of type 'String' to specified type 'Int'" (caught). Put the file back with `git checkout --`; the same xcodebuild gave exit 0, "TEST BUILD SUCCEEDED". The tree is clean.
+    - evidence: 7 findings — DeepseekV4IntegrationTests.swift:122, :127-128, :134, :134-140, :135, :136, :138-139; docs/deepseek-v4-support.md:134
+    - next: the task stays in `review`. Do the 7 findings, then review again.
+  timestamp: 2026-08-13T13:07:12.360020+00:00
+- actor: claude-code
+  id: 01kzxkrqbcw8b76y4faesm7w3z
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 2 files. Decode step 2.10 s to 0.068 s (31x). The cause is Metal residency, not arithmetic: the routed experts took 2039 ms of 2060 ms, but the same layer 43 times took 68 ms. The fix raises the wired limit before the weight load.
+    - test: green — `swift test`, 535 tests, 0 failures, 2 skips that were there before.
+    - commit: f389c22 fix(mlx-lm): raise the Metal wired limit before DeepSeek-V4 weight load
+    - review: findings — the engine attempted 0 files, thus it is not a clean verdict. A mutation proof shows `swift build --build-tests` does not compile IntegrationTesting/ (exit 0 with a type error in it), but `xcodebuild build-for-testing -scheme IntegrationTesting` catches it (exit 65). 7 findings: DeepseekV4IntegrationTests.swift:122, :127-128, :134, :134-140, :135, :136, :138-139; docs/deepseek-v4-support.md:134.
+  timestamp: 2026-08-13T13:07:45.132182+00:00
+- actor: claude-code
+  id: 01kzxpfzw787rv89mdby2jgxqz
+  text: |
+    All 7 review findings closed. Two measurements changed what the card says.
+
+    ## Finding by finding
+
+    1. `:134` build evidence — the file header now records that `swift test` is blind to this directory, with the measured proof (a type error gives exit 0 from `swift build --build-tests` and exit 65 from `xcodebuild build-for-testing`), and it names the xcodebuild command as the compile evidence for this file. `docs/deepseek-v4-support.md` records the same.
+    2. `:134-140` no assertion — two new tests. `wiredMemoryLimitCoversTheWholeCheckpoint` asserts the applied limit and that the limit covers the whole checkpoint. `decodeStepStaysInsideTheLongGenerationBudget` measures 16 steady decode steps and asserts the median against a bound taken from the per-test time limit.
+    3. `:138-139` unchecked `applied` — `raiseWiredMemoryLimit()` now returns a `WiredMemoryOutcome` with `requestedBytes`, `appliedBytes` and `isFullyApplied`. The function prints a warning when the apply is short, and the new test fails on it.
+    4. `:135` silent guard — the guard prints why the limit was not raised.
+    5. `:136` the skip gate reused — the wired limit has its own constants: `deepseekV4CheckpointBytes` + `deepseekV4WiredHeadroomBytes` = `deepseekV4WiredMemoryBytes` (168,662,344,796 bytes). `deepseekV4RequiredMemoryBytes` stays the skip gate, and its doc says so.
+    6. `:127-128` "147 GB of the 141 GB total" — the two numbers were decimal GB against GiB. Measured on the local snapshot: the weight files hold 151,482,475,612 bytes (141 GiB), and the routed experts hold 147,169,738,752 bytes (137 GiB), which is 97%. The file now says "137 GiB of the 141 GiB total".
+    7. `:122` and `docs:134` "141 GB" against "91 GB" — the 91 GB figure was wrong. The measured size is 141 GiB. Every size statement of both files now uses that one measurement, and the header states the byte count beside it.
+
+    ## Two measurements that correct the card
+
+    - The steady decode step through this suite is **0.593 s**, not 0.068 s. The 0.068 s came from a release build with a direct model call. The suite builds for debug and decodes through `TokenIterator`. Both numbers are now in the file and in the document, each with the build it came from.
+    - The earlier "74.8 ms/token" of the two-round test assumed 120 generated tokens. `generate` stops at the end-of-sentence token, thus that turn generated far fewer tokens and the per-token number was too low.
+
+    Thus the 12,400-token run projects to about **123 minutes**, not 15.5 minutes. It is still inside the 240-minute per-test limit, and the criterion holds.
+
+    ## Mutation proof of the new tests
+
+    The production line `let wiredMemory = await raiseWiredMemoryLimit()` was replaced by `let wiredMemory: WiredMemoryOutcome? = nil`, which is the change the finding names.
+
+    - RED: both new tests failed. `wiredMemoryLimitCoversTheWholeCheckpoint` recorded "the load must raise the Metal wired limit before it allocates a weight". `decodeStepStaysInsideTheLongGenerationBudget` measured a median of 2.1247 s against the 0.8710 s bound. Exit 65.
+    - The line was put back. GREEN: both tests pass, wired limit asked 168,662,344,796 bytes and applied the same, median decode step 0.5917 s. Exit 0.
+
+    ## Notes for the next agent
+
+    - Do NOT assert the mean of the first steps. The first `next()` call runs the whole prompt; the test drops it and takes the median of the 16 steps that follow.
+    - Do NOT put a value that holds the model container inside `#require`. `try #require(load.wiredMemory, ...)` printed the whole `ModelContext` on failure, which is 8 MB of output. The test uses `guard ... else { Issue.record(...) }` instead.
+    - Do not pipe an xcodebuild run into `grep` when you need the output later. Redirect to a file.
+  timestamp: 2026-08-13T13:55:24.679528+00:00
+- actor: claude-code
+  id: 01kzxpg7ja7fhgcwemp99enp40
+  text: |
+    ### implement — changed
+    - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift, /Users/wballard/github/swissarmyhammer/mlx-swift-lm/docs/deepseek-v4-support.md. All 7 review findings closed. `xcodebuild build-for-testing -scheme IntegrationTesting`: exit 0, no warning. `xcodebuild test -only-testing:IntegrationTestingTests/DeepseekV4IntegrationTests -skip-testing:.../longGenerationPastTwelveThousandTokensCompletes()`: 8 tests pass in 100.4 s. Mutation proof of the two new tests: exit 65 with the wired-limit call removed (median step 2.1247 s against the 0.8710 s bound), exit 0 with it back (median 0.5917 s). `swift test`: 850 tests in 4 runs, 0 failures.
+    - next: /review
+  timestamp: 2026-08-13T13:55:32.554646+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'DeepSeek-V4 decode performance: about 2.4 s/token blocks the >12k-token test'
@@ -125,7 +186,42 @@ For contrast, the Python reference (mlx-lm PR 1189) also decodes slowly on this 
 
 ## Acceptance Criteria
 
-- [x] A profile names the dominant cost of one decode step with numbers. — The routed experts (`ffn.switch_mlp`) carry 2039 ms of a 2060 ms decode step, which is 99%. The cost is Metal residency of the 147 GB of routed-expert weight buffers, not arithmetic: the same layer chained 43 times, with the same operation count, takes 68 ms.
-- [x] A decision or a fix: either decode gets fast enough that 12,400 tokens fit inside the 240-minute test limit, or the card records why not and what the >12k test should do instead. — FIXED. A `WiredMemoryTicket` that starts before the weight load takes one decode step from 2.10 s to 0.068 s, which is 31 times faster. Measured through the full `generate` path: 74.8 ms/token, thus 12,400 tokens take about 15.5 minutes, well inside the 240-minute limit.
+- [x] A profile names the dominant cost of one decode step with numbers. — The routed experts (`ffn.switch_mlp`) carry 2039 ms of a 2060 ms decode step, which is 99%. The cost is Metal residency of the routed-expert weight buffers, not arithmetic: the same layer chained 43 times, with the same operation count, takes 68 ms.
+- [x] A decision or a fix: either decode gets fast enough that 12,400 tokens fit inside the 240-minute test limit, or the card records why not and what the >12k test should do instead. — FIXED. A `WiredMemoryTicket` that starts before the weight load takes one decode step from 2.124 s to 0.593 s in the debug test build, thus 12,400 tokens take about 123 minutes, inside the 240-minute limit. A release build with a direct model call measures 2.10 s and 0.068 s for the same two steps.
 
 #deepseek-v4
+
+## Review Findings (2026-08-13 08:06)
+
+Scope: commit f389c22, range `HEAD~1..HEAD`.
+
+The review engine gave this result word for word:
+
+> ## Review Findings (2026-08-13 08:01)
+>
+> Nothing in scope to review.
+
+The counts were `findings: 0, confirmed: 0, refuted: 0, attempted: 0, failed: 0`. `attempted: 0` means the engine opened no file. The commit changes only a test file and a Markdown file, and the engine does not read those. Thus this is not a clean result. Nobody looked.
+
+### Mutation proof
+
+A mutation proof replaced the missing engine pass.
+
+1. Put a type error in the changed function `raiseWiredMemoryLimit()`, at `IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift:137`.
+2. `swift build --build-tests` gave **exit 0, "Build complete!"**. The error stayed unseen. `swift package describe` shows no SwiftPM target below `IntegrationTesting/`.
+3. `xcodebuild build-for-testing -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS'` gave **exit 65, "TEST BUILD FAILED"**, with `DeepseekV4IntegrationTests.swift:137:36: error: cannot convert value of type 'String' to specified type 'Int'`.
+4. `git checkout --` put the file back. The same `xcodebuild` command then gave **exit 0, "TEST BUILD SUCCEEDED"**. `git status` shows the file clean.
+
+Result: the Xcode scheme compiles the changed code and finds a mutation in it. The SwiftPM build does not. No test asserts the effect of the change.
+
+The real-weights suite did not run. It loads 141 GB and needs many minutes, and the >12k-token test needs hours.
+
+### Findings
+
+- [x] `IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift:134` — The commit message gives "swift test — 535 tests, 0 failures" as the evidence for this change. No SwiftPM target holds `IntegrationTesting/`, thus that command never compiles the changed code. The mutation proof above shows this: a type error in the changed function left `swift build --build-tests` at exit 0. Give evidence that covers the changed code, or record which build command covers it.
+- [x] `IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift:134-140` — No assertion covers the fix. The suite has no `#expect` for the applied wired limit, and none for decode speed. Line 388 measures `elapsed`, and line 391 only prints it. If a later change removes the call at line 154, or gives a wrong limit, the code still builds and all assertions still pass. The only symptom is the >12k test that hits the 240-minute limit after hours. Add an assertion that fails quickly when the limit is not raised.
+- [x] `IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift:138-139` — The function throws away its own result. The value `applied` goes only to `print`. If `start()` applies fewer bytes than the request, the suite continues at the slow speed and reports no failure. Compare `applied` with `bytes`.
+- [x] `IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift:135` — The `guard let recommended = GPU.maxRecommendedWorkingSetBytes() else { return }` goes back with no message. Every other gate in this file prints the reason when it stops (lines 224, 231, 241). Print the reason here also.
+- [x] `IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift:136` — The wired limit uses `deepseekV4RequiredMemoryBytes`. Line 43 documents that constant as the least physical memory the machine must have, which is a skip gate. The two values answer different questions. A later change to the skip gate changes the wired limit with no warning, and can remove this fix. Give the wired limit its own constant with its own name.
+- [x] `IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift:127-128` — The text says "The routed experts hold 147 GB of the 141 GB total". A part cannot be larger than the whole. Correct the two numbers.
+- [x] `IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift:122` and `docs/deepseek-v4-support.md:134` — The new text says Metal makes "all 141 GB" resident. Lines 11, 43, 145 and 234 of the same file, and `docs/deepseek-v4-support.md:69`, say the checkpoint is about 91 GB. The text does not say why the two numbers are different. Make them agree, or say what each number measures. The correction belongs to the new text, because this commit made the disagreement.

@@ -8,11 +8,12 @@
 // stability past 12k tokens (the `ml-explore/mlx-lm` issue-1662 landmine),
 // and two-round conversation behavior.
 //
-// The checkpoint is a 284B-total / 13B-active MoE, roughly 91 GB installed.
-// The tests never download it. Each real-weights test skips, with a message
-// that says why, when the machine has too little memory or when no local
-// copy of the checkpoint exists. The two encoder-level cache tests at the
-// end run everywhere, because they read no weights.
+// The checkpoint is a 284B-total / 13B-active MoE. Its weight files hold
+// 151,482,475,612 bytes, which is 141 GiB, measured on the published snapshot
+// on 2026-08-13. The tests never download it. Each real-weights test skips,
+// with a message that says why, when the machine has too little memory or when
+// no local copy of the checkpoint exists. The two encoder-level cache tests at
+// the end run everywhere, because they read no weights.
 //
 // The card names `Tests/MLXLMIntegrationTests/` as the location. That target
 // does not exist, and the root package holds no swift-transformers
@@ -20,6 +21,14 @@
 // tokenizer. This suite therefore follows the real-weights pattern of this
 // project (see `MiniMaxM3CacheIntegrationTests`). Run explicitly via:
 // `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/DeepseekV4IntegrationTests`
+//
+// `swift test` is BLIND to this file. No SwiftPM target holds
+// `IntegrationTesting/`, thus `swift build --build-tests` stays at exit 0 with
+// a type error in this file. Measured on 2026-08-13 with a deliberate type
+// error: `swift build --build-tests` gave exit 0, and
+// `xcodebuild build-for-testing -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS'`
+// gave exit 65. Use that xcodebuild command as the compile evidence for any
+// change to this file.
 
 import Foundation
 import HuggingFace
@@ -40,10 +49,31 @@ private let deepseekV4RepositoryID = "mlx-community/DeepSeek-V4-Flash-4bit"
 /// directory, in place of the Hugging Face cache locations.
 private let deepseekV4CheckpointOverrideKey = "MLX_DEEPSEEK_V4_CHECKPOINT"
 
-/// The least physical memory a run needs: about 91 GB of 4-bit weights, plus
+/// The size of the weight files of the published checkpoint, measured on the
+/// local snapshot on 2026-08-13: 151,482,475,612 bytes, which is 141 GiB. The
+/// routed experts (`ffn.switch_mlp`) hold 137 GiB of that, which is 97%.
+private let deepseekV4CheckpointBytes = 151_482_475_612
+
+/// The least physical memory a run needs: the 141 GiB of 4-bit weights, plus
 /// the MoE working set, the KV cache of a 12k-token generation, and system
 /// headroom.
+///
+/// This is the SKIP GATE, and it is not the wired-memory limit. It answers
+/// "is this machine large enough to run at all". The wired limit answers "how
+/// much memory must stay resident", and it has its own constant,
+/// ``deepseekV4WiredMemoryBytes``, thus a change to one never moves the other.
 private let deepseekV4RequiredMemoryBytes: UInt64 = 160 * 1_024 * 1_024 * 1_024
+
+/// The memory the wired limit holds above the weights: room for the KV cache
+/// of a 12k-token generation (about 1 GiB) and for the MoE working set.
+private let deepseekV4WiredHeadroomBytes = 16 * 1_024 * 1_024 * 1_024
+
+/// The Metal wired-memory limit the suite asks for: the whole checkpoint,
+/// plus ``deepseekV4WiredHeadroomBytes``. The limit must cover every weight
+/// buffer, because a buffer outside the residency set costs its full size
+/// again at each decode step. See ``raiseWiredMemoryLimit()``.
+private let deepseekV4WiredMemoryBytes =
+    deepseekV4CheckpointBytes + deepseekV4WiredHeadroomBytes
 
 /// The number of decoder layers of the published checkpoint.
 private let deepseekV4LayerCount = 43
@@ -55,6 +85,34 @@ private let longGenerationTokenCount = 12_400
 
 /// The bound that the long generation must pass: 12k tokens.
 private let longGenerationMinimumTokenCount = 12_288
+
+/// The per-test time limit of this suite, in minutes.
+private let suiteTimeLimitMinutes = 240
+
+/// The number of seconds in one minute.
+private let secondsPerMinute = 60.0
+
+/// The share of the per-test time limit that decode may take: three quarters.
+/// The remaining quarter covers the weight load, the prompt, and the variance
+/// of one machine against another.
+private let longGenerationLimitShare = 0.75
+
+/// The most seconds one decode step may take, so that the
+/// ``longGenerationTokenCount``-token run fits inside its share of the per-test
+/// time limit: 0.87 s.
+///
+/// Measured on an M3 Ultra (512 GiB) through this suite, which builds for
+/// debug: the steady decode step is 0.593 s with the wired limit raised and
+/// 2.124 s without it. The bound therefore holds with a margin of 1.5, and it
+/// fails at once when the limit is not raised.
+private let maximumSecondsPerDecodeStep =
+    Double(suiteTimeLimitMinutes) * secondsPerMinute * longGenerationLimitShare
+    / Double(longGenerationTokenCount)
+
+/// The number of decode steps the speed test measures. The first step of a
+/// generation runs the whole prompt, thus the test asks for one step more and
+/// drops the first.
+private let decodeSpeedSampleTokenCount = 16
 
 /// The number of tokens each short generation asks for.
 private let shortGenerationTokenCount = 48
@@ -113,50 +171,92 @@ private func directoryHoldsSafetensors(_ directory: URL) -> Bool {
 
 // MARK: - The Metal wired limit
 
+/// The result of the one wired-limit request of a test process.
+private struct WiredMemoryOutcome: Sendable {
+    /// The number of bytes the suite asked to keep wired.
+    let requestedBytes: Int
+    /// The number of bytes the wired-memory manager applied.
+    let appliedBytes: Int
+
+    /// Tells whether the manager applied the whole request. A short apply
+    /// leaves weight buffers outside the residency set, thus decode stays slow.
+    var isFullyApplied: Bool { appliedBytes >= requestedBytes }
+}
+
 /// Raises the Metal wired limit, and never lowers it again.
 ///
 /// MLX gives its Metal residency set a capacity of zero unless the process
 /// raises the wired limit, and it takes only buffers of 1 MB or less from the
 /// one heap that set holds. Every weight tensor of this checkpoint is larger
-/// than that, thus each one sits outside the residency set, and Metal makes
-/// all 141 GB resident again for each command buffer. One command buffer is
-/// one decode step, thus each token pays for the whole checkpoint.
+/// than that — each routed-expert tensor is 1 GiB — thus each one sits outside
+/// the residency set, and Metal makes all 141 GiB resident again for each
+/// command buffer. One command buffer is one decode step, thus each token pays
+/// for the whole checkpoint.
 ///
-/// Measured on an M3 Ultra (512 GiB) with this checkpoint, card `^3gh7rb5`:
-/// one decode step takes 2.10 s with the default limit and 0.068 s with the
-/// limit raised, which is 31 times faster. The routed experts hold 147 GB of
-/// the 141 GB total and carry 2.04 s of the 2.10 s.
+/// Measured on an M3 Ultra (512 GiB) with this checkpoint, card `^3gh7rb5`.
+/// With a release build and a direct model call, one decode step takes 2.10 s
+/// with the default limit and 0.068 s with the limit raised, which is 31 times
+/// faster. Through this suite, which builds for debug and decodes through
+/// `TokenIterator`, the same two steps take 2.124 s and 0.593 s. The routed
+/// experts hold 137 GiB of the 141 GiB total and carry 2.04 s of the 2.10 s.
 ///
 /// The order matters. A limit raised AFTER the load changes nothing (measured
 /// 2.10 s), because a buffer joins the residency set when it is made. The
 /// ticket therefore starts before the first weight is allocated, and it never
 /// ends, because a limit that falls again empties the set.
-private func raiseWiredMemoryLimit() async {
-    guard let recommended = GPU.maxRecommendedWorkingSetBytes() else { return }
-    let bytes = min(recommended, Int(deepseekV4RequiredMemoryBytes))
-    let ticket = WiredMemoryTicket(size: bytes, policy: WiredFixedPolicy(limit: bytes))
-    let applied = await ticket.start()
-    print("DeepSeek-V4 wired limit: asked \(bytes) bytes, applied \(applied) bytes")
+///
+/// - Returns: what the suite asked for and what the manager applied, or `nil`
+///   when this device reports no recommended working-set size.
+private func raiseWiredMemoryLimit() async -> WiredMemoryOutcome? {
+    guard let recommended = GPU.maxRecommendedWorkingSetBytes() else {
+        print(
+            "DeepSeek-V4 wired limit not raised: this device reports no recommended "
+                + "working-set size, thus each decode step pays for the whole checkpoint")
+        return nil
+    }
+    let requestedBytes = min(recommended, deepseekV4WiredMemoryBytes)
+    let ticket = WiredMemoryTicket(
+        size: requestedBytes, policy: WiredFixedPolicy(limit: requestedBytes))
+    let outcome = WiredMemoryOutcome(
+        requestedBytes: requestedBytes, appliedBytes: await ticket.start())
+    print(
+        "DeepSeek-V4 wired limit: asked \(outcome.requestedBytes) bytes, "
+            + "applied \(outcome.appliedBytes) bytes")
+    if !outcome.isFullyApplied {
+        print(
+            "DeepSeek-V4 wired limit is short of the request, thus weight buffers stay "
+                + "outside the Metal residency set and each decode step stays slow")
+    }
+    return outcome
 }
 
 // MARK: - One shared load
 
+/// What one shared load produced: the container, and the wired-limit outcome
+/// of the same process.
+private struct DeepseekV4LoadResult: Sendable {
+    /// The loaded model container.
+    let container: LLModelContainer
+    /// The wired-limit outcome, or `nil` when the limit was not raised.
+    let wiredMemory: WiredMemoryOutcome?
+}
+
 /// One shared load of the checkpoint. Each test awaits the same load task,
-/// thus the ~91 GB weight load runs at most once per test process.
+/// thus the 141 GiB weight load runs at most once per test process.
 ///
 /// The task is `nil` when no complete local checkpoint exists, and the task
 /// itself throws when the load fails.
 private enum DeepseekV4Load {
     /// The shared load task, or `nil` when the checkpoint is absent.
-    static let shared: Task<LLModelContainer, Error>? = {
+    static let shared: Task<DeepseekV4LoadResult, Error>? = {
         guard let directory = localDeepseekV4CheckpointDirectory() else { return nil }
         return Task {
-            await raiseWiredMemoryLimit()
+            let wiredMemory = await raiseWiredMemoryLimit()
             print("Loading DeepSeek-V4 from \(directory.path)")
             let container = try await LLMModelFactory.shared.loadContainer(
                 from: directory, using: #huggingFaceTokenizerLoader())
             print("Loaded DeepSeek-V4")
-            return container
+            return DeepseekV4LoadResult(container: container, wiredMemory: wiredMemory)
         }
     }()
 }
@@ -212,13 +312,13 @@ private var deepseekV4ParityFixtureURL: URL {
 
 /// Real-weights integration tests for the published DeepSeek-V4-Flash-4bit
 /// checkpoint. See the file header for the gating rules and the run command.
-@Suite(.serialized, .timeLimit(.minutes(240)))
+@Suite(.serialized, .timeLimit(.minutes(suiteTimeLimitMinutes)))
 struct DeepseekV4IntegrationTests {
 
-    /// Loads the shared container, or prints a skip message and returns
+    /// Loads the shared load result, or prints a skip message and returns
     /// `nil`. The gates are: enough physical memory, a complete local
     /// checkpoint, and a load that completes.
-    private func loadContainerOrSkip(testName: String) async -> LLModelContainer? {
+    private func loadResultOrSkip(testName: String) async -> DeepseekV4LoadResult? {
         guard ProcessInfo.processInfo.physicalMemory >= deepseekV4RequiredMemoryBytes else {
             print(
                 "Skipping \(testName): physical memory "
@@ -231,7 +331,8 @@ struct DeepseekV4IntegrationTests {
                 "Skipping \(testName): no local copy of \(deepseekV4RepositoryID) "
                     + "with safetensors files. Download the checkpoint, or set "
                     + "\(deepseekV4CheckpointOverrideKey) to a checkpoint directory. "
-                    + "This test never downloads the ~91 GB checkpoint itself.")
+                    + "This test never downloads the \(deepseekV4CheckpointBytes)-byte "
+                    + "checkpoint itself.")
             return nil
         }
         do {
@@ -240,6 +341,12 @@ struct DeepseekV4IntegrationTests {
             print("Skipping \(testName): failed to load \(deepseekV4RepositoryID): \(error)")
             return nil
         }
+    }
+
+    /// Loads the shared container, or prints a skip message and returns `nil`.
+    /// The gates are the gates of ``loadResultOrSkip(testName:)``.
+    private func loadContainerOrSkip(testName: String) async -> LLModelContainer? {
+        await loadResultOrSkip(testName: testName)?.container
     }
 
     /// Runs one generation and collects the text chunks.
@@ -280,6 +387,87 @@ struct DeepseekV4IntegrationTests {
         }
         #expect(isDeepseekV4, "the type registry must map deepseek_v4 to DeepSeekV4Model")
         #expect(layerCount == deepseekV4LayerCount)
+    }
+
+    // MARK: The Metal wired limit
+
+    /// The load raises the Metal wired limit, the manager applies the whole
+    /// request, and the limit covers every weight buffer. Without this test a
+    /// change that drops the call to ``raiseWiredMemoryLimit()``, or that asks
+    /// for too few bytes, still builds and still passes every other assertion,
+    /// and the only symptom is the >12k-token test running for hours.
+    @Test func wiredMemoryLimitCoversTheWholeCheckpoint() async throws {
+        guard
+            let load = await loadResultOrSkip(
+                testName: "wiredMemoryLimitCoversTheWholeCheckpoint")
+        else { return }
+
+        guard let wiredMemory = load.wiredMemory else {
+            Issue.record(
+                "the load must raise the Metal wired limit before it allocates a weight")
+            return
+        }
+        #expect(
+            wiredMemory.isFullyApplied,
+            """
+            the wired-memory manager applied \(wiredMemory.appliedBytes) bytes of the \
+            \(wiredMemory.requestedBytes) bytes asked for, thus weight buffers stay \
+            outside the Metal residency set
+            """)
+        #expect(
+            wiredMemory.requestedBytes >= deepseekV4CheckpointBytes,
+            """
+            the wired limit of \(wiredMemory.requestedBytes) bytes must cover the whole \
+            \(deepseekV4CheckpointBytes)-byte checkpoint
+            """)
+    }
+
+    /// The median decode step stays inside ``maximumSecondsPerDecodeStep``,
+    /// thus the 12,400-token run of
+    /// ``longGenerationPastTwelveThousandTokensCompletes()`` fits inside the
+    /// 240-minute suite limit. It fails in seconds when the wired limit is not
+    /// raised, where the >12k-token test needs hours.
+    ///
+    /// The test measures the steady state. It drops the first step, which runs
+    /// the whole prompt, and it takes the median of the steps that follow, thus
+    /// one slow step does not decide the result. Measured on an M3 Ultra, each
+    /// steady step sits within 6% of the median, thus the median times the
+    /// token count estimates the whole run.
+    @Test func decodeStepStaysInsideTheLongGenerationBudget() async throws {
+        guard
+            let container = await loadContainerOrSkip(
+                testName: "decodeStepStaysInsideTheLongGenerationBudget")
+        else { return }
+
+        let stepSeconds = try await container.perform { context in
+            let input = try await context.processor.prepare(
+                input: UserInput(chat: [.user(content: "Count upward from one, forever.")]))
+            var iterator = try TokenIterator(
+                input: input, model: context.model,
+                parameters: GenerateParameters(
+                    maxTokens: decodeSpeedSampleTokenCount + 1, temperature: 0))
+            _ = iterator.next()
+            var seconds: [Double] = []
+            while seconds.count < decodeSpeedSampleTokenCount {
+                let startTime = Date()
+                guard iterator.next() != nil else { break }
+                seconds.append(Date().timeIntervalSince(startTime))
+            }
+            return seconds
+        }
+
+        try #require(
+            stepSeconds.count == decodeSpeedSampleTokenCount,
+            "the generation must run \(decodeSpeedSampleTokenCount) decode steps")
+        let medianSeconds = stepSeconds.sorted()[stepSeconds.count / 2]
+        print("Decode steps: \(stepSeconds) s, median \(medianSeconds) s")
+        #expect(
+            medianSeconds <= maximumSecondsPerDecodeStep,
+            """
+            the median decode step took \(medianSeconds) s, above the \
+            \(maximumSecondsPerDecodeStep) s budget; a Metal wired limit that is not \
+            raised before the weight load is the known cause, see raiseWiredMemoryLimit()
+            """)
     }
 
     // MARK: Greedy parity
