@@ -93,26 +93,34 @@ private let shortGenerationTokenCount = 48
 private let toolCallGenerationTokenCount = 128
 
 /// The name of the one tool the tool-call test offers.
-private let stockToolName = "get_stock_level"
+let stockToolName = "get_stock_level"
 
 /// The name of the one parameter of ``stockToolSpec``. The model must write
 /// this name, because the `## Tools` section of the prompt states it.
-private let stockToolParameterName = "bay"
+let stockToolParameterName = "bay"
 
 /// The bay the tool-call test asks the model to read.
-private let stockToolBayName = "bay 7"
+let stockToolBayName = "bay 7"
 
 /// The system turn of the tool-call test.
 ///
 /// The published reference always carries a real system prompt in front of its
 /// `## Tools` section, thus the test carries one as well.
-private let stockAgentInstructions =
+let stockAgentInstructions =
     "You are an inventory agent. You answer with the tools you are given."
+
+/// The user turn of the tool-call test.
+///
+/// `DeepSeekV4TokenizerIntegrationTests` renders the same turn, thus this
+/// conversation has one definition and the two suites cannot drift apart.
+let stockToolUserPrompt =
+    "Call the \(stockToolName) tool for \(stockToolBayName). "
+    + "Call the tool before you write an answer."
 
 /// The one tool the tool-call test offers, as the Swift dictionary a caller
 /// writes. `DeepSeekV4ChatEncoder` renders it into the `## Tools` section, and
 /// `DSMLToolCallParser` reads the call back out.
-private let stockToolSpec: ToolSpec = [
+let stockToolSpec: ToolSpec = [
     "type": "function",
     "function": [
         "name": stockToolName,
@@ -425,10 +433,7 @@ struct DeepseekV4IntegrationTests {
 
         var text = ""
         var calls: [ToolCall] = []
-        let prompt =
-            "Call the \(stockToolName) tool for \(stockToolBayName). "
-            + "Call the tool before you write an answer."
-        for try await generation in session.streamDetails(to: prompt) {
+        for try await generation in session.streamDetails(to: stockToolUserPrompt) {
             switch generation {
             case .chunk(let chunk):
                 text += chunk

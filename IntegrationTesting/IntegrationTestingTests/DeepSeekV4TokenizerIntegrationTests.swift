@@ -2,13 +2,16 @@
 //
 // Integration tests for the published DeepSeek-V4 tokenizer, from card
 // ^zg3d8wv. The tests download the tokenizer of
-// `deepseek-ai/DeepSeek-V4-Flash` and prove two facts a unit test cannot:
+// `deepseek-ai/DeepSeek-V4-Flash` and prove three facts a unit test cannot:
 //
 // 1. Each prompt marker is one token, and `NaiveStreamingDetokenizer` never
 //    splits it. The turn markers are not `special`, thus a skip-specials
 //    decode keeps them.
 // 2. `Tokenizer.eosTokenId` is 1, and id 1 decodes to the end-of-sentence
 //    marker.
+// 3. A rendered tool prompt tokenizes to the identifiers the published
+//    tokenizer gives the same text, one for one. Only the identifiers reach
+//    the model, thus correct text is not enough.
 //
 // The marker strings come from `DeepSeekV4ChatEncoder.SpecialToken`. The
 // downloaded tokenizer is the independent oracle, thus these tests also prove
@@ -68,8 +71,99 @@ private let deepSeekV4Markers = [
     thinkStartMarker, thinkEndMarker, dsmlMarker, latestReminderMarker,
 ]
 
+// MARK: - The published token identifiers of one tool prompt
+
+/// The token identifiers the published tokenizer gives one rendered tool
+/// prompt.
+///
+/// The fixture comes from the published `tokenizer.json` of
+/// `deepseek-ai/DeepSeek-V4-Flash` @ 60d8d70770c6776ff598c94bb586a859a38244f1,
+/// over the prompt that `encoding/encoding_dsv4.py` renders for the same
+/// conversation:
+///
+/// ```python
+/// import json
+/// from tokenizers import Tokenizer
+/// from encoding_dsv4 import encode_messages
+/// tokenizer = Tokenizer.from_file("tokenizer.json")
+/// prompt = encode_messages(messages, thinking_mode="chat")
+/// json.dump({"prompt_token_ids": tokenizer.encode(prompt, add_special_tokens=False).ids},
+///           open("deepseek-v4-flash-tool-prompt-tokens.json", "w"))
+/// ```
+private struct ToolPromptTokenFixture: Decodable {
+    /// The token identifiers the published tokenizer gives the prompt.
+    let promptTokenIDs: [Int]
+
+    private enum CodingKeys: String, CodingKey {
+        case promptTokenIDs = "prompt_token_ids"
+    }
+}
+
+/// The on-disk location of the tool-prompt token fixture, next to this source
+/// file.
+private var toolPromptTokenFixtureURL: URL {
+    URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures", isDirectory: true)
+        .appendingPathComponent("deepseek-v4-flash-tool-prompt-tokens.json")
+}
+
+/// The conversation of the fixture, in the raw dictionary form
+/// `applyChatTemplate` reads. The two turns come from
+/// `DeepseekV4IntegrationTests`, thus the fixture and the real-weights tool
+/// test render the same conversation.
+private let toolPromptMessages: [[String: any Sendable]] = [
+    ["role": "system", "content": stockAgentInstructions],
+    ["role": "user", "content": stockToolUserPrompt],
+]
+
+/// The number of identifiers a failure message prints on each side of a
+/// difference.
+private let tokenReportWindow = 6
+
+/// The index of the first identifier the two sequences disagree on.
+///
+/// A sequence that is a prefix of the other disagrees at the end of the
+/// shorter one.
+///
+/// - Parameters:
+///   - left: the identifiers under test.
+///   - right: the identifiers of the reference.
+/// - Returns: the index, or `nil` when the two sequences are equal.
+private func firstDifferingIndex(_ left: [Int], _ right: [Int]) -> Int? {
+    let shared = min(left.count, right.count)
+    for index in 0 ..< shared where left[index] != right[index] {
+        return index
+    }
+    return left.count == right.count ? nil : shared
+}
+
+/// The identifiers around one index, each beside its token text, for a
+/// failure message.
+///
+/// The token text is the byte-level spelling of the vocabulary, thus a space
+/// reads `Ġ` and a newline reads `Ċ`. That spelling is what tells one
+/// whitespace token from another.
+///
+/// - Parameters:
+///   - identifiers: the sequence to read.
+///   - index: the index to centre the window on.
+///   - tokenizer: the tokenizer that names each identifier.
+/// - Returns: the window, or `[]` when the index is past the end.
+private func identifierWindow(
+    _ identifiers: [Int], around index: Int, through tokenizer: any MLXLMCommon.Tokenizer
+) -> String {
+    let lower = max(0, index - tokenReportWindow)
+    let upper = min(identifiers.count, index + tokenReportWindow)
+    guard lower < upper else { return "[]" }
+    let pieces = identifiers[lower ..< upper].map { identifier in
+        "\(identifier) \(tokenizer.convertIdToToken(identifier).map { "\"\($0)\"" } ?? "unknown")"
+    }
+    return "[" + pieces.joined(separator: ", ") + "]"
+}
+
 /// One shared download and load of the DeepSeek-V4 tokenizer.
-private enum DeepSeekV4TokenizerLoad {
+enum DeepSeekV4TokenizerLoad {
     /// The repository that publishes the DeepSeek-V4 tokenizer.
     static let repositoryID = "deepseek-ai/DeepSeek-V4-Flash"
     /// The pinned revision. It is the revision the encoder port names in
@@ -192,6 +286,43 @@ struct DeepSeekV4TokenizerIntegrationTests {
                 tokens.contains(marker.id),
                 "the render writes \(marker.text), thus the prompt must carry id \(marker.id)")
         }
+    }
+
+    /// The tool prompt tokenizes to the identifiers the published tokenizer
+    /// gives it, one for one.
+    ///
+    /// ``aRenderedPromptTokenizesEachMarkerAsOneToken()`` asks only that each
+    /// marker id is PRESENT, and a byte comparison of the rendered text asks
+    /// only that the text is right. Neither finds a prompt whose text is
+    /// correct and whose identifiers are not, and only the identifiers reach
+    /// the model. The `## Tools` section is where that matters most: it is
+    /// the one part of the prompt that states the tool schema and the DSML
+    /// rule, thus a tool round rides on it.
+    @Test func theToolPromptTokenizesToThePublishedIdentifiers() async throws {
+        let fixture = try JSONDecoder().decode(
+            ToolPromptTokenFixture.self, from: Data(contentsOf: toolPromptTokenFixtureURL))
+        let base = try await DeepSeekV4TokenizerLoad.shared.value
+        let tokens = try DeepSeekV4EncodingTokenizer(wrapping: base).applyChatTemplate(
+            messages: toolPromptMessages,
+            tools: [stockToolSpec],
+            additionalContext: ["thinking": false])
+
+        let expected = fixture.promptTokenIDs
+        let difference = firstDifferingIndex(tokens, expected)
+        let report =
+            difference.map { index in
+                "index \(index): Swift "
+                    + identifierWindow(tokens, around: index, through: base)
+                    + " against reference "
+                    + identifierWindow(expected, around: index, through: base)
+            } ?? "none"
+        #expect(
+            difference == nil,
+            """
+            the rendered tool prompt must tokenize to the identifiers the published \
+            tokenizer gives it. Swift wrote \(tokens.count) identifiers and the \
+            reference holds \(expected.count). The first difference is at \(report).
+            """)
     }
 
     /// `Tokenizer.eosTokenId` is 1, and id 1 decodes to the end-of-sentence

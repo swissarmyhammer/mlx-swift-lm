@@ -301,6 +301,285 @@ comments:
     the 4-bit quantization or a number in the sparse attention path makes the
     model answer in an untrained syntax.
   timestamp: 2026-08-14T16:14:58.642904+00:00
+- actor: claude-code
+  id: 01m00hw42pr4e62z7t182wtfnz
+  text: |-
+    Research on the three hypotheses. H1 and H2 are dead, and they cost no weights. H3 cannot run in the shape the card states, and the measurement below says why.
+
+    ## H1 — the parser is NOT the defect
+
+    I read `parse_tool_calls` of `encoding/encoding_dsv4.py` again, from the Hub, line by line.
+
+    - The word `functioncall` is in NO file of `deepseek-ai/DeepSeek-V4-Flash`. I searched the whole 27908-byte reference: `grep -i "functioncall|function_call|function call"` gives zero lines.
+    - `parse_tool_calls` reads ONE syntax. It walks `<｜DSML｜invoke`, then `<｜DSML｜parameter`, then `</｜DSML｜invoke`, and it raises `ValueError` on every other shape. Each of the three `re.findall` patterns is anchored with `^` and `$`.
+    - `parse_message_from_completion_text` enters `parse_tool_calls` only on the literal `"\n\n<｜DSML｜tool_calls"`, and it asserts `stop_token == eos_token` in every other case.
+    - `DSMLToolCallParser` reads that same syntax, and it is more forgiving than the reference, not less.
+
+    Thus the published reference accepts DSML and nothing else. To read `<functioncall>` is to loosen the parser past the reference, which this card forbids.
+
+    ## H2 — the placement is NOT the defect
+
+    The published test driver `encoding/test_encoding_dsv4.py` shows where the reference puts the tools:
+
+    - Case 1: `messages[0]["tools"] = td["tools"]` — the SYSTEM turn, `thinking_mode="thinking"`.
+    - Case 3: the tools sit on the DEVELOPER turn, `thinking_mode="thinking"`.
+
+    `render_message` writes `content` and then `"\n\n" + render_tools(tools)` for a system turn, and `<｜User｜>` + `content` + `"\n\n" + render_tools(tools)` for a developer turn. `Chat.swift.messages(from:tools:)` attaches the tools to the first system or developer turn, and `DeepSeekV4ChatEncoder.body(of:)` writes the same two shapes. The order and the placement agree.
+
+    I also re-measured the byte match on my own, with the reference Python and no Swift: the failing conversation renders to 1454 bytes in chat mode, which is the number the card records for the Swift render. The two agree.
+
+    ## H3 — the shape the card states is IMPOSSIBLE, and here are the numbers
+
+    `config.json` of the checkpoint gives `sliding_window = 128`. I tokenized the prompts with the published `tokenizer.json`:
+
+    | prompt | bytes | tokens |
+    | --- | ---: | ---: |
+    | the failing tool prompt, chat mode | 1454 | 328 |
+    | the SMALLEST possible tool prompt | 1186 | 267 |
+    | the same conversation with no tools | 133 | 22 |
+
+    The smallest possible tool prompt is an empty system turn, a tool named `f`, one parameter named `a`, no description on either, and a three-character user turn. It still costs 267 tokens, because `TOOLS_TEMPLATE` alone costs about 250 tokens. Thus NO tool prompt can sit under the 128-token sliding window, and "a short tool prompt against a long one" cannot be measured.
+
+    ## What this leaves, and what the one run must answer
+
+    The published `## Tools` section always sits at the head of the prompt, about 250 tokens in front of the generation point. The reference model therefore MUST read past its own 128-token sliding window to obey the DSML rule. Every DeepSeek-V4 tool round depends on the pooled-chunk path, on this checkpoint and on the published one alike.
+
+    Thus the one question left is: does this port read past the 128-token sliding window at all? The greedy-parity test proves the port only over a 15-token prompt (`<|user|>Write one sentence about the sea.`), thus nothing yet measures the pooled-chunk path against the real weights.
+
+    The one real-weights run answers that question with a phrase planted in front of the window and asked for at the end.
+  timestamp: 2026-08-14T16:32:22.614049+00:00
+- actor: claude-code
+  id: 01m00j6ey49et8xrg2n4kk6wy5
+  text: |-
+    Real-weights run 1 of 3. H3 is dead: the sparse attention path reads the whole prompt.
+
+    I did not write a new probe. The probe already exists:
+    `DeepseekV4AgenticPromptCacheAssessmentTests.longPromptWithoutToolsRecallsAPlantedFact`.
+    It plants the number 4172 on row 7 of a 120-row report and asks for it back at
+    the end, with NO tool in the prompt.
+
+    ```
+    xcodebuild test-without-building ... \
+      "-only-testing:IntegrationTestingTests/DeepseekV4AgenticPromptCacheAssessmentTests/longPromptWithoutToolsRecallsAPlantedFact()"
+
+    DSV4 CACHE: recall rendered prompt tokens = 3626
+    DSV4 CACHE: recall answer = <<<4172>>>
+    ✔ Test longPromptWithoutToolsRecallsAPlantedFact() passed after 39.457 seconds.
+    ** TEST EXECUTE SUCCEEDED **
+    ```
+
+    Chat mode, greedy, 3626 prompt tokens. The planted number sits near the head of
+    the prompt, thus about 3500 tokens in front of the generation point and about
+    27 times the 128-token sliding window. The model read it and wrote it back
+    exactly.
+
+    Thus the pooled-chunk path works on the real weights. A prompt of 328 tokens is
+    far inside a range the model reads correctly, and prompt length is NOT what
+    stops the DSML tool call.
+
+    Two more notes from this run:
+
+    - The sparse path IS live at HEAD. `git merge-base --is-ancestor 1c7bd06 HEAD`
+      gives yes, and `1c7bd06 feat(mlx-lm): read the pooled chunks in DeepSeek-V4
+      attention` landed 2026-08-13 21:31, which is BEFORE the failing tool run of
+      2026-08-14. Thus that failing run already had the sparse path.
+    - The doc comment of `longPromptWithoutToolsRecallsAPlantedFact` is now STALE.
+      It says "`DeepSeekV4Model` runs plain dense attention on every layer" and
+      "the compressor and the indexer both load and neither runs". Both statements
+      were true when the test was written and both are false at HEAD.
+
+    I also cleared one more cause with no weights: nothing masks the `｜DSML｜`
+    token out of the logits. `tokenizer.json` gives id 128825 `special: false`, and
+    `Evaluate.swift` holds no banned-token or logit-bias machinery — its one
+    `-Float.infinity` belongs to the top-k and min-p filters, which greedy decoding
+    at temperature 0 does not use. Thus the model is free to sample the marker and
+    does not.
+
+    ## What run 2 answers
+
+    Every hypothesis of the card is now dead, and one evidence-backed cause is left
+    that no run has tested: the generation MODE.
+
+    The published reference demonstrates tool calls in THINKING mode only:
+
+    - `encoding/test_encoding_dsv4.py` case 1 puts the tools on the system turn
+      with `thinking_mode="thinking"`.
+    - Case 3 puts the tools on the developer turn with `thinking_mode="thinking"`.
+    - Cases 2 and 4, the two `chat` cases, carry no tools at all.
+    - `encode_messages` sets `effective_drop_thinking = False` as soon as ANY turn
+      carries tools. That rule only makes sense when tools imply a thinking
+      trajectory whose reasoning must stay.
+    - `TOOLS_TEMPLATE` states the thinking rule first: "If thinking_mode is enabled
+      ... you MUST output your complete reasoning ... BEFORE any tool calls".
+
+    `aShortToolPromptEmitsOneDSMLToolCall` asks for a tool call in CHAT mode, which
+    is a shape the published reference never demonstrates.
+
+    Run 2 is the existing `thinkingModeToolRoundReusesThePromptCache`, unchanged.
+    It is one of the two tests this card exists to unblock, and it offers the same
+    tool in thinking mode.
+  timestamp: 2026-08-14T16:38:01.412721+00:00
+- actor: claude-code
+  id: 01m00jzb8g6hr6jkyqek2tr18s
+  text: |-
+    THE CAUSE IS FOUND. It is the TOKENIZER, and it is in an external package.
+
+    ## Run 2 of 3: thinking mode fails too, with a THIRD syntax
+
+    `thinkingModeToolRoundReusesThePromptCache`, unchanged, real weights:
+
+    ```
+    ✘ Expectation failed: roundOne.toolCalls.first
+    ↳ thinking mode must emit one DSML tool call ... It wrote:
+      {"function": "get_stock_level", "params": {"bay_id": 7}}
+    ```
+
+    Three runs, three different syntaxes, and `bay_id` in every one:
+
+    | Date | Mode | What the model wrote |
+    | --- | --- | --- |
+    | 2026-08-13 | chat | `{"function": ..., "params": {"bay_id": "bay_7"}}` |
+    | 2026-08-14 | chat | `<functioncall>` then `{"name": ..., "arguments": {"bay_id": "bay 7"}}` |
+    | 2026-08-14 | thinking | `{"function": ..., "params": {"bay_id": 7}}` |
+
+    The model NEVER writes `bay`, and `bay` is in the `## Tools` section alone. It
+    always writes the tool NAME correctly, and that name is in the user turn as
+    well. Thus the model reads the user turn and does not read the `## Tools`
+    section. Run 1 proved that distance is not the reason.
+
+    ## The cause: the Swift tokenizer gives the prompt the WRONG identifiers
+
+    The render is byte exact. The IDENTIFIERS are not, and only the identifiers
+    reach the model.
+
+    New weight-free test
+    `DeepSeekV4TokenizerIntegrationTests.theToolPromptTokenizesToThePublishedIdentifiers`
+    renders the failing conversation through the production path
+    (`DeepSeekV4EncodingTokenizer.applyChatTemplate`) and compares the identifiers
+    with the published `tokenizer.json`:
+
+    ```
+    ✘ the rendered tool prompt must tokenize to the identifiers the published
+      tokenizer gives it. Swift wrote 353 identifiers and the reference holds 328.
+      The first difference is at index 15:
+      Swift     [... 2910 "Ġgiven", 16 ".", 201 "Ċ", 201 "Ċ", 372 "##", 27193 "ĠTools", 201 "Ċ"]
+      reference [... 2910 "Ġgiven", 339 ".ĊĊ", 372 "##", 27193 "ĠTools", 271 "ĊĊ", 3476 "You"]
+    ```
+
+    Swift writes 353 identifiers where the reference writes 328 — 25 too many. The
+    Swift tokenizer NEVER groups a run of newlines. It writes `Ċ` for each newline
+    where the published tokenizer writes `.ĊĊ` (339) and `ĊĊ` (271).
+
+    The `## Tools` section is 24 lines with 10 blank lines in it, thus that section
+    takes nearly all of the damage. The model therefore reads a `## Tools` section
+    in a token shape it never saw in training, which is exactly the observed
+    answer: the tool name comes through, the parameter name does not, and the DSML
+    rule does not.
+
+    ## The exact defect, proven on its own
+
+    `swift-transformers` 1.3.3, `Sources/Tokenizers/String+PreTokenization.swift`.
+    `SplitPreTokenizer` sends a `Regex` pattern through
+    `String.split(by:options:includeSeparators:)`, which loops on
+    `String.range(of:options:.regularExpression)`. That Foundation search cannot
+    match a `\r` or `\n` inside a character class, thus `[\r\n]*` and `[\r\n]+`
+    always match nothing.
+
+    Measured with the published pre-tokenizer pattern of `tokenizer.json` on the
+    text `"given.\n\n## Tools\n\nYou have"`:
+
+    ```
+    String.range(of:options:.regularExpression):
+      ["given", ".", "\n", "\n", "##", " Tools", "\n", "\nYou", " have"]
+
+    NSRegularExpression, SAME pattern:
+      ["given", ".\n\n", "##", " Tools", "\n\n", "You", " have"]
+    ```
+
+    The second line is the reference answer. The isolated probe is sharper still:
+    ` ?[\p{P}\p{S}]+[\r\n]*` against `".\n\n## Tools"` matches `"."` alone under
+    Foundation, and `\s*[\r\n]+` against `"\n\n## Tools"` matches NOTHING at all.
+
+    `swift-transformers` already holds a correct path: `splitMatches(in:with:)` and
+    `split(by captureRegex: NSRegularExpression)` both use `NSRegularExpression`.
+    `SplitPreTokenizer` is the one place that does not.
+
+    ## Why I stop here: the defect is outside this repository
+
+    The package is `https://github.com/huggingface/swift-transformers` at 1.3.3, and
+    it arrives through `https://github.com/huggingface/swift-huggingface` 0.9.0.
+    The root `Package.swift` of this repository does not declare it. 1.3.3 is the
+    newest tag, thus a version bump corrects nothing.
+
+    A person must choose one of these, and each is a scope decision this card does
+    not carry:
+
+    1. Send the correction upstream — route `SplitPreTokenizer` through
+       `NSRegularExpression` — then move the pin.
+    2. Fork or vendor `swift-transformers` in this repository and correct it there.
+    3. Give `DeepSeekV4EncodingTokenizer` its own pre-tokenization path that does
+       not use the broken splitter. This is the largest of the three and it touches
+       a shared file that every model reads.
+
+    I did not choose. The card forbids a workaround, and I do not make a scope
+    decision alone.
+
+    ## What this also means for every other model
+
+    The defect is not DeepSeek-V4's. Any checkpoint whose `tokenizer.json` uses a
+    `Split` pre-tokenizer with a pattern that crosses a newline gets the wrong
+    identifiers on this path. DeepSeek-V4 shows it first because its `## Tools`
+    section is full of blank lines.
+  timestamp: 2026-08-14T16:51:36.848293+00:00
+- actor: claude-code
+  id: 01m00kgmgwgwaypn151ahx8r6c
+  text: |
+    ### implement — stuck
+
+    - evidence: 3 files —
+      `IntegrationTesting/IntegrationTestingTests/DeepSeekV4TokenizerIntegrationTests.swift`
+      (new test `theToolPromptTokenizesToThePublishedIdentifiers`, its fixture type
+      and two report helpers),
+      `IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift`
+      (the stock-tool constants become internal so the two suites share one
+      conversation, and the duplicated user-turn string becomes
+      `stockToolUserPrompt`), and the new fixture
+      `IntegrationTesting/IntegrationTestingTests/Fixtures/deepseek-v4-flash-tool-prompt-tokens.json`.
+      No library file changed.
+
+      `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1 swift test`: 1018 tests in
+      107 suites, all passed, zero failures. One earlier run of the same command
+      printed "Some test targets reported failures: MLXLMTests (XCTest)" with no
+      failing test named, and the second run did not; that is the known metallib
+      bootstrap flake. Two warnings remain, both from `Package.swift` and both
+      older than this change: an unhandled `Libraries/MLXFoundationModels/README.md`
+      and an unhandled `Libraries/MLXGuidedGeneration/README.md`.
+
+      `xcodebuild build-for-testing` for `IntegrationTesting`: TEST BUILD SUCCEEDED,
+      no new warning.
+
+      Three real-weights runs, the budget of this step:
+      1. `longPromptWithoutToolsRecallsAPlantedFact` PASSED — 3626 prompt tokens,
+         answer `4172`. The pooled-chunk path reads the whole prompt, thus H3 is
+         dead.
+      2. `thinkingModeToolRoundReusesThePromptCache` FAILED — the model wrote
+         `{"function": "get_stock_level", "params": {"bay_id": 7}}`, thus the mode
+         is not the reason either.
+      3. Not used. The cause was found with no weights.
+
+      The new weight-free test FAILS on purpose and states the blocker: Swift
+      writes 353 token identifiers for the tool prompt where the published
+      tokenizer writes 328.
+
+    - next: a person chooses how to correct `swift-transformers`. New card
+      `^t56pqr4` holds the defect, and this card now depends on it.
+      `aShortToolPromptEmitsOneDSMLToolCall` and
+      `theToolPromptTokenizesToThePublishedIdentifiers` both stay red until that
+      card lands. H1, H2 and H3 are each dead with evidence; the card's third work
+      item is not done, thus this step is stuck and not changed.
+  timestamp: 2026-08-14T17:01:03.388783+00:00
+depends_on:
+- 01M00K0MWNJ59NG1Q0MT56PQR4
 position_column: doing
 position_ordinal: '8180'
 title: DeepSeek-V4 writes its tool calls as plain JSON, which DSMLToolCallParser does not read
@@ -335,84 +614,60 @@ tools.
       match the training shape explains a model that answers in a different
       syntax
 - [x] Tell whether the defect is the render, the parser, or the model
-- [ ] Correct what the answer names, and make one tool round complete
+- [x] Find what makes the model answer in an untrained syntax. It is NONE of
+      those three: it is the TOKENIZER
+- [ ] Correct what the answer names, and make one tool round complete —
+      BLOCKED, see the blocker below
 
-## Blocker
+## Blocker: the tokenizer gives the prompt the wrong identifiers
 
-The render was wrong and it is now correct. `Chat.swift` wrote the tool schema
-with `JSONSerialization`, which puts the members of a Swift `Dictionary` in the
-hash order of the process, thus the `## Tools` section carried a different
-member order on each run. `PythonStyleJSON` now writes the published order. The
-Swift render of the failing prompt is now byte for byte the render of
-`encoding/encoding_dsv4.py`, 1454 bytes, `cmp` clean.
+The render is byte exact against `encoding/encoding_dsv4.py` — 1454 bytes, `cmp`
+clean. The parser is a faithful reading of `parse_tool_calls`. The model reads
+past its 128-token sliding window correctly. The IDENTIFIERS are wrong, and
+only the identifiers reach the model.
 
-On that byte-exact prompt the model still writes no DSML. One real-weights run
-of `DeepseekV4IntegrationTests/aShortToolPromptEmitsOneDSMLToolCall` on
-2026-08-14 gave:
+`DeepSeekV4TokenizerIntegrationTests.theToolPromptTokenizesToThePublishedIdentifiers`
+renders the failing conversation through the production path and compares it
+with the published `tokenizer.json`:
 
 ```
-
-<functioncall>
-{"name": "get_stock_level", "arguments": {"bay_id": "bay 7"}}
+Swift wrote 353 identifiers and the reference holds 328.
+The first difference is at index 15:
+Swift     [... 2910 "Ġgiven", 16 ".", 201 "Ċ", 201 "Ċ", 372 "##", 27193 "ĠTools", 201 "Ċ"]
+reference [... 2910 "Ġgiven", 339 ".ĊĊ", 372 "##", 27193 "ĠTools", 271 "ĊĊ", 3476 "You"]
 ```
 
-The prompt is the published prompt, the tokens are the published tokens, and
-the parser reads the published syntax, thus the model is the one part left. To
-correct the model is to finish the DeepSeek-V4 attention port, which this card
-does not describe and which is already in flight on this branch. A person
-decides whether this card grows to hold that work or whether a new card takes
-it.
+The Swift tokenizer never groups a run of newlines. The `## Tools` section is
+24 lines with 10 blank lines in it, thus that section takes nearly all of the
+25 extra identifiers, and the model reads it in a token shape it never saw in
+training.
+
+### The defect, and where it lives
+
+`swift-transformers` 1.3.3,
+`Sources/Tokenizers/String+PreTokenization.swift`. `SplitPreTokenizer` sends a
+`Regex` pattern through `String.split(by:options:includeSeparators:)`, which
+loops on `String.range(of:options:.regularExpression)`. That Foundation search
+cannot match `\r` or `\n` inside a character class, thus `[\r\n]*` matches
+nothing. `NSRegularExpression` with the SAME pattern gives the reference
+answer, and `swift-transformers` already uses `NSRegularExpression` in
+`splitMatches(in:with:)`.
+
+The package is `huggingface/swift-transformers`, reached through
+`huggingface/swift-huggingface` 0.9.0. This repository does not own it, and
+1.3.3 is the newest tag.
+
+### A person must choose the correction
+
+1. Send the correction upstream, then move the pin.
+2. Fork or vendor `swift-transformers` here and correct it.
+3. Give `DeepSeekV4EncodingTokenizer` its own pre-tokenization path.
+
+The defect is not DeepSeek-V4's alone: any checkpoint whose `tokenizer.json`
+uses a `Split` pre-tokenizer with a pattern that crosses a newline gets wrong
+identifiers on this path.
 
 ## Memory
 
 The checkpoint holds 141 GiB. Run ONE real-weights test for each process, or
 the machine runs out of memory. #deepseek-v4
-
-## Review Findings (2026-08-14 07:37)
-
-- [ ] The review engine read no file of the range `0048b9b..HEAD`. This range
-      has no code review. A person must repair the engine, then start the
-      review again.
-
-### The proof that the engine read no file
-
-The range holds 3 commits, 26 changed files and 687 new lines. 20 of the
-changed files are `.swift` files, and the `swift` validator matches
-`**/*.swift`. Each call below gave `attempted: 0`. That count is the number of
-the files the engine read.
-
-- `review sha 0048b9b..HEAD` gave attempted 0, findings 0, skipped 0.
-- The same call with the two full 40-character ids gave attempted 0.
-- `review file Libraries/MLXLMCommon/PythonStyleJSON.swift` gave attempted 0.
-  That file holds 15604 bytes on the disk.
-- `review file Package.swift` gave attempted 0 with the `session` backend and
-  attempted 0 with the `local` backend.
-- `check validators` gave ok, 15 validators, no error.
-
-### The cause
-
-`review file` with the full path
-`/Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/PythonStyleJSON.swift`
-gave this error:
-
-```
-review pipeline failed: Validator 'scope' error: path
-'/Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/PythonStyleJSON.swift'
-escapes the repository root
-```
-
-That path is in this repository. `git rev-parse --show-toplevel` gives
-`/Users/wballard/github/swissarmyhammer/mlx-swift-lm`, and `os.path.realpath`
-changes neither that root nor that path. Thus no symbolic link explains the
-error. The engine uses a different directory as its repository root. Each scope
-of the engine is empty, thus the engine reads no file.
-
-The 15 validators are good. The defect is the repository root that the engine
-uses, not the validator set.
-
-### What this review does not say
-
-This review does not say that the range is clean. A clean result needs an
-engine that reads the files. This engine read no file. The card stays in the
-review column until a person repairs the engine and a new review reads the 20
-changed Swift files.
