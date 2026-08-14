@@ -478,6 +478,58 @@ comments:
     - next: a person must answer the `reuse/reuse` conflict. The three
       `swift/documentation` findings are closed.
   timestamp: 2026-08-14T19:14:21.593545+00:00
+- actor: claude-code
+  id: 01m00v6my4fnvnnhbxdyxd0ppb
+  text: |
+    ### finish iteration 1 — stuck on one finding
+
+    - implement: changed — the pre-tokenization path landed, then two rounds of
+      review findings were corrected
+    - test: green — `swift test`, 1029 tests in 108 suites, zero failures;
+      `xcodebuild build-for-testing` succeeded; `swift-format` needs no change
+    - commit: 3c301af, 3f96737, 8871bd5
+    - review: findings — round 1 gave 2 and both are corrected; round 2 gave 4,
+      three are corrected and one stays open
+
+    ### What the card achieved
+
+    `theToolPromptTokenizesToThePublishedIdentifiers` was red at 353
+    identifiers and is green at 328, each one equal to the published fixture.
+    The version pin did not move, nothing was forked, nothing was vendored,
+    and no other model reads a changed line.
+
+    ### The open finding, and why the loop stops
+
+    `reuse/reuse` at `DeepSeekV4Tokenization.swift:76` asks to extract the
+    byte-level encoding into a shared module. It names three files, and the
+    pass measured each one:
+
+    | File | The premise |
+    | --- | --- |
+    | `PythonStyleJSON.swift` | FALSE — no byte-level encoding of any kind. The 0.90 score matched on shape. |
+    | `TokenizerVocabExtractor.swift` | TRUE — holds `bpeUnicodeToByte`. |
+    | `WhitespaceTokenBias.swift` | TRUE — holds `bpeUnicodeToByte`. |
+
+    The two true ones hold the same 256-value loop, the same identity ranges
+    `0x21-0x7E`, `0xA1-0xAC` and `0xAE-0xFF`, and the same `0x100` start.
+
+    Both sit at the `main` version on this branch ON PURPOSE. `git diff main`
+    on each prints nothing. The user reverted every file that is not
+    DeepSeek-V4 or MiniMax work, twice, and asked for the difference against
+    `main` to hold that work alone.
+
+    Thus the finding and the branch rule cannot both hold. The pass extracted
+    nothing, edited neither file, and invented no middle path. This is a true
+    conflict of the first kind, and the rule says a person decides.
+
+    ### What a person must choose
+
+    1. Obey the finding: extract a shared byte-level module and change two
+       files that this branch holds at `main`. The PR grows.
+    2. Hold the branch rule: leave the duplicate, and open a card against
+       `main` for it. That duplicate pair stands on `main` today and lives in
+       `MLXGuidedGeneration`, thus it is not DeepSeek-V4 work.
+  timestamp: 2026-08-14T19:15:24.740459+00:00
 position_column: doing
 position_ordinal: '8280'
 title: swift-transformers splits every newline on its own, thus every prompt with a blank line gets the wrong token identifiers
