@@ -194,8 +194,64 @@ comments:
 
     I did not run any real-weights test. I did not run `xcodebuild test` or `xcodebuild test-without-building`.
   timestamp: 2026-08-14T12:32:56.462744+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m004hb3drw10wdsj8xswkgts
+  text: |
+    ### review — stuck
+    - evidence: The review engine read no file of `0048b9b..HEAD`. That range holds 3 commits, 26 changed files, 687 new lines, and 20 changed `.swift` files. `review sha 0048b9b..HEAD` gave attempted 0. The same call with the two full 40-character ids gave attempted 0. `review file Libraries/MLXLMCommon/PythonStyleJSON.swift` gave attempted 0, and that file holds 15604 bytes on the disk. `review file Package.swift` gave attempted 0 with the `session` backend and with the `local` backend. `check validators` gave ok, 15 validators, no error. `review file` with the full in-repository path gave the error "Validator 'scope' error: path ... escapes the repository root", but `git rev-parse --show-toplevel` gives that same root and `os.path.realpath` changes neither the root nor the path. Thus the engine uses a different directory as its repository root, each scope of the engine is empty, and the engine reads no file.
+    - next: a person repairs the repository root that the review engine uses, then starts the review of `0048b9b..HEAD` again. I did not report a clean result, because no file was read. I ran no test. I ran no real-weights test, and no `xcodebuild test`. The card stays in the review column.
+  timestamp: 2026-08-14T12:39:17.869619+00:00
+- actor: claude-code
+  id: 01m004k4mwasjp64k0hqgq97r0
+  text: |
+    ### finish iteration 1 — stuck
+
+    - implement: stuck — the render is corrected and is now byte identical to
+      `encoding_dsv4.py` (1454 bytes); the model still writes `<functioncall>` and
+      plain JSON, thus no tool round completes
+    - test: green — `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1 swift test`,
+      1081 passed, 0 failed; `xcodebuild build-for-testing` succeeded with 0 errors
+    - commit: b1ce2b9, e5bc0c3, 50cfd2b
+    - review: stuck — the engine attempted 0 files on `0048b9b..HEAD` (26 files, 20
+      of them `.swift`)
+
+    ### Two blockers, and both need a person
+
+    **1. The card cannot close on a render correction alone.** The `## Tools`
+    section is now correct to the byte. The parser is a faithful reading of
+    `parse_tool_calls` of the published `encoding_dsv4.py`. The model reads the
+    published prompt, in the published tokens, and answers in a different syntax.
+    The remaining causes are the 4-bit quantization of this checkpoint or a number
+    in the sparse attention path — not the render and not the parser. That is a
+    different card.
+
+    **2. The review gate cannot run.** The engine opens no file. Measured twice, by
+    the reviewer and again by the orchestrator:
+
+    ```
+    review file Libraries/MLXLMCommon/PythonStyleJSON.swift
+    → counts: attempted 0, findings 0
+    ```
+
+    That file holds 15,604 bytes. `check validators` answers `ok: true` with 15
+    validators. `review file` on the same path in absolute form answers
+    `Validator 'scope' error: path ... escapes the repository root`, although
+    `git rev-parse --show-toplevel` gives that same root. The engine is rooted
+    outside this repository.
+
+    `attempted: 0` is not a clean review. Nobody looked. Thus this card cannot pass
+    the review gate, and it stays in `review`.
+
+    ### The state of the work list
+
+    - [x] Read the `## Tools` section the encoder renders, and compare it with the
+          published reference
+    - [x] Tell whether the defect is the render, the parser, or the model — it was
+          the render; it is corrected; the model is what remains
+    - [ ] Correct what the answer names, and make one tool round complete — blocked
+  timestamp: 2026-08-14T12:40:16.796012+00:00
+position_column: review
+position_ordinal: '80'
 title: DeepSeek-V4 writes its tool calls as plain JSON, which DSMLToolCallParser does not read
 ---
 Measured on 2026-08-13 against `mlx-community/DeepSeek-V4-Flash-4bit` with the
@@ -260,3 +316,52 @@ it.
 
 The checkpoint holds 141 GiB. Run ONE real-weights test for each process, or
 the machine runs out of memory. #deepseek-v4
+
+## Review Findings (2026-08-14 07:37)
+
+- [ ] The review engine read no file of the range `0048b9b..HEAD`. This range
+      has no code review. A person must repair the engine, then start the
+      review again.
+
+### The proof that the engine read no file
+
+The range holds 3 commits, 26 changed files and 687 new lines. 20 of the
+changed files are `.swift` files, and the `swift` validator matches
+`**/*.swift`. Each call below gave `attempted: 0`. That count is the number of
+the files the engine read.
+
+- `review sha 0048b9b..HEAD` gave attempted 0, findings 0, skipped 0.
+- The same call with the two full 40-character ids gave attempted 0.
+- `review file Libraries/MLXLMCommon/PythonStyleJSON.swift` gave attempted 0.
+  That file holds 15604 bytes on the disk.
+- `review file Package.swift` gave attempted 0 with the `session` backend and
+  attempted 0 with the `local` backend.
+- `check validators` gave ok, 15 validators, no error.
+
+### The cause
+
+`review file` with the full path
+`/Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/PythonStyleJSON.swift`
+gave this error:
+
+```
+review pipeline failed: Validator 'scope' error: path
+'/Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/PythonStyleJSON.swift'
+escapes the repository root
+```
+
+That path is in this repository. `git rev-parse --show-toplevel` gives
+`/Users/wballard/github/swissarmyhammer/mlx-swift-lm`, and `os.path.realpath`
+changes neither that root nor that path. Thus no symbolic link explains the
+error. The engine uses a different directory as its repository root. Each scope
+of the engine is empty, thus the engine reads no file.
+
+The 15 validators are good. The defect is the repository root that the engine
+uses, not the validator set.
+
+### What this review does not say
+
+This review does not say that the range is clean. A clean result needs an
+engine that reads the files. This engine read no file. The card stays in the
+review column until a person repairs the engine and a new review reads the 20
+changed Swift files.
