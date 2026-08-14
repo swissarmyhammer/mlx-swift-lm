@@ -1,8 +1,22 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '9980'
+comments:
+- actor: claude-code
+  id: 01kzyvggzw5yj89s9v4nh6m72y
+  text: |-
+    ### Closed without the rename — a decision, not work
+
+    The user closed this card on 2026-08-14 and asked for no rename.
+
+    **The code still spells the name `comb`.** Nothing changed. `DeepSeekV4HyperConnection.collapse` still answers `(collapsed:, post:, comb:)`, `expand` still takes `comb:`, and `DeepSeekV4Math.hcSplitSinkhorn` still answers the same third value under the same name. A later reader must not read this card as done work.
+
+    The rename would have touched 59 sites in five files: `DeepSeekV4HyperConnection.swift`, `DeepSeekV4.swift`, `DeepSeekV4MathHelpers.swift`, `DeepSeekV4HyperConnectionTests.swift`, `DeepSeekV4MathHelpersTests.swift` and `DeepSeekV4ModelTests.swift`, plus the name `expectedComb` and the documentation text. That is a wide change of names alone, and it gives no behaviour.
+
+    Open this card again if the abbreviation gets in the way of a reader later.
+  timestamp: 2026-08-14T00:42:19.516680+00:00
+position_column: done
+position_ordinal: f580
 title: Give the `comb` tuple label of DeepSeekV4HyperConnection its full word
 ---
 ## What

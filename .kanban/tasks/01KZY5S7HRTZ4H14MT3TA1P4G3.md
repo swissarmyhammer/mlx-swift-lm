@@ -39,8 +39,28 @@ comments:
 
     This card's own scope (onTokenCommitted) is done. Leaving the card open only if a person wants a final read-through of the diff; the build and tests are green.
   timestamp: 2026-08-13T20:27:21.070153+00:00
-position_column: todo
-position_ordinal: 9b80
+- actor: claude-code
+  id: 01kzyvfdd90mn57bfmb980wc6q
+  text: |-
+    ### Closed — the work is committed
+
+    The port landed in commit `f9d797f` on branch `catch-up-upstream`, during the catch-up to the official `ml-explore/mlx-swift-lm`.
+
+    **The finding that made the card necessary:** upstream STILL holds the bug that `onTokenCommitted` guarded. In `GuidedGenerationLoop.run`, the fast-forward branch feeds only the jump-forward tokens through the model. The sampled token that STARTED the batch never goes through, thus its KV-cache entry goes away without a sign. `CommitResult.tokens` does not give the sampled token back, and the other forward-pass site is the `else` branch, which does not run while `ffTokens` holds anything.
+
+    **The fix**, applied on top of upstream's simpler file as an addition:
+    1. `onTokenCommitted: ((Int) -> Void)? = nil` is a parameter of `GuidedGenerationLoop.run` again.
+    2. The fast-forward branch now feeds the sampled token through the model FIRST, before the `ffTokens` loop.
+    3. `onTokenCommitted` fires for each token that the model reads.
+
+    Upstream's simpler design stays otherwise: no `LoopState` struct and no `RunResult`, because the call sites in `MLXLanguageModel.swift` read the bare `Int`.
+
+    `swift test` is green: 1068 tests, 0 failures.
+
+    **This bug belongs upstream.** It is a defect of `ml-explore/mlx-swift-lm` that this fork now carries a fix for. A pull request to the official repository would give the fix back.
+  timestamp: 2026-08-14T00:41:43.081729+00:00
+position_column: done
+position_ordinal: f480
 title: Port onTokenCommitted onto the upstream GuidedGenerationLoop
 ---
 `swift build --build-tests` fails with exactly one error:
