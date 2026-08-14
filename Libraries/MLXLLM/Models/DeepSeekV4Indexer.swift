@@ -226,10 +226,8 @@ final class DeepSeekV4Indexer: Module {
 
     /// The block-causal visibility of each pooled chunk.
     ///
-    /// Chunk `c` covers the raw positions `c * chunkWidth` through
-    /// `(c + 1) * chunkWidth - 1`. A query at absolute position `q` reads that
-    /// chunk when the whole chunk stands behind it, thus when
-    /// `(c + 1) * chunkWidth <= q + 1`.
+    /// The rule is ``DeepSeekV4Math/pooledChunkVisibility(queryCount:offset:chunkCount:chunkWidth:)``,
+    /// which the attention mask of a compressed layer reads as well.
     ///
     /// - Parameters:
     ///   - queryCount: The number of tokens in this block.
@@ -237,11 +235,9 @@ final class DeepSeekV4Indexer: Module {
     ///   - chunkCount: The number of chunks the compressor pooled.
     /// - Returns: The visibility, shape `(1, queryCount, chunkCount)`.
     private func chunkVisibility(queryCount: Int, offset: Int, chunkCount: Int) -> MLXArray {
-        let positions = MLXArray(Int32(offset) ..< Int32(offset + queryCount))
-            .reshaped(1, queryCount, 1)
-        let chunkEnds =
-            (MLXArray(Int32(0) ..< Int32(chunkCount)) + 1) * Int32(chunkWidth)
-        return chunkEnds.reshaped(1, 1, chunkCount) .<= (positions + 1)
+        DeepSeekV4Math.pooledChunkVisibility(
+            queryCount: queryCount, offset: offset, chunkCount: chunkCount,
+            chunkWidth: chunkWidth)
     }
 
     /// The score of each pooled chunk against each query of one block.

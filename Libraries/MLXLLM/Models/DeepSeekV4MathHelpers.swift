@@ -367,4 +367,33 @@ enum DeepSeekV4Math {
     static func reduceRoutedExpertsFP32(_ routed: MLXArray) -> MLXArray {
         routed.asType(.float32).sum(axis: routedExpertAxis)
     }
+
+    // MARK: - Pooled-chunk visibility
+
+    /// The block-causal visibility of each pooled chunk.
+    ///
+    /// A compressor pools each run of `chunkWidth` tokens into one chunk, thus
+    /// chunk `c` covers the raw positions `c * chunkWidth` through
+    /// `(c + 1) * chunkWidth - 1`. A query at absolute position `q` reads that
+    /// chunk only when the whole chunk stands behind it, thus only when
+    /// `(c + 1) * chunkWidth <= q + 1`.
+    ///
+    /// Both halves of DeepSeek-V4 sparse attention read this rule: the
+    /// attention mask of a layer that holds a compressor, and the ranking of a
+    /// layer that also holds an indexer.
+    ///
+    /// - Parameters:
+    ///   - queryCount: The number of tokens in this block.
+    ///   - offset: The absolute position of the first token of this block.
+    ///   - chunkCount: The number of chunks the compressor pooled.
+    ///   - chunkWidth: The number of raw positions one chunk covers.
+    /// - Returns: The visibility, shape `(1, queryCount, chunkCount)`.
+    static func pooledChunkVisibility(
+        queryCount: Int, offset: Int, chunkCount: Int, chunkWidth: Int
+    ) -> MLXArray {
+        let positions = MLXArray(Int32(offset) ..< Int32(offset + queryCount))
+            .reshaped(1, queryCount, 1)
+        let chunkEnds = (MLXArray(Int32(0) ..< Int32(chunkCount)) + 1) * Int32(chunkWidth)
+        return chunkEnds.reshaped(1, 1, chunkCount) .<= (positions + 1)
+    }
 }

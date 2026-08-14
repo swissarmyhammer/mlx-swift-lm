@@ -494,4 +494,58 @@ struct DeepSeekV4MathHelpersTests {
             "float32 error \(fp32Error) must beat bfloat16 error \(bfloat16Error)")
         #expect(fp32Sum == Self.exactRoutedSum)
     }
+
+    // MARK: - Pooled-chunk visibility
+
+    /// The number of raw positions one pooled chunk covers in the visibility
+    /// tests.
+    private static let visibilityChunkWidth = 4
+
+    /// The number of pooled chunks the visibility tests read.
+    private static let visibilityChunkCount = 5
+
+    /// The number of queries the visibility tests read.
+    private static let visibilityQueryCount = 7
+
+    /// The absolute position of the first query of the visibility tests. It is
+    /// not a multiple of ``visibilityChunkWidth``, thus a rule that reads the
+    /// offset wrongly cannot agree by luck.
+    private static let visibilityOffset = 6
+
+    @Test func pooledChunkVisibilityHidesEveryChunkThatReachesPastItsQuery() {
+        let visible = DeepSeekV4Math.pooledChunkVisibility(
+            queryCount: Self.visibilityQueryCount,
+            offset: Self.visibilityOffset,
+            chunkCount: Self.visibilityChunkCount,
+            chunkWidth: Self.visibilityChunkWidth)
+        eval(visible)
+
+        #expect(visible.shape == [1, Self.visibilityQueryCount, Self.visibilityChunkCount])
+        #expect(visible.dtype == .bool)
+
+        // The rule again, in plain Swift: a query at absolute position `q`
+        // reads chunk `c` only when the whole chunk stands behind it.
+        let read = visible.asType(.int32).asArray(Int32.self)
+        for query in 0 ..< Self.visibilityQueryCount {
+            let position = Self.visibilityOffset + query
+            for chunk in 0 ..< Self.visibilityChunkCount {
+                let expected = (chunk + 1) * Self.visibilityChunkWidth <= position + 1
+                let actual = read[query * Self.visibilityChunkCount + chunk] != 0
+                #expect(actual == expected, "query \(position), chunk \(chunk)")
+            }
+        }
+    }
+
+    @Test func pooledChunkVisibilityHidesEveryChunkFromTheFirstPositions() {
+        let visible = DeepSeekV4Math.pooledChunkVisibility(
+            queryCount: Self.visibilityChunkWidth - 1,
+            offset: 0,
+            chunkCount: Self.visibilityChunkCount,
+            chunkWidth: Self.visibilityChunkWidth)
+        eval(visible)
+
+        #expect(
+            visible.asType(.int32).asArray(Int32.self).allSatisfy { $0 == 0 },
+            "no chunk has ended before position \(Self.visibilityChunkWidth - 1)")
+    }
 }
