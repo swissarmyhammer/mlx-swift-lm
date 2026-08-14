@@ -367,6 +367,132 @@ struct DeepseekV4AgenticPromptCacheAssessmentTests {
             """)
     }
 
+    /// Tokens the follow-up round of the long conversation may produce.
+    private let conversationFollowUpTokenBudget = 32
+
+    /// Measures what the prompt cache of a long conversation does from one
+    /// turn to the next.
+    ///
+    /// This is the tool round of ``measureToolRound(mode:)`` with the tools
+    /// taken out. The cache machinery is the same machinery -- `ChatSession`
+    /// renders the whole transcript again for each turn and
+    /// `ExtendCachedPrefixRule` feeds only the new tail -- thus this measures
+    /// requirement 3 even while the model writes its tool calls in a syntax
+    /// `DSMLToolCallParser` does not read.
+    ///
+    /// The two facts it takes are the two facts
+    /// `Qwen36UpstreamPromptCacheAssessmentTests` takes, and DeepSeek-V4
+    /// answers them differently:
+    ///
+    ///   (a) The follow-up render IS a true prefix extension of round 1's.
+    ///       Qwen-3.6 fails here, because its template rewrites the priming
+    ///       tail. The DeepSeek-V4 chat template does not.
+    ///   (b) Upstream reprocesses the whole prompt anyway. A good prefix is
+    ///       thus not sufficient, which is the number this suite exists to
+    ///       hold.
+    ///
+    /// This is a baseline, not a wish. Every assertion below records what the
+    /// run measured on 2026-08-14. When reuse appears, these assertions fail
+    /// on purpose: invert them and record the new numbers.
+    @Test func aLongConversationMeasuresPromptCacheReuseAcrossTurns() async throws {
+        guard
+            let container = await deepseekV4ContainerOrSkip(
+                testName: "aLongConversationMeasuresPromptCacheReuseAcrossTurns")
+        else { return }
+
+        let context = additionalContext(for: .chat)
+        let parameters = GenerateParameters(
+            maxTokens: conversationFollowUpTokenBudget, temperature: greedyTemperature)
+        let prompt = makeRecallPrompt()
+        let session = ChatSession(
+            container, generateParameters: parameters, additionalContext: context)
+
+        let roundOneRendered = try await renderPromptTokens(
+            container, messages: [.user(prompt)], additionalContext: context)
+        let roundOne = measurement(
+            try await collect(session.streamDetails(to: prompt)),
+            renderedTokenCount: roundOneRendered.count)
+
+        let transcript: [Chat.Message] = [.user(prompt), .assistant(roundOne.text)]
+        let followUpRendered = try await renderPromptTokens(
+            container, messages: transcript + [.user(followUpPrompt)],
+            additionalContext: context)
+        let followUp = measurement(
+            try await collect(session.streamDetails(to: followUpPrompt)),
+            renderedTokenCount: followUpRendered.count)
+
+        // The control seeds a cold session with the same transcript, thus it
+        // pays the whole prefill the live session skips.
+        let controlSession = ChatSession(
+            container, history: transcript, generateParameters: parameters,
+            additionalContext: context)
+        let control = measurement(
+            try await collect(controlSession.streamDetails(to: followUpPrompt)),
+            renderedTokenCount: followUpRendered.count)
+
+        let seam = try await describeSeam(
+            container, earlier: roundOneRendered, later: followUpRendered)
+        let label = "\(measurementPrefix) conversation"
+        reportPass(label: "\(label) round 1", pass: roundOne)
+        reportPass(label: "\(label) follow-up round", pass: followUp)
+        reportPass(label: "\(label) control", pass: control)
+        print("\(label) follow-up extends round 1 = \(seam.isPrefixExtension)")
+        print(
+            "\(label) follow-up common prefix with round 1 = \(seam.sharedPrefixLength) "
+                + "of \(seam.earlierLength)")
+        print("\(label) round 1 divergent tail = <<<\(seam.earlierTail)>>>")
+        print("\(label) follow-up divergent tail = <<<\(seam.laterTail)>>>")
+
+        #expect(
+            roundOne.renderedTokenCount >= minimumPrefillTokenCount,
+            """
+            round 1's rendered prompt (\(roundOne.renderedTokenCount) tokens) must reach \
+            \(minimumPrefillTokenCount) tokens for prefill to dominate the timing
+            """)
+        #expect(!followUp.text.isEmpty, "the follow-up round must answer")
+
+        // Fact (a): the DeepSeek-V4 chat template writes round 1's turn again
+        // token for token, thus `ExtendCachedPrefixRule` is reachable here. This
+        // is where Qwen-3.6 fails and DeepSeek-V4 passes.
+        #expect(
+            seam.isPrefixExtension,
+            """
+            (a) the follow-up render does not extend round 1's. The two share \
+            \(seam.sharedPrefixLength) of round 1's \(seam.earlierLength) tokens. Round 1 \
+            wrote <<<\(seam.earlierTail)>>> where the follow-up writes <<<\(seam.laterTail)>>>.
+            """)
+
+        // Fact (b): upstream reprocesses the whole prompt anyway. A good prefix
+        // between the two RENDERS is thus not sufficient, because
+        // `ExtendCachedPrefixRule` compares the new render against the LEDGER,
+        // which is round 1's render PLUS the tokens round 1 generated. The
+        // divergent tail printed above shows why the two part: the follow-up
+        // render writes `</think>` at position 3626 and the ledger writes the
+        // first generated token there. The encoder adds that token when it
+        // renders an assistant turn as history, and the live prompt of round 1
+        // does not end with it. One token thus breaks the prefix, and the
+        // fall-back `RewindToCommonPrefixRule` needs a trimmable cache, which a
+        // `RotatingKVCache` past its 128-token window is not.
+        //
+        // Card ^mscrreq holds the correction; until it lands, this number stays
+        // at zero.
+        #expect(
+            followUp.skippedTokenCount == 0,
+            """
+            (b) the follow-up round skipped \(followUp.skippedTokenCount) of its \
+            \(followUp.renderedTokenCount) rendered tokens; it fed every one of them when this \
+            baseline was taken. Reuse appeared -- invert this assertion and close ^mscrreq.
+            """)
+        #expect(
+            followUp.prefillSeconds >= control.prefillSeconds * noReuseTimeFloorFraction,
+            """
+            (b) the follow-up round spent \(followUp.prefillSeconds) s on prefill against the \
+            cold control's \(control.prefillSeconds) s for the same prompt, dropping below \
+            \(noReuseTimeFloorFraction) of the control. The follow-up stopped reprocessing the \
+            whole prompt -- invert this assertion and close ^mscrreq.
+            """)
+    }
+
     // MARK: The measurement
 
     /// Runs one agentic tool round in `mode` and prints every measured number.

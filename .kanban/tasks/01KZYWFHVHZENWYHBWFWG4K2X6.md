@@ -95,8 +95,42 @@ comments:
   id: 01kzyyn2ngr1m18027exkga2ph
   text: 'Job 1 re-run after the shared-load refactor, to prove the move broke nothing: 8 of 8 tests pass in one process in 81.3 s. The wired-memory manager applied the whole 168,662,344,796-byte request and the median decode step stays near 0.62 s. `longGenerationPastTwelveThousandTokensCompletes` stays out of the run.'
   timestamp: 2026-08-14T01:37:14.416264+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01kzzyz0tsd2cagn80qjpsrt4z
+  text: |
+    ### Job 2 — the numbers, taken 2026-08-14
+
+    The blocker (`^3x0krt4`) is gone, thus job 2 could take its measurement. The
+    tool round is still out of reach, because the model writes its tool calls in a
+    syntax `DSMLToolCallParser` does not read (`^2dvj1g6`). The measurement was
+    therefore taken on the same shape with the tools removed:
+    `aLongConversationMeasuresPromptCacheReuseAcrossTurns`.
+
+    | Pass | Rendered | Fed | Skipped | Prefill |
+    | --- | --- | --- | --- | --- |
+    | round 1 | 3626 | 3626 | 0 | 12.20 s |
+    | follow-up | 3646 | 3646 | 0 | 12.80 s |
+    | cold control | 3646 | 3646 | 0 | 12.96 s |
+
+    **(a) Is round N+1's render a true prefix extension of round N's? YES.** The
+    two share 3,626 of 3,626 tokens. This is where Qwen-3.6 fails and DeepSeek-V4
+    passes.
+
+    **(b) Given a good prefix, does the cache skip the work? NO.** The follow-up
+    fed every one of its 3,646 tokens, and it spent 99% of the cold control's
+    prefill time.
+
+    **Is the cache trimmable?** A FRESH cache is. A cache past the 128-token window
+    is NOT: `DeepSeekV4Model.newCache` now gives `RotatingKVCache(maxSize: 128)` to
+    every layer with no compressor, and `RotatingKVCache.isTrimmable` is
+    `offset < maxSize`. The earlier answer of "43 of 43 rewind" was taken before
+    the sparse path landed.
+
+    The cause of (b) is measured and written on `^mscrreq`, which also holds the
+    correction. This card measured and reported, and it built no correction.
+  timestamp: 2026-08-14T11:01:54.649511+00:00
+position_column: done
+position_ordinal: ff80
 title: Prove DeepSeek-V4 after the upstream catch-up, then measure the agentic prompt cache
 ---
 The merge of `ml-explore/mlx-swift-lm` used `-X theirs`, which reverted the DeepSeek-V4 hooks in shared files. A person re-applied them by hand. Nobody has run the real-weights suite since.

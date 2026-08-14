@@ -1,8 +1,36 @@
 ---
 assignees:
 - claude-code
-position_column: doing
-position_ordinal: '8380'
+comments:
+- actor: claude-code
+  id: 01kzzyys56qmbdg9bez5d3dec0
+  text: |
+    ### Cured, and verified again at HEAD on 2026-08-14
+
+    The sparse path of `^ab1eq0r` (commit `1c7bd06`) closed this defect. The
+    reproduction now passes in its own process:
+
+    ```
+    DSV4 CACHE: recall rendered prompt tokens = 3626
+    DSV4 CACHE: recall answer = <<<4172>>>
+    ✔ Test longPromptWithoutToolsRecallsAPlantedFact() passed after 35.560 seconds.
+    ```
+
+    The three sub-tasks of the work list are answered:
+
+    - The layers with a compress ratio of 0 take the 128-token sliding window; the
+      41 layers with a compressor take that window AND the pooled chunks of
+      everything before it.
+    - `slidingWindow` now reaches the layers that take it.
+    - `DeepSeekV4Cache` records the pooled chunks, and both the indexer and the
+      sparse path read them.
+
+    A note for the reader: the recall test ran while commit `1c7bd06` was being
+    made, thus the 2026-08-13 pass in the log and this 2026-08-14 pass are the same
+    code.
+  timestamp: 2026-08-14T11:01:46.790639+00:00
+position_column: done
+position_ordinal: fd80
 title: DeepSeek-V4 writes gibberish on a prompt of more than a few hundred tokens
 ---
 Measured on 2026-08-13 against `mlx-community/DeepSeek-V4-Flash-4bit` with the real weights.

@@ -35,8 +35,8 @@ comments:
 
     `DeepSeekV4Indexer` answers a Boolean mask that already holds the causal rule. The reference gathers the top-k rows instead. A mask gives the same numbers, because a masked chunk takes no softmax weight, and it keeps the one selection path for prefill and decode.
   timestamp: 2026-08-14T01:52:18.836301+00:00
-position_column: doing
-position_ordinal: '8280'
+position_column: done
+position_ordinal: fe80
 title: 'Read the pooled chunks in DeepSeek-V4 attention: the sparse path and its pooled cache'
 ---
 ## What
