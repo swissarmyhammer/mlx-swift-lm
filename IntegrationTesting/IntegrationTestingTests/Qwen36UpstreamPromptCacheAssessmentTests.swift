@@ -160,59 +160,9 @@ private func measureRound(
         generationTokenCount: completionInfo.generationTokenCount)
 }
 
-/// Renders `messages` through the model's own chat template and returns the
-/// resulting prompt tokens.
-///
-/// This is the same `UserInputProcessor.prepare(input:)` call `ChatSession`
-/// makes for every turn, so the tokens here are the tokens a turn would feed
-/// with a cold cache.
-///
-/// - Parameters:
-///   - container: the loaded model container
-///   - messages: the conversation to render
-/// - Returns: the rendered prompt token ids.
-/// - Throws: any error the processor raises.
-private func renderPromptTokens(
-    _ container: LLModelContainer, messages: [Chat.Message]
-) async throws -> [Int] {
-    // `[Chat.Message]` is not `Sendable`, so it crosses the container boundary
-    // through the `nonSendable:` overload -- the same overload upstream's own
-    // `MLXLanguageModel.Executor.respond` uses for its messages.
-    try await container.perform(nonSendable: messages) { context, messages in
-        let input = try await context.processor.prepare(input: UserInput(chat: messages))
-        return input.text.tokens.asArray(Int.self)
-    }
-}
-
-/// The number of leading tokens `first` and `second` share.
-private func commonPrefixLength(_ first: [Int], _ second: [Int]) -> Int {
-    zip(first, second).prefix { $0 == $1 }.count
-}
-
-/// Decodes `tokens` through the model's own tokenizer, so a token range reads
-/// as the template markup it came from.
-///
-/// - Parameters:
-///   - container: the loaded model container
-///   - tokens: the token ids to decode
-/// - Returns: the decoded text.
-private func decodeTokens(_ container: LLModelContainer, tokens: [Int]) async -> String {
-    await container.perform { context in
-        context.tokenizer.decode(tokenIds: tokens)
-    }
-}
-
-/// The tokens `render` writes from `index` onward, capped at
-/// ``divergenceReportTokenCount`` so the report stays readable.
-///
-/// - Parameters:
-///   - render: a rendered prompt
-///   - index: the first divergent position
-/// - Returns: the capped divergent tail, empty when `index` is past the end.
-private func divergentTail(of render: [Int], from index: Int) -> [Int] {
-    guard index < render.count else { return [] }
-    return Array(render[index..<min(index + divergenceReportTokenCount, render.count)])
-}
+// `renderPromptTokens`, `commonPrefixLength`, `decodeTokens` and
+// `divergentTail` live in `IntegrationTestHelpers`, because the DeepSeek-V4
+// agentic prompt-cache suite measures the same four things.
 
 /// A long user turn whose content the model has to read, so a real prefill of
 /// several thousand tokens happens rather than a template-only prompt.
@@ -270,9 +220,13 @@ struct Qwen36UpstreamPromptCacheAssessmentTests {
         let sharedPrefix = commonPrefixLength(firstRendered, secondRendered)
         let skippedTokenCount = secondRendered.count - secondRound.promptTokenCount
         let firstTail = await decodeTokens(
-            container, tokens: divergentTail(of: firstRendered, from: sharedPrefix))
+            container,
+            tokens: divergentTail(
+                of: firstRendered, from: sharedPrefix, limit: divergenceReportTokenCount))
         let secondTail = await decodeTokens(
-            container, tokens: divergentTail(of: secondRendered, from: sharedPrefix))
+            container,
+            tokens: divergentTail(
+                of: secondRendered, from: sharedPrefix, limit: divergenceReportTokenCount))
         report(
             firstRendered: firstRendered, firstRound: firstRound,
             secondRendered: secondRendered, secondRound: secondRound,
