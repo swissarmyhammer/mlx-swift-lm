@@ -196,7 +196,7 @@ public struct DeepSeekV4ChatEncoder: Sendable {
 
     /// One of the internal classification tasks that DeepSeek-V4 answers with a
     /// task token in place of an ordinary assistant turn.
-    public enum QuickInstructionTask: String, Sendable {
+    public enum QuickInstructionTask: String, Sendable, CaseIterable {
         /// Choose the next action.
         case action
         /// Write a search query.
@@ -420,6 +420,18 @@ public struct DeepSeekV4ChatEncoder: Sendable {
         /// - Returns: the marker.
         public static func task(_ task: QuickInstructionTask) -> String {
             marker(task.rawValue)
+        }
+
+        /// Every marker that ``DeepSeekV4ChatEncoder`` writes.
+        ///
+        /// ``DeepSeekV4Tokenization`` reads this list: each of these markers
+        /// is one token of the published vocabulary, thus each one stands
+        /// outside the pre-tokenizer.
+        public static var allMarkers: [String] {
+            [
+                beginOfSentence, endOfSentence, user, assistant, latestReminder,
+                thinkStart, thinkEnd, dsml,
+            ] + QuickInstructionTask.allCases.map(task)
         }
     }
 

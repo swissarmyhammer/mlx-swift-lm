@@ -254,8 +254,10 @@ extension Tokenizer {
 /// render a conversation: its `applyChatTemplate` throws
 /// ``TokenizerError/missingChatTemplate``, and the plain-text fallback makes
 /// a wrong prompt. This wrapper renders the conversation with the encoder
-/// instead, and encodes the rendered text with the wrapped tokenizer. Every
-/// other operation forwards to the wrapped tokenizer unchanged.
+/// instead, and reads the rendered text with ``DeepSeekV4Tokenization``, which
+/// runs the published `tokenizer.json` rules over the vocabulary of the
+/// wrapped tokenizer. Every other operation forwards to the wrapped tokenizer
+/// unchanged.
 ///
 /// `LLMModel.promptTokenizer(wrapping:)` installs the wrapper at load time
 /// for a checkpoint that the type registry identifies as `deepseek_v4`, thus
@@ -268,22 +270,35 @@ public struct DeepSeekV4EncodingTokenizer: Tokenizer {
     /// row injects, and the same default: absent means `thinking`.
     private static let thinkingKey = "thinking"
 
-    /// The tokenizer that encodes the rendered prompt text.
+    /// The tokenizer that holds the vocabulary of the checkpoint.
     private let base: any Tokenizer
+
+    /// The tokenization that the published `tokenizer.json` states.
+    private let tokenization: DeepSeekV4Tokenization
 
     /// Creates the wrapper.
     /// - Parameter base: the loaded tokenizer of the model.
     public init(wrapping base: any Tokenizer) {
         self.base = base
+        self.tokenization = DeepSeekV4Tokenization(vocabulary: base)
     }
 
-    /// Forwards to the wrapped tokenizer.
+    /// Reads the text as ``DeepSeekV4Tokenization`` reads it.
+    ///
+    /// The wrapped tokenizer cannot do this work itself: `swift-transformers`
+    /// 1.3.3 runs the `Split` pre-tokenizer through a Foundation search that
+    /// cannot match a carriage return or a newline inside a character class,
+    /// thus it writes one token for each newline where the published tokenizer
+    /// writes one token for a whole run.
+    ///
     /// - Parameters:
     ///   - text: the text to tokenize.
     ///   - addSpecialTokens: whether to add the tokenizer's special tokens.
+    ///     The published `post_processor` of this checkpoint is `ByteLevel`,
+    ///     which adds no token, thus this flag changes nothing here.
     /// - Returns: the token IDs representing the text.
     public func encode(text: String, addSpecialTokens: Bool) -> [Int] {
-        base.encode(text: text, addSpecialTokens: addSpecialTokens)
+        tokenization.identifiers(of: text)
     }
 
     /// Forwards to the wrapped tokenizer.
@@ -340,7 +355,7 @@ public struct DeepSeekV4EncodingTokenizer: Tokenizer {
         let prompt = DeepSeekV4ChatEncoder().encode(
             messages: DeepSeekV4ChatEncoder.Message.messages(from: messages, tools: tools),
             thinkingMode: thinking ? .thinking : .chat)
-        return base.encode(text: prompt, addSpecialTokens: false)
+        return tokenization.identifiers(of: prompt)
     }
 }
 

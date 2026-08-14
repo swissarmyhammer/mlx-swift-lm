@@ -633,6 +633,40 @@ comments:
     or vendor the package here, or give `DeepSeekV4EncodingTokenizer` its own
     pre-tokenization path.
   timestamp: 2026-08-14T17:02:06.652251+00:00
+- actor: claude-code
+  id: 01m00ry65xyma6tes5xyzvk8y2
+  text: |
+    The blocker card `^t56pqr4` is done, and it does NOT unblock the last work item
+    of this card.
+
+    `DeepSeekV4EncodingTokenizer` now reads a prompt through its own
+    pre-tokenization path (`Libraries/MLXLMCommon/DeepSeekV4Tokenization.swift`),
+    which runs the published `Split` patterns through `NSRegularExpression`.
+    `theToolPromptTokenizesToThePublishedIdentifiers` is green: 328 identifiers,
+    each equal to the fixture, where Swift wrote 353 before.
+
+    One real-weights run of `aShortToolPromptEmitsOneDSMLToolCall` on the corrected
+    identifiers:
+
+    ```
+    Tool round text: <<<
+
+    <functioncall>
+    {"name": "get_stock_level", "arguments": {"bay_id": "bay 7"}}>>>
+    Tool round calls: []
+    ```
+
+    That is BYTE IDENTICAL to the answer of 2026-08-14 on the wrong identifiers.
+    Thus the third work item of this card, "Correct what the answer names, and make
+    one tool round complete", stays open, and the tokenizer joins the list of dead
+    causes: the render, the parser, the tool placement, the prompt length and the
+    generation mode.
+
+    What is left is the weights and the layers that read them — the 4-bit
+    quantization of `mlx-community/DeepSeek-V4-Flash-4bit`, or a number in the
+    DeepSeek-V4 attention port. A person decides whether this card grows to hold
+    that work or whether a new card takes it. I did not decide it.
+  timestamp: 2026-08-14T18:35:50.333955+00:00
 depends_on:
 - 01M00K0MWNJ59NG1Q0MT56PQR4
 position_column: doing
