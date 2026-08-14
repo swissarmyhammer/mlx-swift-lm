@@ -499,40 +499,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         await cache.lastError(modelID: modelID)
     }
 
-    /// Whether `model`'s cache-layer composition can take part in
-    /// prompt-cache reuse. Either of two mechanisms makes this `true`:
-    ///
-    /// - Ordinary chunk reuse (see ``PromptCache/isChunkable(_:)``): `true`
-    ///   for a cache stack of only `KVCacheSimple`. `false` for a
-    ///   `maxKVSize`-driven `RotatingKVCache` stack, which is neither
-    ///   chunkable nor hybrid. That combination never supports reuse.
-    /// - Whole-stack hybrid checkpoint reuse (see
-    ///   ``PromptCache/isHybridMambaAttention(_:)``): `true` for the hybrid
-    ///   Mamba/attention architectures of the Qwen3.6 and Qwen3-Next family,
-    ///   whose cache stack mixes `KVCacheSimple` for the full-attention
-    ///   layers with `MambaCache` for the linear-attention layers. These
-    ///   reuse the cache with a checkpoint and restore, not with chunks.
-    ///
-    /// A session against a model where this is `false` reports an input
-    /// `cachedTokenCount` of `0` on every round. A caller can thus tell that
-    /// expected `0` from a reuse that missed on a model which does support
-    /// it.
-    ///
-    /// - Parameters:
-    ///   - model: The loaded model to examine.
-    ///   - parameters: Generation parameters passed to
-    ///     `model.newCache(parameters:)`, so that the cache examined is the
-    ///     cache a real generation call builds.
-    /// - Returns: `true` when the cache of `model` can take part in either
-    ///   chunk reuse or hybrid checkpoint reuse.
-    /// - Throws: Whatever `model.newCache(parameters:)` throws.
-    public static func supportsPromptCacheReuse(
-        model: any MLXLMCommon.LanguageModel, parameters: GenerateParameters? = nil
-    ) throws -> Bool {
-        let cache = try model.newCache(parameters: parameters)
-        return PromptCache.isChunkable(cache) || PromptCache.isHybridMambaAttention(cache)
-    }
-
     // MARK: - LanguageModel Conformance
 
     /// MLX supports guided generation via xgrammar grammar-constrained
