@@ -867,9 +867,10 @@ public enum ToolCallTests {
 
     /// GLM-4 takes the tool-call format of the official upstream.
     ///
-    /// This helper looked for a bare GLM-4 format before 2026-08-14. The
-    /// catch-up to `ml-explore/mlx-swift-lm` took the upstream registry, which
-    /// gives `.glm4` to `mlx-community/GLM-4-9B-0414-4bit`, and the user
+    /// This helper looked for a bare GLM-4 format before 2026-08-14.
+    ///
+    /// The catch-up to `ml-explore/mlx-swift-lm` took the upstream registry,
+    /// which gives `.glm4` to `mlx-community/GLM-4-9B-0414-4bit`, and the user
     /// decided to keep the upstream value rather than hold our own. Card
     /// `^f9zzxt7` records the decision, and the bare format left the tree with
     /// it.

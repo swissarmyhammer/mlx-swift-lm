@@ -6,14 +6,10 @@
 # honored on top of this, so gitignored files are never reviewed either.
 #
 # Auto-generated on the first review; edit freely — it is never overwritten.
-
-# Code review is OFF for this repository. `*` matches each path, thus the
-# review engine keeps no file in scope and each review answers with an empty
-# set. Set on 2026-08-14, during the catch-up to the official upstream
-# `ml-explore/mlx-swift-lm`.
 #
-# To turn review on again, remove the `*` line. To turn it on for one area
-# only, keep `*` and add a negation under it, for example:
-#     *
-#     !Libraries/MLXLLM/
-*
+# Code review is ON. A `*` line here turns it off for the whole repository:
+# `*` matches each path, thus no file stays in scope and each review answers
+# with an empty set and a count of 0 attempted files. That line was set on
+# 2026-08-14 during the catch-up to `ml-explore/mlx-swift-lm`, and removed the
+# same day. Read the count, not the words: `attempted: 0` means the engine
+# opened no file, which is never the same as a clean review.

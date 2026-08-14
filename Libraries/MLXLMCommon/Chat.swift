@@ -191,6 +191,16 @@ public enum Chat {
             create(role: .user, content: content, images: images, videos: videos, audios: audios)
         }
 
+        /// Creates a tool-result message, which answers one tool call of an
+        /// earlier assistant message.
+        ///
+        /// - Parameters:
+        ///   - content: The text the tool gave back.
+        ///   - id: The identifier of the tool call this message answers. A
+        ///     conversation that carries no identifier gives `nil`.
+        ///   - name: The function name of the tool call this message answers.
+        /// - Returns: A new ``Message`` with the ``Role/tool`` role, which
+        ///   carries the identifier and the name as its tool metadata.
         public static func tool(
             _ content: String, id: String? = nil, name: String? = nil
         ) -> Self {
