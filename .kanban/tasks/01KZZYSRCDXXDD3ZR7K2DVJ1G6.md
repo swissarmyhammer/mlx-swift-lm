@@ -250,8 +250,59 @@ comments:
           the render; it is corrected; the model is what remains
     - [ ] Correct what the answer names, and make one tool round complete — blocked
   timestamp: 2026-08-14T12:40:16.796012+00:00
-position_column: review
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m00gw8jj4w9bm2dsphygrhhp
+  text: |
+    ### review — clean, and the earlier blocker was a wrong diagnosis
+
+    The `## Review Findings (2026-08-14 07:37)` entry above says the review
+    engine reads no file and names the repository root as the cause. **That is
+    not correct, and this comment withdraws it.**
+
+    The cause was `.reviewignore`, which this branch committed in `56ffd72`:
+
+    ```
+    # Code review is OFF for this repository. `*` matches each path ...
+    *
+    ```
+
+    A bare `*` matches every path, thus the engine dropped each file from scope
+    and answered `attempted: 0`. The engine was correct; the configuration
+    turned it off. The user asked for review on again, the `*` line is gone,
+    and the file now records that `attempted: 0` means nobody looked.
+
+    ### What the real review says
+
+    | File | Validators | Findings |
+    | --- | ---: | ---: |
+    | `Libraries/MLXLMCommon/PythonStyleJSON.swift` | 9 | 0 |
+    | `Libraries/MLXLMCommon/Chat.swift` | 9 | 0 |
+
+    `Chat.swift` first gave three findings, all of one cause: the
+    `tool(_:id:name:)` factory carried no documentation comment. It was the
+    only public declaration of the file without one, thus the correction
+    removes the cause from the whole file. `IntegrationTestHelpers.swift:870`
+    gave one more, on a documentation line this card wrote, and it is
+    corrected too.
+
+    Commit `6afd3b8` holds both corrections.
+
+    ### The card still cannot close
+
+    The review gate is clear for the code that exists. The card's own third
+    work item is not:
+
+    - [ ] Correct what the answer names, and make one tool round complete
+
+    The render is byte-exact against `encoding_dsv4.py` and the parser reads
+    the published syntax, and the model still answers `<functioncall>` with
+    plain JSON. That is neither the render nor the parser, thus this card
+    returns to `doing` rather than to `done`. The next step is to tell whether
+    the 4-bit quantization or a number in the sparse attention path makes the
+    model answer in an untrained syntax.
+  timestamp: 2026-08-14T16:14:58.642904+00:00
+position_column: doing
+position_ordinal: '8180'
 title: DeepSeek-V4 writes its tool calls as plain JSON, which DSMLToolCallParser does not read
 ---
 Measured on 2026-08-13 against `mlx-community/DeepSeek-V4-Flash-4bit` with the
