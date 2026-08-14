@@ -1,8 +1,29 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '9580'
+comments:
+- actor: claude-code
+  id: 01kzyvnrbjwy58jy34679z21wb
+  text: |-
+    ### Closed — the official upstream corrected this
+
+    The catch-up to `ml-explore/mlx-swift-lm` on 2026-08-13 brought two commits that answer this card:
+
+    - `631325f` **Fix Python finfo.min port in quantized attention masking (#369)** — this is the very defect the card names. The card says the mask fills a held-back position with `Float.leastNormalMagnitude`, which is +1.175e-38 and not a large negative number.
+    - `b207f60` **Fix Gemma 3n Boolean attention masks (#479)**
+
+    **Verified in the code, not assumed.** `Libraries/MLXLLM/Models/Gemma3nText.swift` now holds one use of `Float.leastNormalMagnitude`, at line 813:
+
+        let epsilonTensor = MLXArray(Float.leastNormalMagnitude, dtype: h0.dtype)
+
+    That is the epsilon for a magnitude, and this card says in its own words that the use is correct and must not change. The mask path no longer holds it. The defect is gone.
+
+    `swift test` is green: 1068 tests, 0 failures.
+
+    No work of ours was needed. Upstream owns `Gemma3nText.swift` now, thus a later reader must read that file, not this card.
+  timestamp: 2026-08-14T00:45:10.898169+00:00
+position_column: done
+position_ordinal: f680
 title: Fix masked-position fill value in Gemma3n sliding-window mask
 ---
 ## What
