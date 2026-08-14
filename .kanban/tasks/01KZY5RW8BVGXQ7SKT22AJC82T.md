@@ -135,8 +135,35 @@ comments:
 
     Give this port a public `clearPromptCache(modelID:)`, or make `remove(modelID:)` public. Without it the port rebuilds the wall that `^qsv1415` was filed against.
   timestamp: 2026-08-14T00:53:38.050381+00:00
-position_column: todo
-position_ordinal: 9a80
+- actor: claude-code
+  id: 01kzywcbt3y7ppqy8749m5avce
+  text: |-
+    ### Abandoned on 2026-08-14 — Qwen is written off for the time being
+
+    The user chose to drop this port and to put the effort into DeepSeek-V4 instead, with working caching for agentic and multi-tool use.
+
+    **Nothing was ported.** Upstream's `MLXLanguageModel` still keeps no cross-turn prompt cache, thus each `respond()` builds a cache of its own and drops it. Qwen 3.6 pays a full prefill on each turn: 11.59 s for round two against a cold control of 11.60 s, 0 tokens skipped of 4748.
+
+    **What stays in the tree, dead:**
+
+    - `Libraries/MLXFoundationModels/PromptCache.swift`, 1371 lines
+    - `Libraries/MLXFoundationModels/PromptCacheChunks.swift`, 732 lines
+    - `Tests/MLXFoundationModelsTests/PromptCacheHybridExecutorTests.swift.disabled`, the 9 tests of card `^tbyb0dy`
+
+    They build, and no caller names them. They are kept, not deleted, because the user said "for the time being": a later reader can wire them in without recovering anything. The tag `pre-upstream-merge-2026-08-13` also holds each one.
+
+    **What a later port must know**, so that this work is not learned twice:
+
+    1. Upstream's FoundationModels `Executor` holds no cross-turn cache. This is not a wiring gap; there is nothing to wire to.
+    2. Qwen 3.6 breaks prefix extension at the turn seam by 2 tokens. Round one ends `<think>`, round two ends `Here's a thinking process:`, because `ChatSession.Conversation.record` appends `.assistant(content, toolCalls:)` and never fills `Chat.Message.reasoning`.
+    3. A hybrid Mamba/attention stack is not trimmable, thus `RewindToCommonPrefixRule` answers `.rebuild` even for the 4703-token common prefix that does survive.
+    4. Keep `chunkKey` a chain of hashes. Card `^3z5pydx` says why.
+    5. Make `remove(modelID:)` public. Card `^qsv1415` says why.
+
+    The measurement that gives these numbers is `IntegrationTesting/IntegrationTestingTests/Qwen36UpstreamPromptCacheAssessmentTests.swift`, commit `f85fc50`. It runs, and it will answer the same question for another model with a change of model id.
+  timestamp: 2026-08-14T00:57:31.715098+00:00
+position_column: done
+position_ordinal: fb80
 title: Wire the prompt cache into the upstream MLXLanguageModel
 ---
 The upstream catch-up merge (`-X theirs`) replaced our `Libraries/MLXFoundationModels/MLXLanguageModel.swift` (5086 lines) with the official one (2229 lines). Both sides had created that file after the merge base, so the merge took the upstream file whole.
