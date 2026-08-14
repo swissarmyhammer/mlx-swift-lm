@@ -75,24 +75,19 @@ private func readParts(
 /// HuggingFace, in the forward direction.
 enum DeepSeekV4ByteLevel {
 
-    /// The first byte of the printable ASCII range that keeps its own code
-    /// point.
+    /// The first byte of the printable ASCII range that keeps its own code point.
     private static let firstPrintableASCIIByte = 0x21
-    /// The last byte of the printable ASCII range that keeps its own code
-    /// point.
+    /// The last byte of the printable ASCII range that keeps its own code point.
     private static let lastPrintableASCIIByte = 0x7E
-    /// The first byte of the lower Latin-1 range that keeps its own code
-    /// point.
+    /// The first byte of the lower Latin-1 range that keeps its own code point.
     private static let firstLowerLatin1Byte = 0xA1
     /// The last byte of the lower Latin-1 range that keeps its own code point.
     private static let lastLowerLatin1Byte = 0xAC
-    /// The first byte of the upper Latin-1 range that keeps its own code
-    /// point.
+    /// The first byte of the upper Latin-1 range that keeps its own code point.
     private static let firstUpperLatin1Byte = 0xAE
     /// The last byte of the upper Latin-1 range that keeps its own code point.
     private static let lastUpperLatin1Byte = 0xFF
-    /// The first code point that spells a byte which keeps no code point of
-    /// its own.
+    /// The first code point that spells a byte with no code point of its own.
     private static let firstMovedCodePoint: UInt32 = 0x100
     /// The number of byte values.
     private static let byteCount = 256
@@ -153,8 +148,7 @@ enum DeepSeekV4ByteLevel {
 /// ``DeepSeekV4ByteLevel`` does its work. What is left is the three splits.
 enum DeepSeekV4PreTokenizer {
 
-    /// The three `Split` patterns of the published `pre_tokenizer`, in the
-    /// published order.
+    /// The three `Split` patterns of the published `pre_tokenizer`, in order.
     ///
     /// The published file writes a carriage return and a newline as the
     /// characters themselves. `\r` and `\n` here mean the same two characters
@@ -220,8 +214,9 @@ enum DeepSeekV4BytePairMerge {
         return identifiers
     }
 
-    /// The index of the neighbouring pair whose joined text holds the lowest
-    /// identifier.
+    /// The index of the neighbouring pair with the lowest identifier.
+    ///
+    /// The identifier of a pair is the identifier of its joined text.
     ///
     /// - Parameters:
     ///   - parts: the tokens so far.
@@ -266,8 +261,7 @@ enum DeepSeekV4BytePairMerge {
 /// tokenizer.
 public struct DeepSeekV4Tokenization: Sendable {
 
-    /// The markers of ``DeepSeekV4ChatEncoder``, longest first, as one
-    /// alternation.
+    /// The markers of ``DeepSeekV4ChatEncoder`` as one alternation.
     ///
     /// The longest marker comes first so that a marker which starts with
     /// another marker still matches whole.

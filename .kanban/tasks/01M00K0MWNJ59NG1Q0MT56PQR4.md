@@ -341,6 +341,143 @@ comments:
       NO real-weights test ran. The 141 GiB checkpoint stayed on disk.
     - next: review.
   timestamp: 2026-08-14T18:57:01.056681+00:00
+- actor: claude-code
+  id: 01m00tntxs9n9ff57ydnhym0cf
+  text: |
+    Second review of `Libraries/MLXLMCommon/DeepSeekV4Tokenization.swift`. Four
+    findings. I verified the premise of the `reuse/reuse` finding before I touched
+    anything.
+
+    ## The `reuse/reuse` finding, and what the three named files really hold
+
+    The finding names three files as clone-siblings of `DeepSeekV4ByteLevel`:
+    `TokenizerVocabExtractor.swift` (0.94), `WhitespaceTokenBias.swift` (0.93) and
+    `PythonStyleJSON.swift` (0.90). I read all three. The premise is TRUE for two of
+    them and FALSE for the third.
+
+    ### TRUE — `Libraries/MLXGuidedGeneration/TokenizerVocabExtractor.swift`
+
+    `bpeUnicodeToByte` is the same `bytes_to_unicode` table, in the inverse
+    direction. Its doc comment names the algorithm word for word: "HuggingFace
+    `bytes_to_unicode()` map, inverted." The body loops `for b in 0 ..< 256`, keeps
+    the SAME three identity ranges, and starts the moved code points at the SAME
+    `0x100`:
+
+    ```swift
+    var extendedCodepoint: UInt32 = 0x100
+    for b in 0 ..< 256 {
+        let isIdentity =
+            (b >= 0x21 && b <= 0x7E)
+            || (b >= 0xA1 && b <= 0xAC)
+            || (b >= 0xAE && b <= 0xFF)
+    ```
+
+    `DeepSeekV4ByteLevel.characterOfByte` holds the same three ranges
+    (`0x21`/`0x7E`, `0xA1`/`0xAC`, `0xAE`/`0xFF`), the same `0x100` start and the
+    same 256-value loop, in the forward direction. This is one table, not two.
+
+    ### TRUE — `Libraries/MLXGuidedGeneration/WhitespaceTokenBias.swift`
+
+    It holds `bpeUnicodeToByte` again, character for character equal to the one in
+    `TokenizerVocabExtractor`, doc comment included. The extractor already writes
+    that duplication down: "`WhitespaceTokenBias` (in MLXLMCommon) inlines an
+    identical helper so the bias's whitespace classification agrees with what this
+    extractor reports as a token's 'real bytes'." Thus this pair is a known
+    duplicate that stands on `main` today.
+
+    ### FALSE — `Libraries/MLXLMCommon/PythonStyleJSON.swift`
+
+    This file holds NO byte-level vocabulary encoding. It is a JSON reader and a
+    `json.dumps(value, ensure_ascii=False)` writer. There is no `bytes_to_unicode`
+    map, no loop over `0 ..< 256`, and no mapping of byte values onto printable code
+    points. Its one byte-shaped constant is
+    `private static let firstPrintableScalarValue: UInt32 = 0x20`, which chooses
+    between `\u00XX` and the scalar itself inside a JSON string. The detector matched
+    on shape alone: a `private static let` map literal, a scalar loop and a
+    `Unicode.Scalar` argument. The 0.90 score carries no shared algorithm.
+
+    ## The conflict, and why I stop on this finding
+
+    Two of the three named files DO hold the algorithm, thus the finding's
+    prescribed correction — "Extract byte-level vocabulary encoding into a shared
+    utility module (e.g. `Libraries/MLXLMCommon/ByteLevelVocabularyEncoding.swift`)
+    and import it in all files that need byte-level encoding" — reaches those two
+    files. That is a rule against a rule:
+
+    - SIDE ONE, the finding: `reuse/reuse` requires one shared module, and the
+      duplicate is real.
+    - SIDE TWO, the branch rule: this branch holds its difference against `main` to
+      DeepSeek-V4 and MiniMax work alone. Measured now:
+      `git diff --stat main -- Libraries/MLXGuidedGeneration/TokenizerVocabExtractor.swift Libraries/MLXGuidedGeneration/WhitespaceTokenBias.swift`
+      prints NOTHING. Both files sit at the `main` version on purpose, and unrelated
+      files have been reverted twice. `PythonStyleJSON.swift` is new on this branch
+      (408 insertions), which is why it is the only one of the three that this
+      branch owns.
+
+    Extracting the shared module would edit two files that this branch deliberately
+    holds at `main`, and would move a duplicate that exists on `main` independently
+    of DeepSeek-V4. I did not extract, I edited neither file, and I invented no
+    middle path. A person must choose.
+
+    One note for whoever chooses: the duplicate pair
+    `TokenizerVocabExtractor.bpeUnicodeToByte` / `WhitespaceTokenBias.bpeUnicodeToByte`
+    stands on `main` today and belongs to `MLXGuidedGeneration`, thus that half of
+    the work is not DeepSeek-V4 work and reads as its own card against `main`.
+  timestamp: 2026-08-14T19:06:13.817813+00:00
+- actor: claude-code
+  id: 01m00v4q8sj3mcfsqgtrcae78z
+  text: |
+    ### implement — changed
+    - evidence: 1 file — `Libraries/MLXLMCommon/DeepSeekV4Tokenization.swift`,
+      documentation comments only. No line of code moved.
+      `swift/documentation` states: "The first line is a single-sentence summary
+      ending in a period; any elaboration follows after a blank `///` line." The
+      finding named lines 156, 223 and 269. A finding gives ONE example of a cause,
+      thus I read EVERY documentation comment of the file and corrected each one
+      whose first line is not a complete sentence. Eight in all:
+      | was, over two lines | is now, one line |
+      | --- | --- |
+      | The first byte of the printable ASCII range that keeps its own code / point. | ... its own code point. |
+      | The last byte of the printable ASCII range that keeps its own code / point. | ... its own code point. |
+      | The first byte of the lower Latin-1 range that keeps its own code / point. | ... its own code point. |
+      | The first byte of the upper Latin-1 range that keeps its own code / point. | ... its own code point. |
+      | The first code point that spells a byte which keeps no code point of / its own. | The first code point that spells a byte with no code point of its own. |
+      | The three `Split` patterns of the published `pre_tokenizer`, in the / published order. | The three `Split` patterns of the published `pre_tokenizer`, in order. |
+      | The index of the neighbouring pair whose joined text holds the lowest / identifier. | The index of the neighbouring pair with the lowest identifier. |
+      | The markers of ``DeepSeekV4ChatEncoder``, longest first, as one / alternation. | The markers of ``DeepSeekV4ChatEncoder`` as one alternation. |
+      Two of them keep the words the summary dropped, in a body paragraph after a
+      blank `///` line, exactly as the rule states. `lowestPair` gains "The
+      identifier of a pair is the identifier of its joined text." `markerExpression`
+      already held "The longest marker comes first so that a marker which starts
+      with another marker still matches whole", thus "longest first" loses nothing.
+      I checked the rule set for a column limit before I rewrapped: there is NO
+      line-length rule in any of the nine validators, and `swift/idioms` states that
+      "Whitespace, indentation, and import ordering are `swift-format`'s job, not
+      review findings."
+      REFUSED, with the reason: the `reuse/reuse` finding at line 76. The premise is
+      true for two of its three named files and false for the third, and the
+      correction it prescribes edits two files that this branch holds at `main` on
+      purpose. That is a rule against a rule, thus I recorded both sides and stopped
+      on that finding alone. It stays unchecked under `## Review Findings`.
+      `swift-format format --configuration .swift-format` against the file: no
+      difference, thus the file is already formatted.
+      `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1 swift test`: 1029 tests
+      (814 + 69 + 139 + 7) in 108 suites, all passed. Zero failures. The only
+      warnings are the three package build-graph warnings that stand on `main`.
+      `xcodebuild build-for-testing` for `IntegrationTesting`: TEST BUILD SUCCEEDED.
+      The one warning in the log is "Metadata extraction skipped, no
+      AppIntents.framework dependency found", which is not a compiler warning.
+      ACCEPTANCE: `IntegrationTestingTests/DeepSeekV4TokenizerIntegrationTests`
+      passed, 4 of 4,
+      `theToolPromptTokenizesToThePublishedIdentifiers()` included. That test
+      asserts `firstDifferingIndex(tokens, expected) == nil`, thus it needs equality
+      at every index AND equal lengths. The fixture
+      `Fixtures/deepseek-v4-flash-tool-prompt-tokens.json` holds 328 identifiers,
+      measured now, thus Swift wrote the same 328.
+      NO real-weights test ran. The 141 GiB checkpoint stayed on disk.
+    - next: a person must answer the `reuse/reuse` conflict. The three
+      `swift/documentation` findings are closed.
+  timestamp: 2026-08-14T19:14:21.593545+00:00
 position_column: doing
 position_ordinal: '8280'
 title: swift-transformers splits every newline on its own, thus every prompt with a blank line gets the wrong token identifiers
@@ -417,6 +554,36 @@ newest tag, thus a version bump corrects nothing.
 - [x] Run `aShortToolPromptEmitsOneDSMLToolCall` again, and record what the
       model writes on a correct token sequence — it writes `<functioncall>`
       with plain JSON, thus the tokenizer was not the last cause
+
+## Review Findings
+
+Second review of `Libraries/MLXLMCommon/DeepSeekV4Tokenization.swift`.
+
+- [x] `swift/documentation`, lines 156, 223 and 269 — the first line of the
+      documentation comment is not a complete single-sentence summary ending in
+      a period. Corrected at all three, and the cause is removed from the WHOLE
+      file: I read every documentation comment and corrected the five more that
+      hold the same defect (`firstPrintableASCIIByte`, `lastPrintableASCIIByte`,
+      `firstLowerLatin1Byte`, `firstUpperLatin1Byte`, `firstMovedCodePoint`).
+      Eight corrections in all.
+- [ ] `reuse/reuse`, line 76 — BLOCKED ON A PERSON. A rule stands against a
+      rule, and an agent must not choose. See the comment of 2026-08-14 for the
+      measurements. In short:
+      - The premise is TRUE for two of the three named files.
+        `TokenizerVocabExtractor.swift` and `WhitespaceTokenBias.swift` each
+        hold `bpeUnicodeToByte`, the same `bytes_to_unicode` table in the
+        inverse direction: the same loop over 256 byte values, the same three
+        identity ranges (`0x21`-`0x7E`, `0xA1`-`0xAC`, `0xAE`-`0xFF`) and the
+        same `0x100` start.
+      - The premise is FALSE for `PythonStyleJSON.swift`. That file holds no
+        byte-level vocabulary encoding at all — it is a JSON reader and a
+        `json.dumps` writer. The 0.90 score is a match on shape alone.
+      - THE CONFLICT. The prescribed correction reaches the two files that hold
+        the real duplicate, and `git diff main` shows BOTH sit at the `main`
+        version on this branch on purpose. This branch holds its difference
+        against `main` to DeepSeek-V4 and MiniMax work alone, and unrelated
+        files have been reverted twice.
+      - I extracted nothing, edited neither file, and invented no middle path.
 
 ## Memory
 
