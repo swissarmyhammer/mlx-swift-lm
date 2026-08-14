@@ -15,25 +15,7 @@ import Testing
 /// `MTPRung4TokenParityTests`.
 private let drafter31BRevision = "28e92270316e89288579ec59c17939541d9ca433"
 
-/// The 31B `gemma-4-31B-it-assistant-bf16` drafter checkpoint this test
-/// requires -- a ~33GB download not fetched by default. `.enabled(if:)`
-/// reports SKIPPED (not FAILED) when it's absent, matching the
-/// `MLX_RUN_VLM_INTEGRATION` idiom used elsewhere (see
-/// `VisionIntegrationTests`, `PromptCacheMultimodalBoundaryTests`).
-///
-/// To exclude this test from an `xcodebuild test-without-building`
-/// invocation by name, use
-/// `-skip-testing:"IntegrationTestingTests/testMTPDrafterFactoryLoadFromDirectoryWhenCheckpointPresent()"`
-/// -- experimentally verified: for this free-function Swift Testing test
-/// (declared at file scope, not inside a `@Suite` struct), the identifier's
-/// last path segment MUST include the trailing `()`; the bare name without
-/// parens matches zero tests. See the header comment in
-/// `MTPRung4TokenParityTests.swift` for the full verified `-skip-testing`
-/// invocation covering every checkpoint-guarded suite together.
-@Test(
-    .enabled(
-        if: hfSnapshotDir(modelId: "mlx-community/gemma-4-31B-it-assistant-bf16") != nil)
-)
+@Test
 func testMTPDrafterFactoryLoadFromDirectoryWhenCheckpointPresent() async throws {
     await Gemma4AssistantRegistration.register()
     let factory = MTPDrafterModelFactory.shared

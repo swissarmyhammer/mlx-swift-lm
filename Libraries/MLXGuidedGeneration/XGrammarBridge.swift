@@ -80,33 +80,14 @@ public final class GrammarTokenizer: @unchecked Sendable {
     ///     decoding.
     ///   - eosTokenId: End-of-sequence token ID, registered as a stop
     ///     token on the xgrammar TokenizerInfo.
-    public convenience init(vocab: [String], vocabType: VocabType, eosTokenId: Int32) throws {
-        try self.init(vocab: vocab, vocabType: vocabType, stopTokenIDs: [eosTokenId])
-    }
-
-    /// Construct a tokenizer that registers more than one stop token.
-    ///
-    /// Most models have a single primary EOS token, so ``init(vocab:vocabType:eosTokenId:)``
-    /// covers the common case. A model with a secondary turn-ender (e.g. a
-    /// chat-template close tag that is not the tokenizer's primary EOS) needs
-    /// every one of its stop tokens registered here so the xgrammar mask gates
-    /// them the same way it gates the primary EOS: forced only at a
-    /// structurally legal stop point, never sampled as ordinary string
-    /// content.
-    ///
-    /// - Parameters:
-    ///   - vocab: Per-token strings, as in ``init(vocab:vocabType:eosTokenId:)``.
-    ///   - vocabType: Selects xgrammar's token-decoding path, as in
-    ///     ``init(vocab:vocabType:eosTokenId:)``.
-    ///   - stopTokenIDs: Every token ID that ends generation, registered as
-    ///     stop tokens on the xgrammar TokenizerInfo.
-    public init(vocab: [String], vocabType: VocabType, stopTokenIDs: [Int32]) throws {
+    public init(vocab: [String], vocabType: VocabType, eosTokenId: Int32) throws {
         self.vocabSize = vocab.count
 
         var info: OpaquePointer?
+        let stopTokens: [Int32] = [eosTokenId]
 
         let status: XGStatus = vocab.withCStringPointers { ptrs in
-            stopTokenIDs.withUnsafeBufferPointer { stopBuf in
+            stopTokens.withUnsafeBufferPointer { stopBuf in
                 xg_tokenizer_info_new(
                     ptrs.baseAddress,
                     ptrs.count,

@@ -29,16 +29,6 @@ private func drafterForwardFixturesOrSkip(name: String) async -> URL? {
     }
 }
 
-/// The 31B `gemma-4-31B-it-assistant-bf16` drafter checkpoint this suite
-/// requires. It is a ~33GB download not fetched by default; presence gates
-/// the whole suite via `.enabled(if:)` below so environment absence reads
-/// as SKIPPED (not FAILED) in a full-run triage.
-private let gemma4AssistantDrafterModelID = "mlx-community/gemma-4-31B-it-assistant-bf16"
-
-private var gemma4AssistantCheckpointAvailable: Bool {
-    hfSnapshotDir(modelId: gemma4AssistantDrafterModelID) != nil
-}
-
 // MARK: - Gemma4 assistant integration tests
 //
 // Wrapped in `@Suite(.serialized)` so the three tests below (which each load
