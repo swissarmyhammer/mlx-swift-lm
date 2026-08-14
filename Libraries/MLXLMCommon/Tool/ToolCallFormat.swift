@@ -44,7 +44,7 @@ extension ToolCallParser {
     /// Default implementation: `false`, because most formats carry a literal
     /// marker (a start tag or a JSON envelope) that lets tool calls be
     /// found one chunk at a time as text comes in. Only formats with no
-    /// marker (e.g. ``GLM4BareToolCallParser``) set this to `true`.
+    /// marker set this to `true`.
     public var buffersEntireResponse: Bool { false }
 
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
@@ -97,13 +97,6 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
     /// GLM4 format with arg_key/arg_value tags.
     /// Example: `func<arg_key>k</arg_key><arg_value>v</arg_value>`
     case glm4
-
-    /// GLM4 bare format used by the original (pre-4.7, non-MoE) GLM-4
-    /// checkpoints, such as GLM-4-9B-0414. No wrapper tags or JSON envelope:
-    /// the function name appears alone, followed by a bare JSON object of
-    /// just the arguments.
-    /// Example: `get_weather\n{"location": "Paris", "unit": "celsius"}`
-    case glm4Bare = "glm4_bare"
 
     /// Gemma function call format.
     /// Example: `<start_function_call>call:name{key:value,k:<escape>str<escape>}<end_function_call>`
@@ -171,8 +164,6 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return Qwen35ToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
         case .glm4:
             return GLM4ToolCallParser()
-        case .glm4Bare:
-            return GLM4BareToolCallParser()
         case .gemma:
             return GemmaFunctionParser(
                 startTag: "<start_function_call>", endTag: "<end_function_call>",
@@ -236,7 +227,7 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return OnyxStreamAdapter(
                 tokenizer: tokenizer, tools: tools, stopStrings: stopStrings)
 
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .glm4Bare, .gemma, .gemma4, .kimiK2,
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2,
             .minimaxM2, .minimaxM3, .mistral, .llama3, .dsml:
             return nil
         }
@@ -258,7 +249,7 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
             return HarmonyToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
         case .atem:
             return OnyxToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .glm4Bare, .gemma, .gemma4, .kimiK2,
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2,
             .minimaxM2, .minimaxM3, .mistral, .llama3, .dsml:
             return []
         }
@@ -279,7 +270,7 @@ public enum ToolCallFormat: String, Sendable, Codable, CaseIterable {
                     count += message.tool?.calls?.count ?? 0
                 }
             }
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .glm4Bare, .gemma, .gemma4, .kimiK2,
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2,
             .minimaxM2, .minimaxM3, .mistral, .llama3, .dsml:
             0
         }

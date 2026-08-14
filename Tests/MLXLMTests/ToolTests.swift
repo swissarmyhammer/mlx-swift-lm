@@ -964,84 +964,6 @@ struct ToolTests {
     // function-name line followed by a bare JSON object of just the
     // arguments -- no wrapper tags, no `name`/`arguments` JSON envelope.
 
-    @Test("Test GLM4 Bare Tool Call Parser")
-    func testGLM4BareParser() throws {
-        let parser = GLM4BareToolCallParser()
-        let content = "get_weather\n{\"location\": \"Paris\", \"unit\": \"celsius\"}"
-
-        let toolCall = try #require(parser.parse(content: content, tools: nil))
-
-        #expect(toolCall.function.name == "get_weather")
-        #expect(toolCall.function.arguments["location"] == .string("Paris"))
-        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
-    }
-
-    @Test("Test GLM4 Bare Tool Call Parser - No Separator Between Name and JSON")
-    func testGLM4BareParserNoSeparator() throws {
-        let parser = GLM4BareToolCallParser()
-        let content = "get_weather{\"location\": \"Berlin\"}"
-
-        let toolCall = try #require(parser.parse(content: content, tools: nil))
-
-        #expect(toolCall.function.name == "get_weather")
-        #expect(toolCall.function.arguments["location"] == .string("Berlin"))
-    }
-
-    @Test("Test GLM4 Bare Tool Call Parser - Returns Nil Without Function Name")
-    func testGLM4BareParserRequiresFunctionName() throws {
-        let parser = GLM4BareToolCallParser()
-        // A bare JSON object with nothing preceding it has no function name.
-        let content = "{\"location\": \"Berlin\"}"
-
-        #expect(parser.parse(content: content, tools: nil) == nil)
-    }
-
-    @Test("Test GLM4 Bare Tool Call Parser - Returns Nil For Plain Prose")
-    func testGLM4BareParserReturnsNilForPlainProse() throws {
-        let parser = GLM4BareToolCallParser()
-        let content = "Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune."
-
-        #expect(parser.parse(content: content, tools: nil) == nil)
-    }
-
-    @Test("Test GLM4 Bare Format via ToolCallProcessor - Buffers Until EOS")
-    func testGLM4BareFormatProcessorBuffersUntilEOS() throws {
-        let processor = ToolCallProcessor(format: .glm4Bare)
-        let chunks: [String] = [
-            "get_weather", "\n{\"location\":", " \"Paris\", \"unit\": \"celsius\"}",
-        ]
-
-        for chunk in chunks {
-            let result = processor.processChunk(chunk)
-            // The bare format has no wrapper tag, so nothing streams live --
-            // everything is buffered and only parsed at end-of-sequence.
-            #expect(result == nil)
-        }
-
-        #expect(processor.toolCalls.count == 0)
-        processor.processEOS()
-
-        #expect(processor.toolCalls.count == 1)
-        let toolCall = try #require(processor.toolCalls.first)
-        #expect(toolCall.function.name == "get_weather")
-        #expect(toolCall.function.arguments["location"] == .string("Paris"))
-        #expect(toolCall.function.arguments["unit"] == .string("celsius"))
-    }
-
-    @Test("Test GLM4 Bare Format via ToolCallProcessor - Non-Tool Response Flushed At EOS")
-    func testGLM4BareFormatProcessorFlushesPlainTextAtEOS() throws {
-        let processor = ToolCallProcessor(format: .glm4Bare)
-        let content = "The sky is blue due to Rayleigh scattering."
-
-        #expect(processor.processChunk(content) == nil)
-        #expect(processor.toolCalls.isEmpty)
-
-        let residual = processor.processEOS(returnBufferedText: true)
-
-        #expect(residual == content)
-        #expect(processor.toolCalls.isEmpty)
-    }
-
     // MARK: - Gemma Format Tests
 
     @Test("Test Gemma Function Parser")
@@ -1424,7 +1346,6 @@ struct ToolTests {
         #expect(ToolCallFormat.xmlFunction.rawValue == "xml_function")
         #expect(ToolCallFormat.qwen35.rawValue == "qwen3_5")
         #expect(ToolCallFormat.glm4.rawValue == "glm4")
-        #expect(ToolCallFormat.glm4Bare.rawValue == "glm4_bare")
         #expect(ToolCallFormat.gemma.rawValue == "gemma")
         #expect(ToolCallFormat.kimiK2.rawValue == "kimi_k2")
         #expect(ToolCallFormat.minimaxM2.rawValue == "minimax_m2")
