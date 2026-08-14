@@ -578,6 +578,61 @@ comments:
       card lands. H1, H2 and H3 are each dead with evidence; the card's third work
       item is not done, thus this step is stuck and not changed.
   timestamp: 2026-08-14T17:01:03.388783+00:00
+- actor: claude-code
+  id: 01m00kjj9wvp8qr2257ptp7tnv
+  text: |
+    ### finish iteration 2 — stuck
+
+    - implement: stuck — the cause is found and it is the TOKENIZER, not the
+      render, the parser or the model. Three hypotheses died: the reference
+      accepts no syntax but DSML, the tool placement agrees, and the sparse
+      attention path is good (the 3,626-token recall test passed and answered
+      4172).
+    - test: green — `swift test`, 1018 tests, 0 failures;
+      `xcodebuild build-for-testing` succeeded
+    - commit: 5e2a0a7
+    - review: not run — the card is blocked, thus it is not ready for the gate
+
+    ### The measurement that names the cause
+
+    `theToolPromptTokenizesToThePublishedIdentifiers` is new, weight-free, and
+    red on purpose:
+
+    ```
+    Swift wrote 353 identifiers and the reference holds 328.
+    Swift     [... "Ġgiven", ".", "Ċ", "Ċ", "##", "ĠTools", "Ċ"]
+    reference [... "Ġgiven", ".ĊĊ",      "##", "ĠTools", "ĊĊ", "You"]
+    ```
+
+    The render is byte exact and the identifiers are not. Only identifiers
+    reach the model, and nothing measured them until now.
+
+    ### Why the model wrote what it wrote
+
+    The `## Tools` section is 24 lines with 10 blank lines in it, thus it takes
+    nearly all of the 25 extra identifiers. That section is the ONLY place that
+    names the `bay` parameter and states the DSML rule. Across three runs the
+    model always wrote the tool name, which the user turn holds as well, and it
+    never once wrote `bay` or DSML. The two facts it missed are the two facts
+    that live only in the section the tokenizer damaged.
+
+    ### The guardrail
+
+    This is ledger entry 2. No finding has repeated three times, and no
+    iteration made no change. The loop stops for a different reason: the
+    correction is not in this repository.
+
+    `swift-transformers` 1.3.3 `SplitPreTokenizer` sends its pattern through
+    `String.range(of:options:.regularExpression)`, which cannot match `\r` or
+    `\n` inside a character class. The package arrives through
+    `swift-huggingface` 0.9.0, this repository does not declare it, and 1.3.3
+    is the newest tag, thus no version bump corrects it.
+
+    Card `^t56pqr4` holds the correction and this card depends on it. A person
+    chooses one of three: send the correction upstream and move the pin, fork
+    or vendor the package here, or give `DeepSeekV4EncodingTokenizer` its own
+    pre-tokenization path.
+  timestamp: 2026-08-14T17:02:06.652251+00:00
 depends_on:
 - 01M00K0MWNJ59NG1Q0MT56PQR4
 position_column: doing
