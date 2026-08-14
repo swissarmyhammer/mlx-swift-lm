@@ -91,6 +91,10 @@ comments:
     - evidence: Job 1 green, 7 of 7 tests run one at a time (the >12k endurance test stays skipped). Job 2 gives the trimmability answer (43 of 43 `KVCacheSimple` layers rewind) and cannot give the (a)/(b) numbers: DeepSeek-V4 writes gibberish on a 3,626-token prompt with no tools, thus no tool round completes. Files: IntegrationTesting/IntegrationTestingTests/DeepseekV4SharedCheckpoint.swift, IntegrationTesting/IntegrationTestingTests/DeepseekV4AgenticPromptCacheAssessmentTests.swift, IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift, IntegrationTesting/IntegrationTestingTests/Qwen36UpstreamPromptCacheAssessmentTests.swift, Libraries/IntegrationTestHelpers/IntegrationTestHelpers.swift
     - next: card ^3x0krt4 holds the blocker — apply `slidingWindow` and run the sparse path. The agentic cache cannot be measured until a long prompt answers.
   timestamp: 2026-08-14T01:35:14.364328+00:00
+- actor: claude-code
+  id: 01kzyyn2ngr1m18027exkga2ph
+  text: 'Job 1 re-run after the shared-load refactor, to prove the move broke nothing: 8 of 8 tests pass in one process in 81.3 s. The wired-memory manager applied the whole 168,662,344,796-byte request and the median decode step stays near 0.62 s. `longGenerationPastTwelveThousandTokensCompletes` stays out of the run.'
+  timestamp: 2026-08-14T01:37:14.416264+00:00
 position_column: doing
 position_ordinal: '8180'
 title: Prove DeepSeek-V4 after the upstream catch-up, then measure the agentic prompt cache
@@ -99,22 +103,26 @@ The merge of `ml-explore/mlx-swift-lm` used `-X theirs`, which reverted the Deep
 
 The goal: DeepSeek-V4 must work agentically, in multi-tool loops. Many rounds with tool calls need a prompt cache that works.
 
-## Job 1 — prove the port still works
+## Job 1 — prove the port still works — DONE, green
 
-- [ ] Build `IntegrationTesting` with `xcodebuild build-for-testing`
-- [ ] Run each test of `DeepseekV4IntegrationTests` one at a time, and stop at the first failure
-- [ ] Do NOT run `longGenerationPastTwelveThousandTokensCompletes`; the user skipped it permanently
-- [ ] Correct any failure
+- [x] Build `IntegrationTesting` with `xcodebuild build-for-testing`
+- [x] Run each test of `DeepseekV4IntegrationTests` one at a time, and stop at the first failure
+- [x] Do NOT run `longGenerationPastTwelveThousandTokensCompletes`; the user skipped it permanently
+- [x] Correct any failure — none failed, thus nothing needed a correction
 
-## Job 2 — measure the cache in an agentic shape
+## Job 2 — measure the cache in an agentic shape — BLOCKED
 
 Model the new suite on `Qwen36UpstreamPromptCacheAssessmentTests.swift`.
 
-- [ ] (a) Is round N+1's rendered prompt a true prefix extension of round N's, across a tool round?
-- [ ] (b) Given a good prefix, does the cache skip the work? Count tokens fed against tokens skipped, and time prefill against a cold control
-- [ ] Make the shape agentic: user turn, then a tool call in the DSML format, then a tool result, then more assistant text
-- [ ] Measure chat mode and thinking mode
-- [ ] Tell whether the DeepSeek-V4 cache is trimmable, which `RewindToCommonPrefixRule` needs
-- [ ] Print each measurement with a `DSV4 CACHE:` prefix
+- [ ] (a) Is round N+1's rendered prompt a true prefix extension of round N's, across a tool round? — no number: no tool round completes
+- [ ] (b) Given a good prefix, does the cache skip the work? Count tokens fed against tokens skipped, and time prefill against a cold control — no number, same cause
+- [x] Make the shape agentic: user turn, then a tool call in the DSML format, then a tool result, then more assistant text
+- [x] Measure chat mode and thinking mode — both run, both write gibberish
+- [x] Tell whether the DeepSeek-V4 cache is trimmable, which `RewindToCommonPrefixRule` needs — YES: 43 of 43 `KVCacheSimple` layers rewind
+- [x] Print each measurement with a `DSV4 CACHE:` prefix
+
+## The blocker
+
+DeepSeek-V4 writes gibberish on a prompt of more than a few hundred tokens, thus no agentic round completes. Card ^3x0krt4 holds the defect and the reproduction. Job 2 stays open until a long prompt answers.
 
 Measure and report only. Do not build a correction. #deepseek-v4
