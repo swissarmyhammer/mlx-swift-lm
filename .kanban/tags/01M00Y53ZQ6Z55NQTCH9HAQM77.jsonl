@@ -1,0 +1,1 @@
+{"id":"01M00Y53ZR8VQ9EY879ZZXHYYW","timestamp":"2026-08-14T20:07:00.344347Z","op":"create","item_id":"01M00Y53ZQ6Z55NQTCH9HAQM77","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: d876e3\n+tag_name: eventplan\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: d876e3\n-tag_name: eventplan\n","transaction_id":null}
