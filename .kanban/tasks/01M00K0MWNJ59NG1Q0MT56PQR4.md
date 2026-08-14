@@ -224,6 +224,123 @@ comments:
       and what is left there is the 4-bit quantization or a number in the
       DeepSeek-V4 attention port.
   timestamp: 2026-08-14T18:35:37.726828+00:00
+- actor: claude-code
+  id: 01m00t4hdwgt0b9gjg71m52cay
+  text: |
+    Two review findings on `Libraries/MLXLMCommon/DeepSeekV4Tokenization.swift`
+    are corrected. Both are requirements, and each cause is removed from the WHOLE
+    file and not from the named line alone.
+
+    ## Finding 1 — `swift/naming-clarity`
+
+    The rule states "Clarity over brevity", "Omit needless words. Every word must
+    carry salient information at the use site", "Name by role, not type" and
+    "Compensate for weak type information". I read every local name of the file
+    against those four lines and corrected each cryptic one:
+
+    | was | is now | why |
+    | --- | --- | --- |
+    | `wide` | `textAsNSString` | the named line. `text` is the role, `AsNSString` is the salient difference from the `text` parameter |
+    | `start` | `nextPartStart` | a bare `Int` offset. The noun says which start |
+    | `moved` | `nextMovedCodePoint` | an adjective stood for a `UInt32` code point |
+    | `spelled` | `spelledText` | an adjective stood for a `String` |
+    | `next` | `nextPieces` | an adjective stood for a `[String]` |
+    | `lowest` | `lowestIdentifierSoFar` | lowest WHAT was not said |
+    | `alternatives` | `escapedMarkers` | says what the parts are, not that they are branches |
+    | `marker` | `markerIdentifier` | it holds an `Int`, not a marker text. This is the weak-type rule word for word |
+    | `result` (2 places) | `allIdentifiers` | `result` carries no salient information |
+    | `identifiers` (inner, 2 places) | `partIdentifiers`, `pieceIdentifiers` | each says which identifiers |
+
+    `gap`, `parts`, `piece`, `index`, `identifier`, `isByteLevel` and `expression`
+    each name a role already, thus they stay.
+
+    `textAsNSString` does not fight "Name by role, not type": the role is the text,
+    and the representation is the salient difference from the `text` parameter that
+    stands beside it.
+
+    ## Finding 2 — `completeness/public-output-contract`
+
+    A marker that the vocabulary does not hold went to `segmentIdentifiers` and
+    became ordinary text. The type contract states that each marker becomes exactly
+    ONE identifier, thus that answer was wrong and it looked correct. The
+    byte-level path now reports the failure, exactly as the finding states.
+
+    Measured before the correction, on a vocabulary that holds every byte character
+    of `<｜User｜>` and no marker:
+
+    ```
+    identifiers(of: marker + "a") -> [700, 708, 709, 710, 704, 705, 706, 707,
+                                      708, 709, 710, 711, 65]
+    ```
+
+    13 identifiers where the contract states 2. After the correction the whole text
+    goes to the wrapped tokenizer, which is the documented answer of this type for
+    a tokenizer that is not the published one.
+
+    I read the whole file for other places that degrade in silence. There is one
+    more, and it must STAY:
+
+    - `identifiers(of:)` gives the whole text to the wrapped tokenizer when
+      `byteLevelIdentifiers` answers `nil`. That is the documented contract of the
+      type, the same validator forbids turning it into a hard failure (check 4, "A
+      previously-succeeding path now fails hard"), and the correction that the
+      finding prescribes (`isByteLevel = false; return`) REACHES that fallback. It
+      is the reporting path, not a degradation.
+
+    These are not degradations, thus they stay unchanged:
+
+    - `readParts` skips a zero-length match. No text is lost: the gap logic still
+      gives every character to the reader.
+    - `DeepSeekV4BytePairMerge.identifiers` breaks the merge loop when no pair is
+      left, then answers `nil` for a part the vocabulary does not hold.
+    - `compiledExpression` and `scalar(of:)` stop with `preconditionFailure`. Both
+      are programmer error, which `swift/error-handling` permits.
+
+    The type doc comment, the `identifiers(of:)` comment and the
+    `byteLevelIdentifiers` `- Returns:` line now all state the marker failure, thus
+    the contract is written down.
+
+    ## Memory
+
+    NO real-weights test ran for this work. Both findings are provable with
+    weight-free tests alone, and the 141 GiB checkpoint stayed on disk.
+  timestamp: 2026-08-14T18:56:47.036413+00:00
+- actor: claude-code
+  id: 01m00t4z40v6wft8tq53ynzvhs
+  text: |
+    ### implement — changed
+    - evidence: 2 files —
+      `Libraries/MLXLMCommon/DeepSeekV4Tokenization.swift` (finding 1: 11 cryptic
+      local names corrected over the whole file, `wide` -> `textAsNSString`
+      included; finding 2: a marker that the vocabulary does not hold now stops the
+      byte-level path, and the type doc comment states that contract), and
+      `Tests/MLXLMTests/DeepSeekV4TokenizationTests.swift` (a new weight-free test
+      `aMarkerOutsideTheVocabularyStopsTheByteLevelPath`, with the
+      `vocabularyWithoutTheMarker` fixture that holds every byte character of the
+      marker and no marker).
+      The new test was RED first, and for the correct reason: it answered
+      `[700, 708, 709, 710, 704, 705, 706, 707, 708, 709, 710, 711, 65]` — 13
+      identifiers where the contract states 2, because the marker went through the
+      ordinary-text path. It is green after the correction.
+      `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1 swift test`: 1029 tests
+      (814 + 69 + 139 + 7) in 108 suites, all passed. That is 1028 before plus the
+      new one. Zero failures. The only warnings are the three package build-graph
+      warnings that stand on `main`.
+      `xcodebuild build-for-testing` for `IntegrationTesting`: TEST BUILD
+      SUCCEEDED, no new warning.
+      ACCEPTANCE:
+      `IntegrationTestingTests/DeepSeekV4TokenizerIntegrationTests/theToolPromptTokenizesToThePublishedIdentifiers()`
+      passed, thus the 328 identifiers each stay equal to the fixture. The whole
+      `DeepSeekV4TokenizerIntegrationTests` suite passed, 4 of 4.
+      `swift-format` with `.swift-format`: both files need no change.
+      The only production caller is `DeepSeekV4EncodingTokenizer` of
+      `Libraries/MLXLMCommon/Tokenizer.swift`, which wraps the checkpoint
+      tokenizer. That tokenizer holds every marker, which the 328-identifier
+      acceptance test measures, thus the new failure path never runs on the real
+      checkpoint and the answer for real work does not move.
+      NO real-weights test ran. The 141 GiB checkpoint stayed on disk.
+    - next: review.
+  timestamp: 2026-08-14T18:57:01.056681+00:00
 position_column: doing
 position_ordinal: '8280'
 title: swift-transformers splits every newline on its own, thus every prompt with a blank line gets the wrong token identifiers

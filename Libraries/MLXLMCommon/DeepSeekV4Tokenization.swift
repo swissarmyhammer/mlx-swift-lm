@@ -48,20 +48,22 @@ private func readParts(
     of text: String, with expression: NSRegularExpression,
     reader: (_ part: String, _ isMatch: Bool) -> Void
 ) {
-    let wide = text as NSString
-    var start = 0
-    expression.enumerateMatches(in: text, range: NSRange(location: 0, length: wide.length)) {
-        match, _, _ in
+    let textAsNSString = text as NSString
+    var nextPartStart = 0
+    expression.enumerateMatches(
+        in: text, range: NSRange(location: 0, length: textAsNSString.length)
+    ) { match, _, _ in
         guard let match, match.range.length > 0 else { return }
-        if match.range.location > start {
-            let gap = NSRange(location: start, length: match.range.location - start)
-            reader(wide.substring(with: gap), false)
+        if match.range.location > nextPartStart {
+            let gap = NSRange(
+                location: nextPartStart, length: match.range.location - nextPartStart)
+            reader(textAsNSString.substring(with: gap), false)
         }
-        reader(wide.substring(with: match.range), true)
-        start = match.range.location + match.range.length
+        reader(textAsNSString.substring(with: match.range), true)
+        nextPartStart = match.range.location + match.range.length
     }
-    if start < wide.length {
-        reader(wide.substring(from: start), false)
+    if nextPartStart < textAsNSString.length {
+        reader(textAsNSString.substring(from: nextPartStart), false)
     }
 }
 
@@ -99,7 +101,7 @@ enum DeepSeekV4ByteLevel {
     private static let characterOfByte: [Character] = {
         var characters: [Character] = []
         characters.reserveCapacity(byteCount)
-        var moved = firstMovedCodePoint
+        var nextMovedCodePoint = firstMovedCodePoint
         for byte in 0 ..< byteCount {
             let keepsItsOwnCodePoint =
                 (byte >= firstPrintableASCIIByte && byte <= lastPrintableASCIIByte)
@@ -108,8 +110,8 @@ enum DeepSeekV4ByteLevel {
             if keepsItsOwnCodePoint {
                 characters.append(Character(Unicode.Scalar(UInt8(byte))))
             } else {
-                characters.append(Character(scalar(of: moved)))
-                moved += 1
+                characters.append(Character(scalar(of: nextMovedCodePoint)))
+                nextMovedCodePoint += 1
             }
         }
         return characters
@@ -134,12 +136,12 @@ enum DeepSeekV4ByteLevel {
     /// - Parameter text: the text to spell.
     /// - Returns: one character for each UTF-8 byte of the text.
     static func text(of text: String) -> String {
-        var spelled = ""
-        spelled.reserveCapacity(text.utf8.count)
+        var spelledText = ""
+        spelledText.reserveCapacity(text.utf8.count)
         for byte in text.utf8 {
-            spelled.append(characterOfByte[Int(byte)])
+            spelledText.append(characterOfByte[Int(byte)])
         }
-        return spelled
+        return spelledText
     }
 }
 
@@ -174,11 +176,11 @@ enum DeepSeekV4PreTokenizer {
     static func pieces(of text: String) -> [String] {
         var pieces = [text]
         for expression in expressions {
-            var next: [String] = []
+            var nextPieces: [String] = []
             for piece in pieces {
-                readParts(of: piece, with: expression) { part, _ in next.append(part) }
+                readParts(of: piece, with: expression) { part, _ in nextPieces.append(part) }
             }
-            pieces = next
+            pieces = nextPieces
         }
         return pieces
     }
@@ -231,7 +233,11 @@ enum DeepSeekV4BytePairMerge {
         var lowestIndex: Int?
         for index in parts.indices.dropLast() {
             guard let identifier = vocabulary(parts[index] + parts[index + 1]) else { continue }
-            if let lowest = lowestIdentifier, identifier >= lowest { continue }
+            if let lowestIdentifierSoFar = lowestIdentifier,
+                identifier >= lowestIdentifierSoFar
+            {
+                continue
+            }
             lowestIdentifier = identifier
             lowestIndex = index
         }
@@ -252,9 +258,12 @@ enum DeepSeekV4BytePairMerge {
 ///    of ``DeepSeekV4ByteLevel``.
 /// 3. Each spelled piece merges through ``DeepSeekV4BytePairMerge``.
 ///
-/// A tokenizer that holds no byte-level vocabulary cannot answer step 3. The
-/// whole text then goes to the wrapped tokenizer in one call, which keeps this
-/// type safe to wrap around any tokenizer.
+/// A vocabulary that holds no identifier for a marker, and a vocabulary that
+/// is not byte-level, are both signs that the wrapped tokenizer is not the
+/// published DeepSeek-V4 one. The three steps then stop, and the whole text
+/// goes to the wrapped tokenizer in one call. Step 1 therefore never reads a
+/// marker as ordinary text, and this type stays safe to wrap around any
+/// tokenizer.
 public struct DeepSeekV4Tokenization: Sendable {
 
     /// The markers of ``DeepSeekV4ChatEncoder``, longest first, as one
@@ -263,10 +272,10 @@ public struct DeepSeekV4Tokenization: Sendable {
     /// The longest marker comes first so that a marker which starts with
     /// another marker still matches whole.
     private static let markerExpression: NSRegularExpression = {
-        let alternatives = DeepSeekV4ChatEncoder.SpecialToken.allMarkers
+        let escapedMarkers = DeepSeekV4ChatEncoder.SpecialToken.allMarkers
             .sorted { $0.count > $1.count }
             .map { NSRegularExpression.escapedPattern(for: $0) }
-        return compiledExpression(of: alternatives.joined(separator: "|"))
+        return compiledExpression(of: escapedMarkers.joined(separator: "|"))
     }()
 
     /// The tokenizer that holds the vocabulary of the checkpoint.
@@ -284,9 +293,10 @@ public struct DeepSeekV4Tokenization: Sendable {
     /// - Returns: the identifiers, in order.
     public func identifiers(of text: String) -> [Int] {
         guard let identifiers = byteLevelIdentifiers(of: text) else {
-            // The wrapped tokenizer holds no byte-level vocabulary, thus the
-            // published path cannot run. Give it the whole text, exactly as a
-            // caller that knows nothing of this type would.
+            // The wrapped tokenizer holds no byte-level vocabulary, or it
+            // holds no identifier for a marker, thus the published path
+            // cannot run. Give it the whole text, exactly as a caller that
+            // knows nothing of this type would.
             return vocabulary.encode(text: text, addSpecialTokens: false)
         }
         return identifiers
@@ -296,23 +306,31 @@ public struct DeepSeekV4Tokenization: Sendable {
     ///
     /// - Parameter text: the text to read, markers included.
     /// - Returns: the identifiers, or `nil` when the vocabulary is not
-    ///   byte-level.
+    ///   byte-level, or when it holds no identifier for a marker.
     private func byteLevelIdentifiers(of text: String) -> [Int]? {
-        var result: [Int] = []
+        var allIdentifiers: [Int] = []
         var isByteLevel = true
         readParts(of: text, with: Self.markerExpression) { part, isMatch in
             guard isByteLevel else { return }
-            if isMatch, let marker = vocabulary.convertTokenToId(part) {
-                result.append(marker)
-                return
+            if isMatch {
+                // Each marker becomes exactly one identifier. A vocabulary
+                // that holds no identifier for a marker is not the published
+                // one, and reading the marker as ordinary text would break the
+                // structure the model reads. Report the failure instead.
+                guard let markerIdentifier = vocabulary.convertTokenToId(part) else {
+                    isByteLevel = false
+                    return
+                }
+                allIdentifiers.append(markerIdentifier)
+            } else {
+                guard let partIdentifiers = segmentIdentifiers(of: part) else {
+                    isByteLevel = false
+                    return
+                }
+                allIdentifiers.append(contentsOf: partIdentifiers)
             }
-            guard let identifiers = segmentIdentifiers(of: part) else {
-                isByteLevel = false
-                return
-            }
-            result.append(contentsOf: identifiers)
         }
-        return isByteLevel ? result : nil
+        return isByteLevel ? allIdentifiers : nil
     }
 
     /// Reads one text between two markers.
@@ -321,15 +339,15 @@ public struct DeepSeekV4Tokenization: Sendable {
     /// - Returns: the identifiers, or `nil` when the vocabulary holds no
     ///   identifier for a piece of the text.
     private func segmentIdentifiers(of segment: String) -> [Int]? {
-        var result: [Int] = []
+        var allIdentifiers: [Int] = []
         for piece in DeepSeekV4PreTokenizer.pieces(of: segment) {
             guard
-                let identifiers = DeepSeekV4BytePairMerge.identifiers(
+                let pieceIdentifiers = DeepSeekV4BytePairMerge.identifiers(
                     of: DeepSeekV4ByteLevel.text(of: piece),
                     vocabulary: vocabulary.convertTokenToId)
             else { return nil }
-            result.append(contentsOf: identifiers)
+            allIdentifiers.append(contentsOf: pieceIdentifiers)
         }
-        return result
+        return allIdentifiers
     }
 }

@@ -58,6 +58,13 @@ struct DeepSeekV4TokenizationTests {
     private static let userMarkerIdentifier = 999
     /// The identifier that the synthetic vocabulary gives the letter `a`.
     private static let letterAIdentifier = 65
+    /// The first identifier that ``vocabularyWithoutTheMarker`` gives a byte
+    /// character.
+    ///
+    /// It stands above every byte value, thus the byte-level answer and the
+    /// fallback answer of ``TableTokenizer/encode(text:addSpecialTokens:)``
+    /// cannot look the same.
+    private static let firstByteCharacterIdentifier = 700
 
     /// A byte-level vocabulary that holds one marker, the letter `a`, the
     /// newline byte token and the pair of newline byte tokens.
@@ -67,6 +74,24 @@ struct DeepSeekV4TokenizationTests {
         "\u{010A}": 10,
         "\u{010A}\u{010A}": newlinePairIdentifier,
     ])
+
+    /// A byte-level vocabulary that holds every byte character of the user
+    /// marker and the letter `a`, and that holds no marker.
+    ///
+    /// The byte characters are all there, thus a path that reads the marker as
+    /// ordinary text answers with identifiers. Only a path that requires the
+    /// marker itself reports the failure.
+    private static let vocabularyWithoutTheMarker: TableTokenizer = {
+        var identifierOfToken: [String: Int] = ["a": letterAIdentifier]
+        var identifier = firstByteCharacterIdentifier
+        let markerByteText = DeepSeekV4ByteLevel.text(
+            of: DeepSeekV4ChatEncoder.SpecialToken.user)
+        for scalar in markerByteText.unicodeScalars {
+            identifierOfToken[String(scalar)] = identifier
+            identifier += 1
+        }
+        return TableTokenizer(identifierOfToken: identifierOfToken)
+    }()
 
     // MARK: - The pre-tokenizer
 
@@ -142,5 +167,17 @@ struct DeepSeekV4TokenizationTests {
         let tokenization = DeepSeekV4Tokenization(
             vocabulary: TableTokenizer(identifierOfToken: [:]))
         #expect(tokenization.identifiers(of: "ab") == Array("ab".utf8).map { Int($0) })
+    }
+
+    @Test("a marker that the vocabulary does not hold stops the byte-level path")
+    func aMarkerOutsideTheVocabularyStopsTheByteLevelPath() {
+        // Each marker must become exactly one identifier. This vocabulary
+        // holds every byte character of the marker, thus a path that reads the
+        // marker as ordinary text answers with the identifiers 700 and above.
+        // The marker itself is absent, thus the byte-level path must report
+        // the failure and the whole text must go to the wrapped tokenizer.
+        let text = DeepSeekV4ChatEncoder.SpecialToken.user + "a"
+        let tokenization = DeepSeekV4Tokenization(vocabulary: Self.vocabularyWithoutTheMarker)
+        #expect(tokenization.identifiers(of: text) == Array(text.utf8).map { Int($0) })
     }
 }
