@@ -255,7 +255,10 @@ let package = Package(
                 "MLXCXGrammar",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
-            path: "Libraries/MLXGuidedGeneration"
+            path: "Libraries/MLXGuidedGeneration",
+            exclude: [
+                "README.md"
+            ]
         ),
         // Bridges Apple's FoundationModels framework to MLX-powered on-device
         // inference. Public surface is gated by @available(macOS 27 / iOS 27 /
@@ -275,7 +278,10 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
             ],
-            path: "Libraries/MLXFoundationModels"
+            path: "Libraries/MLXFoundationModels",
+            exclude: [
+                "README.md"
+            ]
         ),
         .testTarget(
             name: "MLXFoundationModelsTests",
@@ -300,7 +306,16 @@ let package = Package(
                 "MLXVLM",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
-            path: "Tests/MLXFoundationModelsTests"
+            path: "Tests/MLXFoundationModelsTests",
+            // PromptCacheHybridExecutorTests.swift.disabled holds 9 quarantined
+            // tests for methods a catch-up merge removed from the upstream
+            // Executor (see the file's own header and kanban ^2ajc82t /
+            // ^tbyb0dy). SwiftPM will not compile a ".disabled" file, but it
+            // still flags the file as an unhandled, undeclared source unless
+            // it is named here as an explicit exclusion.
+            exclude: [
+                "PromptCacheHybridExecutorTests.swift.disabled"
+            ]
         ),
         // FM-independent guided-generation tests. Depends only on the engine
         // and MLXLMCommon. No FoundationModels, no direct CXGrammar.

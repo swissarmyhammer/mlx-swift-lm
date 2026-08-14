@@ -2507,7 +2507,7 @@ public func quantizedScaledDotProductAttention(
         let kIndices = MLXArray(0 ..< kL)
         let causalMask = greaterEqual(
             expandedDimensions(qIndices, axis: -1), expandedDimensions(kIndices, axis: -2))
-        scores = MLX.where(causalMask, scores, MLXArray.maskFill(for: scores.dtype))
+        scores = MLX.where(causalMask, scores, maskedFill)
 
     case .array(let maskArray):
         scores = applyMask(maskArray, to: scores)
@@ -2549,7 +2549,7 @@ public func quantizedScaledDotProductAttention(
             maskArray = expandedDimensions(maskArray, axis: -3)
         }
         if maskArray.dtype == .bool {
-            return MLX.where(maskArray, scores, MLXArray.maskFill(for: scores.dtype))
+            return MLX.where(maskArray, scores, maskedFill)
         } else {
             return scores + maskArray
         }

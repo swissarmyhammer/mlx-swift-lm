@@ -242,7 +242,7 @@ struct HardReserveStressTests {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let container = try await loadTestModelContainer(id: Self.modelID)
 
-        try await container.perform { context in
+        await container.perform { context in
             let schemas = [
                 ("tier1", Self.tier1Schema),
                 ("tier2", Self.tier2Schema),
@@ -285,7 +285,7 @@ struct HardReserveStressTests {
     func testTier1HardReserve() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let container = try await loadTestModelContainer(id: Self.modelID)
-        let structuralReserve = try await container.perform { context in
+        let structuralReserve = await container.perform { context in
             CompletionReserve.estimate(
                 schemaJSON: Self.tier1Schema, tokenizer: context.tokenizer)
         }
@@ -319,7 +319,7 @@ struct HardReserveStressTests {
     func testTier2HardReserve() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let container = try await loadTestModelContainer(id: Self.modelID)
-        let structuralReserve = try await container.perform { context in
+        let structuralReserve = await container.perform { context in
             CompletionReserve.estimate(
                 schemaJSON: Self.tier2Schema, tokenizer: context.tokenizer)
         }
@@ -363,7 +363,7 @@ struct HardReserveStressTests {
     func testTier3HardReserve() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let container = try await loadTestModelContainer(id: Self.modelID)
-        let structuralReserve = try await container.perform { context in
+        let structuralReserve = await container.perform { context in
             CompletionReserve.estimate(
                 schemaJSON: Self.tier3Schema, tokenizer: context.tokenizer)
         }
@@ -419,7 +419,7 @@ struct HardReserveStressTests {
     func testTier4HardReserve() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let container = try await loadTestModelContainer(id: Self.modelID)
-        let structuralReserve = try await container.perform { context in
+        let structuralReserve = await container.perform { context in
             CompletionReserve.estimate(
                 schemaJSON: Self.tier4Schema, tokenizer: context.tokenizer)
         }
@@ -483,9 +483,9 @@ struct HardReserveStressTests {
     @Test("Cleanup: release GPU resources after stress tests")
     func releaseGPUResources() async {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let before = GPU.snapshot()
+        let before = Memory.snapshot()
         await releaseAllGPUMemory()
-        let after = GPU.snapshot()
+        let after = Memory.snapshot()
         let freed = before.activeMemory - after.activeMemory
         print(
             "[HardReserveCleanup] freed \(freed / (1024 * 1024))MB active, "

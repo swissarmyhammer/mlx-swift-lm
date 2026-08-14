@@ -596,7 +596,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         load: @escaping ContainerLoader
     ) {
         self.configuration = configuration
-        self.capabilities = LanguageModelCapabilities(capabilities: capabilities)
+        self.capabilities = LanguageModelCapabilities(capabilities)
         self.configurationResolver = configurationResolver
         self.weightsLocation = weightsLocation
         self.load = load
