@@ -795,11 +795,19 @@ public enum ToolCallTests {
         )
     }
 
+    /// GLM-4 takes the tool-call format of the official upstream.
+    ///
+    /// This helper looked for `.glm4Bare` before 2026-08-14. The catch-up to
+    /// `ml-explore/mlx-swift-lm` took the upstream registry, which gives
+    /// `.glm4` to `mlx-community/GLM-4-9B-0414-4bit`, and the user decided to
+    /// keep the upstream value rather than hold our own. Card `^f9zzxt7`
+    /// records the decision. The `.glm4Bare` case and `GLM4BareToolCallParser`
+    /// stay in the tree, and no registry entry selects them now.
     public static func glm4FormatAutoDetection(container: LLModelContainer) async throws {
         let config = await container.configuration
         try check(
-            config.toolCallFormat == ToolCallFormat.glm4Bare,
-            "Expected .glm4Bare tool call format, got: \(String(describing: config.toolCallFormat))"
+            config.toolCallFormat == ToolCallFormat.glm4,
+            "Expected .glm4 tool call format, got: \(String(describing: config.toolCallFormat))"
         )
     }
 
