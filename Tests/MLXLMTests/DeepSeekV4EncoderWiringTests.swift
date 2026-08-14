@@ -167,6 +167,87 @@ struct DeepSeekV4EncoderWiringTests {
         #expect(text.contains(#"<tool_result>{"forecast": "sunny"}</tool_result>"#))
     }
 
+    // MARK: - The order of the members of a JSON object
+
+    // A `ToolSpec` and a ``ToolCall`` both carry a Swift `Dictionary`, which
+    // keeps no order. The published reference writes each object in one fixed
+    // order, and the model saw that order in training, thus the mapping has to
+    // impose it. The two expectations below are transcriptions of the
+    // published golden file `encoding/tests/test_output_1.txt` of
+    // `deepseek-ai/DeepSeek-V4-Flash`.
+
+    /// The `get_weather` schema of the published input `test_input_1.json`,
+    /// as the Swift dictionary a caller writes.
+    private static let weatherToolSpec: ToolSpec = [
+        "type": "function",
+        "function": [
+            "name": "get_weather",
+            "description": "Get the weather for a specific location",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "location": [
+                        "type": "string",
+                        "description": "The city name",
+                    ] as [String: any Sendable],
+                    "unit": [
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                        "description": "Temperature unit",
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+                "required": ["location"],
+            ] as [String: any Sendable],
+        ] as [String: any Sendable],
+    ]
+
+    /// The line that the published golden output writes for
+    /// ``weatherToolSpec`` under `### Available Tool Schemas`.
+    private static let publishedWeatherSchemaLine: String =
+        #"{"name": "get_weather", "description": "Get the weather for a specific location", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "The city name"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "Temperature unit"}}, "required": ["location"]}}"#
+
+    /// The DSML block that the published golden output writes for the
+    /// `get_weather` call of `test_input_1.json`.
+    private static let publishedWeatherCallBlock: String = {
+        let marker = DeepSeekV4ChatEncoder.SpecialToken.dsml
+        return """
+            <\(marker)invoke name="get_weather">
+            <\(marker)parameter name="location" string="true">Beijing</\(marker)parameter>
+            <\(marker)parameter name="unit" string="true">celsius</\(marker)parameter>
+            </\(marker)invoke>
+            """
+    }()
+
+    @Test("a tool schema renders in the member order the published reference writes")
+    func toolSchemaRendersInThePublishedMemberOrder() throws {
+        let processor = try makeDeepSeekV4Processor()
+
+        let input = try processor.prepare(
+            input: UserInput(
+                chat: [.system("Be brief."), .user("Hello")], tools: [Self.weatherToolSpec]))
+
+        #expect(renderedText(of: input).contains(Self.publishedWeatherSchemaLine))
+    }
+
+    @Test("the arguments of a replayed call render in one stable order")
+    func replayedCallArgumentsRenderInOneStableOrder() throws {
+        let processor = try makeDeepSeekV4Processor()
+        let call = MLXLMCommon.ToolCall(
+            function: .init(
+                name: "get_weather",
+                arguments: ["unit": "celsius", "location": "Beijing"] as [String: any Sendable]),
+            id: "call_001")
+
+        let input = try processor.prepare(
+            input: UserInput(
+                chat: [
+                    .user("What's the weather in Beijing?"),
+                    .assistant("", toolCalls: [call]),
+                ], tools: [Self.weatherToolSpec]))
+
+        #expect(renderedText(of: input).contains(Self.publishedWeatherCallBlock))
+    }
+
     @Test("the plain-text path of every other model does not use the encoder")
     func otherModelPathDoesNotUseTheEncoder() throws {
         let processor = LLMUserInputProcessor(

@@ -448,11 +448,19 @@ extension DeepSeekV4ChatEncoder.Message {
     }
 
     /// Writes one JSON value as text for the encoder to render again.
+    ///
+    /// The write goes through ``PythonStyleJSON``, which puts the members of
+    /// each object in the order the published DeepSeek-V4 reference writes
+    /// them. `JSONSerialization` writes a Swift `Dictionary` in its hash order
+    /// instead, which differs in each process, thus it renders the same tool
+    /// schema differently on each run and the `## Tools` section stops matching
+    /// the shape the model saw during training.
+    ///
+    /// - Parameter value: the JSON object or array to write.
+    /// - Returns: the one-line JSON text, or `{}` for a value that is neither.
     private static func jsonText(of value: any Sendable) -> String {
-        guard JSONSerialization.isValidJSONObject(value),
-            let data = try? JSONSerialization.data(withJSONObject: value)
-        else { return "{}" }
-        return String(decoding: data, as: UTF8.self)
+        guard value is [String: any Sendable] || value is [any Sendable] else { return "{}" }
+        return PythonStyleJSON(sendable: value).pythonStyleText
     }
 }
 

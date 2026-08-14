@@ -163,6 +163,37 @@ struct DeepSeekV4TokenizerIntegrationTests {
         }
     }
 
+    /// A rendered DeepSeek-V4 prompt tokenizes with each marker as its own
+    /// token.
+    ///
+    /// The render is correct text only when the tokenizer maps each marker
+    /// back to the one token the model saw in training. A marker that splits
+    /// into ordinary word pieces gives a prompt that reads correctly and
+    /// tokenizes wrongly, which no text comparison can find.
+    @Test func aRenderedPromptTokenizesEachMarkerAsOneToken() async throws {
+        let tokenizer = try await DeepSeekV4TokenizerLoad.shared.value
+        let prompt = DeepSeekV4ChatEncoder().encode(
+            messages: [
+                .system(content: "S"),
+                .user(content: "Q"),
+                .assistant(
+                    content: "", reasoning: "R",
+                    toolCalls: [
+                        DeepSeekV4ChatEncoder.ToolCall(
+                            id: "call_1", name: "alpha", argumentsJSON: #"{"n": "1"}"#)
+                    ]),
+                .toolResult(content: "done", toolCallID: "call_1"),
+            ],
+            thinkingMode: .thinking)
+        let tokens = tokenizer.encode(text: prompt, addSpecialTokens: false)
+
+        for marker in deepSeekV4Markers where prompt.contains(marker.text) {
+            #expect(
+                tokens.contains(marker.id),
+                "the render writes \(marker.text), thus the prompt must carry id \(marker.id)")
+        }
+    }
+
     /// `Tokenizer.eosTokenId` is 1, and id 1 decodes to the end-of-sentence
     /// marker.
     @Test func endOfSentenceTokenIdIsOne() async throws {

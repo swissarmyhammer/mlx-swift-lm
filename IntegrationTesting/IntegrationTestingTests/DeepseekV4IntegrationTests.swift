@@ -4,9 +4,9 @@
 // from card ^e7b24ws. The synthetic-weight unit tests in `Tests/MLXLMTests`
 // prove the math. These tests prove the port against the published
 // checkpoint: the full `LLMModelFactory` load path, greedy-token parity
-// against the Python reference, chat and thinking generation, long-generation
-// stability past 12k tokens (the `ml-explore/mlx-lm` issue-1662 landmine),
-// and two-round conversation behavior.
+// against the Python reference, chat and thinking generation, one agentic tool
+// round, long-generation stability past 12k tokens (the `ml-explore/mlx-lm`
+// issue-1662 landmine), and two-round conversation behavior.
 //
 // The checkpoint is a 284B-total / 13B-active MoE. Its weight files hold
 // 151,482,475,612 bytes, which is 141 GiB, measured on the published snapshot
@@ -87,6 +87,48 @@ private let decodeSpeedSampleTokenCount = 16
 
 /// The number of tokens each short generation asks for.
 private let shortGenerationTokenCount = 48
+
+/// The number of tokens the tool-call test may produce. A DSML block for one
+/// call with one parameter is far shorter than this.
+private let toolCallGenerationTokenCount = 128
+
+/// The name of the one tool the tool-call test offers.
+private let stockToolName = "get_stock_level"
+
+/// The name of the one parameter of ``stockToolSpec``. The model must write
+/// this name, because the `## Tools` section of the prompt states it.
+private let stockToolParameterName = "bay"
+
+/// The bay the tool-call test asks the model to read.
+private let stockToolBayName = "bay 7"
+
+/// The system turn of the tool-call test.
+///
+/// The published reference always carries a real system prompt in front of its
+/// `## Tools` section, thus the test carries one as well.
+private let stockAgentInstructions =
+    "You are an inventory agent. You answer with the tools you are given."
+
+/// The one tool the tool-call test offers, as the Swift dictionary a caller
+/// writes. `DeepSeekV4ChatEncoder` renders it into the `## Tools` section, and
+/// `DSMLToolCallParser` reads the call back out.
+private let stockToolSpec: ToolSpec = [
+    "type": "function",
+    "function": [
+        "name": stockToolName,
+        "description": "Read the recorded stock level of one warehouse bay",
+        "parameters": [
+            "type": "object",
+            "properties": [
+                stockToolParameterName: [
+                    "type": "string",
+                    "description": "The bay to read, for example bay 7",
+                ] as [String: any Sendable]
+            ] as [String: any Sendable],
+            "required": [stockToolParameterName],
+        ] as [String: any Sendable],
+    ] as [String: any Sendable],
+]
 
 /// The number of leading fixture tokens the parity test compares.
 ///
@@ -353,6 +395,66 @@ struct DeepseekV4IntegrationTests {
         print("Chat output: \(chatOutput)")
         #expect(!thinkingOutput.isEmpty, "thinking mode must generate text")
         #expect(!chatOutput.isEmpty, "chat mode must generate text")
+    }
+
+    // MARK: One tool round
+
+    /// A short prompt that offers one tool makes the model write one DSML
+    /// call, and `DSMLToolCallParser` reads it back.
+    ///
+    /// Measured on 2026-08-13, before the member order of the rendered tool
+    /// schema was fixed: the model answered with the plain JSON
+    /// `{"function": "get_stock_level", "params": {"bay_id": "bay_7"}}`, which
+    /// the parser reads none of, thus no tool round completed. The schema of
+    /// that run came out of `JSONSerialization`, which writes a Swift
+    /// `Dictionary` in its hash order, thus the `## Tools` section carried a
+    /// shape the model never saw in training.
+    @Test func aShortToolPromptEmitsOneDSMLToolCall() async throws {
+        guard
+            let container = await deepseekV4ContainerOrSkip(
+                testName: "aShortToolPromptEmitsOneDSMLToolCall")
+        else { return }
+
+        let session = ChatSession(
+            container,
+            instructions: stockAgentInstructions,
+            generateParameters: GenerateParameters(
+                maxTokens: toolCallGenerationTokenCount, temperature: 0),
+            additionalContext: ["thinking": false],
+            tools: [stockToolSpec])
+
+        var text = ""
+        var calls: [ToolCall] = []
+        let prompt =
+            "Call the \(stockToolName) tool for \(stockToolBayName). "
+            + "Call the tool before you write an answer."
+        for try await generation in session.streamDetails(to: prompt) {
+            switch generation {
+            case .chunk(let chunk):
+                text += chunk
+            case .toolCall(let call):
+                calls.append(call)
+            case .info:
+                break
+            }
+        }
+
+        print("Tool round text: <<<\(text)>>>")
+        print("Tool round calls: \(calls)")
+        let call = try #require(
+            calls.first,
+            """
+            the model must write one DSML tool call for the round to complete. \
+            It wrote: <<<\(text)>>>
+            """)
+        #expect(call.function.name == stockToolName)
+        #expect(
+            call.function.arguments[stockToolParameterName] != nil,
+            """
+            the call must name its argument \(stockToolParameterName), which the \
+            ## Tools section of the prompt states. It named \
+            \(call.function.arguments.keys.sorted()).
+            """)
     }
 
     // MARK: Long-generation stability

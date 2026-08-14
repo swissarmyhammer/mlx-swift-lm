@@ -241,6 +241,99 @@ private struct JSONReader {
     }
 }
 
+// MARK: - Reading a Swift value
+
+// A `ToolSpec` and the arguments of a ``ToolCall`` reach this file as a Swift
+// `Dictionary`, which keeps no order at all. `JSONSerialization` writes such a
+// dictionary in its hash order, thus the same tool schema comes out in a
+// different member order in each process, and the `## Tools` section of the
+// prompt stops matching the shape the model saw during training. The
+// initializer below writes one fixed order instead.
+//
+// WHERE THE ORDER COMES FROM
+//
+// ``PythonStyleJSON/publishedMemberOrder`` is the order of the two published
+// tool inputs `encoding/tests/test_input_1.json` and
+// `encoding/tests/test_input_3.json` of `deepseek-ai/DeepSeek-V4-Flash`. Each
+// object of those two files, and of the golden outputs beside them, comes back
+// byte for byte under that one order.
+//
+// WHAT THE ORDER CANNOT GIVE BACK
+//
+// A name the list does not hold sorts by name. Two such names carry real order
+// in the published files — the members of a `properties` object, and the
+// arguments of one call — and a Swift `Dictionary` lost that order before this
+// file saw the value. Sorting gives the same bytes on every run, which the hash
+// order never did, and it gives the published bytes when the published order is
+// the sorted order.
+
+extension PythonStyleJSON {
+
+    /// The member names of the published DeepSeek-V4 tool schemas, in the order
+    /// the published files write them.
+    private static let publishedMemberOrder = [
+        "name", "type", "enum", "items", "description", "anyOf", "parameters",
+        "properties", "required", "additionalProperties", "$schema", "default",
+    ]
+
+    /// Builds a value from the Swift form that a tool specification and the
+    /// arguments of a tool call carry.
+    ///
+    /// The members of each object take ``publishedMemberOrder`` first and the
+    /// order of their names after it, because a Swift `Dictionary` keeps no
+    /// order of its own.
+    ///
+    /// - Parameter value: the value to read.
+    init(sendable value: any Sendable) {
+        switch value {
+        case is NSNull:
+            self = .null
+        case let flag as Bool:
+            self = .bool(flag)
+        case let number as Int:
+            self = .number(String(number))
+        case let number as Double:
+            self = .number(String(number))
+        case let text as String:
+            self = .string(text)
+        case let elements as [any Sendable]:
+            self = .array(elements.map { PythonStyleJSON(sendable: $0) })
+        case let members as [String: any Sendable]:
+            self = .object(Self.orderedMembers(of: members))
+        default:
+            self = .string(String(describing: value))
+        }
+    }
+
+    /// Puts the members of one object in the order this file writes them.
+    /// - Parameter members: the members, by name.
+    /// - Returns: the members, ordered.
+    private static func orderedMembers(of members: [String: any Sendable]) -> [Member] {
+        members.keys.sorted(by: precedes).compactMap { key in
+            members[key].map { Member(key: key, value: PythonStyleJSON(sendable: $0)) }
+        }
+    }
+
+    /// Whether one member name comes before another.
+    /// - Parameters:
+    ///   - left: the name to place.
+    ///   - right: the name to place it against.
+    /// - Returns: whether `left` comes first.
+    private static func precedes(_ left: String, _ right: String) -> Bool {
+        let leftPlace = place(of: left)
+        let rightPlace = place(of: right)
+        return leftPlace == rightPlace ? left < right : leftPlace < rightPlace
+    }
+
+    /// The place of one member name in ``publishedMemberOrder``.
+    /// - Parameter name: the name to look up.
+    /// - Returns: the place, or the length of the list for a name it does not
+    ///   hold.
+    private static func place(of name: String) -> Int {
+        publishedMemberOrder.firstIndex(of: name) ?? publishedMemberOrder.count
+    }
+}
+
 // MARK: - Writing
 
 extension PythonStyleJSON {
