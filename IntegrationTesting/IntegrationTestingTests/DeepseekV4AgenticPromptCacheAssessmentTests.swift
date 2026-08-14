@@ -380,13 +380,11 @@ struct DeepseekV4AgenticPromptCacheAssessmentTests {
     /// requirement 3 even while the model writes its tool calls in a syntax
     /// `DSMLToolCallParser` does not read.
     ///
-    /// The two facts it takes are the two facts
-    /// `Qwen36UpstreamPromptCacheAssessmentTests` takes, and DeepSeek-V4
-    /// answers them differently:
+    /// It takes the two facts of the file header:
     ///
     ///   (a) The follow-up render IS a true prefix extension of round 1's.
-    ///       Qwen-3.6 fails here, because its template rewrites the priming
-    ///       tail. The DeepSeek-V4 chat template does not.
+    ///       A template that rewrites an already-cached region fails here.
+    ///       The DeepSeek-V4 chat template does not rewrite one.
     ///   (b) Upstream reprocesses the whole prompt anyway. A good prefix is
     ///       thus not sufficient, which is the number this suite exists to
     ///       hold.

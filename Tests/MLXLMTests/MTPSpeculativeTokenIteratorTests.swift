@@ -322,7 +322,6 @@ struct MTPKVCacheConfigurationTests {
 
 @Test
 func testMTPSpeculateRoundSmokeWithSynthetics() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     // Plan: prompt of 3 tokens [1, 2, 3], main model is rigged so that it
     // samples bonus token 7 at prefill, then on the verify pass samples
     // [7, 7, 7, 9] (3 matching drafts, 1 correction). Drafter returns
@@ -415,7 +414,6 @@ func testMTPIteratorForwardsPositionDeltasToDrafter() throws {
 
 @Test
 func testMTPIteratorMissingStateFallsBackToPassthrough() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     // Main model with `omitDrafterState=true` never populates the MTP keys,
     // so the iterator switches to passthrough on the first `speculateRound`
     // call. Drafter must not be invoked.
@@ -486,7 +484,6 @@ func testMTPIteratorEmptySharedKVFallsBackToPassthrough() throws {
 
 @Test
 func testMTPIteratorPendingBufferDrainOrder() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     // Drafter returns [5, 5, 5]; main verifies [5, 5, 7, 9].
     // After the prepare-time bonus (5) is yielded first, speculateRound's
     // accept-prefix is positions 0..1 → [5, 5], then correction at position
@@ -521,7 +518,6 @@ func testMTPIteratorPendingBufferDrainOrder() throws {
 
 @Test
 func testMTPIteratorUsesSingleStepWhenOnlyOneTokenRemains() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     // With maxTokens=2, the prepare-time bonus consumes the first output slot.
     // Only one slot remains, so a speculative round would be unable to emit
     // both an accepted draft and the verifier's correction/bonus token. The
@@ -655,7 +651,6 @@ func testQwenStyleMTPRequiresGreedySampling() throws {
 /// discussion_r3391147261.)
 @Test
 func testMTPSharedKVSpanTrimmedAfterPartialAcceptance() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     // Round 1: drafter proposes [5, 5, 5]; main verifies [5, 7, ...] —
     // draft_1 accepted, mismatch at draft_2, so rejected = 2. True
     // sequence after round 1: 3 prompt + 1 bonus + 1 accepted = 5.
@@ -845,7 +840,6 @@ private func makeSourcelessSharedKVState(span: Int) -> LMOutput.State {
 
 @Test
 func testTrimSharedKVStateZeroTokensIsNoOp() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     var state: LMOutput.State? = makeSharedKVState(span: 6)
     reconcileSharedKVState(&state, discarding: 0, lengths: { _ in Int.max })
 
@@ -864,7 +858,6 @@ func testTrimSharedKVStateZeroTokensIsNoOp() throws {
 
 @Test
 func testTrimSharedKVStateTrimsTrailingRowsPreservingPrefix() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     var state: LMOutput.State? = makeSharedKVState(span: 6)
     reconcileSharedKVState(&state, discarding: 2, lengths: { _ in Int.max })
 

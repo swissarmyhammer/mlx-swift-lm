@@ -11,11 +11,6 @@ import XCTest
 class LoRAAdapterTests: XCTestCase {
 
     /// Ensure the Metal library is reachable before any GPU work runs.
-    override func setUp() {
-        super.setUp()
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     /// Give `layer` a deterministic non-zero `lora_b` so the adapter term is
     /// active (a freshly created adapter has `lora_b == 0` and contributes
     /// nothing).

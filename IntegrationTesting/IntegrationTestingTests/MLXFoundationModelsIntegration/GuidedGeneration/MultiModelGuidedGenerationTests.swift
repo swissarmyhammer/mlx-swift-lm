@@ -458,9 +458,9 @@ struct MultiModelGuidedGenerationTests {
     @Test("Cleanup: release multi-model GPU resources")
     func releaseGPUResources() async {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let before = Memory.snapshot()
+        let before = GPU.snapshot()
         await releaseAllGPUMemory()
-        let after = Memory.snapshot()
+        let after = GPU.snapshot()
         let freed = before.activeMemory - after.activeMemory
         print(
             "[MultiModelCleanup] freed \(freed / (1024 * 1024))MB active, "

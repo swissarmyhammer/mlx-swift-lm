@@ -7,11 +7,6 @@ import XCTest
 
 public class GatedDeltaTests: XCTestCase {
 
-    override public func setUp() {
-        super.setUp()
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     private struct Inputs {
         let q, k, v, a, b, aLog, dtBias: MLXArray
     }
@@ -102,8 +97,8 @@ public class GatedDeltaTests: XCTestCase {
         )
 
         // Perturb only the trailing dims the truncating kernel would drop.
-        let qP = inputs.q
-        let kP = inputs.k
+        var qP = inputs.q
+        var kP = inputs.k
         qP[0..., 0..., 0..., 32...] = qP[0..., 0..., 0..., 32...] + MLXArray(1).asType(.bfloat16)
         kP[0..., 0..., 0..., 32...] = kP[0..., 0..., 0..., 32...] + MLXArray(1).asType(.bfloat16)
 

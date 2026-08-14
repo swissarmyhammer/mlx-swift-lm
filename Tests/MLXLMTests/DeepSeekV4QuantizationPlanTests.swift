@@ -61,10 +61,6 @@ private func stubScales(for paths: [String]) -> [String: MLXArray] {
 @Suite(.serialized)
 struct DeepSeekV4QuantizationPlanTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     // MARK: - Fixture facts
 
     /// Decoder layer count of DeepSeek-V4-Flash, and thus the number of layers

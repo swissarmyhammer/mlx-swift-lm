@@ -7,11 +7,6 @@ import XCTest
 
 public class SampleTests: XCTestCase {
 
-    override public func setUp() {
-        super.setUp()
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     private func sampleCounts(sampler: TopPSampler, logits: MLXArray, draws: Int) -> [Int: Int] {
         var counts: [Int: Int] = [:]
         for _ in 0 ..< draws {

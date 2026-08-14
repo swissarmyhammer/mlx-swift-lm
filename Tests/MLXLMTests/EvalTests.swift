@@ -10,11 +10,6 @@ import XCTest
 
 public class EvalTests: XCTestCase {
 
-    override public func setUp() {
-        super.setUp()
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     func testLlamaEval() throws {
         let config = LlamaConfiguration(
             hiddenSize: 64, hiddenLayers: 16, intermediateSize: 512, attentionHeads: 32,

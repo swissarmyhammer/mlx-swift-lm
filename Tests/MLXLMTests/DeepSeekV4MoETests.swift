@@ -32,10 +32,6 @@ import Testing
 @Suite(.serialized)
 struct DeepSeekV4MoETests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     // MARK: - The synthetic checkpoint
 
     /// The width of the residual stream of the synthetic checkpoint.

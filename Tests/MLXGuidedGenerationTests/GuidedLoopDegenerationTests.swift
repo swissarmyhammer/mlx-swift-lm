@@ -117,10 +117,6 @@ private final class ScriptedPreferenceModel: Module, MLXLMCommon.LanguageModel,
 @Suite
 struct GuidedLoopDegenerationTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     private func makeGrammarTokenizer() throws -> GrammarTokenizer {
         let vocab: [String] = (0 ..< ScriptedPreferenceModel.vocabSize).map { byte in
             String(format: "<0x%02X>", byte)

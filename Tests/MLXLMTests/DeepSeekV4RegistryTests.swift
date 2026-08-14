@@ -13,10 +13,6 @@ import Testing
 @Suite(.serialized)
 struct DeepSeekV4RegistryTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     @Test("the type registry has a deepseek_v4 entry")
     func typeRegistryContainsDeepSeekV4() async {
         #expect(await LLMTypeRegistry.shared.contains("deepseek_v4"))

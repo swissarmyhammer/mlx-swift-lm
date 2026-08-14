@@ -63,7 +63,6 @@ func testGemma4AssistantConfigurationDecodesSyntheticJSON() throws {
 
 @Test
 func testSanitizeDropsLmHeadWhenTied() {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cfg = syntheticConfig(tieWordEmbeddings: true)
     let model = Gemma4AssistantDraftModel(cfg)
     let weights: [String: MLXArray] = [
@@ -79,7 +78,6 @@ func testSanitizeDropsLmHeadWhenTied() {
 
 @Test
 func testSanitizeKeepsLmHeadWhenNotTied() {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cfg = syntheticConfig(tieWordEmbeddings: false)
     let model = Gemma4AssistantDraftModel(cfg)
     let weights: [String: MLXArray] = [

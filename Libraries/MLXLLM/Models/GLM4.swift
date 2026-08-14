@@ -158,18 +158,6 @@ public class GLM4ModelInner: Module {
     }
 }
 
-/// Applies a language-model head to `hidden`, falling back to a linear
-/// projection through the tied word-embedding matrix when `lmHead` is `nil`
-/// (i.e. the checkpoint's configuration sets `tie_word_embeddings: true` and
-/// no separate `lm_head` weight was loaded). Shared between `GLM4Model` and
-/// `GLM4MoELiteModel`, which both need this identical tied/untied fallback.
-func applyLMHead(_ lmHead: Linear?, embedTokens: Embedding, _ hidden: MLXArray) -> MLXArray {
-    if let lmHead {
-        return lmHead(hidden)
-    }
-    return embedTokens.asLinear(hidden)
-}
-
 public class GLM4Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
@@ -178,7 +166,7 @@ public class GLM4Model: Module, LLMModel, KVCacheDimensionProvider {
     let configuration: GLM4Configuration
     let modelType: String
 
-    @ModuleInfo(key: "lm_head") var lmHead: Linear?
+    @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     public init(_ args: GLM4Configuration) {
         self.configuration = args
@@ -187,20 +175,12 @@ public class GLM4Model: Module, LLMModel, KVCacheDimensionProvider {
         self.modelType = args.modelType
         self.model = GLM4ModelInner(args)
 
-        if !args.tieWordEmbeddings {
-            _lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabularySize, bias: false)
-        }
+        _lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabularySize, bias: false)
     }
 
-    /// Runs the forward pass: encodes `inputs` through the transformer body,
-    /// then projects to vocabulary logits via `lmHead` when the checkpoint
-    /// provides a separate language-model head, or by reusing the tied
-    /// word-embedding matrix as a linear projection when `lmHead` is `nil`
-    /// (`tie_word_embeddings: true`). `cache` supplies the per-layer KV
-    /// cache used for incremental decoding.
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         let out = model(inputs, cache: cache)
-        return applyLMHead(lmHead, embedTokens: model.embedTokens, out)
+        return lmHead(out)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {

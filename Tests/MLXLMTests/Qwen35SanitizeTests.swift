@@ -12,11 +12,6 @@ import XCTest
 
 final class Qwen35SanitizeTests: XCTestCase {
 
-    override func setUp() {
-        super.setUp()
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     private func makeMinimalConfig() throws -> Qwen35Configuration {
         // Minimum-viable config with small dims so module init stays cheap.
         // Only the fields without defaults need values; everything else

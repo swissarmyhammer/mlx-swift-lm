@@ -42,10 +42,6 @@ private struct Gemma4UnifiedTestTokenizer: Tokenizer {
 }
 
 struct Gemma4UnifiedTests {
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     private func decodeConfig(_ json: String) throws -> Gemma4UnifiedConfiguration {
         try JSONDecoder.json5().decode(Gemma4UnifiedConfiguration.self, from: Data(json.utf8))
     }

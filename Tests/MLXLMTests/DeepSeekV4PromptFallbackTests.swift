@@ -18,10 +18,6 @@ import Testing
 @Suite(.serialized)
 struct DeepSeekV4PromptFallbackTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     // MARK: - Fixtures
 
     /// A tokenizer with no chat template. `applyChatTemplate` throws

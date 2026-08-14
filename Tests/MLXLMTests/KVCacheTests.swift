@@ -189,7 +189,6 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
     .serialized,
     arguments: cacheCreators)
 func testCacheSerialization(creator: (() -> any KVCache)) async throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = (0 ..< 10).map { _ in creator() }
     let keys = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16)
     let values = MLXArray.ones([1, 8, 32, 64], dtype: .bfloat16)
@@ -476,7 +475,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testQuantizedKVCacheRestoresNonDefaultQuantizationMetadata() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = QuantizedKVCache(groupSize: 64, bits: 4)
     let keys = MLXArray.ones([1, 1, 4, 32], dtype: .bfloat16)
     let values = MLXArray.ones([1, 1, 4, 32], dtype: .bfloat16)
@@ -503,7 +501,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testQuantizedKVCacheMetaStateRestoresQuantizationMetadataWithoutState() {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = QuantizedKVCache()
 
     cache.metaState = ["256", "11", "32", "4"]
@@ -515,7 +512,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testQuantizedKVCacheCopyPreservesRestoredQuantizationMetadata() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = QuantizedKVCache()
     cache.metaState = ["256", "5", "32", "4"]
 
@@ -640,7 +636,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 // MARK: - ArraysCache sparse slot round-trip
 
 @Test func testArraysCacheSparseSlots() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = ArraysCache(size: 3)
     let a = MLXArray.ones([2, 4], dtype: .float32) * 3.0
     let b = MLXArray.ones([2, 4], dtype: .float32) * 7.0
@@ -665,7 +660,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 // MARK: - ArraysCache leftPadding round-trip
 
 @Test func testArraysCacheLeftPadding() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = ArraysCache(size: 2, leftPadding: [0, 5])
     let a = MLXArray.ones([2, 4], dtype: .float32)
     let b = MLXArray.ones([2, 4], dtype: .float32) * 2.0
@@ -682,7 +676,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testArraysCacheMaskUsesLeftPaddingAfterStateUpdate() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = ArraysCache(size: 2, leftPadding: [1, 3])
     cache[0] = MLXArray.ones([2, 4], dtype: .float32)
 
@@ -695,7 +688,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testArraysCacheAdvanceUpdatesSequenceMetadataOnly() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = ArraysCache(size: 2, leftPadding: [3, 5])
     cache.offset = 7
     cache.prepare(lengths: [4, 6])
@@ -708,7 +700,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testArraysCacheMaskUsesLengthsWhenLeftPaddingIsAbsent() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = ArraysCache(size: 2)
     cache.prepare(lengths: [1, 3])
 
@@ -721,7 +712,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testTextSequenceLengthsComeFromAttentionMask() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let tokens = MLXArray(0 ..< 8).reshaped(2, 4)
     let mask = MLXArray([1, 1, 0, 0, 1, 1, 1, 0]).reshaped(2, 4)
     let text = LMInput.Text(tokens: tokens, mask: mask)
@@ -730,14 +720,12 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testTextSequenceLengthsInferUniformBatches() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let text = LMInput.Text(tokens: MLXArray(0 ..< 8).reshaped(2, 4))
 
     #expect(text.sequenceLengths == [4, 4])
 }
 
 @Test func testCacheListForwardsPrepareAndFinalize() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let arrays = ArraysCache(size: 2)
     let cache = CacheList(arrays, KVCacheSimple())
 
@@ -749,7 +737,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testCacheListForwardsLifecycleThroughKVCacheProtocol() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let lifecycle = LifecycleRecordingCache()
     let cache = CacheList(KVCacheSimple(), lifecycle)
 
@@ -761,7 +748,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testWithPreparedCacheScopesSequenceMetadata() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = ArraysCache(size: 2)
 
     withPreparedCache([cache], lengths: [2, 4]) {
@@ -772,7 +758,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testArraysCacheLengthsRoundTrip() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = ArraysCache(size: 2)
     cache.prepare(lengths: [4, 2])
     cache[0] = MLXArray.ones([2, 4], dtype: .float32)
@@ -788,7 +773,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testArraysCacheAdvanceUpdatesLengthsAndLeftPaddingMasks() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = ArraysCache(size: 2, leftPadding: [1, 3])
     cache.prepare(lengths: [4, 2])
     cache.advance(2)
@@ -810,7 +794,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testArraysCacheFilterAndExtendPreserveBatchMetadata() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let first = ArraysCache(size: 1, leftPadding: [0, 2])
     first.prepare(lengths: [5, 3])
     first[0] = MLXArray.ones([2, 2], dtype: .float32)
@@ -831,7 +814,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testAttentionMaskUsesSharedCausalCachePath() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = KVCacheSimple()
     let prefillInput = MLXArray.ones([1, 3, 8], dtype: .float32)
 
@@ -866,7 +848,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testSSMMaskUsesSharedMambaMetadataPath() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let leftPadded = MambaCache(leftPadding: [1, 3])
     let input = MLXArray.ones([2, 4, 8], dtype: .float32)
 
@@ -888,7 +869,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testCacheListPrepareFinalizePropagatesThroughNestedHybridCaches() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let mamba = MambaCache(leftPadding: [0, 2])
     let arrays = ArraysCache(size: 1)
     let nested = CacheList(CacheList(mamba), arrays)
@@ -906,7 +886,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testMambaCacheCopyPreservesBatchMaskMetadata() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = MambaCache(leftPadding: [2, 0])
     cache.prepare(lengths: [5, 3])
     cache[0] = MLXArray.ones([2, 3, 4], dtype: .float32)
@@ -921,7 +900,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testArraysCacheFilterKeepsSequenceMetadata() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = ArraysCache(size: 2, leftPadding: [1, 3])
     cache.prepare(lengths: [2, 4])
     cache[0] = MLXArray.ones([2, 4], dtype: .float32)
@@ -933,7 +911,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testArraysCacheExtendPadsMissingSlotsAndMetadata() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let first = ArraysCache(size: 2, leftPadding: [1, 3])
     first.prepare(lengths: [2, 4])
     first[0] = MLXArray.ones([2, 4], dtype: .float32)
@@ -950,7 +927,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testArraysCacheCopyPreservesSparseSlotsAndMetadata() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = ArraysCache(size: 3, leftPadding: [2])
     cache.prepare(lengths: [5])
     cache[2] = MLXArray.ones([1, 4], dtype: .float32)
@@ -968,7 +944,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 // MARK: - MambaCache type preservation
 
 @Test func testMambaCacheRoundTrip() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = MambaCache()
     let a = MLXArray.ones([2, 4], dtype: .float32) * 5.0
     let b = MLXArray.ones([2, 4], dtype: .float32) * 9.0
@@ -988,7 +963,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 // MARK: - CacheList with KV caches
 
 @Test func testCacheListKVCaches() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let simple = KVCacheSimple()
     let rotating = RotatingKVCache(maxSize: 32)
 
@@ -1016,7 +990,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 // MARK: - CacheList with hybrid (MambaCache + KVCacheSimple)
 
 @Test func testCacheListHybrid() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let mamba = MambaCache()
     mamba[0] = MLXArray.ones([2, 4], dtype: .float32) * 3.0
     mamba[1] = MLXArray.ones([2, 4], dtype: .float32) * 4.0
@@ -1044,7 +1017,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 // MARK: - Simple cache round-trip with value assertions
 
 @Test func testSimpleCacheRoundTrip() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = KVCacheSimple()
     let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
     let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
@@ -1060,7 +1032,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 // MARK: - ArraysCache fully populated round-trip
 
 @Test func testArraysCacheFullyPopulated() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let cache = ArraysCache(size: 2)
     cache[0] = MLXArray.ones([2, 4], dtype: .float32)
     cache[1] = MLXArray.ones([2, 4], dtype: .float32) * 2.0
@@ -1081,7 +1052,6 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     .serialized,
     arguments: cacheCreators)
 func testCacheCopyIsIndependent(creator: (() -> any KVCache)) async throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let original = creator()
 
     let keys = MLXArray.ones([1, 8, 4, 64], dtype: .bfloat16)
@@ -1153,7 +1123,6 @@ func testCacheCopyIsIndependent(creator: (() -> any KVCache)) async throws {
     .serialized,
     arguments: cacheCreators)
 func testCacheCopyOnEmptyCache(creator: (() -> any KVCache)) async throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let empty = creator()
     let copied = empty.copy()
 
@@ -1186,7 +1155,6 @@ private func singleTokenKV(fill: Float, kvHeads: Int = 2, headDim: Int = 4) -> (
 }
 
 @Test func testTrimThenContinueMatchesFreshPrefillOfTruncatedSequence() throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     // Prefill 7 tokens (fills 0...6) into cacheA.
     let cacheA = KVCacheSimple()
     for i in 0 ..< 7 {
@@ -1231,7 +1199,6 @@ private func singleTokenKV(fill: Float, kvHeads: Int = 2, headDim: Int = 4) -> (
 /// CacheList.copy() produces independent sub-caches.
 @Test
 func testCacheListCopyIsIndependent() async throws {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let sub1 = KVCacheSimple()
     let sub2 = RotatingKVCache(maxSize: 32)
     let composite = CacheList(sub1, sub2)

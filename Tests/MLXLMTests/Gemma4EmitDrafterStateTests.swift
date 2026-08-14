@@ -21,7 +21,6 @@ import Testing
 
 @Test
 func testGemma4TextEmitFalseReturnsNoStateBySynthetic() {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let model = makeSyntheticGemma4TextLanguageModel(layerTypes: [
         "full_attention", "sliding_attention",
     ])
@@ -82,7 +81,6 @@ func testGemma4TextEmitTrueWithMissingLayerTypeReturnsNilSharedKV() throws {
 
 @Test
 func testGemma4TextEmitDisabledIsBitIdenticalRegressionBySynthetic() {
-    _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
     let model = makeSyntheticGemma4TextLanguageModel(layerTypes: [
         "full_attention", "sliding_attention",
     ])

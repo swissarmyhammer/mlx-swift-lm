@@ -97,11 +97,6 @@ import XCTest
 
 public class CompiledDecodeCorrectnessTests: XCTestCase {
 
-    override public func setUp() {
-        super.setUp()
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     /// A tiny dense Llama model with deterministic (seeded) weights, small
     /// enough to trace/compile quickly.
     private func makeModel() -> LlamaModel {

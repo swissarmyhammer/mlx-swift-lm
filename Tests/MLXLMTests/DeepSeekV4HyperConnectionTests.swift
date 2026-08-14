@@ -42,10 +42,6 @@ import Testing
 @Suite(.serialized)
 struct DeepSeekV4HyperConnectionTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     // MARK: - The synthetic checkpoint
 
     /// The number of parallel copies of the residual stream.

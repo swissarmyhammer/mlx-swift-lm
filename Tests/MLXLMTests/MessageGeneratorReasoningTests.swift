@@ -1,7 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
 import MLXLMCommon
-import MLXVLM
 import Testing
 
 /// `Chat.Message.reasoning` → `reasoning_content` emission by the default
@@ -38,21 +37,5 @@ struct MessageGeneratorReasoningTests {
         let raw = DefaultMessageGenerator().generate(message: message)
         #expect(raw["reasoning_content"] as? String == "let me check")
         #expect(raw["tool_calls"] != nil)
-    }
-
-    /// Qwen3.6 checkpoints ship a VLM processor config and load through
-    /// `Qwen3VLMessageGenerator`, so the live render's generator must emit
-    /// `reasoning_content` exactly like the default one — otherwise the
-    /// preserved-thinking history render silently drops the replayed
-    /// reasoning on the VLM path.
-    @Test("Qwen3VLMessageGenerator emits reasoning_content like the default generator")
-    func qwen3VLGeneratorEmitsReasoningContent() {
-        let message = Chat.Message.assistant("4", reasoning: "2 + 2 is 4")
-        let raw = Qwen3VLMessageGenerator().generate(message: message)
-        #expect(raw["reasoning_content"] as? String == "2 + 2 is 4")
-
-        let plain = Qwen3VLMessageGenerator().generate(
-            message: Chat.Message.assistant("4"))
-        #expect(plain["reasoning_content"] == nil)
     }
 }

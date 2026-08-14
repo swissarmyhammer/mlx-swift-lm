@@ -37,9 +37,7 @@
 // `store()`-backed tests populate a real hybrid stack (`makeChunkableCache`
 // + `MambaCache`), which routes through `snapshotHybridCheckpoint`'s
 // `ownedCopy` tensor evals -- a real GPU-device eval under plain
-// `swift test`; see `TestBootstrap.swift`'s `MetalLibraryTestBootstrap`
-// (kanban 23ff1zx, memory note `swiftpm-test-gpu-metallib-limit`) for why
-// the `init()` bootstrap call below is required.
+// `swift test`.
 
 import Foundation
 import MLX
@@ -87,10 +85,6 @@ private final class HybridPromptCacheProbeModel: Module, MLXLMCommon.LanguageMod
 
 @Suite("PromptCache hybrid checkpoint eviction scope and cross-conversation isolation")
 struct PromptCacheHybridEvictionScopeTests {
-
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
 
     @Test("remove(modelID:) clears every hybrid checkpoint for that model id and reclaims its bytes")
     func removeClearsHybridCheckpointStore() async {

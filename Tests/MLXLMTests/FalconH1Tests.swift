@@ -8,11 +8,6 @@ import XCTest
 
 final class FalconH1Tests: XCTestCase {
 
-    override func setUp() {
-        super.setUp()
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     private func tinyConfiguration(numLogitsToKeep: Int = 1) throws -> FalconH1Configuration {
         let json = """
             {

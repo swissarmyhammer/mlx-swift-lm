@@ -128,7 +128,7 @@ struct TokenizerVocabExtractorTests {
         sourceLocation: SourceLocation = #_sourceLocation
     ) async throws {
         let container = try await loadTestModelContainer(id: modelID)
-        await container.perform { context in
+        try await container.perform { context in
             let vocab = TokenizerVocabExtractor.extract(from: context.tokenizer)
             let offsets = Self.prefixOffsets(of: vocab.tokenLens)
             let ids = context.tokenizer.encode(text: text, addSpecialTokens: false)

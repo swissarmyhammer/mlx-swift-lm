@@ -34,10 +34,6 @@ import Testing
 @Suite(.serialized)
 struct MiniMaxM3Tests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     // MARK: - MiniMaxM3SwiGLUOAI
 
     /// mlx-vlm's `_swiglu_oai` reference formula:

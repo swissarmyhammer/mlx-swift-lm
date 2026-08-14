@@ -11,10 +11,7 @@
 // `makeChunkableCache` populates real `MLXArray` content, because `store()`
 // routes through `sliceChunks`, which requires a genuine `KVCacheSimple
 // .state` (not just `offset`) to slice -- callers of that fixture force a
-// real GPU-device eval under plain `swift test`; see `TestBootstrap.swift`'s
-// `MetalLibraryTestBootstrap` (kanban 23ff1zx, memory note
-// `swiftpm-test-gpu-metallib-limit`) for why those suites' `init()`
-// bootstrap call is required.
+// real GPU-device eval under plain `swift test`.
 
 import Foundation
 import MLX

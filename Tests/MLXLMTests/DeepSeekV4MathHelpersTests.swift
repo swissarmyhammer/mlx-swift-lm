@@ -31,10 +31,6 @@ import Testing
 @Suite(.serialized)
 struct DeepSeekV4MathHelpersTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     // MARK: - Comparison helpers
 
     /// The largest absolute gap allowed against a Sinkhorn fixture.

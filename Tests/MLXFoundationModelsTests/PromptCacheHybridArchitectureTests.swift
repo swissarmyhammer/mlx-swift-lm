@@ -67,10 +67,6 @@ import Testing
 @Suite("PromptCache hybrid Mamba/attention architecture handling")
 struct PromptCacheHybridArchitectureTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     // MARK: - Fixtures
 
     /// A tiny, real `Qwen35TextModel` (Qwen3.6 family) whose module init

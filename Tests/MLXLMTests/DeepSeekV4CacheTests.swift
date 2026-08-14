@@ -29,10 +29,6 @@ import Testing
 @Suite(.serialized)
 struct DeepSeekV4CacheTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     // MARK: - The synthetic checkpoint
 
     /// The number of tokens in the vocabulary of the synthetic checkpoint.

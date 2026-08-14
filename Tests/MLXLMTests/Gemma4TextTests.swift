@@ -5,10 +5,6 @@ import MLXLMCommon
 import Testing
 
 struct Gemma4TextTests {
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     @Test("Gemma4Text handles quantized KV cache in shared full attention")
     func quantizedKVCacheSupportsSharedFullAttention() throws {
         let model = Gemma4TextModel(try Self.configuration(attentionKEqV: false))

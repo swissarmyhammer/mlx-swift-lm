@@ -16,7 +16,6 @@ struct SpeculativeDecodingTests {
     let draftContext: ModelContext
 
     init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
         let processor = TestInputProcessor()
         let modelConfig = Gemma3TextConfiguration(
             modelType: "text",

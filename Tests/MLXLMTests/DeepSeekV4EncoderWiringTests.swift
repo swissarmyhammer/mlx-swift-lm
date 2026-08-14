@@ -16,10 +16,6 @@ import Testing
 @Suite(.serialized)
 struct DeepSeekV4EncoderWiringTests {
 
-    init() {
-        _ = MetalLibraryTestBootstrap.ensureColocatedMetallib
-    }
-
     // MARK: - Fixtures
 
     /// A DeepSeek-V4-like tokenizer for prompt assertions: no chat template
