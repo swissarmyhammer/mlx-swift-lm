@@ -114,6 +114,27 @@ comments:
     - evidence: 1 file — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/IntegrationTesting/IntegrationTestingTests/Qwen36UpstreamPromptCacheAssessmentTests.swift. Commit f85fc50 (not pushed). Test passes: 1 test in 1 suite, 40.9 s, zero warnings in the build.
     - next: the card stays open. The assessment says NO, so the port this card describes is still needed. Do not drop PromptCache.swift or PromptCacheChunks.swift.
   timestamp: 2026-08-13T20:57:08.397811+00:00
+- actor: claude-code
+  id: 01kzyw57m2hgfg52bhm47c1x6j
+  text: |-
+    ### Two properties a port must keep — from cards ^3z5pydx and ^qsv1415
+
+    Both cards closed on 2026-08-14, and each leaves one requirement for this port.
+
+    **1. The chunk key must stay a chain (from `^3z5pydx`).**
+
+    `PromptCacheChunks.chunkKey(parentKey:tokens:)` hashes the PARENT key together with this chunk's tokens, thus each key holds the whole token prefix from position zero. That is what makes it safe to share chunks across the conversations of one model: a conversation resolves another conversation's chunk only when it presents the same tokens, and then the state is its own state.
+
+    A port that hashes only a chunk's own tokens — to save work, or to share more — lets a session take KV state for tokens it never rendered. `^3z5pydx` asked whether a session could act as though a tool call had already happened. With the chained key the answer is no. Without it the answer becomes yes.
+
+    Do not "simplify" this key.
+
+    **2. Clearing must not need an eviction (from `^qsv1415`).**
+
+    `PromptCache.swift` holds `remove(modelID:)` at line 677 and `evictAll()` at line 650, and **each member of that file is internal**. Before the catch-up the only public lever that cleared a prompt cache was `MLXLanguageModel.evictAll()`, which also drops the weights, the tokenizers and the constraint templates. A consumer that wanted one clean cache paid a full model reload — minutes for a 27B model.
+
+    Give this port a public `clearPromptCache(modelID:)`, or make `remove(modelID:)` public. Without it the port rebuilds the wall that `^qsv1415` was filed against.
+  timestamp: 2026-08-14T00:53:38.050381+00:00
 position_column: todo
 position_ordinal: 9a80
 title: Wire the prompt cache into the upstream MLXLanguageModel
