@@ -107,6 +107,13 @@ comments:
     assertions fail on purpose, and their messages say to invert them and revisit
     this card.
   timestamp: 2026-08-13T20:56:50.493029+00:00
+- actor: claude-code
+  id: 01kzyem6hdk21vr7tw8whc8r2j
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/IntegrationTesting/IntegrationTestingTests/Qwen36UpstreamPromptCacheAssessmentTests.swift. Commit f85fc50 (not pushed). Test passes: 1 test in 1 suite, 40.9 s, zero warnings in the build.
+    - next: the card stays open. The assessment says NO, so the port this card describes is still needed. Do not drop PromptCache.swift or PromptCacheChunks.swift.
+  timestamp: 2026-08-13T20:57:08.397811+00:00
 position_column: todo
 position_ordinal: 9a80
 title: Wire the prompt cache into the upstream MLXLanguageModel
