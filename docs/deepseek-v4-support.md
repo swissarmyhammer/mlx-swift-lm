@@ -105,18 +105,32 @@ This repository has no port of `deepseek_v32`, but upstream `mlx-lm` has one
 (`mlx_lm/models/deepseek_v32.py`). It is the closest relative of the sparse
 attention of DeepSeek-V4.
 
-Both parts of the DeepSeek-V4 sparse attention now stand in the module tree,
-and every tensor of both loads from the published checkpoint:
-`Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift` (task `^r92pjcr`) picks the
-pooled chunks each query reads, and
-`Libraries/MLXLLM/Models/DeepSeekV4Compressor.swift` (task `^tty95f4`) pools
-those chunks.
+The DeepSeek-V4 sparse attention is complete, and the attention path reads it.
+Four files carry it:
 
-The attention path reads neither yet, thus a long prompt still runs dense
-attention over every key. The gap is the cache that keeps the pooled chunks
-across calls: a decode step carries one token, and a compressor with no such
-cache pools nothing out of one token. Task `^ab1eq0r` carries that cache and
-the sparse path that reads it.
+- `Libraries/MLXLLM/Models/DeepSeekV4Compressor.swift` (task `^tty95f4`) pools
+  each run of `compress_ratio` tokens into one chunk.
+- `Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift` (task `^r92pjcr`) picks the
+  pooled chunks each query reads.
+- `Libraries/MLXLLM/Models/DeepSeekV4Cache.swift` (task `^ab1eq0r`) keeps those
+  chunks across calls and across turns, beside the sliding window of the layer.
+  A decode step carries one token, thus a stateless compressor pools nothing
+  and the global context would go away at the first decode step. The cache also
+  keeps the raw rows of a chunk that is not whole yet, and an overlapping
+  ratio-4 layer keeps one whole chunk more, so that the chunks a block pools do
+  not depend on how the prefill cut that block.
+- `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift` joins the two: it attends
+  over the sliding window of `sliding_window` keys AND the pooled chunks the
+  indexer picked, under one `[window visibility | chunk visibility]` mask.
+
+`newCache(parameters:)` gives a `RotatingKVCache` to a layer whose compress
+ratio is 0 and a `DeepSeekV4Cache` to every other layer. Both rewind while the
+window has not wrapped, thus `RewindToCommonPrefixRule` still holds.
+
+Before this landed, `DeepSeekV4Configuration.slidingWindow` decoded and nothing
+read it, thus every layer ran dense attention over every key. A prompt under
+128 tokens could not tell that apart from the real model; a prompt of several
+thousand tokens answered gibberish (task `^3x0krt4`).
 
 ### 7. Application-layer pieces from `scouzi1966/maclocal-api` — out of scope by design, unfiled
 

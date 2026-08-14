@@ -37,10 +37,19 @@
 // The compressor of a layer whose compress ratio is more than 0 is
 // Libraries/MLXLLM/Models/DeepSeekV4Compressor.swift, and the indexer of a
 // layer whose compress ratio is 4 is
-// Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift. Both hang below, because
-// their tensors need a module to load into. The attention path does not read
-// either one yet: sparse attention needs the pooled cache that the header of
-// the compressor file records.
+// Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift. The block below reads both:
+// it pools each block through the compressor into
+// Libraries/MLXLLM/Models/DeepSeekV4Cache.swift, asks the indexer which pooled
+// chunks each query reads, and attends over the sliding window joined to those
+// chunks.
+//
+// A fourth detail does not come from the file above either. That file gathers
+// the top-k pooled rows of each query at decode time and builds a mask only
+// for prefill. This file answers ONE selection mask for a block of any length,
+// because ``DeepSeekV4Indexer`` already gives a Boolean mask that holds the
+// block-causal rule. A masked chunk takes no softmax weight, thus the numbers
+// are the numbers a gather gives, and the decode path and the prefill path
+// stay one path.
 
 import Foundation
 import MLX
@@ -245,6 +254,14 @@ final class DeepSeekV4Attention: Module {
     /// True when the softmax reads the learned sink of each head.
     let useAttnSink: Bool
 
+    /// The number of most recent keys a query reads directly.
+    ///
+    /// Every layer attends inside this window. A layer that also holds a
+    /// compressor reads the rest of the context through the pooled chunks
+    /// beside the window; a layer whose compress ratio is 0 reads the window
+    /// and nothing else.
+    let slidingWindow: Int
+
     /// The factor the attention scores take before the softmax.
     let scale: Float
 
@@ -286,9 +303,9 @@ final class DeepSeekV4Attention: Module {
     ///
     /// The selector holds the `attn.indexer.*` tensors of the checkpoint,
     /// which include the `attn.indexer.compressor.*` tensors of the pooled
-    /// keys it scores. The block above does not call it yet: it picks the
-    /// pooled chunks that sparse attention reads, and sparse attention needs a
-    /// pooled cache this repository does not carry.
+    /// keys it scores. It answers which pooled chunks each query of a block
+    /// reads, and the attention mask of this layer then holds that answer
+    /// beside the sliding window.
     @ModuleInfo(key: "indexer") var indexer: DeepSeekV4Indexer?
 
     /// The key/value compressor of this layer, or `nil` on a layer whose
@@ -299,6 +316,9 @@ final class DeepSeekV4Attention: Module {
     /// published DeepSeek-V4-Flash checkpoint names those tensors on the 41
     /// layers 2 to 42 alone, thus a compressor on layer 0 or layer 1 would
     /// fail the weight load rather than sit unused.
+    ///
+    /// A layer that holds one reads the sparse path: the sliding window joined
+    /// to the pooled chunks. A layer that holds none reads the window alone.
     @ModuleInfo(key: "compressor") var compressor: DeepSeekV4Compressor?
 
     /// DeepSeek-V4 keeps one latent key/value head and sends it to every
@@ -341,6 +361,7 @@ final class DeepSeekV4Attention: Module {
         self.outputLoraRank = configuration.oLoraRank
         self.normEps = configuration.rmsNormEps
         self.useAttnSink = configuration.useAttnSink
+        self.slidingWindow = configuration.slidingWindow
         self.scale = 1 / sqrt(Float(configuration.headDim))
         self.rope = DeepSeekV4RoPE(configuration: configuration, layer: layer)
 
@@ -386,26 +407,28 @@ final class DeepSeekV4Attention: Module {
     ) -> MLXArray {
         let batch = x.dim(0)
         let length = x.dim(1)
-        let angles = rope.cosSin(offset: cache?.offset ?? 0, length: length)
+        let offset = cache?.offset ?? 0
+        let angles = rope.cosSin(offset: offset, length: length)
         let cosTable = angles.cos.expandedDimensions(axes: [0, 1])
         let sinTable = angles.sin.expandedDimensions(axes: [0, 1])
 
-        let queries = rotatedQueries(x, batch: batch, length: length, cos: cosTable, sin: sinTable)
+        let queryResidual = qNorm(wqA(x))
+        let queries = rotatedQueries(
+            queryResidual, batch: batch, length: length, cos: cosTable, sin: sinTable)
         let keyValues = rotatedKeyValues(
             x, batch: batch, length: length, cos: cosTable, sin: sinTable)
 
-        // `attentionWithCacheUpdate` feeds SDPA the very arrays the cache
-        // returned. A block that dropped that return and fed its own tensor
-        // instead leaks one Metal buffer for each layer and each token --
-        // `ml-explore/mlx-lm` issue 1662.
-        let attended = attentionWithCacheUpdate(
-            queries: queries,
-            keys: keyValues,
-            values: keyValues,
-            cache: cache,
-            scale: scale,
-            mask: mask,
-            sinks: useAttnSink ? attnSink.asType(queries.dtype) : nil)
+        // The window mask must read the offset the cache stood at BEFORE the
+        // keys of this block joined it.
+        let windowMask = compressor == nil
+            ? mask
+            : cache?.makeMask(n: length, windowSize: slidingWindow, returnArray: true)
+                ?? makeAttentionMask(
+                    n: length, cache: nil, windowSize: slidingWindow, returnArray: true)
+
+        let attended = attentionOutput(
+            x, queries: queries, keyValues: keyValues, queryResidual: queryResidual,
+            windowMask: windowMask, cache: cache, cos: cosTable, sin: sinTable, offset: offset)
 
         // The keys carried the position into the scores. Turning the output
         // backward takes it out again, thus the residual stream reads a
@@ -419,6 +442,223 @@ final class DeepSeekV4Attention: Module {
         return woB(groupedOutputProjection(flattened))
     }
 
+    // MARK: - The two attention paths
+
+    /// The attention output of one block.
+    ///
+    /// A layer whose compress ratio is 0 reads the sliding window alone, which
+    /// is the plain path this file always had. A layer that holds a compressor
+    /// reads that window AND the pooled chunks of everything before it.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, tokens, hidden)`.
+    ///   - queries: The rotated queries of this block.
+    ///   - keyValues: The rotated keys of this block, which are also its
+    ///     values.
+    ///   - queryResidual: The low-rank query of this block, after its norm.
+    ///   - windowMask: The mask of the sliding window alone.
+    ///   - cache: The key/value cache of this layer, or `nil`.
+    ///   - cos: The cosine of each rotary angle of this block.
+    ///   - sin: The sine of each rotary angle of this block.
+    ///   - offset: The absolute position of the first token of this block.
+    /// - Returns: The attention output, shape
+    ///   `(batch, heads, tokens, headDim)`.
+    private func attentionOutput(
+        _ x: MLXArray,
+        queries: MLXArray,
+        keyValues: MLXArray,
+        queryResidual: MLXArray,
+        windowMask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?,
+        cos: MLXArray,
+        sin: MLXArray,
+        offset: Int
+    ) -> MLXArray {
+        let sinks = useAttnSink ? attnSink.asType(queries.dtype) : nil
+        guard let compressor else {
+            // `attentionWithCacheUpdate` feeds SDPA the very arrays the cache
+            // returned. A block that dropped that return and fed its own tensor
+            // instead leaks one Metal buffer for each layer and each token --
+            // `ml-explore/mlx-lm` issue 1662.
+            return attentionWithCacheUpdate(
+                queries: queries,
+                keys: keyValues,
+                values: keyValues,
+                cache: cache,
+                scale: scale,
+                mask: windowMask,
+                sinks: sinks)
+        }
+
+        let pooled = pooledChunks(x, compressor: compressor, cache: cache, offset: offset)
+        let windowKeys = cache.map { $0.update(keys: keyValues, values: keyValues).0 } ?? keyValues
+        guard pooled.attention.dim(Self.chunkAxis) > 0 else {
+            return MLXFast.scaledDotProductAttention(
+                queries: queries, keys: windowKeys, values: windowKeys,
+                scale: scale, mask: windowMask, sinks: sinks)
+        }
+
+        // The pooled chunks arrive as a second run of keys behind the window,
+        // thus the mask reads `[window visibility | chunk visibility]`.
+        let batch = x.dim(0)
+        let length = x.dim(1)
+        let chunkMask = chunkVisibility(
+            x, queryResidual: queryResidual, pooled: pooled, cos: cos, sin: sin,
+            offset: offset, batch: batch, length: length)
+        let joinedMask = concatenated(
+            [
+                broadcast(
+                    windowVisibility(windowMask, length: length, keyCount: windowKeys.dim(2)),
+                    to: [batch, 1, length, windowKeys.dim(2)]),
+                chunkMask,
+            ], axis: -1)
+        let keys = concatenated(
+            [windowKeys, pooled.attention.expandedDimensions(axis: Self.latentHeadAxis)],
+            axis: Self.keyAxis)
+        return MLXFast.scaledDotProductAttention(
+            queries: queries, keys: keys, values: keys,
+            scale: scale, mask: .array(joinedMask), sinks: sinks)
+    }
+
+    /// The axis a `(batch, chunks, headDim)` pool holds its chunks on.
+    private static let chunkAxis = 1
+
+    /// The axis a `(batch, heads, keys, width)` tensor holds its one latent
+    /// key/value head on.
+    private static let latentHeadAxis = 1
+
+    /// The axis a `(batch, heads, keys, width)` tensor holds its keys on.
+    private static let keyAxis = 2
+
+    /// The chunks of each branch of this layer.
+    private struct PooledChunks {
+        /// The chunks the compressor of the attention pooled, shape
+        /// `(batch, chunks, headDim)`.
+        let attention: MLXArray
+
+        /// The chunks the compressor inside the indexer pooled, or `nil` on a
+        /// layer that holds no indexer.
+        let indexer: MLXArray?
+    }
+
+    /// Pools one block into every branch of this layer.
+    ///
+    /// A run that keeps a cache pools through it, thus the chunks of every
+    /// earlier block stay and the tokens of a chunk that is not whole yet wait
+    /// for the block that ends it. A run that keeps no cache pools the block
+    /// it is given, which is the whole context of such a run.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, tokens, hidden)`.
+    ///   - compressor: The compressor of this layer.
+    ///   - cache: The key/value cache of this layer, or `nil`.
+    ///   - offset: The absolute position of the first token of this block.
+    /// - Returns: The chunks of each branch.
+    private func pooledChunks(
+        _ x: MLXArray, compressor: DeepSeekV4Compressor, cache: KVCache?, offset: Int
+    ) -> PooledChunks {
+        guard let cache else {
+            return PooledChunks(
+                attention: compressor(x, rope: rope, offset: offset),
+                indexer: indexer.map { $0.compressor(x, rope: rope, offset: offset) })
+        }
+        guard let pooledCache = cache as? DeepSeekV4Cache else {
+            preconditionFailure(
+                "a layer whose compress ratio is more than 0 needs a DeepSeekV4Cache, and it "
+                    + "got a \(type(of: cache)). Build the cache with "
+                    + "DeepSeekV4Model.newCache(parameters:).")
+        }
+        var indexerChunks: MLXArray?
+        if let branch = pooledCache.indexerChunks, let selector = indexer {
+            indexerChunks = branch.pooled(
+                x, through: selector.compressor, rope: rope, offset: offset)
+        }
+        return PooledChunks(
+            attention: pooledCache.attentionChunks.pooled(
+                x, through: compressor, rope: rope, offset: offset),
+            indexer: indexerChunks)
+    }
+
+    /// The chunks each query of this block reads.
+    ///
+    /// A layer that holds an indexer asks it, and the answer already holds the
+    /// block-causal rule. A layer that holds no indexer reads every chunk that
+    /// stands wholly behind its query.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, tokens, hidden)`.
+    ///   - queryResidual: The low-rank query of this block, after its norm.
+    ///   - pooled: The chunks of each branch.
+    ///   - cos: The cosine of each rotary angle of this block.
+    ///   - sin: The sine of each rotary angle of this block.
+    ///   - offset: The absolute position of the first token of this block.
+    ///   - batch: The number of sequences in this block.
+    ///   - length: The number of tokens in this block.
+    /// - Returns: The visibility, shape `(batch, 1, length, chunks)`.
+    private func chunkVisibility(
+        _ x: MLXArray,
+        queryResidual: MLXArray,
+        pooled: PooledChunks,
+        cos: MLXArray,
+        sin: MLXArray,
+        offset: Int,
+        batch: Int,
+        length: Int
+    ) -> MLXArray {
+        let chunkCount = pooled.attention.dim(Self.chunkAxis)
+        if let selector = indexer, let pooledKeys = pooled.indexer {
+            return selector(
+                x, queryResidual: queryResidual, pooledKeys: pooledKeys,
+                cos: cos, sin: sin, offset: offset)
+        }
+        let visible = DeepSeekV4Math.pooledChunkVisibility(
+            queryCount: length, offset: offset, chunkCount: chunkCount,
+            chunkWidth: compressorChunkWidth)
+        return broadcast(
+            visible.expandedDimensions(axis: Self.latentHeadAxis),
+            to: [batch, 1, length, chunkCount])
+    }
+
+    /// The number of raw positions one pooled chunk of this layer covers.
+    ///
+    /// A layer that holds no compressor never reads this, thus the fallback of
+    /// 1 stands for a layer that pools nothing.
+    private var compressorChunkWidth: Int {
+        compressor?.chunkWidth ?? 1
+    }
+
+    /// The window mask, as a Boolean array of the shape the joined mask needs.
+    ///
+    /// - Parameters:
+    ///   - mask: The mask the sliding window answered.
+    ///   - length: The number of tokens in this block.
+    ///   - keyCount: The number of keys the window holds.
+    /// - Returns: The visibility, shape `(1, 1, length, keyCount)`.
+    private func windowVisibility(
+        _ mask: MLXFast.ScaledDotProductAttentionMaskMode, length: Int, keyCount: Int
+    ) -> MLXArray {
+        switch mask {
+        case .array(let visible):
+            precondition(
+                visible.ndim == Self.windowMaskAxisCount,
+                "a window mask must hold one axis for the queries and one for the keys, and "
+                    + "this one holds \(visible.ndim)")
+            return visible.expandedDimensions(axes: [0, 1])
+        case .none:
+            // A block of one token reads every key the window holds, thus the
+            // window answers no mask at all.
+            return MLXArray.ones([1, 1, length, keyCount], dtype: .bool)
+        default:
+            preconditionFailure(
+                "a window mask taken with returnArray true must be an array or none, and this "
+                    + "one is \(mask)")
+        }
+    }
+
+    /// The number of axes a window mask array holds: one for the queries and
+    /// one for the keys.
+    private static let windowMaskAxisCount = 2
+
     /// Projects the queries, norms each head, and turns the rotary
     /// dimensions forward.
     ///
@@ -426,9 +666,9 @@ final class DeepSeekV4Attention: Module {
     /// divides by a mean of squares over 512 numbers, and float16 loses that
     /// sum.
     private func rotatedQueries(
-        _ x: MLXArray, batch: Int, length: Int, cos: MLXArray, sin: MLXArray
+        _ queryResidual: MLXArray, batch: Int, length: Int, cos: MLXArray, sin: MLXArray
     ) -> MLXArray {
-        let projected = wqB(qNorm(wqA(x))).reshaped(batch, length, headCount, headDim)
+        let projected = wqB(queryResidual).reshaped(batch, length, headCount, headDim)
         let wide = projected.asType(.float32)
         let normed = wide * rsqrt((wide * wide).mean(axis: -1, keepDims: true) + normEps)
         return DeepSeekV4Math.applyPartialRoPE(

@@ -1,8 +1,42 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '9880'
+comments:
+- actor: claude-code
+  id: 01kzyzgnwm38k9t7gxmx48dpfg
+  text: |
+    ### Research — the design the attention path needs
+
+    Folded with `^3x0krt4`: the same work.
+
+    **What the port has today**
+
+    - `DeepSeekV4ModelInner` builds one mask with `createAttentionMask(h:cache:)` and NO `windowSize:`, thus every layer attends densely.
+    - `newCache` comes from `KVCacheDimensionProvider`: 43 `KVCacheSimple` layers.
+    - `DeepSeekV4Attention` builds the compressor and the indexer and calls neither.
+
+    **Infrastructure this repository already gives**
+
+    - `RotatingKVCache(maxSize:keep:)`. Its `makeMask(n:windowSize:returnArray:)` gives the windowed causal mask a local window needs, and its `logicalView(tail:)` reads the ring without a write.
+    - `RotatingKVCache.isTrimmable` is `offset < maxSize`. A fresh cache is thus trimmable, which is what `everyCacheLayerRewinds` reads. After 128 tokens it is not, thus `RewindToCommonPrefixRule` cannot rescue a broken prefix — `ExtendCachedPrefixRule` is the rule requirement 3 rides on, and that rule needs no trim.
+    - Prefill runs in balanced chunks of at most 512 tokens (`PrefillParameters.defaultStepSize`). A chunk boundary is thus NOT a multiple of the compress ratio, which is why the pooled state needs a carry buffer.
+
+    **The pooled cache, and how it differs from the reference**
+
+    `scouzi1966/mlx-swift-lm` keeps the incomplete tail as PROJECTED `kv`/`gate` rows and holds a hand-written overlap accumulator (`accumulateOverlapWindows`) for the ratio-4 layers. This port keeps the incomplete tail as RAW hidden rows and re-pools them, because:
+
+    - `DeepSeekV4Compressor` is already tested as a stateless pooler with 12 tests and six mutation proofs. A raw carry feeds that very code and needs no second pooling path.
+    - An overlapping layer keeps one MORE whole chunk of raw rows and drops the first pooled row of each call. Chunk `c` then reads chunk `c - 1`'s leading half from the real tokens rather than from the `-inf` padding the first row takes.
+    - The two branches of a ratio-4 layer (the attention compressor and the compressor inside the indexer) pool the SAME raw rows at the same ratio, thus one carry serves both and only the two pooled tensors differ.
+
+    Cost: at most `2 * ratio` rows are re-projected for each call. On a ratio-128 layer that is 256 rows through two 4096x512 linears for each decode step, which is under 1 percent of a 0.60 s step.
+
+    **The selection is a mask, not a gather**
+
+    `DeepSeekV4Indexer` answers a Boolean mask that already holds the causal rule. The reference gathers the top-k rows instead. A mask gives the same numbers, because a masked chunk takes no softmax weight, and it keeps the one selection path for prefill and decode.
+  timestamp: 2026-08-14T01:52:18.836301+00:00
+position_column: doing
+position_ordinal: '8280'
 title: 'Read the pooled chunks in DeepSeek-V4 attention: the sparse path and its pooled cache'
 ---
 ## What

@@ -26,13 +26,13 @@
 //     `mtp.*` and builds a DSpark drafter from it. The Python reference drops
 //     every `mtp.` key, and this repository carries no DSpark type, thus the
 //     load filter drops them here.
-//  3. **The compressor and the indexer both load, and neither runs yet.** The
-//     file above keeps `attn.compressor.*` and `attn.indexer.*` and wires
-//     them into its attention. ``DeepSeekV4Attention`` holds the indexer and
-//     the compressor, thus every one of those tensors loads, and the
-//     attention path reads neither: sparse attention needs the pooled cache
-//     that Libraries/MLXLLM/Models/DeepSeekV4Compressor.swift records. No
-//     sparse-attention key is dropped.
+//  3. **The pooled cache keeps RAW rows, not projected rows.** The file above
+//     keeps the incomplete tail of a chunk as `wkv` and `wgate` output and
+//     holds a second pooling path for it. This port keeps the raw block rows
+//     and re-pools them through the one pooling path
+//     ``DeepSeekV4Compressor`` has --
+//     Libraries/MLXLLM/Models/DeepSeekV4Cache.swift records the whole
+//     difference. No sparse-attention key is dropped either way.
 //  4. **The language-model head is optional.** The file above declares a
 //     non-optional `lm_head`. `MLXLMCommon.loadWeights` verifies with
 //     `.allModelKeysSet`, thus a checkpoint whose `tie_word_embeddings` is
@@ -56,13 +56,11 @@
 //    `DeepseekV4Block.__init__` of the Python reference builds a
 //    `DeepseekV4MoE` for every layer, and DeepSeek-V4 `config.json` carries no
 //    `first_k_dense_replace` key for a dense prefix to read.
-//  - **The cache is the one `KVCacheDimensionProvider` gives.** The file above
-//    allocates a `RotatingKVCache` for a layer whose compress ratio is 0 and a
-//    compressing cache for every other layer. A rotating window is correct
-//    only where the attention path reads the pooled chunks of the compressor
-//    beside it, and this attention path reads no pooled chunk yet, thus a
-//    window here would silently lose context. A plain cache keeps every key
-//    until sparse attention lands.
+//  - **The cache is the one the sparse path needs.** `newCache` below gives a
+//    `RotatingKVCache` to a layer whose compress ratio is 0 and a
+//    ``DeepSeekV4Cache`` to every other layer, which is what the file above
+//    does as well. The window is only correct beside a path that reads the
+//    pooled chunks, thus the two landed together.
 
 import Foundation
 import MLX
@@ -279,11 +277,15 @@ public final class DeepSeekV4ModelInner: Module {
     /// The number of parallel copies of the residual stream.
     private let hcMult: Int
 
+    /// The number of most recent keys every layer reads directly.
+    private let slidingWindow: Int
+
     /// Builds the decoder stack of one checkpoint.
     ///
     /// - Parameter configuration: The configuration of the checkpoint.
     init(configuration: DeepSeekV4Configuration) {
         self.hcMult = configuration.hcMult
+        self.slidingWindow = configuration.slidingWindow
         self._embedTokens.wrappedValue = Embedding(
             embeddingCount: configuration.vocabSize, dimensions: configuration.hiddenSize)
         self.layers = (0 ..< configuration.numHiddenLayers).map {
@@ -310,8 +312,15 @@ public final class DeepSeekV4ModelInner: Module {
         let embedded = embedTokens(inputs)
         DeepSeekV4NumericTrace.tensor("embedding", embedded)
 
-        // The mask reads one copy of the stream, which is the embedding itself.
-        let mask = createAttentionMask(h: embedded, cache: cache?.first)
+        // The mask reads one copy of the stream, which is the embedding
+        // itself. EVERY DeepSeek-V4 layer attends inside `sliding_window`: a
+        // layer whose compress ratio is 0 reads that window and nothing else,
+        // and a layer that holds a compressor reads it beside the pooled
+        // chunks of everything before it. Without the window here the layers
+        // trained for a 128-key neighbourhood attend over the whole prompt and
+        // the answer degenerates past that length.
+        let mask = createAttentionMask(
+            h: embedded, cache: cache?.first, windowSize: slidingWindow)
         var stream = MLX.repeated(
             embedded.expandedDimensions(axis: ResidualStreamAxis.copy),
             count: hcMult, axis: ResidualStreamAxis.copy)
@@ -373,6 +382,26 @@ public final class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, 
         let logits = lmHead.map { $0(hidden) } ?? model.embedTokens.asLinear(hidden)
         DeepSeekV4NumericTrace.tensor("logits", logits)
         return logits
+    }
+
+    /// Builds one key/value cache for each decoder layer.
+    ///
+    /// A layer whose compress ratio is 0 reads the sliding window alone, thus
+    /// a plain rotating window holds everything it can see. A layer that holds
+    /// a compressor reads that window AND the pooled chunks of everything
+    /// before it, thus it takes a ``DeepSeekV4Cache``, which holds both.
+    ///
+    /// - Parameter parameters: The generation parameters. DeepSeek-V4 reads no
+    ///   requested capacity from them, because its window is the window the
+    ///   architecture states.
+    /// - Returns: One cache for each layer, in layer order.
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        (0 ..< configuration.numHiddenLayers).map { layer -> KVCache in
+            guard configuration.hasCompressor(layer: layer) else {
+                return RotatingKVCache(maxSize: configuration.slidingWindow, keep: 0)
+            }
+            return DeepSeekV4Cache(configuration: configuration, layer: layer)
+        }
     }
 
     /// The layers a LoRA adapter attaches to.

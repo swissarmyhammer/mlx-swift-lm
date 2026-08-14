@@ -11,11 +11,13 @@
 //
 // Five details do not come from that file.
 //
-//  1. **No pooled cache.** The file above keeps its pooled chunks, and the
-//     tokens of an incomplete chunk, in a `DeepseekV4Cache` that lives across
-//     calls, and it takes that cache as an argument. This repository holds no
-//     such cache. This file therefore pools the block it is given and holds no
-//     state, which is the `v4Cache == nil` path of the file above.
+//  1. **The pooling holds no state.** The file above takes a
+//     `DeepseekV4Cache` as an argument and writes its pooled chunks into it.
+//     This file pools the block it is given and holds nothing, which is the
+//     `v4Cache == nil` path of the file above.
+//     ``DeepSeekV4ChunkCache`` in Libraries/MLXLLM/Models/DeepSeekV4Cache.swift
+//     is what keeps the chunks across calls, and it drives this file rather
+//     than living inside it.
 //  2. **Any batch size.** `updateProjected` of the file above opens with
 //     `precondition(projectedKV.dim(0) == 1 && projectedGate.dim(0) == 1)`,
 //     because its pool windows and its offsets belong to one request. Nothing
@@ -35,11 +37,10 @@
 //     Libraries/MLXLLM/Models/DeepSeekV4Attention.swift records. This file
 //     asks ``DeepSeekV4RoPE/cosSin(positions:)`` for the tables instead.
 //
-// The pooled chunks reach no caller yet. ``DeepSeekV4Attention`` and
-// ``DeepSeekV4Indexer`` each hold a compressor, thus the `attn.compressor.*`
-// and `attn.indexer.compressor.*` tensors of the checkpoint load, and the
-// attention path reads the chunks when sparse attention lands beside the
-// pooled cache of point 1.
+// ``DeepSeekV4Attention`` and ``DeepSeekV4Indexer`` each hold a compressor,
+// thus the `attn.compressor.*` and `attn.indexer.compressor.*` tensors of the
+// checkpoint load. The attention path pools every block through them and
+// attends over the chunks beside its sliding window.
 
 import Foundation
 import MLX

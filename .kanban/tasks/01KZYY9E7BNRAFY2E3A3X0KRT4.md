@@ -1,8 +1,8 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '9980'
+position_column: doing
+position_ordinal: '8380'
 title: DeepSeek-V4 writes gibberish on a prompt of more than a few hundred tokens
 ---
 Measured on 2026-08-13 against `mlx-community/DeepSeek-V4-Flash-4bit` with the real weights.
