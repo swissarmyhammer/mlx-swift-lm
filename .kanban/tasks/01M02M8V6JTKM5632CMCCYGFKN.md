@@ -39,8 +39,53 @@ comments:
     - evidence: 1 file — Libraries/MLXLLM/Models/DeepSeekV4.swift (26 insertions, 16 deletions, comments only; `git diff` shows no code line). `review file` gives 0 `missing-docs-swift` findings and 0 `swift/documentation` findings (9 validators attempted, 0 failed, 0 skipped). `swift build` exits 0. `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1 swift test` exits 0 with 1030 tests (0 + 140 + 69 + 7 + 814) in 109 suites and 0 failures; the 3 warnings are the SwiftPM package warnings that stand before this change. `swift format lint --strict --configuration .swift-format` exits 0, and `swift format` gives the file back unchanged (empty diff).
     - next: /review. The `complexity/cognitive-complexity` finding on `stackRoutedExperts` is open on task `^zyhhbfx`.
   timestamp: 2026-08-15T12:29:53.976282+00:00
-position_column: doing
-position_ordinal: '8480'
+- actor: claude-code
+  id: 01m02pznr4kepj98xwzajkmbj1
+  text: |
+    ### review — clean
+    - evidence: `review sha d0c75e2~1..d0c75e2` — 0 findings, 0 confirmed, 0 refuted; 9 validators attempted, 0 failed, 0 skipped; 1 file reviewed, 0 not reviewed. Every prior checklist item is checked (1 finding item, 5 acceptance criteria). No open `## Review Findings` item.
+    - next: none. The card moves to `done`. The `complexity/cognitive-complexity` finding on `stackRoutedExperts` stays on task ^zyhhbfx; this pass did not raise it again.
+  timestamp: 2026-08-15T12:40:10.756621+00:00
+- actor: claude-code
+  id: 01m02q0qe4ebzgxkzgg6wnb1wm
+  text: |-
+    ### finish iteration 1 — clean
+
+    - implement: changed — `Libraries/MLXLLM/Models/DeepSeekV4.swift`, +26/-16, comments only.
+      `toolCallFormat` gained a documentation comment that names the DSML syntax, and
+      four comments gained the blank `///` line between summary and elaboration.
+    - test: green — `swift build` clean, `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1 swift test`
+      1030 tests and 0 failures at the checkpoint, `swift format lint --strict` exit 0.
+    - commit: d0c75e2 docs(mlx-lm): give the DeepSeek-V4 tool-call declaration a doc comment
+    - review: clean — `review sha d0c75e2~1..d0c75e2`, 0 findings, 9 validators attempted,
+      0 failed, 0 skipped, 1 file reviewed.
+
+    The card is in `done`.
+
+    ### After the checkpoint
+
+    The user asked for a merge of `stable` into `catch-up-upstream`. That merge
+    (`dc0c8b6`) and its fix-up (`7c2450d`) landed after this card's checkpoint and
+    belong to no card. The suite is green after both: 1040 tests, 0 failures.
+
+    ### Recorded elsewhere, and it needs a person to confirm
+
+    The implement pass met one finding it could not act on, because this card states
+    "comments only":
+
+    - `Libraries/MLXLLM/Models/DeepSeekV4.swift` `complexity/cognitive-complexity` —
+      Function has 4 levels of nesting (for layer -> for projection -> for tensor ->
+      map closure), making control flow and reasoning about behavior harder. Extract
+      the innermost operation into a named helper function. For example, refactor the
+      map and stackPerExpertWeights call into a single method that takes layer,
+      projection, and tensor as parameters, reducing the nesting depth from 4 to 2 or 3.
+
+    The pass opened task `^zyhhbfx` for it rather than correcting it here. The final
+    review did not raise it again. A person must say whether that deferral is correct,
+    or whether the finding should have landed on this card.
+  timestamp: 2026-08-15T12:40:45.252872+00:00
+position_column: done
+position_ordinal: ff8280
 title: Give the DeepSeekV4Model chat-convention declaration a documentation comment
 ---
 ## What
