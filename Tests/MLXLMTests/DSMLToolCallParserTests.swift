@@ -150,6 +150,91 @@ struct DSMLToolCallParserTests {
         #expect(calls.last?.function.arguments["timezone"] == .string("CET"))
     }
 
+    // MARK: - The round trip
+
+    /// One call whose parameter names are NOT in alphabetical order.
+    ///
+    /// A render that sorts the names writes `cursor`, `loc`, `path`. Thus a
+    /// byte comparison against this fixture fails as soon as the order of the
+    /// model is lost.
+    private static let unsortedCall = """
+        <｜DSML｜tool_calls>
+        <｜DSML｜invoke name="view_file">
+        <｜DSML｜parameter name="path" string="true">/tmp/notes.txt</｜DSML｜parameter>
+        <｜DSML｜parameter name="cursor" string="false">3</｜DSML｜parameter>
+        <｜DSML｜parameter name="loc" string="false">[1, 2]</｜DSML｜parameter>
+        </｜DSML｜invoke>
+        </｜DSML｜tool_calls>
+        """
+
+    /// The tag that opens a DSML block of calls.
+    private static let toolCallsOpenTag = "<｜DSML｜tool_calls>"
+
+    /// The tag that closes a DSML block of calls.
+    private static let toolCallsCloseTag = "</｜DSML｜tool_calls>"
+
+    /// The DSML block of calls that one prompt holds.
+    ///
+    /// - Parameter prompt: the prompt to read.
+    /// - Returns: the block, or `nil` when the prompt holds none.
+    private static func toolCallsBlock(of prompt: String) -> String? {
+        guard let open = prompt.range(of: toolCallsOpenTag),
+            let close = prompt.range(of: toolCallsCloseTag)
+        else { return nil }
+        return String(prompt[open.lowerBound ..< close.upperBound])
+    }
+
+    /// Renders one assistant turn of calls through the DeepSeek-V4 prompt path.
+    ///
+    /// The path is the one a second round of a conversation takes: the message
+    /// generator writes the raw dictionary of the turn, and the encoder renders
+    /// that dictionary again.
+    ///
+    /// - Parameter calls: the calls of the turn.
+    /// - Returns: the prompt.
+    private static func rendered(_ calls: [ToolCall]) -> String {
+        let raw = DefaultMessageGenerator().generate(messages: [.assistant("", toolCalls: calls)])
+        return DeepSeekV4ChatEncoder().encode(
+            messages: DeepSeekV4ChatEncoder.Message.messages(from: raw), thinkingMode: .chat)
+    }
+
+    @Test("a parsed call renders again with the parameter order of the model")
+    func roundTripKeepsTheParameterOrderOfTheModel() throws {
+        let parser = ToolCallFormat.dsml.createParser()
+        let calls = parser.parseEOS(Self.unsortedCall, tools: nil)
+
+        let block = try #require(Self.toolCallsBlock(of: Self.rendered(calls)))
+        #expect(block == Self.unsortedCall)
+    }
+
+    @Test("the parser records the arguments as JSON text in the order of the model")
+    func parseRecordsArgumentsJSONInTheOrderOfTheModel() throws {
+        let parser = ToolCallFormat.dsml.createParser()
+        let call = try #require(parser.parse(content: Self.unsortedCall, tools: nil))
+
+        #expect(
+            call.function.argumentsJSON
+                == #"{"path": "/tmp/notes.txt", "cursor": 3, "loc": [1, 2]}"#)
+    }
+
+    @Test("a call that records no order still renders every argument")
+    func callWithoutRecordedOrderStillRendersEveryArgument() throws {
+        let call = ToolCall(
+            function: .init(name: "view_file", arguments: ["path": "/tmp/notes.txt", "cursor": 3]))
+
+        let block = try #require(Self.toolCallsBlock(of: Self.rendered([call])))
+        #expect(call.function.argumentsJSON == nil)
+        #expect(
+            block == """
+                <｜DSML｜tool_calls>
+                <｜DSML｜invoke name="view_file">
+                <｜DSML｜parameter name="cursor" string="false">3</｜DSML｜parameter>
+                <｜DSML｜parameter name="path" string="true">/tmp/notes.txt</｜DSML｜parameter>
+                </｜DSML｜invoke>
+                </｜DSML｜tool_calls>
+                """)
+    }
+
     // MARK: - Streaming
 
     @Test("the streaming processor extracts the call and keeps the prose")

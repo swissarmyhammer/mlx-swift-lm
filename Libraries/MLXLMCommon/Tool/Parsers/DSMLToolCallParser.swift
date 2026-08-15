@@ -74,8 +74,7 @@ public struct DSMLToolCallParser: ToolCallParser, Sendable {
     ///   - tools: Unused — see ``parse(content:tools:)``.
     /// - Returns: The tool calls recovered from `toolCallBuffer`, in the
     ///   order they appear.
-    public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall]
-    {
+    public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         Self.extractToolCalls(from: toolCallBuffer)
     }
 
@@ -96,14 +95,32 @@ public struct DSMLToolCallParser: ToolCallParser, Sendable {
             searchRange = close.upperBound ..< content.endIndex
 
             guard !name.isEmpty else { continue }
-            calls.append(ToolCall(function: .init(name: name, arguments: arguments(in: body))))
+            let elements = parameters(in: body)
+            calls.append(
+                ToolCall(
+                    function: .init(
+                        name: name, arguments: arguments(of: elements),
+                        argumentsJSON: argumentsJSON(of: elements))))
         }
         return calls
     }
 
-    /// Parses the parameter elements of one invoke body into its arguments.
-    private static func arguments(in body: String) -> [String: any Sendable] {
-        var arguments: [String: any Sendable] = [:]
+    /// One `<｜DSML｜parameter>` element of an invoke.
+    private struct Parameter {
+        /// The name of the parameter.
+        let name: String
+        /// The value, in the Swift form that ``ToolCall`` carries.
+        let value: any Sendable
+        /// The value, in the JSON form that keeps the text of the model.
+        let json: PythonStyleJSON
+    }
+
+    /// Reads the parameter elements of one invoke body.
+    ///
+    /// - Parameter body: the text between the two invoke tags.
+    /// - Returns: the parameters, in the order the model wrote them.
+    private static func parameters(in body: String) -> [Parameter] {
+        var parameters: [Parameter] = []
         var searchRange = body.startIndex ..< body.endIndex
         while let open = body.range(of: parameterOpen, range: searchRange) {
             guard
@@ -116,11 +133,40 @@ public struct DSMLToolCallParser: ToolCallParser, Sendable {
             let value = String(body[headerEnd.upperBound ..< close.lowerBound])
             searchRange = close.upperBound ..< body.endIndex
 
-            let (name, argument) = argument(header: header, value: value)
-            guard !name.isEmpty else { continue }
-            arguments[name] = argument
+            let element = parameter(header: header, value: value)
+            guard !element.name.isEmpty else { continue }
+            parameters.append(element)
+        }
+        return parameters
+    }
+
+    /// The arguments of one call, by name.
+    ///
+    /// A name that the model wrote twice keeps the value that comes last, which
+    /// is what a Swift `Dictionary` does.
+    ///
+    /// - Parameter parameters: the parameters of the call.
+    /// - Returns: the arguments.
+    private static func arguments(of parameters: [Parameter]) -> [String: any Sendable] {
+        var arguments: [String: any Sendable] = [:]
+        for parameter in parameters {
+            arguments[parameter.name] = parameter.value
         }
         return arguments
+    }
+
+    /// The arguments of one call, as JSON text in the order of the model.
+    ///
+    /// ``DeepSeekV4ChatEncoder`` writes one DSML parameter for each member of
+    /// this text, in the order of the text, thus a replayed call reproduces the
+    /// parameter order the model wrote.
+    ///
+    /// - Parameter parameters: the parameters of the call.
+    /// - Returns: the JSON text.
+    private static func argumentsJSON(of parameters: [Parameter]) -> String {
+        PythonStyleJSON.object(
+            parameters.map { PythonStyleJSON.Member(key: $0.name, value: $0.json) }
+        ).pythonStyleText
     }
 
     /// Splits one parameter header into its name and its converted value.
@@ -129,15 +175,20 @@ public struct DSMLToolCallParser: ToolCallParser, Sendable {
     /// decodes it as JSON. A header without the attribute — which the
     /// reference never writes — falls back to the same JSON decode the
     /// `false` flag asks for, so a bare number still comes through typed.
-    private static func argument(
-        header: String, value: String
-    ) -> (name: String, argument: any Sendable) {
+    ///
+    /// - Parameters:
+    ///   - header: the text between the parameter tag name and its `>`.
+    ///   - value: the text between the two parameter tags.
+    /// - Returns: the parameter.
+    private static func parameter(header: String, value: String) -> Parameter {
         guard let attribute = header.range(of: stringAttribute) else {
-            return (extractName(header), decodedJSON(value))
+            return decoded(name: extractName(header), value: value)
         }
         let name = extractName(String(header[..<attribute.lowerBound]))
         let isString = extractName(String(header[attribute.upperBound...])) == "true"
-        return (name, isString ? value : decodedJSON(value))
+        return isString
+            ? Parameter(name: name, value: value, json: .string(value))
+            : decoded(name: name, value: value)
     }
 
     /// Decodes one `string="false"` value as JSON.
@@ -145,10 +196,24 @@ public struct DSMLToolCallParser: ToolCallParser, Sendable {
     /// `.fragmentsAllowed` accepts the bare scalars the format carries
     /// (`3`, `true`) beside objects and arrays. Text that is not JSON comes
     /// back as it is, the same fallback the upstream parser uses.
-    private static func decodedJSON(_ value: String) -> any Sendable {
+    ///
+    /// ``PythonStyleJSON/parse(_:)`` keeps the digits of each number as the
+    /// model wrote them, thus it reads the JSON form first. Text that only
+    /// `JSONSerialization` reads takes the JSON form of the decoded value, thus
+    /// the two forms of the parameter always carry the same value.
+    ///
+    /// - Parameters:
+    ///   - name: the name of the parameter.
+    ///   - value: the text between the two parameter tags.
+    /// - Returns: the parameter.
+    private static func decoded(name: String, value: String) -> Parameter {
         guard let data = value.data(using: .utf8),
-            let decoded = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
-        else { return value }
-        return asSendable(decoded)
+            let decoded = try? JSONSerialization.jsonObject(
+                with: data, options: [.fragmentsAllowed])
+        else { return Parameter(name: name, value: value, json: .string(value)) }
+        let argument = asSendable(decoded)
+        return Parameter(
+            name: name, value: argument,
+            json: PythonStyleJSON.parse(value) ?? PythonStyleJSON(sendable: argument))
     }
 }
