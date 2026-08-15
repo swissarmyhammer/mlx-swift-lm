@@ -265,8 +265,23 @@ comments:
         changed Swift file.
     - next: `/review`
   timestamp: 2026-08-15T22:51:04.546161+00:00
-position_column: doing
-position_ordinal: '8580'
+- actor: claude-code
+  id: 01m03taphbq6808b1tybzxta09
+  text: |
+    ### review — clean
+
+    - evidence: `review sha 9d574be~1..9d574be`. 0 findings, 0 confirmed, 0 refuted. 16 Swift files reviewed, 0 not reviewed; 9 validators attempted, 0 failed, 0 skipped. The 9 are every validator whose glob covers `*.swift`: swift, code-hygiene, code-security, completeness, complexity, duplication, missing-docs, reuse, test-integrity. The other 3 files of the 19 are the two kanban files and `docs/deepseek-v4-support.md`.
+    - out-of-diff findings discarded: 0. The engine raised no candidate at all, thus none needed the standing rule.
+    - order of the raise: confirmed. `loadWeights` awaits `ModelWeightResidency.shared.raise(toCoverWeightBytes:)` before the `for url in weightURLs` loop that calls `loadArraysAndMetadata`. Nothing is allocated to measure the size, because `weightFileBytes(of:)` reads the file system.
+    - the limit never falls: confirmed. `raise` returns early unless `requestedBytes > highWaterMarkBytes`, and it starts the new ticket before it ends the ticket it replaces.
+    - symlink resolution: confirmed. `weightFileBytes(of:)` calls `resolvingSymlinksInPath()` before it reads `.fileSizeKey`. `aSymbolicLinkCountsTheSizeOfItsTarget` makes a real symbolic link to an 8 MiB blob and expects 8 MiB, thus it goes red if the resolution is removed.
+    - clamp and no-op path: confirmed. `min(recommended, limitBytes(forWeightBytes:))` clamps to `GPU.maxRecommendedWorkingSetBytes()`, and a `nil` from `recommendedWorkingSetBytes()` returns the outcome unchanged.
+    - async propagation: no behavior change beyond `await`. The one other change is `recommendedWorkingSetBytes()` losing `private` so that `WeightResidency.swift` can call it.
+    - test integrity: all 4 tests can fail. `safetensorWeightURLs` sorts the index values, thus `a-absent.safetensors` is read first and the ordering test truly allocates nothing before it throws.
+    - next: none. Every acceptance item was already checked and no prior review section existed, thus the card moves to done.
+  timestamp: 2026-08-15T22:57:52.171494+00:00
+position_column: done
+position_ordinal: ff8680
 title: 'Wired memory: a ticket taken at generate time is too late, thus every large model pays a per-token residency cost'
 ---
 ## What
