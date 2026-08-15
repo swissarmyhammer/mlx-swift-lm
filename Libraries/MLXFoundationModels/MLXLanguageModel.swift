@@ -1874,6 +1874,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
             var reasoningTokenCount = 0
             var completionInfo: GenerateCompletionInfo?
+            // Surfaced as a thrown error, as on the schema and allowed-tool
+            // paths: this path passes no tools, so a tool-call-shaped output is
+            // never executable.
+            var rejectedToolCall: RejectedToolCall?
             let (stream, task) = try generateProtocolTokensTask(
                 input: input,
                 parameters: params,
@@ -1896,6 +1900,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 case .reasoning(let text): segments.append(.reasoning(text))
                                 case .response(let text): segments.append(.response(text))
                                 case .toolCall: break
+                                case .rejectedToolCall(let rejection):
+                                    rejectedToolCall = rejection
+                                    shouldContinue = false
                                 case .protocolError(let message):
                                     Self.protocolLogger.error("\(message)")
                                 case .stop: shouldContinue = false
@@ -1907,6 +1914,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 await Self.send(
                                     segment, responseEntryID: responseEntryID,
                                     reasoningEntryID: reasoningEntryID, channel: channel)
+                            }
+                            if let rejection = rejectedToolCall {
+                                throw RejectedToolCallError(rejection)
                             }
                             if !decoderContinues || !shouldContinue {
                                 task.cancel()
@@ -1949,6 +1959,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     case .reasoning(let text): segments.append(.reasoning(text))
                     case .response(let text): segments.append(.response(text))
                     case .toolCall, .stop: break
+                    case .rejectedToolCall(let rejection):
+                        rejectedToolCall = rejection
                     case .protocolError(let message):
                         Self.protocolLogger.error("\(message)")
                     }
@@ -1960,6 +1972,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         reasoningEntryID: reasoningEntryID, channel: channel)
                 }
                 protocolDecoder = decoder
+                if let rejection = rejectedToolCall {
+                    throw RejectedToolCallError(rejection)
+                }
             } else {
                 for segment in emitter.finalize() {
                     await Self.send(
