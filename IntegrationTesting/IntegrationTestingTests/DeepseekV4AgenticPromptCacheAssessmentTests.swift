@@ -191,6 +191,12 @@ private func collect(
             text += chunk
         case .toolCall(let call):
             toolCalls.append(call)
+        case .rejectedToolCall(let rejection):
+            // The model wrote tool-call-shaped output that the parser or the
+            // authorization step refused. An assessment that drops it silently
+            // reads as "the model made no call", which is a different fault.
+            throw IntegrationTestFailure(
+                "a generation pass rejected a tool call: \(rejection)")
         case .info(let info):
             completionInfo = info
         }

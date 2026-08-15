@@ -439,6 +439,11 @@ struct DeepseekV4IntegrationTests {
                 text += chunk
             case .toolCall(let call):
                 calls.append(call)
+            case .rejectedToolCall(let rejection):
+                // DeepSeek-V4 writes its calls in DSML. A rejection here means
+                // the parser did not read that markup, thus the test must show
+                // it rather than report an empty call list.
+                Issue.record("the model wrote a tool call the parser rejected: \(rejection)")
             case .info:
                 break
             }
