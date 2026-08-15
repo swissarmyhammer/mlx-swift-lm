@@ -791,6 +791,26 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// `GenerationOptions(maximumResponseTokens:)`.
         private static let defaultMaxTokens = 4096
 
+        /// The prompt tokens that cache reuse skipped, for the
+        /// `cachedTokenCount` of every usage event this executor emits.
+        ///
+        /// The value is zero, and it is a MEASURED value rather than a
+        /// placeholder. This executor keeps no KV cache between responses:
+        /// `respond(to:model:streamingInto:)` renders the whole transcript
+        /// again on each call, and each generation entry point it reaches --
+        /// `MLXLMCommon.generate(input:parameters:context:)`,
+        /// `generateProtocolTokensTask(input:parameters:context:decoder:)` and
+        /// `GuidedGenerationLoop.run` -- takes the default `cache: nil`. Thus
+        /// `TokenIterator` builds new cache state for each request, and no
+        /// token of an earlier turn is ever reused. The reused count is
+        /// exactly zero.
+        ///
+        /// `GenerateCompletionInfo` carries no reuse count either, thus there
+        /// is no other number to report. Give this a real count only when the
+        /// executor keeps a prompt cache across turns; card ^z2996cp holds the
+        /// measurement.
+        private static let reusedPromptTokenCount = 0
+
         /// Map FoundationModels' optional `Double` `GenerationOptions.temperature`
         /// to MLXLMCommon's `Float` `GenerateParameters.temperature`, clamping
         /// negatives to 0.
@@ -1425,7 +1445,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             await Self.emitUsage(
                                 input: .init(
                                     totalTokenCount: toolAwareInput.text.tokens.size,
-                                    cachedTokenCount: 0),
+                                    cachedTokenCount: Self.reusedPromptTokenCount),
                                 output: .init(
                                     totalTokenCount: totalOutput,
                                     reasoningTokenCount: Swift.min(reasoningCount, totalOutput)),
@@ -1651,7 +1671,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             await Self.emitUsage(
                 input: .init(
                     totalTokenCount: info.promptTokenCount,
-                    cachedTokenCount: 0),
+                    cachedTokenCount: Self.reusedPromptTokenCount),
                 output: .init(
                     totalTokenCount: info.generationTokenCount,
                     reasoningTokenCount: min(
@@ -1741,7 +1761,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 await Self.emitUsage(
                     input: .init(
                         totalTokenCount: input.text.tokens.size,
-                        cachedTokenCount: 0),
+                        cachedTokenCount: Self.reusedPromptTokenCount),
                     output: .init(
                         totalTokenCount: generatedTokenCount,
                         reasoningTokenCount: 0),
@@ -1790,7 +1810,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // model-generated completion -- see Evaluate.swift's
                     // `GenerateCompletionInfo` definition).
                     await Self.emitUsage(
-                        input: .init(totalTokenCount: info.promptTokenCount, cachedTokenCount: 0),
+                        input: .init(
+                            totalTokenCount: info.promptTokenCount,
+                            cachedTokenCount: Self.reusedPromptTokenCount),
                         output: .init(
                             totalTokenCount: info.generationTokenCount, reasoningTokenCount: 0),
                         entryID: entryID, into: channel)
@@ -2000,7 +2022,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // so we must not also rely on per-delta auto-summing). The
                 // reasoning count is clamped to never exceed the total.
                 await Self.emitUsage(
-                    input: .init(totalTokenCount: info.promptTokenCount, cachedTokenCount: 0),
+                    input: .init(
+                        totalTokenCount: info.promptTokenCount,
+                        cachedTokenCount: Self.reusedPromptTokenCount),
                     output: .init(
                         totalTokenCount: info.generationTokenCount,
                         reasoningTokenCount: min(reasoningTokenCount, info.generationTokenCount)),
