@@ -1,0 +1,33 @@
+---
+assignees:
+- claude-code
+comments:
+- actor: claude-code
+  id: 01kx2hpnrrzhrz9vtgx79whv38
+  text: |-
+    Implementation done, verification green, adversarial double-check in progress.
+
+    Change: `Libraries/MLXFoundationModels/TranscriptConverter.swift` — added an `includeStructure: Bool = false` parameter to the private `extractText(from:)` helper (delegates to `extractConcatenatedText`). The `.response` call site in `mlxMessages(for:)` now passes `includeStructure: true`, so a prior turn's guided/structured generation (a `.structure` segment) survives transcript replay instead of being silently dropped. The `.instructions`/`.prompt` call site (via `makeTextImageMessage`) is untouched — it calls `extractText(from: segments)` with no explicit argument, so it keeps the default `false` and stays `.text`-only.
+
+    TDD: added `testStructuredResponseSegmentCarriesJSONContent` to `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift` (mirrors the existing `testStructuredToolOutputCarriesJSONContent` style) — builds a `.response` entry with a `.structure` segment and asserts the converted assistant message's content contains the structured JSON. Confirmed RED first (messages.count == 0, then a force-unwrap fatal error) against the pre-fix code, then applied the fix and confirmed GREEN.
+
+    Verification:
+    - `swift build`: clean (only a pre-existing, unrelated deprecation warning in MLXLanguageModel.swift).
+    - `xcodebuild build-for-testing -scheme mlx-swift-lm-Package -destination 'platform=macOS' -clonedSourcePackagesDirPath .build -disableAutomaticPackageResolution -skipPackagePluginValidation`: TEST BUILD SUCCEEDED.
+    - `xcrun xctest <bundle>` (unfiltered, each under `timeout`, no `-XCTest` filtering, no piping through `tail`) for all four mandated bundles, all exit 0 / 0 failures:
+      - CXGrammarTests: 7 tests passed.
+      - MLXGuidedGenerationTests: 60 checks passed.
+      - MLXFoundationModelsTests: 114 tests / 115 checks passed (includes the new regression test).
+      - MLXLMTests: 172 legacy XCTest + Swift Testing checks passed.
+
+    Scope: left the separately-tracked tool-output image/`.attachment` dropping issue untouched, per task instructions. Not committing — leaving that to the orchestrator. Task left in `doing` for review.
+  timestamp: 2026-07-09T04:20:47.512651+00:00
+- actor: claude-code
+  id: 01kx2hvnpzvx33evcebr8eewn9
+  text: 'Adversarial double-check (double-check agent) verdict: PASS. Confirmed the diff matches the intended fix exactly, `.instructions`/`.prompt` call sites are unaffected (only two call sites of `extractText` exist in the codebase), the new regression test genuinely exercises the `.structure`-on-`.response` path and would crash/fail pre-fix, and scope is limited to the two named files with the out-of-scope tool-output image issue untouched. Task remains in `doing`, ready for `/review`.'
+  timestamp: 2026-07-09T04:23:31.295159+00:00
+position_column: done
+position_ordinal: '8480'
+title: Route .response transcript entries through includeStructure:true so guided-generation output survives replay
+---
+`TranscriptConverter.swift` (Libraries/MLXFoundationModels/TranscriptConverter.swift) has since been refactored: `extractText` and `extractToolOutputText` now both delegate to a shared `extractConcatenatedText(from:includeStructure:logContext:)`, with `extractText` hardcoded to `includeStructure: false` and `extractToolOutputText` to `includeStructure: true`. The duplication finding from the mechanical review is already resolved — this task is narrower than originally scoped.\n\nRemaining bug: the `.response` case (line ~53-59) calls `extractText(from: response.segments)`, which passes `includeStructure: false`. When a prior turn's response was a guided/structured generation (a `Generable` result carried as a `.structure` segment), that content is silently dropped when the transcript is replayed for the next turn — `.text`-only content survives, structured content does not.\n\nFix: give `.response` entries the same treatment `.toolOutput` already gets. Either add an `includeStructure` parameter to `extractText` (default `false`, pass `true` at the `.response` call site) or call `extractConcatenatedText` directly at that call site with `includeStructure: true`. Don't change the `.instructions`/`.prompt` call sites — those are system/user text and should stay `.text`-only, matching how Anthropic's own `ClaudeForFoundationModels` reference implementation treats instructions text vs. full message-content replay (see `RequestBuilder.text(of:)` vs `RequestBuilder.contentBlocks(from:)` at https://github.com/anthropics/ClaudeForFoundationModels).\n\nSeparately noticed while comparing against that reference implementation: their tool-output replay (`RequestBuilder.contentBlocks`) explicitly preserves `.attachment` (image) segments in tool results — \"tool results may carry images.\" Our `extractToolOutputText`/`extractConcatenatedText` only ever handles `.text` and `.structure`; an image returned by a tool is silently dropped. That's tracked separately as a new task rather than folded in here.\n\nAdd a regression test in Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift that builds a transcript containing a prior `.response` entry with a `.structure` segment and asserts the converted prompt includes that structured content.\n\n## Resolution (2026-07-08)\n\nAdded `includeStructure: Bool = false` to `extractText`, passed `true` at the `.response` call site only; `.instructions`/`.prompt` unaffected. New TDD regression test `testStructuredResponseSegmentCarriesJSONContent`. 428/428 tests green, independently re-verified twice, adversarial double-check PASS.\n\n## Review Findings (2026-07-08 23:29)\n\n- [x] Stale warning message (\"no text content\" → should say \"no text or structure content\" now that `.response` checks both) — **FIXED**, caused directly by this task's own change.\n- [x] `jsonStringLiteral(_ value:)` missing an argument label — **DEFERRED**, confirmed pre-existing/untouched by this task; same class as the already-established first-argument-label convention discussion elsewhere in this branch's history (Swift permits unlabeled first args for conversion-style single-argument functions; not re-litigating a single isolated instance for a one-off task this small).\n- [x] `extractToolOutputText`'s doc comment ends its summary with a colon instead of a period, missing a blank line before elaboration — **DEFERRED**, confirmed pre-existing/untouched.

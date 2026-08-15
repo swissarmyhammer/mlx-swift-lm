@@ -181,7 +181,7 @@ let factory = LLMModelFactory.shared
 let container = try await factory.loadContainer(
     from: HubClient.default,
     using: TokenizersLoader(),
-    configuration: LLMRegistry.llama3_2_3B_4bit
+    configuration: LLMRegistry.llama323b4bit
 )
 
 // Custom factory with registries
@@ -209,11 +209,11 @@ Pre-configured models for quick loading:
 
 ```swift
 // LLM examples
-LLMRegistry.llama3_2_3B_4bit
-LLMRegistry.qwen3_4b_4bit
-LLMRegistry.gemma3_1B_qat_4bit
-LLMRegistry.phi3_5_4bit
-LLMRegistry.mistral7B4bit
+LLMRegistry.llama323b4bit
+LLMRegistry.qwen34b4bit
+LLMRegistry.gemma31bQAT4bit
+LLMRegistry.phi354bit
+LLMRegistry.mistral7b4bit
 
 // VLM examples
 VLMRegistry.qwen2VL2BInstruct4Bit
@@ -307,11 +307,11 @@ await container.perform { context in
 ```swift
 // DEPRECATED
 import MLXLLM
-let config = ModelRegistry.llama3_2_3B_4bit  // ambiguous
+let config = ModelRegistry.llama323b4bit  // ambiguous
 
 // USE INSTEAD
 import MLXLLM
-let config = LLMRegistry.llama3_2_3B_4bit
+let config = LLMRegistry.llama323b4bit
 
 // or for VLM
 import MLXVLM

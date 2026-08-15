@@ -1,0 +1,1 @@
+{"id":"01KXZQAKGV6TSEPGXA2R8130KJ","timestamp":"2026-07-20T12:17:01.979815Z","op":"create","item_id":"01KXZQAKGVX7EZXFDC43MYH5GB","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: e4e669\n+tag_name: minimax\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: e4e669\n-tag_name: minimax\n","transaction_id":null}

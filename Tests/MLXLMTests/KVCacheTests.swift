@@ -1131,6 +1131,71 @@ func testCacheCopyOnEmptyCache(creator: (() -> any KVCache)) async throws {
     #expect(copied.state.count == empty.state.count)
 }
 
+// MARK: - trim() + continuation semantics
+//
+// `PromptCache` (MLXFoundationModels) assumes that trimming a KVCacheSimple
+// back to an earlier offset and then continuing generation from there
+// produces IDENTICAL cache state to having only ever prefilled the
+// truncated sequence followed by the same continuation. That assumption is
+// what makes `.trimTo` a safe substitute for a full rebuild on a diverged
+// prompt. These tests exercise `trim()` itself (not `PromptCache`'s pure
+// decision logic, which `PromptCacheTests` already covers) against a real
+// `KVCacheSimple`, proving the assumption holds at the tensor level.
+
+/// One single-position (seqLen == 1) key/value pair filled with a distinct
+/// scalar so each fed "token" is individually identifiable in the resulting
+/// state tensor.
+private func singleTokenKV(fill: Float, kvHeads: Int = 2, headDim: Int = 4) -> (
+    keys: MLXArray, values: MLXArray
+) {
+    (
+        MLXArray.ones([1, kvHeads, 1, headDim], dtype: .float32) * fill,
+        MLXArray.ones([1, kvHeads, 1, headDim], dtype: .float32) * (fill + 1000)
+    )
+}
+
+@Test func testTrimThenContinueMatchesFreshPrefillOfTruncatedSequence() throws {
+    // Prefill 7 tokens (fills 0...6) into cacheA.
+    let cacheA = KVCacheSimple()
+    for i in 0 ..< 7 {
+        let (k, v) = singleTokenKV(fill: Float(i))
+        _ = cacheA.update(keys: k, values: v)
+    }
+    #expect(cacheA.offset == 7)
+
+    // Trim back by 3 (offset 7 -> 4) -- KVCacheSimple.trim is unbounded, so
+    // the full request is honored.
+    let trimmed = cacheA.trim(3)
+    #expect(trimmed == 3)
+    #expect(cacheA.offset == 4)
+
+    // Continue with 2 NEW tokens (fills 100, 101) from the trimmed offset.
+    for fill: Float in [100, 101] {
+        let (k, v) = singleTokenKV(fill: fill)
+        _ = cacheA.update(keys: k, values: v)
+    }
+    #expect(cacheA.offset == 6)
+
+    // Independent cache, fed ONLY the truncated prefix (fills 0...3) plus
+    // the identical continuation (fills 100, 101) -- what `PromptCache`
+    // assumes trim+continue on cacheA is equivalent to.
+    let cacheB = KVCacheSimple()
+    for i in 0 ..< 4 {
+        let (k, v) = singleTokenKV(fill: Float(i))
+        _ = cacheB.update(keys: k, values: v)
+    }
+    for fill: Float in [100, 101] {
+        let (k, v) = singleTokenKV(fill: fill)
+        _ = cacheB.update(keys: k, values: v)
+    }
+    #expect(cacheB.offset == 6)
+
+    #expect(cacheA.offset == cacheB.offset)
+    eval(cacheA.state)
+    eval(cacheB.state)
+    assertArraysClose(cacheA.state, cacheB.state)
+}
+
 /// CacheList.copy() produces independent sub-caches.
 @Test
 func testCacheListCopyIsIndependent() async throws {

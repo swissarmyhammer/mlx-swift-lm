@@ -1,0 +1,1 @@
+{"id":"01KWW38RED40WGW4SF69CN7RWK","timestamp":"2026-07-06T16:13:04.845834Z","op":"create","item_id":"01KWW38REDC64VNGC6ZQ515TX4","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: e36209\n+tag_name: review\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: e36209\n-tag_name: review\n","transaction_id":null}

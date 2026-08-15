@@ -1,0 +1,4 @@
+# Ralph session state
+# All files are ephemeral per-session instructions
+*
+!.gitignore

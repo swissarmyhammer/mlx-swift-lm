@@ -62,7 +62,10 @@ let package = Package(
         // 602.0.0 floor: swift.org publishes signed prebuilt swift-syntax artifacts only for
         // >= 602 tags on current toolchains; a 600.x/601.x resolution falls back to the full
         // source compile of swift-syntax.
-        .package(url: "https://github.com/swiftlang/swift-syntax.git", "602.0.0" ..< "604.0.0"),
+        // The prior <604 cap kept resolution on those signed prebuilt artifacts; widening to
+        // 605 intentionally admits the 604 prerelease and force-compiles swift-syntax from
+        // source, which the rest of the dependency family already wants (604 or floating up).
+        .package(url: "https://github.com/swiftlang/swift-syntax.git", "602.0.0" ..< "605.0.0"),
     ],
     targets: [
         .target(
@@ -76,6 +79,9 @@ let package = Package(
             path: "Libraries/MLXLLM",
             exclude: [
                 "README.md"
+            ],
+            resources: [
+                .copy("Documentation.docc")
             ]
         ),
         .target(
@@ -101,6 +107,9 @@ let package = Package(
             path: "Libraries/MLXLMCommon",
             exclude: [
                 "README.md"
+            ],
+            resources: [
+                .copy("Documentation.docc")
             ]
         ),
         .target(
@@ -153,7 +162,10 @@ let package = Package(
             exclude: [
                 "README.md"
             ],
-            resources: [.process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov")]
+            resources: [
+                .process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov"),
+                .process("Resources/DeepSeek-V4-Flash-4bit-config.json"),
+            ]
         ),
         .macro(
             name: "MLXHuggingFaceMacros",
@@ -173,7 +185,10 @@ let package = Package(
                     condition: .when(traits: ["FoundationModelsIntegration"])
                 ),
             ],
-            path: "Libraries/MLXHuggingFace"
+            path: "Libraries/MLXHuggingFace",
+            resources: [
+                .copy("Documentation.docc")
+            ]
         ),
         .testTarget(
             name: "MLXHuggingFaceMacrosTests",

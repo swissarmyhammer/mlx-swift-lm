@@ -53,6 +53,7 @@ public enum LLMTypeRegistry {
         "internlm2": create(InternLM2Configuration.self, InternLM2Model.init),
         "deepseek_v2": create(DeepseekV2Configuration.self, DeepseekV2Model.init),
         "deepseek_v3": create(DeepseekV3Configuration.self, DeepseekV3Model.init),
+        "deepseek_v4": create(DeepSeekV4Configuration.self, DeepSeekV4Model.init),
         "granite": create(GraniteConfiguration.self, GraniteModel.init),
         "granitemoehybrid": create(
             GraniteMoeHybridConfiguration.self, GraniteMoeHybridModel.init),
@@ -83,6 +84,9 @@ public enum LLMTypeRegistry {
         "jamba": create(JambaConfiguration.self, JambaModel.init),
         "mamba2": create(Mamba2Configuration.self, Mamba2Model.init),
         "mistral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
+        // Ministral3 (e.g. Devstral-2-123B) shares the Mistral3 text architecture:
+        // Mistral3Text.swift is the port of mlx-lm's ministral3.py.
+        "ministral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
         "apertus": create(ApertusConfiguration.self, ApertusModel.init),
         "hunyuan_v1_dense": create(HunyuanConfiguration.self, HunyuanModel.init),
         "nemotron_labs_diffusion": create(
@@ -152,7 +156,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let gemma2bQuantized = ModelConfiguration(
         id: "mlx-community/quantized-gemma-2b-it",
         // https://www.promptingguide.ai/models/gemma
-        defaultPrompt: "what is the difference between lettuce and cabbage?"
+        defaultPrompt: "What is the difference between lettuce and cabbage?"
     )
 
     static public let gemma_2_9b_it_4bit = ModelConfiguration(
@@ -370,6 +374,11 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: "Tell me about the history of Spain."
     )
 
+    static public let deepseek_v4_flash_4bit = ModelConfiguration(
+        id: "mlx-community/DeepSeek-V4-Flash-4bit",
+        defaultPrompt: "Why is the sky blue?"
+    )
+
     static public let granite3_3_2b_4bit = ModelConfiguration(
         id: "mlx-community/granite-3.3-2b-instruct-4bit",
         defaultPrompt: ""
@@ -522,6 +531,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             qwen3_6_27b_4bit,
             smolLM_135M_4bit,
             deepseek_r1_4bit,
+            deepseek_v4_flash_4bit,
             mimo_7b_sft_4bit,
             glm4_9b_4bit,
             acereason_7b_4bit,
@@ -548,19 +558,40 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
 @available(*, deprecated, renamed: "LLMRegistry", message: "Please use LLMRegistry directly.")
 public typealias ModelRegistry = LLMRegistry
 
-private struct LLMUserInputProcessor: UserInputProcessor {
+/// Errors thrown by ``LLMModelFactory``'s prompt preparation.
+public enum PromptPreparationError: LocalizedError {
+    /// The tokenizer has no chat template, and the model forbids the
+    /// plain-text prompt fallback. The value is the model's refusal message
+    /// (``LLMModel/missingChatTemplateRefusal``).
+    case plainTextFallbackForbidden(String)
+
+    /// A human-readable description of the error.
+    public var errorDescription: String? {
+        switch self {
+        case .plainTextFallbackForbidden(let message):
+            message
+        }
+    }
+}
+
+/// Converts ``UserInput`` into an ``LMInput`` by rendering the tokenizer's
+/// chat template. `internal` so tests can pin the missing-template behavior.
+struct LLMUserInputProcessor: UserInputProcessor {
 
     let tokenizer: Tokenizer
     let configuration: ModelConfiguration
     let messageGenerator: MessageGenerator
+    let missingChatTemplateRefusal: String?
 
     internal init(
         tokenizer: any Tokenizer, configuration: ModelConfiguration,
-        messageGenerator: MessageGenerator
+        messageGenerator: MessageGenerator,
+        missingChatTemplateRefusal: String? = nil
     ) {
         self.tokenizer = tokenizer
         self.configuration = configuration
         self.messageGenerator = messageGenerator
+        self.missingChatTemplateRefusal = missingChatTemplateRefusal
     }
 
     func prepare(input: UserInput) throws -> LMInput {
@@ -571,6 +602,13 @@ private struct LLMUserInputProcessor: UserInputProcessor {
 
             return LMInput(tokens: MLXArray(promptTokens))
         } catch TokenizerError.missingChatTemplate {
+            // A model that forbids the fallback gets a loud error. For such
+            // a model the plain-text prompt below looks correct, gives no
+            // error, and is wrong (card ^f0ymw6b, decision B).
+            if let missingChatTemplateRefusal {
+                throw PromptPreparationError.plainTextFallbackForbidden(
+                    missingChatTemplateRefusal)
+            }
             print(
                 "No chat template was included or provided, so converting messages to simple text format. This is not optimal for model performance, so applications should provide a chat template if none is included with the model."
             )
@@ -723,7 +761,8 @@ public final class LLMModelFactory: GenericModelFactory {
 
         let processor = LLMUserInputProcessor(
             tokenizer: tokenizer, configuration: modelConfig,
-            messageGenerator: messageGenerator)
+            messageGenerator: messageGenerator,
+            missingChatTemplateRefusal: (model as? LLMModel)?.missingChatTemplateRefusal)
 
         return .init(
             configuration: modelConfig, model: model, processor: processor,

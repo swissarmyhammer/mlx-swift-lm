@@ -21,58 +21,58 @@ mlx-swift-lm supports a wide range of LLM and VLM architectures through type reg
 
 ```swift
 // model_type: "llama", "mistral"
-LLMRegistry.llama3_2_3B_4bit      // mlx-community/Llama-3.2-3B-Instruct-4bit
-LLMRegistry.llama3_2_1B_4bit      // mlx-community/Llama-3.2-1B-Instruct-4bit
-LLMRegistry.llama3_8B_4bit        // mlx-community/Meta-Llama-3-8B-Instruct-4bit
-LLMRegistry.llama3_1_8B_4bit      // mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
-LLMRegistry.mistral7B4bit         // mlx-community/Mistral-7B-Instruct-v0.3-4bit
-LLMRegistry.mistralNeMo4bit       // mlx-community/Mistral-Nemo-Instruct-2407-4bit
+LLMRegistry.llama323b4bit    // mlx-community/Llama-3.2-3B-Instruct-4bit
+LLMRegistry.llama321b4bit    // mlx-community/Llama-3.2-1B-Instruct-4bit
+LLMRegistry.llama38b4bit     // mlx-community/Meta-Llama-3-8B-Instruct-4bit
+LLMRegistry.llama318b4bit    // mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+LLMRegistry.mistral7b4bit    // mlx-community/Mistral-7B-Instruct-v0.3-4bit
+LLMRegistry.mistralNemo4bit  // mlx-community/Mistral-Nemo-Instruct-2407-4bit
 ```
 
 ### Qwen
 
 ```swift
 // model_type: "qwen2", "qwen3", "qwen3_moe"
-LLMRegistry.qwen2_5_7b            // mlx-community/Qwen2.5-7B-Instruct-4bit
-LLMRegistry.qwen2_5_1_5b          // mlx-community/Qwen2.5-1.5B-Instruct-4bit
-LLMRegistry.qwen3_4b_4bit         // mlx-community/Qwen3-4B-4bit
-LLMRegistry.qwen3_8b_4bit         // mlx-community/Qwen3-8B-4bit
-LLMRegistry.qwen3MoE_30b_a3b_4bit // mlx-community/Qwen3-30B-A3B-4bit
+LLMRegistry.qwen257b            // mlx-community/Qwen2.5-7B-Instruct-4bit
+LLMRegistry.qwen2515b           // mlx-community/Qwen2.5-1.5B-Instruct-4bit
+LLMRegistry.qwen34b4bit         // mlx-community/Qwen3-4B-4bit
+LLMRegistry.qwen38b4bit         // mlx-community/Qwen3-8B-4bit
+LLMRegistry.qwen3MoE30bA3b4bit  // mlx-community/Qwen3-30B-A3B-4bit
 ```
 
 ### Gemma
 
 ```swift
 // model_type: "gemma", "gemma2", "gemma3", "gemma3_text", "gemma3n"
-LLMRegistry.gemma2bQuantized      // mlx-community/quantized-gemma-2b-it
-LLMRegistry.gemma_2_2b_it_4bit    // mlx-community/gemma-2-2b-it-4bit
-LLMRegistry.gemma_2_9b_it_4bit    // mlx-community/gemma-2-9b-it-4bit
-LLMRegistry.gemma3_1B_qat_4bit    // mlx-community/gemma-3-1b-it-qat-4bit
-LLMRegistry.gemma3n_E4B_it_lm_4bit // mlx-community/gemma-3n-E4B-it-lm-4bit
+LLMRegistry.gemma2bQuantized    // mlx-community/quantized-gemma-2b-it
+LLMRegistry.gemma22bIT4bit      // mlx-community/gemma-2-2b-it-4bit
+LLMRegistry.gemma29bIT4bit      // mlx-community/gemma-2-9b-it-4bit
+LLMRegistry.gemma31bQAT4bit     // mlx-community/gemma-3-1b-it-qat-4bit
+LLMRegistry.gemma3nE4bITLM4bit  // mlx-community/gemma-3n-E4B-it-lm-4bit
 ```
 
 ### Phi
 
 ```swift
 // model_type: "phi", "phi3", "phimoe"
-LLMRegistry.phi4bit               // mlx-community/phi-2-hf-4bit-mlx
-LLMRegistry.phi3_5_4bit           // mlx-community/Phi-3.5-mini-instruct-4bit
-LLMRegistry.phi3_5MoE             // mlx-community/Phi-3.5-MoE-instruct-4bit
+LLMRegistry.phi4bit    // mlx-community/phi-2-hf-4bit-mlx
+LLMRegistry.phi354bit  // mlx-community/Phi-3.5-mini-instruct-4bit
+LLMRegistry.phi35MoE   // mlx-community/Phi-3.5-MoE-instruct-4bit
 ```
 
 ### DeepSeek
 
 ```swift
 // model_type: "deepseek_v3"
-LLMRegistry.deepSeekR1_7B_4bit    // mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit
-LLMRegistry.deepseek_r1_4bit      // mlx-community/DeepSeek-R1-4bit
+LLMRegistry.deepseekR17b4bit  // mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit
+LLMRegistry.deepseekR14bit    // mlx-community/DeepSeek-R1-4bit
 ```
 
 ### GLM
 
 ```swift
 // model_type: "glm4", "glm4_moe", "glm4_moe_lite"
-LLMRegistry.glm4_9b_4bit          // mlx-community/GLM-4-9B-0414-4bit
+LLMRegistry.glm49b4bit          // mlx-community/GLM-4-9B-0414-4bit
 // Note: GLM4 uses special tool call format
 ```
 

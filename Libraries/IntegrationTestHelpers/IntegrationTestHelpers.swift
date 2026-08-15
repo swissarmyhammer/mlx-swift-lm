@@ -27,6 +27,76 @@ public struct IntegrationTestFailure: LocalizedError {
     }
 }
 
+// MARK: - Prompt-cache measurement
+
+/// Renders `messages` through the model's own chat template and returns the
+/// resulting prompt tokens.
+///
+/// This is the same `UserInputProcessor.prepare(input:)` call `ChatSession`
+/// makes for every turn, thus the tokens here are the tokens a turn would feed
+/// with a cold cache.
+///
+/// - Parameters:
+///   - container: the loaded model container.
+///   - messages: the conversation to render.
+///   - tools: the tool specifications the prompt offers the model.
+///   - additionalContext: extra template variables, such as a generation-mode
+///     flag.
+/// - Returns: the rendered prompt token identifiers.
+/// - Throws: any error the processor raises.
+public func renderPromptTokens(
+    _ container: LLModelContainer,
+    messages: [Chat.Message],
+    tools: [ToolSpec]? = nil,
+    additionalContext: [String: any Sendable]? = nil
+) async throws -> [Int] {
+    // `[Chat.Message]` is not `Sendable`, thus it crosses the container
+    // boundary through the `nonSendable:` overload — the same overload
+    // upstream's own `MLXLanguageModel.Executor.respond` uses for its messages.
+    try await container.perform(nonSendable: messages) { context, messages in
+        let input = try await context.processor.prepare(
+            input: UserInput(
+                chat: messages, tools: tools, additionalContext: additionalContext))
+        return input.text.tokens.asArray(Int.self)
+    }
+}
+
+/// Decodes `tokens` through the model's own tokenizer, thus a token range reads
+/// as the template markup it came from.
+///
+/// - Parameters:
+///   - container: the loaded model container.
+///   - tokens: the token identifiers to decode.
+/// - Returns: the decoded text.
+public func decodeTokens(_ container: LLModelContainer, tokens: [Int]) async -> String {
+    await container.perform { context in
+        context.tokenizer.decode(tokenIds: tokens)
+    }
+}
+
+/// The number of leading tokens two rendered prompts share.
+///
+/// - Parameters:
+///   - first: one rendered prompt.
+///   - second: the other rendered prompt.
+/// - Returns: the length of the common prefix.
+public func commonPrefixLength(_ first: [Int], _ second: [Int]) -> Int {
+    zip(first, second).prefix { $0 == $1 }.count
+}
+
+/// The tokens `render` writes from `index` onward, capped so a report stays
+/// readable.
+///
+/// - Parameters:
+///   - render: a rendered prompt.
+///   - index: the first divergent position.
+///   - limit: the most tokens to take.
+/// - Returns: the capped divergent tail, empty when `index` is past the end.
+public func divergentTail(of render: [Int], from index: Int, limit: Int) -> [Int] {
+    guard index < render.count else { return [] }
+    return Array(render[index ..< min(index + limit, render.count)])
+}
+
 private func check(_ condition: Bool, _ message: String) throws {
     guard condition else { throw IntegrationTestFailure(message) }
 }
@@ -799,6 +869,15 @@ public enum ToolCallTests {
         )
     }
 
+    /// GLM-4 takes the tool-call format of the official upstream.
+    ///
+    /// This helper looked for a bare GLM-4 format before 2026-08-14.
+    ///
+    /// The catch-up to `ml-explore/mlx-swift-lm` took the upstream registry,
+    /// which gives `.glm4` to `mlx-community/GLM-4-9B-0414-4bit`, and the user
+    /// decided to keep the upstream value rather than hold our own. Card
+    /// `^f9zzxt7` records the decision, and the bare format left the tree with
+    /// it.
     public static func glm4FormatAutoDetection(container: LLModelContainer) async throws {
         let config = await container.configuration
         try check(

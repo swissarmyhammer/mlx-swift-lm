@@ -1,0 +1,15 @@
+# .reviewignore — paths the review engine must never review.
+#
+# gitignore syntax (same as .gitignore, including `!` negation and directory
+# patterns). Consumed by the `review` MCP ops when resolving a scope: any path
+# matched here is dropped from the reviewed file set. Your repo's .gitignore is
+# honored on top of this, so gitignored files are never reviewed either.
+#
+# Auto-generated on the first review; edit freely — it is never overwritten.
+#
+# Code review is ON. A `*` line here turns it off for the whole repository:
+# `*` matches each path, thus no file stays in scope and each review answers
+# with an empty set and a count of 0 attempted files. That line was set on
+# 2026-08-14 during the catch-up to `ml-explore/mlx-swift-lm`, and removed the
+# same day. Read the count, not the words: `attempted: 0` means the engine
+# opened no file, which is never the same as a clean review.

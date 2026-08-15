@@ -43,7 +43,15 @@ public enum RoPEOffset {
 /// Interface for Key/Value cache for LLMs.
 ///
 /// See ``LanguageModel/newCache(parameters:)``
-public protocol KVCache: Evaluatable {
+/// `KVCache`'s `Evaluatable.innerState()` requirement is structurally
+/// identical to `Updatable.innerState()`, so every conforming cache already
+/// satisfies `Updatable` -- this conformance (added directly to the
+/// protocol's inheritance list, since a protocol extension cannot declare a
+/// new inheritance relationship) is what lets a `[any KVCache]` be passed as
+/// `compile(inputs:outputs:...)`'s state so `compile()` can observe (and
+/// replay) cache mutation across calls. See kanban
+/// 01KYD3ZCWTZ414Y79RSAKVQXXZ for the design note.
+public protocol KVCache: Evaluatable, Updatable {
     /// get the current offset
     var offset: Int { get }
 
@@ -1735,6 +1743,60 @@ struct KVCacheError: Error, LocalizedError {
 
 // MARK: - Utility Functions
 
+/// Registry for `KVCache` types defined outside `MLXLMCommon` (e.g.
+/// model-specific caches in `MLXVLM`/`MLXLLM`) that need `savePromptCache`/
+/// `loadPromptCache` support.
+///
+/// `MLXLMCommon` cannot import downstream modules to switch on their
+/// concrete cache types directly, so those types self-register a
+/// serialization name and a restore factory -- typically via a one-time
+/// `static let` triggered from the type's own `init()`, guaranteeing
+/// registration has happened before any instance could be saved. Without
+/// registration, an unrecognized cache type falls back to being saved as a
+/// plain `KVCache` (``KVCacheSimple``), which silently corrupts round-trips
+/// for any type whose `state` doesn't have exactly 2 arrays.
+public enum KVCacheSerializationRegistry {
+    /// Reconstructs a registered cache type from its saved `state`/`metaState`.
+    public typealias RestoreFactory = ([MLXArray], [String]) -> KVCache
+
+    private static let lock = NSLock()
+    // Manually synchronized by `lock` above -- the compiler cannot see that,
+    // so these are marked `nonisolated(unsafe)` rather than restructured into
+    // an actor (which would force `register`/`className`/`restore` async and
+    // ripple into every `KVCache` save/restore call site).
+    nonisolated(unsafe) private static var classNamesByType: [ObjectIdentifier: String] = [:]
+    nonisolated(unsafe) private static var factoriesByClassName: [String: RestoreFactory] = [:]
+
+    /// Registers a custom `KVCache` type under `className` for save/restore support.
+    ///
+    /// - Parameters:
+    ///   - type: the concrete `KVCache` type being registered
+    ///   - className: a name unique among all registered and built-in class names
+    ///   - restore: reconstructs an instance from previously-saved `state`/`metaState`
+    public static func register<T: KVCache>(
+        _ type: T.Type, className: String, restore: @escaping RestoreFactory
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        classNamesByType[ObjectIdentifier(type)] = className
+        factoriesByClassName[className] = restore
+    }
+
+    fileprivate static func className(for cache: KVCache) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return classNamesByType[ObjectIdentifier(type(of: cache))]
+    }
+
+    fileprivate static func restore(
+        className: String, state: [MLXArray], metaState: [String]
+    ) -> KVCache? {
+        lock.lock()
+        defer { lock.unlock() }
+        return factoriesByClassName[className]?(state, metaState)
+    }
+}
+
 /// Map a cache instance to its Python-compatible class name for serialization.
 private func cacheClassName(_ cache: KVCache) -> String {
     switch cache {
@@ -1746,7 +1808,7 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is TurboQuantKVCache: return "TurboQuantKVCache"
     case is KVCacheSimple: return "KVCache"
     case is CacheList: return "CacheList"
-    default: return "KVCache"
+    default: return KVCacheSerializationRegistry.className(for: cache) ?? "KVCache"
     }
 }
 
@@ -2133,6 +2195,11 @@ private func restoreCacheFromMetaState(
         return try CacheList.fromState(state: state, metaState: metaState)
 
     default:
+        if let restored = KVCacheSerializationRegistry.restore(
+            className: className, state: state, metaState: metaState)
+        {
+            return restored
+        }
         throw KVCacheError(message: "Unknown cache class: \(className)")
     }
 }
@@ -2348,6 +2415,42 @@ public typealias StandardKVCache = KVCacheSimple
 
 // MARK: - Quantized Attention Operations
 
+/// The extra score column a learned attention sink adds.
+private let attentionSinkColumnCount = 1
+
+/// Softmax attention scores, with an optional learned per-head sink logit.
+///
+/// This mirrors what mlx's own fast attention does (`mlx/fast.cpp`): the sink
+/// logit is prepended as one extra score column, after the mask and before
+/// the softmax, and that column is dropped from the weights afterwards. The
+/// sink therefore enters the softmax denominator only, and it does not take
+/// the attention scale.
+///
+/// - Parameters:
+///   - scores: Attention scores, `[B, nQHeads, L, S]`, or
+///     `[B, nKVHeads, nRepeats, L, S]` when GQA split the head axis.
+///   - sinks: One logit per query head, or `nil` for a plain softmax.
+///   - keyValueHeads: The number of key/value heads.
+///   - repeats: The number of query heads per key/value head.
+/// - Returns: Attention weights of the shape of `scores`.
+private func softmaxWithSinks(
+    _ scores: MLXArray, sinks: MLXArray?, keyValueHeads: Int, repeats: Int
+) -> MLXArray {
+    guard let sinks else { return softmax(scores, axis: -1) }
+
+    let headShape =
+        repeats > 1
+        ? [1, keyValueHeads, repeats, 1, 1]
+        : [1, keyValueHeads * repeats, 1, 1]
+    var columnShape = scores.shape
+    columnShape[columnShape.count - 1] = attentionSinkColumnCount
+    let column = broadcast(
+        sinks.asType(scores.dtype).reshaped(headShape), to: columnShape)
+
+    let widened = softmax(concatenated([column, scores], axis: -1), axis: -1)
+    return widened[.ellipsis, attentionSinkColumnCount...]
+}
+
 public func quantizedScaledDotProductAttention(
     queries: MLXArray,
     quantizedKeys: (MLXArray, MLXArray, MLXArray?),
@@ -2356,7 +2459,8 @@ public func quantizedScaledDotProductAttention(
     mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
     groupSize: Int = 64,
     bits: Int = 8,
-    mode: QuantizationMode = .affine
+    mode: QuantizationMode = .affine,
+    sinks: MLXArray? = nil
 ) -> MLXArray {
 
     let (B, nQHeads, L, D) = (queries.dim(0), queries.dim(1), queries.dim(2), queries.dim(3))
@@ -2390,7 +2494,12 @@ public func quantizedScaledDotProductAttention(
         mode: mode
     )
 
-    // Apply mask
+    // Apply mask. A masked position takes the most negative finite number of
+    // the score dtype -- the fill mlx itself uses on the path that is not
+    // quantized -- thus the softmax drives that position to zero. A finite
+    // number, and not `-infinity`, keeps a row whose positions are all masked
+    // from giving NaN.
+    let maskedFill = MLXArray.maskFill(for: scores.dtype)
     switch mask {
     case .causal:
         let (qL, kL) = (scores.dim(-2), scores.dim(-1))
@@ -2413,7 +2522,8 @@ public func quantizedScaledDotProductAttention(
         break
     }
 
-    let attentionWeights = softmax(scores, axis: -1)
+    let attentionWeights = softmaxWithSinks(
+        scores, sinks: sinks, keyValueHeads: nKVHeads, repeats: nRepeats)
 
     // Compute output using quantized matmul
     var output = quantizedMM(

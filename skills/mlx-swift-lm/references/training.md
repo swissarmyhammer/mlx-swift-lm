@@ -300,7 +300,7 @@ let parameters = LoRATrain.Parameters(
 ### Manual Saving
 
 ```swift
-try LoRATrain.saveLoRAWeights(model: model, url: weightsURL)
+try LoRATrain.saveLoRAWeights(model: model, to: weightsURL)
 ```
 
 ### Loading Saved Weights

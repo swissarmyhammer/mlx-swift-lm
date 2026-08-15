@@ -1,0 +1,1 @@
+{"id":"01KXDQXZHXBEW303WWVNNENXT2","timestamp":"2026-07-13T12:41:17.117560Z","op":"create","item_id":"01KXDQXZHXY8XMW3T77795V7W5","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: 7057ff\n+tag_name: test-failure\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: 7057ff\n-tag_name: test-failure\n","transaction_id":null}

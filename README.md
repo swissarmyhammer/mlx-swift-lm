@@ -91,7 +91,7 @@ import HuggingFace
 import Tokenizers
 
 let model = try await #huggingFaceLoadModelContainer(
-    configuration: LLMRegistry.gemma3_1B_qat_4bit
+    configuration: LLMRegistry.gemma31bQAT4bit
 )
 
 let session = ChatSession(model)

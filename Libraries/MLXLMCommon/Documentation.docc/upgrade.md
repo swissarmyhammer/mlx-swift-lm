@@ -31,7 +31,7 @@ If using the <doc:using#MLXHuggingFace-Macros>, if you had code like this:
 import MLXLLM
 import MLXLMCommon
 
-let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
+let modelConfiguration = LLMRegistry.gemma31bQAT4bit
 let model = try await loadModelContainer(configuration: modelConfiguration)
 
 ...
@@ -47,7 +47,7 @@ import MLXHuggingFace
 import HuggingFace
 import Tokenizers
 
-let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
+let modelConfiguration = LLMRegistry.gemma31bQAT4bit
 let model = try await #huggingFaceLoadModelContainer(
     configuration: modelConfiguration
 )
@@ -66,7 +66,7 @@ import MLXHuggingFace
 import HuggingFace
 import Tokenizers
 
-let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
+let modelConfiguration = LLMRegistry.gemma31bQAT4bit
 let model = try await loadModelContainer(
     from: #hubDownloader(),
     using: #huggingFaceTokenizerLoader(),
@@ -84,7 +84,7 @@ If you are using an <doc:using#Integration-Packages> you would do something simi
 import MLXLLM
 import MLXLMCommon
 
-let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
+let modelConfiguration = LLMRegistry.gemma31bQAT4bit
 let model = try await loadModelContainer(configuration: modelConfiguration)
 
 ...
@@ -98,7 +98,7 @@ import MLXLMCommon
 
 import IntegrationPackage
 
-let modelConfiguration = LLMRegistry.gemma3_1B_qat_4bit
+let modelConfiguration = LLMRegistry.gemma31bQAT4bit
 let model = try await loadModelContainer(
     from: HubClient(),
     configuration: modelConfiguration
@@ -182,14 +182,14 @@ Example when downloading from Hugging Face:
 ```swift
 // Before (2.x) – hub defaulted to HubApi()
 let container = try await loadModelContainer(
-    configuration: LLMRegistry.gemma3_1B_qat_4bit
+    configuration: LLMRegistry.gemma31bQAT4bit
 )
 
 // After (3.x) – Using HuggingFace integration macros
 import MLXHuggingFace
 
 let model = try await #huggingFaceLoadModelContainer(
-    configuration: LLMRegistry.gemma3_1B_qat_4bit
+    configuration: LLMRegistry.gemma31bQAT4bit
 )
 ```
 

@@ -153,9 +153,31 @@ enum SchemaConverter {
         // One tag per tool. `begin` fixes `{"name": "<tool>", "arguments": `
         // so the tool name is committed before the arguments schema opens;
         // `content` is the tool's parameter schema; `end` closes the object.
+        //
+        // Each tag's `content.json_schema` compiles as its own independent
+        // JSON Schema document, so a nested `@Generable` type's `$defs` stay
+        // local to that document rather than hoisting to a shared root (contrast
+        // `toolCallingEnvelopeObject`, whose single `oneOf` document needs
+        // per-tool namespacing to avoid same-named defs colliding at one
+        // root). Still run `rewriteDefsRefs` and rename this tool's own
+        // `$defs` keys to the same `<tool>__<def>` scheme, for one
+        // predictable naming convention across both encoders.
         let toolTags: [[String: Any]] = try tools.map { tool in
             let paramsData = try encoder.encode(tool.parameters)
-            let paramsAny = try JSONSerialization.jsonObject(with: paramsData)
+            var paramsAny = rewriteDefsRefs(
+                in: try JSONSerialization.jsonObject(with: paramsData),
+                toolName: tool.name
+            )
+            if var paramsObj = paramsAny as? [String: Any],
+                let defs = paramsObj.removeValue(forKey: "$defs") as? [String: Any]
+            {
+                var renamedDefs: [String: Any] = [:]
+                for (key, value) in defs {
+                    renamedDefs["\(tool.name)__\(key)"] = value
+                }
+                paramsObj["$defs"] = renamedDefs
+                paramsAny = paramsObj
+            }
             let nameData = try JSONSerialization.data(
                 withJSONObject: tool.name, options: [.fragmentsAllowed])
             let nameJSON = String(data: nameData, encoding: .utf8) ?? "\"\(tool.name)\""

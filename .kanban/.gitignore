@@ -1,0 +1,5 @@
+undo_stack.yaml
+mcp.*.log
+search-cache.sqlite3
+search-cache.sqlite3-wal
+search-cache.sqlite3-shm

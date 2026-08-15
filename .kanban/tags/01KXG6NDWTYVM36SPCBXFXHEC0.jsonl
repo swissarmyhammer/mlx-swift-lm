@@ -1,0 +1,1 @@
+{"id":"01KXG6NDWT4TERGHESB21QYM14","timestamp":"2026-07-14T11:37:14.394573Z","op":"create","item_id":"01KXG6NDWTYVM36SPCBXFXHEC0","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: 006b75\n+tag_name: require\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: 006b75\n-tag_name: require\n","transaction_id":null}

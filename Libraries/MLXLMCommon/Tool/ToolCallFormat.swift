@@ -19,6 +19,12 @@ public protocol ToolCallParser: Sendable {
     /// Returns `nil` for inline formats that don't use wrapper tags.
     var endTag: String? { get }
 
+    /// True when the format has no literal marker that shows a tool call
+    /// starts, so no chunk can be classified while the text streams.
+    /// ``ToolCallProcessor`` holds all parsing for them to end-of-sequence.
+    /// Defaults to `false`.
+    var buffersEntireResponse: Bool { get }
+
     /// Parse the content into a `ToolCall`.
     /// - Parameters:
     ///   - content: The text content to parse (may include tags)
@@ -35,6 +41,12 @@ public protocol ToolCallParser: Sendable {
 }
 
 extension ToolCallParser {
+    /// Default implementation: `false`, because most formats carry a literal
+    /// marker (a start tag or a JSON envelope) that lets tool calls be
+    /// found one chunk at a time as text comes in. Only formats with no
+    /// marker set this to `true`.
+    public var buffersEntireResponse: Bool { false }
+
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         if let startTag {
             return
@@ -102,6 +114,14 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
     case minimaxM2 = "minimax_m2"
 
+    /// MiniMax M3 namespaced XML format: parameters are arbitrary
+    /// `<key>value</key>` children rather than M2's `<parameter name="k">v</parameter>`
+    /// attribute style. Every tag is prefixed with M3's literal namespace token.
+    ///
+    /// See ``MiniMaxM3ToolCallParser`` for the full format and parsing details.
+    /// Example: `]<]minimax[>[<invoke name="f">]<]minimax[>[<k>v]<]minimax[>[</k>]<]minimax[>[</invoke>`
+    case minimaxM3 = "minimax_m3"
+
     /// Muse Glimmer's Onyx ATEM invoke/parameter format.
     /// Example: `<atem:function_calls><atem:invoke name="f">...</atem:invoke></atem:function_calls>`
     case atem
@@ -113,6 +133,11 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     /// Llama 3 inline JSON format.
     /// Example: `<|python_tag|>{ "name": "func", "parameters": {...} }`
     case llama3
+
+    /// DeepSeek-V4 DSML format. The `｜DSML｜` marker uses FULLWIDTH
+    /// VERTICAL LINE U+FF5C, and `string="true|false"` types each value.
+    /// Example: `<｜DSML｜invoke name="f"><｜DSML｜parameter name="k" string="true">v</｜DSML｜parameter></｜DSML｜invoke>`
+    case dsml
 
     /// GPT-OSS full Harmony response protocol.
     ///
@@ -150,12 +175,16 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
             return KimiK2ToolCallParser()
         case .minimaxM2:
             return MiniMaxM2ToolCallParser()
+        case .minimaxM3:
+            return MiniMaxM3ToolCallParser()
         case .atem:
             return ATEMToolCallParser()
         case .mistral:
             return MistralToolCallParser()
         case .llama3:
             return Llama3ToolCallParser()
+        case .dsml:
+            return DSMLToolCallParser()
         case .gptOSS:
             return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
         }
@@ -198,8 +227,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
             return OnyxStreamAdapter(
                 tokenizer: tokenizer, tools: tools, stopStrings: stopStrings)
 
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .mistral, .llama3:
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2,
+            .minimaxM2, .minimaxM3, .mistral, .llama3, .dsml:
             return nil
         }
     }
@@ -220,9 +249,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
             return HarmonyToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
         case .atem:
             return OnyxToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .mistral,
-            .llama3:
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2,
+            .minimaxM2, .minimaxM3, .mistral, .llama3, .dsml:
             return []
         }
     }
@@ -242,8 +270,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
                     count += message.tool?.calls?.count ?? 0
                 }
             }
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .mistral, .llama3:
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2,
+            .minimaxM2, .minimaxM3, .mistral, .llama3, .dsml:
             0
         }
     }
