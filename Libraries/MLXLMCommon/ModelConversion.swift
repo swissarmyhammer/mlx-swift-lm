@@ -185,7 +185,7 @@ public func convert(
     options: ModelConversionOptions = .init(),
     progressHandler: @Sendable (ModelConversionProgress) -> Void = { _ in },
     perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil
-) throws -> ModelConversionResult {
+) async throws -> ModelConversionResult {
     try validateConvertibleWeights(in: modelDirectory)
     try validateSourceConfigurationForModelConversion(in: modelDirectory)
     if perLayerQuantization != nil {
@@ -206,7 +206,7 @@ public func convert(
         to: outputDirectory)
 
     progressHandler(.init(stage: .loadingWeights))
-    try loadWeights(
+    try await loadWeights(
         modelDirectory: modelDirectory,
         model: model,
         perLayerQuantization: perLayerQuantization)
@@ -291,8 +291,8 @@ public func convert(
     groupSize: Int? = nil,
     mode: QuantizationMode = .affine,
     perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil
-) throws -> ModelConversionResult {
-    try convert(
+) async throws -> ModelConversionResult {
+    try await convert(
         modelDirectory: modelDirectory,
         tokenizerDirectory: tokenizerDirectory,
         model: model,

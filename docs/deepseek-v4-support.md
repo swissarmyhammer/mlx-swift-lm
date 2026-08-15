@@ -192,11 +192,14 @@ without it. The 12,400-token run of
 minutes, which is inside the 240-minute per-test limit, where the same run
 without the fix would need about 7 hours.
 
-`IntegrationTesting/IntegrationTestingTests/DeepseekV4IntegrationTests.swift`
-raises the limit with a `WiredMemoryTicket` that starts before the shared load
-and never ends. A consumer of this library must do the same. The
-`wiredMemoryTicket` argument of `MLXLMCommon.generate` starts too late to
-help.
+The library raises the limit by itself, thus a consumer gets this speed with
+no code of its own. `MLXLMCommon.loadWeights` asks
+`MLXLMCommon.ModelWeightResidency` to cover the weight files before it reads
+the first one, sized from the bytes of those files and clamped to
+`GPU.maxRecommendedWorkingSetBytes()`. The residency never lowers the limit
+again. The `wiredMemoryTicket` argument of `MLXLMCommon.generate` is a separate
+mechanism for the KV cache of one generation, and it starts too late to help
+the weights.
 
 Two tests of that suite guard the fix, thus a change that removes it fails in
 seconds instead of after hours:
