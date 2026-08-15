@@ -133,8 +133,9 @@ enum DeepSeekV4NumericTrace {
 /// The axes of the `(batch, tokens, copies, width)` residual stream DeepSeek-V4
 /// carries between its blocks.
 private enum ResidualStreamAxis {
-    /// The axis that holds the parallel copies of the residual stream. The
-    /// embedding gains this axis, and the hyper head takes it away again.
+    /// The axis that holds the parallel copies of the residual stream.
+    ///
+    /// The embedding gains this axis, and the hyper head takes it away again.
     static let copy = 2
 }
 
@@ -342,8 +343,9 @@ public final class DeepSeekV4ModelInner: Module {
 /// A DeepSeek-V4 language model.
 public final class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
 
-    /// The number of latent key/value heads of each layer. DeepSeek-V4 keeps
-    /// one, and sends it to every query head.
+    /// The number of latent key/value heads of each layer.
+    ///
+    /// DeepSeek-V4 keeps one, and sends it to every query head.
     public let kvHeads: [Int]
 
     /// The decoder stack.
@@ -495,13 +497,15 @@ public final class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, 
     /// The three tensors a hyper-connection holds.
     private static let hyperConnectionFields = ["fn", "base", "scale"]
 
-    /// The tensor names one quantized projection carries. A high-precision
-    /// projection carries the first alone.
+    /// The tensor names one quantized projection carries.
+    ///
+    /// A high-precision projection carries the first alone.
     private static let projectionTensors = ["weight", "scales", "biases"]
 
     /// The name the mlx-community conversion gives the routing bias of a
-    /// top-k gate. It is the score-correction name of the DeepSeek-V3
-    /// lineage.
+    /// top-k gate.
+    ///
+    /// It is the score-correction name of the DeepSeek-V3 lineage.
     private static let scoreCorrectionBiasPath = ".ffn.gate.e_score_correction_bias"
 
     /// The path ``DeepSeekV4MoEGate`` gives the same tensor.
@@ -645,14 +649,20 @@ public final class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, 
 
 // MARK: - Chat conventions
 
-// DeepSeek-V4 writes its tool calls in its own DSML syntax. The
-// `DeepSeekV4ChatEncoder` renders that syntax and `DSMLToolCallParser`
-// reads it back. The architecture, not the checkpoint, fixes the syntax,
-// so the model declares it here.
-//
-// It declares no `reasoningConfig`. V4 controls thinking through the
-// encoder's own thinking mode, which the chat template flag drives, and
-// not through a `<think>` delimiter pair in the token stream.
 extension DeepSeekV4Model {
+    /// The syntax DeepSeek-V4 writes a tool call in: DSML, the markup this
+    /// model family carries, and not the JSON default.
+    ///
+    /// A DSML call names the tool in a `<｜DSML｜invoke>` element and each
+    /// argument in a `<｜DSML｜parameter>` element inside it.
+    /// `DeepSeekV4ChatEncoder` renders that markup into the prompt, and
+    /// `DSMLToolCallParser` reads the same markup back out of the answer.
+    /// The architecture states the syntax, not the checkpoint, thus the model
+    /// declares it here.
+    ///
+    /// This model declares no `reasoningConfig`. DeepSeek-V4 controls its
+    /// thinking through the thinking mode of the encoder, which the
+    /// chat-template flag drives, and not through a `<think>` delimiter pair
+    /// in the token stream.
     public var toolCallFormat: ToolCallFormat? { .dsml }
 }
