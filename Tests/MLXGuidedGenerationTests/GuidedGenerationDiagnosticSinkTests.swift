@@ -33,9 +33,9 @@ struct GuidedGenerationDiagnosticSinkTests {
     }
 
     @Test
-    func taskLocalBindingIsVisibleWithinScopeOnly() async {
+    func taskLocalBindingIsVisibleWithinScopeOnly() {
         let sink = GuidedGenerationDiagnosticSink()
-        await GuidedGenerationDiagnosticSink.$current.withValue(sink) {
+        GuidedGenerationDiagnosticSink.$current.withValue(sink) {
             GuidedGenerationDiagnosticSink.current?.recordSampledToken(42)
         }
         #expect(sink.sampledTokenIDs == [42])
