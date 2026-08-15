@@ -562,7 +562,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         load: @escaping ContainerLoader
     ) {
         self.configuration = configuration
-        self.capabilities = LanguageModelCapabilities(capabilities: capabilities)
+        self.capabilities = LanguageModelCapabilities(capabilities)
         self.configurationResolver = configurationResolver
         self.weightsLocation = weightsLocation
         self.load = load
@@ -683,7 +683,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             enum Destination: Sendable { case response, reasoning }
             case appendText(String, entryID: String?, destination: Destination)
             case toolCall(id: String, name: String, arguments: String)
-            case updateMetadata([String: any Sendable & Codable & Equatable], entryID: String?)
+            case updateMetadata(
+                [String: any ConvertibleToGeneratedContent & Sendable], entryID: String?)
             case updateUsage(
                 input: LanguageModelExecutorGenerationChannel.Usage.Input,
                 output: LanguageModelExecutorGenerationChannel.Usage.Output,
@@ -711,11 +712,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         }
 
         static func emitMetadata(
-            _ values: [String: any Sendable & Codable & Equatable], entryID: String?,
+            _ values: [String: any ConvertibleToGeneratedContent & Sendable], entryID: String?,
             into channel: LanguageModelExecutorGenerationChannel
         ) async {
             generationObserver?(.updateMetadata(values, entryID: entryID))
-            await channel.send(.response(entryID: entryID, action: .updateMetadata(values)))
+            // The channel takes the plain `ConvertibleToGeneratedContent`
+            // existential. We add `Sendable` to it, because the observer event
+            // crosses task boundaries, thus drop that part here.
+            await channel.send(
+                .response(
+                    entryID: entryID,
+                    action: .updateMetadata(
+                        values.mapValues { $0 as any ConvertibleToGeneratedContent })))
         }
 
         static func emitUsage(
@@ -726,38 +734,35 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) async {
             generationObserver?(.updateUsage(input: input, output: output, entryID: entryID))
 
-            // TODO: papering over an FM-27 SDK symbol drift -- restore
-            // the channel usage send (the commented-out call at the end of this
-            // block) once the shipping dylib matches its own interface.
+            // This send was removed for a time, because the FM-27 beta
+            // `.swiftinterface` declared the three-parameter
+            // `updateUsage(input:output:metadata: = [:])` while the shipping
+            // dylib exported only the two-parameter `updateUsage(input:output:)`.
+            // A call that took the `metadata:` default bound a symbol that the
+            // runtime did not hold, thus dyld aborted the image at load under
+            // chained fixups. While the send was absent, the framework received
+            // no usage event: a consumer read an input count of 0 on each
+            // response, and only the `generationObserver` above saw the true
+            // numbers.
             //
-            // Usage is intentionally NOT forwarded to the FoundationModels
-            // channel on this SDK. The FM-27 beta `.swiftinterface` declares
-            //   Response.Action.updateUsage(input:output:metadata: = [:])
-            // (three parameters), but the shipping FoundationModels dylib only
-            // exports the older two-parameter
-            //   Response.Action.updateUsage(input:output:)
-            // Because our call relies on the `metadata:` default, the compiler
-            // resolves it to the three-parameter symbol, which does not exist
-            // at runtime. dyld cannot bind it: under chained-fixups linking
-            // (the arm64 default) the reference aborts the process the moment
-            // the image loads, and under lazy binding it faults through null
-            // (SIGSEGV at 0x0) the instant this send executes -- crashing every
-            // `respond()` path right after generation completes.
+            // Measured again on macOS 27.0 build 26A5388g, on 2026-08-15, and
+            // the drift is GONE. The interface, the `.tbd` and the runtime
+            // dylib each hold the SAME three-parameter symbol, and the runtime
+            // holds NO `updateUsage` export without `metadata`:
             //
-            // A runtime `dlsym` guard cannot save this: the compiled reference
-            // to the missing symbol is enough to abort at launch regardless of
-            // any surrounding check. The only safe option is to not reference
-            // the symbol at all, so no `channel.send(.updateUsage(...))` here.
+            //   dyld_info -exports \
+            //     /System/Library/Frameworks/FoundationModels.framework/\
+            //     Versions/A/FoundationModels | grep updateUsage
+            //   -> 3 symbols, each with `8metadata` in its mangled name
             //
-            // Effect: the framework does not receive our per-response usage
-            // event, so consumer-visible usage for these responses may be
-            // absent or zero. Tests still observe usage through
-            // `generationObserver` above. When a later SDK ships a dylib that
-            // matches its interface, restore the send:
-            //   await channel.send(
-            //       .response(
-            //           entryID: entryID,
-            //           action: .updateUsage(input: input, output: output)))
+            // Thus the send is correct again, and card ^z2996cp holds the
+            // measurement. If a later SDK moves the symbol once more, this
+            // call is the first thing that fails, and it fails at image load
+            // rather than quietly.
+            await channel.send(
+                .response(
+                    entryID: entryID,
+                    action: .updateUsage(input: input, output: output)))
         }
 
         static func emitToolCall(
