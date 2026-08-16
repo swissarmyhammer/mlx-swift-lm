@@ -471,6 +471,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// a live kernel — the weights free via ARC once that work returns.
     public static func evictAll() async {
         await cache.evictAll()
+        await ExecutorPromptCacheStore.shared.evict(modelID: nil)
     }
 
     /// Drops this model from the shared cache, freeing the GPU memory held by its
@@ -483,6 +484,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// — the in-flight load completes but does not re-populate the cache.
     public func evict() async {
         await Self.cache.remove(modelID: modelID)
+        await ExecutorPromptCacheStore.shared.evict(modelID: modelID)
     }
 
     /// Whether the shared cache has a *genuine download* in flight for the
@@ -791,25 +793,26 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// `GenerationOptions(maximumResponseTokens:)`.
         private static let defaultMaxTokens = 4096
 
-        /// The prompt tokens that cache reuse skipped, for the
-        /// `cachedTokenCount` of every usage event this executor emits.
+        /// Names the session a request belongs to, for the prompt cache that
+        /// session carries between its turns.
         ///
-        /// The value is zero, and it is a MEASURED value rather than a
-        /// placeholder. This executor keeps no KV cache between responses:
-        /// `respond(to:model:streamingInto:)` renders the whole transcript
-        /// again on each call, and each generation entry point it reaches --
-        /// `MLXLMCommon.generate(input:parameters:context:)`,
-        /// `generateProtocolTokensTask(input:parameters:context:decoder:)` and
-        /// `GuidedGenerationLoop.run` -- takes the default `cache: nil`. Thus
-        /// `TokenIterator` builds new cache state for each request, and no
-        /// token of an earlier turn is ever reused. The reused count is
-        /// exactly zero.
+        /// The framework hands this executor no session identity. The identity
+        /// comes from the transcript instead: a `LanguageModelSession` keeps the
+        /// entries of its transcript and appends to them, thus the FIRST entry
+        /// is the same entry on every turn of one session, and two sessions
+        /// never hold one entry identifier.
         ///
-        /// `GenerateCompletionInfo` carries no reuse count either, thus there
-        /// is no other number to report. Give this a real count only when the
-        /// executor keeps a prompt cache across turns; card ^z2996cp holds the
-        /// measurement.
-        private static let reusedPromptTokenCount = 0
+        /// - Parameters:
+        ///   - request: the request whose session is named.
+        ///   - modelID: the model the cache belongs to.
+        /// - Returns: the key, or nil for an empty transcript. A request with no
+        ///   entry names no session, thus it carries no cache.
+        static func sessionCacheKey(
+            for request: LanguageModelExecutorGenerationRequest, modelID: String
+        ) -> ExecutorPromptCacheKey? {
+            guard let firstEntry = request.transcript.first else { return nil }
+            return ExecutorPromptCacheKey(modelID: modelID, sessionID: firstEntry.id)
+        }
 
         /// Map FoundationModels' optional `Double` `GenerationOptions.temperature`
         /// to MLXLMCommon's `Float` `GenerateParameters.temperature`, clamping
@@ -1029,6 +1032,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let declaresReasoning = model.capabilities.contains(.reasoning)
             let configurationResolver = model.configurationResolver
 
+            // The prompt cache this session carries. It is checked out here and
+            // checked back in below, thus one response owns it for its whole
+            // run and a second response on the same session starts cold rather
+            // than writing the same caches.
+            let promptCacheKey = Self.sessionCacheKey(for: request, modelID: modelID)
+            let carriedPromptCache: ExecutorPromptCacheEntry?
+            if let promptCacheKey {
+                carriedPromptCache = await ExecutorPromptCacheStore.shared.checkOut(promptCacheKey)
+            } else {
+                carriedPromptCache = nil
+            }
+            let promptCache = ExecutorPromptCacheSlot(carriedPromptCache)
+
+            let outcome: Result<Void, any Error>
             do {
                 // Send metadata first
                 await Self.emitMetadata(
@@ -1248,6 +1265,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 requestedTemperature: request.generationOptions.temperature,
                                 samplingConfiguration: requestedSamplingConfiguration,
                                 reasoningEntryID: reasoningEntryID,
+                                promptCache: promptCache,
                                 context: context,
                                 channel: channel)
 
@@ -1274,6 +1292,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                     modelID: modelID,
                                     requestedMaxTokens: requestedMaxTokens,
                                     entryID: entryID,
+                                    promptCache: promptCache,
                                     context: context,
                                     channel: channel)
                             } else {
@@ -1287,7 +1306,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                                 || result.endedInsideReasoning
                             {
                                 await emitAllowedUsage(
-                                    result, entryID: entryID, channel: channel)
+                                    result, entryID: entryID, promptCache: promptCache,
+                                    channel: channel)
                             }
                             Stream.gpu.synchronize()
                             return
@@ -1295,6 +1315,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
                         // Required mode is the only mode that reaches guided
                         // tool generation, and it uses developer definitions only.
+                        // `GuidedGenerationLoop.run` builds its own key/value
+                        // cache and accepts none from a caller, thus this pass
+                        // carries nothing from an earlier turn.
+                        promptCache.carriesNoCache()
                         let requiredToolDefinitions = enabledToolDefinitions
                         let toolSpecs = try ToolCallingConversions.makeToolSpecs(
                             from: requiredToolDefinitions)
@@ -1444,8 +1468,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             let totalOutput = generatedTokenCount + reasoningCount
                             await Self.emitUsage(
                                 input: .init(
-                                    totalTokenCount: toolAwareInput.text.tokens.size,
-                                    cachedTokenCount: Self.reusedPromptTokenCount),
+                                    totalTokenCount: toolAwareInput.text.tokens.size
+                                        + promptCache.reusedTokenCount,
+                                    cachedTokenCount: promptCache.reusedTokenCount),
                                 output: .init(
                                     totalTokenCount: totalOutput,
                                     reasoningTokenCount: Swift.min(reasoningCount, totalOutput)),
@@ -1463,6 +1488,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             modelID: modelID,
                             requestedMaxTokens: requestedMaxTokens,
                             entryID: entryID,
+                            promptCache: promptCache,
                             context: context,
                             channel: channel)
                     } else {
@@ -1474,6 +1500,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             samplingConfiguration: requestedSamplingConfiguration,
                             responseEntryID: entryID,
                             reasoningEntryID: reasoningEntryID,
+                            promptCache: promptCache,
                             context: context,
                             channel: channel
                         )
@@ -1481,11 +1508,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
                     Stream.gpu.synchronize()
                 }
+                outcome = .success(())
             } catch is CancellationError {
                 // Synchronize GPU before rethrowing to ensure in-flight operations complete.
                 // Without this, process teardown can crash with Metal assertions.
                 Stream.gpu.synchronize()
-                throw CancellationError()
+                outcome = .failure(CancellationError())
             } catch {
                 // Synchronize GPU before rethrowing to ensure in-flight operations complete
                 Stream.gpu.synchronize()
@@ -1493,10 +1521,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // where the cause is provably user input (see `mapGrammarError`).
                 // Internal-shim failures pass through unchanged.
                 if let grammarError = error as? GrammarError {
-                    throw Self.mapGrammarError(grammarError)
+                    outcome = .failure(Self.mapGrammarError(grammarError))
+                } else {
+                    outcome = .failure(error)
                 }
-                throw error
             }
+
+            // Return the session's prompt cache whatever the outcome, thus a
+            // failed turn leaves nothing stranded outside the store. A turn that
+            // could not represent itself checked in nothing, and the next turn
+            // of that session starts cold.
+            if let promptCacheKey {
+                await ExecutorPromptCacheStore.shared.checkIn(promptCacheKey, promptCache.entry)
+            }
+            try outcome.get()
         }
 
         private struct AllowedToolGenerationResult {
@@ -1516,6 +1554,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
             reasoningEntryID: String,
+            promptCache: ExecutorPromptCacheSlot,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> AllowedToolGenerationResult {
@@ -1523,6 +1562,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 maxTokens: requestedMaxTokens ?? Self.defaultMaxTokens,
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration)
+            let plan = try promptCache.plan(
+                input: input, model: context.model, parameters: params)
             let format = context.configuration.toolCallFormat ?? .json
             var router = AllowedToolOutputRouter(
                 format: format,
@@ -1535,7 +1576,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
             var result = AllowedToolGenerationResult()
             let (stream, task) = try generateProtocolTokensTask(
-                input: input,
+                input: plan?.input ?? input,
+                cache: plan?.caches,
                 parameters: params,
                 context: context,
                 decoder: protocolDecoder)
@@ -1598,6 +1640,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
 
             await task.value
+            promptCache.commit(plan)
             let finalReasoningText: String
             if var decoder = protocolDecoder {
                 result.endedInsideReasoning = decoder.isInsideReasoning
@@ -1665,13 +1708,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private func emitAllowedUsage(
             _ result: AllowedToolGenerationResult,
             entryID: String,
+            promptCache: ExecutorPromptCacheSlot,
             channel: LanguageModelExecutorGenerationChannel
         ) async {
             guard let info = result.completionInfo else { return }
+            // `promptTokenCount` counts the tokens this pass FED, thus the whole
+            // prompt is that count plus the prefix the cache already held.
             await Self.emitUsage(
                 input: .init(
-                    totalTokenCount: info.promptTokenCount,
-                    cachedTokenCount: Self.reusedPromptTokenCount),
+                    totalTokenCount: info.promptTokenCount + promptCache.reusedTokenCount,
+                    cachedTokenCount: promptCache.reusedTokenCount),
                 output: .init(
                     totalTokenCount: info.generationTokenCount,
                     reasoningTokenCount: min(
@@ -1687,9 +1733,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             modelID: String,
             requestedMaxTokens: Int?,
             entryID: String,
+            promptCache: ExecutorPromptCacheSlot,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
+            // `GuidedGenerationLoop.run` builds its own key/value cache and
+            // accepts none from a caller, thus this pass carries nothing from an
+            // earlier turn and reports nothing.
+            promptCache.carriesNoCache()
             let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
                 modelID: modelID,
                 tokenizer: context.tokenizer)
@@ -1760,8 +1811,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if let generatedTokenCount {
                 await Self.emitUsage(
                     input: .init(
-                        totalTokenCount: input.text.tokens.size,
-                        cachedTokenCount: Self.reusedPromptTokenCount),
+                        totalTokenCount: input.text.tokens.size + promptCache.reusedTokenCount,
+                        cachedTokenCount: promptCache.reusedTokenCount),
                     output: .init(
                         totalTokenCount: generatedTokenCount,
                         reasoningTokenCount: 0),
@@ -1782,6 +1833,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
             entryID: String,
+            promptCache: ExecutorPromptCacheSlot,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -1792,9 +1844,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration
             )
+            let plan = try promptCache.plan(
+                input: input, model: context.model, parameters: params)
 
             for await generation in try generate(
-                input: input,
+                input: plan?.input ?? input,
+                cache: plan?.caches,
                 parameters: params,
                 context: context
             ) {
@@ -1808,11 +1863,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // authoritative scalar token counts (`promptTokenCount`
                     // is the prompt; `generationTokenCount` is the
                     // model-generated completion -- see Evaluate.swift's
-                    // `GenerateCompletionInfo` definition).
+                    // `GenerateCompletionInfo` definition). `promptTokenCount`
+                    // counts the tokens this pass FED, thus the whole prompt is
+                    // that count plus the prefix the cache already held.
                     await Self.emitUsage(
                         input: .init(
-                            totalTokenCount: info.promptTokenCount,
-                            cachedTokenCount: Self.reusedPromptTokenCount),
+                            totalTokenCount: info.promptTokenCount
+                                + promptCache.reusedTokenCount,
+                            cachedTokenCount: promptCache.reusedTokenCount),
                         output: .init(
                             totalTokenCount: info.generationTokenCount, reasoningTokenCount: 0),
                         entryID: entryID, into: channel)
@@ -1822,6 +1880,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     throw RejectedToolCallError(rejection)
                 }
             }
+            promptCache.commit(plan)
         }
 
         /// Dispatches the no-tools/no-schema path: reasoning routing when a
@@ -1834,6 +1893,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             samplingConfiguration: MLXSamplingConfiguration?,
             responseEntryID: String,
             reasoningEntryID: String,
+            promptCache: ExecutorPromptCacheSlot,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -1847,6 +1907,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     samplingConfiguration: samplingConfiguration,
                     responseEntryID: responseEntryID,
                     reasoningEntryID: reasoningEntryID,
+                    promptCache: promptCache,
                     context: context,
                     channel: channel)
             } else {
@@ -1856,6 +1917,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     requestedTemperature: requestedTemperature,
                     samplingConfiguration: samplingConfiguration,
                     entryID: responseEntryID,
+                    promptCache: promptCache,
                     context: context,
                     channel: channel)
             }
@@ -1877,6 +1939,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             samplingConfiguration: MLXSamplingConfiguration?,
             responseEntryID: String,
             reasoningEntryID: String,
+            promptCache: ExecutorPromptCacheSlot,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -1885,6 +1948,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration
             )
+            let plan = try promptCache.plan(
+                input: input, model: context.model, parameters: params)
 
             var emitter = ReasoningEventEmitter(
                 config: reasoningConfig, primedInside: primedInside)
@@ -1901,7 +1966,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // never executable.
             var rejectedToolCall: RejectedToolCall?
             let (stream, task) = try generateProtocolTokensTask(
-                input: input,
+                input: plan?.input ?? input,
+                cache: plan?.caches,
                 parameters: params,
                 context: context,
                 decoder: protocolDecoder)
@@ -1971,6 +2037,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 throw error
             }
             await task.value
+            promptCache.commit(plan)
 
             let endedInsideReasoning: Bool
             if var decoder = protocolDecoder {
@@ -2021,10 +2088,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // `.updateUsage` (the framework's aggregator replaces wholesale,
                 // so we must not also rely on per-delta auto-summing). The
                 // reasoning count is clamped to never exceed the total.
+                // `promptTokenCount` counts the tokens this pass FED, thus the
+                // whole prompt is that count plus the prefix the cache held.
                 await Self.emitUsage(
                     input: .init(
-                        totalTokenCount: info.promptTokenCount,
-                        cachedTokenCount: Self.reusedPromptTokenCount),
+                        totalTokenCount: info.promptTokenCount + promptCache.reusedTokenCount,
+                        cachedTokenCount: promptCache.reusedTokenCount),
                     output: .init(
                         totalTokenCount: info.generationTokenCount,
                         reasoningTokenCount: min(reasoningTokenCount, info.generationTokenCount)),
