@@ -123,7 +123,22 @@ comments:
     - evidence: 6 files — Libraries/MLXFoundationModels/ExecutorPromptCache.swift, Libraries/MLXFoundationModels/MLXLanguageModel.swift, Libraries/MLXLMCommon/Evaluate.swift, Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift, Tests/MLXLMTests/DeepSeekV4PromptCacheRewindTests.swift, IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/PromptCacheReuseChannelTests.swift. Five bundles green (847+475, 70, 160, 7, 5). IntegrationTesting builds. Real weights: sliding-window round 2 went from `cached 0, fed 3553` to `cached 3536, fed 17`.
     - next: /review. The user must read the DEVIATION section of the description: the real-weights round ran on `mlx-community/gemma-3-270m-it-4bit`, not on `mlx-community/DeepSeek-V4-Flash-4bit`.
   timestamp: 2026-08-16T17:11:47.052163+00:00
-position_column: doing
+- actor: claude-code
+  id: 01m05s1yvpvda3cqtjbrqc9548
+  text: |-
+    ### commit — changed
+    - evidence: f661489 fix(foundation-models): widen the prompt-cache ledger instead of rewinding it. Files: ExecutorPromptCache.swift, MLXLanguageModel.swift, MLXLMCommon/Evaluate.swift, ExecutorPromptCacheTests.swift, DeepSeekV4PromptCacheRewindTests.swift, PromptCacheReuseChannelTests.swift, plus this card's kanban state.
+    - A second, unrelated board-only commit closed out card ^mscrreq (its code had already landed as 10b350e): 29b4b55 chore(kanban): close ^mscrreq after a clean review.
+    - next: `/review` for this card.
+  timestamp: 2026-08-16T17:14:06.070632+00:00
+- actor: claude-code
+  id: 01m05t16scm75s54gswqp21pw5
+  text: |-
+    ### review — findings
+    - evidence: 5 findings (5 confirmed, 1 refuted, 9 attempted) — `review sha f661489~1..f661489` backend local — MLXLanguageModel.swift:1674, 1914, 1918, 2071, 2074
+    - next: remove the duplicated task-completion and cache-commit code from the whole file, then run /review again.
+  timestamp: 2026-08-16T17:31:09.996244+00:00
+position_column: review
 position_ordinal: '80'
 title: The executor prompt cache gives a sliding-window model no reuse
 ---
@@ -202,3 +217,13 @@ no compressor.
 The DeepSeek-V4 checkpoint holds 141 GiB. Run ONE real-weights test for each
 process, or the machine runs out of memory.
 #deepseek-v4 #performance
+
+## Review Findings (2026-08-16 12:14)
+
+> Scope: `review sha f661489~1..f661489` — reviewed the diffs only — lines this change added or modified. 6 file(s) reviewed, 0 not reviewed.
+
+- [ ] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1674` `duplication/duplication` — Identical method call `promptCache.commit(plan, generatedTokens: await task.value)` appears in three functions (lines 1674, 1918, 2074); cache commitment is duplicated. Extract a shared helper function `commitPromptCache(plan:tokens:)` or pass the task result through a common completion path rather than duplicating the commit call.
+- [ ] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1914` `duplication/duplication` — Identical statement `_ = await task.value` appears across three generation functions; this line duplicates lines 1670 and 2071. Extract task completion logic into a helper function to avoid maintaining three identical error-handling paths.
+- [ ] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1918` `duplication/duplication` — Identical method call `promptCache.commit(plan, generatedTokens: await task.value)` appears across three functions; this line duplicates lines 1674 and 2074. Extract cache commitment into a shared helper to prevent divergence and reduce maintenance burden across three generation paths.
+- [ ] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:2071` `duplication/duplication` — Identical statement `_ = await task.value` appears across three generation functions; this line duplicates lines 1670 and 1914. Extract task completion handling into a helper function to centralize error-path logic and reduce duplication.
+- [ ] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:2074` `duplication/duplication` — Identical method call `promptCache.commit(plan, generatedTokens: await task.value)` appears across three functions; this line duplicates lines 1674 and 1918. Extract cache commitment into a shared helper to ensure consistency and simplify maintenance across runReasoning, runUnconstrained, and runAllowedToolGeneration.
