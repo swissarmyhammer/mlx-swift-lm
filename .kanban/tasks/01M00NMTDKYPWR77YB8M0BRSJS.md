@@ -285,6 +285,48 @@ comments:
       `MLXFoundationModels` untouched. The earlier decision assumed a premise the
       test now disproves.
   timestamp: 2026-08-14T19:46:00.507390+00:00
+- actor: claude-code
+  id: 01m05ez91sq67tc60k4hfezchz
+  text: |
+    ### real-weights evidence from ^5ddpy4s — a tool body that generates does NOT deadlock here
+
+    `^5ddpy4s` added `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/ToolBodyContainerReentryRealModelTests.swift`.
+    It has the shape of `ToolBodyContainerReentryTests`, but it runs over real
+    weights and thus does real MLX evaluation.
+
+    **Model.** `mlx-community/Llama-3.2-1B-Instruct-4bit`, 680 MB, from the local
+    hub cache.
+
+    **Result.** PASSED after 3.697 seconds. It did NOT hang.
+
+    ```
+    ✔ Test "A tool body may generate on the same real model while its turn is in flight" passed after 3.697 seconds.
+    ✔ Test run with 2 tests in 1 suite passed after 3.722 seconds.
+    ```
+
+    **What the turn does.** A `LanguageModelSession` runs a tool under
+    `.toolCallingMode(.required)`, thus the tool call is grammar-constrained and
+    always happens. The tool BODY opens a second `LanguageModelSession` on the SAME
+    `MLXLanguageModel` and awaits `respond`, thus a nested generation runs on the
+    one resident container while the outer turn is in flight. The outer turn then
+    completes on a third generation.
+
+    Three real forward passes, one resident container, no park.
+
+    **The test can fail.** Two mutations prove it:
+
+    1. `turnTimeout` set to 1 ms — the test failed at the timeout arm, thus the arm
+       that catches a park does fire.
+    2. The tool body replaced by a constant, with no nested generation — the test
+       failed on `log.callCount → 0` and `log.generatedText → nil`, thus the
+       nested-generation assertions are load-bearing.
+
+    **What this closes.** This card stays closed on evidence that covers real
+    weights, not a stub. It adds nothing about the grammar-constrained nested
+    decode: this turn's nested round is unconstrained. The cause of the reported
+    hang is in `FoundationModelsRouter` — a per-container `AsyncSemaphore(value: 1)`
+    that `beginTurn()` holds for the complete turn — and not in this repository.
+  timestamp: 2026-08-16T14:17:52.441976+00:00
 position_column: doing
 position_ordinal: '8380'
 title: One turn holds the container lock across tool rounds, so a tool that generates deadlocks

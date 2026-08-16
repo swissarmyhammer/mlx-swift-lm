@@ -215,8 +215,25 @@ comments:
     - evidence: 1 file — Libraries/MLXFoundationModels/MLXLanguageModel.swift (+34/-24). One shared `usageInput(fedTokenCount:promptCache:)` helper, used at all five call sites (the required-tool path, `emitAllowedUsage`, `runSchemaGeneration`, `runUnconstrained`, `runReasoning`). All 4 findings checked. `swift build` clean; `swift-format lint` clean; five bundles green — MLXLMTests 475 XCTest + 844 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 155, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 XCTest = 480 XCTest + 1076 Swift Testing = 1556, 0 failures. `xcodebuild build-for-testing` on the package and on IntegrationTesting each give TEST BUILD SUCCEEDED. Real weights: PromptCacheReuseChannelTests and UpdateUsageEmissionTests pass with unchanged counts.
     - next: `/review`.
   timestamp: 2026-08-16T13:53:02.983380+00:00
-position_column: doing
-position_ordinal: '8580'
+- actor: claude-code
+  id: 01m05dwgf4errhnrr9nknvfw9b
+  text: |
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (sha 57cab44), local backend. 0 findings, 0 confirmed, 0 refuted. 9 validator passes on 1 file, 0 files skipped. The four findings of 2026-08-16 08:22 are all marked `- [x]`.
+    - next: none. The card moves to `done`.
+  timestamp: 2026-08-16T13:58:53.156733+00:00
+- actor: claude-code
+  id: 01m05dx2dtdn2mmcrh0mqxjvpt
+  text: |
+    ### finish iteration 2 — clean
+    - implement: changed — 1 file, one shared `usageInput` helper at all five sites
+    - test: green — five bundles, 480 XCTest + 1076 Swift Testing = 1556, 0 failures
+    - commit: 57cab44
+    - review: clean — 0 findings, 9 validator passes, all 4 prior findings checked
+    - next: the card is in `done`
+  timestamp: 2026-08-16T13:59:11.546353+00:00
+position_column: done
+position_ordinal: ff8780
 title: Reuse the prompt cache across turns inside MLXLanguageModel.Executor
 ---
 ## What
