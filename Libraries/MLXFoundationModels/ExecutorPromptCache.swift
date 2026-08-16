@@ -178,19 +178,35 @@ struct ExecutorPromptCachePlan {
 
     /// The cache this finished pass leaves for the next turn of its session.
     ///
-    /// Generation writes the tokens the model sampled into the caches, and a
-    /// later render of this same turn need not tokenize into those exact
-    /// identifiers. The cache therefore keeps the rendered PROMPT alone, and the
-    /// next turn compares its own render against that render. A ledger that held
-    /// the generated tokens would break the prefix at the seam between the two,
-    /// which is the reuse failure card `^mscrreq` measured.
+    /// Generation feeds the tokens the model sampled into the caches, thus the
+    /// caches hold the render of this pass AND those generated tokens. The
+    /// ledger names both, which is the ledger ``ChatSession`` keeps. A rewind
+    /// back to the render alone is not available to every model -- a rotating
+    /// cache past its sliding window drops the keys a rewind needs -- and this
+    /// ledger asks for none.
     ///
-    /// - Returns: the entry to check in, or nil when the rewind did not land and
-    ///   the session must start cold. A cache past its sliding window cannot
-    ///   rewind, thus a sliding-window model takes the nil answer.
-    func committed() -> ExecutorPromptCacheEntry? {
-        guard rewindPromptCache(caches, to: promptTokens.count) else { return nil }
-        return ExecutorPromptCacheEntry(caches: caches, tokens: promptTokens)
+    /// The next turn reconciles the two. When its render extends this ledger,
+    /// `ExtendCachedPrefixRule` feeds the tail alone. When the render breaks the
+    /// prefix at the seam between the two, `RewindToCommonPrefixRule` takes over
+    /// and answers what the caches allow.
+    ///
+    /// - Parameter generatedTokens: every token this pass generated, in order.
+    ///   `TokenIterator` feeds a token before it answers it, thus each token of
+    ///   this list stands in the caches.
+    /// - Returns: the entry to check in, or nil when the caches did not land on
+    ///   a position this ledger can name and the session must start cold.
+    func committed(generatedTokens: [Int]) -> ExecutorPromptCacheEntry? {
+        guard let position = caches.first?.offset,
+            caches.allSatisfy({ $0.offset == position }),
+            position >= promptTokens.count,
+            position - promptTokens.count <= generatedTokens.count
+        else {
+            return nil
+        }
+        let committedGeneratedTokenCount = position - promptTokens.count
+        return ExecutorPromptCacheEntry(
+            caches: caches,
+            tokens: promptTokens + generatedTokens.prefix(committedGeneratedTokenCount))
     }
 }
 
@@ -226,8 +242,8 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
 
     /// Plans the pass that is about to run, and records what that pass reuses.
     ///
-    /// The slot gives up its entry: the pass owns the caches until ``commit(_:)``
-    /// takes them back.
+    /// The slot gives up its entry: the pass owns the caches until
+    /// ``commit(_:generatedTokens:)`` takes them back.
     ///
     /// - Parameters:
     ///   - input: the prepared input of the pass about to run.
@@ -254,8 +270,12 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     }
 
     /// Records the cache a finished pass leaves for the next turn.
-    func commit(_ plan: ExecutorPromptCachePlan?) {
-        entry = plan?.committed()
+    ///
+    /// - Parameters:
+    ///   - plan: the plan the pass ran, or nil when the pass carried no plan.
+    ///   - generatedTokens: the tokens the pass generated, in order.
+    func commit(_ plan: ExecutorPromptCachePlan?, generatedTokens: [Int]) {
+        entry = plan?.committed(generatedTokens: generatedTokens)
     }
 }
 

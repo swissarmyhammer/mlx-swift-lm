@@ -129,4 +129,28 @@ struct DeepSeekV4PromptCacheRewindTests {
             and record the new behavior.
             """)
     }
+
+    /// The gap card ^2nztex1 names. `rewindPromptCache` is what the
+    /// `MLXFoundationModels` executor asked to take this cache back to the
+    /// render of the turn, and past the window it lands nowhere. A ledger that
+    /// names the render PLUS the generated tokens asks for no rewind, thus the
+    /// executor now keeps that ledger.
+    @Test func aPromptCachePastTheSlidingWindowRewindsToNoEarlierPosition() throws {
+        let (configuration, caches) = try Self.newCache()
+        Self.feed(caches, of: configuration, tokenCount: Self.tokenCountPastTheWindow)
+
+        // The position the render of the turn stands at, with the one token the
+        // turn generated past it.
+        let renderTokenCount = Self.tokenCountPastTheWindow - 1
+
+        #expect(
+            !rewindPromptCache(caches, to: renderTokenCount),
+            """
+            a prompt cache of \(Self.tokenCountPastTheWindow) tokens rewound to \
+            \(renderTokenCount), past the \(configuration.slidingWindow)-token window.
+            """)
+        #expect(
+            caches.allSatisfy { $0.offset == Self.tokenCountPastTheWindow },
+            "a rewind that does not land leaves every cache where it stood")
+    }
 }

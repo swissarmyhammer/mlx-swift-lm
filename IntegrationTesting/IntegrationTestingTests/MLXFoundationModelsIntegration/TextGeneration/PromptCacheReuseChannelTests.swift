@@ -120,6 +120,100 @@ struct PromptCacheReuseChannelTests {
 
         await releaseAllGPUMemory()
     }
+
+    /// The smallest model whose cache ROTATES. `Gemma3TextModel.newCache` gives
+    /// a sliding-window cache to five of each six layers, thus this model is a
+    /// `RotatingKVCache` model in the sense card ^2nztex1 names.
+    private static let slidingWindowModelID = TestFixtures.gemmaModelID
+
+    /// The sliding window of the Gemma 3 configuration, which is the default of
+    /// `sliding_window`. Past this position a rotating cache has overwritten the
+    /// keys a rewind needs, thus the rewind lands nowhere.
+    private static let slidingWindowTokenCount = 512
+
+    /// How many filler words the first prompt of the sliding-window round
+    /// carries. The render must stand PAST the window, or the cache still
+    /// rewinds and the measurement says nothing about a rotating cache.
+    private static let fillerWordCount = 900
+
+    @Test("a second turn of a sliding-window model reuses the prompt of its first turn")
+    func aSecondTurnOfASlidingWindowModelReusesThePromptOfItsFirstTurn() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        await releaseAllGPUMemory()
+
+        let model = makeTestModel(Self.slidingWindowModelID)
+        let executor = try makeMLXExecutor(for: model)
+
+        let filler = (1 ... Self.fillerWordCount).map { "word\($0)" }.joined(separator: " ")
+        let firstPrompt = Transcript.Prompt(
+            segments: [
+                .text(
+                    Transcript.TextSegment(
+                        content: "Read this list: \(filler). Now name one primary color."))
+            ])
+        let secondPrompt = Transcript.Prompt(
+            segments: [
+                .text(Transcript.TextSegment(content: "Name one more. One word."))
+            ])
+
+        let firstTurn = try await respondReadingTheChannel(
+            executor,
+            request: makeExecutorRequest(
+                transcript: Transcript(entries: [.prompt(firstPrompt)]),
+                generationOptions: Self.greedyOptions),
+            model: model)
+        #expect(
+            firstTurn.cachedTokenCount == 0,
+            "The first turn of a session has no earlier turn to reuse.")
+        #expect(
+            firstTurn.promptTokenCount > Self.slidingWindowTokenCount,
+            """
+            the first turn rendered \(firstTurn.promptTokenCount) tokens, which stands inside \
+            the \(Self.slidingWindowTokenCount)-token window. Lengthen the filler, or this \
+            round measures a cache that still rewinds.
+            """)
+
+        let history: [Transcript.Entry] = [
+            .response(
+                Transcript.Response(
+                    assetIDs: [],
+                    segments: [.text(Transcript.TextSegment(content: firstTurn.text))])),
+            .prompt(secondPrompt),
+        ]
+
+        let secondTurn = try await respondReadingTheChannel(
+            executor,
+            request: makeExecutorRequest(
+                transcript: Transcript(entries: [.prompt(firstPrompt)] + history),
+                generationOptions: Self.greedyOptions),
+            model: model)
+
+        print(
+            """
+            sliding-window round 1: prompt \(firstTurn.promptTokenCount), \
+            cached \(firstTurn.cachedTokenCount)
+            sliding-window round 2: prompt \(secondTurn.promptTokenCount), \
+            cached \(secondTurn.cachedTokenCount), \
+            fed \(secondTurn.promptTokenCount - secondTurn.cachedTokenCount)
+            """)
+
+        #expect(
+            secondTurn.cachedTokenCount > 0,
+            """
+            the second turn of a rotating cache reused nothing. The ledger of the first turn \
+            names its render plus the tokens it generated, thus ExtendCachedPrefixRule needs \
+            no rewind here.
+            """)
+        #expect(
+            secondTurn.cachedTokenCount > firstTurn.promptTokenCount,
+            """
+            the second turn reused \(secondTurn.cachedTokenCount) tokens of a first turn that \
+            rendered \(firstTurn.promptTokenCount). A ledger that carries the generated tokens \
+            reaches past the render.
+            """)
+
+        await releaseAllGPUMemory()
+    }
 }
 
 /// What one response sent into the generation channel.

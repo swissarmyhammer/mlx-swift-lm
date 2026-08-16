@@ -1667,12 +1667,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 }
             } catch {
                 task.cancel()
-                await task.value
+                _ = await task.value
                 throw error
             }
 
-            await task.value
-            promptCache.commit(plan)
+            promptCache.commit(plan, generatedTokens: await task.value)
             let finalReasoningText: String
             if var decoder = protocolDecoder {
                 result.endedInsideReasoning = decoder.isInsideReasoning
@@ -1875,36 +1874,48 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let plan = try promptCache.plan(
                 input: input, model: context.model, parameters: params)
 
-            for await generation in try generate(
+            // The token-recording form is what lets this pass leave a prompt
+            // cache behind: the ledger of that cache names the render plus the
+            // tokens generation fed into it, and the text stream alone does not
+            // carry those token identifiers.
+            let (stream, task) = try generateTaskRecordingTokens(
                 input: plan?.input ?? input,
                 cache: plan?.caches,
                 parameters: params,
-                context: context
-            ) {
-                try Task.checkCancellation()
-                switch generation {
-                case .chunk(let text):
-                    await Self.emit(
-                        text: text, entryID: entryID, destination: .response, into: channel)
-                case .info(let info):
-                    // MLX-LM emits one .info event at end-of-generation with
-                    // authoritative scalar token counts (`promptTokenCount`
-                    // is the prompt; `generationTokenCount` is the
-                    // model-generated completion -- see Evaluate.swift's
-                    // `GenerateCompletionInfo` definition).
-                    await Self.emitUsage(
-                        input: Self.usageInput(
-                            fedTokenCount: info.promptTokenCount, promptCache: promptCache),
-                        output: .init(
-                            totalTokenCount: info.generationTokenCount, reasoningTokenCount: 0),
-                        entryID: entryID, into: channel)
-                case .toolCall(_):
-                    break
-                case .rejectedToolCall(let rejection):
-                    throw RejectedToolCallError(rejection)
+                context: context)
+
+            do {
+                for await generation in stream {
+                    try Task.checkCancellation()
+                    switch generation {
+                    case .chunk(let text):
+                        await Self.emit(
+                            text: text, entryID: entryID, destination: .response, into: channel)
+                    case .info(let info):
+                        // MLX-LM emits one .info event at end-of-generation with
+                        // authoritative scalar token counts (`promptTokenCount`
+                        // is the prompt; `generationTokenCount` is the
+                        // model-generated completion -- see Evaluate.swift's
+                        // `GenerateCompletionInfo` definition).
+                        await Self.emitUsage(
+                            input: Self.usageInput(
+                                fedTokenCount: info.promptTokenCount, promptCache: promptCache),
+                            output: .init(
+                                totalTokenCount: info.generationTokenCount, reasoningTokenCount: 0),
+                            entryID: entryID, into: channel)
+                    case .toolCall(_):
+                        break
+                    case .rejectedToolCall(let rejection):
+                        throw RejectedToolCallError(rejection)
+                    }
                 }
+            } catch {
+                task.cancel()
+                _ = await task.value
+                throw error
             }
-            promptCache.commit(plan)
+
+            promptCache.commit(plan, generatedTokens: await task.value)
         }
 
         /// Dispatches the no-tools/no-schema path: reasoning routing when a
@@ -2057,11 +2068,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 }
             } catch {
                 task.cancel()
-                await task.value
+                _ = await task.value
                 throw error
             }
-            await task.value
-            promptCache.commit(plan)
+            promptCache.commit(plan, generatedTokens: await task.value)
 
             let endedInsideReasoning: Bool
             if var decoder = protocolDecoder {

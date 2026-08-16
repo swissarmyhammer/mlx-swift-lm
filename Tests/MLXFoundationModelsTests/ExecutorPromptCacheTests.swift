@@ -4,6 +4,7 @@
 
 import Foundation
 import FoundationModels
+import MLX
 import MLXLMCommon
 import Testing
 
@@ -203,9 +204,116 @@ struct ExecutorPromptCacheTests {
     func aPassThatCommitsNothingLeavesTheSessionCold() {
         let slot = ExecutorPromptCacheSlot(entry(tokens: [1, 2, 3]))
 
-        slot.commit(nil)
+        slot.commit(nil, generatedTokens: [])
 
         #expect(slot.entry == nil)
+    }
+
+    // MARK: - The ledger a finished pass leaves
+
+    /// How many positions the rotating cache of this suite holds. A prompt
+    /// longer than this stands past the window, thus the cache no longer
+    /// rewinds.
+    private static let slidingWindow = 8
+
+    /// The number of sequences the key/value fixture carries.
+    private static let batchSize = 1
+
+    /// The number of attention heads the key/value fixture carries.
+    private static let headCount = 2
+
+    /// The width of one attention head of the key/value fixture.
+    private static let headDimension = 4
+
+    /// Takes every cache of `caches` to the position `tokenCount` tokens take
+    /// it to.
+    ///
+    /// A ledger reads the POSITION of a cache and nothing else, thus a key of
+    /// the right shape moves that position exactly as a prompt of the same
+    /// length does.
+    ///
+    /// - Parameters:
+    ///   - caches: the caches to feed.
+    ///   - tokenCount: the number of tokens to feed.
+    private func feed(_ caches: [KVCache], tokenCount: Int) {
+        let keyValues = MLXArray.zeros([
+            Self.batchSize, Self.headCount, tokenCount, Self.headDimension,
+        ])
+        for cache in caches {
+            _ = cache.update(keys: keyValues, values: keyValues)
+        }
+    }
+
+    /// A finished pass over `caches` that rendered `promptTokens`.
+    private func plan(caches: [KVCache], promptTokens: [Int]) -> ExecutorPromptCachePlan {
+        ExecutorPromptCachePlan(
+            caches: caches,
+            input: LMInput(tokens: MLXArray(promptTokens)),
+            reusedTokenCount: 0,
+            promptTokens: promptTokens)
+    }
+
+    @Test("a cache past its sliding window still carries a ledger to the next turn")
+    func aCachePastItsSlidingWindowStillCarriesALedgerToTheNextTurn() {
+        let caches: [KVCache] = [RotatingKVCache(maxSize: Self.slidingWindow)]
+        let promptTokens = Array(1 ... 12)
+        let generatedTokens = [101, 102, 103]
+        feed(caches, tokenCount: promptTokens.count + generatedTokens.count)
+
+        let committed = plan(caches: caches, promptTokens: promptTokens)
+            .committed(generatedTokens: generatedTokens)
+
+        #expect(!canTrimPromptCache(caches), "the premise: this cache cannot rewind")
+        #expect(committed?.tokens == promptTokens + generatedTokens)
+    }
+
+    @Test("a cache that rewinds carries the same ledger")
+    func aCacheThatRewindsCarriesTheSameLedger() {
+        let caches: [KVCache] = [KVCacheSimple()]
+        let promptTokens = [1, 2, 3, 4]
+        let generatedTokens = [101, 102]
+        feed(caches, tokenCount: promptTokens.count + generatedTokens.count)
+
+        let committed = plan(caches: caches, promptTokens: promptTokens)
+            .committed(generatedTokens: generatedTokens)
+
+        #expect(committed?.tokens == promptTokens + generatedTokens)
+    }
+
+    @Test("a token the caches did not take stays out of the ledger")
+    func aTokenTheCachesDidNotTakeStaysOutOfTheLedger() {
+        let caches: [KVCache] = [KVCacheSimple()]
+        let promptTokens = [1, 2, 3, 4]
+        feed(caches, tokenCount: promptTokens.count + 1)
+
+        let committed = plan(caches: caches, promptTokens: promptTokens)
+            .committed(generatedTokens: [101, 102])
+
+        #expect(committed?.tokens == promptTokens + [101])
+    }
+
+    @Test("caches that hold more than the pass generated leave the session cold")
+    func cachesThatHoldMoreThanThePassGeneratedLeaveTheSessionCold() {
+        let caches: [KVCache] = [KVCacheSimple()]
+        let promptTokens = [1, 2, 3, 4]
+        feed(caches, tokenCount: promptTokens.count + 3)
+
+        #expect(
+            plan(caches: caches, promptTokens: promptTokens)
+                .committed(generatedTokens: [101, 102]) == nil)
+    }
+
+    @Test("caches that disagree on their position leave the session cold")
+    func cachesThatDisagreeOnTheirPositionLeaveTheSessionCold() {
+        let leading = KVCacheSimple()
+        let lagging = KVCacheSimple()
+        let promptTokens = [1, 2, 3, 4]
+        feed([leading], tokenCount: promptTokens.count + 1)
+        feed([lagging], tokenCount: promptTokens.count)
+
+        #expect(
+            plan(caches: [leading, lagging], promptTokens: promptTokens)
+                .committed(generatedTokens: [101]) == nil)
     }
 }
 
