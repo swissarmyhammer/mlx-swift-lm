@@ -728,6 +728,28 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         values.mapValues { $0 as any ConvertibleToGeneratedContent })))
         }
 
+        /// The input half of the usage of one generation pass.
+        ///
+        /// Every count a pass has of its own prompt -- the `promptTokenCount` of
+        /// a completion info, or the size of the input the pass handed to the
+        /// model -- counts the tokens that pass FED. The whole prompt is thus
+        /// that count plus the prefix the cache already held, and the held part
+        /// is the cached part.
+        ///
+        /// - Parameters:
+        ///   - fedTokenCount: the prompt tokens the pass fed to the model.
+        ///   - promptCache: the slot that carries the prefix the pass reused.
+        /// - Returns: the whole prompt count, and the part of it the cache
+        ///   served.
+        static func usageInput(
+            fedTokenCount: Int,
+            promptCache: ExecutorPromptCacheSlot
+        ) -> LanguageModelExecutorGenerationChannel.Usage.Input {
+            .init(
+                totalTokenCount: fedTokenCount + promptCache.reusedTokenCount,
+                cachedTokenCount: promptCache.reusedTokenCount)
+        }
+
         static func emitUsage(
             input: LanguageModelExecutorGenerationChannel.Usage.Input,
             output: LanguageModelExecutorGenerationChannel.Usage.Output,
@@ -1467,10 +1489,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             let reasoningCount = reasoningTokenIDs.count
                             let totalOutput = generatedTokenCount + reasoningCount
                             await Self.emitUsage(
-                                input: .init(
-                                    totalTokenCount: toolAwareInput.text.tokens.size
-                                        + promptCache.reusedTokenCount,
-                                    cachedTokenCount: promptCache.reusedTokenCount),
+                                input: Self.usageInput(
+                                    fedTokenCount: toolAwareInput.text.tokens.size,
+                                    promptCache: promptCache),
                                 output: .init(
                                     totalTokenCount: totalOutput,
                                     reasoningTokenCount: Swift.min(reasoningCount, totalOutput)),
@@ -1712,12 +1733,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             channel: LanguageModelExecutorGenerationChannel
         ) async {
             guard let info = result.completionInfo else { return }
-            // `promptTokenCount` counts the tokens this pass FED, thus the whole
-            // prompt is that count plus the prefix the cache already held.
             await Self.emitUsage(
-                input: .init(
-                    totalTokenCount: info.promptTokenCount + promptCache.reusedTokenCount,
-                    cachedTokenCount: promptCache.reusedTokenCount),
+                input: Self.usageInput(
+                    fedTokenCount: info.promptTokenCount, promptCache: promptCache),
                 output: .init(
                     totalTokenCount: info.generationTokenCount,
                     reasoningTokenCount: min(
@@ -1810,9 +1828,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             if let generatedTokenCount {
                 await Self.emitUsage(
-                    input: .init(
-                        totalTokenCount: input.text.tokens.size + promptCache.reusedTokenCount,
-                        cachedTokenCount: promptCache.reusedTokenCount),
+                    input: Self.usageInput(
+                        fedTokenCount: input.text.tokens.size, promptCache: promptCache),
                     output: .init(
                         totalTokenCount: generatedTokenCount,
                         reasoningTokenCount: 0),
@@ -1863,14 +1880,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // authoritative scalar token counts (`promptTokenCount`
                     // is the prompt; `generationTokenCount` is the
                     // model-generated completion -- see Evaluate.swift's
-                    // `GenerateCompletionInfo` definition). `promptTokenCount`
-                    // counts the tokens this pass FED, thus the whole prompt is
-                    // that count plus the prefix the cache already held.
+                    // `GenerateCompletionInfo` definition).
                     await Self.emitUsage(
-                        input: .init(
-                            totalTokenCount: info.promptTokenCount
-                                + promptCache.reusedTokenCount,
-                            cachedTokenCount: promptCache.reusedTokenCount),
+                        input: Self.usageInput(
+                            fedTokenCount: info.promptTokenCount, promptCache: promptCache),
                         output: .init(
                             totalTokenCount: info.generationTokenCount, reasoningTokenCount: 0),
                         entryID: entryID, into: channel)
@@ -2088,12 +2101,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // `.updateUsage` (the framework's aggregator replaces wholesale,
                 // so we must not also rely on per-delta auto-summing). The
                 // reasoning count is clamped to never exceed the total.
-                // `promptTokenCount` counts the tokens this pass FED, thus the
-                // whole prompt is that count plus the prefix the cache held.
                 await Self.emitUsage(
-                    input: .init(
-                        totalTokenCount: info.promptTokenCount + promptCache.reusedTokenCount,
-                        cachedTokenCount: promptCache.reusedTokenCount),
+                    input: Self.usageInput(
+                        fedTokenCount: info.promptTokenCount, promptCache: promptCache),
                     output: .init(
                         totalTokenCount: info.generationTokenCount,
                         reasoningTokenCount: min(reasoningTokenCount, info.generationTokenCount)),

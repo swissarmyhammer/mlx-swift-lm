@@ -145,6 +145,76 @@ comments:
     Correction to the evidence line above: the counts are swapped. The change is 4
     NEW files and 3 CHANGED files. The file list itself is complete and correct.
   timestamp: 2026-08-16T13:20:44.644753+00:00
+- actor: claude-code
+  id: 01m05ctysxbn8ammrz1gbdb4xt
+  text: |-
+    ### review — findings
+    - evidence: 4 findings (4 confirmed, 1 refuted, 9 attempted) — `review sha HEAD~1..HEAD` with the local backend on sha 08a120e. The lines: Libraries/MLXFoundationModels/MLXLanguageModel.swift:1471, :1719, :1814, :1871. All four lines are in a hunk that this commit added or changed.
+    - next: Make one shared helper for the usage input structure, and use it at all five call sites in MLXLanguageModel.swift. Then do the review again.
+  timestamp: 2026-08-16T13:40:33.725735+00:00
+- actor: claude-code
+  id: 01m05cvmmp4abchgvxx3a7tzrv
+  text: |
+    ### finish iteration 1 — findings
+    - implement: changed — 7 files (4 new, 3 changed)
+    - test: green — five bundles, 480 XCTest + 1076 Swift Testing = 1556, 0 failures
+    - commit: 08a120e
+    - review: findings — Libraries/MLXFoundationModels/MLXLanguageModel.swift:1471, :1719, :1814, :1871
+  timestamp: 2026-08-16T13:40:56.086571+00:00
+- actor: claude-code
+  id: 01m05dhk579j9k7kr8ybn42pv9
+  text: |
+    ### How the four duplication findings were removed
+
+    The four findings name one cause: the usage input structure is built with the
+    same formula at FIVE places in
+    `Libraries/MLXFoundationModels/MLXLanguageModel.swift`. The formula is
+
+        totalTokenCount: <the tokens the pass FED> + promptCache.reusedTokenCount,
+        cachedTokenCount: promptCache.reusedTokenCount
+
+    Only the first term changes between the sites. It is `info.promptTokenCount` at
+    three of them, and the size of the input the pass handed to the model at the
+    other two.
+
+    One helper now holds that formula, beside `emitUsage` in the same type:
+
+        static func usageInput(
+            fedTokenCount: Int,
+            promptCache: ExecutorPromptCacheSlot
+        ) -> LanguageModelExecutorGenerationChannel.Usage.Input
+
+    All five call sites call it: the required-tool path, `emitAllowedUsage`,
+    `runSchemaGeneration`, `runUnconstrained` and `runReasoning`. No site builds the
+    structure itself any more, thus the cause is gone from the whole file, not from
+    the four named lines alone.
+
+    Three call sites carried the same sentence in a comment -- "`promptTokenCount`
+    counts the tokens this pass FED, thus the whole prompt is that count plus the
+    prefix the cache already held". That sentence is now the doc comment of the
+    helper, and the three copies are gone. The other prose of those comments stays
+    where it is, because it says something the helper does not.
+
+    ### Why this pass adds no test
+
+    This is the REFACTOR step of a cycle that is already green. The extraction moves
+    no arithmetic and changes no value, and the paths it touches already carry
+    tests: `UsageChannelSendTests` reads the channel, and the real-weights
+    `PromptCacheReuseChannelTests` and `UpdateUsageEmissionTests` read the counts
+    end to end. The real-weights test reports the SAME three numbers as before the
+    extraction, which is the proof that the behaviour did not move:
+
+        round 1: prompt 45, cached 0
+        round 2: prompt 63, cached 45, fed 18
+        cold control: prompt 63, cached 0
+  timestamp: 2026-08-16T13:52:55.463944+00:00
+- actor: claude-code
+  id: 01m05dhtg7yp8q0q64cqhk9r4q
+  text: |
+    ### implement — changed
+    - evidence: 1 file — Libraries/MLXFoundationModels/MLXLanguageModel.swift (+34/-24). One shared `usageInput(fedTokenCount:promptCache:)` helper, used at all five call sites (the required-tool path, `emitAllowedUsage`, `runSchemaGeneration`, `runUnconstrained`, `runReasoning`). All 4 findings checked. `swift build` clean; `swift-format lint` clean; five bundles green — MLXLMTests 475 XCTest + 844 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 155, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 XCTest = 480 XCTest + 1076 Swift Testing = 1556, 0 failures. `xcodebuild build-for-testing` on the package and on IntegrationTesting each give TEST BUILD SUCCEEDED. Real weights: PromptCacheReuseChannelTests and UpdateUsageEmissionTests pass with unchanged counts.
+    - next: `/review`.
+  timestamp: 2026-08-16T13:53:02.983380+00:00
 position_column: doing
 position_ordinal: '8580'
 title: Reuse the prompt cache across turns inside MLXLanguageModel.Executor
@@ -231,3 +301,12 @@ entry, and the next turn of that session starts cold and reports 0.
       gives `TEST BUILD SUCCEEDED`.
 
 #eventplan
+
+## Review Findings (2026-08-16 08:22)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 7 file(s) reviewed, 0 not reviewed.
+
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1471` `duplication/duplication` — Usage input structure construction duplicates the pattern found at lines 1719, 1814, 1871, and 2095. The construction of totalTokenCount and cachedTokenCount follows the identical formula across all five occurrences, yet only partially abstracted in emitAllowedUsage. Extract a shared helper function for usage input construction, including this occurrence, to eliminate the duplication and ensure consistent handling across all five call sites.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1719` `duplication/duplication` — Usage input structure construction is duplicated across multiple functions. The pattern `totalTokenCount: <X> + promptCache.reusedTokenCount, cachedTokenCount: promptCache.reusedTokenCount` appears in emitAllowedUsage (line 1719), runSchemaGeneration (1814), runUnconstrained (1871), and runReasoning (2095). This pattern should be extracted into a shared helper or parameterized consistently. Extract a shared helper function (similar to how emitAllowedUsage partially abstracts this for one case) that takes the prompt token count as a parameter and constructs the usage input structure. Apply this consistently across all four call sites.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1814` `duplication/duplication` — Usage input structure in runSchemaGeneration duplicates the pattern already abstracted in emitAllowedUsage. The lines construct totalTokenCount and cachedTokenCount using the same formula as other functions, indicating inconsistent abstraction. Extract a helper function to construct this input structure, parameterized by the prompt token count source and output information source, then use it consistently across runSchemaGeneration, runUnconstrained, and runReasoning.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1871` `duplication/duplication` — Usage input structure in runUnconstrained repeats the same construction pattern as emitAllowedUsage, runSchemaGeneration, and runReasoning, creating duplication across four functions. Extract a shared helper function parameterized by the prompt token count value and output structure, consolidating the duplicated usage construction logic.
