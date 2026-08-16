@@ -311,8 +311,25 @@ comments:
       3525 in 12.72 s.
     - next: `/review`. Card `^2nztex1` holds the executor gap this work found.
   timestamp: 2026-08-16T16:22:35.628015+00:00
-position_column: doing
-position_ordinal: '8480'
+- actor: claude-code
+  id: 01m05ppe90caxeq1nqa62a046h
+  text: |
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (sha 10b350e, local backend) gave 0 findings, 0 confirmed, 0 refuted. 9 validator passes attempted, 0 failed, 0 skipped. The 2 Swift files of the commit were read: `Tests/MLXLMTests/DeepseekV4AgenticPromptCacheAssessmentTests.swift` and `Tests/MLXLMTests/DeepSeekV4PromptCacheRewindTests.swift`.
+    - next: none. The card has no open finding, and each item of "The work" is checked. The card moves to `done`.
+  timestamp: 2026-08-16T16:32:51.488934+00:00
+- actor: claude-code
+  id: 01m05pqjbpxdyey12frj0q1jw8
+  text: |
+    ### finish iteration — clean
+    - implement: changed — 2 test files. The defect is gone. Real weights measure the follow-up round feeding 16 of 3525 tokens in 1.99 s, against a 12.72 s cold control. Corrections A, B and C are each unnecessary.
+    - test: green — five bundles, 480 XCTest + 1078 Swift Testing, 0 failures, 0 skipped
+    - commit: 10b350e
+    - review: clean — 0 findings, 9 validator passes, 2 files
+    - next: the card is in `done`. `^2nztex1` holds the executor-side gap for sliding-window models.
+  timestamp: 2026-08-16T16:33:28.438286+00:00
+position_column: done
+position_ordinal: ff8c80
 title: DeepSeek-V4 gets a good prefix and still reprocesses the whole prompt
 ---
 Measured against `mlx-community/DeepSeek-V4-Flash-4bit` with the real weights,
