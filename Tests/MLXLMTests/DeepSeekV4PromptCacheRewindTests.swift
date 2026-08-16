@@ -29,10 +29,18 @@
 //     memory bounded.
 //
 // Thus a DeepSeek-V4 conversation of more than `slidingWindow` tokens has NO
-// rewind, and every turn whose prefix breaks pays the whole prefill again.
-// Card ^mscrreq holds that measurement. When a correction gives this cache a
-// rewind, the second test below fails on purpose: that is the signal to
-// invert it and record the new behavior.
+// rewind, and a turn whose prefix BREAKS pays the whole prefill again.
+//
+// A turn whose prefix holds pays nothing, and that is the ordinary chat-mode
+// turn. Measured with the real weights on 2026-08-16, card ^mscrreq: the ledger
+// of `ChatSession` -- the render of the last turn PLUS the tokens that turn
+// generated -- is a whole prefix of the next render, thus
+// `ExtendCachedPrefixRule` fires first, the follow-up round feeds 16 tokens of
+// its 3525 and no rewind takes part. The missing rewind is therefore a
+// fall-back this model does not have, and not a cost it pays on each turn.
+//
+// When a correction gives this cache a rewind, the second test below fails on
+// purpose: that is the signal to invert it and record the new behavior.
 
 import Foundation
 import MLX
@@ -105,8 +113,8 @@ struct DeepSeekV4PromptCacheRewindTests {
     }
 
     /// The measurement of card ^mscrreq: past the window the rewind is gone,
-    /// thus `RewindToCommonPrefixRule` answers `.rebuild` and the turn feeds
-    /// the whole prompt again.
+    /// thus a turn whose prefix breaks takes `.rebuild` from
+    /// `RewindToCommonPrefixRule` and feeds the whole prompt again.
     @Test func aPromptCachePastTheSlidingWindowNoLongerRewinds() throws {
         let (configuration, caches) = try Self.newCache()
         Self.feed(caches, of: configuration, tokenCount: Self.tokenCountPastTheWindow)
