@@ -360,6 +360,305 @@ comments:
     - The model cannot see the syntax is refuted. `longPromptWithoutToolsRecallsAPlantedFact` reads an exact string about 3400 positions back, thus the pooled-chunk path delivers.
     - A block-boundary defect is refuted at the synthetic level. A new weight-free test compares a whole-prompt prefill against a token-at-a-time decode, and the two agree.
   timestamp: 2026-08-16T18:42:58.939818+00:00
+- actor: claude-code
+  id: 01m062j3y5hprrnrtg4fygqzkk
+  text: |
+    ## Pre-registration: the deduction is VERIFIED, and E1 is INFEASIBLE as written
+
+    ### 1. The indexer ranking is INERT at the failing step. VERIFIED by reading.
+
+    `DeepSeekV4Indexer.callAsFunction` (Libraries/MLXLLM/Models/DeepSeekV4Indexer.swift,
+    line 207) opens with:
+
+    ```swift
+    guard chunkCount > topK else {
+        return broadcast(visible.expandedDimensions(axis: Self.headAxis), ...)
+    }
+    ```
+
+    The published `config.json` of `mlx-community/DeepSeek-V4-Flash-4bit` states
+    `index_topk` = 512 and `compress_ratios` = `[0, 0, 4, 128, 4, 128, ...]`.
+
+    At absolute position 367 a ratio-4 layer holds `367 / 4` = 91 chunks and a
+    ratio-128 layer holds 2. Both stand far below 512, thus `chunkCount > topK` is
+    false, thus the guard returns EVERY visible chunk and the score path never runs.
+
+    Three results follow:
+
+    - The top-k ranking cannot cause this defect. Do NOT spend a run on
+      `index_topk`.
+    - The `wq_b`, `weights_proj` and `compressor` tensors of the indexer take NO
+      part in the failing step. The whole `chunkScores` path is dead code for any
+      prompt below 2048 positions.
+    - The one measurement that DID run the ranking is
+      `longPromptWithoutToolsRecallsAPlantedFact` at 3506 tokens, which holds 876
+      chunks. That test PASSES, thus the ranking is measured good and the failing
+      step does not use it.
+
+    The compressed path at the failing step is thus: EVERY ratio-4 chunk of
+    positions 0 through 363, EVERY ratio-128 chunk of positions 0 through 255, and
+    the 128-token window of positions 240 through 367.
+
+    ### 2. E1 cannot be built. The tool template is larger than the window.
+
+    E1 asks for a tool prompt small enough that the `</｜DSML｜invoke>` syntax stays
+    inside the 128-token window at the losing step. Measured against the published
+    template:
+
+    | quantity | tokens |
+    | --- | ---: |
+    | prompt of the reproduction | 328 |
+    | last `</｜DSML｜invoke>` example ends at prompt index | 116 |
+    | tail after that example | 211 |
+    | decode steps before the losing step | 39 |
+    | distance from the example to the losing step | 251 |
+    | the window | 128 |
+
+    The tail holds the schema and the user turn, which a test may shorten, AND the
+    FIXED words of `TOOLS_TEMPLATE`, which a test may NOT shorten: the
+    `</｜DSML｜tool_calls>` line, the `string="true|false"` paragraph, the
+    `thinking_mode` paragraph, the `Otherwise, output directly` line, the
+    `### Available Tool Schemas` heading and the `You MUST strictly follow` line.
+    Those fixed words are about 131 tokens. Add the 39 decode steps and the least
+    possible distance is about 170 positions, which is 42 past the window.
+
+    Thus NO valid DeepSeek-V4 tool prompt, of any size, puts the closing-tag syntax
+    inside the window at the step that loses the token. The compressed path is the
+    only route the syntax has. E1 as written cannot be a control, thus it is
+    replaced.
+
+    ### 3. What replaces E1: the same question, asked with the prompt
+
+    **E1' — put the syntax inside the window with a reminder in the user turn.**
+
+    Hypothesis: the compressed path fails to deliver the closing-tag syntax, thus
+    the identifier 5406 loses because the syntax reaches the step only through
+    pooled chunks.
+
+    Change: no code. The user turn gains a reminder that states the literal
+    `</｜DSML｜invoke>` about 25 tokens before the end of the prompt, thus about 64
+    positions before the losing step, thus INSIDE the window.
+
+    - The model writes `oke` -> the syntax is reachable through raw keys and not
+      through chunks. The compressed path is implicated.
+    - The model still drops 5406 -> the compressed path is exonerated for THIS
+      defect, because the syntax was in plain view and the model still refused it.
+
+    ### 4. E2 is split in two, because the overlap decides the centre
+
+    The card asks for the chunk position `c * ratio + ratio / 2`. Reading
+    `DeepSeekV4Compressor.overlapped(_:padding:)` shows that this is right for one
+    half of the layers and wrong for the other:
+
+    - A ratio-4 layer POOLS WITH OVERLAP. Chunk `c` reads the tokens of chunk
+      `c - 1` as well as its own, thus it covers the raw positions `4c - 4` through
+      `4c + 3`, whose centre is `4c - 0.5`. The code writes `4c`. Thus on the
+      overlapping layers the code ALREADY stands at the centre, and the comment of
+      the source agrees with its own line.
+    - A ratio-128 layer pools with NO overlap. Chunk `c` covers `128c` through
+      `128c + 127`, whose centre is `128c + 63.5`. The code writes `128c`. Only
+      here do the code and the comment disagree.
+
+    Thus two runs, not one:
+
+    - **E2a** `c * ratio + ratio / 2` on every compressed layer, which is the card's
+      own wording.
+    - **E2b** `c * ratio + ratio / 2` on the NON-overlapping layers alone, which is
+      the one place the two authorities differ.
+
+    Falsification for each: identifier 5406 comes back -> strong evidence. No change
+    -> the chunk position is not the cause.
+
+    ### 5. E3 keeps its place
+
+    The rotary tables cast to bfloat16 at `DeepSeekV4MathHelpers.swift:221-222`.
+    E3 does the rotation in float32 and casts the answer back. Falsification: 5406
+    comes back -> the precision is the cause. No change -> it is not.
+
+    ### 6. One load, five runs
+
+    Each experiment is a run of the SAME loaded model with a different knob, thus
+    one process loads the 141 GiB checkpoint ONE time and measures five
+    configurations: `baseline`, `reminder` (E1'), `center-all` (E2a),
+    `center-coarse` (E2b), `fp32-rope` (E3). Every knob is a temporary edit, and
+    every temporary edit goes away before this card closes.
+  timestamp: 2026-08-16T20:00:12.741612+00:00
+- actor: claude-code
+  id: 01m063ghbz3ywe7fwbr4x2146e
+  text: |
+    ## Results: one load, five configurations, plus one weight-free control
+
+    Run of 2026-08-16, ONE load of the 141 GiB checkpoint, 243.7 s of test time.
+    Log: `scratchpad/e1-e3.log`. Every knob was a temporary edit, and every
+    temporary edit is now reverted.
+
+    ### 0. The deduction is CONFIRMED by a print, not only by reading
+
+    ```
+    DSV4 EXP: indexer offset=0 queries=328 chunkWidth=4 chunkCount=82 topK=512 rankingRuns=false
+    ```
+
+    Six reports, one for each of the first six ratio-4 layers, all the same. The
+    prefill of 328 tokens pools 82 chunks against a budget of 512, thus
+    `chunkCount > topK` is FALSE and the guard returns every visible chunk. The
+    score path of `DeepSeekV4Indexer` never runs at this prompt length. The top-k
+    ranking cannot cause this defect, and no run was spent on `index_topk`.
+
+    ### 1. The baseline reproduces the card exactly
+
+    | identifier | logit |
+    | --- | ---: |
+    | `>\n` 1018 (the winner) | 28.25 |
+    | `oke` 5406 (absent), rank 1 | 21.25 |
+    | gap | 7.0 |
+
+    The 47 generated identifiers match the run of 2026-08-16 in the earlier
+    comment, identifier for identifier, in a NEW process. The defect is stable
+    across processes as well as across runs.
+
+    ### 2. E1' -- the compressed path is EXONERATED
+
+    **Hypothesis**: the compressed path fails to deliver the closing-tag syntax,
+    thus 5406 loses because that syntax reaches the step only through pooled
+    chunks.
+
+    **Change**: no code. The user turn gained a reminder that states the literal
+    `</｜DSML｜invoke>`.
+
+    **Measured, weight-free, by the new tokenizer probe**:
+
+    ```
+    DSV4 E1P: reminder prompt identifiers = 359
+    DSV4 E1P: identifier 5406 stands at [62, 98, 103, 115, 344]
+    DSV4 E1P: the losing step stands at 398
+    DSV4 E1P: the window covers 271 through 398
+    DSV4 E1P: the tail = [2728 "Ġ</", 128825 "｜DSML｜", 40148 "inv", 5406 "oke",
+                          32 ">", 305 "Ġand", 270 "Ġthe", 5603 "Ġblock", ...]
+    ```
+
+    Thus the whole tag `</｜DSML｜invoke>` stands at prompt positions 342 to 346,
+    which is 54 positions before the losing step and WELL INSIDE the 128-token
+    window. Those five identifiers are RAW KEYS of the sliding window at the step
+    that must write 5406.
+
+    **Result**: the model wrote the SAME 47 identifiers as the baseline, byte for
+    byte, and closed with `</｜DSML｜inv>` again.
+
+    | identifier | logit |
+    | --- | ---: |
+    | `>\n` 1018 (the winner) | 33.75 |
+    | `inv` 40148, rank 1 | 24.125 |
+    | `oke` 5406, rank 2 | 22.25 |
+    | gap | 11.5 |
+
+    The gap did not close. It WIDENED from 7.0 to 11.5, and 5406 fell from rank 1
+    to rank 2.
+
+    **The hypothesis is REFUTED.** The model had the exact five identifiers of the
+    correct tag as raw keys, 54 positions back, and refused them by a wider margin
+    than before. A compressed path that failed to deliver the syntax cannot explain
+    a step where the syntax was in plain view.
+
+    ### 3. E2a and E2b -- the chunk position of this port is CORRECT
+
+    Neither variant brings 5406 back. Both DEGRADE the answer, and the degradation
+    rises with the size of the shift.
+
+    | run | shift | the closing tags it wrote | 5406 at the losing step |
+    | --- | --- | --- | --- |
+    | baseline | none | `</｜DSML｜inv>` `</｜DSML｜tool_calls>` | 21.25, rank 1, gap 7.0 |
+    | center-all | `+ ratio / 2` on every compressed layer | `</｜DSML｜inv>` `</｜DSML｜tool>` | 19.25, rank 5, gap 8.625 |
+    | center-coarse | `+ 64` on the ratio-128 layers alone | `</｜DSML｜>` `</｜DSML｜>` | no closing tag at all |
+
+    `center-coarse` shifts 2 chunks on 21 layers by 64 positions and the model then
+    loses the whole tag name, not one piece of it. `center-all` also shifts every
+    ratio-4 chunk by 2 and loses the name `tool_calls` as well.
+
+    **Both hypotheses are REFUTED, and the refutation is POSITIVE evidence.** The
+    first raw position is what the trained weights read, on the overlapping layers
+    AND on the coarse layers. The comment "chunk centers" of the source is wrong;
+    its code line is right, and this port follows the right one. The doc comment of
+    `DeepSeekV4Compressor` that records this choice needs no change.
+
+    ### 4. E3 -- not the cause, but it REFUTES the premise of the card
+
+    **Change**: `rotatePairs` turns the pairs in float32 and casts the answer back,
+    in place of casting the angle tables down to bfloat16 first.
+
+    **Result**: the SAME 47 identifiers. The tag still reads `</｜DSML｜inv>`.
+
+    | identifier | baseline | fp32-rope |
+    | --- | ---: | ---: |
+    | `>\n` 1018 | 28.25 | 30.0 |
+    | `oke` 5406 | 21.25 | 24.625 |
+    | gap | 7.0 | **5.375** |
+
+    **The hypothesis is REFUTED as a cause.** But read the number. ONE cast of the
+    rotary tables is worth 1.625 logits of the gap, and it moves the winner by 1.75
+    logits as well.
+
+    That number takes away the argument this card was built on. The card states:
+    "The gap is 7.0 logits, and a quantization moves a confident logit by a fraction
+    of one unit." The measurement says otherwise. If one bfloat16 cast of a
+    positional table is worth 1.6 logits at this step, then 4-bit affine
+    quantization of 141 GiB of weights across 43 layers is easily worth 7. The
+    FIRST candidate of the card -- the checkpoint -- is back in play, and the
+    reasoning that removed it does not hold.
+
+    ### 5. What the loop leaves standing
+
+    | candidate | state after this loop |
+    | --- | --- |
+    | the indexer top-k ranking | REFUTED. It never runs at this prompt length. |
+    | the compressed path as the route of the syntax | REFUTED by E1'. |
+    | the pooled-chunk rotary position | REFUTED by E2a and E2b, and shown CORRECT as it stands. |
+    | the bfloat16 rotary tables | REFUTED as a cause. Worth 1.6 logits, thus a real numerics lead. |
+    | the 4-bit quantization of the checkpoint | NOT REFUTED. The one argument against it is now measured false. |
+
+    Nothing in the DeepSeek-V4 attention port is named by this loop. Four
+    hypotheses are dead, one of them with positive evidence that the shipped code
+    is right, and the quantization candidate is back.
+
+    ### 6. What a person must decide next
+
+    The loop reached the end of what a single machine with one checkpoint can
+    answer. Two ways forward stay, and each needs a decision:
+
+    1. **The reference run.** Install `mlx` and `mlx-lm` in Python and read whether
+       the reference writes 5406 on the SAME 4-bit checkpoint. This is the one
+       experiment that separates "the port" from "the checkpoint" completely, and
+       it is the blocker this card already records.
+    2. **A second checkpoint.** Read the same prompt on a checkpoint of a different
+       quantization, e.g. 8-bit or bfloat16. If 5406 comes back, the 4-bit
+       quantization is the cause and no port change can correct it. The published
+       bfloat16 weights hold about 700 GiB, thus this may not be possible on this
+       machine.
+
+    Without one of the two, the card should be PARKED. Every cheap discriminator
+    this branch can reach is now spent.
+  timestamp: 2026-08-16T20:16:49.535879+00:00
+- actor: claude-code
+  id: 01m0659w3b1v5hgjt01my7g8bm
+  text: |
+    ### experiment loop — complete, nothing in the port is named
+
+    - evidence: one load of the checkpoint, 243.7 s, five configurations, plus one
+      weight-free tokenizer probe. Logs in the scratchpad: `e1-e3.log`, `e1p2.log`.
+    - reverted: every experimental edit is gone. `git status` shows only the two
+      kanban files of this card. `swift build` is green, the IntegrationTesting
+      project builds, and `DeepseekV4ToolCallTokenDiagnosticTests` reports 1 test
+      skipped in 0.001 s with no checkpoint load, thus the `.disabled` trait is
+      back.
+    - committed: NOTHING. No commit and no push, as the user directed.
+    - outcome: four hypotheses REFUTED (the indexer ranking, the compressed path as
+      the route of the syntax, the chunk rotary position, the bfloat16 rotary
+      tables). One of the refutations is POSITIVE evidence that the shipped chunk
+      position is right. The 4-bit quantization candidate is BACK, because E3
+      measured that one bfloat16 cast is worth 1.6 of the 7.0 logits, which takes
+      away the argument that removed the checkpoint.
+    - next: a person decides between the Python reference run and a second
+      checkpoint of a different quantization. Without one of the two, PARK the card.
+  timestamp: 2026-08-16T20:48:08.299470+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'DeepSeek-V4 generation drops one token: the model writes `</｜DSML｜inv>` for `</｜DSML｜invoke>`'
