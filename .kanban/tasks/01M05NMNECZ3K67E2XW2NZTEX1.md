@@ -248,8 +248,25 @@ comments:
     - evidence: 1 file — Libraries/MLXFoundationModels/MLXLanguageModel.swift (49 insertions, 23 deletions). Two shared helpers, `withPromptCacheCommit(task:plan:promptCache:body:)` and `cancelAndDrain(_:)`, replace the epilogue at all 5 sites. All 5 findings are now `- [x]`. Five bundles green: 847 + 475, 70, 160, 7, 5, 0 failures. IntegrationTesting builds. Real weights unchanged: `sliding-window round 2: prompt 3553, cached 3536, fed 17`, and the control `round 2: prompt 63, cached 47, fed 16`.
     - next: /review
   timestamp: 2026-08-16T17:47:02.676368+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m05vbe10bbj3znsbcpt7wrsr
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (sha 7caab7b), backend local — 0 findings, 0 confirmed, 0 refuted, 9 attempted, 0 failed, 0 skipped. 1 file reviewed: Libraries/MLXFoundationModels/MLXLanguageModel.swift. All 5 prior findings of the section of 2026-08-16 12:14 are checked.
+    - next: none. The card moves to `done`.
+  timestamp: 2026-08-16T17:54:13.664263+00:00
+- actor: claude-code
+  id: 01m05vc6sv8v73vj8red70td3k
+  text: |
+    ### finish iteration 2 — clean
+    - implement: changed — 1 file. Two shared helpers, `withPromptCacheCommit` and `cancelAndDrain`, hold the cache-commit epilogue. Two more sites in `runToolCallReasoningPhase` had the same cause and now call the helper.
+    - test: green — five bundles, 847 + 475 + 70 + 160 + 7 + 5, 0 failures; IntegrationTesting builds
+    - commit: 7caab7b
+    - review: clean — 0 findings, 9 validator passes, all 5 prior findings checked
+    - next: the card is in `done`. The reuse numbers hold: sliding-window round 2 is `cached 3536, fed 17`.
+  timestamp: 2026-08-16T17:54:39.035042+00:00
+position_column: done
+position_ordinal: ff8d80
 title: The executor prompt cache gives a sliding-window model no reuse
 ---
 `Libraries/MLXFoundationModels/ExecutorPromptCache.swift` landed with card

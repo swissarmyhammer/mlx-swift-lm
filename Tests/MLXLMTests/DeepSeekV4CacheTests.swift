@@ -423,6 +423,45 @@ struct DeepSeekV4CacheTests {
         }
     }
 
+    /// The number of tokens the decode-step test takes ONE at a time, after a
+    /// prefill of the tokens before them.
+    ///
+    /// It is a multiple of neither compress ratio, thus the single-token calls
+    /// carry a chunk of each compressed layer over a call boundary.
+    private static let decodeStepCount = 11
+
+    @Test func aPrefillFollowedByOneTokenStepsGivesTheAnswerOfOneCall() throws {
+        let model = try Self.loadedModel()
+        let tokens = MLXArray((0 ..< Self.longPromptLength).map { Int32($0 % Self.vocabSize) })
+            .reshaped([Self.batchSize, Self.longPromptLength])
+
+        let whole = try model.newCache(parameters: nil)
+        let wholeLogits = Self.floats(model(tokens, cache: whole)[0..., -1, 0...])
+
+        // The generation shape: one prefill call, then one call for each
+        // token. `aLongPromptGivesOneAnswerWhateverThePrefillCutIs` cuts the
+        // prompt into blocks of 13 and never reads a block of one, which is
+        // the block every decode step carries.
+        let stepped = try model.newCache(parameters: nil)
+        let prefillEnd = Self.longPromptLength - Self.decodeStepCount
+        _ = model(tokens[0..., 0 ..< prefillEnd], cache: stepped)
+        var steppedLogits: [Float] = []
+        for position in prefillEnd ..< Self.longPromptLength {
+            steppedLogits = Self.floats(
+                model(tokens[0..., position ..< (position + 1)], cache: stepped)[0..., -1, 0...])
+        }
+
+        #expect(steppedLogits.count == wholeLogits.count)
+        #expect(steppedLogits.allSatisfy { $0.isFinite })
+        for (index, pair) in zip(steppedLogits, wholeLogits).enumerated() {
+            #expect(
+                abs(pair.0 - pair.1) <= Self.logitTolerance,
+                Comment(
+                    rawValue: "logit \(index): decode steps gave \(pair.0), "
+                        + "one call gave \(pair.1)"))
+        }
+    }
+
     @Test func aPromptWithNoCacheReadsTheSameSlidingWindowAsACachedRun() throws {
         let model = try Self.loadedModel()
         let tokens = MLXArray((0 ..< Self.longPromptLength).map { Int32($0 % Self.vocabSize) })
@@ -439,7 +478,8 @@ struct DeepSeekV4CacheTests {
         for (index, pair) in zip(stateless, cached).enumerated() {
             #expect(
                 abs(pair.0 - pair.1) <= Self.logitTolerance,
-                Comment(rawValue: "logit \(index): no cache gave \(pair.0), a cache gave \(pair.1)"))
+                Comment(rawValue: "logit \(index): no cache gave \(pair.0), a cache gave \(pair.1)")
+            )
         }
     }
 
