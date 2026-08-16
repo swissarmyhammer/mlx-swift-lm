@@ -577,8 +577,25 @@ comments:
       merge is recorded: the comment describes upstream code that upstream can move,
       so a merge must check that it still sits at the entry of the tool path.
   timestamp: 2026-08-16T14:44:54.296991+00:00
-position_column: doing
-position_ordinal: '8380'
+- actor: claude-code
+  id: 01m05gtqswtytc0212052zrrbv
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (sha 6c3b293), local backend. 0 findings, 0 confirmed, 0 refuted. 9 validator and file pairs attempted, 0 failed, 0 skipped. 1 file reviewed: `Libraries/MLXFoundationModels/MLXLanguageModel.swift`, 11 added comment lines.
+    - next: no work is open. The card moves to `done`. All three acceptance criteria are marked, and no prior review findings section is on the card.
+  timestamp: 2026-08-16T14:50:20.860334+00:00
+- actor: claude-code
+  id: 01m05gv9zemmh2j5f3k5aq779f
+  text: |
+    ### finish iteration 1 — clean
+    - implement: changed — 11 comment-only lines that state the true container-release guarantee; the card premise is disproved
+    - test: green — five bundles, 480 XCTest + 1076 Swift Testing = 1556, 0 failures
+    - commit: 6c3b293
+    - review: clean — 0 findings, 9 validator passes
+    - next: the card is in `done`
+  timestamp: 2026-08-16T14:50:39.470184+00:00
+position_column: done
+position_ordinal: ff8980
 title: One turn holds the container lock across tool rounds, so a tool that generates deadlocks
 ---
 Filed by the `FoundationModelsMultitool` session, with `FoundationModelsRouter` concurring after independently reading the same code.
