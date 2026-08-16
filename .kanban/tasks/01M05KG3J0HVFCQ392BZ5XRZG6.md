@@ -344,6 +344,22 @@ comments:
     - evidence: 2 files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Tests/MLXLMTests/DeepSeekV4CacheTests.swift, /Users/wballard/github/swissarmyhammer/mlx-swift-lm/IntegrationTesting/IntegrationTestingTests/DeepseekV4ToolCallTokenDiagnosticTests.swift. The reproduction test carries `.disabled("^z5xrzg6: ...")`, thus the suite reports 1 test skipped and loads no checkpoint. Both projects build. Five bundles green: MLXLMTests 848 + 475/0 failures, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 160, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5.
     - next: a person decides whether to install `mlx` and `mlx-lm` in Python so that the reference run the card names can happen. The three round-completion criteria stay open until it does.
   timestamp: 2026-08-16T18:41:31.138673+00:00
+- actor: claude-code
+  id: 01m05y4pqvkpd3s60renae0h3g
+  text: |
+    ### finish iteration 1 — stuck
+    - implement: changed — 2 test files, no production code. Three new measurements narrow the card, but neither candidate is confirmed.
+    - test: green — five bundles, 848 + 475 + 70 + 160 + 7 + 5, 0 failures. The reproduction test is disabled with a reference to this card, thus the suite stays green.
+    - commit: 6e87da0
+    - review: not run. The card is not done work.
+    - next: BLOCKED on a decision for a person. The reference run needs `mlx` and `mlx-lm` in Python, which are not installed, and it needs a second 141 GiB load of the checkpoint.
+
+    ## What the measurements took away
+
+    - The 4-bit quantization does not explain the defect. The gap at the losing step is 7.0 logits, and a quantization moves a confident logit by a fraction of one unit.
+    - The model cannot see the syntax is refuted. `longPromptWithoutToolsRecallsAPlantedFact` reads an exact string about 3400 positions back, thus the pooled-chunk path delivers.
+    - A block-boundary defect is refuted at the synthetic level. A new weight-free test compares a whole-prompt prefill against a token-at-a-time decode, and the two agree.
+  timestamp: 2026-08-16T18:42:58.939818+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'DeepSeek-V4 generation drops one token: the model writes `</｜DSML｜inv>` for `</｜DSML｜invoke>`'
