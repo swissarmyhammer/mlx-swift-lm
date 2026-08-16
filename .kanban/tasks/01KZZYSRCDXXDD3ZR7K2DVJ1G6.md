@@ -1116,10 +1116,31 @@ comments:
     - evidence: `36faea6` fix(mlx-llm): install the model's prompt tokenizer at load
     - next: card holds the confirmed root cause and stays with the fix commit; `^z5xrzg6` tracks the new DSML defect found after this fix
   timestamp: 2026-08-16T15:48:03.575369+00:00
+- actor: claude-code
+  id: 01m05mqfse5sk7x0yqdk3k57a7
+  text: |
+    ### review — clean
+
+    - evidence: `review sha HEAD~1..HEAD` (851e224), local backend. counts: 0 findings, 0 confirmed, 0 refuted. 9 validators attempted, 0 failed, 0 skipped, 4 files reviewed.
+    - scope: the code files of the commit are `Libraries/MLXLLM/LLMModelFactory.swift`, `Tests/MLXLMTests/DeepSeekV4EncoderWiringTests.swift`, `Tests/MLXLMTests/DeepSeekV4SyntheticCheckpoint.swift`, and the DeepSeek-V4 tokenizer integration test. The other changed files are kanban records.
+    - the `attempted` count is 9, thus the engine read the files. This is not the `attempted: 0` condition that the `.reviewignore` `*` line made before.
+    - the description holds no unchecked item, and it holds no open `## Review Findings` section.
+    - next: none. The card moves to `done`. Card `^z5xrzg6` owns the identifier that the model drops during generation.
+  timestamp: 2026-08-16T15:58:28.654616+00:00
+- actor: claude-code
+  id: 01m05mr60pc28y1se4c0dzw161
+  text: |
+    ### finish iteration — clean
+    - implement: changed — 4 source files. The true cause is that `LLMModelFactory._load` never called `promptTokenizer(wrapping:)`. Real weights show the model now names `bay`, a name that only the `## Tools` section holds.
+    - test: green — five bundles, 846 + 70 + 155 + 7 + 5, 0 failures, 0 warnings, 0 skipped
+    - commit: 851e224
+    - review: clean — 0 findings, 9 validator passes, 4 files
+    - next: the card is in `done`. The one dropped identifier (5406, `oke`) is a different defect, and `^z5xrzg6` owns it.
+  timestamp: 2026-08-16T15:58:51.414948+00:00
 depends_on:
 - 01M00K0MWNJ59NG1Q0MT56PQR4
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: ff8b80
 title: The factory never installed the DeepSeek-V4 prompt tokenizer, thus every tool was dropped
 ---
 `LLMModelFactory._load` never called `LLMModel.promptTokenizer(wrapping:)`. It
