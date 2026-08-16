@@ -8,6 +8,7 @@
 
 import Foundation
 import MLX
+import MLXNN
 import Testing
 
 @testable import MLXLLM
@@ -18,10 +19,21 @@ struct DeepSeekV4EncoderWiringTests {
 
     // MARK: - Fixtures
 
-    /// A DeepSeek-V4-like tokenizer for prompt assertions: no chat template
-    /// (`applyChatTemplate` throws), and `encode` maps each UTF-8 byte of
-    /// the text to one token id so a test can read the prompt back.
+    /// A DeepSeek-V4-like tokenizer for prompt assertions: `encode` maps each
+    /// UTF-8 byte of the text to one token id so a test can read the prompt
+    /// back, and `applyChatTemplate` answers as
+    /// ``chatTemplateIdentifiers`` states.
     private struct ByteTokenizer: MLXLMCommon.Tokenizer {
+
+        /// The identifiers `applyChatTemplate` answers with, or `nil` when
+        /// this tokenizer carries no chat template and must throw.
+        ///
+        /// The default is `nil`, which is the DeepSeek-V4 checkpoint as the
+        /// family's port assumes it: no template, thus the encoder builds the
+        /// prompt. A test that stands for a checkpoint WITH a template gives
+        /// this property a value.
+        var chatTemplateIdentifiers: [Int]?
+
         func encode(text: String, addSpecialTokens: Bool) -> [Int] {
             Array(text.utf8).map { Int($0) }
         }
@@ -40,7 +52,10 @@ struct DeepSeekV4EncoderWiringTests {
             messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
             additionalContext: [String: any Sendable]?
         ) throws -> [Int] {
-            throw TokenizerError.missingChatTemplate
+            guard let chatTemplateIdentifiers else {
+                throw TokenizerError.missingChatTemplate
+            }
+            return chatTemplateIdentifiers
         }
     }
 
@@ -159,7 +174,9 @@ struct DeepSeekV4EncoderWiringTests {
                 ]))
 
         let text = renderedText(of: input)
-        #expect(text.contains("<\(DeepSeekV4ChatEncoder.SpecialToken.dsml)invoke name=\"get_weather\">"))
+        #expect(
+            text.contains("<\(DeepSeekV4ChatEncoder.SpecialToken.dsml)invoke name=\"get_weather\">")
+        )
         #expect(text.contains(#"<tool_result>{"forecast": "sunny"}</tool_result>"#))
     }
 
@@ -320,5 +337,114 @@ struct DeepSeekV4EncoderWiringTests {
         #expect(prompt.hasPrefix(DeepSeekV4ChatEncoder.SpecialToken.beginOfSentence))
         #expect(prompt.contains(DeepSeekV4ChatEncoder.SpecialToken.user + "Hello"))
         #expect(prompt.contains(DeepSeekV4ChatEncoder.SpecialToken.assistant))
+    }
+
+    // MARK: - The factory wiring
+
+    // A model declares its prompt path with `promptTokenizer(wrapping:)`, and
+    // the declaration only reaches the model when the LOAD installs it. These
+    // tests read the production load, thus they fail when the hook stays
+    // unused, which no test above can see: each one installs the wrapper by
+    // hand.
+
+    /// The one identifier the chat template of ``templateTokenizer`` writes
+    /// for a conversation.
+    ///
+    /// The value sits outside the 0...255 range a byte tokenizer writes, thus
+    /// a prompt that holds it can only come from the chat template of the
+    /// wrapped tokenizer.
+    private static let chatTemplateSentinel = 4242
+
+    /// A tokenizer that renders every conversation with a chat template of its
+    /// own, as the published checkpoint does.
+    ///
+    /// The `mlx-community/DeepSeek-V4-Flash-4bit` snapshot ships an 883-byte
+    /// `chat_template.jinja` that reads the `system`, `user` and `assistant`
+    /// roles and holds no `tools` variable at all. Such a tokenizer never
+    /// throws ``TokenizerError/missingChatTemplate``, thus the refusal in
+    /// ``DeepSeekV4Model/missingChatTemplateRefusal`` never fires, and a
+    /// prompt that drops every tool looks correct and gives no error.
+    private static var templateTokenizer: ByteTokenizer {
+        ByteTokenizer(chatTemplateIdentifiers: [chatTemplateSentinel])
+    }
+
+    /// A loader that gives one ``templateTokenizer`` and reads no file.
+    private struct TemplateTokenizerLoader: TokenizerLoader {
+        func load(from directory: URL) async throws -> any Tokenizer {
+            DeepSeekV4EncoderWiringTests.templateTokenizer
+        }
+    }
+
+    /// Writes a synthetic `deepseek_v4` checkpoint that a factory load reads.
+    ///
+    /// The directory holds the `config.json` of
+    /// ``DeepSeekV4SyntheticCheckpoint`` and one safetensors file that carries
+    /// the model's own initial parameters. The load filter of
+    /// ``DeepSeekV4Model`` passes a checkpoint that already carries module
+    /// paths through unchanged, thus those tensors satisfy the whole-model
+    /// verification that the weight update runs.
+    ///
+    /// - Returns: the checkpoint directory. The caller removes it.
+    private func writeSyntheticCheckpoint() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "deepseek-v4-factory-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        try Data(DeepSeekV4SyntheticCheckpoint.configJSON.utf8).write(
+            to: directory.appendingPathComponent("config.json"))
+
+        let model = DeepSeekV4Model(try DeepSeekV4SyntheticCheckpoint.configuration())
+        eval(model)
+        var weights: [String: MLXArray] = [:]
+        for (path, array) in model.parameters().flattened() {
+            weights[path] = array
+        }
+        try MLX.save(
+            arrays: weights, url: directory.appendingPathComponent("model.safetensors"))
+        return directory
+    }
+
+    /// Loads the synthetic checkpoint through the production factory.
+    ///
+    /// - Parameter directory: the checkpoint directory.
+    /// - Returns: the loaded context.
+    private func loadSyntheticCheckpoint(at directory: URL) async throws -> ModelContext {
+        try await LLMModelFactory.shared._load(
+            configuration: ResolvedModelConfiguration(directory: directory),
+            tokenizerLoader: TemplateTokenizerLoader())
+    }
+
+    @Test("a factory load installs the DeepSeek-V4 prompt tokenizer")
+    func factoryLoadInstallsThePromptTokenizer() async throws {
+        let directory = try writeSyntheticCheckpoint()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let context = try await loadSyntheticCheckpoint(at: directory)
+
+        #expect(
+            context.tokenizer is DeepSeekV4EncodingTokenizer,
+            "the load must install the prompt tokenizer that the model asks for")
+    }
+
+    @Test("a factory load prompts through the encoder, not the checkpoint template")
+    func factoryLoadPromptsThroughTheEncoder() async throws {
+        let directory = try writeSyntheticCheckpoint()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let context = try await loadSyntheticCheckpoint(at: directory)
+        let input = try await context.processor.prepare(
+            input: UserInput(
+                chat: [.system("Be brief."), .user("Hello")], tools: [Self.weatherToolSpec]))
+
+        let identifiers = input.text.tokens.asArray(Int.self)
+        #expect(
+            !identifiers.contains(Self.chatTemplateSentinel),
+            "the load must not build the prompt with the chat template of the checkpoint")
+        let text = ByteTokenizer().decode(tokenIds: identifiers, skipSpecialTokens: false)
+        #expect(text.contains("## Tools"), "the prompt must carry the tools section")
+        #expect(
+            text.contains(Self.publishedWeatherSchemaLine),
+            "the prompt must carry the schema of the offered tool")
     }
 }

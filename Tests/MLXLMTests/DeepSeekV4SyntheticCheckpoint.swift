@@ -11,8 +11,14 @@ import Foundation
 enum DeepSeekV4SyntheticCheckpoint {
 
     /// The text of the `config.json`.
+    ///
+    /// The text names the model type, because a suite that reads this
+    /// checkpoint through `LLMModelFactory` gets its model from that key. A
+    /// suite that decodes `DeepSeekV4Configuration` on its own ignores the
+    /// key.
     static let configJSON = """
         {
+          "model_type": "deepseek_v4",
           "vocab_size": 12,
           "hidden_size": 16,
           "num_hidden_layers": 2,

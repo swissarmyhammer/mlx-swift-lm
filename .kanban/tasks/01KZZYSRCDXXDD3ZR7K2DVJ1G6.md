@@ -667,96 +667,576 @@ comments:
     DeepSeek-V4 attention port. A person decides whether this card grows to hold
     that work or whether a new card takes it. I did not decide it.
   timestamp: 2026-08-14T18:35:50.333955+00:00
+- actor: claude-code
+  id: 01m05j94ndar680v4zra9phjx3
+  text: |-
+    THE REAL CAUSE IS FOUND, and it explains every measurement on this card. The
+    DeepSeek-V4 prompt path is NOT WIRED INTO THE FACTORY. The model never saw the
+    `## Tools` section, not once, in any of the three runs.
+
+    ## The decisive clue was in the last comment
+
+    The run after `^t56pqr4` landed gave an answer BYTE IDENTICAL to the run before
+    it. Greedy decode at temperature 0 is a function of the prompt identifiers. The
+    identifiers changed from 353 to 328, thus an identical answer is only possible
+    when the corrected code NEVER RAN on that path. It did not.
+
+    ## Defect 1: `LLMModelFactory._load` never calls `promptTokenizer(wrapping:)`
+
+    `Libraries/MLXLLM/LLMModelFactory.swift` builds the processor and the context
+    with the RAW loaded tokenizer:
+
+    ```swift
+    let processor = LLMUserInputProcessor(
+        tokenizer: tokenizer, configuration: modelConfig, ...)
+    return .init(
+        configuration: modelConfig, model: model, processor: processor,
+        tokenizer: tokenizer)
+    ```
+
+    `LLMModel.promptTokenizer(wrapping:)` and its `DeepSeekV4Model` override both
+    landed on this branch in `fdfdecf`, and NO caller in `Libraries/` ever calls
+    them. A grep of the whole `Libraries/` tree gives four matches: the protocol
+    requirement, the default that returns the tokenizer unchanged, the DeepSeek-V4
+    override, and doc comments. The hook is dead code on the production path.
+
+    Thus `DeepSeekV4EncodingTokenizer` is never installed, thus
+    `DeepSeekV4ChatEncoder` never renders, thus `DeepSeekV4Tokenization` never runs.
+    The only runtime caller of the encoder is that wrapper.
+
+    ## Defect 2: the checkpoint DOES ship a chat template, and it drops the tools
+
+    The first research comment states the snapshot holds no `chat_template.jinja`.
+    That is no longer true. The local snapshot holds one, 883 bytes:
+
+    ```
+    /Users/wballard/.cache/huggingface/hub/models--mlx-community--DeepSeek-V4-Flash-4bit
+        /snapshots/38c0bd20a6fba70f22c5ee2940ec0092b36ab936/chat_template.jinja
+    ```
+
+    It reads `system`, `user` and `assistant` only. It holds NO `tools` variable —
+    `grep -c tools` gives 0 — and no `tool` role. It writes the four markers and the
+    message content, and nothing else.
+
+    The two defects together make the observed behaviour:
+
+    1. The wrapper is absent, thus the raw tokenizer answers `applyChatTemplate`.
+    2. The raw tokenizer HAS this template, thus it does not throw
+       `missingChatTemplate`, thus `missingChatTemplateRefusal` never fires and the
+       prompt looks correct and is wrong. That is the exact failure mode card
+       ^f0ymw6b decision B names.
+    3. The template DROPS the tools, thus the `## Tools` section never reached the
+       model in any run.
+
+    ## Every observation of this card now fits
+
+    - The model always wrote the tool NAME correctly: the name is in the user turn,
+      which the template does write.
+    - The model NEVER wrote `bay`: that name lives only in the `## Tools` section,
+      which the model never saw.
+    - The model NEVER wrote DSML: the DSML rule lives only in that same section.
+    - The model wrote a different invented syntax each run: with no tool schema and
+      no syntax rule, nothing constrains the shape.
+    - The answer did not move when the tokenizer was corrected: that code is on a
+      path the load never builds.
+
+    The render, the parser, the tool placement, the prompt length, the generation
+    mode and the tokenizer are each correct and each already proven. The wiring is
+    what is missing.
+
+    ## The correction
+
+    `_load` must build the prompt path with the model's own hook, and use that
+    tokenizer for both the processor and the `ModelContext`. That makes the encoder
+    take over for DeepSeek-V4 and leaves every other model unchanged, because the
+    default implementation returns the tokenizer it is given.
+
+    `Libraries/MLXLLM/LLMModelFactory.swift` is a file this branch already changed
+    (49 lines against `main`), thus the standing rule on untouched code does not
+    apply.
+  timestamp: 2026-08-16T15:15:41.357350+00:00
+- actor: claude-code
+  id: 01m05jwmkg0dtdvdy0xeenmn2v
+  text: |-
+    The wiring is corrected, and the defect is reproduced and closed with two
+    weight-free tests.
+
+    ## The tests came first, and they were red for the right reason
+
+    `Tests/MLXLMTests/DeepSeekV4EncoderWiringTests.swift` now holds a `The factory
+    wiring` section. Each test drives the PRODUCTION load,
+    `LLMModelFactory.shared._load`, over a synthetic `deepseek_v4` checkpoint that
+    the test writes to a temporary directory: the `config.json` of
+    `DeepSeekV4SyntheticCheckpoint`, and one safetensors file that carries the
+    model's own initial parameters. No weight of the real checkpoint is read.
+
+    The tokenizer the test injects is the important part. `TemplateTokenizer`
+    answers `applyChatTemplate` with one sentinel identifier and never throws,
+    exactly as the 883-byte `chat_template.jinja` of the published snapshot does.
+    That is what makes the test reproduce the field defect rather than a simpler
+    one.
+
+    Before the correction, three expectations failed:
+
+    ```
+    ✘ "a factory load installs the DeepSeek-V4 prompt tokenizer"
+        Expectation failed: context.tokenizer is DeepSeekV4EncodingTokenizer
+    ✘ "a factory load prompts through the encoder, not the checkpoint template"
+        Expectation failed: !identifiers.contains(Self.chatTemplateSentinel)
+        Expectation failed: text.contains("## Tools")
+        Expectation failed: text.contains(Self.publishedWeatherSchemaLine)
+    ```
+
+    The second and third lines are the field defect itself: the prompt came from
+    the chat template, and it carried no `## Tools` section.
+
+    ## The correction
+
+    `Libraries/MLXLLM/LLMModelFactory.swift`, in `_load`:
+
+    ```swift
+    let promptTokenizer = llmModel?.promptTokenizer(wrapping: tokenizer) ?? tokenizer
+
+    let processor = LLMUserInputProcessor(
+        tokenizer: promptTokenizer, configuration: modelConfig, ...)
+
+    return .init(
+        configuration: modelConfig, model: model, processor: processor,
+        tokenizer: promptTokenizer)
+    ```
+
+    The load now installs the prompt path that the model declares, and it gives the
+    same tokenizer to the processor and to the `ModelContext`, thus every consumer
+    of the loaded context reads one prompt path. A model that declares no prompt
+    tokenizer keeps the loaded tokenizer, because the default implementation of
+    `promptTokenizer(wrapping:)` returns what it is given. Nothing changes for any
+    other model.
+
+    The same edit binds `model as? LLMModel` one time as `llmModel`. The function
+    cast three times after the change, and it casts once now.
+
+    ## The state after the correction
+
+    `xcodebuild build-for-testing`: TEST BUILD SUCCEEDED, zero warnings.
+    `xcrun xctest MLXLMTests.xctest`: 846 tests in 71 suites, ALL PASSED, zero
+    failures. The same command gave 4 issues before the correction, and all 4 were
+    the new tests.
+
+    The real-weights run of `aShortToolPromptEmitsOneDSMLToolCall` is next. It is
+    the acceptance criterion of the card's last work item.
+  timestamp: 2026-08-16T15:26:20.272461+00:00
+- actor: claude-code
+  id: 01m05k3602jj1gs2ny4kmtztfq
+  text: |-
+    Real-weights run on the corrected wiring. The model NOW WRITES DSML, and it
+    names the parameter `bay`. One defect is left, and it is a different one.
+
+    ## The run
+
+    ```
+    xcodebuild test-without-building -project IntegrationTesting/IntegrationTesting.xcodeproj \
+      -scheme IntegrationTesting -destination 'platform=macOS' -parallel-testing-enabled NO \
+      "-only-testing:IntegrationTestingTests/DeepseekV4IntegrationTests/aShortToolPromptEmitsOneDSMLToolCall()"
+    ```
+
+    One test, one process, 64.3 seconds. The test still fails, and the answer has
+    changed completely:
+
+    ```
+    the model wrote a tool call the parser rejected: RejectedToolCall(
+      reason: malformedSyntax, format: dsml, toolName: nil, callID: nil,
+      rawTextPreview: "<｜DSML｜tool_calls>
+    <｜DSML｜invoke name=\"get_stock_level\">
+    <｜DSML｜parameter name=\"bay\" string=\"true\">bay 7</｜DSML｜parameter>
+    </｜DSML｜inv>
+    </｜DSML｜tool_calls>",
+      rawTextByteCount: 179, isPreviewTruncated: false,
+      detail: "The tool-call payload could not be parsed.")
+    ```
+
+    ## What this proves
+
+    Compare with the three earlier runs, each of which wrote a syntax of its own
+    and named `bay_id`:
+
+    | Date | What the model wrote | Parameter |
+    | --- | --- | --- |
+    | 2026-08-13 | `{"function": ..., "params": {...}}` | `bay_id` |
+    | 2026-08-14 chat | `<functioncall>` and OpenAI JSON | `bay_id` |
+    | 2026-08-14 thinking | `{"function": ..., "params": {...}}` | `bay_id` |
+    | 2026-08-16, wired | `<｜DSML｜tool_calls>` and DSML | **`bay`** |
+
+    The model now writes the DSML block, the `<｜DSML｜invoke>` element, the
+    `<｜DSML｜parameter>` element and the closing `</｜DSML｜tool_calls>`. It names
+    the tool `get_stock_level` and the parameter `bay`.
+
+    `bay` is stated in the `## Tools` section ALONE. The user turn never holds it.
+    For three runs the model never once wrote it, and it writes it now. That is
+    direct evidence that the model reads the `## Tools` section for the first time,
+    which is exactly what the wiring correction gives it.
+
+    Thus the first half of the card's last work item, "Correct what the answer
+    names", is MET and measured.
+
+    ## The one defect left
+
+    The closing tag of the invoke element reads `</｜DSML｜inv>` where the syntax
+    states `</｜DSML｜invoke>`. Every other byte of the 179 is well formed. The
+    parser refuses the payload for that reason, thus the round does not complete.
+
+    `DeepSeekV4ChatEncoder` writes the example block correctly — the rendered
+    prompt states `</\(SpecialToken.dsml)invoke>` in the example and in a replayed
+    call. The prompt is not the source of the wrong tag.
+
+    Two candidates are open, and I am measuring them before I touch any code:
+
+    1. The model wrote `inv>`, which the 4-bit quantization can explain.
+    2. Something between the token stream and the parser drops the two characters
+       `ok`. A streaming detokenizer, the slice that cuts the tool-call segment out
+       of the generated text, or a stop-string rule could each do that.
+
+    I will NOT loosen `DSMLToolCallParser` to accept `</｜DSML｜inv>`. The reference
+    `parse_tool_calls` accepts the one syntax and raises on every other, thus a
+    parser that reads the short tag is a parser that no longer matches the
+    reference. Earlier research on this card already closed that door.
+  timestamp: 2026-08-16T15:29:54.690121+00:00
+- actor: claude-code
+  id: 01m05kvj9m16m1gxc9j87k2y0e
+  text: |-
+    The absent token is proven to be a generation defect, not a text defect. Our
+    whole text path is audited and clean.
+
+    ## The measurement
+
+    `aToolCallStreamsBackWholeAcrossItsNewlines` is new, weight-free and GREEN. It
+    tokenizes the correct DSML answer with the production tokenization, streams the
+    identifiers one at a time through `NaiveStreamingDetokenizer`, and gets the
+    answer back byte for byte. The test carries the newlines, which is where the
+    detokenizer starts a new segment, thus it covers the state the damaged tag sits
+    in. The suite's older `markersSurviveStreamingDetokenizationWhole` cannot see
+    this: its stream holds no newline.
+
+    ## The token arithmetic
+
+    The published vocabulary holds no `invoke` token. The merge table of the
+    checkpoint gives:
+
+    | piece | id |
+    | --- | ---: |
+    | `</` | 1718 |
+    | `｜DSML｜` | 128825 |
+    | `inv` | 40148 |
+    | `oke` | 5406 |
+    | `>\n` | 1018 |
+
+    The correct closing tag is the five identifiers
+    `[1718, 128825, 40148, 5406, 1018]`. The answer holds the four identifiers
+    `[1718, 128825, 40148, 1018]`. The loss is one whole token at a true token
+    boundary, and both sequences are legal outputs of a sampler. The correct text is
+    182 bytes and the observed text is 179.
+
+    ## Each stage of the text path, and why it cannot drop an interior token
+
+    - `NaiveStreamingDetokenizer`. `common` is by construction a prefix of
+      `newSegment`, thus `new` is the remainder of `newSegment`. A divergence
+      RE-EMITS a tail; it never deletes one. The incomplete-character path returns
+      `nil` without advancing `segment`, thus the held text returns on the next
+      token. `startNewSegment()` is the one place with a deletion hazard, and it
+      cannot fire here: the decoder of this checkpoint is `ByteLevel` with
+      `clean_up_tokenization_spaces` false, thus `decode([t])` is exactly the text
+      of `t`; and the reset runs only after a newline, which `oke` does not follow.
+    - `StopStringFilter`. `generation_config.json` states no stop string, and
+      `stopStrings` and `extraEOSTokens` are both empty, thus the filter is off and
+      returns each chunk unchanged. Even when it is on it is lossless: a partial
+      match stays in `buffer` and is read again, and a true match cuts the TAIL.
+    - `ToolCallProcessor`. While it collects a call the only write is
+      `toolCallBuffer += chunk`. Both cut points go through `separateToken`, which
+      takes the token and the new buffer from the SAME range of the SAME string.
+      `rawText` is the buffer with no sanitizing, and `makePreview` returns anything
+      under 32768 bytes verbatim, thus the 179-byte preview IS the buffer.
+    - `DSMLToolCallParser` holds no regex. It walks literal ranges, and
+      `invokeClose` is the literal `</｜DSML｜invoke>`. With `inv>` in the text the
+      search gives `nil`, the loop stops, and no call comes back. The parser is
+      correct.
+    - Speculative decoding is not in play. The load filter of `DeepSeekV4Model`
+      drops every `mtp.` tensor, thus the multi-token-prediction head never loads,
+      and the test names no draft model.
+
+    Thus the identifier 5406 never entered the stream. The cause is the 4-bit
+    quantization or a number in the DeepSeek-V4 attention port, and card `^z5xrzg6`
+    holds it with the experiment that tells the two apart.
+
+    ## Note on the working tree
+
+    `Libraries/MLXFoundationModels/MLXLanguageModel.swift` carried an uncommitted
+    change when this step started. The `swift-format` run that
+    `.pre-commit-config.yaml` states brought that file back to its committed
+    content, thus the change was formatting alone. I report it because it was not my
+    edit.
+
+    The same `swift-format` run reformatted nine files that this step never
+    touched. I reverted all nine, thus the diff holds only the four files of this
+    work.
+  timestamp: 2026-08-16T15:43:13.716270+00:00
+- actor: claude-code
+  id: 01m05kw328sqf1xgsv47cm7gvv
+  text: |-
+    ### implement — stuck
+
+    - evidence: 4 files — `Libraries/MLXLLM/LLMModelFactory.swift` (the load now
+      installs `promptTokenizer(wrapping:)` and gives the same tokenizer to the
+      processor and the `ModelContext`; one `model as? LLMModel` binding replaces
+      three casts), `Tests/MLXLMTests/DeepSeekV4EncoderWiringTests.swift` (two new
+      tests that drive the production load over a synthetic checkpoint, and
+      `ByteTokenizer` takes a `chatTemplateIdentifiers` property so no second
+      tokenizer stub is copied), `Tests/MLXLMTests/DeepSeekV4SyntheticCheckpoint.swift`
+      (the `config.json` names its `model_type`, which a factory load reads), and
+      `IntegrationTesting/IntegrationTestingTests/DeepSeekV4TokenizerIntegrationTests.swift`
+      (`aToolCallStreamsBackWholeAcrossItsNewlines`, weight-free).
+
+      The two factory tests failed before the change with three expectations,
+      including `text.contains("## Tools")`, which is the field defect itself.
+
+      `xcodebuild build-for-testing -scheme mlx-swift-lm-Package`: TEST BUILD
+      SUCCEEDED, zero warnings. All five bundles, `xcrun xctest`: MLXLMTests 846
+      passed, MLXGuidedGenerationTests 70 passed, MLXFoundationModelsTests 155
+      passed, CXGrammarTests 7 passed, MLXHuggingFaceMacrosTests 5 passed. Zero
+      failures, zero skipped.
+
+      `xcodebuild build-for-testing` for IntegrationTesting: TEST BUILD SUCCEEDED,
+      zero warnings. `aToolCallStreamsBackWholeAcrossItsNewlines` passed, 0.874 s,
+      no weights.
+
+      Two real-weights runs, one test per process:
+      1. `aShortToolPromptEmitsOneDSMLToolCall` — FAILED, and the answer changed
+         completely. The model now writes the DSML block and names the parameter
+         `bay`, which the `## Tools` section alone states and which three earlier
+         runs never wrote. The closing tag reads `</｜DSML｜inv>`, thus the parser
+         refuses the payload.
+      2. The tokenizer-only run above, which needs no checkpoint.
+
+    - next: a person decides. Three of the four work items are done and measured.
+      The card's root cause is found and corrected: `LLMModelFactory._load` never
+      called `promptTokenizer(wrapping:)`, and the checkpoint ships a
+      `chat_template.jinja` that drops every tool, thus the model never saw the
+      `## Tools` section in any earlier run.
+
+      The last item, "make one tool round complete", is NOT met. The model omits
+      identifier 5406 (`oke`) from the closing tag. The render, the parser, the tool
+      placement, the prompt length, the generation mode, the tokenizer and now the
+      whole text path are each measured and correct, thus what is left is the 4-bit
+      weights or the DeepSeek-V4 attention port. New card `^z5xrzg6` holds that
+      defect and states the experiment that tells the two apart.
+
+      I did not loosen `DSMLToolCallParser` to read the short tag. The published
+      `parse_tool_calls` accepts the one syntax and raises on every other.
+  timestamp: 2026-08-16T15:43:30.888583+00:00
+- actor: claude-code
+  id: 01m05m0e7xm2qrzsg6g2ag14s1
+  text: |-
+    Scope split, by the coordinator's decision. This is a recorded decision, not an
+    escalation.
+
+    ## Why the split
+
+    The old title stated a premise this card disproved: "DeepSeek-V4 writes its tool
+    calls as plain JSON, which `DSMLToolCallParser` does not read." The model writes
+    DSML now. To hold this card open on the one dropped identifier would hide a
+    landed and proven correction behind a different investigation in a different
+    layer.
+
+    ## What changed on the board
+
+    1. The title now names what the card corrected: "The factory never installed the
+       DeepSeek-V4 prompt tokenizer, thus every tool was dropped."
+    2. The description leads with the true cause — `LLMModelFactory._load` never
+       called `promptTokenizer(wrapping:)`, and the 883-byte `chat_template.jinja`
+       holds no `tools` variable, thus the refusal guard never fired.
+    3. The three suspects are kept as recorded history and each is marked DISPROVED
+       with its evidence, so no later pass measures them again. The tokenizer of
+       `^t56pqr4` is in that list: correcting it changed the answer by zero bytes,
+       which is what pointed at the wiring.
+    4. Every work item this card owns is ticked. Four of four.
+    5. "Make one tool round complete" is OFF this card. It is now an acceptance
+       criterion of `^z5xrzg6`, together with the two prompt-cache tool-round tests
+       that wait on it. The item is not half-owned: this card's work list no longer
+       states it, and this card's description names `^z5xrzg6` as the owner.
+
+    `^z5xrzg6` needed no change to its dependencies. It was created with
+    `depends_on: []`, and it is `ready: true` in `todo`, thus it is ready to work.
+
+    ## The state of the code
+
+    No source file changed in this step. The correction and its tests landed in the
+    previous step and are unchanged: 4 files, all five bundles green, zero failures
+    and zero warnings.
+  timestamp: 2026-08-16T15:45:53.405866+00:00
+- actor: claude-code
+  id: 01m05m1akewm7h97c86t9xngf1
+  text: |-
+    ### implement — changed
+
+    - evidence: board only, no source file changed in this step. `git status --short`
+      holds the same four source files as the previous step:
+      `Libraries/MLXLLM/LLMModelFactory.swift`,
+      `Tests/MLXLMTests/DeepSeekV4EncoderWiringTests.swift`,
+      `Tests/MLXLMTests/DeepSeekV4SyntheticCheckpoint.swift` and
+      `IntegrationTesting/IntegrationTestingTests/DeepSeekV4TokenizerIntegrationTests.swift`.
+
+      The scope split of the coordinator is applied:
+      1. This card is retitled "The factory never installed the DeepSeek-V4 prompt
+         tokenizer, thus every tool was dropped". The old title stated a premise this
+         card disproved.
+      2. The description leads with the true cause, and each disproved suspect stays
+         as history marked DISPROVED with its evidence.
+      3. The work list holds four items and all four are ticked. `progress` reads
+         1.0.
+      4. "Make one tool round complete" is off this card and is an acceptance
+         criterion of `^z5xrzg6`, with the two prompt-cache tool-round tests that
+         wait on it. No item is half-owned.
+      5. `^z5xrzg6` has `depends_on: []`, `blocked_by: []`, `ready: true`, in `todo`.
+         It needed no change and it is ready to work.
+
+      The tests are unchanged from the previous step and stay green: MLXLMTests 846,
+      MLXGuidedGenerationTests 70, MLXFoundationModelsTests 155, CXGrammarTests 7,
+      MLXHuggingFaceMacrosTests 5. Zero failures, zero warnings, zero skipped.
+
+      One board artifact to note: the `update task` call reset the `started`
+      timestamp of this card to null and moved `created` to today. The card stays in
+      `doing`. I did not ask for either change, and I report it because the dates no
+      longer show when the work began.
+
+    - next: `/review`. The card has zero open findings and holds only the wiring
+      correction it proved.
+  timestamp: 2026-08-16T15:46:22.446243+00:00
+- actor: claude-code
+  id: 01m05m4dbq6hb3x1rxjx41sq8s
+  text: |-
+    ### commit — changed
+    - evidence: `36faea6` fix(mlx-llm): install the model's prompt tokenizer at load
+    - next: card holds the confirmed root cause and stays with the fix commit; `^z5xrzg6` tracks the new DSML defect found after this fix
+  timestamp: 2026-08-16T15:48:03.575369+00:00
 depends_on:
 - 01M00K0MWNJ59NG1Q0MT56PQR4
 position_column: doing
 position_ordinal: '8180'
-title: DeepSeek-V4 writes its tool calls as plain JSON, which DSMLToolCallParser does not read
+title: The factory never installed the DeepSeek-V4 prompt tokenizer, thus every tool was dropped
 ---
-Measured on 2026-08-13 against `mlx-community/DeepSeek-V4-Flash-4bit` with the
-real weights.
+`LLMModelFactory._load` never called `LLMModel.promptTokenizer(wrapping:)`. It
+gave the RAW loaded tokenizer to the prompt processor and to the `ModelContext`.
+The hook and its `DeepSeekV4Model` override both landed on this branch in
+`fdfdecf`, and no caller in `Libraries/` ever called them, thus the hook was dead
+code on the production path.
 
-A short prompt that offers one tool made the model write:
+`DeepSeekV4EncodingTokenizer` was therefore never installed, thus
+`DeepSeekV4ChatEncoder` never rendered a prompt and `DeepSeekV4Tokenization`
+never ran. That wrapper is the only runtime caller of the encoder.
 
+## Why nothing reported an error
+
+The `mlx-community/DeepSeek-V4-Flash-4bit` snapshot ships an 883-byte
+`chat_template.jinja`. It writes the `system`, `user` and `assistant` turns, and
+it holds NO `tools` variable at all — `grep -c tools` gives 0.
+
+Thus the raw tokenizer answered `applyChatTemplate` without an error,
+`TokenizerError.missingChatTemplate` never threw,
+`DeepSeekV4Model.missingChatTemplateRefusal` never fired, and the prompt silently
+dropped every tool. That is the exact failure mode card `^f0ymw6b` decision B
+names: a prompt that looks correct, gives no error, and is wrong.
+
+**The model never saw the `## Tools` section, in any run.**
+
+## What the model wrote, and why each run fits
+
+| Date | Mode | What the model wrote | Parameter |
+| --- | --- | --- | --- |
+| 2026-08-13 | chat | `{"function": ..., "params": {...}}` | `bay_id` |
+| 2026-08-14 | chat | `<functioncall>` and OpenAI JSON | `bay_id` |
+| 2026-08-14 | thinking | `{"function": ..., "params": {...}}` | `bay_id` |
+| 2026-08-16 | chat, wired | `<｜DSML｜tool_calls>` and DSML | **`bay`** |
+
+- The model always wrote the tool NAME, which the user turn also holds.
+- It never wrote `bay` or DSML, which only the `## Tools` section holds.
+- Each run invented a different syntax, because nothing constrained the shape.
+- The answer did not move when the tokenizer of `^t56pqr4` was corrected. Greedy
+  decode is a function of the identifiers, thus a byte-identical answer proves
+  that corrected code never ran on this path.
+
+`bay` is the decisive evidence. That name lives in the `## Tools` section alone,
+and the model writes it now.
+
+## The correction
+
+`Libraries/MLXLLM/LLMModelFactory.swift`, in `_load`:
+
+```swift
+let promptTokenizer = llmModel?.promptTokenizer(wrapping: tokenizer) ?? tokenizer
 ```
-{"function": "get_stock_level", "params": {"bay_id": "bay_7"}}
-```
 
-`DSMLToolCallParser` reads none of that, thus `toolCalls` stays empty and no
-agentic round completes. Two things differ from the schema the prompt gave:
-
-- The syntax is plain JSON, not the DSML the parser reads.
-- The argument name is `bay_id`, and the tool schema names it `bay`.
-
-## Why it blocks the agentic goal
-
-`chatModeToolRoundReusesThePromptCache` and
-`thinkingModeToolRoundReusesThePromptCache` both stop at
-`#require(roundOne.toolCalls.first)`. Every tool-round measurement is thus out
-of reach, which is why card `^mscrreq` had to measure a conversation with no
-tools.
+The same tokenizer goes to the processor and to the `ModelContext`, thus every
+consumer of the loaded context reads one prompt path. A model that declares no
+prompt tokenizer keeps the loaded tokenizer, because the default implementation
+returns what it is given, thus no other model changes. The edit also binds
+`model as? LLMModel` one time; the function cast three times before.
 
 ## The work
 
-- [x] Read the `## Tools` section `DeepSeekV4ChatEncoder` renders, and compare
-      it with the section of the published reference. A prompt that does not
-      match the training shape explains a model that answers in a different
-      syntax
-- [x] Tell whether the defect is the render, the parser, or the model
-- [x] Find what makes the model answer in an untrained syntax. It is NONE of
-      those three: it is the TOKENIZER
-- [ ] Correct what the answer names, and make one tool round complete —
-      BLOCKED, see the blocker below
+- [x] Read the `## Tools` section `DeepSeekV4ChatEncoder` renders, and compare it
+      with the section of the published reference. The render is byte exact
+      against `encoding/encoding_dsv4.py`, 1454 bytes, `cmp` clean
+- [x] Tell whether the defect is the render, the parser, or the model. It is
+      NONE of the three: the LOAD never gave the model the prompt path
+- [x] Correct the wiring, and prove it with tests that drive the production load
+- [x] Correct what the answer names. The model now writes `bay` and DSML
 
-## Blocker: the tokenizer gives the prompt the wrong identifiers
+## The three suspects this card disproved
 
-The render is byte exact against `encoding/encoding_dsv4.py` — 1454 bytes, `cmp`
-clean. The parser is a faithful reading of `parse_tool_calls`. The model reads
-past its 128-token sliding window correctly. The IDENTIFIERS are wrong, and
-only the identifiers reach the model.
+Each one is closed with evidence, and each cost real measurement. Recorded so no
+later pass repeats them.
 
-`DeepSeekV4TokenizerIntegrationTests.theToolPromptTokenizesToThePublishedIdentifiers`
-renders the failing conversation through the production path and compares it
-with the published `tokenizer.json`:
+- **DISPROVED — the render.** Byte exact against `encoding_dsv4.py`. The member
+  order of a tool schema was a real defect, and `PythonStyleJSON` corrected it;
+  the render still did not reach the model.
+- **DISPROVED — the parser.** `DSMLToolCallParser` is a faithful reading of
+  `parse_tool_calls`, and more forgiving than it. The word `functioncall` is in
+  no file of `deepseek-ai/DeepSeek-V4-Flash`.
+- **DISPROVED — the prompt length and the generation mode.** The pooled-chunk
+  path reads the whole prompt: `longPromptWithoutToolsRecallsAPlantedFact` passed
+  with 3626 prompt tokens and answered `4172`. Thinking mode failed the same way
+  as chat mode. No tool prompt can sit under the 128-token sliding window,
+  because `TOOLS_TEMPLATE` alone costs about 250 tokens.
+- **DISPROVED — the tokenizer.** Card `^t56pqr4` corrected
+  `DeepSeekV4Tokenization` and made
+  `theToolPromptTokenizesToThePublishedIdentifiers` green at 328 identifiers. The
+  real-weights answer did not change by one byte, which is what pointed at the
+  wiring.
 
-```
-Swift wrote 353 identifiers and the reference holds 328.
-The first difference is at index 15:
-Swift     [... 2910 "Ġgiven", 16 ".", 201 "Ċ", 201 "Ċ", 372 "##", 27193 "ĠTools", 201 "Ċ"]
-reference [... 2910 "Ġgiven", 339 ".ĊĊ", 372 "##", 27193 "ĠTools", 271 "ĊĊ", 3476 "You"]
-```
+## The tests that pin this
 
-The Swift tokenizer never groups a run of newlines. The `## Tools` section is
-24 lines with 10 blank lines in it, thus that section takes nearly all of the
-25 extra identifiers, and the model reads it in a token shape it never saw in
-training.
+Weight-free, in `Tests/MLXLMTests/DeepSeekV4EncoderWiringTests.swift`. Both drive
+`LLMModelFactory.shared._load` over a synthetic `deepseek_v4` checkpoint, with a
+tokenizer that answers `applyChatTemplate` as the published `chat_template.jinja`
+does.
 
-### The defect, and where it lives
+- `a factory load installs the DeepSeek-V4 prompt tokenizer`
+- `a factory load prompts through the encoder, not the checkpoint template`
 
-`swift-transformers` 1.3.3,
-`Sources/Tokenizers/String+PreTokenization.swift`. `SplitPreTokenizer` sends a
-`Regex` pattern through `String.split(by:options:includeSeparators:)`, which
-loops on `String.range(of:options:.regularExpression)`. That Foundation search
-cannot match `\r` or `\n` inside a character class, thus `[\r\n]*` matches
-nothing. `NSRegularExpression` with the SAME pattern gives the reference
-answer, and `swift-transformers` already uses `NSRegularExpression` in
-`splitMatches(in:with:)`.
+Both failed before the correction. The second failed on
+`text.contains("## Tools")`, which is the field defect itself. No test above them
+could see the defect, because each one installed the wrapper by hand.
 
-The package is `huggingface/swift-transformers`, reached through
-`huggingface/swift-huggingface` 0.9.0. This repository does not own it, and
-1.3.3 is the newest tag.
+## What this card does NOT own
 
-### A person must choose the correction
+One tool round does not yet complete. The model omits identifier 5406 (`oke`)
+from the closing DSML tag, thus the parser refuses the payload. That is a dropped
+identifier during generation, in a different layer, with a different experiment.
+Card `^z5xrzg6` owns it and owns the round-completion criterion.
 
-1. Send the correction upstream, then move the pin.
-2. Fork or vendor `swift-transformers` here and correct it.
-3. Give `DeepSeekV4EncodingTokenizer` its own pre-tokenization path.
-
-The defect is not DeepSeek-V4's alone: any checkpoint whose `tokenizer.json`
-uses a `Split` pre-tokenizer with a pattern that crosses a newline gets wrong
-identifiers on this path.
+The whole text path is measured and clean, thus the defect is the 4-bit weights
+or a number in the DeepSeek-V4 attention port. `DSMLToolCallParser` stays as it
+is.
 
 ## Memory
 
-The checkpoint holds 141 GiB. Run ONE real-weights test for each process, or
-the machine runs out of memory. #deepseek-v4
+The checkpoint holds 141 GiB. Run ONE real-weights test for each process, or the
+machine runs out of memory. #deepseek-v4

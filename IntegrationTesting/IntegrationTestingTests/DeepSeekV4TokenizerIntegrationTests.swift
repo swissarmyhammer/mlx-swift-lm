@@ -196,6 +196,56 @@ enum DeepSeekV4TokenizerLoad {
 @Suite(.serialized, .timeLimit(.minutes(60)))
 struct DeepSeekV4TokenizerIntegrationTests {
 
+    /// A DSML tool call streams back whole, newlines included.
+    ///
+    /// The real-weights run of card ^2dvj1g6 read the closing tag of the
+    /// invoke element as `</｜DSML｜inv>`, where the syntax states
+    /// `</｜DSML｜invoke>`. The published vocabulary holds no `invoke` token:
+    /// it writes the word as `inv` (40148) and `oke` (5406). Exactly one token
+    /// was thus absent from the text the tool-call parser read.
+    ///
+    /// This test streams the answer that a tool round needs, one token at a
+    /// time, through the production detokenizer, and asks for the text back
+    /// unchanged. `markersSurviveStreamingDetokenizationWhole` cannot see this
+    /// defect: its stream holds no newline, and
+    /// `NaiveStreamingDetokenizer` starts a new segment at each newline. The
+    /// DSML answer holds four newlines, and the damaged tag follows one.
+    @Test func aToolCallStreamsBackWholeAcrossItsNewlines() async throws {
+        let tokenizer = try await DeepSeekV4TokenizerLoad.shared.value
+        let marker = DeepSeekV4ChatEncoder.SpecialToken.dsml
+        let answer = """
+            <\(marker)tool_calls>
+            <\(marker)invoke name="get_stock_level">
+            <\(marker)parameter name="bay" string="true">bay 7</\(marker)parameter>
+            </\(marker)invoke>
+            </\(marker)tool_calls>
+            """
+
+        let identifiers = DeepSeekV4Tokenization(vocabulary: tokenizer).identifiers(of: answer)
+
+        // The encode side first: the identifiers must carry the whole answer.
+        // A failure here is a tokenization defect, not a streaming defect.
+        #expect(
+            tokenizer.decode(tokenIds: identifiers) == answer,
+            "the identifiers of the answer must decode back to the answer")
+
+        var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        var pieces: [String] = []
+        for identifier in identifiers {
+            detokenizer.append(token: identifier)
+            guard let piece = detokenizer.next() else { continue }
+            pieces.append(piece)
+        }
+
+        #expect(
+            pieces.joined() == answer,
+            """
+            the streamed text must equal the answer. The tool-call parser reads \
+            this text, thus a token the stream drops is a tool round that never \
+            completes.
+            """)
+    }
+
     /// Each marker is one token that the streaming detokenizer emits whole,
     /// a mixed stream keeps the markers complete and the text in order, and
     /// a skip-specials decode keeps the turn markers.

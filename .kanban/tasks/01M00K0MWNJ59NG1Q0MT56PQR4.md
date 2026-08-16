@@ -683,8 +683,26 @@ comments:
       NO real-weights test ran. The 141 GiB checkpoint stayed on disk.
     - next: `/review`. The card holds no open finding and no open work item.
   timestamp: 2026-08-16T15:04:10.258061+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m05hqxbsm8t4srzrtn6364dt
+  text: |
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (c88660c), backend local. counts: 0 findings, 0 confirmed, 0 refuted, 0 attempted. The commit changes only kanban state files (`.kanban/tasks/01M00K0MWNJ59NG1Q0MT56PQR4.{jsonl,md}`, `.kanban/tasks/01M00NMTDKYPWR77YB8M0BRSJS.{jsonl,md}`), thus no source line is in scope. `git diff --stat HEAD~1..HEAD` proves this.
+    - prior findings: all items in `## Review Findings` are checked. The `reuse/reuse` item at line 76 stays closed as TOSSED under the standing rule for code this branch did not change. That is a valid release, not an open finding.
+    - next: card moves to `done`. This unblocks `^2dvj1g6`.
+  timestamp: 2026-08-16T15:06:16.825269+00:00
+- actor: claude-code
+  id: 01m05hrrymfknezehvqqd14zpt
+  text: |
+    ### finish iteration — clean
+    - implement: changed — the card only; the last `reuse/reuse` finding closes as tossed under the standing rule for code this branch did not change
+    - test: green — five bundles, 480 XCTest + 1076 Swift Testing, 0 failures, 0 skipped
+    - commit: c88660c
+    - review: clean — 0 findings; the commit holds kanban state only, thus no source line is in scope
+    - next: the card is in `done`, and `^2dvj1g6` is no longer blocked
+  timestamp: 2026-08-16T15:06:45.076354+00:00
+position_column: done
+position_ordinal: ff8a80
 title: swift-transformers splits every newline on its own, thus every prompt with a blank line gets the wrong token identifiers
 ---
 Found on 2026-08-14 while card `^2dvj1g6` looked for the reason DeepSeek-V4
