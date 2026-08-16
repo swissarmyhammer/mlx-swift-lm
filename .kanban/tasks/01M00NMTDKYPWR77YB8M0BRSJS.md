@@ -327,11 +327,269 @@ comments:
     hang is in `FoundationModelsRouter` — a per-container `AsyncSemaphore(value: 1)`
     that `beginTurn()` holds for the complete turn — and not in this repository.
   timestamp: 2026-08-16T14:17:52.441976+00:00
+- actor: claude-code
+  id: 01m05fsdnedv5rdttptfnx3kkr
+  text: |
+    ### The premise is FALSE. I checked the code again, independently.
+
+    I read `MLXLanguageModel.swift` on the current tree. I did not take the earlier
+    comments on trust. The line numbers of the card moved since the card was filed:
+    the card says 1017 / 1232 / 1475, and the current tree says 1081 / 1298 / 1531.
+    Each item below gives the symbol and the current line.
+
+    **What the card gets RIGHT.** The executor emits the tool-call delta while it
+    holds the container. Two paths do this:
+
+    - `.allowed` path: `Self.emitToolCall` at line 1303.
+    - `.required` path: `emitRequiredToolCallEvent` at line 1479.
+
+    Both are inside the block that `try await container.perform(nonSendable:)`
+    opens at line 1081.
+
+    **What the card gets WRONG.** That block holds NO tool round. Both exits are
+    short:
+
+    - Lines 1334-1335: `Stream.gpu.synchronize()`, then `return`. That `return` sits
+      at the indent of the `perform` closure body. An `if` block is not a function
+      body, thus the `return` leaves the closure itself. The tool-call emit at line
+      1303 is the last work the `.allowed` path does before it releases.
+    - Line 1531: the `perform` block closes. The `.required` path reaches it just
+      after its emit at 1479 and its usage events.
+
+    There is NO loop over tool rounds in that block. The comment at lines 1198-1201
+    gives the design: "Tool path, entered on every round while tools are enabled --
+    fresh turns and continuations alike." Each continuation round is a NEW `respond`
+    call from the session. Each `respond` call opens its own `perform`. Thus the
+    lock is taken one time and released one time for each round. It is not held
+    across rounds.
+
+    **The lock releases when the block returns.** The chain has three steps:
+
+    - `ModelContainer.perform(nonSendable:_:)` calls `context.read`
+      (`Libraries/MLXLMCommon/ModelContainer.swift:116`).
+    - `SerialAccessContainer.read` calls `lock.withLock`
+      (`Libraries/MLXLMCommon/Utilities/SerialAccessContainer.swift:55`).
+    - `AsyncMutex.withLock` has `defer { unlock() }`
+      (`Libraries/MLXLMCommon/Utilities/SerialAccessContainer.swift:34`).
+
+    Thus the container is free as soon as the closure returns. The session then runs
+    the tool body against a free container.
+
+    **One call site only.** `container.perform` occurs ONE time in the complete
+    `MLXFoundationModels` library: `MLXLanguageModel.swift:1081`. No other path of
+    that library takes the container, thus no other path can hold it across a tool
+    round.
+
+    ### The tests agree, and they pass on the current tree
+
+    Both branches of the tool code now have a test.
+
+    - `Tests/MLXFoundationModelsTests/ToolBodyContainerReentryTests.swift` covers the
+      `.allowed` path with scripted doubles. I ran it today. The test "A tool body
+      may generate on the same model while its turn is in flight" PASSED after 0.043
+      seconds. The complete bundle gave 155 tests in 24 suites with 0 failures.
+    - `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/ToolBodyContainerReentryRealModelTests.swift`
+      covers the `.required` path with real weights on
+      `mlx-community/Llama-3.2-1B-Instruct-4bit`. Card ^5ddpy4s recorded a PASS after
+      3.697 seconds. This is the grammar-constrained path that an earlier comment
+      listed as an untested lead. It is tested now.
+
+    ### The cause is OUTSIDE this repository
+
+    The `FoundationModelsRouter` session traced the hang it saw to a per-container
+    `AsyncSemaphore(value: 1)`. Its `beginTurn()` holds that semaphore for the
+    complete turn together with the tool rounds of that turn. That code is in
+    `FoundationModelsRouter`, which is a DIFFERENT repository.
+
+    I checked this repository for the same construct: `Libraries/` holds no
+    `AsyncSemaphore` and no `beginTurn`. The construct that causes the hang does not
+    exist here.
+
+    Note that an earlier comment on this card ruled the router out. That conclusion
+    was too early: it examined only `container.perform` call sites of the router,
+    and the router's lock is a semaphore of its own, not a container lock.
+
+    ### The acceptance criteria
+
+    - Criterion 1 is MET. Two tests generate from inside a tool body on the same
+      container. Both complete. Both fail loudly and do not hang: each has a timeout
+      arm, and each timeout arm was proved by a mutation (1 ns on the stub test, 1 ms
+      on the real-model test).
+    - Criterion 3 is MET. The premise is wrong, and this comment records why, with a
+      file and a line for each item of evidence. The real cause is the router
+      semaphore, outside this repository.
+    - Criterion 2 does NOT apply, and it stays unticked. Its condition is "Whichever
+      direction is chosen". No direction is chosen, because there is no defect here
+      to correct. The constraint that criterion 2 names -- a tool body must not
+      generate on its own container -- is FALSE on this code. To write it in the
+      documentation would put a false statement in the documentation. A person must
+      decide if `MLXLanguageModel` instead gets the OPPOSITE statement: that a tool
+      body MAY generate on the same container, because two tests now guard that
+      behaviour. That decision is surfaced to the user, not made here.
+
+    ### No production code changed
+
+    `Libraries/MLXFoundationModels/MLXLanguageModel.swift` is UNCHANGED. This card
+    alone changed. No fix was invented for a defect that does not exist here.
+  timestamp: 2026-08-16T14:32:09.134736+00:00
+- actor: claude-code
+  id: 01m05ftgfp7v62825p3c6qd360
+  text: |
+    ### implement — no-change
+
+    - evidence: NO source file changed. `Libraries/MLXFoundationModels/MLXLanguageModel.swift`
+      is unchanged; `git status` shows only kanban files. The card description and
+      this comment thread are the whole change.
+      I checked the premise independently and it is FALSE: `container.perform` opens
+      at `MLXLanguageModel.swift:1081` and closes at `:1531`, and it holds NO tool
+      round. The `.allowed` path emits its tool call at `:1303` and then `return`s
+      out of the closure at `:1335`. The `.required` path emits at `:1479` and
+      reaches the close at `:1531`. `AsyncMutex.withLock` releases on `defer`
+      (`SerialAccessContainer.swift:34`), thus the container is free while the
+      session runs the tool body. `container.perform` has exactly ONE call site in
+      the complete `MLXFoundationModels` library.
+      Test evidence on the current tree:
+      `xcodebuild build-for-testing -skipPackagePluginValidation -scheme
+      mlx-swift-lm-Package -destination 'platform=macOS'` then `xcrun xctest
+      MLXFoundationModelsTests.xctest` — 155 tests in 24 suites passed, 0 failures.
+      "A tool body may generate on the same model while its turn is in flight"
+      PASSED after 0.043 s. The five bundles were NOT all run, because no source
+      file changed.
+      Criteria 1 and 3 are ticked. Criterion 2 does not apply and stays unticked,
+      with the reason written into the description.
+    - next: a person decides one question only — does `MLXLanguageModel` get a
+      documentation sentence that states the POSITIVE guarantee (a tool body may
+      generate on the same container)? Two independent sessions read this code and
+      both concluded a deadlock exists, thus the code misleads a reader. Nothing
+      else on this card is open.
+  timestamp: 2026-08-16T14:32:44.790306+00:00
+- actor: claude-code
+  id: 01m05gghcqt3r2vmbzfqqbv6k7
+  text: |
+    ### The guarantee is documented. Criterion 2 is met.
+
+    The user decided to write the documentation:
+
+    > yes, write the documentation. I am deciding this, not escalating it. Two
+    > independent sessions read this code and both concluded a deadlock exists. That
+    > is a defect in what the code communicates, even though the behavior is
+    > correct.
+
+    ### Where it went, and why there
+
+    `Libraries/MLXFoundationModels/MLXLanguageModel.swift`, at the entry of the tool
+    path, immediately above `if !enabledToolDefinitions.isEmpty`. It extends the
+    comment block that is already there.
+
+    That position is correct for three reasons:
+
+    1. It is the entry of BOTH tool branches. The `.allowed` branch and the
+       `.required` branch each begin below it, thus one block covers both emit sites
+       and no text is duplicated.
+    2. It sits with the emit sites, not at the top of the file. A reader who hunts
+       for the deadlock reads the tool path, thus the reader meets the answer at the
+       place of the question.
+    3. The block above it already describes the tool path. The new text continues
+       that description instead of starting a competing one.
+
+    ### The text
+
+        // A tool body can start a second generation on this same
+        // model. This executor releases the model container BEFORE
+        // the SDK runs a tool body. This `perform` closure sends the
+        // tool-call delta, then it returns. Each continuation round
+        // opens its own `perform`. Thus the container lock covers
+        // one generation. It does not cover a complete turn with
+        // the tool rounds of that turn.
+        // `ToolBodyContainerReentryTests` and
+        // `ToolBodyContainerReentryRealModelTests` guard this
+        // guarantee.
+
+    It states the guarantee, it names the mechanism, and it names the two tests. It
+    does not repeat the investigation; this card holds that.
+
+    `//` is correct and `///` is not: the comment is inside a method body, thus it
+    documents no declaration. The `swift/documentation` rule that requires `///`
+    governs documentation comments on declarations.
+
+    ### The rules were read first
+
+    `dump validators` gave 65 rules across 9 validators for this file. The rules that
+    touch a comment were checked one at a time:
+
+    - `code-hygiene/no-commented-code` — the block is English prose, thus it is not
+      commented-out code at any length.
+    - `swift/documentation`, "Describe what/why, not how" — the text states the
+      guarantee and why it holds.
+    - `swift/concurrency` — this rule ASKS for a comment that states a
+      synchronization invariant. The new text is what the rule wants.
+    - No rule forbids a test name, a file name, or an issue link inside a comment.
+    - No line-length rule exists in the set, and comment-only lines do not count
+      toward the function-length gate.
+
+    ### Verification
+
+    - `swift-format format --in-place` then `swift-format lint` -- CLEAN. The
+      formatter changed nothing in the new text. The file was clean before the edit
+      too, thus the result is not accidental.
+    - `xcodebuild build-for-testing -skipPackagePluginValidation -scheme
+      mlx-swift-lm-Package -destination 'platform=macOS'` -- TEST BUILD SUCCEEDED,
+      0 compiler warnings.
+    - All FIVE bundles ran, and each exited 0 with 0 failure lines:
+
+      | bundle | result |
+      |---|---|
+      | MLXLMTests | 844 tests in 71 suites + 475 XCTest, 0 failures |
+      | MLXGuidedGenerationTests | 70 tests in 14 suites, 0 failures |
+      | MLXFoundationModelsTests | 155 tests in 24 suites, 0 failures |
+      | CXGrammarTests | 7 tests in 5 suites, 0 failures |
+      | MLXHuggingFaceMacrosTests | 5 XCTest, 0 failures |
+
+      Total: 1076 Swift Testing tests and 480 XCTest tests. Nothing was skipped.
+
+    - The guard test still passes: "A tool body may generate on the same model while
+      its turn is in flight" PASSED after 0.045 seconds.
+
+    ### A note for the merge
+
+    This comment describes behaviour of the UPSTREAM `MLXLanguageModel`, and it
+    corrects no code. Upstream can move this code without knowing that the comment
+    exists. A person who merges upstream must check that the comment still sits at
+    the entry of the tool path, and that the two branch names below it are unchanged.
+  timestamp: 2026-08-16T14:44:46.615206+00:00
+- actor: claude-code
+  id: 01m05ggrwryhh5082ynhrq8tn1
+  text: |
+    ### implement — changed
+
+    - evidence: 1 source file — `Libraries/MLXFoundationModels/MLXLanguageModel.swift`
+      (+11 lines, comment only, at the entry of the tool path above
+      `if !enabledToolDefinitions.isEmpty`). No executable code changed.
+      `swift-format lint` CLEAN, and the formatter changed nothing in the new text.
+      `xcodebuild build-for-testing` — TEST BUILD SUCCEEDED, 0 compiler warnings.
+      All five bundles, each exit 0 with 0 failure lines: MLXLMTests 844 + 475
+      XCTest; MLXGuidedGenerationTests 70; MLXFoundationModelsTests 155;
+      CXGrammarTests 7; MLXHuggingFaceMacrosTests 5 XCTest. 1076 Swift Testing and
+      480 XCTest, nothing skipped.
+      Acceptance criteria 1, 2 and 3 are ALL ticked now. Criterion 2 is met by the
+      new comment; the direction taken is recorded in the description.
+    - next: ready for `/review`. Nothing is open on this card. One item for a future
+      merge is recorded: the comment describes upstream code that upstream can move,
+      so a merge must check that it still sits at the entry of the tool path.
+  timestamp: 2026-08-16T14:44:54.296991+00:00
 position_column: doing
 position_ordinal: '8380'
 title: One turn holds the container lock across tool rounds, so a tool that generates deadlocks
 ---
 Filed by the `FoundationModelsMultitool` session, with `FoundationModelsRouter` concurring after independently reading the same code.
+
+**RESOLVED: the premise is false for this repository. See the comment of
+2026-08-16.** The tool rounds do NOT run inside `container.perform`. The block
+emits the tool-call delta and then returns, thus the container is free while the
+session runs the tool body. The reported hang comes from a per-container
+`AsyncSemaphore(value: 1)` in `FoundationModelsRouter`, a different repository.
+`MLXLanguageModel` now documents the true guarantee at its tool path. The text
+below is the original report and is kept as filed.
 
 ## The defect
 
@@ -357,11 +615,18 @@ Give the two slots different models and the sharing disappears. We are running t
 ## What was ruled out
 
 - **Not the router.** `FoundationModelsRouter` has exactly one `container.perform` in its whole `Sources` tree, in `embed(texts:)`. Generation never goes through it — the router drives a native `LanguageModelSession` through `MLXFoundationModelsSessionBackend` and takes no container lock. Nothing on the router side needs re-entrancy handling.
+  **CORRECTION (2026-08-16): this conclusion was wrong.** It examined only the
+  `container.perform` call sites of the router. The router's lock is an
+  `AsyncSemaphore(value: 1)` of its own, held by `beginTurn()` for the complete
+  turn with its tool rounds. That is the real cause.
 - **Not memory, not the model, not the grammar.** See the numbers above.
 
 ## What is not proven
 
 That the SDK invokes a tool body while the `respond` executor call is still suspended inside `perform`, rather than after it returns. Reading alone did not settle it. The hang is the strongest evidence that it does, since a deadlock requires exactly that ordering.
+
+**SETTLED (2026-08-16): the SDK invokes the tool body AFTER `respond` returns.**
+Two tests prove it, one with scripted doubles and one with real weights.
 
 If it turns out the SDK does call tools after `respond` returns, then this card is wrong and the hang has another cause — please say so on the card rather than closing it silently, because the consumer-side evidence is real and would then need a different explanation.
 
@@ -375,10 +640,28 @@ Not prescriptive — the fork owns this call:
 
 A silent park is the worst of the three. A host cannot tell it from a slow model, and a host that has deliberately removed its timeouts — ours has, for discovery — waits forever.
 
+**THE DIRECTION TAKEN (2026-08-16).** None of the three above is taken, because
+the code already behaves correctly: it releases the container across a tool round
+by itself. The direction taken is the documentation half of direction 3, with the
+statement INVERTED. The code now states the true guarantee at its tool path: a
+tool body CAN generate on the same container. Two independent sessions read this
+code and both concluded that a deadlock exists, thus the code misled a reader.
+The comment removes that trap. It costs nothing at run time.
+
 ## Acceptance Criteria
 
-- [ ] A test that generates from inside a tool body on the same container either completes or fails loudly; it does not hang
-- [ ] Whichever direction is chosen, the constraint on tool bodies is stated in `MLXLanguageModel`'s own documentation, where a host implementer will read it
-- [ ] If the premise is wrong (tools are invoked after `respond` returns), that is recorded here with what the real cause is
+- [x] A test that generates from inside a tool body on the same container either completes or fails loudly; it does not hang
+- [x] Whichever direction is chosen, the constraint on tool bodies is stated in `MLXLanguageModel`'s own documentation, where a host implementer will read it
+- [x] If the premise is wrong (tools are invoked after `respond` returns), that is recorded here with what the real cause is
+
+Criterion 2 is met by the comment at the tool path of
+`Libraries/MLXFoundationModels/MLXLanguageModel.swift`, above
+`if !enabledToolDefinitions.isEmpty`. It is the entry of BOTH tool branches
+(`.allowed` and `.required`), thus it sits with the two emit sites that a reader
+who hunts for the deadlock will examine. What it states is the guarantee, not a
+constraint: a tool body can start a second generation on the same model, because
+the `perform` closure sends the tool-call delta and then returns, and because
+each continuation round opens its own `perform`. It names the two tests that
+guard the guarantee.
 
 #eventplan

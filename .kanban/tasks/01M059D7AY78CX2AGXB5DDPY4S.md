@@ -216,8 +216,25 @@ comments:
     - evidence: 1 file — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/ToolBodyContainerReentryRealModelTests.swift; new suite passes in 3.697 s on mlx-community/Llama-3.2-1B-Instruct-4bit; five package bundles pass with 0 failures; swiftlint 0.65.0 gives 0 findings
     - next: /review
   timestamp: 2026-08-16T14:17:58.105041+00:00
-position_column: doing
-position_ordinal: '8580'
+- actor: claude-code
+  id: 01m05fgt8bez5m9ttf3sgx5fkg
+  text: |
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (9a987e2), backend local — 0 findings, 0 confirmed, 0 refuted; 9 validator passes attempted, 0 failed, 0 skipped; 1 file reviewed (IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/ToolBodyContainerReentryRealModelTests.swift), 0 not reviewed
+    - next: none — the card moves to done
+  timestamp: 2026-08-16T14:27:27.115009+00:00
+- actor: claude-code
+  id: 01m05fh71m7tn8eyhghv1vdb3d
+  text: |
+    ### finish iteration 1 — clean
+    - implement: changed — 1 new file, `ToolBodyContainerReentryRealModelTests.swift`
+    - test: green — the new test passes after 3.697 s on `mlx-community/Llama-3.2-1B-Instruct-4bit`; five package bundles 0 failures
+    - commit: 9a987e2
+    - review: clean — 0 findings, 9 validator passes, 1 file
+    - next: the card is in `done`
+  timestamp: 2026-08-16T14:27:40.212378+00:00
+position_column: done
+position_ordinal: ff8880
 title: Add a tool-body re-entrancy test that uses a real model
 ---
 ## Scope

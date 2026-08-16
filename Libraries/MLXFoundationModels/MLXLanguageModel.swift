@@ -1199,6 +1199,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // -- fresh turns and continuations alike. Allowed mode uses
                     // native generation so the model can answer or call a tool;
                     // required mode constrains generation to a real tool call.
+                    //
+                    // A tool body can start a second generation on this same
+                    // model. This executor releases the model container BEFORE
+                    // the SDK runs a tool body. This `perform` closure sends the
+                    // tool-call delta, then it returns. Each continuation round
+                    // opens its own `perform`. Thus the container lock covers
+                    // one generation. It does not cover a complete turn with
+                    // the tool rounds of that turn.
+                    // `ToolBodyContainerReentryTests` and
+                    // `ToolBodyContainerReentryRealModelTests` guard this
+                    // guarantee.
                     if !enabledToolDefinitions.isEmpty {
                         // Re-render using the model's native tool-aware chat
                         // template (Qwen/Llama/Phi/Gemma all ship one in their
