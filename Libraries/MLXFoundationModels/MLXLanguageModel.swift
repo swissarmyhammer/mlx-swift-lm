@@ -1578,6 +1578,50 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var endedInsideReasoning = false
         }
 
+        /// Stops the generation task and waits until it stops.
+        ///
+        /// The task holds the GPU loop. A caller that leaves the token stream
+        /// before its end must stop the task and then wait for it. A caller that
+        /// does not wait leaves the loop in operation, and the next pass then
+        /// shares the GPU with it.
+        ///
+        /// - Parameter task: the generation task to stop.
+        private func cancelAndDrain<Success>(_ task: Task<Success, Never>) async {
+            task.cancel()
+            _ = await task.value
+        }
+
+        /// Reads a generation stream and keeps its cache for the next turn.
+        ///
+        /// Both exits wait for the generation task, thus the GPU loop never
+        /// stays in operation. A good exit gives the prompt cache the tokens
+        /// that the task fed into the caches. The ledger of that cache is then
+        /// the render plus those tokens, thus the next turn reuses the cache
+        /// with no rewind. An error exit stops the task first, sends the error
+        /// on, and keeps no cache.
+        ///
+        /// - Parameters:
+        ///   - task: the generation task that feeds the caches.
+        ///   - plan: the plan that the pass ran, or nil when the pass had no
+        ///     plan.
+        ///   - promptCache: the slot that keeps the cache for the next turn.
+        ///   - body: reads the token stream of the same generation.
+        /// - Throws: the error that `body` throws.
+        private func withPromptCacheCommit(
+            task: Task<[Int], Never>,
+            plan: ExecutorPromptCachePlan?,
+            promptCache: ExecutorPromptCacheSlot,
+            body: () async throws -> Void
+        ) async rethrows {
+            do {
+                try await body()
+            } catch {
+                await cancelAndDrain(task)
+                throw error
+            }
+            promptCache.commit(plan, generatedTokens: await task.value)
+        }
+
         private func runAllowedToolGeneration(
             input: LMInput,
             toolSpecs: [[String: any Sendable]],
@@ -1614,7 +1658,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 context: context,
                 decoder: protocolDecoder)
 
-            do {
+            try await withPromptCacheCommit(task: task, plan: plan, promptCache: promptCache) {
                 generationLoop: for await generation in stream {
                     try Task.checkCancellation()
                     switch generation {
@@ -1665,13 +1709,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         result.completionInfo = info
                     }
                 }
-            } catch {
-                task.cancel()
-                _ = await task.value
-                throw error
             }
 
-            promptCache.commit(plan, generatedTokens: await task.value)
             let finalReasoningText: String
             if var decoder = protocolDecoder {
                 result.endedInsideReasoning = decoder.isInsideReasoning
@@ -1884,7 +1923,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 parameters: params,
                 context: context)
 
-            do {
+            try await withPromptCacheCommit(task: task, plan: plan, promptCache: promptCache) {
                 for await generation in stream {
                     try Task.checkCancellation()
                     switch generation {
@@ -1909,13 +1948,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         throw RejectedToolCallError(rejection)
                     }
                 }
-            } catch {
-                task.cancel()
-                _ = await task.value
-                throw error
             }
-
-            promptCache.commit(plan, generatedTokens: await task.value)
         }
 
         /// Dispatches the no-tools/no-schema path: reasoning routing when a
@@ -2007,7 +2040,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 context: context,
                 decoder: protocolDecoder)
 
-            do {
+            try await withPromptCacheCommit(task: task, plan: plan, promptCache: promptCache) {
                 generationLoop: for await generation in stream {
                     try Task.checkCancellation()
                     switch generation {
@@ -2066,12 +2099,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         completionInfo = info
                     }
                 }
-            } catch {
-                task.cancel()
-                _ = await task.value
-                throw error
             }
-            promptCache.commit(plan, generatedTokens: await task.value)
 
             let endedInsideReasoning: Bool
             if var decoder = protocolDecoder {
@@ -2286,13 +2314,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // this exit path. Keep one clean GPU sync per exit path —
                 // cascading syncs across nested catches can race the Metal
                 // command-buffer state during teardown.
-                task.cancel()
-                _ = await task.value
+                await cancelAndDrain(task)
                 throw error
             }
             // Drain the generation task before Phase 2 reuses the Stream.
-            task.cancel()
-            _ = await task.value
+            await cancelAndDrain(task)
             Stream.gpu.synchronize()
 
             for segment in collector.finalize() {

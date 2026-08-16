@@ -138,7 +138,117 @@ comments:
     - evidence: 5 findings (5 confirmed, 1 refuted, 9 attempted) — `review sha f661489~1..f661489` backend local — MLXLanguageModel.swift:1674, 1914, 1918, 2071, 2074
     - next: remove the duplicated task-completion and cache-commit code from the whole file, then run /review again.
   timestamp: 2026-08-16T17:31:09.996244+00:00
-position_column: review
+- actor: claude-code
+  id: 01m05t20z1jaz5h2aw4bz80a52
+  text: |
+    ### finish iteration 1 — findings
+    - implement: changed — 6 files. The ledger widens to the cache, thus no rewind is necessary. Real weights: round 2 goes from `cached 0, fed 3553` to `cached 3536, fed 17`.
+    - test: green — five bundles, 847 + 475 + 70 + 160 + 7 + 5, 0 failures
+    - commit: f661489
+    - review: findings — Libraries/MLXFoundationModels/MLXLanguageModel.swift:1674, :1914, :1918, :2071, :2074. One cause: the cache-commit epilogue repeats in `runReasoning`, `runUnconstrained` and `runAllowedToolGeneration`.
+  timestamp: 2026-08-16T17:31:36.801227+00:00
+- actor: claude-code
+  id: 01m05ty3yrjzygnwrr2txtpcra
+  text: |-
+    Second implement pass. The five `duplication` findings had ONE cause, and that
+    cause is now out of the whole file.
+
+    ## Working-tree check first
+
+    The review comment noted uncommitted work in
+    `Libraries/MLXFoundationModels/MLXLanguageModel.swift`. That work is NOT
+    uncommitted now: commit f661489 holds it. `git status --short` before any edit
+    showed only the two kanban files of this card. Nothing was discarded.
+
+    ## The cause
+
+    Three generation paths -- `runAllowedToolGeneration`, `runUnconstrained` and
+    `runReasoning` -- each ended with the same two statements, one in the catch
+    block and one after it:
+
+        _ = await task.value
+        promptCache.commit(plan, generatedTokens: await task.value)
+
+    ## The correction
+
+    Two shared helpers, and every site now calls them.
+
+    `withPromptCacheCommit(task:plan:promptCache:body:)` holds the WHOLE epilogue.
+    The caller gives it the token loop as the body:
+
+        try await withPromptCacheCommit(task: task, plan: plan, promptCache: promptCache) {
+            generationLoop: for await generation in stream {
+                ...
+            }
+        }
+
+    It is `async rethrows`, thus it throws only what the body throws. A good exit
+    commits. An error exit stops the task, sends the error on, and commits nothing.
+    The body is a non-escaping closure, thus it still writes the local `var`s that
+    each path reads after the loop -- `protocolDecoder`, `router`, `result`,
+    `completionInfo`, `rejectedToolCall`.
+
+    `cancelAndDrain(_:)` holds the `task.cancel()` plus `_ = await task.value`
+    pair. It is generic over the success type, because the three cache paths carry
+    a `Task<[Int], Never>` and `runToolCallReasoningPhase` carries a
+    `Task<Void, Never>`.
+
+    The finding named 5 lines in 3 functions. The pair also stood TWICE more in
+    `runToolCallReasoningPhase`, at its catch and at its Phase-2 boundary. Both now
+    call `cancelAndDrain`, thus `_ = await task.value` is gone from the whole file
+    except inside the one helper.
+
+    ## Nothing about the reuse behavior moved
+
+    `promptCache.commit(plan, generatedTokens: await task.value)` runs at the same
+    point of each path, with the same two arguments. The early `task.cancel()` plus
+    `break generationLoop` of the two decoder paths still leaves the loop and still
+    reaches the commit, because the wrapper commits when the body returns.
+
+    The real weights say the same, on `mlx-community/gemma-3-270m-it-4bit`:
+
+        sliding-window round 1: prompt 3512, cached 0
+        sliding-window round 2: prompt 3553, cached 3536, fed 17
+
+    `cached 3536, fed 17` is the number the card recorded. The non-rotating control
+    round holds too:
+
+        round 1: prompt 45, cached 0
+        round 2: prompt 63, cached 47, fed 16
+        cold control: prompt 63, cached 0
+
+    ## Rules read before the edit
+
+    `dump validators` on the file gave 9 validators and 65 rules. Three of them
+    decided the shape:
+
+    * `duplication` asks for exactly this fix -- "extract a shared function and
+      parameterize the difference". The Swift carve-out for a forwarding one-liner
+      does NOT release these sites, because two statements of real logic repeat.
+    * `reuse` states that a single-call-site helper is not a finding, thus a helper
+      is safe to extract.
+    * `missing-docs-swift` runs with `warning: [open, public]`, thus a `private`
+      helper needs no doc comment. Both helpers carry one anyway, in the shape the
+      `swift/documentation` rule states: `///`, a one-sentence summary, a blank
+      `///` line, `- Parameter` keys that name the INTERNAL parameter, and a
+      `- Throws:` line because the wrapper rethrows.
+
+    ## Tests
+
+    Five bundles, all green, at the same counts as the last pass: MLXLMTests
+    847 + 475, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 160,
+    CXGrammarTests 7, MLXHuggingFaceMacrosTests 5. The IntegrationTesting project
+    builds. `swift-format` and `swift-format lint` are clean, and they changed no
+    other file.
+  timestamp: 2026-08-16T17:46:57.368021+00:00
+- actor: claude-code
+  id: 01m05ty94mg7cd0zbdwxy4mpx0
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Libraries/MLXFoundationModels/MLXLanguageModel.swift (49 insertions, 23 deletions). Two shared helpers, `withPromptCacheCommit(task:plan:promptCache:body:)` and `cancelAndDrain(_:)`, replace the epilogue at all 5 sites. All 5 findings are now `- [x]`. Five bundles green: 847 + 475, 70, 160, 7, 5, 0 failures. IntegrationTesting builds. Real weights unchanged: `sliding-window round 2: prompt 3553, cached 3536, fed 17`, and the control `round 2: prompt 63, cached 47, fed 16`.
+    - next: /review
+  timestamp: 2026-08-16T17:47:02.676368+00:00
+position_column: doing
 position_ordinal: '80'
 title: The executor prompt cache gives a sliding-window model no reuse
 ---
@@ -222,8 +332,8 @@ process, or the machine runs out of memory.
 
 > Scope: `review sha f661489~1..f661489` — reviewed the diffs only — lines this change added or modified. 6 file(s) reviewed, 0 not reviewed.
 
-- [ ] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1674` `duplication/duplication` — Identical method call `promptCache.commit(plan, generatedTokens: await task.value)` appears in three functions (lines 1674, 1918, 2074); cache commitment is duplicated. Extract a shared helper function `commitPromptCache(plan:tokens:)` or pass the task result through a common completion path rather than duplicating the commit call.
-- [ ] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1914` `duplication/duplication` — Identical statement `_ = await task.value` appears across three generation functions; this line duplicates lines 1670 and 2071. Extract task completion logic into a helper function to avoid maintaining three identical error-handling paths.
-- [ ] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1918` `duplication/duplication` — Identical method call `promptCache.commit(plan, generatedTokens: await task.value)` appears across three functions; this line duplicates lines 1674 and 2074. Extract cache commitment into a shared helper to prevent divergence and reduce maintenance burden across three generation paths.
-- [ ] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:2071` `duplication/duplication` — Identical statement `_ = await task.value` appears across three generation functions; this line duplicates lines 1670 and 1914. Extract task completion handling into a helper function to centralize error-path logic and reduce duplication.
-- [ ] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:2074` `duplication/duplication` — Identical method call `promptCache.commit(plan, generatedTokens: await task.value)` appears across three functions; this line duplicates lines 1674 and 1918. Extract cache commitment into a shared helper to ensure consistency and simplify maintenance across runReasoning, runUnconstrained, and runAllowedToolGeneration.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1674` `duplication/duplication` — Identical method call `promptCache.commit(plan, generatedTokens: await task.value)` appears in three functions (lines 1674, 1918, 2074); cache commitment is duplicated. Extract a shared helper function `commitPromptCache(plan:tokens:)` or pass the task result through a common completion path rather than duplicating the commit call.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1914` `duplication/duplication` — Identical statement `_ = await task.value` appears across three generation functions; this line duplicates lines 1670 and 2071. Extract task completion logic into a helper function to avoid maintaining three identical error-handling paths.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1918` `duplication/duplication` — Identical method call `promptCache.commit(plan, generatedTokens: await task.value)` appears across three functions; this line duplicates lines 1674 and 2074. Extract cache commitment into a shared helper to prevent divergence and reduce maintenance burden across three generation paths.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:2071` `duplication/duplication` — Identical statement `_ = await task.value` appears across three generation functions; this line duplicates lines 1670 and 1914. Extract task completion handling into a helper function to centralize error-path logic and reduce duplication.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:2074` `duplication/duplication` — Identical method call `promptCache.commit(plan, generatedTokens: await task.value)` appears across three functions; this line duplicates lines 1674 and 1918. Extract cache commitment into a shared helper to ensure consistency and simplify maintenance across runReasoning, runUnconstrained, and runAllowedToolGeneration.
