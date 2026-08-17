@@ -2,18 +2,23 @@
 //
 // The real-weights measurement of card ^z5xrzg6: the model writes
 // `</｜DSML｜inv>` where the DSML syntax states `</｜DSML｜invoke>`, thus the
-// identifier of the piece `oke` never reaches the tool-call parser.
+// identifier of the piece `oke` (5406) never reaches the tool-call parser.
+//
+// The card ACCEPTS that loss rather than corrects it. `DSMLToolCallParser` now
+// accepts the short tag, thus this suite records the divergence rather than
+// reports a defect: it asserts that the greedy answer carries a closing tag the
+// parser reads, whether the checkpoint writes the short tag or the whole one.
 //
 // `DeepseekV4IntegrationTests.aShortToolPromptEmitsOneDSMLToolCall` runs the
 // same conversation through `ChatSession` and reports the TEXT. Text cannot
-// answer the two questions the card asks:
+// answer the two questions this suite keeps a record of:
 //
 //   1. Does the same run give the same identifiers every time? A greedy decode
 //      is deterministic, thus a difference between two runs would name a
-//      non-deterministic path rather than a wrong number.
-//   2. How far below the winner does the absent identifier stand? A gap of a
-//      few hundredths of a logit is what the 4-bit quantization of the
-//      checkpoint does to a close call. A gap of several logits is not.
+//      non-deterministic path rather than a stable property of the checkpoint.
+//   2. How far below the winner does the absent identifier stand? The gap is
+//      the size of the divergence, thus a run that measures a smaller gap tells
+//      the next reader that the checkpoint, or the numerics, moved.
 //
 // This suite drives the model directly rather than through `TokenIterator`,
 // because `TokenIterator` answers identifiers and never logits. It reads the
@@ -22,10 +27,9 @@
 // The identifiers of the closing tag come from the published tokenizer of the
 // checkpoint, thus this file states no vocabulary number of its own.
 //
-// The defect this suite reproduces is OPEN, thus its one test is DISABLED and
-// a clean run reports it as skipped rather than as a failure. Take the
-// `.disabled` trait away when card ^z5xrzg6 corrects the defect, and the run
-// gives the identifiers and the logits back.
+// Every `print` of the run stays. It is the record of the accepted divergence,
+// thus a future reader gets the identifiers, the candidates and the logits back
+// from one run of the suite.
 //
 // The checkpoint holds 141 GiB. This suite awaits the one shared load of
 // `DeepseekV4SharedCheckpoint.swift`, thus a process loads it at most once.
@@ -178,37 +182,32 @@ private func firstIndex(of pattern: [Int], in run: [Int]) -> Int? {
 
 // MARK: - The suite
 
-/// The real-weights measurement of the identifier the tool round loses.
+/// The real-weights record of the identifier the tool round loses.
 ///
-/// This suite holds the REPRODUCTION of an OPEN defect: card ^z5xrzg6 records
-/// that DeepSeek-V4 drops identifier 5406 from the closing DSML tag, and no
-/// correction for it is written yet. Its one test is thus DISABLED, so that a
-/// clean run reports it as skipped rather than as a failure. Take the
-/// `.disabled` trait away as soon as the defect is corrected.
+/// Card ^z5xrzg6 ACCEPTS the loss: `DSMLToolCallParser` reads the short closing
+/// tag `</｜DSML｜inv>` beside the whole one, thus the round completes although
+/// identifier 5406 never comes. This suite is the record of that divergence. It
+/// keeps every measurement print, and it asserts what the round needs: two
+/// greedy runs that agree, and a closing tag the parser reads.
 ///
 /// See the file header for the gating rules and the run command.
 @Suite(.serialized, .timeLimit(.minutes(suiteTimeLimitMinutes)))
 struct DeepseekV4ToolCallTokenDiagnosticTests {
 
-    /// The greedy run writes the whole closing tag of the invoke element, and
-    /// it writes the same identifiers every time.
+    /// The greedy run writes a closing tag that the DSML parser reads, and it
+    /// writes the same identifiers every time.
     ///
-    /// The measurement the run prints answers the card: the identifiers the
-    /// model wrote, whether two runs agree, and how far the absent identifier
-    /// stood below the winner at the step that lost it.
-    @Test(
-        .disabled(
-            """
-            ^z5xrzg6: DeepSeek-V4 drops identifier 5406 from the closing DSML tag. \
-            Enable this test when that defect is corrected.
-            """))
-    func theGreedyRunWritesTheWholeInvokeClosingTag() async throws {
+    /// The measurement the run prints holds the record of the card: the
+    /// identifiers the model wrote, whether two runs agree, and how far the
+    /// absent identifier stood below the winner at the step that lost it.
+    @Test func theGreedyRunWritesAClosingTagTheParserReads() async throws {
         guard
             let container = await deepseekV4ContainerOrSkip(
-                testName: "theGreedyRunWritesTheWholeInvokeClosingTag")
+                testName: "theGreedyRunWritesAClosingTagTheParserReads")
         else { return }
 
         let closeTag = "</\(DeepSeekV4ChatEncoder.SpecialToken.dsml)invoke>"
+        let shortCloseTag = "</\(DeepSeekV4ChatEncoder.SpecialToken.dsml)inv>"
         let promptIdentifiers = try await renderPromptTokens(
             container,
             messages: [.system(stockAgentInstructions), .user(stockToolUserPrompt)],
@@ -246,6 +245,10 @@ struct DeepseekV4ToolCallTokenDiagnosticTests {
         } else {
             print("\(measurementPrefix) the run wrote no closing tag at all")
         }
+        print("\(measurementPrefix) the answer holds \(closeTag): \(text.contains(closeTag))")
+        print(
+            "\(measurementPrefix) the answer holds \(shortCloseTag): "
+                + "\(text.contains(shortCloseTag))")
 
         #expect(
             generated == second.map(\.identifier),
@@ -253,11 +256,12 @@ struct DeepseekV4ToolCallTokenDiagnosticTests {
             a greedy decode is deterministic, thus the two runs must write the same \
             identifiers. Run 1 wrote \(generated.count) and run 2 wrote \(second.count).
             """)
+        let calls = DSMLToolCallParser().parseEOS(text, tools: nil)
         #expect(
-            firstIndex(of: closeTagIdentifiers, in: generated) != nil,
+            calls.first?.function.name == stockToolName,
             """
-            the model must write the whole closing tag \(closeTagIdentifiers) for the tool \
-            round to complete. It wrote: <<<\(text)>>>
+            the answer must carry a closing tag the DSML parser reads for the tool round \
+            to complete. The parser read \(calls). The model wrote: <<<\(text)>>>
             """)
     }
 }

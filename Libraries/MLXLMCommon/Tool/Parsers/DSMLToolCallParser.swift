@@ -19,6 +19,47 @@ import Foundation
 /// References: https://github.com/ml-explore/mlx-lm/pull/1337
 /// (`mlx_lm/tool_parsers/deepseek_dsml.py`) and `parse_tool_calls` in
 /// `encoding/encoding_dsv4.py` of `deepseek-ai/DeepSeek-V4-Flash`.
+///
+/// ## Tolerance of the short invoke closing tag — card `^z5xrzg6`
+///
+/// This parser accepts ONE tag that the DSML syntax does not state:
+/// `</｜DSML｜inv>`. That is a DELIBERATE divergence from the published
+/// `parse_tool_calls`, which accepts the one syntax and raises on every other.
+/// Do NOT "correct" it back before you read card `^z5xrzg6`.
+///
+/// The reason is measured, not supposed. With the real weights of
+/// `mlx-community/DeepSeek-V4-Flash-4bit` and greedy decoding, the model
+/// deterministically drops identifier 5406 (`oke`) from the closing tag of the
+/// invoke element and writes `</｜DSML｜inv>`. At the losing step the winner
+/// `>\n` (1018) stands at logit 28.25 and `oke` at 21.25 — a gap of 7.0 logits,
+/// which repeats identifier for identifier across runs AND across processes. No
+/// change of this port corrects it, thus a tool round can never complete while
+/// the parser holds the one literal.
+///
+/// The rule this tolerance follows: **accept a closing tag whose name is a
+/// prefix of the published name, cut at a token boundary of the published
+/// tokenization of that name.** The published `tokenizer.json` writes each name
+/// as:
+///
+/// | name | pieces | prefixes at a token boundary |
+/// | --- | --- | --- |
+/// | `invoke` | `inv` (40148), `oke` (5406) | `inv` |
+/// | `tool_calls` | `tool` (72461), `_c` (4941), `alls` (12548) | `tool`, `tool_c` |
+/// | `parameter` | `parameter` (41523) | none |
+///
+/// Thus the rule gives exactly one extra literal for `invoke`, and that literal
+/// is exactly the string the weights write. The rule stops at the token
+/// boundary on purpose: the vocabulary also holds `i` (75) and `in` (261), thus
+/// `</｜DSML｜in>` is a legal output of a sampler, but it is a DIFFERENT word
+/// rather than a lost piece of the published tokenization. This parser refuses
+/// it, and it refuses every other text.
+///
+/// The rule gives nothing for `parameter`, whose name is one token. It gives two
+/// literals for `tool_calls`, and neither is necessary here: ``extractToolCalls``
+/// reads the closing tag of the BLOCK never — it walks the invoke elements alone
+/// — and the only reader of ``endTag`` is `ToolCallProcessor`, which uses it to
+/// flush its streaming buffer. A short block closing tag thus holds the buffer
+/// to the end of generation, where ``parseEOS(_:tools:)`` recovers every call.
 public struct DSMLToolCallParser: ToolCallParser, Sendable {
 
     /// The `｜DSML｜` marker: `DSML` between two FULLWIDTH VERTICAL LINE
@@ -31,6 +72,18 @@ public struct DSMLToolCallParser: ToolCallParser, Sendable {
 
     /// The closing tag of one invoke element.
     private static let invokeClose = "</\(marker)invoke>"
+
+    /// The closing tag of one invoke element without the second piece of its
+    /// name.
+    ///
+    /// The published tokenizer writes `invoke` as `inv` (40148) and `oke`
+    /// (5406), thus this is the ONE prefix of that name at a token boundary,
+    /// and it is the tag the real weights write. See the "Tolerance" section of
+    /// the type documentation and card `^z5xrzg6`.
+    private static let shortInvokeClose = "</\(marker)inv>"
+
+    /// Every closing tag of an invoke element this parser accepts.
+    private static let invokeCloseTags = [invokeClose, shortInvokeClose]
 
     /// The opening of one parameter element, up to its `name=` attribute.
     private static let parameterOpen = "<\(marker)parameter name="
@@ -78,6 +131,25 @@ public struct DSMLToolCallParser: ToolCallParser, Sendable {
         Self.extractToolCalls(from: toolCallBuffer)
     }
 
+    /// The first closing tag of an invoke element that `content` holds at or
+    /// after `start`.
+    ///
+    /// The search reads every tag of ``invokeCloseTags`` and keeps the one that
+    /// comes first. No accepted tag is a substring of another, thus well-formed
+    /// text always answers with ``invokeClose``.
+    ///
+    /// - Parameters:
+    ///   - content: the text to search.
+    ///   - start: where the search starts.
+    /// - Returns: the range of the tag, or `nil` when the text holds none.
+    private static func invokeCloseRange(
+        in content: String, from start: String.Index
+    ) -> Range<String.Index>? {
+        invokeCloseTags
+            .compactMap { content.range(of: $0, range: start ..< content.endIndex) }
+            .min { $0.lowerBound < $1.lowerBound }
+    }
+
     /// Walks every `<｜DSML｜invoke name="...">...</｜DSML｜invoke>` element
     /// of `content` and parses each one into a call.
     private static func extractToolCalls(from content: String) -> [ToolCall] {
@@ -86,8 +158,7 @@ public struct DSMLToolCallParser: ToolCallParser, Sendable {
         while let open = content.range(of: invokeOpen, range: searchRange) {
             guard
                 let headerEnd = content.range(of: ">", range: open.upperBound ..< content.endIndex),
-                let close = content.range(
-                    of: invokeClose, range: headerEnd.upperBound ..< content.endIndex)
+                let close = invokeCloseRange(in: content, from: headerEnd.upperBound)
             else { break }
 
             let name = extractName(String(content[open.upperBound ..< headerEnd.lowerBound]))

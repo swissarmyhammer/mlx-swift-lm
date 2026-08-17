@@ -253,4 +253,112 @@ struct DSMLToolCallParserTests {
         #expect(processor.toolCalls.count == 1)
         #expect(processor.toolCalls.first?.function.name == "get_weather")
     }
+
+    // MARK: - The short closing tag of the checkpoint
+    //
+    // Card ^z5xrzg6: `mlx-community/DeepSeek-V4-Flash-4bit` deterministically
+    // drops identifier 5406 (`oke`) from the closing tag of the invoke element,
+    // thus it writes `</｜DSML｜inv>`. The parser accepts that one extra
+    // literal. See the "Tolerance" note on `DSMLToolCallParser` for the rule and
+    // for why the rule stops where it does.
+
+    /// The closing tag of one invoke element, as the DSML syntax states it.
+    private static let wholeInvokeCloseTag = "</｜DSML｜invoke>"
+
+    /// The closing tag of one invoke element as the real weights write it. The
+    /// name `invoke` is the two pieces `inv` (40148) and `oke` (5406), and the
+    /// second piece is absent.
+    private static let shortInvokeCloseTag = "</｜DSML｜inv>"
+
+    /// The closing tag of one block of calls with two of its three name pieces
+    /// absent. The name `tool_calls` is `tool` (72461), `_c` (4941) and `alls`
+    /// (12548).
+    private static let shortToolCallsCloseTag = "</｜DSML｜tool>"
+
+    /// The name of the tool the fixtures of this section call.
+    private static let stockToolName = "get_stock_level"
+
+    /// One block that holds one call of ``stockToolName``, with the two closing
+    /// tags the caller states.
+    ///
+    /// The two tags are the only difference between the fixtures of this
+    /// section, thus one builder holds the whole block.
+    ///
+    /// - Parameters:
+    ///   - closingInvoke: the closing tag of the invoke element.
+    ///   - closingBlock: the closing tag of the block.
+    /// - Returns: the block.
+    private static func stockCall(
+        closingInvoke: String, closingBlock: String = toolCallsCloseTag
+    ) -> String {
+        """
+        \(toolCallsOpenTag)
+        <｜DSML｜invoke name="\(stockToolName)">
+        <｜DSML｜parameter name="bay" string="true">bay 7</｜DSML｜parameter>
+        \(closingInvoke)
+        \(closingBlock)
+        """
+    }
+
+    @Test("the short closing tag of the checkpoint gives the call of the whole tag")
+    func theShortInvokeCloseTagGivesTheCallOfTheWholeTag() throws {
+        let parser = ToolCallFormat.dsml.createParser()
+        let whole = try #require(
+            parser.parse(
+                content: Self.stockCall(closingInvoke: Self.wholeInvokeCloseTag),
+                tools: nil))
+        let short = try #require(
+            parser.parse(
+                content: Self.stockCall(closingInvoke: Self.shortInvokeCloseTag),
+                tools: nil))
+
+        #expect(short == whole)
+        #expect(short.function.name == Self.stockToolName)
+        #expect(short.function.arguments["bay"] == .string("bay 7"))
+        // `ToolCall` equality reads the name and the arguments alone, thus the
+        // JSON text of the arguments needs its own comparison.
+        #expect(short.function.argumentsJSON == whole.function.argumentsJSON)
+    }
+
+    @Test("a call read from the short tag renders again with the whole tag")
+    func aCallReadFromTheShortTagRendersAgainWithTheWholeTag() throws {
+        // The tolerance belongs to the READ side alone. The write side keeps
+        // the syntax, thus a replayed round carries the whole tag again.
+        let parser = ToolCallFormat.dsml.createParser()
+        let calls = parser.parseEOS(
+            Self.stockCall(closingInvoke: Self.shortInvokeCloseTag), tools: nil)
+
+        let block = try #require(Self.toolCallsBlock(of: Self.rendered(calls)))
+        #expect(block == Self.stockCall(closingInvoke: Self.wholeInvokeCloseTag))
+    }
+
+    @Test("a closing tag that no lost piece explains is refused")
+    func aClosingTagThatNoLostPieceExplainsIsRefused() {
+        // `inv` is the ONE prefix of `invoke` at a token boundary. Each name
+        // below cuts the word somewhere else, thus no lost piece explains it.
+        let refused = ["</｜DSML｜i>", "</｜DSML｜in>", "</｜DSML｜invok>", "</｜DSML｜>", ""]
+        let parser = ToolCallFormat.dsml.createParser()
+        for tag in refused {
+            #expect(
+                parser.parse(content: Self.stockCall(closingInvoke: tag), tools: nil) == nil,
+                "the closing tag \(tag) must open no call")
+        }
+    }
+
+    @Test("a round completes although the model shortens both closing tags")
+    func aRoundCompletesAlthoughBothClosingTagsAreShort() {
+        // The parser reads the block closing tag never — it walks the invoke
+        // elements alone — thus a short block tag only keeps the streaming
+        // buffer to the end of generation, where `parseEOS` recovers the call.
+        let processor = ToolCallProcessor(format: .dsml)
+        _ = processor.processChunk(
+            Self.stockCall(
+                closingInvoke: Self.shortInvokeCloseTag,
+                closingBlock: Self.shortToolCallsCloseTag))
+        processor.processEOS()
+
+        #expect(processor.toolCalls.count == 1)
+        #expect(processor.toolCalls.first?.function.name == Self.stockToolName)
+        #expect(processor.toolCalls.first?.function.arguments["bay"] == .string("bay 7"))
+    }
 }
