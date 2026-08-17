@@ -659,6 +659,44 @@ comments:
     - next: a person decides between the Python reference run and a second
       checkpoint of a different quantization. Without one of the two, PARK the card.
   timestamp: 2026-08-16T20:48:08.299470+00:00
+- actor: claude-code
+  id: 01m07rdg52hdzk4zf0nayt3xg3
+  text: |
+    ### finish iteration 2 — stuck (infrastructure, not the work)
+
+    - implement: no-change. The sub agent read the card and the comments, started to
+      read `QuantizedLinear` and `Module.update`, and then stopped to make progress.
+      Its transcript did not grow for approximately 30 minutes.
+    - Measured, not assumed: `ps` showed NO `xctest` process, `vm.swapusage` showed
+      0.00M used, and the system reported 98% memory free. Thus no checkpoint load
+      was in progress and the machine was not in difficulty. The agent was wedged.
+    - The orchestrator stopped the agent. `git status` is empty and the tree is
+      clean, thus the wedged agent left nothing behind.
+    - test: not run.
+    - commit: none.
+    - review: not run.
+
+    ## The planned experiment stays valid
+
+    It was never attempted. Record it here so the next agent does not design it
+    again:
+
+    **Hypothesis**: the 4-bit quantization of the checkpoint loses identifier 5406.
+
+    **Method**: raise precision selectively inside the checkpoint already on disk,
+    and read the gap at each step.
+    1. Dequantize the output head to float32. Read the gap.
+    2. Extend to the last N decoder layers, with N rising.
+    3. Compute the memory BEFORE a full dequantization. The 4-bit checkpoint holds
+       141 GiB and float32 is approximately 8 times that, thus a full float32 model
+       does not fit in the 512 GB of this machine. Do not attempt it.
+
+    **Falsification**: a gap that closes as precision rises confirms the
+    quantization. A gap that does not move refutes it.
+
+    This experiment needs NO Python, NO install and NO second checkpoint. The
+    blocker this card recorded earlier is not correct.
+  timestamp: 2026-08-17T11:41:24.514012+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'DeepSeek-V4 generation drops one token: the model writes `</｜DSML｜inv>` for `</｜DSML｜invoke>`'
