@@ -292,8 +292,33 @@ comments:
       round
     - review: findings — Tests/MLXLMTests/DeepSeekV4CommittedTurnSessionTests.swift:105
   timestamp: 2026-08-17T15:39:13.930673+00:00
-position_column: review
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m086emgsr7zc55rs0bt3kw04
+  text: |
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (commit `8112d26`) — findings 0, confirmed 0, refuted 0; 7 attempted, 0 failed, 0 skipped, 1 file reviewed. The prior finding on `Tests/MLXLMTests/DeepSeekV4CommittedTurnSessionTests.swift:105` is `- [x]`.
+    - verification: each documented invariant was read against the code and is TRUE. `ScriptedTokenizer` keeps no stored property — `vocabularySize`, `bosToken`, `eosToken` and `unknownToken` are computed, the type has no base class, and every member reads only `static let` values (`Token`, `firstRender`, `secondRender`, `DeepSeekV4ChatEncoder.SpecialToken.endOfSentence`). `ScriptedModel` mutates `passes` and `step` only in `callAsFunction(_:cache:)`; each other stored property is a `let`. One `ChatSession` owns the model, and `ChatSession.streamMap` runs the whole turn inside `try await cache.update { ... }`, which is the serial lock of the session, thus no two forward passes overlap. `respond(to:)` drains its `AsyncThrowingStream` whole before it returns, thus the read of `passes` in the assertion follows both turns.
+    - next: none. The card moves to `done`.
+  timestamp: 2026-08-17T15:46:41.817496+00:00
+- actor: claude-code
+  id: 01m086fenb7z6pm6kdf13vy1dd
+  text: |
+    ### finish iteration 2 — clean
+
+    - implement: changed — 1 file. The invariant of `@unchecked Sendable` is now
+      stated on `ScriptedModel` and on `ScriptedTokenizer`, because the same cause
+      was in both types of the file.
+    - test: green — all five package bundles, 0 failures (MLXLMTests 479 XCTest +
+      874 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 160,
+      CXGrammarTests 7, MLXHuggingFaceMacrosTests 5). `swift-format lint` clean.
+    - commit: 8112d26 docs(mlx-lm): state the concurrency invariant of the scripted
+      test helpers
+    - review: clean — 0 findings, 7 attempted, 0 skipped. The reviewer also read
+      both types and proved each documented claim TRUE against the code, thus the
+      invariant is accurate and not only present. The card is in `done`.
+  timestamp: 2026-08-17T15:47:08.587937+00:00
+position_column: done
+position_ordinal: ff9080
 title: 'DeepSeek-V4: the tool round reuses NO prompt cache, although its render extends round 1 whole'
 ---
 Found on 2026-08-17 while card `^z5xrzg6` made DeepSeek-V4 tool calling work. The
