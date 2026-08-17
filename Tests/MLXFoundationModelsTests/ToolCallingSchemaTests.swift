@@ -288,6 +288,8 @@ struct ToolCallingSchemaTests {
         for schema in [wrappedSchema, bareSchema] {
             let defs = try #require(schema["$defs"] as? [String: Any])
             #expect(defs["book_trip__Traveler"] != nil)
+            #expect(defs["book_trip__Passport"] != nil)
+            #expect(collectRefs(in: schema).allSatisfy { $0.hasPrefix("#/$defs/book_trip__") })
         }
     }
 
