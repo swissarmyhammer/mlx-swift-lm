@@ -249,8 +249,10 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
             return HarmonyToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
         case .atem:
             return OnyxToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
+        case .dsml:
+            return DSMLCommittedTurnRule(tokenizer: tokenizer).map { [$0] } ?? []
         case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2,
-            .minimaxM2, .minimaxM3, .mistral, .llama3, .dsml:
+            .minimaxM2, .minimaxM3, .mistral, .llama3:
             return []
         }
     }

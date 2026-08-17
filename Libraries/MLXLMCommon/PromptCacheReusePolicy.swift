@@ -96,6 +96,17 @@ struct PromptCacheState: Sendable {
     /// means the ledger was invalidated and nothing may be spliced onto.
     var cachedTokens: [Int]
 
+    /// The whole prompt that the last prefill rendered, which is not the same as
+    /// ``cachedTokens``: the ledger also holds the tokens the model generated
+    /// after that render.
+    ///
+    /// A protocol rule compares this with the new render to prove that the
+    /// template rewrote no already-cached rendered region. Once that holds, the
+    /// only region the two can differ in is the one the model generated, and the
+    /// cache holds the true version of it. Empty means no render is on record,
+    /// thus no rule may splice.
+    var previousRenderTokens: [Int] = []
+
     /// Authoritative logical position of the main cache — the model-wide
     /// timeline maintained by ``KVCacheStorage``, not a per-entry offset.
     var processedTokenCount: Int

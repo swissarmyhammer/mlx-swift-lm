@@ -162,6 +162,24 @@ public final class ChatSession {
         /// leave its final verifier sample here.
         var uncommittedTokens: [Int] = []
 
+        /// The whole prompt the last prefill rendered, which is not the same as
+        /// `cachedTokens`: the ledger also holds the tokens the model generated
+        /// after that render.
+        ///
+        /// A response protocol whose generated tokens a render cannot reproduce
+        /// compares this with the new render to prove that the template rewrote
+        /// no already-cached rendered region. An empty value means no render is
+        /// on record, thus no such rule may splice.
+        var renderedTokens: [Int] = []
+
+        /// Forgets what the caches represent, which forces the next turn to
+        /// rebuild from the retained messages.
+        mutating func invalidate() {
+            cachedTokens.removeAll()
+            uncommittedTokens.removeAll()
+            renderedTokens.removeAll()
+        }
+
         @discardableResult
         mutating func record(
             _ assistant: AssistantGeneration,
@@ -173,8 +191,7 @@ public final class ChatSession {
                 // assistant turn to replay. Its cache may nevertheless
                 // contain generated or lookahead tokens, so invalidate
                 // the ledger and rebuild from the retained messages.
-                cachedTokens.removeAll()
-                uncommittedTokens.removeAll()
+                invalidate()
                 return false
             }
 
@@ -191,8 +208,7 @@ public final class ChatSession {
                 // The iterator/cache relationship could not be proven
                 // (for example, a speculative iterator retained
                 // un-emitted lookahead).
-                cachedTokens.removeAll()
-                uncommittedTokens.removeAll()
+                invalidate()
             }
 
             messages.append(
@@ -963,8 +979,7 @@ public final class ChatSession {
                             // Cache-affecting generation parameters changed. Because a
                             // structured transcript is retained, rebuild the cache from it
                             // rather than silently continuing with the old cache policy.
-                            restored.cachedTokens.removeAll()
-                            restored.uncommittedTokens.removeAll()
+                            restored.invalidate()
                             kvCache = KVCacheStorage(
                                 try model.newCache(parameters: generateParameters),
                                 plan: kvCachePlan)
@@ -1094,6 +1109,7 @@ public final class ChatSession {
                                 usesSpeculativeDecoding: speculativeDecoding != nil)
                             let cacheState = PromptCacheState(
                                 cachedTokens: cachedTokenIds,
+                                previousRenderTokens: currentConversation.renderedTokens,
                                 processedTokenCount: kvCache.processedTokenCount,
                                 mainCacheIsAligned: mainCacheIsAligned,
                                 hasDraftCache: draftKVCache != nil,
@@ -1170,6 +1186,11 @@ public final class ChatSession {
                             case .prefillAll, .trimToCommonPrefix, .rebuild:
                                 currentConversation.cachedTokens = promptTokenIds
                             }
+                            // The render of THIS prefill, which the next turn
+                            // compares its own render against. It is recorded
+                            // whatever the decision was, because it names the
+                            // rendered region the caches now hold.
+                            currentConversation.renderedTokens = promptTokenIds
                             currentConversation.uncommittedTokens.removeAll()
                             conversation = currentConversation
                         }
