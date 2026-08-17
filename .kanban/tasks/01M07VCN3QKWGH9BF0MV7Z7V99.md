@@ -253,7 +253,46 @@ comments:
       `swift-format lint` is clean on all eight, and no other file was formatted.
     - next: `/review`. The card stays in `doing`.
   timestamp: 2026-08-17T15:27:26.662329+00:00
-position_column: doing
+- actor: claude-code
+  id: 01m08601v01m9ps4t160tskms5
+  text: |
+    ### review — findings
+
+    - evidence: `review sha HEAD~1..HEAD` (commit `12223aa`). counts: 1 finding,
+      1 confirmed, 2 refuted, 7 attempted, 0 failed, 0 skipped. The engine ATTEMPTED
+      7 files and reported 8 reviewed, 0 not reviewed, thus every file of the change
+      was looked at.
+    - evidence, the finding:
+      `Tests/MLXLMTests/DeepSeekV4CommittedTurnSessionTests.swift:105` `swift/concurrency`
+      — `@unchecked Sendable` carries no documented synchronization invariant.
+    - evidence, the four areas the reviewer was told to concentrate on returned no
+      confirmed finding: the guards of `DSMLCommittedTurnRule.reuse`
+      (`soleCommitIndex`, `suffixStart`, `representedTokens`), the
+      `previousRenderTokens` bookkeeping of `ChatSession`, the encoder changes
+      (`contentBeforeToolCalls`, `holdsItsOwnReasoning`), and the draft-cache branch
+      `appendSuffixToMain`. Two candidate findings were raised and both were refuted.
+    - next: correct the one finding on the new test file, then re-review. The card
+      stays in `review`.
+  timestamp: 2026-08-17T15:38:43.936284+00:00
+- actor: claude-code
+  id: 01m0860z4axpas8zgswytx3fqd
+  text: |
+    ### finish iteration 1 — findings
+
+    - implement: changed — 8 files. Four causes measured with real weights, two
+      corrected in `DeepSeekV4ChatEncoder` and two served by the new
+      `DSMLCommittedTurnRule`.
+    - test: green — all five package bundles, 0 failures (MLXLMTests 479 XCTest +
+      874 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 160,
+      CXGrammarTests 7, MLXHuggingFaceMacrosTests 5). Real weights, one load, both
+      tool tests: `✔ Test run with 2 tests in 1 suite passed after 1033.438
+      seconds.` The tool round now skips 3878 of 3906 tokens in chat mode and 3889
+      of 3917 in thinking mode.
+    - commit: 12223aa fix(mlx-lm): reuse the prompt cache on a DeepSeek-V4 tool
+      round
+    - review: findings — Tests/MLXLMTests/DeepSeekV4CommittedTurnSessionTests.swift:105
+  timestamp: 2026-08-17T15:39:13.930673+00:00
+position_column: review
 position_ordinal: '80'
 title: 'DeepSeek-V4: the tool round reuses NO prompt cache, although its render extends round 1 whole'
 ---
@@ -359,3 +398,9 @@ the `<｜end▁of▁sentence｜>` of the last assistant turn.
 
 The checkpoint holds 141 GiB. Run ONE real-weights test for each process. The two
 tests above run in one process, because the suite awaits one shared load. #deepseek-v4
+
+## Review Findings (2026-08-17 10:29)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 8 file(s) reviewed, 0 not reviewed.
+
+- [x] `Tests/MLXLMTests/DeepSeekV4CommittedTurnSessionTests.swift:105` `swift/concurrency` — @unchecked Sendable requires a documented synchronization invariant, but none is provided. This test helper uses @unchecked Sendable without explaining why it is safe to cross task boundaries, violating the concurrency safety contract. Add a documentation comment above line 105 explaining the synchronization invariant, such as: `/// Thread-safe test model—only accessed from test thread, no concurrent mutations.`.

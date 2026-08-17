@@ -66,6 +66,11 @@ final class DeepSeekV4CommittedTurnSessionTests: XCTestCase {
 
     /// A tokenizer that renders the scripted conversation and resolves the
     /// commit marker.
+    ///
+    /// The conformance is `@unchecked` because it keeps NO stored property.
+    /// Every member is a computed property or a pure function that reads the
+    /// immutable static tokens of the enclosing suite, thus no task can observe
+    /// a mutation and no synchronization is necessary.
     private final class ScriptedTokenizer: MLXLMCommon.Tokenizer, @unchecked Sendable {
         var vocabularySize: Int { Token.count }
         var bosToken: String? { nil }
@@ -102,6 +107,13 @@ final class DeepSeekV4CommittedTurnSessionTests: XCTestCase {
 
     /// A model that writes one scripted token for each forward pass and records
     /// what each pass received.
+    ///
+    /// The conformance is `@unchecked` because ``passes`` and `step` are mutable
+    /// and carry no lock. The invariant that makes it safe: one ``ChatSession``
+    /// owns this model, and a session runs its forward passes ONE AT A TIME, thus
+    /// every mutation happens inside ``callAsFunction(_:cache:)`` and no two
+    /// calls overlap. The test reads ``passes`` only after both `respond(to:)`
+    /// calls return, thus the read never races a write.
     private final class ScriptedModel: Module, LLMModel, KVCacheDimensionProvider,
         @unchecked Sendable
     {
