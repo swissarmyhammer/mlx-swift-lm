@@ -305,16 +305,27 @@ extension MessageGenerator {
     }
 
     /// Adds tool-call metadata from a structured message to a raw message dictionary.
+    ///
+    /// The `arguments` member of each call is a Swift `Dictionary`, thus it
+    /// keeps no order. A call that also carries
+    /// ``ToolCall/Function/argumentsJSON`` — the arguments as the model itself
+    /// wrote them — gets that text beside the dictionary, under
+    /// ``ToolCall/Function/argumentsJSONKey``, so a template that renders the
+    /// call again can write the arguments in the order of the model.
     public func addToolMetadata(to dictionary: inout Message, for message: Chat.Message) {
         switch message.tool?.storage {
         case .calls(let calls):
             dictionary["tool_calls"] = calls.map { toolCall -> [String: any Sendable] in
+                var function: [String: any Sendable] = [
+                    "name": toolCall.function.name,
+                    "arguments": toolCall.function.argumentsObject,
+                ]
+                if let argumentsJSON = toolCall.function.argumentsJSON {
+                    function[ToolCall.Function.argumentsJSONKey] = argumentsJSON
+                }
                 var entry: [String: any Sendable] = [
                     "type": "function",
-                    "function": [
-                        "name": toolCall.function.name,
-                        "arguments": toolCall.function.argumentsObject,
-                    ] as [String: any Sendable],
+                    "function": function,
                 ]
                 if let id = toolCall.id {
                     entry["id"] = id
@@ -392,8 +403,7 @@ extension DeepSeekV4ChatEncoder.Message {
         var messages = rawMessages.map(message(from:))
         let encoderTools = (tools ?? []).compactMap(tool(from:))
         guard !encoderTools.isEmpty else { return messages }
-        if let index = messages.firstIndex(where: { $0.role == .system || $0.role == .developer })
-        {
+        if let index = messages.firstIndex(where: { $0.role == .system || $0.role == .developer }) {
             messages[index].tools = encoderTools
         } else {
             messages.insert(.system(content: "", tools: encoderTools), at: 0)
@@ -441,10 +451,15 @@ extension DeepSeekV4ChatEncoder.Message {
 
     /// The arguments of one call, as JSON text for the encoder.
     ///
-    /// ``MessageGenerator/addToolMetadata(to:for:)`` writes the arguments as
-    /// an object; a raw `.messages` caller may write JSON text instead, and
-    /// that text passes through as it is.
+    /// ``MessageGenerator/addToolMetadata(to:for:)`` writes the arguments of
+    /// the model under ``ToolCall/Function/argumentsJSONKey``, and that text
+    /// comes first because it alone keeps the order the model wrote. It writes
+    /// the arguments as an object beside that text; a raw `.messages` caller
+    /// may write JSON text instead, and that text passes through as it is.
     private static func argumentsJSON(of function: [String: any Sendable]) -> String {
+        if let text = function[ToolCall.Function.argumentsJSONKey] as? String {
+            return text
+        }
         if let text = function["arguments"] as? String {
             return text
         }

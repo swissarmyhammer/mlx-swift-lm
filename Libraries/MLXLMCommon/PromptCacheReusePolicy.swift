@@ -96,6 +96,17 @@ struct PromptCacheState: Sendable {
     /// means the ledger was invalidated and nothing may be spliced onto.
     var cachedTokens: [Int]
 
+    /// The whole prompt that the last prefill rendered, which is not the same as
+    /// ``cachedTokens``: the ledger also holds the tokens the model generated
+    /// after that render.
+    ///
+    /// A protocol rule compares this with the new render to prove that the
+    /// template rewrote no already-cached rendered region. Once that holds, the
+    /// only region the two can differ in is the one the model generated, and the
+    /// cache holds the true version of it. Empty means no render is on record,
+    /// thus no rule may splice.
+    var previousRenderTokens: [Int] = []
+
     /// Authoritative logical position of the main cache — the model-wide
     /// timeline maintained by ``KVCacheStorage``, not a per-entry offset.
     var processedTokenCount: Int
@@ -217,5 +228,81 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
         }
 
         return .trimToCommonPrefix(commonPrefixLength: commonPrefixLength, trimCount: trimCount)
+    }
+}
+
+// MARK: - Applying a decision to live caches
+
+/// Rewinds `caches` to `position`, and confirms that every cache landed there.
+///
+/// A cache answers a trim with the number of positions it really dropped, and a
+/// rotating cache past its window drops none. A caller must never splice a
+/// prompt onto a cache that did not land, thus this function reports the
+/// outcome instead of assuming it.
+///
+/// - Parameters:
+///   - caches: the live caches, one for each layer of the model.
+///   - position: the logical position every cache must hold on return.
+/// - Returns: `true` when every cache holds exactly `position` positions. A
+///   `false` answer leaves the caches unusable, and the caller must build new
+///   ones.
+package func rewindPromptCache(_ caches: [KVCache], to position: Int) -> Bool {
+    guard let first = caches.first, position >= 0 else { return false }
+    let trimCount = first.offset - position
+    guard trimCount >= 0 else { return false }
+    guard trimCount == 0 || trimPromptCache(caches, numTokens: trimCount) == trimCount else {
+        return false
+    }
+    return caches.allSatisfy { $0.offset == position }
+}
+
+/// Reconciles live caches with a newly rendered prompt, and reports how much of
+/// that prompt the caches already hold.
+///
+/// The caller owns `caches` and the ledger `cachedTokens`, which names the exact
+/// tokens `caches` represents. This function asks ``PromptCacheReusePolicy`` for
+/// a decision, applies a rewind when the decision asks for one, and confirms
+/// that the rewind landed.
+///
+/// It consults no protocol rule. Those rules serve a ledger that holds generated
+/// tokens a template render cannot reproduce; this entry point serves a caller
+/// whose ledger holds a render alone, which is why a plain prefix comparison is
+/// the whole question. ``ChatSession`` keeps the richer application, because it
+/// also owns a draft cache, carried model state and prepared media.
+///
+/// - Parameters:
+///   - promptTokens: the whole newly rendered prompt.
+///   - cachedTokens: the tokens `caches` represents.
+///   - caches: the live caches, one for each layer of the model.
+/// - Returns: how many leading tokens of `promptTokens` the caches hold when
+///   this function returns, thus the caller feeds `promptTokens` from that index
+///   onward. `nil` when the caches cannot serve this prompt at all, and the
+///   caller must build new ones.
+package func reusablePromptPrefix(
+    promptTokens: [Int], cachedTokens: [Int], caches: [KVCache]
+) -> Int? {
+    guard !caches.isEmpty else { return nil }
+
+    let turn = PromptCacheTurn(promptTokens: promptTokens)
+    let cacheState = PromptCacheState(
+        cachedTokens: cachedTokens,
+        processedTokenCount: caches.first?.offset ?? 0,
+        mainCacheIsAligned: caches.allSatisfy { $0.offset == cachedTokens.count },
+        isTrimmable: canTrimPromptCache(caches))
+
+    switch PromptCacheReusePolicy().decide(turn: turn, cache: cacheState) {
+    case .prefillAll:
+        // The rule reaches this case only at position zero, thus the caches
+        // hold nothing and the whole prompt is fed into them.
+        return 0
+
+    case .appendSuffix(let suffixStart, _), .appendSuffixToMain(let suffixStart, _):
+        return suffixStart
+
+    case .trimToCommonPrefix(let commonPrefixLength, _):
+        return rewindPromptCache(caches, to: commonPrefixLength) ? commonPrefixLength : nil
+
+    case .rebuild:
+        return nil
     }
 }

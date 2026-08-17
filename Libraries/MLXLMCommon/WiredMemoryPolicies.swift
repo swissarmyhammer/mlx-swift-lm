@@ -3,7 +3,11 @@
 import Foundation
 import MLX
 
-private func recommendedWorkingSetBytes() -> Int? {
+/// The working-set size Metal recommends for this device, in bytes.
+///
+/// - Returns: The recommended size, or `nil` where no Metal device answers,
+///   which is the case where no wired-memory control exists.
+func recommendedWorkingSetBytes() -> Int? {
     #if canImport(Metal)
     GPU.maxRecommendedWorkingSetBytes()
     #else

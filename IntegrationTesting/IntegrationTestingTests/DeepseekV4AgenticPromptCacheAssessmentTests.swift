@@ -191,6 +191,12 @@ private func collect(
             text += chunk
         case .toolCall(let call):
             toolCalls.append(call)
+        case .rejectedToolCall(let rejection):
+            // The model wrote tool-call-shaped output that the parser or the
+            // authorization step refused. An assessment that drops it silently
+            // reads as "the model made no call", which is a different fault.
+            throw IntegrationTestFailure(
+                "a generation pass rejected a tool call: \(rejection)")
         case .info(let info):
             completionInfo = info
         }
@@ -385,13 +391,13 @@ struct DeepseekV4AgenticPromptCacheAssessmentTests {
     ///   (a) The follow-up render IS a true prefix extension of round 1's.
     ///       A template that rewrites an already-cached region fails here.
     ///       The DeepSeek-V4 chat template does not rewrite one.
-    ///   (b) Upstream reprocesses the whole prompt anyway. A good prefix is
-    ///       thus not sufficient, which is the number this suite exists to
-    ///       hold.
+    ///   (b) The follow-up round feeds the new tail alone, and it beats the
+    ///       cold control by a wide margin.
     ///
     /// This is a baseline, not a wish. Every assertion below records what the
-    /// run measured on 2026-08-14. When reuse appears, these assertions fail
-    /// on purpose: invert them and record the new numbers.
+    /// run measured on 2026-08-16. When a change moves one of these numbers,
+    /// the assertion fails on purpose: read the measurement again, and record
+    /// what it says.
     @Test func aLongConversationMeasuresPromptCacheReuseAcrossTurns() async throws {
         guard
             let container = await deepseekV4ContainerOrSkip(
@@ -460,34 +466,47 @@ struct DeepseekV4AgenticPromptCacheAssessmentTests {
             wrote <<<\(seam.earlierTail)>>> where the follow-up writes <<<\(seam.laterTail)>>>.
             """)
 
-        // Fact (b): upstream reprocesses the whole prompt anyway. A good prefix
-        // between the two RENDERS is thus not sufficient, because
-        // `ExtendCachedPrefixRule` compares the new render against the LEDGER,
-        // which is round 1's render PLUS the tokens round 1 generated. The
-        // divergent tail printed above shows why the two part: the follow-up
-        // render writes `</think>` at position 3626 and the ledger writes the
-        // first generated token there. The encoder adds that token when it
-        // renders an assistant turn as history, and the live prompt of round 1
-        // does not end with it. One token thus breaks the prefix, and the
-        // fall-back `RewindToCommonPrefixRule` needs a trimmable cache, which a
-        // `RotatingKVCache` past its 128-token window is not.
+        // Fact (b): the follow-up round feeds the new tail alone.
         //
-        // Card ^mscrreq holds the correction; until it lands, this number stays
-        // at zero.
+        // `ExtendCachedPrefixRule` compares the new render against the LEDGER of
+        // `ChatSession`, which is round 1's render PLUS the tokens round 1
+        // generated. It fires only when the encoder writes those same tokens
+        // again as it renders that turn into history. It does.
+        //
+        // Measured on 2026-08-16, card ^mscrreq, with the reuse decision printed
+        // beside `promptCachePolicy.decide`: round 1 renders 3506 tokens and
+        // commits 3 generated tokens, thus its ledger holds 3509; the follow-up
+        // render holds 3525 and shares every one of those 3509; the decision is
+        // `appendSuffix(suffixStart: 3509)`. The follow-up then feeds 16 tokens
+        // in 2.00 s where the cold control feeds 3525 in 12.77 s.
+        //
+        // The cache is NOT trimmable at that point -- a `RotatingKVCache` past
+        // its 128-token window answers false -- and it does not need to be,
+        // because no rewind takes part in this decision.
+        //
+        // The same test skipped nothing on 2026-08-14. Its renders were 120
+        // tokens longer, because the `SplitPreTokenizer` of swift-transformers
+        // 1.3.3 cannot match a newline inside a character class and made each
+        // newline its own piece. This prompt holds 120 report rows, one on each
+        // line, which is that difference exactly.
+        //
+        // Two commits closed it. `3c301af` gave DeepSeek-V4 its own
+        // pre-tokenization path, and `851e224` installed that path at load --
+        // `LLMModelFactory._load` never called `LLMModel.promptTokenizer(wrapping:)`
+        // before it, thus the new path reached no loaded model.
         #expect(
-            followUp.skippedTokenCount == 0,
+            followUp.skippedTokenCount > 0,
             """
-            (b) the follow-up round skipped \(followUp.skippedTokenCount) of its \
-            \(followUp.renderedTokenCount) rendered tokens; it fed every one of them when this \
-            baseline was taken. Reuse appeared -- invert this assertion and close ^mscrreq.
+            (b) the follow-up round fed every one of its \
+            \(followUp.renderedTokenCount) rendered tokens and skipped none, thus the live \
+            cache saved no work.
             """)
         #expect(
-            followUp.prefillSeconds >= control.prefillSeconds * noReuseTimeFloorFraction,
+            followUp.prefillSeconds < control.prefillSeconds * noReuseTimeFloorFraction,
             """
             (b) the follow-up round spent \(followUp.prefillSeconds) s on prefill against the \
-            cold control's \(control.prefillSeconds) s for the same prompt, dropping below \
-            \(noReuseTimeFloorFraction) of the control. The follow-up stopped reprocessing the \
-            whole prompt -- invert this assertion and close ^mscrreq.
+            cold control's \(control.prefillSeconds) s for the same prompt, which is not below \
+            \(noReuseTimeFloorFraction) of the control.
             """)
     }
 

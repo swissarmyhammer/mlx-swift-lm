@@ -90,8 +90,75 @@ comments:
 
     The loop stops here. The card stays out of `done` with one finding open. Do not force it.
   timestamp: 2026-08-13T17:04:38.048918+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m02kvfvydm7h6xeny1btfajc
+  text: |-
+    ### finish iteration 3 — stuck
+    - implement: no-change. The one open finding is the recorded true conflict, and nothing about it moved.
+    - verify: the conflict was re-proved on the CURRENT toolchain, not read from this card. Xcode 27.0 (27A5237l), macOS 27.0 (26A5406e). The pass applied `private` to the declaration, ran `swift build --build-tests`, and got:
+
+    ```
+    Tests/MLXLMTests/DeepSeekV4AttentionTests.swift:381:31: error:
+    'groupedOutputProjection' is inaccessible due to 'private' protection level
+    error: Build failed
+    ```
+
+      The declaration went straight back, and `git status` is clean.
+    - commit: none. Nothing changed.
+    - review: not run. A review of an unchanged tree tells nobody anything.
+
+    **The line numbers of this card are stale, and the finding is unaffected.** Later
+    commits (`1c7bd06`, `bd15e30`) grew the file. The finding says `:462` for the
+    declaration and `:419` for the internal call. They now sit at
+    `DeepSeekV4Attention.swift:702` and `:442`. The call from the test target is at
+    `Tests/MLXLMTests/DeepSeekV4AttentionTests.swift:381`, and a second test,
+    `groupedOutputProjectionReachesTheFullHiddenSize`, calls the same method.
+
+    **The premise of the finding is false.** The finding says the method is "called
+    only from within the same class". It is called from the test target as well.
+    `@testable import` opens `internal` and never `private`, thus no build setting
+    and no access level makes the finding compile beside the tests that are there.
+
+    This is a true conflict of the second kind: a rule that needs code that cannot
+    compile. The loop stops, and a person decides. The card stays out of `done`
+    with one finding open. It was not forced.
+  timestamp: 2026-08-15T11:45:27.934859+00:00
+- actor: claude-code
+  id: 01m02maqpmrcq92g8an5e7e64s
+  text: |
+    ### review — clean
+
+    - scope: `review sha 507d5fa~1..465085d`, the two commits of this card. This iteration changed no code, and the working tree holds no delta of either Swift file.
+    - counts: 1 finding, 1 confirmed, 0 refuted, 9 files attempted, 0 failed, 0 skipped.
+    - the one finding: `Libraries/MLXLLM/Models/DeepSeekV4.swift:657` `code-hygiene/missing-docs-swift` — public declarations should be documented.
+    - disposition: a record only. `git log -L 656,658` gives commit `bd15e30` for that line, and `git diff 507d5fa~1..465085d` holds neither `toolCallFormat` nor the `MARK: - Chat conventions` header. The standing rule of `^ag7ant0` releases this card from a finding on a line its commits did not touch. New task `^ccygfkn` holds the finding word for word, so that it is not lost. This follows the precedent of `^r92pjcr`, which made this card the same way.
+    - every prior item of this card is checked. The `private groupedOutputProjection` finding stays released by the decision of a person on 2026-08-15, because its stated premise is false.
+    - verification in hand this session: `swift build` clean; `swift build --build-tests` clean; `swift test` serial with `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1`, 1030 tests, 0 failures; `xcodebuild build-for-testing` on IntegrationTesting.xcodeproj, TEST BUILD SUCCEEDED.
+    - next: none. The card is in column `done`. Task `^ccygfkn` waits in column `todo`.
+  timestamp: 2026-08-15T11:53:47.476157+00:00
+- actor: claude-code
+  id: 01m02mc3kp6xbw29cs9pdwxx84
+  text: |-
+    ### finish iteration 4 — clean
+
+    - implement: no-change. The block was a decision, not code. A person released the
+      `private` finding on 2026-08-15, and the card records the reason and the proof.
+    - test: green, from this session — `swift build` clean, `swift build --build-tests`
+      clean, `swift test` serial with 1030 tests and 0 failures,
+      `xcodebuild build-for-testing` TEST BUILD SUCCEEDED.
+    - commit: no Swift file changed this iteration. The board state alone is committed.
+    - review: clean — `review sha 507d5fa~1..465085d`, 1 finding, 1 confirmed, 0 refuted,
+      9 files attempted, 0 failed, 0 skipped. The one finding,
+      `Libraries/MLXLLM/Models/DeepSeekV4.swift:657` `code-hygiene/missing-docs-swift`,
+      sits on a line that commit `bd15e30` wrote. The standing rule of `^ag7ant0` makes
+      it a record only, thus it is not a block against `done`. Task `^ccygfkn` holds it
+      word for word.
+
+    The card is in `done`. Every item of the card is checked, and the one open finding
+    is the out-of-scope record above.
+  timestamp: 2026-08-15T11:54:32.438847+00:00
+position_column: done
+position_ordinal: ff8180
 title: Correct the two review findings of DeepSeekV4.swift that earlier commits left
 ---
 ## What
@@ -137,34 +204,43 @@ A finding gives one example of a cause. Remove each cause from the whole of each
 A person put both findings below IN SCOPE for this card, because this card pays this class of debt.
 
 - [x] `Libraries/MLXLLM/Models/DeepSeekV4.swift:162` — Property `ffn` uses an abbreviation while the parallel component `attention` (line 159) uses the full word. This inconsistency reduces clarity and violates the guidance to avoid abbreviating to save characters. Rename `ffn` to `mixtureOfExperts` to match the full-word style of `attention` and improve clarity. Update call sites at lines 188, 196, and 224.
-- [ ] `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:462` — Instance method `groupedOutputProjection` lacks an explicit access modifier and defaults to `internal`, but it is called only from within the same class (line 419: `return woB(groupedOutputProjection(flattened))`). Helper methods used only internally should be marked `private`. Add `private` before `func` on line 462: `private func groupedOutputProjection(_ output: MLXArray) -> MLXArray {`. **BLOCKED — true conflict, see below.**
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:462` — Instance method `groupedOutputProjection` lacks an explicit access modifier and defaults to `internal`, but it is called only from within the same class (line 419: `return woB(groupedOutputProjection(flattened))`). Helper methods used only internally should be marked `private`. Add `private` before `func` on line 462: `private func groupedOutputProjection(_ output: MLXArray) -> MLXArray {`. **RELEASED by the user on 2026-08-15 — the premise is false. See below.**
 
-## Blocker: the `private` finding cannot compile
+## The released finding, and why a person released it
 
-The premise of the finding is not correct. `groupedOutputProjection` is NOT called only from
-inside the class. `Tests/MLXLMTests/DeepSeekV4AttentionTests.swift` calls it from two tests,
-`groupedOutputProjectionMatchesThePythonReference` (line 385) and
-`groupedOutputProjectionReachesTheFullHiddenSize`. The first test holds the numeric parity
-fixture of `V4Attention._grouped_output_projection` of the Python reference.
+The `private` finding rests on one stated fact: the method "is called only from
+within the same class". That fact is not correct.
 
-`private` reaches only the same declaration and the same-file extensions of that declaration.
-`@testable import` gives a test target the `internal` members, and never the `private` ones,
-thus the fix the finding gives makes the test target fail to build. This is not an opinion. The
-pass applied `private` and ran `swift build --build-tests`:
+`Tests/MLXLMTests/DeepSeekV4AttentionTests.swift` calls the method from two
+tests, `groupedOutputProjectionMatchesThePythonReference` (line 381) and
+`groupedOutputProjectionReachesTheFullHiddenSize`. The first holds the numeric
+parity fixture of `V4Attention._grouped_output_projection` of the Python
+reference. Thus the method is part of the tested surface of the type, not an
+internal helper.
+
+`private` reaches the same declaration and the same-file extensions of that
+declaration. `@testable import` gives a test target the `internal` members and
+never the `private` ones, thus the fix the finding gives makes the test target
+fail to build. Two passes proved this, on two different toolchains.
+
+The second proof, on Xcode 27.0 (27A5237l) and macOS 27.0 (26A5406e), 2026-08-15:
 
 ```
-Tests/MLXLMTests/DeepSeekV4AttentionTests.swift:385:31: error: 'groupedOutputProjection'
-is inaccessible due to 'private' protection level
+Tests/MLXLMTests/DeepSeekV4AttentionTests.swift:381:31: error:
+'groupedOutputProjection' is inaccessible due to 'private' protection level
 error: Build failed
 ```
 
-The pass then put the declaration back as it was.
+The declaration went back to what it was, and the working tree stayed clean.
 
-This is a true conflict of the second kind: a rule that needs code that cannot compile. The
-only ways to make `private` compile are to delete the two tests or to rewrite them to go
-through `callAsFunction`, which throws away the parity fixture of one Python routine. A
-finding does not permit either, thus the pass changed nothing here, invented no workaround,
-and records the conflict. A person must decide.
+The only ways to make `private` compile are to delete the two tests or to route
+them through `callAsFunction`, which throws away the parity fixture of one
+Python routine. A person weighed that and released the finding on 2026-08-15:
+the method stays `internal`, and the two tests stay as they are.
+
+The line numbers of the finding are stale, and the release is unaffected. Later
+commits (`1c7bd06`, `bd15e30`) grew the file, thus the declaration now sits at
+`:702` and the internal call at `:442`.
 
 ## The sweep of each cause
 
@@ -213,7 +289,41 @@ internally should be marked `private`". The pass read every method of both files
 - Part of the used surface: `DeepSeekV4NumericTrace.tokens` and `.tensor` (three different
   types of the file call them, thus `private` would not compile), `cosSin(offset:length:)` and
   `cosSin(positions:)` (`DeepSeekV4Compressor` and `DeepSeekV4Indexer` call them), every
-  `callAsFunction`, every `init`, `layers`, `sanitize`, `loraLayers`.
-- `groupedOutputProjection`: the blocker above.
+  `callAsFunction`, every `init`, `layers`, `sanitize`, `loraLayers`, and
+  `groupedOutputProjection` (two parity tests read it).
 
 No other method of either file needs the change.
+
+## Review Findings (2026-08-15 06:47)
+
+> Scope: `review sha 507d5fa~1..465085d` — reviewed the diffs only — lines this change added or modified. 4 file(s) reviewed, 0 not reviewed.
+
+- [ ] `Libraries/MLXLLM/Models/DeepSeekV4.swift:657` `code-hygiene/missing-docs-swift` — public declarations should be documented.
+
+### Out of scope — a line that the commits of this card did not touch
+
+Standing rule from task `^ag7ant0`: the engine sweeps a full file, thus a finding on a line
+of an earlier commit is a record only. Do not correct it here.
+
+The finding above names this declaration:
+
+```swift
+extension DeepSeekV4Model {
+    public var toolCallFormat: ToolCallFormat? { .dsml }
+}
+```
+
+`git log -L 656,658:Libraries/MLXLLM/Models/DeepSeekV4.swift` gives commit `bd15e30`
+("feat(mlx-lm): register MiniMax-M3 and declare the chat conventions") for that line. The two
+commits of this card, `507d5fa` and `465085d`, added no part of that block:
+`git diff 507d5fa~1..465085d -- Libraries/MLXLLM/Models/DeepSeekV4.swift` holds neither
+`toolCallFormat` nor the `MARK: - Chat conventions` header.
+
+Every declaration that the two commits of this card added carries a documentation comment.
+The diff of this card gives a documentation comment to each of `mixtureOfExperts`,
+`mixtureOfExpertsNorm`, `mixtureOfExpertsConnection`, `attention`, `attentionNorm`,
+`attentionConnection`, `embedTokens`, `hcHead`, `norm`, `stackPerExpertWeights`, the four
+members of `YarnScaling`, and the seven `@ModuleInfo` properties of `DeepSeekV4Attention`.
+
+Thus this finding is not a block against column `done` for this card. Task `^ccygfkn` holds it
+word for word, so that it is not lost.

@@ -121,7 +121,7 @@ extension LLMModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        return try MLXLMCommon.convert(
+        return try await MLXLMCommon.convert(
             modelDirectory: modelDirectory,
             tokenizerDirectory: configuration.tokenizerDirectory,
             model: model,

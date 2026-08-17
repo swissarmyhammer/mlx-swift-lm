@@ -406,7 +406,6 @@ func respondCollectingReasoningTextAndUsage(
     return (reasoning, text, count, cachedTokenCount, outputTokenCount)
 }
 
-
 /// Reflectively extracts a channel event/action's associated value.
 ///
 /// The macOS 27 SDK made `LanguageModelExecutorGenerationChannel`'s `Event`
@@ -522,6 +521,12 @@ enum TestFixtures {
         "Generate a 3-day travel itinerary to Mount Fuji with 3 activities per day. Respond as JSON."
 
     static let gemmaModelID = "mlx-community/gemma-3-270m-it-4bit"
+
+    /// Llama 3.2 (1B) instruction-tuned. Small, and its chat template renders an
+    /// assistant turn of history with the same header it writes to prime a
+    /// generation, thus one turn's render is a true prefix of the next turn's
+    /// render and the prompt cache can be reused across turns.
+    static let llamaModelID = "mlx-community/Llama-3.2-1B-Instruct-4bit"
 
     /// Gemma 4 (E2B) instruction-tuned. Its chat template natively renders
     /// tool calls and `tool` responses, so it exercises the multi-turn

@@ -462,6 +462,97 @@ final class DeepSeekV4ToolEncodingTests: XCTestCase {
         )
     }
 
+    // MARK: - The turn the model wrote
+
+    /// The two turns that open the agent conversation of the cache tests.
+    private static let agentPrompt: [DeepSeekV4ChatEncoder.Message] = [
+        .system(content: "S", tools: [echoTool]),
+        .user(content: "Q"),
+    ]
+
+    /// The text the model writes in front of its block of calls.
+    ///
+    /// `ChatSession` keeps this text as the content of the assistant turn. It
+    /// holds the reasoning and the close of the reasoning, because DeepSeek-V4
+    /// declares no `reasoningConfig` and thus no decoder splits the reasoning
+    /// out. It also holds the blank line that the DSML syntax asks for in front
+    /// of the block, because the block itself leaves the text stream as a
+    /// structured call.
+    private static let generatedContent = "Reasoning.</think>I will look.\n\n"
+
+    /// The block of calls that the model writes after ``generatedContent``.
+    private static let generatedToolCallsBlock = """
+        <｜DSML｜tool_calls>
+        <｜DSML｜invoke name="echo">
+        <｜DSML｜parameter name="text" string="true">hi</｜DSML｜parameter>
+        </｜DSML｜invoke>
+        </｜DSML｜tool_calls>
+        """
+
+    /// The one call of ``generatedToolCallsBlock``, as the parser reads it back.
+    private static let echoCall = DeepSeekV4ChatEncoder.ToolCall(
+        id: "call_1", name: "echo", argumentsJSON: "{\"text\": \"hi\"}")
+
+    /// Everything the model writes after the generation tail of round 1.
+    private static var generatedTurn: String {
+        generatedContent + generatedToolCallsBlock
+            + DeepSeekV4ChatEncoder.SpecialToken.endOfSentence
+    }
+
+    /// The render of the tool round holds the render of round 1 and then the
+    /// text the model wrote.
+    ///
+    /// This is the property a live prompt cache needs. The ledger of
+    /// `ChatSession` is the render of round 1 plus the tokens the model wrote,
+    /// thus `ExtendCachedPrefixRule` splices the tool result onto the cache
+    /// only while the next render writes those same tokens again.
+    ///
+    /// Card ^v7z7v99 measured the failure on the published checkpoint: the tool
+    /// round fed every one of its 3906 tokens and skipped none, because the
+    /// render wrote a second `</think>` and two more newlines than the model.
+    func testToolRoundRenderExtendsRoundOneAndTheTextTheModelWrote() {
+        let roundOne = encoder.encode(messages: Self.agentPrompt, thinkingMode: .thinking)
+        let toolRound = encoder.encode(
+            messages: Self.agentPrompt + [
+                .assistant(content: Self.generatedContent, toolCalls: [Self.echoCall]),
+                .toolResult(content: "result", toolCallID: "call_1"),
+            ], thinkingMode: .thinking)
+        XCTAssertTrue(
+            toolRound.hasPrefix(roundOne + Self.generatedTurn),
+            """
+            the tool round render must hold the render of round 1 and then the text the \
+            model wrote. It holds: <<<\(toolRound)>>>
+            """)
+    }
+
+    /// An assistant turn whose content already holds the close of its reasoning
+    /// renders that close once.
+    func testAssistantContentThatHoldsItsOwnThinkEndRendersOneThinkEnd() {
+        let prompt = encoder.encode(
+            messages: [
+                .user(content: "Q"),
+                .assistant(content: "Reasoning.</think>Answer."),
+            ], thinkingMode: .thinking)
+        XCTAssertEqual(
+            prompt,
+            "<｜begin▁of▁sentence｜><｜User｜>Q<｜Assistant｜><think>Reasoning.</think>Answer."
+                + "<｜end▁of▁sentence｜>")
+    }
+
+    /// The block of calls carries the blank line in front of it, thus a content
+    /// that ends with that same blank line renders one blank line and not two.
+    func testTheBlankLineInFrontOfTheToolCallsBlockRendersOnce() {
+        let prompt = encoder.encode(
+            messages: [
+                .user(content: "Q"),
+                .assistant(content: "I will look.\n\n", toolCalls: [Self.echoCall]),
+            ], thinkingMode: .chat)
+        XCTAssertEqual(
+            prompt,
+            "<｜begin▁of▁sentence｜><｜User｜>Q<｜Assistant｜></think>I will look.\n\n"
+                + Self.generatedToolCallsBlock + "<｜end▁of▁sentence｜>")
+    }
+
     // MARK: - Special token spelling
 
     func testDSMLTokenUsesFullwidthVerticalLine() {

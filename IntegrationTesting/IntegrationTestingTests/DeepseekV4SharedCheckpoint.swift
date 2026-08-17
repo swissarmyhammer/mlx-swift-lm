@@ -43,20 +43,9 @@ let deepseekV4CheckpointBytes = 151_482_475_612
 ///
 /// This is the SKIP GATE, and it is not the wired-memory limit. It answers
 /// "is this machine large enough to run at all". The wired limit answers "how
-/// much memory must stay resident", and it has its own constant,
-/// ``deepseekV4WiredMemoryBytes``, thus a change to one never moves the other.
+/// much memory must stay resident", and `MLXLMCommon.ModelWeightResidency`
+/// owns it, thus a change to one never moves the other.
 let deepseekV4RequiredMemoryBytes: UInt64 = 160 * 1_024 * 1_024 * 1_024
-
-/// The memory the wired limit holds above the weights: room for the KV cache
-/// of a 12k-token generation (about 1 GiB) and for the MoE working set.
-private let deepseekV4WiredHeadroomBytes = 16 * 1_024 * 1_024 * 1_024
-
-/// The Metal wired-memory limit the load asks for: the whole checkpoint,
-/// plus ``deepseekV4WiredHeadroomBytes``. The limit must cover every weight
-/// buffer, because a buffer outside the residency set costs its full size
-/// again at each decode step. See ``raiseWiredMemoryLimit()``.
-let deepseekV4WiredMemoryBytes =
-    deepseekV4CheckpointBytes + deepseekV4WiredHeadroomBytes
 
 // MARK: - Checkpoint location
 
@@ -95,27 +84,13 @@ private func directoryHoldsSafetensors(_ directory: URL) -> Bool {
 
 // MARK: - The Metal wired limit
 
-/// The result of the one wired-limit request of a test process.
-struct WiredMemoryOutcome: Sendable {
-    /// The number of bytes the load asked to keep wired.
-    let requestedBytes: Int
-    /// The number of bytes the wired-memory manager applied.
-    let appliedBytes: Int
-
-    /// Tells whether the manager applied the whole request. A short apply
-    /// leaves weight buffers outside the residency set, thus decode stays slow.
-    var isFullyApplied: Bool { appliedBytes >= requestedBytes }
-}
-
-/// Raises the Metal wired limit, and never lowers it again.
+/// Reports the Metal wired limit that the weight load of `MLXLMCommon` raised.
 ///
-/// MLX gives its Metal residency set a capacity of zero unless the process
-/// raises the wired limit, and it takes only buffers of 1 MB or less from the
-/// one heap that set holds. Every weight tensor of this checkpoint is larger
-/// than that — each routed-expert tensor is 1 GiB — thus each one sits outside
-/// the residency set, and Metal makes all 141 GiB resident again for each
-/// command buffer. One command buffer is one decode step, thus each token pays
-/// for the whole checkpoint.
+/// The library owns the raise. `MLXLMCommon.loadWeights` asks
+/// ``MLXLMCommon/ModelWeightResidency`` to cover the weight files before it
+/// reads the first one, because a buffer joins the Metal residency set when it
+/// is made. This function only reads the outcome of that raise, thus it holds
+/// no wired-limit logic of its own.
 ///
 /// Measured on an M3 Ultra (512 GiB) with this checkpoint, card `^3gh7rb5`.
 /// With a release build and a direct model call, one decode step takes 2.10 s
@@ -125,25 +100,16 @@ struct WiredMemoryOutcome: Sendable {
 /// routed experts hold 137 GiB of the 141 GiB total and carry 2.04 s of the
 /// 2.10 s.
 ///
-/// The order matters. A limit raised AFTER the load changes nothing (measured
-/// 2.10 s), because a buffer joins the residency set when it is made. The
-/// ticket therefore starts before the first weight is allocated, and it never
-/// ends, because a limit that falls again empties the set.
-///
 /// - Returns: what the load asked for and what the manager applied, or `nil`
-///   when this device reports no recommended working-set size.
-private func raiseWiredMemoryLimit() async -> WiredMemoryOutcome? {
-    guard let recommended = GPU.maxRecommendedWorkingSetBytes() else {
+///   when this device has no wired-memory control.
+private func wiredMemoryOutcomeOfTheLoad() async -> WiredMemoryOutcome? {
+    let outcome = await ModelWeightResidency.shared.outcome
+    guard let outcome else {
         print(
-            "DeepSeek-V4 wired limit not raised: this device reports no recommended "
-                + "working-set size, thus each decode step pays for the whole checkpoint")
+            "DeepSeek-V4 wired limit not raised: this device has no wired-memory control, "
+                + "thus each decode step pays for the whole checkpoint")
         return nil
     }
-    let requestedBytes = min(recommended, deepseekV4WiredMemoryBytes)
-    let ticket = WiredMemoryTicket(
-        size: requestedBytes, policy: WiredFixedPolicy(limit: requestedBytes))
-    let outcome = WiredMemoryOutcome(
-        requestedBytes: requestedBytes, appliedBytes: await ticket.start())
     print(
         "DeepSeek-V4 wired limit: asked \(outcome.requestedBytes) bytes, "
             + "applied \(outcome.appliedBytes) bytes")
@@ -176,11 +142,13 @@ enum DeepseekV4Load {
     static let shared: Task<DeepseekV4LoadResult, Error>? = {
         guard let directory = localDeepseekV4CheckpointDirectory() else { return nil }
         return Task {
-            let wiredMemory = await raiseWiredMemoryLimit()
             print("Loading DeepSeek-V4 from \(directory.path)")
             let container = try await LLMModelFactory.shared.loadContainer(
                 from: directory, using: #huggingFaceTokenizerLoader())
             print("Loaded DeepSeek-V4")
+            // The load itself raised the limit, before it made the first weight
+            // buffer. This reads what it asked for and what it applied.
+            let wiredMemory = await wiredMemoryOutcomeOfTheLoad()
             return DeepseekV4LoadResult(container: container, wiredMemory: wiredMemory)
         }
     }()

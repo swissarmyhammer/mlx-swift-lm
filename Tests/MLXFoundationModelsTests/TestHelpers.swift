@@ -122,6 +122,41 @@ func makeExecutorRequest(
     )
 }
 
+// MARK: - Channel Event Reflection
+
+/// Reflectively extracts a channel event/action's associated value.
+///
+/// The macOS 27 SDK made `LanguageModelExecutorGenerationChannel`'s `Event`
+/// and `Action` types opaque on the consume side: each is a struct whose only
+/// public surface is static factory functions, with the discriminating enum
+/// held in an internal `kind` property — there is no public pattern-matching
+/// or accessor API for a test to observe what an executor emitted. The
+/// payload TYPES themselves (`Response`, `TextFragment`, `Usage`) remain
+/// public, so one `Mirror` hop through `kind` to the labeled case payload
+/// recovers a value we can cast back to its real public type. Runtime layout
+/// verified against the macOS 27 SDK (`kind:` → `.<caseLabel>: <payload>`);
+/// if Apple reshapes the internals this returns `nil` and the consuming
+/// test fails loudly at its `#require`/assertion rather than miscounting.
+///
+/// The IntegrationTesting xcodeproj carries its own copy in
+/// `FMTestHelpers.swift`. The two test targets share no sources — see this
+/// file's header — so each keeps the helpers it needs.
+///
+/// - Parameters:
+///   - value: The opaque `Event` or `Action` struct to inspect.
+///   - caseLabel: The internal enum case label to match (e.g. `"response"`,
+///     `"appendText"`, `"updateUsage"`).
+///   - type: The public payload type to cast the matched value to.
+/// - Returns: The payload when `value`'s kind matches `caseLabel`, else `nil`.
+func reflectedChannelPayload<T>(of value: Any, caseLabel: String, as type: T.Type) -> T? {
+    guard
+        let kind = Mirror(reflecting: value).children.first(where: { $0.label == "kind" })?.value,
+        let payload = Mirror(reflecting: kind).children.first,
+        payload.label == caseLabel
+    else { return nil }
+    return payload.value as? T
+}
+
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)
 
 // MARK: - Shared Test Fixtures (model-free)

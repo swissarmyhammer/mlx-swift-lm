@@ -255,9 +255,10 @@ struct DeepseekV4IntegrationTests {
 
     /// The load raises the Metal wired limit, the manager applies the whole
     /// request, and the limit covers every weight buffer. Without this test a
-    /// change that drops the call to ``raiseWiredMemoryLimit()``, or that asks
-    /// for too few bytes, still builds and still passes every other assertion,
-    /// and the only symptom is the >12k-token test running for hours.
+    /// change that drops the raise inside `MLXLMCommon.loadWeights`, or that
+    /// asks for too few bytes, still builds and still passes every other
+    /// assertion, and the only symptom is the >12k-token test running for
+    /// hours.
     @Test func wiredMemoryLimitCoversTheWholeCheckpoint() async throws {
         guard
             let load = await deepseekV4LoadResultOrSkip(
@@ -328,7 +329,7 @@ struct DeepseekV4IntegrationTests {
             """
             the median decode step took \(medianSeconds) s, above the \
             \(maximumSecondsPerDecodeStep) s budget; a Metal wired limit that is not \
-            raised before the weight load is the known cause, see raiseWiredMemoryLimit()
+            raised before the weight load is the known cause, see ModelWeightResidency
             """)
     }
 
@@ -439,6 +440,11 @@ struct DeepseekV4IntegrationTests {
                 text += chunk
             case .toolCall(let call):
                 calls.append(call)
+            case .rejectedToolCall(let rejection):
+                // DeepSeek-V4 writes its calls in DSML. A rejection here means
+                // the parser did not read that markup, thus the test must show
+                // it rather than report an empty call list.
+                Issue.record("the model wrote a tool call the parser rejected: \(rejection)")
             case .info:
                 break
             }

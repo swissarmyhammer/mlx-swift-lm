@@ -70,6 +70,30 @@
 //    ``encode(messages:thinkingMode:reasoningEffort:dropsEarlierReasoning:context:addsBeginOfSentence:)``
 //    always merges first, thus a `tool` turn never reaches the renderer. The
 //    switch stays exhaustive and renders such a turn the way the merge would.
+//
+// TWO PLACES THIS FILE WRITES THE TURN THE MODEL WROTE
+//
+// The Python reads an assistant turn from an API caller, thus its `reasoning`
+// and its `content` are always two separate fields and its `content` never
+// holds the text of a tool call. A turn that comes back from a LIVE generation
+// is not shaped that way, because the model writes one stream of text and
+// `MLXLMCommon` keeps the whole of it as the content:
+//
+// 1. DeepSeek-V4 declares no `reasoningConfig`, thus no decoder splits the
+//    reasoning out and the content holds `reasoning` + `</think>` + the answer.
+//    ``holdsItsOwnReasoning(_:)`` finds such a content and writes no second
+//    close in front of it.
+// 2. The model writes a blank line between its answer and its block of calls,
+//    and the tool-call reader keeps that blank line with the answer.
+//    ``contentBeforeToolCalls(of:)`` takes those newlines away, because
+//    ``toolCallsBlock(_:)`` writes the same blank line again.
+//
+// Both rules keep the render of a turn equal to the text the model wrote. A
+// live prompt cache needs that: its token ledger is the render of the round
+// before PLUS the tokens the model wrote, thus a render that writes those
+// tokens differently makes the whole cache useless. Card ^v7z7v99 measured
+// that loss on the published checkpoint, and
+// `Tests/MLXLMTests/DeepSeekV4ToolEncodingTests.swift` holds the rule.
 
 /// Builds a DeepSeek-V4 prompt from a conversation.
 ///
@@ -594,15 +618,52 @@ public struct DeepSeekV4ChatEncoder: Sendable {
             var out = ""
             if thinkingMode == .thinking && !precededByTask
                 && (!dropsReasoning || isAfterLastUser)
+                && !holdsItsOwnReasoning(message)
             {
                 out += (message.reasoning ?? "") + SpecialToken.thinkEnd
             }
-            out += message.content + toolCallsBlock(message.toolCalls)
+            out += contentBeforeToolCalls(of: message) + toolCallsBlock(message.toolCalls)
             if message.endsWithEndOfSentence {
                 out += SpecialToken.endOfSentence
             }
             return out
         }
+    }
+
+    /// Tells whether the content of an assistant turn already holds its own
+    /// closed reasoning block.
+    ///
+    /// `ChatSession` keeps the whole generated text of a turn as the content of
+    /// that turn, because DeepSeek-V4 declares no `reasoningConfig` and thus no
+    /// decoder splits the reasoning out of the token stream. Such a content
+    /// already holds ``SpecialToken/thinkEnd``, thus one more in front of it
+    /// makes a turn the model never wrote.
+    ///
+    /// - Parameter message: the assistant turn to read.
+    /// - Returns: `true` when the turn carries no separate reasoning and its
+    ///   content holds the close of a reasoning block.
+    private static func holdsItsOwnReasoning(_ message: Message) -> Bool {
+        message.reasoning == nil && message.content.contains(SpecialToken.thinkEnd)
+    }
+
+    /// The content of an assistant turn, without the newlines that belong to
+    /// the block of calls after it.
+    ///
+    /// The model writes a blank line between its answer and its block of calls.
+    /// The tool-call reader keeps that blank line with the answer, because the
+    /// block leaves the text stream as a structured call, thus the content of
+    /// the turn ends with the same two newlines that ``toolCallsBlock(_:)``
+    /// writes. Together they make four newlines where the model wrote two.
+    ///
+    /// - Parameter message: the assistant turn to read.
+    /// - Returns: the content to render in front of the block of calls.
+    private static func contentBeforeToolCalls(of message: Message) -> String {
+        guard !message.toolCalls.isEmpty else { return message.content }
+        var content = message.content
+        while content.hasSuffix("\n") {
+            content.removeLast()
+        }
+        return content
     }
 
     /// Renders the tail that primes the model to generate.

@@ -160,6 +160,28 @@ package func quantizationParameters(
     return quantization?.asTuple
 }
 
+/// The total size of the given weight files, in bytes.
+///
+/// The sizes come from the file system, thus this reads no weight into memory
+/// and it can run before the first weight buffer is made. A file whose size the
+/// file system does not report counts as zero.
+///
+/// Each path is resolved first, because a `huggingface_hub` snapshot holds a
+/// symbolic link to a blob for each weight file. `URLResourceValues` reads the
+/// LINK, thus an unresolved path answers the size of the link and not the size
+/// of the weights: measured on a snapshot of
+/// `mlx-community/Llama-3.2-1B-Instruct-4bit`, 76 bytes against 745,270,382.
+///
+/// - Parameter weightURLs: The URL of each weight file.
+/// - Returns: The sum of the sizes of the files, in bytes.
+package func weightFileBytes(of weightURLs: [URL]) -> Int {
+    weightURLs.reduce(0) { total, url in
+        let values = try? url.resolvingSymlinksInPath()
+            .resourceValues(forKeys: [.fileSizeKey])
+        return total + (values?.fileSize ?? 0)
+    }
+}
+
 /// Load model weights.
 ///
 /// This is typically called via ``GenericModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
@@ -167,15 +189,26 @@ package func quantizationParameters(
 /// calls ``BaseLanguageModel/sanitize(weights:metadata:)`` to allow per-model preprocessing,
 /// applies optional quantization, and
 /// updates the model with the weights.
+///
+/// The function first raises the Metal wired-memory limit so that it covers the
+/// weight files, through ``ModelWeightResidency``. A weight buffer joins the
+/// Metal residency set when it is made, thus the limit must stand before the
+/// first file is read. Without that, each decode step makes the whole weight
+/// set resident again, which costs 2.10 s for each token of a 141 GiB model
+/// against 0.068 s with the limit raised.
 public func loadWeights(
     modelDirectory: URL, model: BaseLanguageModel,
     quantization: BaseConfiguration.Quantization? = nil,
     perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil
-) throws {
+) async throws {
+    let weightURLs = try safetensorWeightURLs(in: modelDirectory)
+    await ModelWeightResidency.shared.raise(
+        toCoverWeightBytes: weightFileBytes(of: weightURLs))
+
     // load the weights and collect metadata from the first safetensor file
     var weights: [String: MLXArray] = [:]
     var metadata: [String: String] = [:]
-    for url in try safetensorWeightURLs(in: modelDirectory) {
+    for url in weightURLs {
         let (w, m) = try loadArraysAndMetadata(url: url)
         for (key, value) in w {
             weights[key] = value

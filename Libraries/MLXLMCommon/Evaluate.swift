@@ -1994,6 +1994,45 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
     )
 }
 
+/// Package variant of
+/// ``generate(input:cache:state:parameters:context:components:wiredMemoryTicket:tools:)``
+/// that also answers the tokens the generation fed into `cache`.
+///
+/// The `MLXFoundationModels` executor keeps a token ledger of the prompt cache
+/// each session carries, the same ledger ``ChatSession`` keeps, thus it needs
+/// the tokens the generation sampled and not the decoded text alone.
+///
+/// - Parameters:
+///   - input: the input for the language model.
+///   - cache: optional ``KVCache``.
+///   - state: optional model state saved with `cache`.
+///   - parameters: the configuration options for token generation.
+///   - context: the model context, including the model and its tokenizer.
+///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``.
+///   - wiredMemoryTicket: optional wired memory ticket.
+///   - tools: optional tool schemas used to parse tool-call arguments.
+/// - Returns: the stream of text and tool calls, and the task that generates
+///   them. The value of the task is every generated token, in order.
+/// - Throws: an error when the iterator cannot be built.
+package func generateTaskRecordingTokens(
+    input: LMInput, cache: [KVCache]? = nil, state: LMOutput.State? = nil,
+    parameters: GenerateParameters, context: ModelContext,
+    components: GenerationComponents = .init(),
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    tools: [[String: any Sendable]]? = nil
+) throws -> (AsyncStream<Generation>, Task<[Int], Never>) {
+    let iterator = try TokenIterator(
+        input: input, model: context.model, cache: cache, state: state,
+        parameters: parameters, components: components)
+    return generateTaskRecordingTokens(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        tools: tools)
+}
+
 /// Internal variant used by `ChatSession` to keep its token-prefix record in
 /// lockstep with the KV cache.
 func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
@@ -2275,6 +2314,14 @@ public func generateTokensTask(
 ///
 /// The decoder remains owned by the caller; this function only applies its
 /// semantic stop-token policy to the generic generation loop.
+///
+/// The task answers every token the iterator generated, in order, which is
+/// more than the stream yields: a suppressed stop token stays out of the
+/// stream and its forward pass has already advanced the cache. A caller that
+/// keeps a token ledger of that cache needs the whole list.
+///
+/// - Returns: the stream of raw tokens, and the task that generates them. The
+///   value of the task is every generated token.
 package func generateProtocolTokensTask(
     input: LMInput,
     cache: [KVCache]? = nil,
@@ -2284,7 +2331,7 @@ package func generateProtocolTokensTask(
     decoder: (any TokenStreamDecoder)?,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
-) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
+) throws -> (AsyncStream<TokenGeneration>, Task<[Int], Never>) {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
@@ -2294,6 +2341,7 @@ package func generateProtocolTokensTask(
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
+        tokenCollector: RecordingGeneratedTokens(),
         handler: RawTokenLoopHandler(
             additionalStopTokenIDs: decoder?.additionalStopTokenIDs ?? [],
             receivesStopTokens: decoder?.receivesStopTokens ?? false)

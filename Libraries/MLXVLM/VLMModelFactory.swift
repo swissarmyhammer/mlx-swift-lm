@@ -454,7 +454,7 @@ public final class VLMModelFactory: GenericModelFactory {
             from: configuration.tokenizerDirectory)
         async let processorConfigTask = loadProcessorConfig(from: modelDirectory)
 
-        try loadWeights(
+        try await loadWeights(
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization)
 
@@ -544,7 +544,7 @@ func loadProcessorConfig(from modelDirectory: URL) async throws -> (
     do {
         return try decodeProcessorConfig(at: primaryURL)
     } catch let error as ProcessorConfigError
-    where preferPreprocessor && isMissingProcessorClassKey(error.underlying)
+        where preferPreprocessor && isMissingProcessorClassKey(error.underlying)
         && FileManager.default.fileExists(atPath: processorConfigURL.path)
     {
         return try decodeProcessorConfig(at: processorConfigURL)

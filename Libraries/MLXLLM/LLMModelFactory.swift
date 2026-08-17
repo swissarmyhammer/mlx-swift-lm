@@ -729,17 +729,19 @@ public final class LLMModelFactory: GenericModelFactory {
         async let tokenizerTask = tokenizerLoader.load(
             from: configuration.tokenizerDirectory)
 
-        try loadWeights(
+        try await loadWeights(
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization)
 
         let tokenizer = try await tokenizerTask
 
+        let llmModel = model as? LLMModel
+
         let messageGenerator: any MessageGenerator
         if let configuredMessageGenerator = mutableConfiguration.messageGenerator {
             messageGenerator = configuredMessageGenerator
-        } else if let model = model as? LLMModel {
-            messageGenerator = model.messageGenerator(tokenizer: tokenizer)
+        } else if let llmModel {
+            messageGenerator = llmModel.messageGenerator(tokenizer: tokenizer)
         } else {
             messageGenerator = DefaultMessageGenerator()
         }
@@ -759,14 +761,23 @@ public final class LLMModelFactory: GenericModelFactory {
             reasoningConfig: mutableConfiguration.reasoningConfig,
             messageGenerator: mutableConfiguration.messageGenerator)
 
+        // The prompt path the model declares. A model that declares none keeps
+        // the loaded tokenizer, thus this changes nothing for it. DeepSeek-V4
+        // declares its own encoder here, and the declaration only reaches the
+        // model when the load installs it: the checkpoint of that family ships
+        // a chat template that writes the turns and drops every tool, thus the
+        // refusal below never fires and the loaded tokenizer would build a
+        // prompt that looks correct and states no tool (card ^2dvj1g6).
+        let promptTokenizer = llmModel?.promptTokenizer(wrapping: tokenizer) ?? tokenizer
+
         let processor = LLMUserInputProcessor(
-            tokenizer: tokenizer, configuration: modelConfig,
+            tokenizer: promptTokenizer, configuration: modelConfig,
             messageGenerator: messageGenerator,
-            missingChatTemplateRefusal: (model as? LLMModel)?.missingChatTemplateRefusal)
+            missingChatTemplateRefusal: llmModel?.missingChatTemplateRefusal)
 
         return .init(
             configuration: modelConfig, model: model, processor: processor,
-            tokenizer: tokenizer)
+            tokenizer: promptTokenizer)
     }
 
 }

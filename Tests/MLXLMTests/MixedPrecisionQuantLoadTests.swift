@@ -151,7 +151,7 @@ struct MixedPrecisionQuantLoadTests {
     }
 
     @Test("Per-module quantization overrides are applied when loading")
-    func perModuleOverridesApplied() throws {
+    func perModuleOverridesApplied() async throws {
         let config = try tinyUnifiedConfig()
         let reference = Gemma4Unified(config)
         let (arrays, mlpPaths, fourBitPaths) = makeCheckpoint(model: reference)
@@ -163,7 +163,7 @@ struct MixedPrecisionQuantLoadTests {
 
         let baseConfig = try quantizationConfig(mlpPaths: mlpPaths)
         let model = Gemma4Unified(config)
-        try loadWeights(
+        try await loadWeights(
             modelDirectory: directory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization)
 
@@ -183,7 +183,7 @@ struct MixedPrecisionQuantLoadTests {
     }
 
     @Test("Ignoring the per-module overrides fails loudly, not silently")
-    func globalOnlyQuantizationFailsLoudly() throws {
+    func globalOnlyQuantizationFailsLoudly() async throws {
         let config = try tinyUnifiedConfig()
         let reference = Gemma4Unified(config)
         let (arrays, mlpPaths, _) = makeCheckpoint(model: reference)
@@ -197,8 +197,8 @@ struct MixedPrecisionQuantLoadTests {
         // 8-bit payload. That must surface as a load error — decoding the
         // 8-bit payload as 4-bit would produce garbage logits downstream.
         let model = Gemma4Unified(config)
-        #expect(throws: (any Error).self) {
-            try loadWeights(
+        await #expect(throws: (any Error).self) {
+            try await loadWeights(
                 modelDirectory: directory, model: model,
                 quantization: .init(groupSize: Self.groupSize, bits: 4))
         }

@@ -42,9 +42,8 @@ CI runs only `MLXLMTests`. Run all five before you say that the tests are green.
 A full run is approximately 1520 tests: 1040 with Swift Testing and 480 with
 XCTest.
 
-Three tests stay skipped on purpose. `ConstraintCachingTests` is `.disabled`
-because `GrammarMatcher::Fork()` needs xgrammar v0.1.34 or later, and
-`Libraries/MLXCXGrammar/xgrammar/VERSION` pins v0.1.30.
+No test is skipped. `Libraries/MLXCXGrammar/xgrammar/VERSION` pins v0.1.34,
+which supplies `GrammarMatcher::Fork()`, thus `ConstraintCachingTests` runs.
 
 ## How to build
 
