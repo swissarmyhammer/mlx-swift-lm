@@ -1000,8 +1000,26 @@ comments:
     - evidence: 3 source files — /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Libraries/MLXLMCommon/Tool/Parsers/DSMLToolCallParser.swift, /Users/wballard/github/swissarmyhammer/mlx-swift-lm/Tests/MLXLMTests/DSMLToolCallParserTests.swift, /Users/wballard/github/swissarmyhammer/mlx-swift-lm/IntegrationTesting/IntegrationTestingTests/DeepseekV4ToolCallTokenDiagnosticTests.swift. Tests written FIRST and proved RED (2 of 3 failed before the parser change; the refusal test passed then and passes now). Both projects build. Five bundles green: MLXLMTests 852 Swift Testing + 475 XCTest/0 failures, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 160, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5. Real weights, one load for each of four processes: `aShortToolPromptEmitsOneDSMLToolCall` PASSED in 65.8 s with the call `get_stock_level(bay: "bay 7")`; `theGreedyRunWritesAClosingTagTheParserReads` PASSED in 272.8 s and records the 7.0 gap and `the answer holds </｜DSML｜inv>: true`; the two prompt-cache tool rounds both got past `#require(roundOne.toolCalls.first)` with `round 1 tool calls = ["get_stock_level"]`. Every acceptance criterion of the card is checked. `swift-format lint` clean on the three files.
     - next: /review. New work found and carded: `^v7z7v99` holds the prompt-cache failure the completed tool round newly exposes.
   timestamp: 2026-08-17T12:34:48.431111+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m07w2xentpznqeqp50x45z1v
+  text: |
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (sha d1c0a37), backend `local`. counts: 0 findings, 0 confirmed, 0 refuted, 9 attempted, 0 failed, 0 skipped. 3 files reviewed, 0 not reviewed: `Libraries/MLXLMCommon/Tool/Parsers/DSMLToolCallParser.swift`, `Tests/MLXLMTests/DSMLToolCallParserTests.swift`, `Tests/MLXLMTests/DeepseekV4ToolCallTokenDiagnosticTests.swift`.
+    - note: the engine raised NO finding against the deliberate divergence from the published `parse_tool_calls`. Thus no conflict is recorded. If a later pass asks to remove the tolerance and make the parser strict again, that request fights the user's decision that tool calling matters more than strict fidelity. Do NOT act on such a finding. Record it and stop.
+    - next: none. Every acceptance criterion is checked and the card moves to `done`. The prompt-cache assertions that stand after the tool round are new work on card ^v7z7v99.
+  timestamp: 2026-08-17T12:45:31.989475+00:00
+- actor: claude-code
+  id: 01m07w3skvzr7dqy8xs8xf5c0y
+  text: |
+    ### finish iteration 3 — clean
+    - implement: changed — 3 source files. `DSMLToolCallParser` accepts the short closing tag. The tests came first and 2 of 3 were RED.
+    - test: green — five bundles, 852 + 475 Swift Testing and XCTest, 70, 160, 7, 5, all with 0 failures. Both projects build. Real weights: `aShortToolPromptEmitsOneDSMLToolCall` passed after 65.8 s with the call `get_stock_level(bay: "bay 7")`; `theGreedyRunWritesAClosingTagTheParserReads` passed after 272.8 s.
+    - commit: d1c0a37
+    - review: clean — 0 findings, 9 validator passes, 3 code files
+    - next: the card is in `done`. DeepSeek-V4 tool calling works.
+  timestamp: 2026-08-17T12:46:00.827635+00:00
+position_column: done
+position_ordinal: ff8f80
 title: 'Make DeepSeek-V4 tool calling work: the DSML parser accepts the short closing tag `</｜DSML｜inv>`'
 ---
 ## The purpose
