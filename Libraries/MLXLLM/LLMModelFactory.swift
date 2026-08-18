@@ -708,15 +708,17 @@ public final class LLMModelFactory: GenericModelFactory {
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIds
         mutableConfiguration.stopStrings.formUnion(generationConfig?.stopStrings ?? [])
-        // Chat conventions. Precedence: an explicit value on the configuration
-        // (registry entry or caller) wins; then a registered resolver, which sees
-        // the repo id the model cannot; then the model's own declaration.
+        // Chat conventions. An explicit value on the configuration wins, followed
+        // by a registered resolver that sees the repo id. Checkpoint metadata then
+        // resolves the model declaration against the selected tool template.
         let modelId = configuration.name
         if mutableConfiguration.toolCallFormat == nil {
             mutableConfiguration.toolCallFormat =
                 conventionsRegistry.toolCallFormat(
                     modelId: modelId, modelType: baseConfig.modelType)
-                ?? model.toolCallFormat
+                ?? ToolCallFormat.resolved(
+                    forTokenizerDirectory: configuration.tokenizerDirectory,
+                    modelFormat: model.toolCallFormat)
         }
         if mutableConfiguration.reasoningConfig == nil {
             mutableConfiguration.reasoningConfig =

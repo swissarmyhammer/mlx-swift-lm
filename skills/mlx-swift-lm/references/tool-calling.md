@@ -185,17 +185,33 @@ let processor = ToolCallProcessor(
 )
 ```
 
-## Format Auto-Detection
+## Format Resolution
 
-Formats are auto-detected from model type:
+When a model is loaded, the factories resolve the format in this order:
+
+1. an explicit value on the `ModelConfiguration` (registry entry or caller),
+2. a `ChatConventionsResolving` registered with `ChatConventionsRegistry`
+   (keyed on repo id / model type, for conventions the model cannot know),
+3. an explicit `tool_parser_type` in the checkpoint's tokenizer files,
+4. the selected tool template reconciled with the model's own
+   `ChatConventionsProviding` declaration.
+
+Nothing resolved means the default `.json` parser is used.
+
+At step 4, the model declaration remains selected when it can parse the template's
+dialect. Otherwise, the template refines it because the template is what teaches
+the model what to emit. This lets Qwen 3.5 keep its dual-dialect parser while a
+Hermes checkpoint can refine the Llama 3 architecture heuristic from inline JSON
+to framed JSON. If the template has no recognizable tool syntax, the model
+declaration remains the fallback.
 
 ```swift
-// Auto-detected based on model_type in config.json
-ToolCallFormat.infer(from: "lfm2")     // -> .lfm2
-ToolCallFormat.infer(from: "glm4")     // -> .glm4
-ToolCallFormat.infer(from: "gemma")    // -> .gemma
-ToolCallFormat.infer(from: "llama")    // -> nil (use default .json)
+ToolCallFormat.inferred(fromChatTemplate: template)  // -> .mistral, .glm4, ...
+ToolCallFormat(toolParserType: "qwen3_coder")        // -> .xmlFunction
 ```
+
+Protocols with token-level framing (`.gptOSS`, `.atem`) are deliberately not
+inferred from templates — they are selected by the models that own them.
 
 ### Explicit Format in Configuration
 
