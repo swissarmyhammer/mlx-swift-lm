@@ -392,6 +392,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             loader: makeContainerLoader())
     }
 
+    /// The process-global MLX buffer-reuse pool limit in bytes: 256 binary
+    /// megabytes, written as a shift.
+    private static let gpuCacheLimitBytes = 256 << 20
+
     /// Sets the process-global MLX buffer-reuse pool limit a single time. A
     /// `static let` initializer runs lazily and exactly once (thread-safe), so
     /// repeated model loads don't re-stomp a consumer's own `Memory.cacheLimit`.
@@ -400,7 +404,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// memory. 256MB comfortably holds activations and KV cache for a 3B model
     /// without forcing pool evictions mid-forward-pass.
     private static let configureGPUCacheOnce: Void = {
-        MLX.Memory.cacheLimit = 256 * 1024 * 1024
+        MLX.Memory.cacheLimit = gpuCacheLimitBytes
     }()
 
     private func makeContainerLoader() -> @Sendable () async throws -> ModelContainer {
@@ -814,6 +818,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// structured outputs. Consumers can override via
         /// `GenerationOptions(maximumResponseTokens:)`.
         private static let defaultMaxTokens = 4096
+
+        /// Multiplier on the structural completion reserve. It gives the
+        /// guided loop room for more than one attempt to reach structural
+        /// close before the budget runs out.
+        private static let completionReserveStructuralMultiplier = 3
+
+        /// Divisor on the token budget. The completion reserve keeps at
+        /// least this fraction (one quarter) of the budget.
+        private static let completionReserveBudgetDivisor = 4
+
+        /// Multiplier on the structural reserve that sets the hard reserve,
+        /// the point where the guided loop forces structural close.
+        private static let hardReserveStructuralMultiplier = 8
+
+        /// The rank of a batched token tensor (`[1, N]`) from a VLM
+        /// processor. LLM processors produce rank-1 tokens (`[N]`).
+        private static let batchedPromptRank = 2
+
+        /// The count of prompt-tail tokens to decode when the executor checks
+        /// whether the rendered prompt ends inside an open reasoning block.
+        private static let reasoningProbeTailTokenCount = 64
 
         /// Names the session a request belongs to, for the prompt cache that
         /// session carries between its turns.
@@ -1737,8 +1762,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 tokenizer: context.tokenizer
             )
             let completionReserve = Swift.max(
-                structuralReserve * 3, maxTokens / 4)
-            let hardReserve = structuralReserve * 8
+                structuralReserve * Self.completionReserveStructuralMultiplier,
+                maxTokens / Self.completionReserveBudgetDivisor)
+            let hardReserve =
+                structuralReserve * Self.hardReserveStructuralMultiplier
 
             let whitespaceBias = bias.whitespace
             let whitespaceTokenIDs = bias.whitespaceTokenIDs
@@ -2265,8 +2292,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let structuralReserve = CompletionReserve.estimate(
                 schemaJSON: schemaJSON,
                 tokenizer: context.tokenizer)
-            let completionReserve = Swift.max(structuralReserve * 3, maxTokens / 4)
-            let hardReserve = structuralReserve * 8
+            let completionReserve = Swift.max(
+                structuralReserve * Self.completionReserveStructuralMultiplier,
+                maxTokens / Self.completionReserveBudgetDivisor)
+            let hardReserve =
+                structuralReserve * Self.hardReserveStructuralMultiplier
 
             let (textStream, textContinuation) = AsyncStream<String>.makeStream()
             async let forwarder: Void = {
@@ -2684,7 +2714,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let promptTokens = input.text.tokens
             var appended = MLXArray(tokenIDs.map { Int32($0) })
                 .asType(promptTokens.dtype)
-            if promptTokens.ndim == 2 {
+            if promptTokens.ndim == Self.batchedPromptRank {
                 appended = appended[.newAxis, 0...]
             }
             return LMInput(
@@ -2697,7 +2727,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             input: LMInput, config: ReasoningConfig, tokenizer: any Tokenizer
         ) -> Bool {
             let tokens = input.text.tokens.asArray(Int.self)
-            let renderedTail = tokenizer.decode(tokenIds: Array(tokens.suffix(64)))
+            let renderedTail = tokenizer.decode(
+                tokenIds: Array(tokens.suffix(Self.reasoningProbeTailTokenCount)))
             return ReasoningEventEmitter.promptEndsInsideReasoning(
                 renderedPromptTail: renderedTail, config: config)
         }

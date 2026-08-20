@@ -139,6 +139,71 @@ comments:
 
     All tests pass. Zero failures. Zero warnings. Zero skipped tests. The build is clean.
   timestamp: 2026-08-20T13:57:51.051066+00:00
+- actor: claude-code
+  id: 01m0fqezcw77468qjtvzq4mxpr
+  text: |-
+    ### commit — changed
+    - evidence: 2be19e6 refactor(foundation-models): split runRespond into executor helpers; 4 files changed, 750 insertions(+), 414 deletions(-)
+    - next: proceed to review
+  timestamp: 2026-08-20T13:58:39.772687+00:00
+- actor: claude-code
+  id: 01m0fqtrm6y09gqg8qpnhrcgs9
+  text: |-
+    ### review — findings
+    - evidence: `review sha HEAD~1..HEAD` (commit 2be19e6) — 2 findings: `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1740`, `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1741`, both `code-hygiene/magic-numbers-swift`. All findings from the round of 08:20 are checked.
+    - next: Replace the magic numbers with named constants in the full file, then run the review again.
+  timestamp: 2026-08-20T14:05:06.054739+00:00
+- actor: claude-code
+  id: 01m0fqvdrcembpqbnyb13w19mb
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — 2 files (runRespond decomposed into 5 executor helpers; named constants in ScriptedModelTestSupport)
+    - test: green — 5 bundles, 1656 tests, 0 failures, 0 warnings
+    - commit: 2be19e6
+    - review: findings — Libraries/MLXFoundationModels/MLXLanguageModel.swift:1740 (magic-numbers-swift), Libraries/MLXFoundationModels/MLXLanguageModel.swift:1741 (magic-numbers-swift); the 3 prior findings are all checked
+  timestamp: 2026-08-20T14:05:27.692277+00:00
+- actor: claude-code
+  id: 01m0fr6yczcfamvxn2pwzka4h5
+  text: |-
+    Corrected the 2 review findings of 2026-08-20 08:58 and did a sweep of the full file.
+
+    The sweep: swiftlint 0.65.0 with the validators' exact child configuration (`only_rules: [no_magic_numbers]`, `allowed_numbers: [0, 1, -1, 100]`, `severity: warning`, default `test_parent_classes`) on the full `Libraries/MLXFoundationModels/MLXLanguageModel.swift`. It found 5 sites (11 literal reports): lines 403, 1740-1741, 2268-2269, 2687, and 2700. I gave a name to each value. The values did not change, thus the behavior did not change.
+
+    1. Lines 1740-1741 (the 2 findings, in the required-tool turn) and lines 2268-2269 (the same expression in the guided-JSON run): new `Executor` constants `completionReserveStructuralMultiplier = 3`, `completionReserveBudgetDivisor = 4`, and `hardReserveStructuralMultiplier = 8`, near `defaultMaxTokens`. Both sites now use the constants.
+    2. Line 403: new `MLXLanguageModel` constant `gpuCacheLimitBytes = 256 << 20` replaces `256 * 1024 * 1024` in `configureGPUCacheOnce`. The rule permits shift operands (the rule dump gives the measurement), and the value is identical.
+    3. Line 2687: new `Executor` constant `batchedPromptRank = 2` replaces the `ndim == 2` comparison in `continuationInput`.
+    4. Line 2700: new `Executor` constant `reasoningProbeTailTokenCount = 64` replaces the `suffix(64)` argument in `reasoningPrimedInside`.
+
+    Verification:
+
+    - swiftlint 0.65.0 with the validators' configuration on the full file: 0 findings.
+    - `swift-format` (repository-wide, per project rules): no more changes to the file.
+    - `swift build --build-tests`: build complete, 0 compiler warnings.
+    - `xcodebuild build-for-testing -skipPackagePluginValidation -scheme mlx-swift-lm-Package -destination 'platform=macOS'`: TEST BUILD SUCCEEDED, 0 compiler warnings.
+    - `xcrun xctest` on `MLXFoundationModelsTests.xctest` from DerivedData directory `mlx-swift-lm-cnjnzwndareuzzexscgeoxmybjtz`: 162 tests in 25 suites, all passed, 0 failures. The suite "Cancelled generation drain" passed (both tests) — the regression suite stays green.
+
+    Both finding items of 2026-08-20 08:58 are set to `- [x]` on the card. The task stays in `doing` for the next review.
+  timestamp: 2026-08-20T14:11:45.183979+00:00
+- actor: claude-code
+  id: 01m0fr746q7cfr2dm8bx68sa8r
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Libraries/MLXFoundationModels/MLXLanguageModel.swift. Named constants replace all unnamed numeric literals outside the allow list: findings at lines 1740-1741 plus the sweep sites at 403, 2268-2269, 2687, 2700. swiftlint 0.65.0 with the validators' config: 0 findings on the file. Test build succeeded, 0 warnings. MLXFoundationModelsTests: 162/162 passed, including the Cancelled generation drain suite. Both 08:58 finding items are checked on the card.
+    - next: /review
+  timestamp: 2026-08-20T14:11:51.127077+00:00
+- actor: claude-code
+  id: 01m0frvdbgc4f236knc13tfsme
+  text: |-
+    ### test — green
+    - evidence: `xcodebuild build-for-testing -skipPackagePluginValidation -scheme mlx-swift-lm-Package -destination 'platform=macOS'` — TEST BUILD SUCCEEDED, 0 warnings.
+    - `xcrun xctest MLXLMTests.xctest` — 493 XCTest + 919 Swift Testing = 1412 tests, 0 failures.
+    - `xcrun xctest MLXGuidedGenerationTests.xctest` — 70 tests (Swift Testing, includes ConstraintCachingTests), 0 failures.
+    - `xcrun xctest MLXFoundationModelsTests.xctest` — 162 tests (Swift Testing), 0 failures.
+    - `xcrun xctest CXGrammarTests.xctest` — 7 tests (Swift Testing), 0 failures.
+    - `xcrun xctest MLXHuggingFaceMacrosTests.xctest` — 5 tests (XCTest), 0 failures.
+    - Total: 1656 tests, 0 failures, 0 warnings, 0 skipped tests (all "skip" text hits were test names describing tested behavior, e.g. `testUnsupportedEntryTypesAreSkipped`, and all passed).
+    - next: none. All five bundles clean.
+  timestamp: 2026-08-20T14:22:55.856003+00:00
 position_column: doing
 position_ordinal: '80'
 title: A cancelled generation returns to the caller before the GPU drain completes, and a process exit in that window aborts on signal 6 or 11
@@ -195,3 +260,10 @@ Counter-example that stays green: cancel a 1B generation mid-decode with `Task.c
 - [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1039` `code-hygiene/function-length-swift` — Function body should span 250 lines or less excluding comments and whitespace: currently spans 381 lines.
 - [x] `Tests/MLXFoundationModelsTests/ScriptedModelTestSupport.swift:42` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
 - [x] `Tests/MLXFoundationModelsTests/ScriptedModelTestSupport.swift:196` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+
+## Review Findings (2026-08-20 08:58)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 2 file(s) reviewed, 0 not reviewed.
+
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1740` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1741` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
