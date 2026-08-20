@@ -204,8 +204,32 @@ comments:
     - Total: 1656 tests, 0 failures, 0 warnings, 0 skipped tests (all "skip" text hits were test names describing tested behavior, e.g. `testUnsupportedEntryTypesAreSkipped`, and all passed).
     - next: none. All five bundles clean.
   timestamp: 2026-08-20T14:22:55.856003+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m0frwfhzq2pf1vkbj62fmqp7
+  text: |-
+    ### commit — changed
+    - evidence: 4cbef01 refactor(foundationmodels): name magic numbers in MLXLanguageModel (3 files changed, 121 insertions, 8 deletions)
+    - next: none
+  timestamp: 2026-08-20T14:23:30.879748+00:00
+- actor: claude-code
+  id: 01m0fs66prp2t2yyn9qpxnmkdj
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (commit 4cbef01) — counts: 0 findings, 0 confirmed, 2 refuted, 7 attempted, 1 file reviewed. All items in the prior `## Review Findings` sections show `- [x]`.
+    - next: none. The task moved to `done`.
+  timestamp: 2026-08-20T14:28:49.496875+00:00
+- actor: claude-code
+  id: 01m0fs702j93p09f4kt54c66jz
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — 1 file (named constants for all magic numbers in MLXLanguageModel.swift, whole-file sweep)
+    - test: green — 5 bundles, 1656 tests, 0 failures, 0 warnings
+    - commit: 4cbef01
+    - review: clean — 0 findings on HEAD~1..HEAD; all 5 prior findings checked; task moved to done
+    - note: the one unchecked criterion (downstream router re-verification) belongs to the router repository card ^bkdm97c and cannot complete in this repository
+  timestamp: 2026-08-20T14:29:15.474299+00:00
+position_column: done
+position_ordinal: ff9180
 title: A cancelled generation returns to the caller before the GPU drain completes, and a process exit in that window aborts on signal 6 or 11
 ---
 Moved from the FoundationModelsRouter board, card `^bkdm97c`. The router-side investigation located the fault in this repository, so the fix belongs here.
