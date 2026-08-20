@@ -89,7 +89,8 @@ struct MiniMaxM3CoherenceIntegrationTests {
 
         let configuration = resolveMiniMaxM3Configuration()
         guard checkpointIsAvailable(configuration) else {
-            print("Skipping MiniMax-M3 coherence test: checkpoint not found at \(configuration.name)")
+            print(
+                "Skipping MiniMax-M3 coherence test: checkpoint not found at \(configuration.name)")
             return
         }
 

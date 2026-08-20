@@ -420,7 +420,8 @@ final class DeepSeekV4Attention: Module {
 
         // The window mask must read the offset the cache stood at BEFORE the
         // keys of this block joined it.
-        let windowMask = compressor == nil
+        let windowMask =
+            compressor == nil
             ? mask
             : cache?.makeMask(n: length, windowSize: slidingWindow, returnArray: true)
                 ?? makeAttentionMask(

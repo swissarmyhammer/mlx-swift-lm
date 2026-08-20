@@ -96,7 +96,9 @@ struct MiniMaxM3Tests {
         #expect(abs(out.item(Float.self) - expected) < 1e-5)
     }
 
-    @Test("linear branch clips symmetrically at both bounds", arguments: [12.0 as Float, -12.0 as Float])
+    @Test(
+        "linear branch clips symmetrically at both bounds",
+        arguments: [12.0 as Float, -12.0 as Float])
     func linearClipsSymmetrically(xLinear: Float) {
         let activation = MiniMaxM3SwiGLUOAI(alpha: 1.702, limit: 7.0, beta: 1.0)
         let xGlu: Float = 1.0
@@ -232,7 +234,8 @@ struct MiniMaxM3Tests {
         #expect(abs((routed[2] ?? .nan) - (sig(0) / denom) * 2.0) < 1e-4)
     }
 
-    @Test("the packed shared expert contributes with unscaled weight 1.0, not routed_scaling_factor")
+    @Test(
+        "the packed shared expert contributes with unscaled weight 1.0, not routed_scaling_factor")
     func sharedExpertWeightIsUnscaled() throws {
         // A distinctive routed_scaling_factor far from 1.0: if the shared
         // expert's weight were (incorrectly) also multiplied by it, the
@@ -527,7 +530,8 @@ struct MiniMaxM3Tests {
         let json = """
             { "model_type": "minimax_m3", "use_qk_norm": false, "qk_norm_type": "flat" }
             """
-        let config = try JSONDecoder().decode(MiniMaxM3TextConfiguration.self, from: Data(json.utf8))
+        let config = try JSONDecoder().decode(
+            MiniMaxM3TextConfiguration.self, from: Data(json.utf8))
         #expect(config.qkNormType == "flat")
         #expect(config.useQkNorm == false)
     }
@@ -691,7 +695,9 @@ struct MiniMaxM3Tests {
         #expect(maxDiff <= 1e-5)
     }
 
-    @Test("the indexer selects the expected blocks for a hand-constructed input (shrunk block=4, topk=2)")
+    @Test(
+        "the indexer selects the expected blocks for a hand-constructed input (shrunk block=4, topk=2)"
+    )
     func indexerSelectsExpectedBlocksForHandConstructedInput() throws {
         // indexDim/numIndexHeads/hiddenSize/headDim all shrunk to 4, with
         // rotaryDim: 2 -- only the first 2 of indexDim's 4 dims rotate, so
@@ -750,7 +756,9 @@ struct MiniMaxM3Tests {
         #expect(lastQuerySelection == [1, 2])
     }
 
-    @Test("the indexer selects the expected blocks with scoreType \"lse\", including the all-masked-block NaN guard")
+    @Test(
+        "the indexer selects the expected blocks with scoreType \"lse\", including the all-masked-block NaN guard"
+    )
     func indexerSelectsExpectedBlocksWithLogSumExpScoreType() throws {
         // Same hand-constructed setup as the "max" score-type test above,
         // but with scoreType: "lse" -- exercises the untested logSumExp
@@ -815,7 +823,9 @@ struct MiniMaxM3Tests {
         #expect(firstQuerySelection.allSatisfy { $0 == 0 || $0 == -1 })
     }
 
-    @Test("generation runs incrementally through MiniMaxM3KVCache without shape errors (shrunk block=2, topk=2)")
+    @Test(
+        "generation runs incrementally through MiniMaxM3KVCache without shape errors (shrunk block=2, topk=2)"
+    )
     func incrementalDecodeThroughSparseCacheProducesExpectedShapes() {
         let sparseConfig = MiniMaxM3SparseAttentionConfiguration(
             indexDim: 4, numIndexHeads: 2, topkBlocks: 2, blockSize: 2)
@@ -900,7 +910,8 @@ struct MiniMaxM3Tests {
         #expect(restored.count == 2)
         #expect(restored[0] is KVCacheSimple)
         guard let restoredSparse = restored[1] as? MiniMaxM3KVCache else {
-            Issue.record("expected restored[1] to be MiniMaxM3KVCache, got \(type(of: restored[1]))")
+            Issue.record(
+                "expected restored[1] to be MiniMaxM3KVCache, got \(type(of: restored[1]))")
             return
         }
         #expect(restoredSparse.offset == sparseCache.offset)
@@ -936,7 +947,8 @@ struct MiniMaxM3Tests {
         -> MiniMaxM3Configuration
     {
         MiniMaxM3Configuration(
-            textConfiguration: tinyModelConfig(hiddenLayers: hiddenLayers, moeLayerFreq: moeLayerFreq),
+            textConfiguration: tinyModelConfig(
+                hiddenLayers: hiddenLayers, moeLayerFreq: moeLayerFreq),
             visionConfiguration: tinyVisionConfig())
     }
 
@@ -1011,7 +1023,9 @@ struct MiniMaxM3Tests {
         #expect(cache[3] is MiniMaxM3KVCache)
     }
 
-    @Test("newCache returns KVCacheSimple for layers 0..<3, MiniMaxM3KVCache for 3..<60 in the real schedule")
+    @Test(
+        "newCache returns KVCacheSimple for layers 0..<3, MiniMaxM3KVCache for 3..<60 in the real schedule"
+    )
     func newCacheReturns60EntriesForRealSchedule() {
         let realSchedule = [0, 0, 0] + Array(repeating: 1, count: 57)
         let config = MiniMaxM3TextConfiguration(
@@ -1023,13 +1037,15 @@ struct MiniMaxM3Tests {
         let cache = model.newCache(parameters: nil)
 
         #expect(cache.count == 60)
-        #expect(cache[0..<3].allSatisfy { $0 is KVCacheSimple })
+        #expect(cache[0 ..< 3].allSatisfy { $0 is KVCacheSimple })
         #expect(cache[3...].allSatisfy { $0 is MiniMaxM3KVCache })
     }
 
     // MARK: - MiniMaxM3Vision (vision tower, 3D RoPE)
 
-    @Test("tiny vision tower forward pass produces (tokens, hiddenSize), projector produces (tokens, projectionDim)")
+    @Test(
+        "tiny vision tower forward pass produces (tokens, hiddenSize), projector produces (tokens, projectionDim)"
+    )
     func visionTowerForwardProducesExpectedShape() {
         MLXRandom.seed(0)
         let visionConfig = tinyVisionConfig()
@@ -1090,7 +1106,8 @@ struct MiniMaxM3Tests {
         #expect(sinDiff < 1e-5)
     }
 
-    @Test("a tiny vision-capable model's prepare() runs the image path end-to-end and returns logits")
+    @Test(
+        "a tiny vision-capable model's prepare() runs the image path end-to-end and returns logits")
     func prepareRunsImagePathEndToEnd() throws {
         MLXRandom.seed(0)
         let config = tinyVisionModelConfig()
@@ -1107,7 +1124,8 @@ struct MiniMaxM3Tests {
         let numImageTokens = grid.product / (mergeSize * mergeSize)
 
         var tokens: [Int32] = [1]
-        tokens.append(contentsOf: Array(repeating: Int32(config.imageTokenIndex), count: numImageTokens))
+        tokens.append(
+            contentsOf: Array(repeating: Int32(config.imageTokenIndex), count: numImageTokens))
         tokens.append(2)
         let inputIds = MLXArray(tokens).reshaped(1, tokens.count)
 
@@ -1116,7 +1134,8 @@ struct MiniMaxM3Tests {
             image: .init(pixels: pixelValues, frames: [grid]))
 
         let cache = model.newCache(parameters: nil)
-        let result = try model.prepare(input, cache: cache, state: nil, prefill: .init(stepSize: nil))
+        let result = try model.prepare(
+            input, cache: cache, state: nil, prefill: .init(stepSize: nil))
 
         guard case .logits(let output) = result else {
             Issue.record("expected .logits for an image prompt, got .tokens")
@@ -1254,7 +1273,8 @@ struct MiniMaxM3Tests {
 
         let sanitized = model.sanitize(weights: raw)
 
-        let gateUpKey = "language_model.model.layers.0.block_sparse_moe.switch_mlp.gate_up_proj.weight"
+        let gateUpKey =
+            "language_model.model.layers.0.block_sparse_moe.switch_mlp.gate_up_proj.weight"
         let downKey = "language_model.model.layers.0.block_sparse_moe.switch_mlp.down_proj.weight"
 
         #expect(sanitized[gateUpKey] != nil)
@@ -1384,20 +1404,18 @@ struct MiniMaxM3Tests {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        try
-            """
-            { "image_processor_type": "MiniMaxM3VLImageProcessor" }
-            """
-            .write(
-                to: tempDir.appendingPathComponent("preprocessor_config.json"),
-                atomically: true, encoding: .utf8)
-        try
-            """
-            { "processor_class": "MiniMaxM3VLProcessor" }
-            """
-            .write(
-                to: tempDir.appendingPathComponent("processor_config.json"),
-                atomically: true, encoding: .utf8)
+        try """
+        { "image_processor_type": "MiniMaxM3VLImageProcessor" }
+        """
+        .write(
+            to: tempDir.appendingPathComponent("preprocessor_config.json"),
+            atomically: true, encoding: .utf8)
+        try """
+        { "processor_class": "MiniMaxM3VLProcessor" }
+        """
+        .write(
+            to: tempDir.appendingPathComponent("processor_config.json"),
+            atomically: true, encoding: .utf8)
 
         let (_, config) = try await loadProcessorConfig(from: tempDir)
         #expect(config.processorClass == "MiniMaxM3VLProcessor")
@@ -1494,7 +1512,9 @@ struct MiniMaxM3Tests {
         #expect(occurrences == expectedImageTokens)
     }
 
-    @Test("MiniMaxM3Processor throws a descriptive error for image input when no chat template is configured")
+    @Test(
+        "MiniMaxM3Processor throws a descriptive error for image input when no chat template is configured"
+    )
     func processorThrowsForImageInputWithoutChatTemplate() async throws {
         // TestTokenizer's `applyChatTemplate` never throws
         // `TokenizerError.missingChatTemplate` (it just returns random

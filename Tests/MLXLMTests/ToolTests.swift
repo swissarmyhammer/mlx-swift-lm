@@ -1609,7 +1609,9 @@ struct ToolTests {
     /// merely contains a stray `<`/`>` -- ordinary text, not an attempt at a
     /// tag -- must round-trip as a plain string rather than being
     /// misdiagnosed as malformed XML.
-    @Test("Test MiniMax M3 Tool Call Parser - stray angle brackets in a scalar value are not malformed")
+    @Test(
+        "Test MiniMax M3 Tool Call Parser - stray angle brackets in a scalar value are not malformed"
+    )
     func testMiniMaxM3ParserStrayAngleBracketsInScalarValue() throws {
         let parser = MiniMaxM3ToolCallParser()
         let ns = Self.minimaxM3NamespaceToken

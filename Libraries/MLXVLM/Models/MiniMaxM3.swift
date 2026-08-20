@@ -420,12 +420,14 @@ public struct MiniMaxM3SparseAttentionConfiguration: Codable, Sendable {
         indexDim = try container.decodeIfPresent(Int.self, forKey: .indexDim) ?? defaultIndexDim
         numIndexHeads =
             try container.decodeIfPresent(Int.self, forKey: .numIndexHeads) ?? defaultNumIndexHeads
-        topkBlocks = try container.decodeIfPresent(Int.self, forKey: .topkBlocks) ?? defaultTopkBlocks
+        topkBlocks =
+            try container.decodeIfPresent(Int.self, forKey: .topkBlocks) ?? defaultTopkBlocks
         blockSize = try container.decodeIfPresent(Int.self, forKey: .blockSize) ?? defaultBlockSize
         initBlocks =
             try container.decodeIfPresent(Int.self, forKey: .initBlocks) ?? defaultSparseInitBlocks
         localBlocks =
-            try container.decodeIfPresent(Int.self, forKey: .localBlocks) ?? defaultSparseLocalBlocks
+            try container.decodeIfPresent(Int.self, forKey: .localBlocks)
+            ?? defaultSparseLocalBlocks
         scoreType =
             try container.decodeIfPresent(String.self, forKey: .scoreType) ?? defaultSparseScoreType
     }
@@ -571,7 +573,8 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         swigluLimit: Float = defaultSwigluLimit,
         swigluBeta: Float = defaultSwigluBeta,
         numMTPModules: Int = defaultNumMTPModules,
-        sparseAttention: MiniMaxM3SparseAttentionConfiguration = MiniMaxM3SparseAttentionConfiguration()
+        sparseAttention: MiniMaxM3SparseAttentionConfiguration =
+            MiniMaxM3SparseAttentionConfiguration()
     ) {
         self.modelType = modelType
         self.hiddenSize = hiddenSize
@@ -672,7 +675,8 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         hiddenLayers =
             try container.decodeIfPresent(Int.self, forKey: .hiddenLayers) ?? defaultHiddenLayers
         attentionHeads =
-            try container.decodeIfPresent(Int.self, forKey: .attentionHeads) ?? defaultAttentionHeads
+            try container.decodeIfPresent(Int.self, forKey: .attentionHeads)
+            ?? defaultAttentionHeads
         kvHeads = try container.decodeIfPresent(Int.self, forKey: .kvHeads) ?? defaultKvHeads
         headDim = try container.decodeIfPresent(Int.self, forKey: .headDim) ?? defaultHeadDim
         vocabularySize =
@@ -684,7 +688,8 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         rmsNormEps =
             try container.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? defaultRmsNormEps
         useGemmaNorm = try container.decodeIfPresent(Bool.self, forKey: .useGemmaNorm) ?? true
-        ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? defaultRopeTheta
+        ropeTheta =
+            try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? defaultRopeTheta
         partialRotaryFactor =
             try container.decodeIfPresent(Float.self, forKey: .partialRotaryFactor)
             ?? defaultPartialRotaryFactor
@@ -731,7 +736,8 @@ public struct MiniMaxM3TextConfiguration: Codable, Sendable {
         let decodedSharedIntermediateSize = try container.decodeIfPresent(
             Int.self, forKey: .sharedIntermediateSize)
         numLocalExperts =
-            try container.decodeIfPresent(Int.self, forKey: .numLocalExperts) ?? defaultNumLocalExperts
+            try container.decodeIfPresent(Int.self, forKey: .numLocalExperts)
+            ?? defaultNumLocalExperts
         numExpertsPerTok =
             try container.decodeIfPresent(Int.self, forKey: .numExpertsPerTok)
             ?? defaultNumExpertsPerTok
@@ -1054,16 +1060,23 @@ enum MiniMaxM3Vision {
                 MLXArray(0 ..< grid.t).asType(.int32).reshaped([grid.t, 1, 1, 1, 1]), to: shape)
             let hBlock = MLXArray(0 ..< mergedH).asType(.int32).reshaped([1, mergedH, 1, 1, 1])
             let wBlock = MLXArray(0 ..< mergedW).asType(.int32).reshaped([1, 1, mergedW, 1, 1])
-            let intraRow = MLXArray(0 ..< mergeSize).asType(.int32).reshaped([1, 1, 1, mergeSize, 1])
-            let intraCol = MLXArray(0 ..< mergeSize).asType(.int32).reshaped([1, 1, 1, 1, mergeSize])
+            let intraRow = MLXArray(0 ..< mergeSize).asType(.int32).reshaped([
+                1, 1, 1, mergeSize, 1,
+            ])
+            let intraCol = MLXArray(0 ..< mergeSize).asType(.int32).reshaped([
+                1, 1, 1, 1, mergeSize,
+            ])
             let hIndex = broadcast(hBlock * Int32(mergeSize) + intraRow, to: shape)
             let wIndex = broadcast(wBlock * Int32(mergeSize) + intraCol, to: shape)
 
             let freqs = concatenated(
                 [
-                    axisFrequencies(tIndex.flattened(), dimensions: axisDim, theta: config.ropeTheta),
-                    axisFrequencies(hIndex.flattened(), dimensions: axisDim, theta: config.ropeTheta),
-                    axisFrequencies(wIndex.flattened(), dimensions: axisDim, theta: config.ropeTheta),
+                    axisFrequencies(
+                        tIndex.flattened(), dimensions: axisDim, theta: config.ropeTheta),
+                    axisFrequencies(
+                        hIndex.flattened(), dimensions: axisDim, theta: config.ropeTheta),
+                    axisFrequencies(
+                        wIndex.flattened(), dimensions: axisDim, theta: config.ropeTheta),
                 ], axis: -1)
             freqSegments.append(concatenated([freqs, freqs], axis: -1))
         }
@@ -1220,13 +1233,17 @@ enum MiniMaxM3Vision {
 
         init(_ config: MiniMaxM3VisionConfiguration) {
             _selfAttn.wrappedValue = Attention(config)
-            _layerNorm1.wrappedValue = LayerNorm(dimensions: config.hiddenSize, eps: config.layerNormEps)
+            _layerNorm1.wrappedValue = LayerNorm(
+                dimensions: config.hiddenSize, eps: config.layerNormEps)
             _mlp.wrappedValue = MLP(config)
-            _layerNorm2.wrappedValue = LayerNorm(dimensions: config.hiddenSize, eps: config.layerNormEps)
+            _layerNorm2.wrappedValue = LayerNorm(
+                dimensions: config.hiddenSize, eps: config.layerNormEps)
             super.init()
         }
 
-        func callAsFunction(_ x: MLXArray, cuSeqlens: [Int], cos: MLXArray, sin: MLXArray) -> MLXArray {
+        func callAsFunction(_ x: MLXArray, cuSeqlens: [Int], cos: MLXArray, sin: MLXArray)
+            -> MLXArray
+        {
             var h = x + selfAttn(layerNorm1(x), cuSeqlens: cuSeqlens, cos: cos, sin: sin)
             h = h + mlp(layerNorm2(h))
             return h
@@ -1243,7 +1260,9 @@ enum MiniMaxM3Vision {
             super.init()
         }
 
-        func callAsFunction(_ x: MLXArray, cuSeqlens: [Int], cos: MLXArray, sin: MLXArray) -> MLXArray {
+        func callAsFunction(_ x: MLXArray, cuSeqlens: [Int], cos: MLXArray, sin: MLXArray)
+            -> MLXArray
+        {
             var h = x
             for layer in layers {
                 h = layer(h, cuSeqlens: cuSeqlens, cos: cos, sin: sin)
@@ -1268,7 +1287,8 @@ enum MiniMaxM3Vision {
         init(_ config: MiniMaxM3VisionConfiguration) {
             self.config = config
             _embeddings.wrappedValue = Embeddings(config)
-            _preLayerNorm.wrappedValue = LayerNorm(dimensions: config.hiddenSize, eps: config.layerNormEps)
+            _preLayerNorm.wrappedValue = LayerNorm(
+                dimensions: config.hiddenSize, eps: config.layerNormEps)
             _encoder.wrappedValue = Encoder(config)
             super.init()
         }
@@ -1317,7 +1337,10 @@ final class MiniMaxM3Projector: Module {
     @ModuleInfo(key: "linear_2") var linear2: Linear
     let hiddenAct: String
 
-    init(inputDimensions: Int, hiddenDimensions: Int, outputDimensions: Int, bias: Bool, hiddenAct: String) {
+    init(
+        inputDimensions: Int, hiddenDimensions: Int, outputDimensions: Int, bias: Bool,
+        hiddenAct: String
+    ) {
         _linear1.wrappedValue = Linear(inputDimensions, hiddenDimensions, bias: bias)
         _linear2.wrappedValue = Linear(hiddenDimensions, outputDimensions, bias: bias)
         self.hiddenAct = hiddenAct
@@ -1416,7 +1439,8 @@ public struct MiniMaxM3Configuration: Decodable, Sendable {
         modelType =
             try container.decodeIfPresent(String.self, forKey: .modelType) ?? "minimax_m3_vl"
         textConfiguration =
-            try container.decodeIfPresent(MiniMaxM3TextConfiguration.self, forKey: .textConfiguration)
+            try container.decodeIfPresent(
+                MiniMaxM3TextConfiguration.self, forKey: .textConfiguration)
             ?? MiniMaxM3TextConfiguration()
         visionConfiguration =
             try container.decodeIfPresent(
@@ -1496,7 +1520,8 @@ public final class MiniMaxM3KVCache: KVCache {
     /// present). Triggered once, lazily, from `init()` below -- guaranteed to
     /// run before any instance could be saved.
     private static let registerSerialization: Void = {
-        KVCacheSerializationRegistry.register(MiniMaxM3KVCache.self, className: "MiniMaxM3KVCache") {
+        KVCacheSerializationRegistry.register(MiniMaxM3KVCache.self, className: "MiniMaxM3KVCache")
+        {
             state, metaState in
             let cache = MiniMaxM3KVCache()
             cache.state = state
@@ -2550,7 +2575,8 @@ extension MiniMaxM3Model: VLMModel {
 
         var logits = MLXArray(0)
         withPreparedCache(cache, lengths: [inputIds.size]) {
-            logits = self(inputIds, cache: cache.isEmpty ? nil : cache, inputEmbeddings: mergedEmbeds)
+            logits = self(
+                inputIds, cache: cache.isEmpty ? nil : cache, inputEmbeddings: mergedEmbeds)
             eval(cache)
         }
 
@@ -2841,7 +2867,8 @@ public struct MiniMaxM3Processor: UserInputProcessor {
                 "Number of image placeholder tokens does not match number of images")
         }
 
-        let mergeLength = configuration.imageProcessor.mergeSize * configuration.imageProcessor.mergeSize
+        let mergeLength =
+            configuration.imageProcessor.mergeSize * configuration.imageProcessor.mergeSize
         let replacementSequences = frames.map { frame -> [Int] in
             let count = frame.product / mergeLength
             let text =

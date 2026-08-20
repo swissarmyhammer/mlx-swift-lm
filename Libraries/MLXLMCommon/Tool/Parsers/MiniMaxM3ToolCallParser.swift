@@ -122,7 +122,8 @@ public struct MiniMaxM3ToolCallParser: ToolCallParser, Sendable {
     ///   empty dictionary for a no-argument call (`<invoke name="x"></invoke>`);
     ///   or a single `__parse_error__` entry when the body is malformed XML or
     ///   parses to something other than an object (e.g. a bare `<item>` list).
-    private static func parseArguments(_ body: String, functionName: String) -> [String: any Sendable]
+    private static func parseArguments(_ body: String, functionName: String) -> [String:
+        any Sendable]
     {
         guard let value = elementValue(from: body) else {
             return [

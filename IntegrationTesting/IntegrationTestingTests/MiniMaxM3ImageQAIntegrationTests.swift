@@ -66,7 +66,8 @@ struct MiniMaxM3ImageQAIntegrationTests {
 
         let configuration = resolveMiniMaxM3Configuration()
         guard checkpointIsAvailable(configuration) else {
-            print("Skipping MiniMax-M3 image Q&A test: checkpoint not found at \(configuration.name)")
+            print(
+                "Skipping MiniMax-M3 image Q&A test: checkpoint not found at \(configuration.name)")
             return
         }
 

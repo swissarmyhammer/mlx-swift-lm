@@ -981,13 +981,62 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
         }
 
+        /// The drain coordinator of the `respond` call the current task runs.
+        ///
+        /// Task-local, like ``generationObserver``, so every generation site
+        /// inside one `respond` reaches its own coordinator without a
+        /// parameter through every call. Nil outside `respond`, which makes
+        /// the tracking helpers a no-op for any other caller of the
+        /// generation functions.
+        @TaskLocal private static var drainCoordinator: GenerationDrainCoordinator?
+
         /// Generates a response for the given request, streaming events into the channel.
+        ///
+        /// A caller that cancels the generation must find the GPU quiet when
+        /// its `CancellationError` returns — a process exit inside a window
+        /// with generation work still in flight aborts on signal 6 or 11.
+        /// The framework resumes a cancelled `LanguageModelSession.respond`
+        /// WITHOUT awaiting this executor, so ordering inside this task
+        /// alone cannot give that guarantee. A cancellation handler
+        /// therefore holds the canceller — the `cancel()` call that cancels
+        /// this task — until the coordinator drained every active
+        /// generation, and the framework resumes the caller only after that
+        /// handler returns. `CancelledGenerationDrainTests` holds the
+        /// guarantee at the session level and at this executor level.
         ///
         /// - Parameters:
         ///   - request: The generation request containing transcript, tools, and options
         ///   - model: The model instance for this request
         ///   - channel: The channel to send response events into
         public func respond(
+            to request: LanguageModelExecutorGenerationRequest,
+            model: MLXLanguageModel,
+            streamingInto channel: LanguageModelExecutorGenerationChannel
+        ) async throws {
+            let coordinator = GenerationDrainCoordinator()
+            try await withTaskCancellationHandler {
+                try await Self.$drainCoordinator.withValue(coordinator) {
+                    try await runRespond(to: request, model: model, streamingInto: channel)
+                }
+            } onCancel: {
+                coordinator.cancelActiveAndAwaitQuiescence()
+            }
+        }
+
+        /// Runs one generation turn on the current task.
+        ///
+        /// Every exit path — the return, the `CancellationError` and every
+        /// other throw — first stops the generation task, waits for it, and
+        /// synchronizes the GPU stream, thus the caller of this method finds
+        /// the GPU quiet. ``respond(to:model:streamingInto:)`` wraps this
+        /// method in the cancellation gate that extends the same guarantee
+        /// to a canceller the framework resumes early.
+        ///
+        /// - Parameters:
+        ///   - request: The generation request containing transcript, tools, and options
+        ///   - model: The model instance for this request
+        ///   - channel: The channel to send response events into
+        private func runRespond(
             to request: LanguageModelExecutorGenerationRequest,
             model: MLXLanguageModel,
             streamingInto channel: LanguageModelExecutorGenerationChannel
@@ -1463,21 +1512,23 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         var incomplete = false
                         var generatedTokenCount: Int?
                         do {
-                            generatedTokenCount = try GuidedGenerationLoop.run(
-                                input: phase2Input,
-                                context: context,
-                                constraint: constraint,
-                                maxTokens: phase2MaxTokens,
-                                vocabSize: Int(xgTokenizer.vocabSize),
-                                completionReserve: completionReserve,
-                                hardReserve: hardReserve,
-                                closingBias: closingBias,
-                                whitespaceBias: whitespaceBias,
-                                whitespaceTokenIDs: whitespaceTokenIDs
-                            ) { text in
-                                outputBuffer += text
-                                GuidedGenerationDiagnosticSink.current?.recordEmit()
-                                return !Task.isCancelled
+                            generatedTokenCount = try Self.withGuidedGenerationSection {
+                                try GuidedGenerationLoop.run(
+                                    input: phase2Input,
+                                    context: context,
+                                    constraint: constraint,
+                                    maxTokens: phase2MaxTokens,
+                                    vocabSize: Int(xgTokenizer.vocabSize),
+                                    completionReserve: completionReserve,
+                                    hardReserve: hardReserve,
+                                    closingBias: closingBias,
+                                    whitespaceBias: whitespaceBias,
+                                    whitespaceTokenIDs: whitespaceTokenIDs
+                                ) { text in
+                                    outputBuffer += text
+                                    GuidedGenerationDiagnosticSink.current?.recordEmit()
+                                    return !Task.isCancelled
+                                }
                             }
                         } catch GuidedGenerationError.incompleteOutput {
                             incomplete = true
@@ -1578,6 +1629,165 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var endedInsideReasoning = false
         }
 
+        /// Drains the active generations of one `respond` at cancellation.
+        ///
+        /// The framework resumes a cancelled `LanguageModelSession.respond`
+        /// before this executor's own teardown completes, so the caller
+        /// could otherwise see its `CancellationError` while a forward pass
+        /// still runs on the GPU — and a process exit in that window aborts
+        /// on signal 6 or 11. The coordinator closes that window from the
+        /// cancellation side: each generation registers as one section, and
+        /// the cancellation handler cancels every registered generation and
+        /// waits until every section left.
+        ///
+        /// The wait must not depend on the respond task making progress —
+        /// a cancellation handler runs BEFORE the runtime resumes that
+        /// task's suspended continuations, so a wait on the whole `respond`
+        /// deadlocks against its own delivery. Every section therefore
+        /// leaves through a path that needs no cancellation delivery: a
+        /// token-producer task polls its own flag, which the direct
+        /// `cancel()` here sets, and a watcher task reports its end; a
+        /// guided-generation loop polls the respond task's flag, which the
+        /// runtime sets before it runs this handler, and leaves on its own
+        /// thread.
+        ///
+        /// An `NSCondition` guards the state; every access takes the lock,
+        /// which is the synchronization invariant behind
+        /// `@unchecked Sendable`. A condition rather than an actor, because
+        /// a cancellation handler is synchronous and cannot await.
+        private final class GenerationDrainCoordinator: @unchecked Sendable {
+
+            /// Longest the canceller waits for quiescence.
+            ///
+            /// An active section ends within one forward pass plus a stream
+            /// synchronize — under a second on a 1B model and within
+            /// seconds on a 30B model. The bound stands far above both so a
+            /// pathological hang cannot block the canceller forever.
+            private static let quiescenceTimeout: TimeInterval = 60
+
+            private let condition = NSCondition()
+            private var activeSections = 0
+            private var cancellationRequested = false
+            private var pendingCancels: [() -> Void] = []
+
+            /// Enters one generation section.
+            ///
+            /// Throws `CancellationError` when the respond task is already
+            /// cancelled, so an abandoned `respond` can start no new GPU
+            /// work after the canceller was released.
+            func enterSection() throws {
+                try Task.checkCancellation()
+                condition.lock()
+                activeSections += 1
+                condition.unlock()
+            }
+
+            /// Registers the closure that cancels the section's generation.
+            ///
+            /// When the cancellation already ran, the closure runs at once,
+            /// so a generation that started inside the cancellation race is
+            /// still cancelled and its section still leaves.
+            func attachCancel(_ cancel: @escaping @Sendable () -> Void) {
+                condition.lock()
+                let requested = cancellationRequested
+                if !requested {
+                    pendingCancels.append(cancel)
+                }
+                condition.unlock()
+                if requested {
+                    cancel()
+                }
+            }
+
+            /// Leaves one generation section and wakes the canceller.
+            func leaveSection() {
+                condition.lock()
+                activeSections -= 1
+                condition.broadcast()
+                condition.unlock()
+            }
+
+            /// Cancels every registered generation and waits for quiescence.
+            ///
+            /// Runs on the canceller's thread, inside the `cancel()` call
+            /// that cancels the respond task, thus that call does not return
+            /// — and the framework does not resume the caller — until every
+            /// active section left or ``quiescenceTimeout`` passed.
+            func cancelActiveAndAwaitQuiescence() {
+                condition.lock()
+                cancellationRequested = true
+                let cancels = pendingCancels
+                pendingCancels.removeAll()
+                condition.unlock()
+                for cancel in cancels {
+                    cancel()
+                }
+                let deadline = Date(timeIntervalSinceNow: Self.quiescenceTimeout)
+                condition.lock()
+                while activeSections > 0 {
+                    guard condition.wait(until: deadline) else { break }
+                }
+                condition.unlock()
+            }
+        }
+
+        /// Starts a token-producer task inside a drain-coordinator section.
+        ///
+        /// The section is entered BEFORE `make` runs, so a cancellation that
+        /// strikes between the two finds the section active and waits for
+        /// it; ``GenerationDrainCoordinator/attachCancel(_:)`` then cancels
+        /// the fresh producer at registration. The watcher `Task` is
+        /// deliberately unstructured: it must outlive a `respond` the
+        /// framework abandoned, it only awaits the producer and reports its
+        /// end, and it ends the moment the producer does.
+        ///
+        /// - Parameter make: builds the stream and its producer task.
+        /// - Returns: what `make` returned.
+        /// - Throws: `CancellationError` when the respond task is already
+        ///   cancelled, and whatever `make` throws.
+        private static func startTrackedGeneration<Element: Sendable, Value: Sendable>(
+            _ make: () throws -> (AsyncStream<Element>, Task<Value, Never>)
+        ) throws -> (AsyncStream<Element>, Task<Value, Never>) {
+            guard let coordinator = drainCoordinator else { return try make() }
+            try coordinator.enterSection()
+            do {
+                let (stream, task) = try make()
+                coordinator.attachCancel { task.cancel() }
+                Task {
+                    _ = await task.value
+                    coordinator.leaveSection()
+                }
+                return (stream, task)
+            } catch {
+                coordinator.leaveSection()
+                throw error
+            }
+        }
+
+        /// Runs one guided-generation pass inside a drain-coordinator section.
+        ///
+        /// A guided loop runs synchronously on the respond task and polls
+        /// `Task.isCancelled` per token, so it leaves its section on its own
+        /// thread with no cancellation delivery needed. The GPU stream is
+        /// synchronized before the section leaves, thus a canceller that the
+        /// coordinator releases finds the GPU quiet.
+        ///
+        /// - Parameter body: the guided-generation pass.
+        /// - Returns: what `body` returned.
+        /// - Throws: `CancellationError` when the respond task is already
+        ///   cancelled, and whatever `body` throws.
+        private static func withGuidedGenerationSection<Value>(
+            _ body: () throws -> Value
+        ) throws -> Value {
+            guard let coordinator = drainCoordinator else { return try body() }
+            try coordinator.enterSection()
+            defer {
+                Stream.gpu.synchronize()
+                coordinator.leaveSection()
+            }
+            return try body()
+        }
+
         /// Stops the generation task and waits until it stops.
         ///
         /// The task holds the GPU loop. A caller that leaves the token stream
@@ -1651,12 +1861,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 stopStrings: context.configuration.effectiveStopStrings)
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
             var result = AllowedToolGenerationResult()
-            let (stream, task) = try generateProtocolTokensTask(
-                input: plan?.input ?? input,
-                cache: plan?.caches,
-                parameters: params,
-                context: context,
-                decoder: protocolDecoder)
+            let (stream, task) = try Self.startTrackedGeneration {
+                try generateProtocolTokensTask(
+                    input: plan?.input ?? input,
+                    cache: plan?.caches,
+                    parameters: params,
+                    context: context,
+                    decoder: protocolDecoder)
+            }
 
             try await withPromptCacheCommit(task: task, plan: plan, promptCache: promptCache) {
                 generationLoop: for await generation in stream {
@@ -1842,21 +2054,23 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var incomplete = false
             var generatedTokenCount: Int?
             do {
-                generatedTokenCount = try GuidedGenerationLoop.run(
-                    input: input,
-                    context: context,
-                    constraint: constraint,
-                    maxTokens: maxTokens,
-                    vocabSize: Int(xgTokenizer.vocabSize),
-                    completionReserve: completionReserve,
-                    hardReserve: hardReserve,
-                    closingBias: bias.closing,
-                    whitespaceBias: bias.whitespace,
-                    whitespaceTokenIDs: bias.whitespaceTokenIDs
-                ) { text in
-                    textContinuation.yield(text)
-                    GuidedGenerationDiagnosticSink.current?.recordEmit()
-                    return !Task.isCancelled
+                generatedTokenCount = try Self.withGuidedGenerationSection {
+                    try GuidedGenerationLoop.run(
+                        input: input,
+                        context: context,
+                        constraint: constraint,
+                        maxTokens: maxTokens,
+                        vocabSize: Int(xgTokenizer.vocabSize),
+                        completionReserve: completionReserve,
+                        hardReserve: hardReserve,
+                        closingBias: bias.closing,
+                        whitespaceBias: bias.whitespace,
+                        whitespaceTokenIDs: bias.whitespaceTokenIDs
+                    ) { text in
+                        textContinuation.yield(text)
+                        GuidedGenerationDiagnosticSink.current?.recordEmit()
+                        return !Task.isCancelled
+                    }
                 }
             } catch GuidedGenerationError.incompleteOutput {
                 incomplete = true
@@ -1917,11 +2131,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // cache behind: the ledger of that cache names the render plus the
             // tokens generation fed into it, and the text stream alone does not
             // carry those token identifiers.
-            let (stream, task) = try generateTaskRecordingTokens(
-                input: plan?.input ?? input,
-                cache: plan?.caches,
-                parameters: params,
-                context: context)
+            let (stream, task) = try Self.startTrackedGeneration {
+                try generateTaskRecordingTokens(
+                    input: plan?.input ?? input,
+                    cache: plan?.caches,
+                    parameters: params,
+                    context: context)
+            }
 
             try await withPromptCacheCommit(task: task, plan: plan, promptCache: promptCache) {
                 for await generation in stream {
@@ -2033,12 +2249,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // paths: this path passes no tools, so a tool-call-shaped output is
             // never executable.
             var rejectedToolCall: RejectedToolCall?
-            let (stream, task) = try generateProtocolTokensTask(
-                input: plan?.input ?? input,
-                cache: plan?.caches,
-                parameters: params,
-                context: context,
-                decoder: protocolDecoder)
+            let (stream, task) = try Self.startTrackedGeneration {
+                try generateProtocolTokensTask(
+                    input: plan?.input ?? input,
+                    cache: plan?.caches,
+                    parameters: params,
+                    context: context,
+                    decoder: protocolDecoder)
+            }
 
             try await withPromptCacheCommit(task: task, plan: plan, promptCache: promptCache) {
                 generationLoop: for await generation in stream {
@@ -2290,8 +2508,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 config: config, primedInside: primedInside, tokenizer: context.tokenizer
             )
 
-            let (stream, task) = try generateTokensTask(
-                input: input, parameters: params, context: context)
+            let (stream, task) = try Self.startTrackedGeneration {
+                try generateTokensTask(
+                    input: input, parameters: params, context: context)
+            }
             var closed = false
             do {
                 for await generation in stream {

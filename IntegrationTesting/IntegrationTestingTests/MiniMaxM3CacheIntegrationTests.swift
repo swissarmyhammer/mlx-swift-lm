@@ -65,7 +65,9 @@ struct MiniMaxM3CacheIntegrationTests {
 
     @Test
     func saveAndRestoreCacheContinuesWithFactRecall() async throws {
-        guard let container = await loadContainerOrSkip(testName: "saveAndRestoreCacheContinuesWithFactRecall")
+        guard
+            let container = await loadContainerOrSkip(
+                testName: "saveAndRestoreCacheContinuesWithFactRecall")
         else {
             return
         }
@@ -86,7 +88,8 @@ struct MiniMaxM3CacheIntegrationTests {
             generateParameters: GenerateParameters(maxTokens: 30, temperature: 0))
 
         var response = ""
-        for try await token in sessionB.streamResponse(to: "What number did I just ask you to remember?")
+        for try await token in sessionB.streamResponse(
+            to: "What number did I just ask you to remember?")
         {
             response += token
         }
@@ -102,7 +105,9 @@ struct MiniMaxM3CacheIntegrationTests {
 
     @Test
     func incrementalCacheMatchesFreshFullContextRebuild() async throws {
-        guard let container = await loadContainerOrSkip(testName: "incrementalCacheMatchesFreshFullContextRebuild")
+        guard
+            let container = await loadContainerOrSkip(
+                testName: "incrementalCacheMatchesFreshFullContextRebuild")
         else {
             return
         }
