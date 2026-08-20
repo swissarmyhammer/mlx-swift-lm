@@ -1,0 +1,1 @@
+{"id":"01M0FE65RM93Z6Y0AJBXJAZ9T3","timestamp":"2026-08-20T11:16:34.196589Z","op":"create","item_id":"01M0FE65RKB5AFT3F76QSPZ93G","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: c5def5\n+tag_name: cancellation\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: c5def5\n-tag_name: cancellation\n","transaction_id":null}

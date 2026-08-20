@@ -1,0 +1,1 @@
+{"id":"01M0FE66CK7QDC7M9QRV0VTW7G","timestamp":"2026-08-20T11:16:34.835225Z","op":"create","item_id":"01M0FE66CJGEN3QJ8Q0C9YMDJF","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: e4e669\n+tag_name: metal\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: e4e669\n-tag_name: metal\n","transaction_id":null}
