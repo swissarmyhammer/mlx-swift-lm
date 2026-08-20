@@ -29,6 +29,9 @@ struct ScriptedByteTokenizer: MLXLMCommon.Tokenizer {
     /// never stop.
     static let endOfTextByte = 3
 
+    /// Mask that keeps the low byte of a token ID when decoding.
+    private static let tokenByteMask = 0xFF
+
     /// The token IDs that make the model emit `text` and then stop.
     static func tokenIDs(for text: String) -> [Int] {
         Array(text.utf8).map { Int($0) } + [endOfTextByte]
@@ -39,7 +42,8 @@ struct ScriptedByteTokenizer: MLXLMCommon.Tokenizer {
     }
 
     func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
-        let bytes = tokenIds.filter { $0 != Self.endOfTextByte }.map { UInt8($0 & 0xFF) }
+        let bytes = tokenIds.filter { $0 != Self.endOfTextByte }
+            .map { UInt8($0 & Self.tokenByteMask) }
         return String(bytes: bytes, encoding: .utf8) ?? ""
     }
 
@@ -191,9 +195,12 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
 /// non-empty token array of the rank an LLM processor produces.
 struct FixedPromptInputProcessor: UserInputProcessor {
 
-    /// Three arbitrary token IDs. The count only has to be more than zero so
-    /// the prefill path runs its normal course.
-    private static let promptTokens: [Int32] = [1, 2, 3]
+    /// The number of arbitrary prompt token IDs. The count only has to be
+    /// more than zero so the prefill path runs its normal course.
+    private static let promptTokenCount: Int32 = 3
+
+    /// Arbitrary token IDs that stand in for a rendered prompt.
+    private static let promptTokens: [Int32] = Array(1 ... promptTokenCount)
 
     func prepare(input: UserInput) async throws -> LMInput {
         LMInput(tokens: MLXArray(Self.promptTokens))

@@ -1132,59 +1132,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     let userInput = UserInput(chat: messages)
                     let input = try await context.processor.prepare(input: userInput)
 
-                    // Resolve the per-instance configuration. Held strictly as
-                    // a local; it never lands in context.configuration or
-                    // Executor.Configuration, so two instances with the same id
-                    // but different resolvers don't cross-contaminate through
-                    // the shared caches. Identity is read from
-                    // context.configuration (above, at load time) and never
-                    // from `resolved`.
-                    let configData = try? Data(
-                        contentsOf:
-                            context.configuration.modelDirectory
-                            .appendingPathComponent("config.json"))
-                    let modelType =
-                        configData.flatMap {
-                            try? JSONDecoder.json5().decode(
-                                BaseConfiguration.self, from: $0
-                            ).modelType
-                        } ?? ""
-                    let descriptor = ModelDescriptor(
-                        modelType: modelType,
-                        modelId: modelID,
-                        configData: configData,
-                        tokenizer: context.tokenizer)
-                    let resolved = configurationResolver.resolve(
-                        context.configuration, for: descriptor)
-
-                    // Capability gate. When the caller omits `.reasoning`
-                    // but the resolved configuration carries a reasoning
-                    // config, the model must not be allowed to think:
-                    //
-                    // - Toggleable strategies (`.templateFlag`) re-render the
-                    //   prompt with thinking off (handled below per path).
-                    // - Non-suppressible strategies (`.alwaysOn`) raise
-                    //   `unsupportedCapability` BEFORE generation, regardless
-                    //   of which path (tools / schema / unconstrained) the
-                    //   request would otherwise take. The throw is
-                    //   path-independent so a tool-calling or schema-guided
-                    //   request on a model that always reasons surfaces the
-                    //   same typed error the unconstrained path does, never a
-                    //   silent leak through the grammar's malformed-output
-                    //   fallback.
-                    if !declaresReasoning, let suppressionConfig = resolved.reasoningConfig {
-                        do {
-                            _ = try suppressionConfig.promptStrategy
-                                .additionalContext(forThinkingEnabled: false)
-                        } catch ReasoningError.cannotDisableReasoning {
-                            throw LanguageModelError.unsupportedCapability(
-                                LanguageModelError.UnsupportedCapability(
-                                    capability: .reasoning,
-                                    debugDescription:
-                                        "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
-                                ))
-                        }
-                    }
+                    let resolved = resolveConfiguration(
+                        context: context, modelID: modelID,
+                        configurationResolver: configurationResolver)
 
                     // Reasoning is only consumed by the unconstrained path
                     // (no tools, no schema). On the guided/tool paths the
@@ -1197,373 +1147,44 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     let mayRunReasoningPath =
                         enabledToolDefinitions.isEmpty
                         && request.schema == nil
-
-                    // When .reasoning is OMITTED on the unconstrained path,
-                    // re-render the prompt with thinking off so the model
-                    // doesn't emit `<think>`. Toggleable-only;
-                    // .alwaysOn was already rejected above.
-                    let suppressedInput: LMInput?
-                    if mayRunReasoningPath, !declaresReasoning,
-                        let suppressionConfig = resolved.reasoningConfig
-                    {
-                        suppressedInput = try await Self.preparedInput(
-                            messages: messages, config: suppressionConfig,
-                            thinkingEnabled: false, processor: context.processor,
-                            cannotDisableMessage:
-                                "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
-                        )
-                    } else {
-                        suppressedInput = nil
-                    }
-
-                    let reasoningSetup:
-                        (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
-                    if mayRunReasoningPath, declaresReasoning,
-                        let reasoningConfig = resolved.reasoningConfig
-                    {
-                        let thinkingEnabled = Self.thinkingEnabled(
-                            for: request.contextOptions.reasoningLevel)
-                        let reasoningInput = try await Self.preparedInput(
-                            messages: messages, config: reasoningConfig,
-                            thinkingEnabled: thinkingEnabled, processor: context.processor,
-                            cannotDisableMessage:
-                                "This model always reasons; reasoning cannot be disabled via reasoningLevel."
-                        )
-                        reasoningSetup = (
-                            reasoningInput, reasoningConfig,
-                            Self.reasoningPrimedInside(
-                                input: reasoningInput, config: reasoningConfig,
-                                tokenizer: context.tokenizer)
-                        )
-                    } else {
-                        reasoningSetup = nil
-                    }
+                    // The `.alwaysOn` capability gate throws in here, before
+                    // any path starts generation.
+                    let reasoningPlan = try await makeReasoningPlan(
+                        request: request,
+                        messages: messages,
+                        resolved: resolved,
+                        declaresReasoning: declaresReasoning,
+                        mayRunReasoningPath: mayRunReasoningPath,
+                        context: context)
 
                     // The prompt actually fed into generation: the suppressed
                     // prompt when we're forcing thinking off, otherwise the
                     // baseline `input` rendered above.
-                    let effectiveInput = suppressedInput ?? input
+                    let effectiveInput = reasoningPlan.suppressedInput ?? input
 
                     // Tool path, entered on every round while tools are enabled
                     // -- fresh turns and continuations alike. Allowed mode uses
                     // native generation so the model can answer or call a tool;
                     // required mode constrains generation to a real tool call.
-                    //
-                    // A tool body can start a second generation on this same
-                    // model. This executor releases the model container BEFORE
-                    // the SDK runs a tool body. This `perform` closure sends the
-                    // tool-call delta, then it returns. Each continuation round
-                    // opens its own `perform`. Thus the container lock covers
-                    // one generation. It does not cover a complete turn with
-                    // the tool rounds of that turn.
-                    // `ToolBodyContainerReentryTests` and
-                    // `ToolBodyContainerReentryRealModelTests` guard this
-                    // guarantee.
                     if !enabledToolDefinitions.isEmpty {
-                        // Re-render using the model's native tool-aware chat
-                        // template (Qwen/Llama/Phi/Gemma all ship one in their
-                        // tokenizer_config.json). This is what teaches the model
-                        // *what* tools exist and how to decide between them; the
-                        // grammar constraint below only enforces the *shape* of
-                        // whatever tool call it emits.
-                        // Think-then-call is gated to the enable_thinking
-                        // family (Qwen3/QwQ): their template both renders the tool
-                        // block AND honors `enable_thinking`. R1-style `.alwaysOn`
-                        // models are tool-blind (template ignores `tools:`), so
-                        // they fall through to the single-phase path unchanged;
-                        // thinking-disabled requests stay single-phase too.
-                        let thinkThenCallConfig: ReasoningConfig? = {
-                            guard declaresReasoning,
-                                let cfg = resolved.reasoningConfig,
-                                case .templateFlag = cfg.promptStrategy,
-                                Self.thinkingEnabled(
-                                    for: request.contextOptions.reasoningLevel) != false
-                            else { return nil }
-                            return cfg
-                        }()
-                        // Thread `enable_thinking` through the tool-aware template
-                        // so the prompt's thinking state matches how we drive
-                        // generation. For a toggleable model (`.templateFlag`, e.g.
-                        // Qwen3 whose `enable_thinking` defaults ON) the effective
-                        // value is:
-                        //   - reasoning declared: honor the requested level
-                        //     (default ON), and the think-then-call phase below
-                        //     lets the model reason before the grammar constrains it;
-                        //   - reasoning NOT declared: force thinking OFF, mirroring
-                        //     the unconstrained path's suppression (see
-                        //     `suppressedInput` above).
-                        // Forcing OFF here is load-bearing for both modes. Native
-                        // `.allowed` generation would otherwise surface undeclared
-                        // reasoning through response/tool parsing. In `.required`,
-                        // the grammar forces tool-call JSON from the first token, so
-                        // a thinking-primed model cannot emit its `<think>` block and
-                        // greedy decoding of unconstrained developer tool string
-                        // arguments can degenerate (Qwen: "1234567890...").
-                        // `.alwaysOn` models with reasoning undeclared were already
-                        // rejected by the capability gate above; `.none`/no-config
-                        // models take no context.
-                        let toolAwareContext: [String: any Sendable]?
-                        if case .templateFlag(let key, let defaultOn)? =
-                            resolved.reasoningConfig?.promptStrategy
-                        {
-                            let enabled =
-                                declaresReasoning
-                                ? (Self.thinkingEnabled(
-                                    for: request.contextOptions.reasoningLevel) ?? defaultOn)
-                                : false
-                            toolAwareContext = [key: enabled]
-                        } else {
-                            toolAwareContext = nil
-                        }
-                        // Prepare through the model's UserInputProcessor (like the
-                        // unconstrained and guided paths) instead of hand-building
-                        // an LMInput from raw applyChatTemplate output: processors
-                        // produce the token rank their model family requires (LLM
-                        // processors emit [N]; VLM processors emit [1, N], and VLM
-                        // `prepare` fatally aborts on 1-D input), and they carry
-                        // image/video content through to the model.
-                        if ToolCallingModeResolution.usesAllowedBehavior(toolCallingMode) {
-                            let toolSpecs = try ToolCallingConversions.makeToolSpecs(
-                                from: enabledToolDefinitions)
-                            let toolAwareInput = try await context.processor.prepare(
-                                input: UserInput(
-                                    chat: messages,
-                                    tools: toolSpecs,
-                                    additionalContext: toolAwareContext))
-                            let reasoning = thinkThenCallConfig.map {
-                                (
-                                    config: $0,
-                                    primedInside: Self.reasoningPrimedInside(
-                                        input: toolAwareInput,
-                                        config: $0,
-                                        tokenizer: context.tokenizer)
-                                )
-                            }
-                            let result = try await runAllowedToolGeneration(
-                                input: toolAwareInput,
-                                toolSpecs: toolSpecs,
-                                reasoning: reasoning,
-                                requestedMaxTokens: requestedMaxTokens,
-                                requestedTemperature: request.generationOptions.temperature,
-                                samplingConfiguration: requestedSamplingConfiguration,
-                                reasoningEntryID: reasoningEntryID,
-                                promptCache: promptCache,
-                                context: context,
-                                channel: channel)
-
-                            if result.endedInsideReasoning {
-                                await Self.emitMetadata(
-                                    ["incompleteOutput": true], entryID: entryID, into: channel)
-                            } else if !result.toolCalls.isEmpty {
-                                for call in result.toolCalls {
-                                    let argumentsData = try JSONEncoder().encode(
-                                        call.function.arguments)
-                                    let arguments = String(
-                                        decoding: argumentsData, as: UTF8.self)
-                                    await Self.emitToolCall(
-                                        id: call.id ?? UUID().uuidString,
-                                        name: call.function.name,
-                                        arguments: arguments,
-                                        entryID: toolCallsEntryID,
-                                        into: channel)
-                                }
-                            } else if let schemaJSON {
-                                try await runSchemaGeneration(
-                                    schemaJSON: schemaJSON,
-                                    input: input,
-                                    modelID: modelID,
-                                    requestedMaxTokens: requestedMaxTokens,
-                                    entryID: entryID,
-                                    promptCache: promptCache,
-                                    context: context,
-                                    channel: channel)
-                            } else {
-                                await Self.emit(
-                                    text: result.responseText,
-                                    entryID: entryID,
-                                    destination: .response,
-                                    into: channel)
-                            }
-                            if schemaJSON == nil || !result.toolCalls.isEmpty
-                                || result.endedInsideReasoning
-                            {
-                                await emitAllowedUsage(
-                                    result, entryID: entryID, promptCache: promptCache,
-                                    channel: channel)
-                            }
-                            Stream.gpu.synchronize()
-                            return
-                        }
-
-                        // Required mode is the only mode that reaches guided
-                        // tool generation, and it uses developer definitions only.
-                        // `GuidedGenerationLoop.run` builds its own key/value
-                        // cache and accepts none from a caller, thus this pass
-                        // carries nothing from an earlier turn.
-                        promptCache.carriesNoCache()
-                        let requiredToolDefinitions = enabledToolDefinitions
-                        let toolSpecs = try ToolCallingConversions.makeToolSpecs(
-                            from: requiredToolDefinitions)
-                        let toolAwareInput = try await context.processor.prepare(
-                            input: UserInput(
-                                chat: messages,
-                                tools: toolSpecs,
-                                additionalContext: toolAwareContext))
-
-                        let toolCallingGrammar =
-                            try SchemaConverter.encodeToolCallingGrammar(
-                                tools: requiredToolDefinitions
-                            )
-                        // The inner JSON envelope is still needed separately to
-                        // seed `CompletionReserve` -- the wrapper tokens
-                        // (`<tool_call>`, two `\n`s, `</tool_call>`) are small
-                        // and fixed, so padding the reserve with their
-                        // tokenized size adds noise rather than accuracy.
-                        let toolCallingEnvelopeJSON =
-                            try SchemaConverter.encodeToolCallingEnvelopeJSON(
-                                tools: requiredToolDefinitions
-                            )
-
-                        let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+                        try await runToolGeneration(
+                            request: request,
+                            messages: messages,
+                            enabledToolDefinitions: enabledToolDefinitions,
+                            toolCallingMode: toolCallingMode,
+                            schemaJSON: schemaJSON,
+                            baselineInput: input,
+                            resolved: resolved,
+                            declaresReasoning: declaresReasoning,
                             modelID: modelID,
-                            tokenizer: context.tokenizer
-                        )
-                        let constraint = try await MLXLanguageModel.makeConstraint(
-                            modelID: modelID,
-                            kind: .structuralTag,
-                            source: toolCallingGrammar,
-                            tokenizer: xgTokenizer,
-                            hostTokenizer: context.tokenizer,
-                            fastForward: true
-                        )
-
-                        // Always partition into zones -- the grammar has
-                        // wiggle room (JSON whitespace before the outer
-                        // `}`, whitespace before `\n</tool_call>`) that
-                        // open-source models tend to exploit into infinite
-                        // loops when not pushed toward structural close.
-                        // Use the caller's budget when set, otherwise the
-                        // Executor's default.
-                        let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
-                        let bias = await MLXLanguageModel.makeTokenizerBias(
-                            modelID: modelID,
-                            tokenizer: context.tokenizer
-                        )
-                        let closingBias = bias.closing
-                        let structuralReserve = CompletionReserve.estimate(
-                            schemaJSON: toolCallingEnvelopeJSON,
-                            tokenizer: context.tokenizer
-                        )
-                        let completionReserve = Swift.max(
-                            structuralReserve * 3, maxTokens / 4)
-                        let hardReserve = structuralReserve * 8
-
-                        let whitespaceBias = bias.whitespace
-                        let whitespaceTokenIDs = bias.whitespaceTokenIDs
-
-                        // PHASE 1 (think-then-call): reason unconstrained until
-                        // `</think>`, retaining the token IDs to prefill into the
-                        // constrained phase below. Empty on the single-phase path.
-                        var reasoningTokenIDs: [Int] = []
-                        if let cfg = thinkThenCallConfig {
-                            let primedInside = Self.reasoningPrimedInside(
-                                input: toolAwareInput, config: cfg,
-                                tokenizer: context.tokenizer)
-                            let phase1 = try await runToolCallReasoningPhase(
-                                input: toolAwareInput, config: cfg,
-                                primedInside: primedInside, maxTokens: maxTokens,
-                                requestedTemperature: request.generationOptions
-                                    .temperature,
-                                samplingConfiguration: requestedSamplingConfiguration,
-                                reasoningEntryID: reasoningEntryID,
-                                responseEntryID: entryID,
-                                context: context, channel: channel)
-                            reasoningTokenIDs = phase1.tokenIDs
-                            if !phase1.closed {
-                                // Cut off mid-thought (budget exhausted before
-                                // `</think>`). Don't prefill a truncated thought
-                                // into the grammar — signal and finish. Phase 1
-                                // already synchronized the GPU on its way out.
-                                await Self.emitMetadata(
-                                    ["incompleteOutput": true], entryID: entryID, into: channel)
-                                return
-                            }
-                        }
-
-                        // Phase 2 continues from the model's completed reasoning;
-                        // carry the raw IDs (no decode/re-encode) so the grammar
-                        // starts from the exact post-`</think>` state.
-                        let phase2Input =
-                            reasoningTokenIDs.isEmpty
-                            ? toolAwareInput
-                            : Self.continuationInput(
-                                from: toolAwareInput, appending: reasoningTokenIDs)
-                        // Shared budget (match the unconstrained path): the
-                        // envelope continues under the remaining budget, floored
-                        // at the completion reserve so it always has room to close
-                        // the tool call.
-                        let phase2MaxTokens =
-                            reasoningTokenIDs.isEmpty
-                            ? maxTokens
-                            : Swift.max(
-                                maxTokens - reasoningTokenIDs.count, completionReserve)
-
-                        var outputBuffer = ""
-                        var incomplete = false
-                        var generatedTokenCount: Int?
-                        do {
-                            generatedTokenCount = try Self.withGuidedGenerationSection {
-                                try GuidedGenerationLoop.run(
-                                    input: phase2Input,
-                                    context: context,
-                                    constraint: constraint,
-                                    maxTokens: phase2MaxTokens,
-                                    vocabSize: Int(xgTokenizer.vocabSize),
-                                    completionReserve: completionReserve,
-                                    hardReserve: hardReserve,
-                                    closingBias: closingBias,
-                                    whitespaceBias: whitespaceBias,
-                                    whitespaceTokenIDs: whitespaceTokenIDs
-                                ) { text in
-                                    outputBuffer += text
-                                    GuidedGenerationDiagnosticSink.current?.recordEmit()
-                                    return !Task.isCancelled
-                                }
-                            }
-                        } catch GuidedGenerationError.incompleteOutput {
-                            incomplete = true
-                        }
-                        try Task.checkCancellation()
-
-                        GuidedGenerationDiagnosticSink.current?.recordBuffer(
-                            outputBuffer, incompleteOutput: incomplete)
-
-                        await emitRequiredToolCallEvent(
-                            outputBuffer: outputBuffer,
+                            requestedMaxTokens: requestedMaxTokens,
+                            samplingConfiguration: requestedSamplingConfiguration,
+                            entryID: entryID,
                             toolCallsEntryID: toolCallsEntryID,
-                            channel: channel
-                        )
-
-                        if let generatedTokenCount {
-                            // Output total spans both phases (reasoning + envelope);
-                            // the reasoning subset is the Phase-1 token count,
-                            // clamped ≤ total.
-                            let reasoningCount = reasoningTokenIDs.count
-                            let totalOutput = generatedTokenCount + reasoningCount
-                            await Self.emitUsage(
-                                input: Self.usageInput(
-                                    fedTokenCount: toolAwareInput.text.tokens.size,
-                                    promptCache: promptCache),
-                                output: .init(
-                                    totalTokenCount: totalOutput,
-                                    reasoningTokenCount: Swift.min(reasoningCount, totalOutput)),
-                                entryID: entryID, into: channel)
-                        }
-
-                        if incomplete {
-                            await Self.emitMetadata(
-                                ["incompleteOutput": true], entryID: entryID, into: channel)
-                        }
+                            reasoningEntryID: reasoningEntryID,
+                            promptCache: promptCache,
+                            context: context,
+                            channel: channel)
                     } else if let schemaJSON {
                         try await runSchemaGeneration(
                             schemaJSON: schemaJSON,
@@ -1576,7 +1197,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             channel: channel)
                     } else {
                         try await runTextGeneration(
-                            reasoningSetup: reasoningSetup,
+                            reasoningSetup: reasoningPlan.reasoningSetup,
                             fallbackInput: effectiveInput,
                             requestedMaxTokens: requestedMaxTokens,
                             requestedTemperature: request.generationOptions.temperature,
@@ -1618,6 +1239,613 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 await ExecutorPromptCacheStore.shared.checkIn(promptCacheKey, promptCache.entry)
             }
             try outcome.get()
+        }
+
+        /// Resolves the per-instance configuration for one generation.
+        ///
+        /// The result is held strictly as a local by the caller; it never
+        /// lands in `context.configuration` or `Executor.Configuration`, so
+        /// two instances with the same id but different resolvers don't
+        /// cross-contaminate through the shared caches. Identity is read
+        /// from `context.configuration` (at load time) and never from the
+        /// resolved value.
+        ///
+        /// - Parameters:
+        ///   - context: The loaded model context whose configuration is resolved
+        ///   - modelID: The model identifier the descriptor carries
+        ///   - configurationResolver: The per-instance resolver to apply
+        private func resolveConfiguration(
+            context: ModelContext,
+            modelID: String,
+            configurationResolver: any ModelConfigurationResolver
+        ) -> ModelConfiguration {
+            let configData = try? Data(
+                contentsOf:
+                    context.configuration.modelDirectory
+                    .appendingPathComponent("config.json"))
+            let modelType =
+                configData.flatMap {
+                    try? JSONDecoder.json5().decode(
+                        BaseConfiguration.self, from: $0
+                    ).modelType
+                } ?? ""
+            let descriptor = ModelDescriptor(
+                modelType: modelType,
+                modelId: modelID,
+                configData: configData,
+                tokenizer: context.tokenizer)
+            return configurationResolver.resolve(
+                context.configuration, for: descriptor)
+        }
+
+        /// The reasoning inputs one generation turn carries.
+        private struct ReasoningPlan {
+            /// The prompt re-rendered with thinking forced off, or nil when
+            /// no suppression applies to this turn.
+            let suppressedInput: LMInput?
+            /// The reasoning prompt, its config, and whether the template
+            /// primed generation inside the think block; nil when this turn
+            /// does not run the reasoning path.
+            let reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
+        }
+
+        /// Gates the reasoning capability and prepares the reasoning inputs.
+        ///
+        /// Capability gate: when the caller omits `.reasoning` but the
+        /// resolved configuration carries a reasoning config, the model must
+        /// not be allowed to think:
+        ///
+        /// - Toggleable strategies (`.templateFlag`) re-render the prompt
+        ///   with thinking off (the returned ``ReasoningPlan/suppressedInput``,
+        ///   which only the unconstrained path consumes).
+        /// - Non-suppressible strategies (`.alwaysOn`) raise
+        ///   `unsupportedCapability` BEFORE generation, regardless of which
+        ///   path (tools / schema / unconstrained) the request would
+        ///   otherwise take. The throw is path-independent so a tool-calling
+        ///   or schema-guided request on a model that always reasons
+        ///   surfaces the same typed error the unconstrained path does,
+        ///   never a silent leak through the grammar's malformed-output
+        ///   fallback.
+        ///
+        /// - Parameters:
+        ///   - request: The request whose context options select the reasoning level
+        ///   - messages: The chat messages the prompts re-render from
+        ///   - resolved: The resolver-patched configuration carrying the reasoning config
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init
+        ///   - mayRunReasoningPath: Whether this turn takes the unconstrained path
+        ///   - context: The loaded model context whose processor renders the prompts
+        private func makeReasoningPlan(
+            request: LanguageModelExecutorGenerationRequest,
+            messages: [Chat.Message],
+            resolved: ModelConfiguration,
+            declaresReasoning: Bool,
+            mayRunReasoningPath: Bool,
+            context: ModelContext
+        ) async throws -> ReasoningPlan {
+            if !declaresReasoning, let suppressionConfig = resolved.reasoningConfig {
+                do {
+                    _ = try suppressionConfig.promptStrategy
+                        .additionalContext(forThinkingEnabled: false)
+                } catch ReasoningError.cannotDisableReasoning {
+                    throw LanguageModelError.unsupportedCapability(
+                        LanguageModelError.UnsupportedCapability(
+                            capability: .reasoning,
+                            debugDescription:
+                                "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
+                        ))
+                }
+            }
+
+            // When .reasoning is OMITTED on the unconstrained path,
+            // re-render the prompt with thinking off so the model
+            // doesn't emit `<think>`. Toggleable-only;
+            // .alwaysOn was already rejected above.
+            let suppressedInput: LMInput?
+            if mayRunReasoningPath, !declaresReasoning,
+                let suppressionConfig = resolved.reasoningConfig
+            {
+                suppressedInput = try await Self.preparedInput(
+                    messages: messages, config: suppressionConfig,
+                    thinkingEnabled: false, processor: context.processor,
+                    cannotDisableMessage:
+                        "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
+                )
+            } else {
+                suppressedInput = nil
+            }
+
+            let reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
+            if mayRunReasoningPath, declaresReasoning,
+                let reasoningConfig = resolved.reasoningConfig
+            {
+                let thinkingEnabled = Self.thinkingEnabled(
+                    for: request.contextOptions.reasoningLevel)
+                let reasoningInput = try await Self.preparedInput(
+                    messages: messages, config: reasoningConfig,
+                    thinkingEnabled: thinkingEnabled, processor: context.processor,
+                    cannotDisableMessage:
+                        "This model always reasons; reasoning cannot be disabled via reasoningLevel."
+                )
+                reasoningSetup = (
+                    reasoningInput, reasoningConfig,
+                    Self.reasoningPrimedInside(
+                        input: reasoningInput, config: reasoningConfig,
+                        tokenizer: context.tokenizer)
+                )
+            } else {
+                reasoningSetup = nil
+            }
+
+            return ReasoningPlan(
+                suppressedInput: suppressedInput, reasoningSetup: reasoningSetup)
+        }
+
+        /// Runs the tool path of one generation turn — fresh turns and
+        /// continuations alike.
+        ///
+        /// Allowed mode uses native generation so the model can answer or
+        /// call a tool; required mode constrains generation to a real tool
+        /// call.
+        ///
+        /// A tool body can start a second generation on this same model.
+        /// This executor releases the model container BEFORE the SDK runs a
+        /// tool body: the caller's `perform` closure sends the tool-call
+        /// delta, then it returns, and each continuation round opens its
+        /// own `perform`. Thus the container lock covers one generation. It
+        /// does not cover a complete turn with the tool rounds of that
+        /// turn. `ToolBodyContainerReentryTests` and
+        /// `ToolBodyContainerReentryRealModelTests` guard this guarantee.
+        ///
+        /// - Parameters:
+        ///   - request: The generation request for this turn
+        ///   - messages: The chat messages the tool-aware prompt renders from
+        ///   - enabledToolDefinitions: The tool definitions this turn exposes
+        ///   - toolCallingMode: The resolved tool-calling mode
+        ///   - schemaJSON: The encoded response schema, when the request carries one
+        ///   - baselineInput: The prompt rendered without tool awareness
+        ///   - resolved: The resolver-patched configuration
+        ///   - declaresReasoning: Whether `.reasoning` was declared at init
+        ///   - modelID: The model identifier the constraint caches key on
+        ///   - requestedMaxTokens: The caller's token budget, when set
+        ///   - samplingConfiguration: The translated sampling mode
+        ///   - entryID: The transcript entry id for response events
+        ///   - toolCallsEntryID: The transcript entry id for tool-call events
+        ///   - reasoningEntryID: The transcript entry id for reasoning events
+        ///   - promptCache: The session's prompt-cache slot
+        ///   - context: The loaded model context
+        ///   - channel: The channel to send response events into
+        private func runToolGeneration(
+            request: LanguageModelExecutorGenerationRequest,
+            messages: [Chat.Message],
+            enabledToolDefinitions: [Transcript.ToolDefinition],
+            toolCallingMode: GenerationOptions.ToolCallingMode,
+            schemaJSON: String?,
+            baselineInput: LMInput,
+            resolved: ModelConfiguration,
+            declaresReasoning: Bool,
+            modelID: String,
+            requestedMaxTokens: Int?,
+            samplingConfiguration: MLXSamplingConfiguration?,
+            entryID: String,
+            toolCallsEntryID: String,
+            reasoningEntryID: String,
+            promptCache: ExecutorPromptCacheSlot,
+            context: ModelContext,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws {
+            // Re-render using the model's native tool-aware chat
+            // template (Qwen/Llama/Phi/Gemma all ship one in their
+            // tokenizer_config.json). This is what teaches the model
+            // *what* tools exist and how to decide between them; the
+            // grammar constraint below only enforces the *shape* of
+            // whatever tool call it emits.
+            // Think-then-call is gated to the enable_thinking
+            // family (Qwen3/QwQ): their template both renders the tool
+            // block AND honors `enable_thinking`. R1-style `.alwaysOn`
+            // models are tool-blind (template ignores `tools:`), so
+            // they fall through to the single-phase path unchanged;
+            // thinking-disabled requests stay single-phase too.
+            let thinkThenCallConfig: ReasoningConfig? = {
+                guard declaresReasoning,
+                    let cfg = resolved.reasoningConfig,
+                    case .templateFlag = cfg.promptStrategy,
+                    Self.thinkingEnabled(
+                        for: request.contextOptions.reasoningLevel) != false
+                else { return nil }
+                return cfg
+            }()
+            // Thread `enable_thinking` through the tool-aware template
+            // so the prompt's thinking state matches how we drive
+            // generation. For a toggleable model (`.templateFlag`, e.g.
+            // Qwen3 whose `enable_thinking` defaults ON) the effective
+            // value is:
+            //   - reasoning declared: honor the requested level
+            //     (default ON), and the think-then-call phase below
+            //     lets the model reason before the grammar constrains it;
+            //   - reasoning NOT declared: force thinking OFF, mirroring
+            //     the unconstrained path's suppression (see
+            //     `ReasoningPlan.suppressedInput`).
+            // Forcing OFF here is load-bearing for both modes. Native
+            // `.allowed` generation would otherwise surface undeclared
+            // reasoning through response/tool parsing. In `.required`,
+            // the grammar forces tool-call JSON from the first token, so
+            // a thinking-primed model cannot emit its `<think>` block and
+            // greedy decoding of unconstrained developer tool string
+            // arguments can degenerate (Qwen: "1234567890...").
+            // `.alwaysOn` models with reasoning undeclared were already
+            // rejected by the capability gate above; `.none`/no-config
+            // models take no context.
+            let toolAwareContext: [String: any Sendable]?
+            if case .templateFlag(let key, let defaultOn)? =
+                resolved.reasoningConfig?.promptStrategy
+            {
+                let enabled =
+                    declaresReasoning
+                    ? (Self.thinkingEnabled(
+                        for: request.contextOptions.reasoningLevel) ?? defaultOn)
+                    : false
+                toolAwareContext = [key: enabled]
+            } else {
+                toolAwareContext = nil
+            }
+            if ToolCallingModeResolution.usesAllowedBehavior(toolCallingMode) {
+                try await runAllowedToolTurn(
+                    request: request,
+                    messages: messages,
+                    enabledToolDefinitions: enabledToolDefinitions,
+                    toolAwareContext: toolAwareContext,
+                    thinkThenCallConfig: thinkThenCallConfig,
+                    schemaJSON: schemaJSON,
+                    baselineInput: baselineInput,
+                    modelID: modelID,
+                    requestedMaxTokens: requestedMaxTokens,
+                    samplingConfiguration: samplingConfiguration,
+                    entryID: entryID,
+                    toolCallsEntryID: toolCallsEntryID,
+                    reasoningEntryID: reasoningEntryID,
+                    promptCache: promptCache,
+                    context: context,
+                    channel: channel)
+                return
+            }
+            try await runRequiredToolTurn(
+                request: request,
+                messages: messages,
+                enabledToolDefinitions: enabledToolDefinitions,
+                toolAwareContext: toolAwareContext,
+                thinkThenCallConfig: thinkThenCallConfig,
+                modelID: modelID,
+                requestedMaxTokens: requestedMaxTokens,
+                samplingConfiguration: samplingConfiguration,
+                entryID: entryID,
+                toolCallsEntryID: toolCallsEntryID,
+                reasoningEntryID: reasoningEntryID,
+                promptCache: promptCache,
+                context: context,
+                channel: channel)
+        }
+
+        /// Runs allowed tool mode: native generation over the tool-aware
+        /// prompt, so the model can answer in text or call a tool.
+        ///
+        /// The prompt goes through the model's UserInputProcessor (like the
+        /// unconstrained and guided paths) instead of hand-building an
+        /// LMInput from raw applyChatTemplate output: processors produce
+        /// the token rank their model family requires (LLM processors emit
+        /// [N]; VLM processors emit [1, N], and VLM `prepare` fatally
+        /// aborts on 1-D input), and they carry image/video content through
+        /// to the model.
+        ///
+        /// - Parameters:
+        ///   - request: The generation request for this turn
+        ///   - messages: The chat messages the tool-aware prompt renders from
+        ///   - enabledToolDefinitions: The tool definitions this turn exposes
+        ///   - toolAwareContext: The thinking flag threaded into the template
+        ///   - thinkThenCallConfig: The reasoning config of the think-then-call phase, when active
+        ///   - schemaJSON: The encoded response schema, when the request carries one
+        ///   - baselineInput: The prompt rendered without tool awareness
+        ///   - modelID: The model identifier the schema fallback keys on
+        ///   - requestedMaxTokens: The caller's token budget, when set
+        ///   - samplingConfiguration: The translated sampling mode
+        ///   - entryID: The transcript entry id for response events
+        ///   - toolCallsEntryID: The transcript entry id for tool-call events
+        ///   - reasoningEntryID: The transcript entry id for reasoning events
+        ///   - promptCache: The session's prompt-cache slot
+        ///   - context: The loaded model context
+        ///   - channel: The channel to send response events into
+        private func runAllowedToolTurn(
+            request: LanguageModelExecutorGenerationRequest,
+            messages: [Chat.Message],
+            enabledToolDefinitions: [Transcript.ToolDefinition],
+            toolAwareContext: [String: any Sendable]?,
+            thinkThenCallConfig: ReasoningConfig?,
+            schemaJSON: String?,
+            baselineInput: LMInput,
+            modelID: String,
+            requestedMaxTokens: Int?,
+            samplingConfiguration: MLXSamplingConfiguration?,
+            entryID: String,
+            toolCallsEntryID: String,
+            reasoningEntryID: String,
+            promptCache: ExecutorPromptCacheSlot,
+            context: ModelContext,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws {
+            let toolSpecs = try ToolCallingConversions.makeToolSpecs(
+                from: enabledToolDefinitions)
+            let toolAwareInput = try await context.processor.prepare(
+                input: UserInput(
+                    chat: messages,
+                    tools: toolSpecs,
+                    additionalContext: toolAwareContext))
+            let reasoning = thinkThenCallConfig.map {
+                (
+                    config: $0,
+                    primedInside: Self.reasoningPrimedInside(
+                        input: toolAwareInput,
+                        config: $0,
+                        tokenizer: context.tokenizer)
+                )
+            }
+            let result = try await runAllowedToolGeneration(
+                input: toolAwareInput,
+                toolSpecs: toolSpecs,
+                reasoning: reasoning,
+                requestedMaxTokens: requestedMaxTokens,
+                requestedTemperature: request.generationOptions.temperature,
+                samplingConfiguration: samplingConfiguration,
+                reasoningEntryID: reasoningEntryID,
+                promptCache: promptCache,
+                context: context,
+                channel: channel)
+
+            if result.endedInsideReasoning {
+                await Self.emitMetadata(
+                    ["incompleteOutput": true], entryID: entryID, into: channel)
+            } else if !result.toolCalls.isEmpty {
+                for call in result.toolCalls {
+                    let argumentsData = try JSONEncoder().encode(
+                        call.function.arguments)
+                    let arguments = String(
+                        decoding: argumentsData, as: UTF8.self)
+                    await Self.emitToolCall(
+                        id: call.id ?? UUID().uuidString,
+                        name: call.function.name,
+                        arguments: arguments,
+                        entryID: toolCallsEntryID,
+                        into: channel)
+                }
+            } else if let schemaJSON {
+                try await runSchemaGeneration(
+                    schemaJSON: schemaJSON,
+                    input: baselineInput,
+                    modelID: modelID,
+                    requestedMaxTokens: requestedMaxTokens,
+                    entryID: entryID,
+                    promptCache: promptCache,
+                    context: context,
+                    channel: channel)
+            } else {
+                await Self.emit(
+                    text: result.responseText,
+                    entryID: entryID,
+                    destination: .response,
+                    into: channel)
+            }
+            if schemaJSON == nil || !result.toolCalls.isEmpty
+                || result.endedInsideReasoning
+            {
+                await emitAllowedUsage(
+                    result, entryID: entryID, promptCache: promptCache,
+                    channel: channel)
+            }
+            Stream.gpu.synchronize()
+        }
+
+        /// Runs required tool mode: guided generation constrained to a real
+        /// tool call.
+        ///
+        /// Required mode is the only mode that reaches guided tool
+        /// generation, and it uses developer definitions only.
+        /// `GuidedGenerationLoop.run` builds its own key/value cache and
+        /// accepts none from a caller, thus this pass carries nothing from
+        /// an earlier turn.
+        ///
+        /// - Parameters:
+        ///   - request: The generation request for this turn
+        ///   - messages: The chat messages the tool-aware prompt renders from
+        ///   - enabledToolDefinitions: The tool definitions the grammar constrains to
+        ///   - toolAwareContext: The thinking flag threaded into the template
+        ///   - thinkThenCallConfig: The reasoning config of the think-then-call phase, when active
+        ///   - modelID: The model identifier the constraint caches key on
+        ///   - requestedMaxTokens: The caller's token budget, when set
+        ///   - samplingConfiguration: The translated sampling mode
+        ///   - entryID: The transcript entry id for response events
+        ///   - toolCallsEntryID: The transcript entry id for tool-call events
+        ///   - reasoningEntryID: The transcript entry id for reasoning events
+        ///   - promptCache: The session's prompt-cache slot
+        ///   - context: The loaded model context
+        ///   - channel: The channel to send response events into
+        private func runRequiredToolTurn(
+            request: LanguageModelExecutorGenerationRequest,
+            messages: [Chat.Message],
+            enabledToolDefinitions: [Transcript.ToolDefinition],
+            toolAwareContext: [String: any Sendable]?,
+            thinkThenCallConfig: ReasoningConfig?,
+            modelID: String,
+            requestedMaxTokens: Int?,
+            samplingConfiguration: MLXSamplingConfiguration?,
+            entryID: String,
+            toolCallsEntryID: String,
+            reasoningEntryID: String,
+            promptCache: ExecutorPromptCacheSlot,
+            context: ModelContext,
+            channel: LanguageModelExecutorGenerationChannel
+        ) async throws {
+            promptCache.carriesNoCache()
+            let requiredToolDefinitions = enabledToolDefinitions
+            let toolSpecs = try ToolCallingConversions.makeToolSpecs(
+                from: requiredToolDefinitions)
+            let toolAwareInput = try await context.processor.prepare(
+                input: UserInput(
+                    chat: messages,
+                    tools: toolSpecs,
+                    additionalContext: toolAwareContext))
+
+            let toolCallingGrammar =
+                try SchemaConverter.encodeToolCallingGrammar(
+                    tools: requiredToolDefinitions
+                )
+            // The inner JSON envelope is still needed separately to
+            // seed `CompletionReserve` -- the wrapper tokens
+            // (`<tool_call>`, two `\n`s, `</tool_call>`) are small
+            // and fixed, so padding the reserve with their
+            // tokenized size adds noise rather than accuracy.
+            let toolCallingEnvelopeJSON =
+                try SchemaConverter.encodeToolCallingEnvelopeJSON(
+                    tools: requiredToolDefinitions
+                )
+
+            let xgTokenizer = try await MLXLanguageModel.makeXGTokenizer(
+                modelID: modelID,
+                tokenizer: context.tokenizer
+            )
+            let constraint = try await MLXLanguageModel.makeConstraint(
+                modelID: modelID,
+                kind: .structuralTag,
+                source: toolCallingGrammar,
+                tokenizer: xgTokenizer,
+                hostTokenizer: context.tokenizer,
+                fastForward: true
+            )
+
+            // Always partition into zones -- the grammar has
+            // wiggle room (JSON whitespace before the outer
+            // `}`, whitespace before `\n</tool_call>`) that
+            // open-source models tend to exploit into infinite
+            // loops when not pushed toward structural close.
+            // Use the caller's budget when set, otherwise the
+            // Executor's default.
+            let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
+            let bias = await MLXLanguageModel.makeTokenizerBias(
+                modelID: modelID,
+                tokenizer: context.tokenizer
+            )
+            let closingBias = bias.closing
+            let structuralReserve = CompletionReserve.estimate(
+                schemaJSON: toolCallingEnvelopeJSON,
+                tokenizer: context.tokenizer
+            )
+            let completionReserve = Swift.max(
+                structuralReserve * 3, maxTokens / 4)
+            let hardReserve = structuralReserve * 8
+
+            let whitespaceBias = bias.whitespace
+            let whitespaceTokenIDs = bias.whitespaceTokenIDs
+
+            // PHASE 1 (think-then-call): reason unconstrained until
+            // `</think>`, retaining the token IDs to prefill into the
+            // constrained phase below. Empty on the single-phase path.
+            var reasoningTokenIDs: [Int] = []
+            if let cfg = thinkThenCallConfig {
+                let primedInside = Self.reasoningPrimedInside(
+                    input: toolAwareInput, config: cfg,
+                    tokenizer: context.tokenizer)
+                let phase1 = try await runToolCallReasoningPhase(
+                    input: toolAwareInput, config: cfg,
+                    primedInside: primedInside, maxTokens: maxTokens,
+                    requestedTemperature: request.generationOptions
+                        .temperature,
+                    samplingConfiguration: samplingConfiguration,
+                    reasoningEntryID: reasoningEntryID,
+                    responseEntryID: entryID,
+                    context: context, channel: channel)
+                reasoningTokenIDs = phase1.tokenIDs
+                if !phase1.closed {
+                    // Cut off mid-thought (budget exhausted before
+                    // `</think>`). Don't prefill a truncated thought
+                    // into the grammar — signal and finish. Phase 1
+                    // already synchronized the GPU on its way out.
+                    await Self.emitMetadata(
+                        ["incompleteOutput": true], entryID: entryID, into: channel)
+                    return
+                }
+            }
+
+            // Phase 2 continues from the model's completed reasoning;
+            // carry the raw IDs (no decode/re-encode) so the grammar
+            // starts from the exact post-`</think>` state.
+            let phase2Input =
+                reasoningTokenIDs.isEmpty
+                ? toolAwareInput
+                : Self.continuationInput(
+                    from: toolAwareInput, appending: reasoningTokenIDs)
+            // Shared budget (match the unconstrained path): the
+            // envelope continues under the remaining budget, floored
+            // at the completion reserve so it always has room to close
+            // the tool call.
+            let phase2MaxTokens =
+                reasoningTokenIDs.isEmpty
+                ? maxTokens
+                : Swift.max(
+                    maxTokens - reasoningTokenIDs.count, completionReserve)
+
+            var outputBuffer = ""
+            var incomplete = false
+            var generatedTokenCount: Int?
+            do {
+                generatedTokenCount = try Self.withGuidedGenerationSection {
+                    try GuidedGenerationLoop.run(
+                        input: phase2Input,
+                        context: context,
+                        constraint: constraint,
+                        maxTokens: phase2MaxTokens,
+                        vocabSize: Int(xgTokenizer.vocabSize),
+                        completionReserve: completionReserve,
+                        hardReserve: hardReserve,
+                        closingBias: closingBias,
+                        whitespaceBias: whitespaceBias,
+                        whitespaceTokenIDs: whitespaceTokenIDs
+                    ) { text in
+                        outputBuffer += text
+                        GuidedGenerationDiagnosticSink.current?.recordEmit()
+                        return !Task.isCancelled
+                    }
+                }
+            } catch GuidedGenerationError.incompleteOutput {
+                incomplete = true
+            }
+            try Task.checkCancellation()
+
+            GuidedGenerationDiagnosticSink.current?.recordBuffer(
+                outputBuffer, incompleteOutput: incomplete)
+
+            await emitRequiredToolCallEvent(
+                outputBuffer: outputBuffer,
+                toolCallsEntryID: toolCallsEntryID,
+                channel: channel
+            )
+
+            if let generatedTokenCount {
+                // Output total spans both phases (reasoning + envelope);
+                // the reasoning subset is the Phase-1 token count,
+                // clamped ≤ total.
+                let reasoningCount = reasoningTokenIDs.count
+                let totalOutput = generatedTokenCount + reasoningCount
+                await Self.emitUsage(
+                    input: Self.usageInput(
+                        fedTokenCount: toolAwareInput.text.tokens.size,
+                        promptCache: promptCache),
+                    output: .init(
+                        totalTokenCount: totalOutput,
+                        reasoningTokenCount: Swift.min(reasoningCount, totalOutput)),
+                    entryID: entryID, into: channel)
+            }
+
+            if incomplete {
+                await Self.emitMetadata(
+                    ["incompleteOutput": true], entryID: entryID, into: channel)
+            }
         }
 
         private struct AllowedToolGenerationResult {

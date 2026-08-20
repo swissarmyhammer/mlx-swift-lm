@@ -57,6 +57,88 @@ comments:
     - note: a `diagnostics check working` call reported 2 stale "cannot find in scope" errors in `ToolBodyContainerReentryTests.swift` for `makeScriptedWeightsDirectory` and `makeScriptedContainer`. Both functions exist in `ScriptedModelTestSupport.swift` in the same test target, and the real `xcodebuild build-for-testing` step built and ran this test with no error. This is a stale SourceKit index, not a real defect (the setup status shows sourcekit-lsp is not installed in this environment).
     - next: ready for review.
   timestamp: 2026-08-20T13:18:40.181828+00:00
+- actor: claude-code
+  id: 01m0fn85cm4z86b7j013a55b0m
+  text: |
+    ### commit — changed
+    - evidence: 168dde8 fix(foundationmodels): drain GPU before returning from cancelled generation (14 files changed, 904 insertions(+), 271 deletions(-))
+    - Staged and committed the GenerationDrainCoordinator change in Libraries/MLXFoundationModels/MLXLanguageModel.swift, the new hermetic tests CancelledGenerationDrainTests.swift and ScriptedModelTestSupport.swift, and the doubles extraction in ToolBodyContainerReentryTests.swift.
+    - Ran the pre-commit formatter (swift-format, repo-wide) per project rules before commit. It reflowed 6 unrelated files (MiniMaxM3 integration tests, MiniMaxM3.swift, MiniMaxM3ToolCallParser.swift, DeepSeekV4Attention.swift, MiniMaxM3Tests.swift, ToolTests.swift) with line-wrap-only changes, no logic changes. Those formatting changes are included in this commit.
+    - The scratch file IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/CancelledGenerationTimeLimitRecipeTests.swift named in the caller's warning does not exist in this branch, so nothing was excluded on that account.
+    - next: proceed to review.
+  timestamp: 2026-08-20T13:19:59.380147+00:00
+- actor: claude-code
+  id: 01m0fnxf2cw5h5gxmkz9t528h5
+  text: |-
+    ### review — findings
+    - evidence: `review sha HEAD~1..HEAD` — 3 findings (confirmed 4, refuted 1, attempted 21): Libraries/MLXFoundationModels/MLXLanguageModel.swift:1039, Tests/MLXFoundationModelsTests/ScriptedModelTestSupport.swift:42, Tests/MLXFoundationModelsTests/ScriptedModelTestSupport.swift:196
+    - next: correct the three findings, then run the review again
+  timestamp: 2026-08-20T13:31:37.420318+00:00
+- actor: claude-code
+  id: 01m0fnycj9gabf15j4hwp773kp
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 4 files (GenerationDrainCoordinator + regression tests)
+    - test: green — 5 bundles, 1656 tests, 0 failures, 0 warnings
+    - commit: 168dde8e411d69930ee21ef74b6436b5670a1953
+    - review: findings — Libraries/MLXFoundationModels/MLXLanguageModel.swift:1039 (function-length-swift), Tests/MLXFoundationModelsTests/ScriptedModelTestSupport.swift:42 (magic-numbers-swift), Tests/MLXFoundationModelsTests/ScriptedModelTestSupport.swift:196 (magic-numbers-swift)
+  timestamp: 2026-08-20T13:32:07.625325+00:00
+- actor: claude-code
+  id: 01m0fpbch0afy9z0vevfe1gsmh
+  text: |-
+    Research for the review findings (2026-08-20 08:20):
+
+    - Rule bodies read from `dump validators`. `function-length-swift`: swiftlint `function_body_length` + `closure_body_length`, both gated at 250 lines excluding comments and whitespace. `magic-numbers-swift`: swiftlint `no_magic_numbers` with `allowed_numbers: [0, 1, -1, 100]`; scalar declarations (static let, stored property, default parameter) are silent, but literals in expressions and in array literals report.
+    - Measured the whole file for the function-length cause: `runRespond` (body 381 code lines) is the ONLY body over 250 in `MLXLanguageModel.swift`. Its inner `container.perform` closure alone spans 314 code lines, so the closure must shrink too, not only the outer function. Next-largest bodies: `runReasoning` ~165, `runRequiredToolTurn` extraction target ~124 — all far under the gate.
+    - Decomposition plan (no behavior change): extract from `runRespond` into private Executor methods — `resolveConfiguration` (config.json read + resolver), `makeReasoningPlan` (capability gate + suppressed input + reasoning setup, returned as a `ReasoningPlan` struct), and `runToolGeneration` dispatching to `runAllowedToolTurn` / `runRequiredToolTurn`. The allowed branch's early `return` becomes a normal method return; the trailing `Stream.gpu.synchronize()` in the perform closure then runs one extra time on those paths, which is an idempotent no-op on a quiet stream.
+    - Magic numbers in `ScriptedModelTestSupport.swift`: `0xFF` mask in `decode` (line 42) and the `[1, 2, 3]` array literal in `promptTokens` (line 196). Whole-file sweep found no other unnamed literal outside the allow list in an expression or array position. Fix: named `tokenByteMask` constant; derive `promptTokens` from a named `promptTokenCount` via `Array(1...promptTokenCount)`.
+  timestamp: 2026-08-20T13:39:13.568508+00:00
+- actor: claude-code
+  id: 01m0fpr93jy4c2m89pz00eq9d0
+  text: |-
+    Fixed all 3 review findings from 2026-08-20 08:20. No behavior change.
+
+    1. `function-length-swift` at `MLXLanguageModel.swift:1039` — decomposed `runRespond` (body was 381 code lines; its inner `container.perform` closure alone was 314). Extracted five private Executor members, each with the moved code verbatim: `resolveConfiguration` (config.json read + per-instance resolver), `ReasoningPlan` struct + `makeReasoningPlan` (the path-independent `.alwaysOn` capability gate, thinking suppression, and reasoning setup), `runToolGeneration` (think-then-call config + `enable_thinking` template context + mode dispatch), `runAllowedToolTurn`, and `runRequiredToolTurn`. Two intentional non-semantic deltas: the allowed branch's early `return` from the perform closure became a normal return from `runToolGeneration`, and the required-mode phase-1 early return does the same — on both paths the closure's trailing `Stream.gpu.synchronize()` now runs one extra time on an already-quiet stream, an idempotent no-op. Whole-file check: `runRespond` was the only body over the gate; every function in the file is now under 250.
+    2 and 3. `magic-numbers-swift` at `ScriptedModelTestSupport.swift:42` and `:196` — named the `0xFF` decode mask as `ScriptedByteTokenizer.tokenByteMask`, and replaced the `[1, 2, 3]` array literal with `Array(1...promptTokenCount)` over a named `promptTokenCount`. Whole-file sweep: no other unnamed literal outside the `[0, 1, -1, 100]` allow list remains in an expression or array position.
+
+    Verification:
+
+    - swiftlint 0.65.0 (the validators' own version and rule configs, child config with `function_body_length`/`closure_body_length` at 250 and `no_magic_numbers` with `allowed_numbers: [0, 1, -1, 100]`): zero findings on both files.
+    - `swift build --build-tests`: clean, no compiler warnings.
+    - `xcodebuild build-for-testing -skipPackagePluginValidation -scheme mlx-swift-lm-Package -destination 'platform=macOS'`: TEST BUILD SUCCEEDED, zero compiler warnings.
+    - `xcrun xctest MLXFoundationModelsTests.xctest`: 162 tests in 25 suites, all passed, exit 0. The "Cancelled generation drain" regression suite passed (both tests) — the GenerationDrainCoordinator fix from 168dde8e keeps working.
+    - `swift-format` ran repo-wide after the edits; only the two intended files changed.
+
+    Note for the runner: the DerivedData glob `mlx-swift-lm*` now matches TWO directories (`mlx-swift-lm-…` and a stale `mlx-swift-lm_main-…`), so `D=$(echo …)` from CLAUDE.md gets a two-path string and `xcrun xctest "$D/…"` silently runs nothing (prints an env dump, exit 0, ~100 ms). Use the exact directory `mlx-swift-lm-cnjnzwndareuzzexscgeoxmybjtz` or delete the stale one.
+  timestamp: 2026-08-20T13:46:16.050522+00:00
+- actor: claude-code
+  id: 01m0fprewpsvmy9ecsc8f2jv9w
+  text: |-
+    ### implement — changed
+    - evidence: 2 files — Libraries/MLXFoundationModels/MLXLanguageModel.swift (runRespond decomposed into resolveConfiguration, ReasoningPlan + makeReasoningPlan, runToolGeneration, runAllowedToolTurn, runRequiredToolTurn; every body now under 250 code lines), Tests/MLXFoundationModelsTests/ScriptedModelTestSupport.swift (named constants tokenByteMask and promptTokenCount replace the 0xFF and [1, 2, 3] literals). swiftlint 0.65.0 with the validators' configs: 0 findings on both files. Test build succeeded with 0 warnings; MLXFoundationModelsTests 162/162 passed including the Cancelled generation drain suite. All 3 review findings checked off on the card.
+    - next: /review
+  timestamp: 2026-08-20T13:46:21.974084+00:00
+- actor: claude-code
+  id: 01m0fqdftbvatcq99s3msddx7t
+  text: |-
+    ### test — green
+
+    - command 1: `xcodebuild build-for-testing -skipPackagePluginValidation -scheme mlx-swift-lm-Package -destination 'platform=macOS'`. Result: build OK. 0 errors. 0 compiler warnings (checked with pattern `.swift:LINE:COL: warning:`).
+    - DerivedData had two folders. The correct folder is `mlx-swift-lm-cnjnzwndareuzzexscgeoxmybjtz`. It has all five `.xctest` bundles and the `mlx-swift_Cmlx.bundle` metallib.
+    - command 2 (one run per bundle): `xcrun xctest "$D/<Bundle>.xctest"`.
+
+    Test counts per bundle:
+    - MLXLMTests: 919 tests (Swift Testing) + 493 tests (XCTest) = 1412 tests. 0 failures.
+    - MLXGuidedGenerationTests: 70 tests (includes suite `ConstraintCachingTests`). 0 failures.
+    - MLXFoundationModelsTests: 162 tests. 0 failures.
+    - CXGrammarTests: 7 tests. 0 failures.
+    - MLXHuggingFaceMacrosTests: 5 tests. 0 failures.
+    - Total: 1656 tests. 0 failures. 0 skipped tests. 0 warnings.
+
+    Extra check: I touched `Libraries/MLXFoundationModels/MLXLanguageModel.swift` and `Tests/MLXFoundationModelsTests/ScriptedModelTestSupport.swift` to force a fresh compile of the two files changed in this iteration, then rebuilt. Both files compiled with 0 warnings. One non-code message came from the Xcode tool `appintentsmetadataprocessor`: "Metadata extraction skipped, no AppIntents.framework dependency found". This is standard Xcode output for a test bundle with no AppIntents framework. It is not a compiler warning about the source code, and it is not present at all in the CI-matching build. Then I ran `git status --porcelain` to confirm the touch did not change file content, only the timestamp.
+
+    All tests pass. Zero failures. Zero warnings. Zero skipped tests. The build is clean.
+  timestamp: 2026-08-20T13:57:51.051066+00:00
 position_column: doing
 position_ordinal: '80'
 title: A cancelled generation returns to the caller before the GPU drain completes, and a process exit in that window aborts on signal 6 or 11
@@ -105,3 +187,11 @@ Counter-example that stays green: cancel a 1B generation mid-decode with `Task.c
 ## Workflow
 
 - Use `/tdd` — write the failing regression test first, then make it pass. #defect #cancellation #metal
+
+## Review Findings (2026-08-20 08:20)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 12 file(s) reviewed, 0 not reviewed.
+
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModel.swift:1039` `code-hygiene/function-length-swift` — Function body should span 250 lines or less excluding comments and whitespace: currently spans 381 lines.
+- [x] `Tests/MLXFoundationModelsTests/ScriptedModelTestSupport.swift:42` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXFoundationModelsTests/ScriptedModelTestSupport.swift:196` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
