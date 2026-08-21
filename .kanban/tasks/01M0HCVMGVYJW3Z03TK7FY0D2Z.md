@@ -52,8 +52,33 @@ comments:
     - No fix was needed. All bundles were green on the first run.
     - next: /review
   timestamp: 2026-08-21T12:30:30.538142+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m0j4vkxfm9x1nf6gg62wf0tk
+  text: |-
+    ### commit — changed
+    - evidence: 239b41e fix(foundationmodels): let the plan guard accept a batched VLM text-only input (7 files changed, 344 insertions(+), 11 deletions(-))
+    - next: none. This is a local commit only. No push was done.
+  timestamp: 2026-08-21T12:31:14.351321+00:00
+- actor: claude-code
+  id: 01m0j52z7r6f15rjjgcvpv1qsf
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (commit 239b41e). The engine reviewed 3 files and attempted 7 validator-file pairs: `Libraries/MLXFoundationModels/ExecutorPromptCache.swift`, `Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift`, `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/PromptCacheReuseChannelTests.swift`. 0 findings, 0 confirmed, 0 refuted, 0 files skipped. The description holds no prior `## Review Findings` section.
+    - next: The task moved `doing → review → done`. One acceptance criterion stays unchecked in the description: `FoundationModelsRouter`'s `secondTurnReusesFirstTurnsKVCache` passes against the corrected revision. That check lives in the `FoundationModelsRouter` repository (card ^de1yq0p), not in this one.
+  timestamp: 2026-08-21T12:35:15.320045+00:00
+- actor: claude-code
+  id: 01m0j53xvc187z165fkc8kf8ga
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 3 files (Libraries/MLXFoundationModels/ExecutorPromptCache.swift, Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift, IntegrationTesting/.../PromptCacheReuseChannelTests.swift)
+    - test: green — xcodebuild build-for-testing exit 0, 0 warnings; five bundles 1661 passed, 0 failed, 0 skipped; real-weights VLM test 1 passed (round 2 cached 63 of 75)
+    - commit: 239b41e (local only, not pushed)
+    - review: clean — review sha HEAD~1..HEAD, 3 files, 7 validator-file pairs, 0 findings
+    - column: done
+    - open: acceptance box 4 (FoundationModelsRouter `secondTurnReusesFirstTurnsKVCache`) needs a pushed commit on `stable`; the push is the user's step
+  timestamp: 2026-08-21T12:35:46.668616+00:00
+position_column: done
+position_ordinal: ff9280
 title: 'The executor prompt cache never engages for a VLM-processor model: a batched, masked text-only input fails the plan guard'
 ---
 The executor prompt cache never engages for a model that loads through `VLMModelFactory`, even on a turn that has no image. The turn thus processes the whole prompt again, and `usage.input.cachedTokenCount` stays 0.
