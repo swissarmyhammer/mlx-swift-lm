@@ -214,6 +214,84 @@ struct PromptCacheReuseChannelTests {
 
         await releaseAllGPUMemory()
     }
+
+    /// A model that loads through `VLMModelFactory`. Its processor batches a
+    /// text-only prompt to one row and masks every token present, which is
+    /// the input shape card ^7fy0d2z lets through the plan guard. The
+    /// checkpoint must already stand in the local Hugging Face cache. The
+    /// model always reasons, thus `.reasoning` must be declared on it.
+    private static let vlmModelID = "mlx-community/Muse-Glimmer-30B-4bit"
+
+    /// Runs two turns of one session on `model`, and reads what the channel
+    /// carried for each.
+    ///
+    /// The second turn keeps the FIRST entry of the first turn, thus it names
+    /// the same session and the executor finds that session's cache.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func twoTurnsOfOneSession(
+        on model: MLXLanguageModel, firstPrompt: String, secondPrompt: String
+    ) async throws -> (first: ChannelResponse, second: ChannelResponse) {
+        let executor = try makeMLXExecutor(for: model)
+        let firstEntry = Transcript.Entry.prompt(
+            Transcript.Prompt(segments: [.text(Transcript.TextSegment(content: firstPrompt))]))
+
+        let firstTurn = try await respondReadingTheChannel(
+            executor,
+            request: makeExecutorRequest(
+                transcript: Transcript(entries: [firstEntry]),
+                generationOptions: Self.greedyOptions),
+            model: model)
+
+        let secondTurn = try await respondReadingTheChannel(
+            executor,
+            request: makeExecutorRequest(
+                transcript: Transcript(entries: [
+                    firstEntry,
+                    .response(
+                        Transcript.Response(
+                            assetIDs: [],
+                            segments: [.text(Transcript.TextSegment(content: firstTurn.text))])),
+                    .prompt(
+                        Transcript.Prompt(
+                            segments: [.text(Transcript.TextSegment(content: secondPrompt))])),
+                ]),
+                generationOptions: Self.greedyOptions),
+            model: model)
+        return (firstTurn, secondTurn)
+    }
+
+    @Test("a second turn of a VLM-processor model reuses the prompt of its first turn")
+    func aSecondTurnOfAVLMProcessorModelReusesThePromptOfItsFirstTurn() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        await releaseAllGPUMemory()
+
+        let turns = try await twoTurnsOfOneSession(
+            on: makeReasoningTestModel(Self.vlmModelID),
+            firstPrompt: "Name one primary color. One word.",
+            secondPrompt: "Name one more. One word.")
+
+        print(
+            """
+            VLM-processor round 1: prompt \(turns.first.promptTokenCount), \
+            cached \(turns.first.cachedTokenCount)
+            VLM-processor round 2: prompt \(turns.second.promptTokenCount), \
+            cached \(turns.second.cachedTokenCount), \
+            fed \(turns.second.promptTokenCount - turns.second.cachedTokenCount)
+            """)
+
+        #expect(
+            turns.first.cachedTokenCount == 0,
+            "The first turn of a session has no earlier turn to reuse.")
+        #expect(
+            turns.second.cachedTokenCount > 0,
+            """
+            the second turn of a VLM-processor session reused nothing. The processor batches \
+            a text-only prompt to one row and masks every token present; the plan must read \
+            the token ledger from that one row.
+            """)
+
+        await releaseAllGPUMemory()
+    }
 }
 
 /// What one response sent into the generation channel.

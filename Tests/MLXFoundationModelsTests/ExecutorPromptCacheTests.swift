@@ -11,7 +11,8 @@ import Testing
 @testable import MLXFoundationModels
 
 /// Unit tests for the pieces that let one session carry a prompt cache from one
-/// turn to the next: the session key, the store and the slot.
+/// turn to the next: the session key, the store, the slot and the plan of one
+/// pass.
 ///
 /// No weights are needed. The store holds whatever entry it is given, thus the
 /// entries here carry empty caches and a token ledger alone.
@@ -314,6 +315,84 @@ struct ExecutorPromptCacheTests {
         #expect(
             plan(caches: [leading, lagging], promptTokens: promptTokens)
                 .committed(generatedTokens: [101]) == nil)
+    }
+
+    // MARK: - Planning one pass over a processor's input
+
+    /// `tokens` the way a VLM processor batches a text-only prompt: one row.
+    private func oneRow(_ tokens: [Int]) -> MLXArray {
+        MLXArray(tokens).expandedDimensions(axis: 0)
+    }
+
+    /// A text-only input of one batched row, masked with `mask`, or with a
+    /// mask that marks every token present when `mask` is nil.
+    ///
+    /// This is the input `MuseGlimmerProcessor.prepare(input:)` gives for a
+    /// prompt that carries no image.
+    private func batchedInput(_ tokens: [Int], mask: [Int]? = nil) -> LMInput {
+        let tokenArray = oneRow(tokens)
+        let maskArray = mask.map { oneRow($0) } ?? ones(like: tokenArray)
+        return LMInput(text: .init(tokens: tokenArray, mask: maskArray.asType(.int8)))
+    }
+
+    /// Plans `input` against an entry whose caches hold `cachedTokens`, or
+    /// against no entry when `cachedTokens` is nil.
+    ///
+    /// The model owns no attention layer, thus a fresh cache is empty, which
+    /// is all a plan needs here.
+    private func plan(
+        _ input: LMInput, cachedTokens: [Int]? = nil
+    ) throws -> ExecutorPromptCachePlan? {
+        let entry = cachedTokens.map { tokens -> ExecutorPromptCacheEntry in
+            let caches: [KVCache] = [KVCacheSimple()]
+            feed(caches, tokenCount: tokens.count)
+            return ExecutorPromptCacheEntry(caches: caches, tokens: tokens)
+        }
+        return try ExecutorPromptCachePlan.make(
+            reusing: entry, input: input, model: ScriptedLanguageModel(rounds: []),
+            parameters: GenerateParameters())
+    }
+
+    @Test("a text-only prompt a VLM processor batched to one row gets a plan")
+    func aTextOnlyPromptAVLMProcessorBatchedToOneRowGetsAPlan() throws {
+        let planned = try plan(batchedInput([1, 2, 3]))
+
+        #expect(planned?.promptTokens == [1, 2, 3])
+        #expect(planned?.reusedTokenCount == 0)
+    }
+
+    @Test("that plan reuses the prefix an earlier turn left, in the shape the model expects")
+    func thatPlanReusesThePrefixAnEarlierTurnLeftInTheShapeTheModelExpects() throws {
+        let planned = try #require(
+            try plan(batchedInput([1, 2, 3, 4, 5]), cachedTokens: [1, 2, 3]))
+
+        #expect(planned.reusedTokenCount == 3)
+        #expect(planned.input.text.tokens.shape == [1, 2])
+        #expect(planned.input.text.tokens.asArray(Int.self) == [4, 5])
+        #expect(planned.input.text.mask?.shape == [1, 2])
+        #expect(planned.input.text.mask?.dtype == .int8)
+        #expect(planned.input.text.mask?.asArray(Int.self) == [1, 1])
+    }
+
+    @Test("a mask that holds a zero gets no plan")
+    func aMaskThatHoldsAZeroGetsNoPlan() throws {
+        #expect(try plan(batchedInput([1, 2, 3], mask: [1, 1, 0])) == nil)
+    }
+
+    @Test("a batch of more than one row gets no plan")
+    func aBatchOfMoreThanOneRowGetsNoPlan() throws {
+        let twoRows = MLXArray([1, 2, 3, 4, 5, 6]).reshaped([2, 3])
+        let input = LMInput(text: .init(tokens: twoRows, mask: ones(like: twoRows)))
+
+        #expect(try plan(input) == nil)
+    }
+
+    @Test("an image keeps a prompt out of the plan")
+    func anImageKeepsAPromptOutOfThePlan() throws {
+        let text = batchedInput([1, 2, 3]).text
+        let input = LMInput(text: text, image: .init(pixels: MLXArray.zeros([1, 1])))
+
+        #expect(try plan(input) == nil)
     }
 }
 

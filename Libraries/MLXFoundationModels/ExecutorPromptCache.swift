@@ -137,23 +137,18 @@ struct ExecutorPromptCachePlan {
     ///   - model: the model that owns the cache shape.
     ///   - parameters: the generation parameters the new caches must match.
     /// - Returns: the plan, or nil when a carried cache cannot serve this input
-    ///   at all. Media, an explicit attention mask and a batched token rank each
-    ///   place content in the model's input that a token ledger cannot describe;
-    ///   the caller then generates with no carried cache.
+    ///   at all. Media, a mask that hides a token and a batch of more than one
+    ///   row each place content in the model's input that a token ledger cannot
+    ///   describe; the caller then generates with no carried cache.
     static func make(
         reusing entry: ExecutorPromptCacheEntry?,
         input: LMInput,
         model: any LanguageModel,
         parameters: GenerateParameters
     ) throws -> ExecutorPromptCachePlan? {
-        guard input.image == nil, input.video == nil, input.audio == nil,
-            input.text.mask == nil, input.text.tokens.ndim == 1
-        else {
+        guard let promptTokens = ledgerTokens(of: input), !promptTokens.isEmpty else {
             return nil
         }
-
-        let promptTokens = input.text.tokens.asArray(Int.self)
-        guard !promptTokens.isEmpty else { return nil }
 
         if let entry,
             let reusedTokenCount = reusablePromptPrefix(
@@ -164,7 +159,7 @@ struct ExecutorPromptCachePlan {
                 caches: entry.caches,
                 input: reusedTokenCount == 0
                     ? input
-                    : LMInput(tokens: MLXArray(Array(promptTokens[reusedTokenCount...]))),
+                    : narrowed(input, to: Array(promptTokens[reusedTokenCount...])),
                 reusedTokenCount: reusedTokenCount,
                 promptTokens: promptTokens)
         }
@@ -174,6 +169,52 @@ struct ExecutorPromptCachePlan {
             input: input,
             reusedTokenCount: 0,
             promptTokens: promptTokens)
+    }
+
+    /// The rank of a token array a processor batched: one row for each
+    /// sequence, and the tokens of that sequence along the other axis.
+    private static let batchedTokenRank = 2
+
+    /// The prompt tokens of `input`, or nil when `input` carries content a
+    /// token ledger cannot describe.
+    ///
+    /// A VLM processor batches a text-only prompt to one row and masks every
+    /// token present. That input carries nothing a ledger cannot describe, thus
+    /// it passes. Media, a batch of more than one row and a mask that hides a
+    /// token each carry more than the tokens say, thus they do not.
+    private static func ledgerTokens(of input: LMInput) -> [Int]? {
+        guard input.image == nil, input.video == nil, input.audio == nil,
+            holdsOneSequence(input.text.tokens),
+            marksEveryTokenPresent(input.text.mask, of: input.text.tokens)
+        else {
+            return nil
+        }
+        return input.text.tokens.asArray(Int.self)
+    }
+
+    /// Whether `tokens` holds one sequence: a plain vector, or a batch of one
+    /// row.
+    private static func holdsOneSequence(_ tokens: MLXArray) -> Bool {
+        tokens.ndim == 1 || (tokens.ndim == batchedTokenRank && tokens.dim(0) == 1)
+    }
+
+    /// Whether `mask` marks every token of `tokens` present. No mask hides
+    /// nothing; a mask of another shape, or one that holds a zero, hides
+    /// something the ledger cannot name.
+    private static func marksEveryTokenPresent(_ mask: MLXArray?, of tokens: MLXArray) -> Bool {
+        guard let mask else { return true }
+        return mask.shape == tokens.shape && mask.asArray(Int32.self).allSatisfy { $0 != 0 }
+    }
+
+    /// `input` narrowed to `tokens`, in the rank and the mask presence of
+    /// `input`, thus the model sees the shape its processor makes.
+    private static func narrowed(_ input: LMInput, to tokens: [Int]) -> LMInput {
+        var narrowedTokens = MLXArray(tokens)
+        if input.text.tokens.ndim == batchedTokenRank {
+            narrowedTokens = narrowedTokens.expandedDimensions(axis: 0)
+        }
+        let narrowedMask = input.text.mask.map { ones(like: narrowedTokens).asType($0.dtype) }
+        return LMInput(text: .init(tokens: narrowedTokens, mask: narrowedMask))
     }
 
     /// The cache this finished pass leaves for the next turn of its session.
