@@ -77,6 +77,13 @@ comments:
     - column: done
     - open: acceptance box 4 (FoundationModelsRouter `secondTurnReusesFirstTurnsKVCache`) needs a pushed commit on `stable`; the push is the user's step
   timestamp: 2026-08-21T12:35:46.668616+00:00
+- actor: claude-code
+  id: 01m0j9z61p35dxncaf6nm93d8x
+  text: |-
+    ### commit — changed
+    - evidence: 35a2c84 chore(kanban): close the VLM prompt-cache plan-guard card (^7fy0d2z); pushed with 239b41e to origin/stable (689a964..35a2c84)
+    - next: run `secondTurnReusesFirstTurnsKVCache` in FoundationModelsRouter against `stable` at 239b41e, then check acceptance box 4
+  timestamp: 2026-08-21T14:00:34.102887+00:00
 position_column: done
 position_ordinal: ff9280
 title: 'The executor prompt cache never engages for a VLM-processor model: a batched, masked text-only input fails the plan guard'
