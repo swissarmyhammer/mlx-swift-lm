@@ -26,6 +26,9 @@ let package = Package(
             name: "MLXEmbedders",
             targets: ["MLXEmbedders"]),
         .library(
+            name: "MLXRerankers",
+            targets: ["MLXRerankers"]),
+        .library(
             name: "MLXHuggingFace",
             targets: ["MLXHuggingFace"]),
         .library(
@@ -125,6 +128,15 @@ let package = Package(
             ]
         ),
         .target(
+            name: "MLXRerankers",
+            dependencies: [
+                "MLXLMCommon",
+                "MLXLLM",
+                "MLXEmbedders",
+            ],
+            path: "Libraries/MLXRerankers"
+        ),
+        .target(
             name: "BenchmarkHelpers",
             dependencies: [
                 "MLXLMCommon",
@@ -142,6 +154,7 @@ let package = Package(
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
+                "MLXRerankers",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "Libraries/IntegrationTestHelpers",
@@ -157,6 +170,7 @@ let package = Package(
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
+                "MLXRerankers",
             ],
             path: "Tests/MLXLMTests",
             exclude: [

@@ -353,12 +353,14 @@ public final class VLMModelFactory: GenericModelFactory {
     public init(
         typeRegistry: ModelTypeRegistry<LanguageModel>, processorRegistry: ProcessorTypeRegistry,
         modelRegistry: AbstractModelRegistry,
-        conventionsRegistry: ChatConventionsRegistry = .shared
+        conventionsRegistry: ChatConventionsRegistry = .shared,
+        processorLoadingRegistry: VLMProcessorLoadingRegistry = .shared
     ) {
         self.typeRegistry = typeRegistry
         self.processorRegistry = processorRegistry
         self.modelRegistry = modelRegistry
         self.conventionsRegistry = conventionsRegistry
+        self.processorLoadingRegistry = processorLoadingRegistry
     }
 
     /// Shared instance with default behavior.
@@ -378,6 +380,9 @@ public final class VLMModelFactory: GenericModelFactory {
     /// resolvers for chat conventions that are keyed on model id rather than declared
     /// by the model itself, e.g. DeepSeek-R1
     public let conventionsRegistry: ChatConventionsRegistry
+
+    /// resolvers for processor metadata that is absent or incorrect in a checkpoint
+    public let processorLoadingRegistry: VLMProcessorLoadingRegistry
 
     public func _load(
         configuration: ResolvedModelConfiguration,
@@ -452,22 +457,26 @@ public final class VLMModelFactory: GenericModelFactory {
         // Note: loadProcessorConfig does synchronous I/O but is marked async to enable
         // parallel scheduling. This may briefly block a cooperative thread pool thread,
         // but the config file is small and model loading is not a high-concurrency path.
-        let processorFallback = try qwenProcessorFallback(
-            modelType: baseConfig.modelType, model: model)
+        let processorLoadingContext = VLMProcessorLoadingContext(
+            modelId: configuration.name,
+            modelType: baseConfig.modelType,
+            configurationData: configData)
         async let tokenizerTask = tokenizerLoader.load(
             from: configuration.tokenizerDirectory)
-        async let processorConfigTask = loadProcessorConfig(
-            from: modelDirectory, fallback: processorFallback)
+        async let processorConfigTask = resolveProcessorConfiguration(
+            from: modelDirectory,
+            context: processorLoadingContext,
+            registry: processorLoadingRegistry)
 
         try await loadWeights(
             modelDirectory: modelDirectory, model: model,
-            perLayerQuantization: baseConfig.perLayerQuantization)
+            perLayerQuantization: baseConfig.perLayerQuantization,
+            weightFileSelection: configuration.weightFileSelection)
 
         let tokenizer = try await tokenizerTask
-        let processorConfigData: Data
-        let baseProcessorConfig: BaseProcessorConfiguration
+        let processorConfiguration: VLMProcessorConfiguration
         do {
-            (processorConfigData, baseProcessorConfig) = try await processorConfigTask
+            processorConfiguration = try await processorConfigTask
         } catch let error as ProcessorConfigError {
             if let decodingError = error.underlying as? DecodingError {
                 throw ModelFactoryError.configurationDecodingError(
@@ -475,21 +484,14 @@ public final class VLMModelFactory: GenericModelFactory {
             }
             throw ModelFactoryError.configurationFileError(
                 error.filename, configuration.name, error.underlying)
+        } catch let error as DecodingError {
+            throw ModelFactoryError.configurationDecodingError(
+                configurationURL.lastPathComponent, configuration.name, error)
         }
 
-        // Override processor type based on model type for models that need special handling
-        // Mistral3 models ship with "PixtralProcessor" in their config but need Mistral3Processor
-        // to handle spatial merging correctly
-        let processorTypeOverrides: [String: String] = [
-            "mistral3": "Mistral3Processor",
-            "gemma4_unified": "Gemma4UnifiedProcessor",
-        ]
-        let processorType =
-            processorTypeOverrides[baseConfig.modelType] ?? baseProcessorConfig.processorClass
-
         let baseProcessor = try await processorRegistry.createModel(
-            configuration: processorConfigData,
-            processorType: processorType, tokenizer: tokenizer)
+            configuration: processorConfiguration.data,
+            processorType: processorConfiguration.processorType, tokenizer: tokenizer)
         let processor: any UserInputProcessor
         if let messageGenerator = mutableConfiguration.messageGenerator {
             processor = MessageGeneratorUserInputProcessor(
@@ -527,21 +529,31 @@ struct ProcessorConfigError: Error {
     let underlying: Error
 }
 
-func qwenProcessorFallback(
-    modelType: String, model: any LanguageModel
-) throws -> (Data, BaseProcessorConfiguration)? {
-    guard modelType == "qwen3_5" || modelType == "qwen3_5_moe",
-        let model = model as? Qwen35
-    else {
-        return nil
+/// Selects checkpoint processor metadata, then resolves the processor type.
+func resolveProcessorConfiguration(
+    from modelDirectory: URL,
+    context: VLMProcessorLoadingContext,
+    registry: VLMProcessorLoadingRegistry
+) async throws -> VLMProcessorConfiguration {
+    let configuration = try await loadProcessorConfig(from: modelDirectory) {
+        try registry.fallbackProcessorConfiguration(for: context)
     }
+    let processorType =
+        try registry.processorType(
+            for: context, declaredProcessorType: configuration.processorType)
+        ?? configuration.processorType
+    guard let processorType else {
+        throw missingProcessorTypeError(filename: configuration.filename)
+    }
+    return VLMProcessorConfiguration(data: configuration.data, processorType: processorType)
+}
 
-    let configuration = Qwen3VLProcessorConfiguration(
-        qwen35VisionConfiguration: model.config.visionConfiguration)
-    return (
-        try JSONEncoder().encode(configuration),
-        BaseProcessorConfiguration(processorClass: "Qwen3VLProcessor")
-    )
+/// Processor configuration selected from a checkpoint file or a generated fallback.
+/// The type remains optional until loading resolvers have had a chance to supply one.
+struct LoadedVLMProcessorConfiguration {
+    let data: Data
+    let processorType: String?
+    let filename: String
 }
 
 /// Loads processor configuration, preferring preprocessor_config.json over processor_config.json.
@@ -550,7 +562,7 @@ func qwenProcessorFallback(
 /// `preprocessor_config.json` that only configures the image/video
 /// sub-processors and omits `processor_class` entirely, while the composite
 /// `processor_config.json` alongside it carries the real value. When the
-/// preferred file decodes but is missing exactly that key, this falls back to
+/// preferred file declares no `processor_class`, this falls back to
 /// `processor_config.json` instead of failing the whole load.
 ///
 /// When no config file exists at all, `fallback` (a synthesized configuration,
@@ -560,51 +572,70 @@ func qwenProcessorFallback(
 /// Throws ProcessorConfigError wrapping any underlying error with the filename.
 func loadProcessorConfig(
     from modelDirectory: URL,
-    fallback: (Data, BaseProcessorConfiguration)? = nil
-) async throws -> (
-    Data, BaseProcessorConfiguration
-) {
+    fallback: () throws -> VLMProcessorConfiguration? = { nil }
+) async throws -> LoadedVLMProcessorConfiguration {
     let processorConfigURL = modelDirectory.appending(component: "processor_config.json")
     let preprocessorConfigURL = modelDirectory.appending(component: "preprocessor_config.json")
 
     if FileManager.default.fileExists(atPath: preprocessorConfigURL.path) {
-        do {
-            return try decodeProcessorConfig(at: preprocessorConfigURL)
-        } catch let error as ProcessorConfigError
-            where isMissingProcessorClassKey(error.underlying)
-            && FileManager.default.fileExists(atPath: processorConfigURL.path)
+        let preferred = try readProcessorConfig(from: preprocessorConfigURL)
+        if preferred.processorType == nil,
+            FileManager.default.fileExists(atPath: processorConfigURL.path)
         {
-            return try decodeProcessorConfig(at: processorConfigURL)
+            return try readProcessorConfig(from: processorConfigURL)
         }
+        return preferred
     }
     if FileManager.default.fileExists(atPath: processorConfigURL.path) {
-        return try decodeProcessorConfig(at: processorConfigURL)
+        return try readProcessorConfig(from: processorConfigURL)
     }
-    if let fallback {
-        return fallback
+    if let fallback = try fallback() {
+        return LoadedVLMProcessorConfiguration(
+            data: fallback.data,
+            processorType: fallback.processorType,
+            filename: "config.json")
     }
 
-    return try decodeProcessorConfig(at: processorConfigURL)
+    return try readProcessorConfig(from: processorConfigURL)
 }
 
-/// Reads and decodes `BaseProcessorConfiguration` from `url`, wrapping any
+private struct DeclaredProcessorConfiguration: Decodable {
+    let processorClass: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case processorClass = "processor_class"
+    }
+}
+
+private enum ProcessorConfigurationCodingKey: String, CodingKey {
+    case processorClass = "processor_class"
+}
+
+private func missingProcessorTypeError(filename: String) -> ProcessorConfigError {
+    ProcessorConfigError(
+        filename: filename,
+        underlying: DecodingError.keyNotFound(
+            ProcessorConfigurationCodingKey.processorClass,
+            DecodingError.Context(
+                codingPath: [],
+                debugDescription:
+                    "No processor_class was declared and no processor loading resolver supplied one."
+            )))
+}
+
+/// Reads and decodes the declared processor metadata of `url`, wrapping any
 /// failure in a `ProcessorConfigError` that carries the filename.
-private func decodeProcessorConfig(at url: URL) throws -> (Data, BaseProcessorConfiguration) {
+private func readProcessorConfig(from url: URL) throws -> LoadedVLMProcessorConfiguration {
     do {
         let data = try Data(contentsOf: url)
-        let config = try JSONDecoder.json5().decode(BaseProcessorConfiguration.self, from: data)
-        return (data, config)
+        let config = try JSONDecoder.json5().decode(DeclaredProcessorConfiguration.self, from: data)
+        return LoadedVLMProcessorConfiguration(
+            data: data,
+            processorType: config.processorClass,
+            filename: url.lastPathComponent)
     } catch {
         throw ProcessorConfigError(filename: url.lastPathComponent, underlying: error)
     }
-}
-
-/// Whether `error` is a `DecodingError.keyNotFound` for
-/// `BaseProcessorConfiguration`'s `processor_class` key -- the specific
-/// failure `loadProcessorConfig` falls back on.
-private func isMissingProcessorClassKey(_ error: Error) -> Bool {
-    guard case .keyNotFound(let key, _) = error as? DecodingError else { return false }
-    return key.stringValue == BaseProcessorConfiguration.CodingKeys.processorClass.rawValue
 }
 
 public class TrampolineModelFactory: NSObject, ModelFactoryTrampoline {

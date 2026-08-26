@@ -1417,8 +1417,8 @@ struct MiniMaxM3Tests {
             to: tempDir.appendingPathComponent("processor_config.json"),
             atomically: true, encoding: .utf8)
 
-        let (_, config) = try await loadProcessorConfig(from: tempDir)
-        #expect(config.processorClass == "MiniMaxM3VLProcessor")
+        let config = try await loadProcessorConfig(from: tempDir)
+        #expect(config.processorType == "MiniMaxM3VLProcessor")
     }
 
     // MARK: - MiniMaxM3Processor

@@ -46,7 +46,7 @@ public struct WiredMemoryOutcome: Sendable, Equatable {
 /// Order and direction both decide the result:
 ///
 /// - A buffer joins the residency set when it is MADE, thus a limit raised
-///   after the load changes nothing. ``MLXLMCommon/loadWeights(modelDirectory:model:quantization:perLayerQuantization:)``
+///   after the load changes nothing. ``MLXLMCommon/loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:)``
 ///   therefore raises the limit before it reads the first weight file.
 /// - A limit that falls again empties the residency set, thus this type never
 ///   lowers the limit. A request below the standing limit changes nothing.
