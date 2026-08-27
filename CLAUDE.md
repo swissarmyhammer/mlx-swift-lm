@@ -5,30 +5,59 @@
 Do not use `swift test`. It stops the whole test process at the first GPU test
 with `MLX error: Failed to load the default metallib`. Both build systems fail
 the same way (`--build-system swiftbuild`, the default, and `--build-system
-native`). SwiftPM puts the metallib in
-`<Target>.xctest/Contents/Resources/mlx-swift_Cmlx.bundle/Contents/Resources/`,
-but the test binary is in `<Target>.xctest/Contents/MacOS/`. All five probe
-paths in the mlx loader (`Cmlx/mlx/backend/metal/device.cpp`) miss it.
+native`).
 
-Use the two steps that CI uses (see `.github/workflows/pull_request.yml`).
+Build the tests with SwiftPM, but run them with `xctest`.
 
 1. Build the tests:
 
    ```sh
-   xcodebuild build-for-testing -skipPackagePluginValidation \
-       -scheme mlx-swift-lm-Package -destination 'platform=macOS'
+   swift build --build-tests
    ```
 
 2. Run a test bundle:
 
    ```sh
-   D=$(echo ~/Library/Developer/Xcode/DerivedData/mlx-swift-lm*/Build/Products/Debug)
-   xcrun xctest "$D/MLXLMTests.xctest"
+   xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest
    ```
 
-`xcodebuild` also puts `mlx-swift_Cmlx.bundle` beside the `.xctest` bundles in
-`Build/Products/Debug/`. The mlx loader finds the metallib there, so no symlink
-and no test bootstrap are necessary.
+One `xctest` command runs the XCTest tests and the Swift Testing tests of that
+bundle together. The SwiftPM build products are correct as they are, so neither
+a symlink nor a test bootstrap is necessary. (`.build/out/Products/Debug/` is
+the product directory of the `swiftbuild` build system, which is the default.)
+
+The two steps that CI uses (see `.github/workflows/pull_request.yml`) also
+work, and they put the bundles in DerivedData instead:
+
+```sh
+xcodebuild build-for-testing -skipPackagePluginValidation \
+    -scheme mlx-swift-lm-Package -destination 'platform=macOS'
+D=$(echo ~/Library/Developer/Xcode/DerivedData/mlx-swift-lm*/Build/Products/Debug)
+xcrun xctest "$D/MLXLMTests.xctest"
+```
+
+### Why `swift test` fails
+
+The cause is the test runner, not the layout of the build products. `swift
+test` runs the two test libraries in two different processes:
+
+- The XCTest tests run in the `xctest` tool. That tool opens the bundle with
+  `NSBundle`, so `NSBundle.allBundles` contains the bundle. The mlx loader
+  finds `mlx-swift_Cmlx.bundle` in the resources of that bundle. These tests
+  pass.
+- The Swift Testing tests run in `swiftpm-testing-helper` (in the toolchain, at
+  `usr/libexec/swift/pm/`). That helper uses `dlopen`, which does not record
+  the bundle with `NSBundle`. The bundle probe of the mlx loader
+  (`load_swiftpm_library` in `Cmlx/mlx/backend/metal/device.cpp`) thus finds
+  nothing. The four other probes look only in
+  `<Target>.xctest/Contents/MacOS/` and in the current directory, and the
+  metallib is in `<Target>.xctest/Contents/Resources/mlx-swift_Cmlx.bundle/
+  Contents/Resources/`. All five probes fail.
+
+The mlx-swift repository does not have this problem, because all of its own
+tests use XCTest. A fix must come from upstream: the mlx loader must also look
+for the SwiftPM bundle relative to the binary that contains it, and not only
+through `NSBundle`.
 
 There are five test bundles:
 
@@ -47,9 +76,9 @@ which supplies `GrammarMatcher::Fork()`, thus `ConstraintCachingTests` runs.
 
 ## How to build
 
-`swift build` is correct for the libraries alone. Use `swift build
---build-tests` when you only want to find compile errors and warnings in the
-test targets quickly. Do not run the tests that this command builds.
+`swift build` is correct for the libraries alone. `swift build --build-tests`
+builds the test targets also. Use it to find compile errors and warnings in the
+test targets quickly, and to make the bundles that step 2 above runs.
 
 ## Before you commit
 
