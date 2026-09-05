@@ -355,8 +355,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
     /// Resolves a model identifier to its on-disk weights directory. Used by
     /// the availability checks (`modelExistsOnDisk()`, `freeDiskSpaceBytes`),
-    /// not by the load path. Injected so this module needs no HuggingFace
-    /// path-resolution dependency.
+    /// not by the load path. The checks pass `configuration.name` (the
+    /// repository id, or the path-based name of a directory), not
+    /// ``modelID``, thus the closure always receives a path-shaped id.
+    /// Injected so this module needs no HuggingFace path-resolution
+    /// dependency.
     public let weightsLocation: @Sendable (String) -> URL
 
     /// Loads the model container for a configuration, forwarding download
@@ -370,10 +373,30 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
     private let load: ContainerLoader
 
+    /// The revision `ModelConfiguration.Identifier.id(_:revision:)` takes when
+    /// the caller gives none. A Hub model at this revision keeps the bare
+    /// repository id as its ``modelID``, thus existing cache keys do not change.
+    private static let defaultRevision = "main"
+
     /// Stable identity for the model cache, executor configuration, tokenizer
-    /// caches, availability, and progress reporting. Derived from the
+    /// caches, availability state, and the prompt cache. Derived from the
     /// configuration so it is the single place identity is defined.
-    public var modelID: String { configuration.name }
+    ///
+    /// A Hub model at a revision other than ``defaultRevision`` gets
+    /// `"\(id)@\(revision)"`, thus two revisions of one repository hold two
+    /// cache entries and load two containers. A Hub model at the default
+    /// revision, and a directory-backed model, keep `configuration.name`.
+    ///
+    /// On-disk resolution (`weightsLocation`) and download progress use
+    /// `configuration.name`, not this value: both want a path-shaped id.
+    public var modelID: String {
+        switch configuration.id {
+        case .id(let id, let revision) where revision != Self.defaultRevision:
+            return "\(id)@\(revision)"
+        case .id, .directory:
+            return configuration.name
+        }
+    }
 
     /// Loads the model container for this model, returning a cached instance
     /// when one exists. Shares the process-global cache that `respond()`,

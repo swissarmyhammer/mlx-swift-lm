@@ -34,6 +34,182 @@ struct MLXLanguageModelInitTests {
     }
 }
 
+// MARK: - Revision identity
+
+/// Counts the loads a stub container loader serves, so a test can tell a
+/// cache hit from a fresh load.
+private actor LoadCounter {
+    /// The number of loads served so far.
+    private(set) var count = 0
+
+    /// Records one load.
+    func increment() { count += 1 }
+}
+
+// Nested under the serialized `FoundationModelsCacheTests` parent (declared in
+// ModelCacheEvictionTests.swift): `MLXLanguageModel` holds one process-global
+// `static let cache`, and these tests read and evict entries in it.
+extension FoundationModelsCacheTests {
+
+    @Suite("MLXLanguageModel revision identity")
+    struct RevisionIdentity {
+
+        /// The one repository the revision tests share.
+        private static let repositoryID = "org/repo"
+
+        /// The first of the two revisions the tests load.
+        private static let revisionA = "a"
+
+        /// The second of the two revisions the tests load.
+        private static let revisionB = "b"
+
+        /// A weights location that holds no `config.json`.
+        private static let missingWeights = URL(fileURLWithPath: "/no/such/path")
+
+        /// The number of loads two distinct revisions cost.
+        private static let loadsForTwoRevisions = 2
+
+        /// The number of loads after one evicted revision loads again.
+        private static let loadsAfterReload = 3
+
+        /// Makes a model for ``repositoryID`` at `revision` whose loader
+        /// counts on `counter` and serves a scripted container: no weights.
+        @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+        private static func makeModel(
+            revision: String, counter: LoadCounter
+        ) -> MLXLanguageModel {
+            MLXLanguageModel(
+                configuration: ModelConfiguration(id: repositoryID, revision: revision),
+                capabilities: [],
+                weightsLocation: { _ in missingWeights },
+                load: { configuration, _ in
+                    await counter.increment()
+                    return makeScriptedContainer(modelID: configuration.name, rounds: [])
+                })
+        }
+
+        /// Makes a model over `configuration` that never loads: a test reads
+        /// only its identity and its on-disk check. `weightsLocation` gets
+        /// ``missingWeights`` when the test does not care about the disk.
+        @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+        private static func makeUnloadedModel(
+            configuration: ModelConfiguration,
+            weightsLocation: @escaping @Sendable (String) -> URL = { _ in missingWeights }
+        ) -> MLXLanguageModel {
+            MLXLanguageModel(
+                configuration: configuration,
+                capabilities: [],
+                weightsLocation: weightsLocation,
+                load: stubLoad())
+        }
+
+        /// Removes both revisions from the shared cache, so a test starts
+        /// and ends with no entry of its own.
+        @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+        private static func evictBoth(_ first: MLXLanguageModel, _ second: MLXLanguageModel) async {
+            await first.evict()
+            await second.evict()
+        }
+
+        @Test("modelID carries the revision when it is not main")
+        func modelIDCarriesRevision() {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let counter = LoadCounter()
+            let modelA = Self.makeModel(revision: Self.revisionA, counter: counter)
+            let modelB = Self.makeModel(revision: Self.revisionB, counter: counter)
+
+            #expect(modelA.modelID == "org/repo@a")
+            #expect(modelB.modelID == "org/repo@b")
+            #expect(modelA.modelID != modelB.modelID)
+            #expect(modelA.configuration.name == Self.repositoryID)
+            #expect(modelB.configuration.name == Self.repositoryID)
+        }
+
+        @Test("modelID is configuration.name at revision main")
+        func modelIDAtMainIsName() {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let model = Self.makeUnloadedModel(
+                configuration: ModelConfiguration(id: Self.repositoryID, revision: "main"))
+            #expect(model.modelID == Self.repositoryID)
+        }
+
+        @Test("modelID is configuration.name for a directory")
+        func modelIDForDirectoryIsName() {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let directory = URL(fileURLWithPath: "/models/org/repo")
+            let model = Self.makeUnloadedModel(
+                configuration: ModelConfiguration(directory: directory))
+            #expect(model.modelID == model.configuration.name)
+            #expect(model.modelID == "org/repo")
+        }
+
+        @Test("two revisions of one id load two containers")
+        func twoRevisionsLoadTwice() async throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let counter = LoadCounter()
+            let modelA = Self.makeModel(revision: Self.revisionA, counter: counter)
+            let modelB = Self.makeModel(revision: Self.revisionB, counter: counter)
+            await Self.evictBoth(modelA, modelB)
+
+            _ = try await modelA.loadContainer()
+            _ = try await modelB.loadContainer()
+            #expect(await counter.count == Self.loadsForTwoRevisions)
+
+            // A second call for either revision is a cache hit.
+            _ = try await modelA.loadContainer()
+            _ = try await modelB.loadContainer()
+            #expect(await counter.count == Self.loadsForTwoRevisions)
+
+            await Self.evictBoth(modelA, modelB)
+        }
+
+        @Test("evict() on one revision leaves the other revision cached")
+        func evictIsPerRevision() async throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let counter = LoadCounter()
+            let modelA = Self.makeModel(revision: Self.revisionA, counter: counter)
+            let modelB = Self.makeModel(revision: Self.revisionB, counter: counter)
+            await Self.evictBoth(modelA, modelB)
+            _ = try await modelA.loadContainer()
+            _ = try await modelB.loadContainer()
+
+            await modelA.evict()
+
+            _ = try await modelB.loadContainer()
+            #expect(
+                await counter.count == Self.loadsForTwoRevisions,
+                "evict() on revision a must leave revision b cached")
+            _ = try await modelA.loadContainer()
+            #expect(
+                await counter.count == Self.loadsAfterReload,
+                "evict() on revision a must make revision a load again")
+
+            await Self.evictBoth(modelA, modelB)
+        }
+
+        @Test("modelExistsOnDisk() resolves through configuration.name")
+        func modelExistsOnDiskUsesName() throws {
+            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+            let present = try makeScriptedWeightsDirectory()
+            defer { try? FileManager.default.removeItem(at: present) }
+            let model = Self.makeUnloadedModel(
+                configuration: ModelConfiguration(id: Self.repositoryID, revision: Self.revisionA),
+                weightsLocation: { id in
+                    id == Self.repositoryID ? present : Self.missingWeights
+                })
+
+            #expect(model.modelID != model.configuration.name)
+            #expect(model.modelExistsOnDisk())
+        }
+    }
+}
+
 // MARK: - Test Stubs
 
 /// Minimal `Downloader` conformance. The tests in this suite only verify

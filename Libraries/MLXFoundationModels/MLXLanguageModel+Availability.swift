@@ -131,7 +131,7 @@ extension MLXLanguageModel {
     /// Free bytes on the volume hosting this model's configured weights
     /// location, or `nil` if the volume can't be resolved.
     ///
-    /// Walks up `weightsLocation(modelID)` to the first extant
+    /// Walks up `weightsLocation(configuration.name)` to the first extant
     /// ancestor and queries `URLResourceKey.volumeAvailableCapacityForImportantUsageKey`
     /// against it. Returns `nil` rather than `0` on lookup failure so callers
     /// can distinguish "low" from "unknown". Synchronous because it's just an
@@ -140,7 +140,7 @@ extension MLXLanguageModel {
         // The per-model location won't exist until after a download, so walk
         // up to the first extant ancestor (usually the caches directory,
         // which the app sandbox always provides).
-        var probe = weightsLocation(modelID)
+        var probe = weightsLocation(configuration.name)
         while !FileManager.default.fileExists(atPath: probe.path) {
             let parent = probe.deletingLastPathComponent()
             // `deletingLastPathComponent()` is a fixed point at the
@@ -178,8 +178,12 @@ extension MLXLanguageModel {
     /// A partial download that finished `config.json` but not the weight
     /// shards will report `.available` here and fail at load time; that's an
     /// acceptable trade-off versus walking the full file list on every check.
+    ///
+    /// Resolves through `configuration.name`, not ``modelID``: the cache key
+    /// carries the revision (`org/repo@rev`), and a `weightsLocation` closure
+    /// expects the path-shaped repository id.
     func modelExistsOnDisk() -> Bool {
-        let configPath = weightsLocation(modelID).appending(path: "config.json")
+        let configPath = weightsLocation(configuration.name).appending(path: "config.json")
         return FileManager.default.fileExists(atPath: configPath.path)
     }
 }
