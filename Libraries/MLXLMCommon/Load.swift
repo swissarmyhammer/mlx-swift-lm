@@ -488,7 +488,8 @@ package func weightFileBytes(of weightURLs: [URL]) -> Int {
 /// This function loads model weight `safetensor` files in the given `modelDirectory`,
 /// calls ``BaseLanguageModel/sanitize(weights:metadata:)`` to allow per-model preprocessing,
 /// applies optional quantization, and
-/// updates the model with the weights.
+/// updates the model with the weights. Derived inference-only state is prepared after the
+/// checkpoint update and before the model is evaluated and returned to callers.
 ///
 /// The function first raises the Metal wired-memory limit so that it covers the
 /// weight files, through ``ModelWeightResidency``. A weight buffer joins the
@@ -501,6 +502,10 @@ package func weightFileBytes(of weightURLs: [URL]) -> Int {
 /// exist, and otherwise by the conventional `model*.safetensors` names. A model can name extra
 /// files it needs by conforming to ``AdditionalWeightFilesProviding``, and a caller can override
 /// the choice with ``ModelConfiguration/weightFileSelection``.
+///
+/// Loading blocks its thread on file I/O and fans out with `DispatchQueue.concurrentPerform`.
+/// Swift concurrency's cooperative threads must never block, thus the load runs on a global
+/// queue and this function suspends the caller until it is complete.
 public func loadWeights(
     modelDirectory: URL, model: BaseLanguageModel,
     quantization: BaseConfiguration.Quantization? = nil,
@@ -515,6 +520,32 @@ public func loadWeights(
     await ModelWeightResidency.shared.raise(
         toCoverWeightBytes: weightFileBytes(of: weightURLs))
 
+    let model = SendableBox(model)
+    try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<Void, any Error>) in
+        DispatchQueue.global(qos: .userInitiated).async {
+            continuation.resume(
+                with: Result {
+                    try installWeights(
+                        from: weightURLs, into: model.consume(),
+                        quantization: quantization,
+                        perLayerQuantization: perLayerQuantization)
+                })
+        }
+    }
+}
+
+/// The blocking part of ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:)``.
+///
+/// Reads the weight files, lets the model sanitize them, applies the optional
+/// quantization, installs the parameters, and then prepares the derived
+/// inference state. Runs on the global queue that `loadWeights` dispatches to,
+/// never on a cooperative thread.
+private func installWeights(
+    from weightURLs: [URL], into model: BaseLanguageModel,
+    quantization: BaseConfiguration.Quantization?,
+    perLayerQuantization: BaseConfiguration.PerLayerQuantization?
+) throws {
     // load the weights and collect metadata from the first safetensor file
     var weights = [String: MLXArray]()
     var metadata = [String: String]()
@@ -536,5 +567,7 @@ public func loadWeights(
     let parameters = ModuleParameters.unflattened(weights)
     try model.update(parameters: parameters, verify: [.all])
 
-    eval(model)
+    // Build derived inference-only state and realize the model while the loader
+    // still has exclusive access. Forward passes must remain read-only.
+    materializeModelForInference(model)
 }
