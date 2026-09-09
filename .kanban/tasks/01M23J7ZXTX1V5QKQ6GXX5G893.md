@@ -454,8 +454,26 @@ comments:
     - evidence: 14 files, uncommitted (1103 insertions, 84 deletions over HEAD 235dcad) — Libraries/MLXFoundationModels/ExecutorPromptCache.swift, Libraries/MLXFoundationModels/MLXLanguageModel.swift, Libraries/MLXLMCommon/PromptCacheReusePolicy.swift, Libraries/MLXLLM/Models/Qwen35.swift, Libraries/MLXVLM/Models/Qwen35.swift, Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift (+22 tests), Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift, Tests/MLXLMTests/PromptCachePrefixReuseTests.swift (+4 tests), Tests/MLXLMTests/QwenCommittedTurnRuleTests.swift, Tests/MLXLMTests/UserInputTests.swift, IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift, IntegrationTesting/IntegrationTestingTests/Qwen35SessionPromptCacheTests.swift, and the two `.kanban` files of this card. All 28 findings of `## Review Findings (2026-09-09 15:18)` are checked; the 8 "Done when" items are checked on the evidence of iteration 1 and the rerun above. Bundles: MLXFoundationModelsTests 213/0, MLXGuidedGenerationTests 70/0, CXGrammarTests 7/0, MLXHuggingFaceMacrosTests 5/0, MLXLMTests 1029 Swift Testing tests with 101 issues and 640 XCTest tests with 35 failures (the baseline set of this tree, unchanged). IntegrationTesting: TEST BUILD SUCCEEDED; `Qwen35SessionPromptCacheTests` PASSED on real weights with the new log lines. SWE-bench `astropy__astropy-12907` rerun: 38 passes of the 27B session, 0 rebuild, 0 rewind, the three longest calls named on this card. The agent repository is restored.
     - next: `/review`. The task stays in `doing`. Nothing is committed or pushed.
   timestamp: 2026-09-09T21:14:33.215102+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m240pej78p7db31zvvdpz78c
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (commit 7b6c5e3, iteration 2). Zero findings. 7 review tasks attempted, 0 failed, 1 candidate refuted. 12 files reviewed, 2 kanban files not reviewed (no validator). This run is complete. The prior run had 1 failed review task of 14; this run has none.
+    - prior findings: 28 of 28 checked.
+    - next: none. The task moved from review to done.
+  timestamp: 2026-09-09T21:20:32.327664+00:00
+- actor: claude-code
+  id: 01m240qhbykwgdjttffd1ysevg
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 14 files; 28 of 28 findings checked; executor log lines added with 22 unit tests; SWE-bench rerun of astropy__astropy-12907 logged 38 passes, 0 rebuild, 0 rewind, every warm pass `rule=splice`; the three longest calls (125 s, 92 s, 84 s) were long generations on a warm cache
+    - test: MLXFoundationModelsTests 213/0, MLXGuidedGenerationTests 70/0, CXGrammarTests 7/0, MLXHuggingFaceMacrosTests 5/0, MLXLMTests 1029 tests with 101 issues and 640 XCTest with 35 failures (the pre-existing baseline, unchanged)
+    - commit: 7b6c5e3
+    - review: clean — 0 findings, 7 of 7 review tasks complete; the task moved to done
+    - next: push 7b6c5e3 to origin/stable at the standing request of the user
+  timestamp: 2026-09-09T21:21:07.966117+00:00
+position_column: done
+position_ordinal: ff9380
 title: Make the prompt cache carry across tool rounds on Qwen 3.5 hybrid models, with real-weights proof
 ---
 ## The problem
