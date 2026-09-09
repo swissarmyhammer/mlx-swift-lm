@@ -243,7 +243,7 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     /// - Parameter tokenizer: used to resolve protocol control tokens; a
     ///   tokenizer lacking them yields no rules, leaving the model on the
     ///   standard path.
-    func promptCacheReuseRules(tokenizer: any Tokenizer) -> [any PromptCacheReuseRule] {
+    package func promptCacheReuseRules(tokenizer: any Tokenizer) -> [any PromptCacheReuseRule] {
         switch self {
         case .gptOSS:
             return HarmonyToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
@@ -251,7 +251,9 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
             return OnyxToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
         case .dsml:
             return DSMLCommittedTurnRule(tokenizer: tokenizer).map { [$0] } ?? []
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2,
+        case .qwen35:
+            return QwenCommittedTurnRule(tokenizer: tokenizer).map { [$0] } ?? []
+        case .json, .lfm2, .xmlFunction, .glm4, .gemma, .gemma4, .kimiK2,
             .minimaxM2, .minimaxM3, .mistral, .llama3:
             return []
         }

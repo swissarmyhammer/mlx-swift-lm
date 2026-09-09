@@ -115,6 +115,93 @@ struct PromptCachePrefixReuseTests {
         #expect(prefix == nil)
     }
 
+    // MARK: - Carrying model state
+
+    @Test("a carried model state forbids a rewind")
+    func aCarriedModelStateForbidsARewind() {
+        // Model state such as an M-RoPE anchor is tied to the prefill that
+        // made it, thus the caches cannot rewind under it. The turn rebuilds.
+        let caches = simpleCaches(offset: 5)
+
+        let reuse = reconcilePromptCache(
+            promptTokens: [1, 2, 9, 9], cachedTokens: [1, 2, 3, 4, 5], caches: caches,
+            carriesModelState: true)
+
+        #expect(reuse == nil)
+        #expect(caches.allSatisfy { $0.offset == 5 }, "a refused rewind moves nothing")
+    }
+
+    @Test("a carried model state still lets the prompt extend the ledger")
+    func aCarriedModelStateStillLetsThePromptExtendTheLedger() {
+        let reuse = reconcilePromptCache(
+            promptTokens: [1, 2, 3, 4], cachedTokens: [1, 2, 3], caches: simpleCaches(offset: 3),
+            carriesModelState: true)
+
+        #expect(reuse == PromptCacheReuse(suffixStart: 3, representedTokens: [1, 2, 3, 4]))
+    }
+
+    // MARK: - Reconciling with a protocol rule
+
+    /// The commit token of the splicing fixture below.
+    private static let commit = 9
+
+    /// A rule that splices the tail of the render after its commit, the way
+    /// a committed-turn rule does, whatever the generated region holds.
+    private struct SplicingRule: PromptCacheReuseRule {
+        func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
+            guard turn.promptTokens.starts(with: cache.previousRenderTokens),
+                let commitIndex = turn.promptTokens.firstIndex(
+                    of: PromptCachePrefixReuseTests.commit)
+            else { return nil }
+            let suffixStart = commitIndex + 1
+            return .appendSuffix(
+                suffixStart: suffixStart,
+                representedTokens: cache.cachedTokens + turn.promptTokens[suffixStart...])
+        }
+    }
+
+    @Test("without a rule the caches represent the render once the suffix is fed")
+    func withoutARuleTheCachesRepresentTheRenderOnceTheSuffixIsFed() {
+        let reuse = reconcilePromptCache(
+            promptTokens: [1, 2, 3, 4, 5], cachedTokens: [1, 2, 3],
+            previousRenderTokens: [1, 2], caches: simpleCaches(offset: 3))
+
+        #expect(reuse == PromptCacheReuse(suffixStart: 3, representedTokens: [1, 2, 3, 4, 5]))
+    }
+
+    @Test("a protocol rule decides before the standard rules and names what the caches represent")
+    func aProtocolRuleDecidesBeforeTheStandardRulesAndNamesWhatTheCachesRepresent() {
+        // The caches hold the render [1, 2] and the tokens the model wrote,
+        // [70, commit]. The new render writes 71 where the model wrote 70, thus
+        // no prefix comparison serves it, and a rewind of a hybrid cache is not
+        // available. The rule splices after the commit.
+        let caches = simpleCaches(offset: 4)
+
+        let reuse = reconcilePromptCache(
+            promptTokens: [1, 2, 71, Self.commit, 20, 21], cachedTokens: [1, 2, 70, Self.commit],
+            previousRenderTokens: [1, 2], caches: caches, protocolRules: [SplicingRule()])
+
+        #expect(
+            reuse
+                == PromptCacheReuse(
+                    suffixStart: 4, representedTokens: [1, 2, 70, Self.commit, 20, 21]))
+        #expect(caches.allSatisfy { $0.offset == 4 }, "a splice rewinds nothing")
+    }
+
+    @Test("a rule that declines leaves the turn to the standard rules")
+    func aRuleThatDeclinesLeavesTheTurnToTheStandardRules() {
+        // No commit in the render, thus the rule declines and the standard
+        // rules rewind to the common prefix.
+        let caches = simpleCaches(offset: 4)
+
+        let reuse = reconcilePromptCache(
+            promptTokens: [1, 2, 71, 20], cachedTokens: [1, 2, 70, Self.commit],
+            previousRenderTokens: [1, 2], caches: caches, protocolRules: [SplicingRule()])
+
+        #expect(reuse == PromptCacheReuse(suffixStart: 2, representedTokens: [1, 2, 71, 20]))
+        #expect(caches.allSatisfy { $0.offset == 2 })
+    }
+
     // MARK: - Rewinding directly
 
     @Test("a rewind lands every cache on the requested position")

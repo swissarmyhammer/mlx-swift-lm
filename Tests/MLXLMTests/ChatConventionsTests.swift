@@ -108,7 +108,7 @@ final class ChatConventionsModelTests: XCTestCase {
         let model = Qwen35TextModel(config)
 
         XCTAssertEqual(model.toolCallFormat, .qwen35)
-        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.tagged)
+        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.qwen35)
     }
 
     // MARK: Registry injection

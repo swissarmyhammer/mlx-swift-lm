@@ -107,13 +107,38 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// with the active tokenizer and does not rely on this hint.
     public var isSpecialToken: Bool
 
+    /// Whether the reasoning of a past assistant turn goes back into the
+    /// history render of that turn, as the `reasoning_content` of its message.
+    ///
+    /// A chat template that keeps the `<think>` block of a past turn writes
+    /// that key inside the block. The history render then holds what the model
+    /// read while it wrote, thus the render of a later round extends the tokens
+    /// the model wrote and a prompt cache carries across the round. A template
+    /// that drops the block of a past turn gains nothing from the key, and the
+    /// default `false` keeps its renders unchanged.
+    public var replaysReasoningIntoHistory: Bool
+
+    /// Creates a reasoning protocol.
+    ///
+    /// - Parameters:
+    ///   - startDelimiter: the marker that opens a reasoning span.
+    ///   - endDelimiter: the marker that closes a reasoning span.
+    ///   - promptStrategy: how thinking on or off reaches the chat template.
+    ///   - isSpecialToken: whether `startDelimiter` is one special token.
+    ///   - implicitEndDelimiters: markers that leave reasoning without
+    ///     `endDelimiter`.
+    ///   - budgetTransition: how the model leaves an exhausted reasoning
+    ///     budget, or `nil` when no safe transition is known.
+    ///   - replaysReasoningIntoHistory: whether a past turn's reasoning goes
+    ///     back into its history render.
     public init(
         startDelimiter: String,
         endDelimiter: String,
         promptStrategy: ReasoningPromptStrategy,
         isSpecialToken: Bool = false,
         implicitEndDelimiters: [String] = [],
-        budgetTransition: ReasoningBudgetTransition? = nil
+        budgetTransition: ReasoningBudgetTransition? = nil,
+        replaysReasoningIntoHistory: Bool = false
     ) {
         self.startDelimiter = startDelimiter
         self.endDelimiter = endDelimiter
@@ -121,6 +146,7 @@ public struct ReasoningConfig: Sendable, Equatable {
         self.isSpecialToken = isSpecialToken
         self.implicitEndDelimiters = implicitEndDelimiters
         self.budgetTransition = budgetTransition
+        self.replaysReasoningIntoHistory = replaysReasoningIntoHistory
     }
 
     // MARK: - Presets

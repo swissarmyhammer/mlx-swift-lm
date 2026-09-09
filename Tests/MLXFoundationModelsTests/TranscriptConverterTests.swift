@@ -407,6 +407,202 @@ struct TranscriptConverterTests {
     }
 
     @Test
+    func testReplayedReasoningRidesOnTheResponseThatFollowsIt() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // A reasoning model whose template keeps the `<think>` block of a past
+        // turn gets the chain-of-thought back as `reasoning_content`, thus the
+        // history render of the turn holds what the model read.
+        let entries: [Transcript.Entry] = [
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "What is 2+2?"))],
+                    responseFormat: nil
+                )),
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [
+                        .text(Transcript.TextSegment(content: "Let me add: 2 plus 2 is 4."))
+                    ]
+                )),
+            .response(
+                Transcript.Response(
+                    assetIDs: [],
+                    segments: [.text(Transcript.TextSegment(content: "4"))]
+                )),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+
+        #expect(messages.map(\.role) == [.user, .assistant])
+        #expect(messages[1].content == "4")
+        #expect(messages[1].reasoning == "Let me add: 2 plus 2 is 4.")
+    }
+
+    @Test
+    func testReplayedReasoningRidesOnTheToolCallsThatFollowIt() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // A think-then-call round: the model reasons, then calls a tool. The
+        // history render of that turn writes the reasoning in front of the call.
+        let toolCall = Transcript.ToolCall(
+            id: "call_1",
+            toolName: "get_weather",
+            arguments: try GeneratedContent(json: #"{"location":"Paris"}"#))
+        let entries: [Transcript.Entry] = [
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "Weather in Paris?"))],
+                    responseFormat: nil
+                )),
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "I need the tool."))]
+                )),
+            .toolCalls(Transcript.ToolCalls(id: "tc_1", [toolCall])),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+
+        #expect(messages.map(\.role) == [.user, .assistant])
+        #expect(messages[1].reasoning == "I need the tool.")
+        #expect(messages[1].tool?.calls?.map(\.function.name) == ["get_weather"])
+    }
+
+    @Test
+    func testReplayedReasoningBelongsToTheNextAssistantEntryAlone() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // Reasoning that a prompt follows belongs to no later turn, and two
+        // consecutive reasoning entries join.
+        let entries: [Transcript.Entry] = [
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "stray thought"))]
+                )),
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "Hi"))],
+                    responseFormat: nil
+                )),
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "first thought"))]
+                )),
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "second thought"))]
+                )),
+            .response(
+                Transcript.Response(
+                    assetIDs: [],
+                    segments: [.text(Transcript.TextSegment(content: "Hello"))]
+                )),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+
+        #expect(messages.map(\.role) == [.user, .assistant])
+        #expect(messages[0].reasoning == nil)
+        #expect(messages[1].reasoning == "first thought\nsecond thought")
+    }
+
+    @Test
+    func testReplayedReasoningThatFollowsItsResponseRidesOnThatResponse() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // The framework appends a turn's `.reasoning` entry AFTER its
+        // `.response` entry: the response entry opens with the turn, and the
+        // reasoning entry opens when the first reasoning fragment arrives.
+        // Measured on macOS 27 with `LanguageModelSession` (card ^xx5g893):
+        // `instructions prompt response reasoning`.
+        let entries: [Transcript.Entry] = [
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "What is 2+2?"))],
+                    responseFormat: nil
+                )),
+            .response(
+                Transcript.Response(
+                    assetIDs: [],
+                    segments: [.text(Transcript.TextSegment(content: "4"))]
+                )),
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [
+                        .text(Transcript.TextSegment(content: "Let me add: 2 plus 2 is 4."))
+                    ]
+                )),
+            .prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "And 3+3?"))],
+                    responseFormat: nil
+                )),
+            .response(
+                Transcript.Response(
+                    assetIDs: [],
+                    segments: [.text(Transcript.TextSegment(content: "6"))]
+                )),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+
+        #expect(messages.map(\.role) == [.user, .assistant, .user, .assistant])
+        #expect(messages[1].reasoning == "Let me add: 2 plus 2 is 4.")
+        #expect(messages[3].reasoning == nil)
+    }
+
+    @Test
+    func testReplayedReasoningAroundOneResponseJoinsOnThatResponse() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // Reasoning before the response and reasoning after it both belong to
+        // that one turn, thus the render keeps both, in order.
+        let entries: [Transcript.Entry] = [
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "before"))]
+                )),
+            .response(
+                Transcript.Response(
+                    assetIDs: [],
+                    segments: [.text(Transcript.TextSegment(content: "Hello"))]
+                )),
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "after"))]
+                )),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+
+        #expect(messages.count == 1)
+        #expect(messages[0].reasoning == "before\nafter")
+    }
+
+    @Test
+    func testReasoningStaysOutOfHistoryWhenNotReplayed() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let entries: [Transcript.Entry] = [
+            .reasoning(
+                Transcript.Reasoning(
+                    segments: [.text(Transcript.TextSegment(content: "a thought"))]
+                )),
+            .response(
+                Transcript.Response(
+                    assetIDs: [],
+                    segments: [.text(Transcript.TextSegment(content: "Hello"))]
+                )),
+        ]
+
+        let messages = TranscriptConverter.mlxMessages(for: entries, replayReasoning: false)
+
+        #expect(messages.count == 1)
+        #expect(messages[0].reasoning == nil)
+    }
+
+    @Test
     func testMultipleReasoningEntriesAllDropped() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 

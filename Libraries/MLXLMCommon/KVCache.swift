@@ -1537,8 +1537,26 @@ public class MambaCache: ArraysCache {
         super.init(size: 2, leftPadding: leftPadding)
     }
 
+    /// Moves this cache past `tokenCount` tokens the layer fed through it.
+    ///
+    /// The conv and recurrent state already hold those tokens. This moves the
+    /// batch bookkeeping of ``ArraysCache/advance(_:)`` AND the position
+    /// `offset`, thus a prompt cache can compare this cache with the attention
+    /// caches of the same model. A recurrent cache whose position stays at zero
+    /// never agrees with its token ledger, and the model starts every round
+    /// cold.
+    ///
+    /// - Parameter tokenCount: the number of tokens the layer fed.
+    public func advancePosition(by tokenCount: Int) {
+        advance(tokenCount)
+        offset += tokenCount
+    }
+
     /// Save the recurrent state at the last unconditionally committed token
     /// inside a speculative verification pass.
+    ///
+    /// The caller saves BEFORE it moves this cache past the whole input, thus
+    /// the checkpoint's position is the current position plus `tokenCount`.
     package func saveSpeculativeCheckpoint(
         convState: MLXArray,
         recurrentState: MLXArray,
@@ -1546,7 +1564,7 @@ public class MambaCache: ArraysCache {
     ) {
         speculativeCheckpoint = SpeculativeCheckpoint(
             state: [convState, recurrentState],
-            offset: offset,
+            offset: offset + tokenCount,
             leftPadding: leftPadding.map { $0 - tokenCount },
             lengths: lengths.map { $0 - tokenCount })
     }

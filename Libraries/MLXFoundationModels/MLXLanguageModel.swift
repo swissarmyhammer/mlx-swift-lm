@@ -718,12 +718,26 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 input: LanguageModelExecutorGenerationChannel.Usage.Input,
                 output: LanguageModelExecutorGenerationChannel.Usage.Output,
                 entryID: String?)
+
+            /// What the generation loop reported at the end of one pass. The
+            /// framework has no event for the seconds a prefill took, thus a
+            /// test that measures prompt-cache reuse reads this mirror alone;
+            /// nothing enters the channel for it.
+            case completion(GenerateCompletionInfo)
         }
 
         /// Attached only by tests (via `$generationObserver.withValue`); nil in
         /// shipping. Task-local so it reaches child tasks that also emit (e.g.
         /// the guided-generation text forwarder).
         @TaskLocal static var generationObserver: (@Sendable (GenerationEvent) -> Void)?
+
+        /// Shows the test observer what one generation pass reported when it
+        /// ended.
+        ///
+        /// - Parameter info: the completion report of the pass.
+        static func observeCompletion(_ info: GenerateCompletionInfo) {
+            generationObserver?(.completion(info))
+        }
 
         static func emit(
             text: String, entryID: String?, destination: GenerationEvent.Destination,
@@ -775,6 +789,61 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             .init(
                 totalTokenCount: fedTokenCount + promptCache.reusedTokenCount,
                 cachedTokenCount: promptCache.reusedTokenCount)
+        }
+
+        /// Every token a pass generated and its caches hold, the stop token
+        /// included.
+        ///
+        /// The generation loop leaves the stop token out of
+        /// `generationTokenCount` when it suppresses that token from the
+        /// output, and names it in `stopTokenFedToCache` instead: its forward
+        /// pass already advanced the caches. The prompt-cache ledger holds it,
+        /// thus the output count a turn reports adds it back, and the prompt
+        /// count plus the output count of a turn reaches every token the next
+        /// turn can reuse.
+        ///
+        /// - Parameter info: the completion report of the pass.
+        /// - Returns: the generated token count, with the fed stop token.
+        static func generatedTokenCount(of info: GenerateCompletionInfo) -> Int {
+            info.generationTokenCount + (info.stopTokenFedToCache == nil ? 0 : 1)
+        }
+
+        /// The cache-reuse rules of the model's response protocol.
+        ///
+        /// A protocol that keeps tokens in the cache which a chat-template
+        /// render cannot write again -- DSML, Qwen 3.5 -- contributes a rule
+        /// that splices past the turn the model committed. Every other model
+        /// contributes none, thus the standard prefix rules decide alone.
+        ///
+        /// - Parameter context: the loaded model context.
+        /// - Returns: the rules, in the order the policy consults them.
+        static func promptCacheReuseRules(of context: ModelContext) -> [any PromptCacheReuseRule] {
+            context.configuration.toolCallFormat?
+                .promptCacheReuseRules(tokenizer: context.tokenizer) ?? []
+        }
+
+        /// The chat messages of `transcript` for a model whose reasoning
+        /// protocol `resolved` names.
+        ///
+        /// A protocol that replays reasoning into history renders the
+        /// transcript again with each `.reasoning` entry attached to the
+        /// assistant entry after it. Every other protocol keeps `messages`,
+        /// the render taken before the model loaded, which drops the reasoning.
+        ///
+        /// - Parameters:
+        ///   - transcript: the transcript of the request.
+        ///   - resolved: the configuration resolved for this call.
+        ///   - messages: the messages rendered before the model loaded.
+        /// - Returns: the messages to render the prompt from.
+        static func historyMessages(
+            of transcript: Transcript, resolved: ModelConfiguration,
+            otherwise messages: [Chat.Message]
+        ) -> [Chat.Message] {
+            guard resolved.reasoningConfig?.replaysReasoningIntoHistory == true else {
+                return messages
+            }
+            let replayed = TranscriptConverter.mlxMessages(for: transcript, replayReasoning: true)
+            return replayed.isEmpty ? messages : replayed
         }
 
         static func emitUsage(
@@ -1176,13 +1245,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // .Video are not Sendable), so route the array through
                 // perform(nonSendable:_:) which boxes it across the actor hop.
                 try await container.perform(nonSendable: messages) { context, messages in
-                    // Render the prompt through the model's UserInputProcessor.
-                    let userInput = UserInput(chat: messages)
-                    let input = try await context.processor.prepare(input: userInput)
-
                     let resolved = resolveConfiguration(
                         context: context, modelID: modelID,
                         configurationResolver: configurationResolver)
+
+                    // A protocol that replays reasoning into history renders
+                    // the transcript again with the reasoning attached, which
+                    // the render taken before the model loaded could not do.
+                    let messages = Self.historyMessages(
+                        of: request.transcript, resolved: resolved, otherwise: messages)
+
+                    // Render the prompt through the model's UserInputProcessor.
+                    let userInput = UserInput(chat: messages)
+                    let input = try await context.processor.prepare(input: userInput)
 
                     // Reasoning is only consumed by the unconstrained path
                     // (no tools, no schema). On the guided/tool paths the
@@ -2092,12 +2167,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - task: the generation task that feeds the caches.
         ///   - plan: the plan that the pass ran, or nil when the pass had no
         ///     plan.
+        ///   - state: the model state the prefill of the pass left, which the
+        ///     next turn seeds its iterator with.
         ///   - promptCache: the slot that keeps the cache for the next turn.
         ///   - body: reads the token stream of the same generation.
         /// - Throws: the error that `body` throws.
         private func withPromptCacheCommit(
             task: Task<[Int], Never>,
             plan: ExecutorPromptCachePlan?,
+            state: LMOutput.State?,
             promptCache: ExecutorPromptCacheSlot,
             body: () async throws -> Void
         ) async rethrows {
@@ -2107,7 +2185,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 await cancelAndDrain(task)
                 throw error
             }
-            promptCache.commit(plan, generatedTokens: await task.value)
+            promptCache.commit(plan, generatedTokens: await task.value, state: state)
         }
 
         private func runAllowedToolGeneration(
@@ -2127,7 +2205,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration)
             let plan = try promptCache.plan(
-                input: input, model: context.model, parameters: params)
+                input: input, model: context.model, parameters: params,
+                protocolRules: Self.promptCacheReuseRules(of: context))
             let format = context.configuration.toolCallFormat ?? .json
             var router = AllowedToolOutputRouter(
                 format: format,
@@ -2139,16 +2218,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 stopStrings: context.configuration.effectiveStopStrings)
             var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
             var result = AllowedToolGenerationResult()
+            var preparedState: LMOutput.State?
             let (stream, task) = try Self.startTrackedGeneration {
                 try generateProtocolTokensTask(
                     input: plan?.input ?? input,
                     cache: plan?.caches,
+                    state: plan?.state,
                     parameters: params,
                     context: context,
-                    decoder: protocolDecoder)
+                    decoder: protocolDecoder,
+                    preparedState: { preparedState = $0 })
             }
 
-            try await withPromptCacheCommit(task: task, plan: plan, promptCache: promptCache) {
+            try await withPromptCacheCommit(
+                task: task, plan: plan, state: preparedState, promptCache: promptCache
+            ) {
                 generationLoop: for await generation in stream {
                     try Task.checkCancellation()
                     switch generation {
@@ -2196,6 +2280,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             }
                         }
                     case .info(let info):
+                        Self.observeCompletion(info)
                         result.completionInfo = info
                     }
                 }
@@ -2276,7 +2361,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 input: Self.usageInput(
                     fedTokenCount: info.promptTokenCount, promptCache: promptCache),
                 output: .init(
-                    totalTokenCount: info.generationTokenCount,
+                    totalTokenCount: Self.generatedTokenCount(of: info),
                     reasoningTokenCount: min(
                         result.reasoningTokenCount,
                         info.generationTokenCount)),
@@ -2406,21 +2491,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 samplingConfiguration: samplingConfiguration
             )
             let plan = try promptCache.plan(
-                input: input, model: context.model, parameters: params)
+                input: input, model: context.model, parameters: params,
+                protocolRules: Self.promptCacheReuseRules(of: context))
 
             // The token-recording form is what lets this pass leave a prompt
             // cache behind: the ledger of that cache names the render plus the
             // tokens generation fed into it, and the text stream alone does not
             // carry those token identifiers.
+            var preparedState: LMOutput.State?
             let (stream, task) = try Self.startTrackedGeneration {
                 try generateTaskRecordingTokens(
                     input: plan?.input ?? input,
                     cache: plan?.caches,
+                    state: plan?.state,
                     parameters: params,
-                    context: context)
+                    context: context,
+                    preparedState: { preparedState = $0 })
             }
 
-            try await withPromptCacheCommit(task: task, plan: plan, promptCache: promptCache) {
+            try await withPromptCacheCommit(
+                task: task, plan: plan, state: preparedState, promptCache: promptCache
+            ) {
                 for await generation in stream {
                     try Task.checkCancellation()
                     switch generation {
@@ -2433,11 +2524,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         // is the prompt; `generationTokenCount` is the
                         // model-generated completion -- see Evaluate.swift's
                         // `GenerateCompletionInfo` definition).
+                        Self.observeCompletion(info)
                         await Self.emitUsage(
                             input: Self.usageInput(
                                 fedTokenCount: info.promptTokenCount, promptCache: promptCache),
                             output: .init(
-                                totalTokenCount: info.generationTokenCount, reasoningTokenCount: 0),
+                                totalTokenCount: Self.generatedTokenCount(of: info),
+                                reasoningTokenCount: 0),
                             entryID: entryID, into: channel)
                     case .toolCall(_):
                         break
@@ -2514,7 +2607,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 samplingConfiguration: samplingConfiguration
             )
             let plan = try promptCache.plan(
-                input: input, model: context.model, parameters: params)
+                input: input, model: context.model, parameters: params,
+                protocolRules: Self.promptCacheReuseRules(of: context))
 
             var emitter = ReasoningEventEmitter(
                 config: reasoningConfig, primedInside: primedInside)
@@ -2530,16 +2624,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // paths: this path passes no tools, so a tool-call-shaped output is
             // never executable.
             var rejectedToolCall: RejectedToolCall?
+            var preparedState: LMOutput.State?
             let (stream, task) = try Self.startTrackedGeneration {
                 try generateProtocolTokensTask(
                     input: plan?.input ?? input,
                     cache: plan?.caches,
+                    state: plan?.state,
                     parameters: params,
                     context: context,
-                    decoder: protocolDecoder)
+                    decoder: protocolDecoder,
+                    preparedState: { preparedState = $0 })
             }
 
-            try await withPromptCacheCommit(task: task, plan: plan, promptCache: promptCache) {
+            try await withPromptCacheCommit(
+                task: task, plan: plan, state: preparedState, promptCache: promptCache
+            ) {
                 generationLoop: for await generation in stream {
                     try Task.checkCancellation()
                     switch generation {
@@ -2595,6 +2694,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             }
                         }
                     case .info(let info):
+                        Self.observeCompletion(info)
                         completionInfo = info
                     }
                 }
@@ -2653,7 +2753,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     input: Self.usageInput(
                         fedTokenCount: info.promptTokenCount, promptCache: promptCache),
                     output: .init(
-                        totalTokenCount: info.generationTokenCount,
+                        totalTokenCount: Self.generatedTokenCount(of: info),
                         reasoningTokenCount: min(reasoningTokenCount, info.generationTokenCount)),
                     entryID: responseEntryID, into: channel)
             }

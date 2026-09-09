@@ -423,7 +423,9 @@ struct Qwen35MTPRegistrationTests {
     }
 }
 
-private func qwen35TextConfigJSON(
+/// The JSON of a small Qwen 3.5 text configuration. Shared with
+/// `Qwen35RecurrentCachePositionTests`, thus one fixture serves both suites.
+func qwen35TextConfigJSON(
     mtpLayers: Int,
     mtpUseDedicatedEmbeddings: Bool = false,
     numExperts: Int = 0

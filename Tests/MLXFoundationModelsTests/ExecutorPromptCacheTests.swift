@@ -245,13 +245,59 @@ struct ExecutorPromptCacheTests {
         }
     }
 
-    /// A finished pass over `caches` that rendered `promptTokens`.
+    /// A finished pass over `caches` that rendered `promptTokens` and fed the
+    /// whole render, thus the caches represent the render once it is fed.
     private func plan(caches: [KVCache], promptTokens: [Int]) -> ExecutorPromptCachePlan {
         ExecutorPromptCachePlan(
             caches: caches,
             input: LMInput(tokens: MLXArray(promptTokens)),
             reusedTokenCount: 0,
-            promptTokens: promptTokens)
+            promptTokens: promptTokens,
+            representedTokens: promptTokens,
+            state: nil)
+    }
+
+    /// A recurrent cache placed at `position`, the way a Qwen 3.5 linear
+    /// layer places it after `position` tokens.
+    private func recurrentCache(at position: Int) -> MambaCache {
+        let cache = MambaCache()
+        cache.advancePosition(by: position)
+        return cache
+    }
+
+    @Test("a hybrid stack whose caches agree on their position commits to a ledger")
+    func aHybridStackWhoseCachesAgreeOnTheirPositionCommitsToALedger() {
+        // One recurrent cache beside one attention cache, both past the render
+        // and the generated tokens: the ledger names both.
+        let promptTokens = [1, 2, 3, 4]
+        let generatedTokens = [101, 102]
+        let attention = KVCacheSimple()
+        feed([attention], tokenCount: promptTokens.count + generatedTokens.count)
+        let caches: [KVCache] = [
+            recurrentCache(at: promptTokens.count + generatedTokens.count), attention,
+        ]
+
+        let committed = plan(caches: caches, promptTokens: promptTokens)
+            .committed(generatedTokens: generatedTokens)
+
+        #expect(!canTrimPromptCache(caches), "the premise: a recurrent cache cannot rewind")
+        #expect(committed?.tokens == promptTokens + generatedTokens)
+    }
+
+    @Test("a recurrent cache that reports no position leaves the session cold")
+    func aRecurrentCacheThatReportsNoPositionLeavesTheSessionCold() {
+        // The defect of card ^xx5g893: a linear layer that never moves its
+        // cache's position leaves the recurrent caches at zero while the
+        // attention caches stand past the prompt. The two cannot share one
+        // ledger, thus the session starts cold. Every cache, recurrent or
+        // attention, must report the position.
+        let promptTokens = [1, 2, 3, 4]
+        let attention = KVCacheSimple()
+        feed([attention], tokenCount: promptTokens.count + 1)
+
+        #expect(
+            plan(caches: [recurrentCache(at: 0), attention], promptTokens: promptTokens)
+                .committed(generatedTokens: [101]) == nil)
     }
 
     @Test("a cache past its sliding window still carries a ledger to the next turn")
@@ -393,6 +439,164 @@ struct ExecutorPromptCacheTests {
         let input = LMInput(text: text, image: .init(pixels: MLXArray.zeros([1, 1])))
 
         #expect(try plan(input) == nil)
+    }
+
+    // MARK: - Planning one pass with a protocol rule
+
+    /// The commit token of the splicing fixtures below.
+    private static let commit = 9
+
+    /// A rule that keeps the tokens the model wrote and feeds the tail of the
+    /// render after its commit, the way a committed-turn rule does.
+    private struct SplicingRule: PromptCacheReuseRule {
+        func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
+            guard turn.promptTokens.starts(with: cache.previousRenderTokens),
+                let commitIndex = turn.promptTokens.firstIndex(
+                    of: ExecutorPromptCacheTests.commit)
+            else { return nil }
+            let suffixStart = commitIndex + 1
+            return .appendSuffix(
+                suffixStart: suffixStart,
+                representedTokens: cache.cachedTokens + turn.promptTokens[suffixStart...])
+        }
+    }
+
+    @Test("a protocol rule splices the render's tail onto the tokens the model wrote")
+    func aProtocolRuleSplicesTheRendersTailOntoTheTokensTheModelWrote() throws {
+        // The last pass rendered [1, 2] and the model wrote [70, commit]. The
+        // new render writes 71 where the model wrote 70, and a recurrent cache
+        // cannot rewind, thus only the rule can serve this turn.
+        let ledger = [1, 2, 70, Self.commit]
+        let caches: [KVCache] = [recurrentCache(at: ledger.count)]
+        let entry = ExecutorPromptCacheEntry(caches: caches, tokens: ledger, renderTokens: [1, 2])
+        let render = [1, 2, 71, Self.commit, 20, 21]
+
+        let planned = try #require(
+            try ExecutorPromptCachePlan.make(
+                reusing: entry, input: LMInput(tokens: MLXArray(render)),
+                model: ScriptedLanguageModel(rounds: []), parameters: GenerateParameters(),
+                protocolRules: [SplicingRule()]))
+
+        #expect(planned.reusedTokenCount == 4)
+        #expect(planned.input.text.tokens.asArray(Int.self) == [20, 21])
+        #expect(planned.representedTokens == [1, 2, 70, Self.commit, 20, 21])
+    }
+
+    @Test("a spliced pass commits the tokens the model wrote, not the render")
+    func aSplicedPassCommitsTheTokensTheModelWroteNotTheRender() throws {
+        let ledger = [1, 2, 70, Self.commit]
+        let recurrent = recurrentCache(at: ledger.count)
+        let entry = ExecutorPromptCacheEntry(
+            caches: [recurrent], tokens: ledger, renderTokens: [1, 2])
+        let render = [1, 2, 71, Self.commit, 20, 21]
+        let planned = try #require(
+            try ExecutorPromptCachePlan.make(
+                reusing: entry, input: LMInput(tokens: MLXArray(render)),
+                model: ScriptedLanguageModel(rounds: []), parameters: GenerateParameters(),
+                protocolRules: [SplicingRule()]))
+        // The pass feeds the two-token tail and generates one token.
+        recurrent.advancePosition(by: 2 + 1)
+
+        let committed = planned.committed(generatedTokens: [30])
+
+        #expect(committed?.tokens == [1, 2, 70, Self.commit, 20, 21, 30])
+        #expect(committed?.renderTokens == render)
+    }
+
+    @Test("a plan without a rule records the render it fed for the next pass")
+    func aPlanWithoutARuleRecordsTheRenderItFedForTheNextPass() throws {
+        let caches: [KVCache] = [KVCacheSimple()]
+        let promptTokens = [1, 2, 3]
+        feed(caches, tokenCount: promptTokens.count)
+
+        let committed = plan(caches: caches, promptTokens: promptTokens)
+            .committed(generatedTokens: [])
+
+        #expect(committed?.renderTokens == promptTokens)
+    }
+
+    // MARK: - Carrying model state
+
+    /// The state key of the fixtures below, the way a Qwen 3.5 VL model keys
+    /// its M-RoPE anchor.
+    private static let anchorKey = LMOutput.Key<Int>("test.anchor")
+
+    /// A state that holds `anchor` under ``anchorKey``.
+    private func state(anchor: Int) -> LMOutput.State {
+        var state = LMOutput.State()
+        state[Self.anchorKey] = anchor
+        return state
+    }
+
+    /// An entry whose caches hold [1, 2, 3] and whose state holds `anchor`.
+    private func anchoredEntry(anchor: Int) -> ExecutorPromptCacheEntry {
+        let caches: [KVCache] = [KVCacheSimple()]
+        feed(caches, tokenCount: 3)
+        return ExecutorPromptCacheEntry(
+            caches: caches, tokens: [1, 2, 3], state: state(anchor: anchor))
+    }
+
+    @Test("a plan seeds the model state the entry carries")
+    func aPlanSeedsTheModelStateTheEntryCarries() throws {
+        let planned = try #require(
+            try ExecutorPromptCachePlan.make(
+                reusing: anchoredEntry(anchor: 7), input: LMInput(tokens: MLXArray([1, 2, 3, 4])),
+                model: ScriptedLanguageModel(rounds: []), parameters: GenerateParameters()))
+
+        #expect(planned.reusedTokenCount == 3)
+        #expect(planned.state?[Self.anchorKey] == 7)
+    }
+
+    @Test("a carried model state keeps the caches from a rewind")
+    func aCarriedModelStateKeepsTheCachesFromARewind() throws {
+        // The state is anchored to the prefill that made it, thus a render
+        // that rewrites a cached token gets fresh caches and no state.
+        let entry = anchoredEntry(anchor: 7)
+
+        let planned = try #require(
+            try ExecutorPromptCachePlan.make(
+                reusing: entry, input: LMInput(tokens: MLXArray([1, 2, 9])),
+                model: ScriptedLanguageModel(rounds: []), parameters: GenerateParameters()))
+
+        #expect(planned.reusedTokenCount == 0)
+        #expect(planned.state == nil)
+        #expect(entry.caches.allSatisfy { $0.offset == 3 })
+    }
+
+    @Test("a commit keeps the state the prefill left for the next turn")
+    func aCommitKeepsTheStateThePrefillLeftForTheNextTurn() {
+        let caches: [KVCache] = [KVCacheSimple()]
+        feed(caches, tokenCount: 3)
+
+        let committed = plan(caches: caches, promptTokens: [1, 2, 3])
+            .committed(generatedTokens: [], state: state(anchor: 11))
+
+        #expect(committed?.state?[Self.anchorKey] == 11)
+    }
+
+    @Test("a slot hands the prepared state to the entry it commits")
+    func aSlotHandsThePreparedStateToTheEntryItCommits() {
+        let caches: [KVCache] = [KVCacheSimple()]
+        feed(caches, tokenCount: 3)
+        let slot = ExecutorPromptCacheSlot(nil)
+
+        slot.commit(
+            plan(caches: caches, promptTokens: [1, 2, 3]), generatedTokens: [],
+            state: state(anchor: 5))
+
+        #expect(slot.entry?.state?[Self.anchorKey] == 5)
+    }
+
+    // MARK: - Reading the store without a check-out
+
+    @Test("a peek reads the entry of a session and leaves it in the store")
+    func aPeekReadsTheEntryOfASessionAndLeavesItInTheStore() async {
+        let store = ExecutorPromptCacheStore()
+        await store.checkIn(key("a"), entry(tokens: [1, 2, 3]))
+
+        #expect(await store.peek(key("a"))?.tokens == [1, 2, 3])
+        #expect(await store.retainedSessionCount == 1)
+        #expect(await store.checkOut(key("a"))?.tokens == [1, 2, 3])
     }
 }
 

@@ -8,6 +8,24 @@ import Testing
 @Suite
 struct ReasoningConfigTests {
 
+    // MARK: - Reasoning replayed into history
+
+    @Test func `the Qwen 3.5 protocol replays reasoning into history`() {
+        // Its chat template keeps the `<think>` block of a past turn, thus the
+        // history render of a turn can hold what the model read.
+        #expect(QwenReasoningProtocol.qwen35.replaysReasoningIntoHistory)
+    }
+
+    @Test func `the other Qwen protocols drop reasoning from history`() {
+        #expect(!QwenReasoningProtocol.tagged.replaysReasoningIntoHistory)
+        #expect(!QwenReasoningProtocol.qwen3.replaysReasoningIntoHistory)
+    }
+
+    @Test func `a protocol drops reasoning from history unless it says otherwise`() {
+        #expect(!ReasoningConfig.thinkTagsWithEnableThinking.replaysReasoningIntoHistory)
+        #expect(!ReasoningConfig.alwaysOnThinking.replaysReasoningIntoHistory)
+    }
+
     // MARK: - ReasoningPromptStrategy.additionalContext
 
     @Test func templateFlagThinkingOn() throws {

@@ -257,6 +257,29 @@ public class UserInputTests: XCTestCase {
         }
     }
 
+    /// The Qwen 3 VL generator serves the Qwen 3.5 family, whose chat
+    /// template keeps the `<think>` block of a past turn. The replayed
+    /// reasoning must reach the raw message as `reasoning_content`, with the
+    /// tool calls beside it, or the history render writes an empty block and
+    /// the prompt cache of the next round parts from the tokens the model
+    /// wrote.
+    public func testQwen3VLMessageGeneratorReplaysReasoning() throws {
+        var assistant = Chat.Message.assistant(
+            "",
+            toolCalls: [
+                ToolCall(function: .init(name: "get_weather", arguments: [:]), id: "call_1")
+            ])
+        assistant.reasoning = "Paris first."
+
+        let raw = Qwen3VLMessageGenerator().generate(message: assistant)
+
+        XCTAssertEqual(raw["reasoning_content"] as? String, "Paris first.")
+        XCTAssertEqual((raw["tool_calls"] as? [[String: any Sendable]])?.count, 1)
+
+        let plain = Qwen3VLMessageGenerator().generate(message: .assistant("4"))
+        XCTAssertNil(plain["reasoning_content"], "a message without reasoning adds no key")
+    }
+
     // MARK: - Qwen2 Message Generator Tests
 
     public func testQwen2ConversionImage() {

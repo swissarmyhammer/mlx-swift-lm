@@ -696,7 +696,7 @@ public enum Qwen35Language {
 
             if let cache {
                 cache[1] = state
-                cache.advance(S)
+                cache.advancePosition(by: S)
             }
 
             let gated = norm(out, gate: z)
@@ -1506,5 +1506,5 @@ extension Qwen35 {
 // `Qwen35MoE` subclasses `Qwen35` and inherits both declarations.
 extension Qwen35 {
     public var toolCallFormat: ToolCallFormat? { .qwen35 }
-    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
+    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.qwen35 }
 }

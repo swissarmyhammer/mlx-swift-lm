@@ -24,10 +24,11 @@ struct ExecutorPromptCacheKey: Hashable, Sendable {
 /// The live key/value cache of one session, and the tokens it holds.
 ///
 /// This is a reference type because the caches it carries are reference types
-/// that generation writes into. ``ExecutorPromptCacheStore`` hands one entry to
-/// at most one turn at a time -- a check-out REMOVES the entry from the store --
-/// thus no two tasks write the same caches, and the `@unchecked Sendable`
-/// conformance rests on that.
+/// that generation writes into, and the model state beside them is not
+/// `Sendable`. ``ExecutorPromptCacheStore`` hands one entry to at most one turn
+/// at a time -- a check-out REMOVES the entry from the store -- thus no two
+/// tasks write the same caches or read the same state, and the
+/// `@unchecked Sendable` conformance rests on that.
 final class ExecutorPromptCacheEntry: @unchecked Sendable {
 
     /// One cache for each layer of the model.
@@ -36,10 +37,41 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// The exact prompt tokens `caches` represents, in order.
     let tokens: [Int]
 
+    /// The whole prompt the last pass rendered, which is not the same as
+    /// `tokens`: the ledger also holds the tokens the model generated after
+    /// that render.
+    ///
+    /// A protocol rule compares this with the next render to prove that the
+    /// template rewrote no cached region before it splices past the turn the
+    /// model committed. Empty means no render is on record, thus no rule may
+    /// splice.
+    let renderTokens: [Int]
+
+    /// The model state the last pass left with `caches`, or nil for a model
+    /// that carries none.
+    ///
+    /// A Qwen VL model keys its M-RoPE anchor here and refuses a warm cache
+    /// without it, thus the next turn seeds its iterator with this state. The
+    /// state is tied to the prefill that made it, thus the caches never rewind
+    /// under it.
+    let state: LMOutput.State?
+
     /// Creates an entry for caches that hold `tokens`.
-    init(caches: [KVCache], tokens: [Int]) {
+    ///
+    /// - Parameters:
+    ///   - caches: one cache for each layer of the model.
+    ///   - tokens: the exact tokens `caches` represents.
+    ///   - renderTokens: the whole prompt the last pass rendered, or empty
+    ///     when no render is on record.
+    ///   - state: the model state the last pass left, or nil.
+    init(
+        caches: [KVCache], tokens: [Int], renderTokens: [Int] = [],
+        state: LMOutput.State? = nil
+    ) {
         self.caches = caches
         self.tokens = tokens
+        self.renderTokens = renderTokens
+        self.state = state
     }
 }
 
@@ -79,6 +111,14 @@ actor ExecutorPromptCacheStore {
     func checkOut(_ key: ExecutorPromptCacheKey) -> ExecutorPromptCacheEntry? {
         usageOrder.removeAll { $0 == key }
         return entries.removeValue(forKey: key)
+    }
+
+    /// Reads the entry of `key` and leaves it in the store. Read by tests that
+    /// compare a session's ledger with its next render.
+    ///
+    /// - Returns: the entry, or nil when the store holds none for `key`.
+    func peek(_ key: ExecutorPromptCacheKey) -> ExecutorPromptCacheEntry? {
+        entries[key]
     }
 
     /// Puts `entry` back under `key`, or drops the key when `entry` is nil.
@@ -128,6 +168,17 @@ struct ExecutorPromptCachePlan {
     /// The whole rendered prompt of this pass.
     let promptTokens: [Int]
 
+    /// The tokens `caches` represents once this pass has fed `input`, before
+    /// generation. This is `promptTokens` on the standard path. A protocol rule
+    /// that splices past a committed turn names the tokens the model wrote
+    /// instead, plus the tail of the render it fed.
+    let representedTokens: [Int]
+
+    /// The model state to seed the iterator with: the state the entry carried
+    /// when this pass reuses its caches, and nil when the pass builds fresh
+    /// caches.
+    let state: LMOutput.State?
+
     /// Plans what `entry` may serve for `input`, building fresh caches when it
     /// may serve nothing.
     ///
@@ -136,6 +187,8 @@ struct ExecutorPromptCachePlan {
     ///   - input: the prepared input of the pass about to run.
     ///   - model: the model that owns the cache shape.
     ///   - parameters: the generation parameters the new caches must match.
+    ///   - protocolRules: the cache-reuse rules of the model's response
+    ///     protocol, consulted before the standard prefix rules.
     /// - Returns: the plan, or nil when a carried cache cannot serve this input
     ///   at all. Media, a mask that hides a token and a batch of more than one
     ///   row each place content in the model's input that a token ledger cannot
@@ -144,31 +197,38 @@ struct ExecutorPromptCachePlan {
         reusing entry: ExecutorPromptCacheEntry?,
         input: LMInput,
         model: any LanguageModel,
-        parameters: GenerateParameters
+        parameters: GenerateParameters,
+        protocolRules: [any PromptCacheReuseRule] = []
     ) throws -> ExecutorPromptCachePlan? {
         guard let promptTokens = ledgerTokens(of: input), !promptTokens.isEmpty else {
             return nil
         }
 
         if let entry,
-            let reusedTokenCount = reusablePromptPrefix(
-                promptTokens: promptTokens, cachedTokens: entry.tokens, caches: entry.caches),
-            reusedTokenCount < promptTokens.count
+            let reuse = reconcilePromptCache(
+                promptTokens: promptTokens, cachedTokens: entry.tokens,
+                previousRenderTokens: entry.renderTokens, caches: entry.caches,
+                protocolRules: protocolRules, carriesModelState: entry.state != nil),
+            reuse.suffixStart < promptTokens.count
         {
             return ExecutorPromptCachePlan(
                 caches: entry.caches,
-                input: reusedTokenCount == 0
+                input: reuse.suffixStart == 0
                     ? input
-                    : narrowed(input, to: Array(promptTokens[reusedTokenCount...])),
-                reusedTokenCount: reusedTokenCount,
-                promptTokens: promptTokens)
+                    : narrowed(input, to: Array(promptTokens[reuse.suffixStart...])),
+                reusedTokenCount: reuse.suffixStart,
+                promptTokens: promptTokens,
+                representedTokens: reuse.representedTokens,
+                state: entry.state)
         }
 
         return ExecutorPromptCachePlan(
             caches: try model.newCache(parameters: parameters),
             input: input,
             reusedTokenCount: 0,
-            promptTokens: promptTokens)
+            promptTokens: promptTokens,
+            representedTokens: promptTokens,
+            state: nil)
     }
 
     /// The rank of a token array a processor batched: one row for each
@@ -220,34 +280,44 @@ struct ExecutorPromptCachePlan {
     /// The cache this finished pass leaves for the next turn of its session.
     ///
     /// Generation feeds the tokens the model sampled into the caches, thus the
-    /// caches hold the render of this pass AND those generated tokens. The
-    /// ledger names both, which is the ledger ``ChatSession`` keeps. A rewind
-    /// back to the render alone is not available to every model -- a rotating
-    /// cache past its sliding window drops the keys a rewind needs -- and this
-    /// ledger asks for none.
+    /// caches hold what this pass represented before generation AND those
+    /// generated tokens. The ledger names both, which is the ledger
+    /// ``ChatSession`` keeps. A rewind back to the render alone is not available
+    /// to every model -- a rotating cache past its sliding window drops the keys
+    /// a rewind needs, and a recurrent cache never rewinds -- and this ledger
+    /// asks for none.
     ///
     /// The next turn reconciles the two. When its render extends this ledger,
-    /// `ExtendCachedPrefixRule` feeds the tail alone. When the render breaks the
-    /// prefix at the seam between the two, `RewindToCommonPrefixRule` takes over
-    /// and answers what the caches allow.
+    /// `ExtendCachedPrefixRule` feeds the tail alone. When the render rewrites
+    /// the turn the model wrote, a protocol rule splices past the commit that
+    /// closed that turn, with the render recorded here as its proof. Otherwise
+    /// `RewindToCommonPrefixRule` takes over and answers what the caches allow.
     ///
-    /// - Parameter generatedTokens: every token this pass generated, in order.
-    ///   `TokenIterator` feeds a token before it answers it, thus each token of
-    ///   this list stands in the caches.
+    /// - Parameters:
+    ///   - generatedTokens: every token this pass generated, in order.
+    ///     `TokenIterator` feeds a token before it answers it, thus each token
+    ///     of this list stands in the caches.
+    ///   - state: the model state the prefill of this pass left, which the
+    ///     next turn seeds its iterator with, or nil for a model that carries
+    ///     none.
     /// - Returns: the entry to check in, or nil when the caches did not land on
     ///   a position this ledger can name and the session must start cold.
-    func committed(generatedTokens: [Int]) -> ExecutorPromptCacheEntry? {
+    func committed(
+        generatedTokens: [Int], state: LMOutput.State? = nil
+    ) -> ExecutorPromptCacheEntry? {
         guard let position = caches.first?.offset,
             caches.allSatisfy({ $0.offset == position }),
-            position >= promptTokens.count,
-            position - promptTokens.count <= generatedTokens.count
+            position >= representedTokens.count,
+            position - representedTokens.count <= generatedTokens.count
         else {
             return nil
         }
-        let committedGeneratedTokenCount = position - promptTokens.count
+        let committedGeneratedTokenCount = position - representedTokens.count
         return ExecutorPromptCacheEntry(
             caches: caches,
-            tokens: promptTokens + generatedTokens.prefix(committedGeneratedTokenCount))
+            tokens: representedTokens + generatedTokens.prefix(committedGeneratedTokenCount),
+            renderTokens: promptTokens,
+            state: state)
     }
 }
 
@@ -290,12 +360,16 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     ///   - input: the prepared input of the pass about to run.
     ///   - model: the model that owns the cache shape.
     ///   - parameters: the generation parameters the new caches must match.
+    ///   - protocolRules: the cache-reuse rules of the model's response
+    ///     protocol, consulted before the standard prefix rules.
     /// - Returns: the plan, or nil when the pass carries no cache.
     func plan(
-        input: LMInput, model: any LanguageModel, parameters: GenerateParameters
+        input: LMInput, model: any LanguageModel, parameters: GenerateParameters,
+        protocolRules: [any PromptCacheReuseRule] = []
     ) throws -> ExecutorPromptCachePlan? {
         let plan = try ExecutorPromptCachePlan.make(
-            reusing: entry, input: input, model: model, parameters: parameters)
+            reusing: entry, input: input, model: model, parameters: parameters,
+            protocolRules: protocolRules)
         entry = nil
         reusedTokenCount = plan?.reusedTokenCount ?? 0
         return plan
@@ -315,8 +389,11 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     /// - Parameters:
     ///   - plan: the plan the pass ran, or nil when the pass carried no plan.
     ///   - generatedTokens: the tokens the pass generated, in order.
-    func commit(_ plan: ExecutorPromptCachePlan?, generatedTokens: [Int]) {
-        entry = plan?.committed(generatedTokens: generatedTokens)
+    ///   - state: the model state the prefill of the pass left, or nil.
+    func commit(
+        _ plan: ExecutorPromptCachePlan?, generatedTokens: [Int], state: LMOutput.State? = nil
+    ) {
+        entry = plan?.committed(generatedTokens: generatedTokens, state: state)
     }
 }
 

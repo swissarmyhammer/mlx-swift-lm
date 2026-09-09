@@ -7,7 +7,7 @@ import Foundation
 ///
 /// A decision describes *what* to do; applying it (trimming, rebuilding,
 /// prefilling) belongs to whoever owns the caches.
-enum PromptCacheReuseDecision: Equatable {
+package enum PromptCacheReuseDecision: Equatable {
 
     /// Feed the whole prompt. The cache holds nothing worth reusing.
     case prefillAll
@@ -46,25 +46,25 @@ enum PromptCacheReuseDecision: Equatable {
 }
 
 /// The prompt-side facts of one turn that affect cache reuse.
-struct PromptCacheTurn: Sendable {
+package struct PromptCacheTurn: Sendable {
     /// The full rendered prompt for this turn.
-    var promptTokens: [Int]
+    package var promptTokens: [Int]
 
     /// This turn's messages introduce new media, so the cached text prefix is
     /// no longer a valid prefix of the model's actual input.
-    var carriesNewMedia: Bool = false
+    package var carriesNewMedia: Bool = false
 
     /// The prepared input contains image/video/audio tensors, which the rewind
     /// path cannot account for.
-    var carriesPreparedMedia: Bool = false
+    package var carriesPreparedMedia: Bool = false
 
     /// The prepared input carries an explicit attention mask; a partial prefill
     /// would apply it against the wrong positions.
-    var carriesAttentionMask: Bool = false
+    package var carriesAttentionMask: Bool = false
 
     /// Per-call model state (e.g. M-RoPE deltas) is carried across turns. Such
     /// state is anchored to a prefill and cannot be rewound.
-    var carriesModelState: Bool = false
+    package var carriesModelState: Bool = false
 
     /// This turn appends tool results to a transcript whose last assistant
     /// message issued tool calls, i.e. the generation loop is resuming rather
@@ -72,29 +72,29 @@ struct PromptCacheTurn: Sendable {
     ///
     /// Response protocols that keep private per-turn state in the cache use
     /// this to recognize a restart they can splice onto.
-    var isToolResultContinuation: Bool = false
+    package var isToolResultContinuation: Bool = false
 
     /// Generated tokens returned to the previous caller but not yet represented
     /// by the main cache. Speculative iterators can leave their final verifier
     /// sample in this state.
-    var previousGenerationUncommittedTokens: [Int] = []
+    package var previousGenerationUncommittedTokens: [Int] = []
 
     /// Number of structured assistant tool-call messages represented by the
     /// rendered prompt. A protocol can compare this with raw control-token
     /// occurrences to reject ambiguous boundaries introduced by message text.
-    var structuredToolCallCount: Int?
+    package var structuredToolCallCount: Int?
 
     /// The session is configured to use a draft model when possible. Protocol
     /// rules use this to avoid resuming from a private main-cache path with a
     /// missing or divergent draft cache.
-    var usesSpeculativeDecoding: Bool = false
+    package var usesSpeculativeDecoding: Bool = false
 }
 
 /// What the caches currently hold.
-struct PromptCacheState: Sendable {
+package struct PromptCacheState: Sendable {
     /// Exact tokens the main cache represents, per the session's ledger. Empty
     /// means the ledger was invalidated and nothing may be spliced onto.
-    var cachedTokens: [Int]
+    package var cachedTokens: [Int]
 
     /// The whole prompt that the last prefill rendered, which is not the same as
     /// ``cachedTokens``: the ledger also holds the tokens the model generated
@@ -105,26 +105,26 @@ struct PromptCacheState: Sendable {
     /// only region the two can differ in is the one the model generated, and the
     /// cache holds the true version of it. Empty means no render is on record,
     /// thus no rule may splice.
-    var previousRenderTokens: [Int] = []
+    package var previousRenderTokens: [Int] = []
 
     /// Authoritative logical position of the main cache — the model-wide
     /// timeline maintained by ``KVCacheStorage``, not a per-entry offset.
-    var processedTokenCount: Int
+    package var processedTokenCount: Int
 
     /// The main cache's timeline agrees with the ledger length.
-    var mainCacheIsAligned: Bool = false
+    package var mainCacheIsAligned: Bool = false
 
     /// A live draft cache is available for the next generation.
-    var hasDraftCache: Bool = false
+    package var hasDraftCache: Bool = false
 
     /// The draft cache's timeline agrees with the ledger length. This remains
     /// `true` when no draft exists so generic main-only cache decisions keep
     /// their existing behavior; protocol rules can inspect `hasDraftCache`
     /// when absence matters.
-    var draftCacheIsAligned: Bool = true
+    package var draftCacheIsAligned: Bool = true
 
     /// Every cache supports rewinding.
-    var isTrimmable: Bool = false
+    package var isTrimmable: Bool = false
 }
 
 /// One reusability rule.
@@ -132,7 +132,7 @@ struct PromptCacheState: Sendable {
 /// Returning `nil` means "this rule does not apply"; the policy then consults
 /// the next rule. This is the extension point for response protocols whose
 /// on-device token stream is not reproducible by a chat-template render.
-protocol PromptCacheReuseRule: Sendable {
+package protocol PromptCacheReuseRule: Sendable {
     func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision?
 }
 
@@ -256,53 +256,109 @@ package func rewindPromptCache(_ caches: [KVCache], to position: Int) -> Bool {
     return caches.allSatisfy { $0.offset == position }
 }
 
+/// What live caches hold of a newly rendered prompt once a decision is applied.
+package struct PromptCacheReuse: Equatable, Sendable {
+    /// How many leading tokens of the prompt the caches hold, thus the caller
+    /// feeds the prompt from this index onward.
+    package let suffixStart: Int
+
+    /// The tokens the caches represent once the caller has fed the suffix. This
+    /// is the prompt itself on the standard path, and the ledger the model wrote
+    /// plus the new tail when a protocol rule spliced past a committed turn.
+    package let representedTokens: [Int]
+
+    /// Creates a reuse of `suffixStart` leading tokens.
+    package init(suffixStart: Int, representedTokens: [Int]) {
+        self.suffixStart = suffixStart
+        self.representedTokens = representedTokens
+    }
+}
+
 /// Reconciles live caches with a newly rendered prompt, and reports how much of
-/// that prompt the caches already hold.
+/// that prompt the caches already hold and what they represent afterwards.
 ///
 /// The caller owns `caches` and the ledger `cachedTokens`, which names the exact
 /// tokens `caches` represents. This function asks ``PromptCacheReusePolicy`` for
 /// a decision, applies a rewind when the decision asks for one, and confirms
 /// that the rewind landed.
 ///
-/// It consults no protocol rule. Those rules serve a ledger that holds generated
-/// tokens a template render cannot reproduce; this entry point serves a caller
-/// whose ledger holds a render alone, which is why a plain prefix comparison is
-/// the whole question. ``ChatSession`` keeps the richer application, because it
-/// also owns a draft cache, carried model state and prepared media.
+/// The protocol rules come first, the way ``ChatSession`` orders them. A rule
+/// serves a ledger that holds generated tokens a template render cannot write
+/// again; it needs `previousRenderTokens` to prove that the new render rewrote
+/// no cached region. A caller with no rule, or no render on record, gets the
+/// plain prefix comparison. ``ChatSession`` keeps the richer application,
+/// because it also owns a draft cache, carried model state and prepared media.
+///
+/// - Parameters:
+///   - promptTokens: the whole newly rendered prompt.
+///   - cachedTokens: the tokens `caches` represents.
+///   - previousRenderTokens: the whole prompt the last prefill rendered, or
+///     empty when no render is on record.
+///   - caches: the live caches, one for each layer of the model.
+///   - protocolRules: the rules of the model's response protocol, consulted
+///     before the standard rules.
+///   - carriesModelState: whether the caller carries per-call model state
+///     with `caches`, such as the M-RoPE anchor of a Qwen VL model. That
+///     state is tied to the prefill that made it, thus the caches must not
+///     rewind under it: a prompt that rewrites a cached token gets no reuse.
+/// - Returns: what the caches hold and represent when this function returns.
+///   `nil` when the caches cannot serve this prompt at all, and the caller must
+///   build new ones.
+package func reconcilePromptCache(
+    promptTokens: [Int],
+    cachedTokens: [Int],
+    previousRenderTokens: [Int] = [],
+    caches: [KVCache],
+    protocolRules: [any PromptCacheReuseRule] = [],
+    carriesModelState: Bool = false
+) -> PromptCacheReuse? {
+    guard !caches.isEmpty else { return nil }
+
+    let turn = PromptCacheTurn(promptTokens: promptTokens, carriesModelState: carriesModelState)
+    let cacheState = PromptCacheState(
+        cachedTokens: cachedTokens,
+        previousRenderTokens: previousRenderTokens,
+        processedTokenCount: caches.first?.offset ?? 0,
+        mainCacheIsAligned: caches.allSatisfy { $0.offset == cachedTokens.count },
+        isTrimmable: canTrimPromptCache(caches))
+
+    switch PromptCacheReusePolicy(protocolRules: protocolRules).decide(
+        turn: turn, cache: cacheState)
+    {
+    case .prefillAll:
+        // The rule reaches this case only at position zero, thus the caches
+        // hold nothing and the whole prompt is fed into them.
+        return PromptCacheReuse(suffixStart: 0, representedTokens: promptTokens)
+
+    case .appendSuffix(let suffixStart, let representedTokens),
+        .appendSuffixToMain(let suffixStart, let representedTokens):
+        return PromptCacheReuse(suffixStart: suffixStart, representedTokens: representedTokens)
+
+    case .trimToCommonPrefix(let commonPrefixLength, _):
+        guard rewindPromptCache(caches, to: commonPrefixLength) else { return nil }
+        return PromptCacheReuse(suffixStart: commonPrefixLength, representedTokens: promptTokens)
+
+    case .rebuild:
+        return nil
+    }
+}
+
+/// Reconciles live caches with a newly rendered prompt through the standard
+/// rules alone, and reports how much of that prompt the caches already hold.
+///
+/// This is ``reconcilePromptCache(promptTokens:cachedTokens:previousRenderTokens:caches:protocolRules:)``
+/// for a caller whose ledger holds a render alone, thus the answer is the
+/// prefix and nothing more.
 ///
 /// - Parameters:
 ///   - promptTokens: the whole newly rendered prompt.
 ///   - cachedTokens: the tokens `caches` represents.
 ///   - caches: the live caches, one for each layer of the model.
 /// - Returns: how many leading tokens of `promptTokens` the caches hold when
-///   this function returns, thus the caller feeds `promptTokens` from that index
-///   onward. `nil` when the caches cannot serve this prompt at all, and the
-///   caller must build new ones.
+///   this function returns, or `nil` when the caches cannot serve this prompt.
 package func reusablePromptPrefix(
     promptTokens: [Int], cachedTokens: [Int], caches: [KVCache]
 ) -> Int? {
-    guard !caches.isEmpty else { return nil }
-
-    let turn = PromptCacheTurn(promptTokens: promptTokens)
-    let cacheState = PromptCacheState(
-        cachedTokens: cachedTokens,
-        processedTokenCount: caches.first?.offset ?? 0,
-        mainCacheIsAligned: caches.allSatisfy { $0.offset == cachedTokens.count },
-        isTrimmable: canTrimPromptCache(caches))
-
-    switch PromptCacheReusePolicy().decide(turn: turn, cache: cacheState) {
-    case .prefillAll:
-        // The rule reaches this case only at position zero, thus the caches
-        // hold nothing and the whole prompt is fed into them.
-        return 0
-
-    case .appendSuffix(let suffixStart, _), .appendSuffixToMain(let suffixStart, _):
-        return suffixStart
-
-    case .trimToCommonPrefix(let commonPrefixLength, _):
-        return rewindPromptCache(caches, to: commonPrefixLength) ? commonPrefixLength : nil
-
-    case .rebuild:
-        return nil
-    }
+    reconcilePromptCache(promptTokens: promptTokens, cachedTokens: cachedTokens, caches: caches)?
+        .suffixStart
 }

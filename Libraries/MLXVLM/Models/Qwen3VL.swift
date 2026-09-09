@@ -2045,6 +2045,11 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
             "content": imageContent + videoContent + textContent,
         ]
         addToolMetadata(to: &dictionary, for: message)
+        // The Qwen 3.5 chat template keeps the `<think>` block of a past
+        // turn and reads `reasoning_content` into it. Without this key the
+        // history render writes an empty block, thus the next round parts
+        // from the tokens the model wrote and the prompt cache starts cold.
+        addReasoningMetadata(to: &dictionary, for: message)
         return dictionary
     }
 }

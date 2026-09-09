@@ -2017,6 +2017,9 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
 ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``.
 ///   - wiredMemoryTicket: optional wired memory ticket.
 ///   - tools: optional tool schemas used to parse tool-call arguments.
+///   - preparedState: receives the model state the prefill left. A caller
+///     that carries `cache` to a later turn seeds that turn with it; a Qwen VL
+///     model keys its M-RoPE anchor there and refuses a warm cache without it.
 /// - Returns: the stream of text and tool calls, and the task that generates
 ///   them. The value of the task is every generated token, in order.
 /// - Throws: an error when the iterator cannot be built.
@@ -2025,11 +2028,13 @@ package func generateTaskRecordingTokens(
     parameters: GenerateParameters, context: ModelContext,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
-    tools: [[String: any Sendable]]? = nil
+    tools: [[String: any Sendable]]? = nil,
+    preparedState: (LMOutput.State?) -> Void = { _ in }
 ) throws -> (AsyncStream<Generation>, Task<[Int], Never>) {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
+    preparedState(iterator.state)
     return generateTaskRecordingTokens(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
@@ -2326,6 +2331,9 @@ public func generateTokensTask(
 /// stream and its forward pass has already advanced the cache. A caller that
 /// keeps a token ledger of that cache needs the whole list.
 ///
+///   - preparedState: receives the model state the prefill left. A caller
+///     that carries `cache` to a later turn seeds that turn with it; a Qwen VL
+///     model keys its M-RoPE anchor there and refuses a warm cache without it.
 /// - Returns: the stream of raw tokens, and the task that generates them. The
 ///   value of the task is every generated token.
 package func generateProtocolTokensTask(
@@ -2336,11 +2344,13 @@ package func generateProtocolTokensTask(
     context: ModelContext,
     decoder: (any TokenStreamDecoder)?,
     components: GenerationComponents = .init(),
-    wiredMemoryTicket: WiredMemoryTicket? = nil
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    preparedState: (LMOutput.State?) -> Void = { _ in }
 ) throws -> (AsyncStream<TokenGeneration>, Task<[Int], Never>) {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
+    preparedState(iterator.state)
     return generateLoopTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
@@ -2475,29 +2485,6 @@ private func generateLoopTask<
             )
             stopTokenIds.formUnion(handler.additionalStopTokenIDs)
 
-            // Dispatches an EOS/stop token. When `includeStopToken` is false the
-            // stop token is suppressed from the emitted output: its identity is
-            // captured in `stopTokenFedToCache` (its forward pass already advanced
-            // the cache) and discarded from the iterator. Otherwise it is counted
-            // and routed through the handler's own stop-token dispatch. Either way
-            // the token loop always terminates once a stop token is seen, so this
-            // returns the resulting `GenerateStopReason` rather than a full
-            // disposition.
-            func handleStopToken(_ token: Int) -> GenerateStopReason {
-                guard includeStopToken else {
-                    stopTokenFedToCache = token
-                    iterator.discardGeneratedToken()
-                    return .stop
-                }
-                tokenCount += 1
-                switch handler.onStopToken(token, emit: continuation.yield) {
-                case .more, .stop:
-                    return .stop
-                case .cancelled:
-                    return .cancelled
-                }
-            }
-
             // Dispatches a newly generated (non-stop) token through the handler,
             // counting it toward the loop's token budget.
             func handleGeneratedToken(_ token: Int) -> TokenLoopDisposition {
@@ -2522,8 +2509,16 @@ private func generateLoopTask<
                     start = now
                 }
 
-                // Check for end-of-sequence tokens
+                // Check for end-of-sequence tokens. When `includeStopToken` is
+                // false the stop token stays out of the emitted output and out
+                // of `tokenCount`, whether the handler receives it or not. Its
+                // forward pass already advanced the cache, thus its identity
+                // goes into `stopTokenFedToCache` for the caller that keeps a
+                // token ledger beside the cache.
                 if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
+                    if !includeStopToken {
+                        stopTokenFedToCache = token
+                    }
                     let deliverToHandler =
                         includeStopToken
                         || (handler.receivesStopTokens && stopTokenIds.contains(token))
@@ -2801,6 +2796,7 @@ public struct GenerateCompletionInfo: Sendable {
             promptTime: promptTime,
             generationTime: generateTime,
             stopReason: stopReason,
+            stopTokenFedToCache: stopTokenFedToCache,
             proposedDraftTokens: proposedDraftTokens,
             acceptedDraftTokens: acceptedDraftTokens,
             passthroughReason: passthroughReason,

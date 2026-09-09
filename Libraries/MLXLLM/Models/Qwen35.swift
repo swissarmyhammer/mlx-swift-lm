@@ -346,7 +346,7 @@ final class Qwen35GatedDeltaNet: Module {
                     recurrentState: checkpoint.recurrent,
                     advancedBy: checkpointAfter)
             }
-            cache.advance(inputs.dim(1))
+            cache.advancePosition(by: inputs.dim(1))
         }
         return out
     }
@@ -784,7 +784,7 @@ final class Qwen35DecoderLayer: Module {
         let out = compiledLinearLayer(self, [x, convState, recState])
         cache[0] = out[1]
         cache[1] = out[2]
-        cache.advance(1)
+        cache.advancePosition(by: 1)
         return out[0]
     }
 
@@ -1041,7 +1041,7 @@ public class Qwen35TextModelInner: Module {
                 let mambaCache = mambaCaches[layerIndex]!
                 mambaCache[0] = outputs[1 + 2 * i]
                 mambaCache[1] = outputs[2 + 2 * i]
-                mambaCache.advance(1)
+                mambaCache.advancePosition(by: 1)
             }
 
             pendingAttention = []
@@ -1286,10 +1286,10 @@ extension Qwen35Model: SpeculativeCacheRewindModel {
 // `Qwen35MoEModel` subclasses `Qwen35Model` and inherits both declarations.
 extension Qwen35Model {
     public var toolCallFormat: ToolCallFormat? { .qwen35 }
-    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
+    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.qwen35 }
 }
 
 extension Qwen35TextModel {
     public var toolCallFormat: ToolCallFormat? { .qwen35 }
-    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
+    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.qwen35 }
 }
