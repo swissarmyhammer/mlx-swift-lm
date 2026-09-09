@@ -227,6 +227,8 @@ public struct Qwen35Configuration: Codable, Sendable {
 
 // MARK: - Language
 
+/// The text decoder of the Qwen 3.5 vision-language model, and the layers it
+/// is built from.
 public enum Qwen35Language {
 
     final class RotaryEmbedding {
@@ -1505,6 +1507,11 @@ extension Qwen35 {
 
 // `Qwen35MoE` subclasses `Qwen35` and inherits both declarations.
 extension Qwen35 {
+    /// The XML tool-call format of the Qwen 3.5 chat template.
     public var toolCallFormat: ToolCallFormat? { .qwen35 }
+
+    /// The Qwen 3.5 reasoning protocol, which replays the reasoning of a past
+    /// turn into the history render, thus the prompt cache extends across
+    /// tool rounds.
     public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.qwen35 }
 }

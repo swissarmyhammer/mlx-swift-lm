@@ -11,7 +11,11 @@
 // it appends, in which order, and whether the first entry keeps its identity.
 // The executor keys the session's cache on that identity.
 //
-// Every measurement line carries the `QWEN35 SESSION:` prefix.
+// Every measurement line goes to the unified log, in the subsystem
+// `com.apple.FoundationModels-MLX` under the category
+// `Qwen35SessionPromptCache`, with the `QWEN35 SESSION:` prefix. Read the
+// numbers after a run with:
+// `log show --info --start <time> --predicate 'subsystem == "com.apple.FoundationModels-MLX"'`
 //
 // Run explicitly via:
 // `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/Qwen35SessionPromptCacheTests`
@@ -24,11 +28,16 @@ import IntegrationTestHelpers
 import MLX
 import MLXLMCommon
 import Testing
+import os
 
 @testable import MLXFoundationModels
 
-/// Prefix that makes every measurement line greppable in a run log.
+/// Prefix that makes every measurement line greppable in the log.
 private let measurementPrefix = "QWEN35 SESSION:"
+
+/// The log every measurement line of this suite goes to.
+private let measurementLog = Logger(
+    subsystem: "com.apple.FoundationModels-MLX", category: "Qwen35SessionPromptCache")
 
 /// The hybrid checkpoint under measurement.
 private let hybridModelID = "mlx-community/Qwen3.8-27B-mxfp4"
@@ -82,11 +91,17 @@ struct Qwen35SessionPromptCacheTests {
         let ledgerTail = await decodeTokens(
             container,
             tokens: divergentTail(of: ledger, from: shared, limit: divergenceReportTokenCount))
-        print(
+        let seam =
             "\(measurementPrefix) turn 2 render shares \(shared) of the \(ledger.count)-token "
-                + "ledger; render <<<\(renderTail)>>> where the ledger holds <<<\(ledgerTail)>>>")
-        print("\(measurementPrefix) turn 2 first entry id = \(session.transcript.first?.id ?? "-")")
-        print("\(measurementPrefix) turn 1 first entry id = \(firstEntryID)")
+            + "ledger; render <<<\(renderTail)>>> where the ledger holds <<<\(ledgerTail)>>>"
+        let secondEntryID = session.transcript.first?.id ?? "-"
+        measurementLog.info("\(seam, privacy: .public)")
+        measurementLog.info(
+            "\(measurementPrefix, privacy: .public) turn 2 first entry id = \(secondEntryID, privacy: .public)"
+        )
+        measurementLog.info(
+            "\(measurementPrefix, privacy: .public) turn 1 first entry id = \(firstEntryID, privacy: .public)"
+        )
 
         #expect(first.usage.input.cachedTokenCount == 0)
         #expect(
@@ -99,13 +114,10 @@ struct Qwen35SessionPromptCacheTests {
         await releaseAllGPUMemory()
     }
 
-    /// Prints the usage of one turn and the entries the transcript holds.
+    /// Logs the usage of one turn and the entries the transcript holds.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func report(turn: Int, usage: LanguageModelSession.Usage, transcript: Transcript) {
         let line = "\(measurementPrefix) turn \(turn)"
-        print("\(line) rendered prompt tokens = \(usage.input.totalTokenCount)")
-        print("\(line) cachedTokenCount = \(usage.input.cachedTokenCount)")
-        print("\(line) generated tokens = \(usage.output.totalTokenCount)")
         let kinds = transcript.map { entry -> String in
             switch entry {
             case .instructions: return "instructions"
@@ -117,7 +129,15 @@ struct Qwen35SessionPromptCacheTests {
             default: return "other"
             }
         }
-        print("\(line) transcript = \(kinds.joined(separator: " "))")
+        let lines = [
+            "rendered prompt tokens = \(usage.input.totalTokenCount)",
+            "cachedTokenCount = \(usage.input.cachedTokenCount)",
+            "generated tokens = \(usage.output.totalTokenCount)",
+            "transcript = \(kinds.joined(separator: " "))",
+        ]
+        for measurement in lines {
+            measurementLog.info("\(line, privacy: .public) \(measurement, privacy: .public)")
+        }
     }
 }
 

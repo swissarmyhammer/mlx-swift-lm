@@ -254,7 +254,8 @@ struct ExecutorPromptCacheTests {
             reusedTokenCount: 0,
             promptTokens: promptTokens,
             representedTokens: promptTokens,
-            state: nil)
+            state: nil,
+            decision: .cold)
     }
 
     /// A recurrent cache placed at `position`, the way a Qwen 3.5 linear
@@ -597,6 +598,314 @@ struct ExecutorPromptCacheTests {
         #expect(await store.peek(key("a"))?.tokens == [1, 2, 3])
         #expect(await store.retainedSessionCount == 1)
         #expect(await store.checkOut(key("a"))?.tokens == [1, 2, 3])
+    }
+
+    // MARK: - Naming the rule that decided a pass
+
+    /// An entry whose one recurrent cache stands at the end of `ledger`, thus
+    /// the caches cannot rewind and a render that parts from the ledger
+    /// rebuilds.
+    private func recurrentEntry(ledger: [Int]) -> ExecutorPromptCacheEntry {
+        ExecutorPromptCacheEntry(caches: [recurrentCache(at: ledger.count)], tokens: ledger)
+    }
+
+    /// Plans `render` against `entry` with no protocol rule.
+    private func plan(
+        render: [Int], reusing entry: ExecutorPromptCacheEntry?
+    ) throws -> ExecutorPromptCachePlan? {
+        try ExecutorPromptCachePlan.make(
+            reusing: entry, input: LMInput(tokens: MLXArray(render)),
+            model: ScriptedLanguageModel(rounds: []), parameters: GenerateParameters())
+    }
+
+    @Test("a pass with no carried entry names the cold rule")
+    func aPassWithNoCarriedEntryNamesTheColdRule() throws {
+        #expect(try plan(render: [1, 2, 3], reusing: nil)?.decision == .cold)
+    }
+
+    @Test("a render that extends the ledger names the extend rule")
+    func aRenderThatExtendsTheLedgerNamesTheExtendRule() throws {
+        let planned = try plan(batchedInput([1, 2, 3, 4]), cachedTokens: [1, 2, 3])
+
+        #expect(planned?.decision == .extend)
+    }
+
+    @Test("a protocol rule that splices names the splice rule")
+    func aProtocolRuleThatSplicesNamesTheSpliceRule() throws {
+        let ledger = [1, 2, 70, Self.commit]
+        let entry = ExecutorPromptCacheEntry(
+            caches: [recurrentCache(at: ledger.count)], tokens: ledger, renderTokens: [1, 2])
+
+        let planned = try ExecutorPromptCachePlan.make(
+            reusing: entry, input: LMInput(tokens: MLXArray([1, 2, 71, Self.commit, 20, 21])),
+            model: ScriptedLanguageModel(rounds: []), parameters: GenerateParameters(),
+            protocolRules: [SplicingRule()])
+
+        #expect(planned?.decision == .splice)
+    }
+
+    @Test("a rewind names the rewind rule and the seam it rewound to")
+    func aRewindNamesTheRewindRuleAndTheSeamItRewoundTo() throws {
+        let planned = try plan(batchedInput([1, 2, 9, 9]), cachedTokens: [1, 2, 3, 4, 5])
+
+        #expect(
+            planned?.decision
+                == .rewind(
+                    ExecutorPromptCacheDivergence(
+                        index: 2, renderTokens: [9, 9], ledgerTokens: [3, 4, 5])))
+    }
+
+    @Test("a rebuild names the rebuild rule and the seam the caches could not rewind to")
+    func aRebuildNamesTheRebuildRuleAndTheSeamTheCachesCouldNotRewindTo() throws {
+        let planned = try plan(
+            render: [1, 2, 9, 9], reusing: recurrentEntry(ledger: [1, 2, 3, 4]))
+
+        #expect(planned?.reusedTokenCount == 0)
+        #expect(
+            planned?.decision
+                == .rebuild(
+                    ExecutorPromptCacheDivergence(
+                        index: 2, renderTokens: [9, 9], ledgerTokens: [3, 4])))
+    }
+
+    @Test("a seam keeps a short window of tokens on each side")
+    func aSeamKeepsAShortWindowOfTokensOnEachSide() {
+        let window = ExecutorPromptCacheDivergence.reportedTokenCount
+        let shared = [1, 2]
+        let render = shared + Array(repeating: 8, count: window * 2)
+        let ledger = shared + Array(repeating: 9, count: window * 2)
+
+        let seam = ExecutorPromptCacheDivergence(render: render, ledger: ledger)
+
+        #expect(seam.index == shared.count)
+        #expect(seam.renderTokens == Array(repeating: 8, count: window))
+        #expect(seam.ledgerTokens == Array(repeating: 9, count: window))
+    }
+
+    @Test("a seam at the end of one side keeps no token on that side")
+    func aSeamAtTheEndOfOneSideKeepsNoTokenOnThatSide() {
+        let seam = ExecutorPromptCacheDivergence(render: [1, 2], ledger: [1, 2, 3])
+
+        #expect(
+            seam == ExecutorPromptCacheDivergence(index: 2, renderTokens: [], ledgerTokens: [3]))
+    }
+
+    // MARK: - Why a finished pass checks nothing in
+
+    @Test("caches that disagree on their position name every position")
+    func cachesThatDisagreeOnTheirPositionNameEveryPosition() {
+        let leading = KVCacheSimple()
+        let lagging = KVCacheSimple()
+        let promptTokens = [1, 2, 3, 4]
+        feed([leading], tokenCount: promptTokens.count + 1)
+        feed([lagging], tokenCount: promptTokens.count)
+
+        let outcome = plan(caches: [leading, lagging], promptTokens: promptTokens)
+            .commitOutcome(generatedTokens: [101])
+
+        #expect(outcome.refusal == .positionsDisagree([5, 4]))
+    }
+
+    @Test("caches behind the ledger name their position and the ledger length")
+    func cachesBehindTheLedgerNameTheirPositionAndTheLedgerLength() {
+        let caches: [KVCache] = [KVCacheSimple()]
+        feed(caches, tokenCount: 3)
+
+        let outcome = plan(caches: caches, promptTokens: [1, 2, 3, 4])
+            .commitOutcome(generatedTokens: [])
+
+        #expect(outcome.refusal == .behindTheLedger(position: 3, ledgerLength: 4))
+    }
+
+    @Test("caches past the generation name what the pass generated")
+    func cachesPastTheGenerationNameWhatThePassGenerated() {
+        let caches: [KVCache] = [KVCacheSimple()]
+        feed(caches, tokenCount: 7)
+
+        let outcome = plan(caches: caches, promptTokens: [1, 2, 3, 4])
+            .commitOutcome(generatedTokens: [101])
+
+        #expect(
+            outcome.refusal
+                == .pastTheGeneration(position: 7, ledgerLength: 4, generatedTokenCount: 1))
+    }
+
+    @Test("a pass with no cache at all names that")
+    func aPassWithNoCacheAtAllNamesThat() {
+        let outcome = plan(caches: [], promptTokens: [1, 2]).commitOutcome(generatedTokens: [])
+
+        #expect(outcome.refusal == .noCaches)
+    }
+
+    @Test("a good commit is checked in and refuses nothing")
+    func aGoodCommitIsCheckedInAndRefusesNothing() {
+        let caches: [KVCache] = [KVCacheSimple()]
+        feed(caches, tokenCount: 4)
+
+        let outcome = plan(caches: caches, promptTokens: [1, 2, 3])
+            .commitOutcome(generatedTokens: [101])
+
+        #expect(outcome.refusal == nil)
+        #expect(outcome.entry?.tokens == [1, 2, 3, 101])
+    }
+
+    // MARK: - The log line of one pass
+
+    /// Decodes a token window the way the report tests read it: each token
+    /// as its number, separated by one space.
+    private func decodeAsNumbers(_ tokens: [Int]) -> String {
+        tokens.map(String.init).joined(separator: " ")
+    }
+
+    /// The session every report line of this section names.
+    private var reportedKey: ExecutorPromptCacheKey { key("session-1") }
+
+    @Test("the plan line of an extension names the counts and the rule")
+    func thePlanLineOfAnExtensionNamesTheCountsAndTheRule() throws {
+        let planned = try plan(batchedInput([1, 2, 3, 4]), cachedTokens: [1, 2, 3])
+
+        let line = ExecutorPromptCacheReport.planLine(
+            key: reportedKey, plan: planned, decodeTokens: decodeAsNumbers)
+
+        #expect(
+            line
+                == "prompt cache plan model=test/prompt-cache session=session-1 "
+                + "rendered=4 reused=3 fed=1 rule=extend")
+    }
+
+    @Test("the plan line of a rebuild names the seam and decodes each side")
+    func thePlanLineOfARebuildNamesTheSeamAndDecodesEachSide() throws {
+        let planned = try plan(
+            render: [1, 2, 9, 9], reusing: recurrentEntry(ledger: [1, 2, 3, 4]))
+
+        let line = ExecutorPromptCacheReport.planLine(
+            key: reportedKey, plan: planned, decodeTokens: decodeAsNumbers)
+
+        #expect(
+            line
+                == "prompt cache plan model=test/prompt-cache session=session-1 "
+                + "rendered=4 reused=0 fed=4 rule=rebuild divergence=2 "
+                + "render=<<<9 9>>> ledger=<<<3 4>>>")
+    }
+
+    @Test("the plan line of a rewind names the seam it rewound to")
+    func thePlanLineOfARewindNamesTheSeamItRewoundTo() throws {
+        let planned = try plan(batchedInput([1, 2, 9]), cachedTokens: [1, 2, 3, 4])
+
+        let line = ExecutorPromptCacheReport.planLine(
+            key: reportedKey, plan: planned, decodeTokens: decodeAsNumbers)
+
+        #expect(
+            line
+                == "prompt cache plan model=test/prompt-cache session=session-1 "
+                + "rendered=3 reused=2 fed=1 rule=rewind divergence=2 "
+                + "render=<<<9>>> ledger=<<<3 4>>>")
+    }
+
+    @Test("the plan line of a cold pass names the cold rule")
+    func thePlanLineOfAColdPassNamesTheColdRule() throws {
+        let line = ExecutorPromptCacheReport.planLine(
+            key: reportedKey, plan: try plan(render: [1, 2, 3], reusing: nil),
+            decodeTokens: decodeAsNumbers)
+
+        #expect(
+            line
+                == "prompt cache plan model=test/prompt-cache session=session-1 "
+                + "rendered=3 reused=0 fed=3 rule=cold")
+    }
+
+    @Test("the plan line of a pass with no plan says why")
+    func thePlanLineOfAPassWithNoPlanSaysWhy() {
+        let line = ExecutorPromptCacheReport.planLine(
+            key: reportedKey, plan: nil, decodeTokens: decodeAsNumbers)
+
+        #expect(
+            line
+                == "prompt cache plan model=test/prompt-cache session=session-1 "
+                + "rule=none (the input carries media, a batch or a mask)")
+    }
+
+    @Test("a pass with no session key names no session")
+    func aPassWithNoSessionKeyNamesNoSession() {
+        let line = ExecutorPromptCacheReport.planLine(
+            key: nil, plan: nil, decodeTokens: decodeAsNumbers)
+
+        #expect(line.hasPrefix("prompt cache plan model=none session=none "))
+    }
+
+    @Test("the commit line names the ledger length checked in")
+    func theCommitLineNamesTheLedgerLengthCheckedIn() {
+        let caches: [KVCache] = [KVCacheSimple()]
+        feed(caches, tokenCount: 4)
+        let outcome = plan(caches: caches, promptTokens: [1, 2, 3])
+            .commitOutcome(generatedTokens: [101])
+
+        let line = ExecutorPromptCacheReport.commitLine(key: reportedKey, outcome: outcome)
+
+        #expect(
+            line == "prompt cache commit model=test/prompt-cache session=session-1 ledger=4")
+    }
+
+    @Test("the commit line names why nothing was checked in")
+    func theCommitLineNamesWhyNothingWasCheckedIn() {
+        let prefix = "prompt cache commit model=test/prompt-cache session=session-1 "
+        let lines = [
+            ExecutorPromptCacheCommitRefusal.noPlan,
+            .noCaches,
+            .positionsDisagree([5, 0]),
+            .behindTheLedger(position: 3, ledgerLength: 4),
+            .pastTheGeneration(position: 7, ledgerLength: 4, generatedTokenCount: 1),
+        ].map { ExecutorPromptCacheReport.commitLine(key: reportedKey, outcome: .refused($0)) }
+
+        #expect(
+            lines == [
+                prefix + "checked in nothing: the pass carried no plan",
+                prefix + "checked in nothing: the pass carried no cache",
+                prefix + "checked in nothing: the caches disagree on their position [5, 0]",
+                prefix + "checked in nothing: the caches stand at 3, behind the 4-token ledger",
+                prefix + "checked in nothing: the caches stand at 7, past the 4-token ledger "
+                    + "and the 1 generated tokens",
+            ])
+    }
+
+    @Test("a slot reports one plan line and one commit line for each pass")
+    func aSlotReportsOnePlanLineAndOneCommitLineForEachPass() throws {
+        var lines: [String] = []
+        let caches: [KVCache] = [KVCacheSimple()]
+        feed(caches, tokenCount: 3)
+        let entry = ExecutorPromptCacheEntry(caches: caches, tokens: [1, 2, 3])
+        let slot = ExecutorPromptCacheSlot(entry, key: reportedKey) { lines.append($0) }
+
+        let planned = try slot.plan(
+            input: LMInput(tokens: MLXArray([1, 2, 3, 4])),
+            model: ScriptedLanguageModel(rounds: []), parameters: GenerateParameters(),
+            decodeTokens: decodeAsNumbers)
+        feed(caches, tokenCount: 1)
+        slot.commit(planned, generatedTokens: [])
+
+        #expect(
+            lines == [
+                "prompt cache plan model=test/prompt-cache session=session-1 "
+                    + "rendered=4 reused=3 fed=1 rule=extend",
+                "prompt cache commit model=test/prompt-cache session=session-1 ledger=4",
+            ])
+    }
+
+    @Test("a guided pass reports that it owns its cache")
+    func aGuidedPassReportsThatItOwnsItsCache() {
+        var lines: [String] = []
+        let slot = ExecutorPromptCacheSlot(nil, key: reportedKey) { lines.append($0) }
+
+        slot.carriesNoCache()
+        slot.commit(nil, generatedTokens: [])
+
+        #expect(
+            lines == [
+                "prompt cache plan model=test/prompt-cache session=session-1 "
+                    + "rule=guided (the guided pass owns its cache and carries none)",
+                "prompt cache commit model=test/prompt-cache session=session-1 "
+                    + "checked in nothing: the pass carried no plan",
+            ])
     }
 }
 

@@ -407,7 +407,7 @@ struct TranscriptConverterTests {
     }
 
     @Test
-    func testReplayedReasoningRidesOnTheResponseThatFollowsIt() throws {
+    func replayedReasoningRidesOnTheResponseThatFollowsIt() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
         // A reasoning model whose template keeps the `<think>` block of a past
@@ -440,7 +440,7 @@ struct TranscriptConverterTests {
     }
 
     @Test
-    func testReplayedReasoningRidesOnTheToolCallsThatFollowIt() throws {
+    func replayedReasoningRidesOnTheToolCallsThatFollowIt() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
         // A think-then-call round: the model reasons, then calls a tool. The
@@ -470,7 +470,7 @@ struct TranscriptConverterTests {
     }
 
     @Test
-    func testReplayedReasoningBelongsToTheNextAssistantEntryAlone() throws {
+    func replayedReasoningBelongsToTheNextAssistantEntryAlone() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
         // Reasoning that a prompt follows belongs to no later turn, and two
@@ -508,7 +508,7 @@ struct TranscriptConverterTests {
     }
 
     @Test
-    func testReplayedReasoningThatFollowsItsResponseRidesOnThatResponse() throws {
+    func replayedReasoningThatFollowsItsResponseRidesOnThatResponse() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
         // The framework appends a turn's `.reasoning` entry AFTER its
@@ -553,7 +553,7 @@ struct TranscriptConverterTests {
     }
 
     @Test
-    func testReplayedReasoningAroundOneResponseJoinsOnThatResponse() throws {
+    func replayedReasoningAroundOneResponseJoinsOnThatResponse() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
         // Reasoning before the response and reasoning after it both belong to
@@ -581,7 +581,7 @@ struct TranscriptConverterTests {
     }
 
     @Test
-    func testReasoningStaysOutOfHistoryWhenNotReplayed() throws {
+    func reasoningStaysOutOfHistoryWhenNotReplayed() throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
         let entries: [Transcript.Entry] = [

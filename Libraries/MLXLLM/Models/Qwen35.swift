@@ -1285,11 +1285,21 @@ extension Qwen35Model: SpeculativeCacheRewindModel {
 
 // `Qwen35MoEModel` subclasses `Qwen35Model` and inherits both declarations.
 extension Qwen35Model {
+    /// The XML tool-call format of the Qwen 3.5 chat template.
     public var toolCallFormat: ToolCallFormat? { .qwen35 }
+
+    /// The Qwen 3.5 reasoning protocol, which replays the reasoning of a past
+    /// turn into the history render, thus the prompt cache extends across
+    /// tool rounds.
     public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.qwen35 }
 }
 
 extension Qwen35TextModel {
+    /// The XML tool-call format of the Qwen 3.5 chat template.
     public var toolCallFormat: ToolCallFormat? { .qwen35 }
+
+    /// The Qwen 3.5 reasoning protocol, which replays the reasoning of a past
+    /// turn into the history render, thus the prompt cache extends across
+    /// tool rounds.
     public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.qwen35 }
 }

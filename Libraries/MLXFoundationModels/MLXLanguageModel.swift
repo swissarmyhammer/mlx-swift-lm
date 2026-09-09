@@ -1231,7 +1231,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } else {
                 carriedPromptCache = nil
             }
-            let promptCache = ExecutorPromptCacheSlot(carriedPromptCache)
+            let promptCache = ExecutorPromptCacheSlot(carriedPromptCache, key: promptCacheKey)
 
             let outcome: Result<Void, any Error>
             do {
@@ -2206,7 +2206,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 samplingConfiguration: samplingConfiguration)
             let plan = try promptCache.plan(
                 input: input, model: context.model, parameters: params,
-                protocolRules: Self.promptCacheReuseRules(of: context))
+                protocolRules: Self.promptCacheReuseRules(of: context),
+                decodeTokens: context.tokenizer.decode(tokenIds:))
             let format = context.configuration.toolCallFormat ?? .json
             var router = AllowedToolOutputRouter(
                 format: format,
@@ -2492,7 +2493,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             )
             let plan = try promptCache.plan(
                 input: input, model: context.model, parameters: params,
-                protocolRules: Self.promptCacheReuseRules(of: context))
+                protocolRules: Self.promptCacheReuseRules(of: context),
+                decodeTokens: context.tokenizer.decode(tokenIds:))
 
             // The token-recording form is what lets this pass leave a prompt
             // cache behind: the ledger of that cache names the render plus the
@@ -2608,7 +2610,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             )
             let plan = try promptCache.plan(
                 input: input, model: context.model, parameters: params,
-                protocolRules: Self.promptCacheReuseRules(of: context))
+                protocolRules: Self.promptCacheReuseRules(of: context),
+                decodeTokens: context.tokenizer.decode(tokenIds:))
 
             var emitter = ReasoningEventEmitter(
                 config: reasoningConfig, primedInside: primedInside)

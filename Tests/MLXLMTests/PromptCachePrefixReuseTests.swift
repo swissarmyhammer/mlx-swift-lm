@@ -137,7 +137,52 @@ struct PromptCachePrefixReuseTests {
             promptTokens: [1, 2, 3, 4], cachedTokens: [1, 2, 3], caches: simpleCaches(offset: 3),
             carriesModelState: true)
 
-        #expect(reuse == PromptCacheReuse(suffixStart: 3, representedTokens: [1, 2, 3, 4]))
+        #expect(
+            reuse
+                == PromptCacheReuse(
+                    suffixStart: 3, representedTokens: [1, 2, 3, 4], kind: .extend))
+    }
+
+    // MARK: - Naming the rule that decided
+
+    @Test("an extension names the extend rule")
+    func anExtensionNamesTheExtendRule() {
+        let reuse = reconcilePromptCache(
+            promptTokens: [1, 2, 3, 4, 5], cachedTokens: [1, 2, 3], caches: simpleCaches(offset: 3))
+
+        #expect(reuse?.kind == .extend)
+    }
+
+    @Test("an empty cache names the prefill rule")
+    func anEmptyCacheNamesThePrefillRule() {
+        let reuse = reconcilePromptCache(
+            promptTokens: [1, 2, 3], cachedTokens: [], caches: simpleCaches(offset: 0))
+
+        #expect(reuse?.kind == .prefill)
+    }
+
+    @Test("a rewind names the rewind rule")
+    func aRewindNamesTheRewindRule() {
+        let reuse = reconcilePromptCache(
+            promptTokens: [1, 2, 9, 9], cachedTokens: [1, 2, 3, 4, 5],
+            caches: simpleCaches(offset: 5))
+
+        #expect(reuse?.kind == .rewind)
+    }
+
+    @Test("a protocol rule that answers what the extend rule would answer still names the splice")
+    func aProtocolRuleThatAnswersWhatTheExtendRuleWouldAnswerStillNamesTheSplice() {
+        // On Qwen 3.8 the render extends the ledger whole, thus the committed
+        // turn rule and the extend rule agree on the numbers. The rule that
+        // decided is still the protocol rule, and the log must name it.
+        let reuse = reconcilePromptCache(
+            promptTokens: [1, 2, 70, Self.commit, 20, 21], cachedTokens: [1, 2, 70, Self.commit],
+            previousRenderTokens: [1, 2], caches: simpleCaches(offset: 4),
+            protocolRules: [SplicingRule()])
+
+        #expect(reuse?.suffixStart == 4)
+        #expect(reuse?.representedTokens == [1, 2, 70, Self.commit, 20, 21])
+        #expect(reuse?.kind == .splice)
     }
 
     // MARK: - Reconciling with a protocol rule
@@ -166,7 +211,10 @@ struct PromptCachePrefixReuseTests {
             promptTokens: [1, 2, 3, 4, 5], cachedTokens: [1, 2, 3],
             previousRenderTokens: [1, 2], caches: simpleCaches(offset: 3))
 
-        #expect(reuse == PromptCacheReuse(suffixStart: 3, representedTokens: [1, 2, 3, 4, 5]))
+        #expect(
+            reuse
+                == PromptCacheReuse(
+                    suffixStart: 3, representedTokens: [1, 2, 3, 4, 5], kind: .extend))
     }
 
     @Test("a protocol rule decides before the standard rules and names what the caches represent")
@@ -184,7 +232,8 @@ struct PromptCachePrefixReuseTests {
         #expect(
             reuse
                 == PromptCacheReuse(
-                    suffixStart: 4, representedTokens: [1, 2, 70, Self.commit, 20, 21]))
+                    suffixStart: 4, representedTokens: [1, 2, 70, Self.commit, 20, 21],
+                    kind: .splice))
         #expect(caches.allSatisfy { $0.offset == 4 }, "a splice rewinds nothing")
     }
 
@@ -198,7 +247,10 @@ struct PromptCachePrefixReuseTests {
             promptTokens: [1, 2, 71, 20], cachedTokens: [1, 2, 70, Self.commit],
             previousRenderTokens: [1, 2], caches: caches, protocolRules: [SplicingRule()])
 
-        #expect(reuse == PromptCacheReuse(suffixStart: 2, representedTokens: [1, 2, 71, 20]))
+        #expect(
+            reuse
+                == PromptCacheReuse(
+                    suffixStart: 2, representedTokens: [1, 2, 71, 20], kind: .rewind))
         #expect(caches.allSatisfy { $0.offset == 2 })
     }
 

@@ -6,6 +6,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import os
 
 // MARK: - Identity
 
@@ -179,6 +180,9 @@ struct ExecutorPromptCachePlan {
     /// caches.
     let state: LMOutput.State?
 
+    /// The rule that decided this plan, which the log line of the pass names.
+    let decision: ExecutorPromptCacheDecision
+
     /// Plans what `entry` may serve for `input`, building fresh caches when it
     /// may serve nothing.
     ///
@@ -219,7 +223,8 @@ struct ExecutorPromptCachePlan {
                 reusedTokenCount: reuse.suffixStart,
                 promptTokens: promptTokens,
                 representedTokens: reuse.representedTokens,
-                state: entry.state)
+                state: entry.state,
+                decision: decision(of: reuse, render: promptTokens, ledger: entry.tokens))
         }
 
         return ExecutorPromptCachePlan(
@@ -228,7 +233,34 @@ struct ExecutorPromptCachePlan {
             reusedTokenCount: 0,
             promptTokens: promptTokens,
             representedTokens: promptTokens,
-            state: nil)
+            state: nil,
+            decision: entry.map { .rebuild(.init(render: promptTokens, ledger: $0.tokens)) }
+                ?? .cold)
+    }
+
+    /// The decision a reuse of a carried cache stands for.
+    ///
+    /// - Parameters:
+    ///   - reuse: what the caches hold of the render once the decision is
+    ///     applied.
+    ///   - render: the whole rendered prompt.
+    ///   - ledger: the tokens the carried caches held before the decision.
+    /// - Returns: the decision, with the seam a rewind went back to.
+    private static func decision(
+        of reuse: PromptCacheReuse, render: [Int], ledger: [Int]
+    ) -> ExecutorPromptCacheDecision {
+        switch reuse.kind {
+        case .prefill:
+            // The carried caches hold nothing, thus the pass is cold in all
+            // but name: the whole prompt is fed.
+            return .cold
+        case .extend:
+            return .extend
+        case .splice:
+            return .splice
+        case .rewind:
+            return .rewind(ExecutorPromptCacheDivergence(render: render, ledger: ledger))
+        }
     }
 
     /// The rank of a token array a processor batched: one row for each
@@ -302,22 +334,286 @@ struct ExecutorPromptCachePlan {
     ///     none.
     /// - Returns: the entry to check in, or nil when the caches did not land on
     ///   a position this ledger can name and the session must start cold.
+    ///   ``commitOutcome(generatedTokens:state:)`` names the reason.
     func committed(
         generatedTokens: [Int], state: LMOutput.State? = nil
     ) -> ExecutorPromptCacheEntry? {
-        guard let position = caches.first?.offset,
-            caches.allSatisfy({ $0.offset == position }),
-            position >= representedTokens.count,
-            position - representedTokens.count <= generatedTokens.count
-        else {
-            return nil
+        commitOutcome(generatedTokens: generatedTokens, state: state).entry
+    }
+
+    /// The cache this finished pass leaves for the next turn, or the reason it
+    /// leaves none.
+    ///
+    /// This is ``committed(generatedTokens:state:)`` with the reason kept,
+    /// thus the log line of the pass can name it.
+    ///
+    /// - Parameters:
+    ///   - generatedTokens: every token this pass generated, in order.
+    ///   - state: the model state the prefill of this pass left, or nil.
+    /// - Returns: the entry to check in, or the refusal.
+    func commitOutcome(
+        generatedTokens: [Int], state: LMOutput.State? = nil
+    ) -> ExecutorPromptCacheCommitOutcome {
+        guard let position = caches.first?.offset else { return .refused(.noCaches) }
+        let positions = caches.map(\.offset)
+        guard positions.allSatisfy({ $0 == position }) else {
+            return .refused(.positionsDisagree(positions))
         }
-        let committedGeneratedTokenCount = position - representedTokens.count
-        return ExecutorPromptCacheEntry(
-            caches: caches,
-            tokens: representedTokens + generatedTokens.prefix(committedGeneratedTokenCount),
-            renderTokens: promptTokens,
-            state: state)
+        let ledgerLength = representedTokens.count
+        guard position >= ledgerLength else {
+            return .refused(.behindTheLedger(position: position, ledgerLength: ledgerLength))
+        }
+        let committedGeneratedTokenCount = position - ledgerLength
+        guard committedGeneratedTokenCount <= generatedTokens.count else {
+            return .refused(
+                .pastTheGeneration(
+                    position: position, ledgerLength: ledgerLength,
+                    generatedTokenCount: generatedTokens.count))
+        }
+        return .checkedIn(
+            ExecutorPromptCacheEntry(
+                caches: caches,
+                tokens: representedTokens + generatedTokens.prefix(committedGeneratedTokenCount),
+                renderTokens: promptTokens,
+                state: state))
+    }
+}
+
+// MARK: - The rule that decided a pass
+
+/// Where a render parts from the ledger it did not extend: the first index
+/// where the two differ, and a short window of tokens on each side of it.
+struct ExecutorPromptCacheDivergence: Equatable {
+
+    /// How many tokens each side keeps past the seam. Enough to read the seam
+    /// in a log line, and no more.
+    static let reportedTokenCount = 12
+
+    /// The index of the first token where the render and the ledger differ.
+    /// This is the length of the prefix the two share, thus it is the length
+    /// of the shorter side when that side is a prefix of the other.
+    let index: Int
+
+    /// The render's tokens from `index`, at most ``reportedTokenCount`` of
+    /// them. Empty when the render ends at `index`.
+    let renderTokens: [Int]
+
+    /// The ledger's tokens from `index`, at most ``reportedTokenCount`` of
+    /// them. Empty when the ledger ends at `index`.
+    let ledgerTokens: [Int]
+
+    /// Creates a seam at `index` with the tokens each side holds past it.
+    ///
+    /// - Parameters:
+    ///   - index: the first index where the two sides differ.
+    ///   - renderTokens: the render's tokens from `index`.
+    ///   - ledgerTokens: the ledger's tokens from `index`.
+    init(index: Int, renderTokens: [Int], ledgerTokens: [Int]) {
+        self.index = index
+        self.renderTokens = renderTokens
+        self.ledgerTokens = ledgerTokens
+    }
+
+    /// Finds the seam between `render` and `ledger`.
+    ///
+    /// - Parameters:
+    ///   - render: the whole rendered prompt.
+    ///   - ledger: the tokens the carried caches held.
+    init(render: [Int], ledger: [Int]) {
+        let index = commonPrefixLength(of: render, and: ledger)
+        self.init(
+            index: index,
+            renderTokens: Self.window(of: render, from: index),
+            ledgerTokens: Self.window(of: ledger, from: index))
+    }
+
+    /// At most ``reportedTokenCount`` tokens of `tokens` from `index`.
+    private static func window(of tokens: [Int], from index: Int) -> [Int] {
+        Array(tokens.dropFirst(index).prefix(reportedTokenCount))
+    }
+}
+
+/// The rule that decided what one generation pass does with the cache its
+/// session carries.
+///
+/// The log line of the pass names it, thus a slow round of an agent run can
+/// be attributed: a cold prefill, a rebuild the caches could not avoid, or a
+/// long generation on a warm cache.
+enum ExecutorPromptCacheDecision: Equatable {
+
+    /// The session carried no cache, or a cache that held nothing, thus the
+    /// whole prompt is fed into fresh caches.
+    case cold
+
+    /// The render extends the ledger whole, thus the tail alone is fed.
+    case extend
+
+    /// A rule of the response protocol kept the tokens the model wrote and fed
+    /// the render past the turn the model committed.
+    case splice
+
+    /// The caches rewound to the seam, and the render past the seam is fed.
+    case rewind(ExecutorPromptCacheDivergence)
+
+    /// The render parts from the ledger at the seam and the caches cannot
+    /// rewind to it, thus the whole prompt is fed into fresh caches.
+    case rebuild(ExecutorPromptCacheDivergence)
+
+    /// The name the log line gives the rule.
+    var name: String {
+        switch self {
+        case .cold: "cold"
+        case .extend: "extend"
+        case .splice: "splice"
+        case .rewind: "rewind"
+        case .rebuild: "rebuild"
+        }
+    }
+
+    /// The seam the decision names, or nil when the render extends the ledger
+    /// or no ledger was carried.
+    var divergence: ExecutorPromptCacheDivergence? {
+        switch self {
+        case .cold, .extend, .splice: nil
+        case .rewind(let divergence), .rebuild(let divergence): divergence
+        }
+    }
+}
+
+/// Why a finished pass checked nothing in, thus why the next turn of its
+/// session starts cold.
+enum ExecutorPromptCacheCommitRefusal: Equatable {
+
+    /// The pass carried no plan: its input carries content a token ledger
+    /// cannot describe, or the pass owned its cache.
+    case noPlan
+
+    /// The plan carried no cache at all.
+    case noCaches
+
+    /// The caches do not agree on one position. The positions stand in cache
+    /// order, thus a recurrent layer that never advanced shows as a zero.
+    case positionsDisagree([Int])
+
+    /// The caches stand before the end of the tokens the plan represented.
+    case behindTheLedger(position: Int, ledgerLength: Int)
+
+    /// The caches stand past the represented tokens plus every token the pass
+    /// generated, thus the ledger cannot name what they hold.
+    case pastTheGeneration(position: Int, ledgerLength: Int, generatedTokenCount: Int)
+
+    /// The reason as the log line states it.
+    var reason: String {
+        switch self {
+        case .noPlan:
+            "the pass carried no plan"
+        case .noCaches:
+            "the pass carried no cache"
+        case .positionsDisagree(let positions):
+            "the caches disagree on their position \(positions)"
+        case .behindTheLedger(let position, let ledgerLength):
+            "the caches stand at \(position), behind the \(ledgerLength)-token ledger"
+        case .pastTheGeneration(let position, let ledgerLength, let generatedTokenCount):
+            "the caches stand at \(position), past the \(ledgerLength)-token ledger "
+                + "and the \(generatedTokenCount) generated tokens"
+        }
+    }
+}
+
+/// What a finished pass leaves for the next turn: an entry to check in, or
+/// the reason there is none.
+enum ExecutorPromptCacheCommitOutcome {
+
+    /// The entry the next turn of the session reuses.
+    case checkedIn(ExecutorPromptCacheEntry)
+
+    /// Nothing is checked in, for this reason.
+    case refused(ExecutorPromptCacheCommitRefusal)
+
+    /// The entry to check in, or nil when the pass was refused.
+    var entry: ExecutorPromptCacheEntry? {
+        switch self {
+        case .checkedIn(let entry): entry
+        case .refused: nil
+        }
+    }
+
+    /// The refusal, or nil when an entry was checked in.
+    var refusal: ExecutorPromptCacheCommitRefusal? {
+        switch self {
+        case .checkedIn: nil
+        case .refused(let refusal): refusal
+        }
+    }
+}
+
+// MARK: - The log line of one pass
+
+/// Composes the log lines of one generation pass.
+///
+/// Every function here is pure, thus a unit test reads the exact text that
+/// `log show` shows for an agent run.
+enum ExecutorPromptCacheReport {
+
+    /// The line that names what the pass does with the carried cache.
+    ///
+    /// - Parameters:
+    ///   - key: the session the cache belongs to, or nil when the request
+    ///     names no session.
+    ///   - plan: the plan of the pass, or nil when the pass carries no cache.
+    ///   - decodeTokens: decodes a token window to the text the seam shows.
+    /// - Returns: one line, with the seam and its decoded sides when the
+    ///   decision names one.
+    static func planLine(
+        key: ExecutorPromptCacheKey?, plan: ExecutorPromptCachePlan?,
+        decodeTokens: ([Int]) -> String
+    ) -> String {
+        let head = "prompt cache plan \(session(key)) "
+        guard let plan else {
+            return head + "rule=none (the input carries media, a batch or a mask)"
+        }
+        let rendered = plan.promptTokens.count
+        let counts =
+            "rendered=\(rendered) reused=\(plan.reusedTokenCount) "
+            + "fed=\(rendered - plan.reusedTokenCount) rule=\(plan.decision.name)"
+        guard let seam = plan.decision.divergence else { return head + counts }
+        return head + counts
+            + " divergence=\(seam.index) render=<<<\(decodeTokens(seam.renderTokens))>>> "
+            + "ledger=<<<\(decodeTokens(seam.ledgerTokens))>>>"
+    }
+
+    /// The line of a guided pass, which owns its cache and carries none.
+    ///
+    /// - Parameter key: the session of the pass, or nil.
+    /// - Returns: one line.
+    static func guidedLine(key: ExecutorPromptCacheKey?) -> String {
+        "prompt cache plan \(session(key)) "
+            + "rule=guided (the guided pass owns its cache and carries none)"
+    }
+
+    /// The line that names what the finished pass checked in.
+    ///
+    /// - Parameters:
+    ///   - key: the session of the pass, or nil.
+    ///   - outcome: what the pass leaves for the next turn.
+    /// - Returns: one line with the ledger length, or the reason nothing was
+    ///   checked in.
+    static func commitLine(
+        key: ExecutorPromptCacheKey?, outcome: ExecutorPromptCacheCommitOutcome
+    ) -> String {
+        let head = "prompt cache commit \(session(key)) "
+        switch outcome {
+        case .checkedIn(let entry):
+            return head + "ledger=\(entry.tokens.count)"
+        case .refused(let refusal):
+            return head + "checked in nothing: \(refusal.reason)"
+        }
+    }
+
+    /// The model and the session of `key`, or `none` for each when the
+    /// request names no session.
+    private static func session(_ key: ExecutorPromptCacheKey?) -> String {
+        "model=\(key?.modelID ?? "none") session=\(key?.sessionID ?? "none")"
     }
 }
 
@@ -329,11 +625,19 @@ struct ExecutorPromptCachePlan {
 /// session's cache out before it generates and checks this slot's entry back in
 /// when it finishes, whatever the outcome.
 ///
+/// The slot writes one log line when a pass is planned and one when it is
+/// committed, at `info` level in the `com.apple.FoundationModels-MLX`
+/// subsystem, thus `log show` names every rebuild of an agent run.
+///
 /// A response runs one generation pass at a time, and every pass runs inside the
 /// model container, which serializes the passes of one model. This box is thus
 /// written by one task at a time, and the `@unchecked Sendable` conformance
 /// rests on that.
 final class ExecutorPromptCacheSlot: @unchecked Sendable {
+
+    /// The log every slot writes its lines to.
+    private static let logger = Logger(
+        subsystem: "com.apple.FoundationModels-MLX", category: "ExecutorPromptCache")
 
     /// The cache the session carries into its next turn, or nil when the next
     /// turn must start cold.
@@ -346,15 +650,35 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     /// truth for that pass.
     private(set) var reusedTokenCount = 0
 
+    /// The session the cache belongs to, which every log line names, or nil
+    /// when the request names no session.
+    private let key: ExecutorPromptCacheKey?
+
+    /// Receives each log line. The unified log by default; a test reads the
+    /// lines through its own sink.
+    private let report: (String) -> Void
+
     /// Creates a slot holding the entry a session checked out.
-    init(_ entry: ExecutorPromptCacheEntry?) {
+    ///
+    /// - Parameters:
+    ///   - entry: the entry the session checked out, or nil for a cold session.
+    ///   - key: the session the entry belongs to, or nil when the request
+    ///     names no session.
+    ///   - report: receives each log line of the response.
+    init(
+        _ entry: ExecutorPromptCacheEntry?, key: ExecutorPromptCacheKey? = nil,
+        report: @escaping (String) -> Void = ExecutorPromptCacheSlot.log
+    ) {
         self.entry = entry
+        self.key = key
+        self.report = report
     }
 
-    /// Plans the pass that is about to run, and records what that pass reuses.
+    /// Plans the pass that is about to run, records what that pass reuses,
+    /// and logs the decision.
     ///
     /// The slot gives up its entry: the pass owns the caches until
-    /// ``commit(_:generatedTokens:)`` takes them back.
+    /// ``commit(_:generatedTokens:state:)`` takes them back.
     ///
     /// - Parameters:
     ///   - input: the prepared input of the pass about to run.
@@ -362,16 +686,20 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     ///   - parameters: the generation parameters the new caches must match.
     ///   - protocolRules: the cache-reuse rules of the model's response
     ///     protocol, consulted before the standard prefix rules.
+    ///   - decodeTokens: decodes the tokens on each side of a seam for the log
+    ///     line of a rewind or a rebuild.
     /// - Returns: the plan, or nil when the pass carries no cache.
     func plan(
         input: LMInput, model: any LanguageModel, parameters: GenerateParameters,
-        protocolRules: [any PromptCacheReuseRule] = []
+        protocolRules: [any PromptCacheReuseRule] = [],
+        decodeTokens: ([Int]) -> String
     ) throws -> ExecutorPromptCachePlan? {
         let plan = try ExecutorPromptCachePlan.make(
             reusing: entry, input: input, model: model, parameters: parameters,
             protocolRules: protocolRules)
         entry = nil
         reusedTokenCount = plan?.reusedTokenCount ?? 0
+        report(ExecutorPromptCacheReport.planLine(key: key, plan: plan, decodeTokens: decodeTokens))
         return plan
     }
 
@@ -382,9 +710,11 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     /// earlier pass of the same response reused a prefix.
     func carriesNoCache() {
         reusedTokenCount = 0
+        report(ExecutorPromptCacheReport.guidedLine(key: key))
     }
 
-    /// Records the cache a finished pass leaves for the next turn.
+    /// Records the cache a finished pass leaves for the next turn, and logs
+    /// the ledger length or the reason nothing is left.
     ///
     /// - Parameters:
     ///   - plan: the plan the pass ran, or nil when the pass carried no plan.
@@ -393,7 +723,18 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     func commit(
         _ plan: ExecutorPromptCachePlan?, generatedTokens: [Int], state: LMOutput.State? = nil
     ) {
-        entry = plan?.committed(generatedTokens: generatedTokens, state: state)
+        let outcome =
+            plan?.commitOutcome(generatedTokens: generatedTokens, state: state)
+            ?? .refused(.noPlan)
+        entry = outcome.entry
+        report(ExecutorPromptCacheReport.commitLine(key: key, outcome: outcome))
+    }
+
+    /// Writes `line` to the unified log at `info` level. Every field is
+    /// public: the line carries token counts, a session identifier and a
+    /// short decoded seam, and `log show` must show them.
+    private static func log(_ line: String) {
+        logger.info("\(line, privacy: .public)")
     }
 }
 

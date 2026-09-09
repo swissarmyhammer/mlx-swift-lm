@@ -28,8 +28,13 @@
 // takes the standard prefix rules alone. It shows what the same driver reads on
 // a model that has no recurrent layer and no committed-turn rule.
 //
-// Every measurement line carries the `QWEN35 CACHE:` prefix so a run log can
-// be grepped for the numbers alone.
+// Every measurement line goes to the unified log, in the subsystem
+// `com.apple.FoundationModels-MLX` under the category
+// `Qwen35AgenticPromptCacheAssessment`, with the `QWEN35 CACHE:` prefix. Read
+// the numbers after a run with:
+// `log show --info --start <time> --predicate 'subsystem == "com.apple.FoundationModels-MLX"'`
+// The executor's own `ExecutorPromptCache` lines stand beside them there, one
+// plan line and one commit line for each round.
 //
 // Run explicitly via:
 // `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -only-testing:IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests`
@@ -48,13 +53,18 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import Testing
+import os
 
 @testable import MLXFoundationModels
 
 // MARK: - Constants
 
-/// Prefix that makes every measurement line greppable in a run log.
+/// Prefix that makes every measurement line greppable in the log.
 private let measurementPrefix = "QWEN35 CACHE:"
+
+/// The log every measurement line of this suite goes to.
+private let measurementLog = Logger(
+    subsystem: "com.apple.FoundationModels-MLX", category: "Qwen35AgenticPromptCacheAssessment")
 
 /// The hybrid checkpoint under measurement. It must already stand in the
 /// local Hugging Face cache; this suite downloads nothing.
@@ -73,8 +83,18 @@ private let suiteTimeLimitMinutes = 90
 /// cache that carries a long transcript, not a short one.
 private let stockReportRowCount = 800
 
-/// The bays the agent is told to look up, one for each tool call.
-private let queriedBays = [3, 7, 11, 15]
+/// How many bays the agent is told to look up, one for each tool call.
+private let queriedBayCount = 4
+
+/// The first bay the agent is told to look up.
+private let firstQueriedBay = 3
+
+/// The distance from one queried bay to the next.
+private let queriedBayStride = 4
+
+/// The bays the agent is told to look up, one for each tool call: every
+/// `queriedBayStride`th bay from `firstQueriedBay`.
+private let queriedBays = (0 ..< queriedBayCount).map { firstQueriedBay + queriedBayStride * $0 }
 
 /// How many rounds the driver runs. Round 1 is the user turn; every round
 /// after it continues from a tool result, thus five rounds give four tool
@@ -468,19 +488,23 @@ private struct SessionDriver {
         }
     }
 
-    /// Prints every number of one round under the measurement prefix.
+    /// Logs every number of one round under the measurement prefix.
     private func report(_ round: RoundMeasurement, name: String? = nil) {
         let line = "\(measurementPrefix) \(label) \(name ?? "round \(round.number)")"
-        print("\(line) rendered prompt tokens = \(round.renderedTokenCount)")
-        print("\(line) fed prompt tokens = \(round.fedTokenCount)")
-        print("\(line) cachedTokenCount = \(round.cachedTokenCount)")
-        print("\(line) prefill seconds = \(round.prefillSeconds)")
-        print("\(line) generated tokens = \(round.generatedTokenCount)")
-        print("\(line) round seconds = \(round.roundSeconds)")
-        print(
-            "\(line) emitted = \(round.toolCall.map { "tool call \($0.name) \($0.arguments)" } ?? "text")"
-        )
-        print("\(line) first divergent token = \(round.seam.summary)")
+        let emitted = round.toolCall.map { "tool call \($0.name) \($0.arguments)" } ?? "text"
+        let lines = [
+            "rendered prompt tokens = \(round.renderedTokenCount)",
+            "fed prompt tokens = \(round.fedTokenCount)",
+            "cachedTokenCount = \(round.cachedTokenCount)",
+            "prefill seconds = \(round.prefillSeconds)",
+            "generated tokens = \(round.generatedTokenCount)",
+            "round seconds = \(round.roundSeconds)",
+            "emitted = \(emitted)",
+            "first divergent token = \(round.seam.summary)",
+        ]
+        for measurement in lines {
+            measurementLog.info("\(line, privacy: .public) \(measurement, privacy: .public)")
+        }
     }
 }
 
@@ -534,9 +558,10 @@ struct Qwen35AgenticPromptCacheAssessmentTests {
         let cachedTokens = await driver.leadingTokens(of: cachedRound.generatedText)
         let coldTokens = await driver.leadingTokens(of: cold.generatedText)
         let sharedGenerated = commonPrefixLength(cachedTokens, coldTokens)
-        print(
+        let comparison =
             "\(measurementPrefix) \(label) cached round \(cachedRound.number) and cold control "
-                + "share \(sharedGenerated) of the first \(comparedTokenCount) generated tokens")
+            + "share \(sharedGenerated) of the first \(comparedTokenCount) generated tokens"
+        measurementLog.info("\(comparison, privacy: .public)")
 
         expectRounds(session.rounds, label: label)
         #expect(

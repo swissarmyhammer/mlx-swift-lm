@@ -263,7 +263,7 @@ public class UserInputTests: XCTestCase {
     /// tool calls beside it, or the history render writes an empty block and
     /// the prompt cache of the next round parts from the tokens the model
     /// wrote.
-    public func testQwen3VLMessageGeneratorReplaysReasoning() throws {
+    func testQwen3VLMessageGeneratorReplaysReasoning() throws {
         var assistant = Chat.Message.assistant(
             "",
             toolCalls: [

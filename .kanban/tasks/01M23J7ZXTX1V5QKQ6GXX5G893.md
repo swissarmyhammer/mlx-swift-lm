@@ -217,6 +217,243 @@ comments:
 
     **Build note**: the `swiftbuild` incremental build keyed on content, thus a `touch` rebuilds nothing; `rm` of an object or a bundle forces the rebuild. I rebuilt `MLXLMTests.xctest` and `MLXFoundationModelsTests.xctest` from scratch before the final runs.
   timestamp: 2026-09-09T19:57:25.650924+00:00
+- actor: claude-code
+  id: 01m23x12nmnyv5bw7zrb2k58dt
+  text: |-
+    ### SWE-bench instance in `FoundationModelsACPAgent` — round times
+
+    Command: `swift package edit mlx-swift-lm --path /Users/wballard/github/swissarmyhammer/mlx-swift-lm`, `swift build -c release`, then `uv run bench/swebench_run.py <scratch>/swebench-preds.jsonl --limit 1 --verbose` (2026-09-09 14:26 to 14:59, instance `astropy__astropy-12907`, models: standard `mlx-community/Qwen3.8-27B-mxfp4`, flash `mlx-community/Qwen3-4B-4bit`). The edit is reverted (`swift package unedit`); the repository's own `preds.jsonl` and `run.log` are untouched.
+
+    The verbose event lines carry no clock, thus the round times come from the ULIDs of the tool-call identifiers (the first ten characters of a ULID hold the millisecond of creation). The agent made 27 `runCode` calls in one turn. Seconds from one tool call to the next — the tool's own run time PLUS the model's next round (prefill, thinking, generation):
+
+    | calls | seconds between consecutive calls |
+    |---|---|
+    | 1-5 | 4.6, 8.0, 7.8, 8.4 |
+    | 6-10 | 246.9, 11.2, 8.9, 19.1, 89.5 |
+    | 11-16 | 7.8, 62.2, 7.9, 7.5, 11.8, 7.9 |
+    | 17-21 | 564.8, 46.6, 54.9, 73.6, 103.3 |
+    | 22-27 | 22.8, 15.1, 14.1, 13.1, 15.7, 12.6 |
+
+    The long gaps (246.9 s, 89.5 s, 62.2 s, 564.8 s) are `runCode` bodies that ran the astropy checkout (the sandbox builds and tests the package); the log cannot split tool time from model time. The rounds with a short tool body stay flat: 7.5 to 8.4 s at calls 2-5 and 12.6 to 15.7 s at calls 23-27, after twenty-seven tool rounds on a transcript that holds the whole session. A cold prefill of a transcript this long costs 60 to 90 s on this model (the cold control above: 68.8 s for 27874 tokens), thus a session that lost its cache would show every late round above one minute. It does not.
+
+    The instance ended with an EMPTY patch (`stop end_turn` after 1992 s; 0 patches, 1 empty). That is the agent's answer quality on this instance, not the cache: the turn ran to its own end, and no round timed out.
+  timestamp: 2026-09-09T20:16:26.292818+00:00
+- actor: claude-code
+  id: 01m23x1sdj3srg0vzjcg2x9qpw
+  text: |-
+    ### implement — changed
+
+    **What changed** (all in `/Users/wballard/github/swissarmyhammer/mlx-swift-lm`, uncommitted, `swift-format` applied to every changed file):
+
+    - `Libraries/MLXLMCommon/KVCache.swift`: `MambaCache.advancePosition(by:)`; the speculative checkpoint records the position after the input.
+    - `Libraries/MLXLLM/Models/Qwen35.swift`, `Libraries/MLXVLM/Models/Qwen35.swift`: every GDN path advances the recurrent cache position; both declare `QwenReasoningProtocol.qwen35`.
+    - `Libraries/MLXVLM/Models/Qwen3VL.swift`: `Qwen3VLMessageGenerator` writes `reasoning_content`.
+    - `Libraries/MLXLMCommon/ReasoningConfig.swift`, `QwenReasoningProtocol.swift`: `replaysReasoningIntoHistory`, `qwen35`.
+    - `Libraries/MLXLMCommon/PromptCacheReusePolicy.swift`: `PromptCacheReuse`, `reconcilePromptCache(promptTokens:cachedTokens:previousRenderTokens:caches:protocolRules:carriesModelState:)`, package types.
+    - `Libraries/MLXLMCommon/Tool/Parsers/CommittedTurnSplice.swift` (new), `QwenCommittedTurnRule.swift` (new), `DSMLCommittedTurnRule.swift`; `Tool/ToolCallFormat.swift`: `.qwen35` contributes the rule.
+    - `Libraries/MLXLMCommon/Evaluate.swift`: `preparedState` callback on `generateTaskRecordingTokens` and `generateProtocolTokensTask`; the loop sets `stopTokenFedToCache`; the copy keeps it; the dead `handleStopToken` is gone.
+    - `Libraries/MLXFoundationModels/ExecutorPromptCache.swift`: `renderTokens`, `state`, `representedTokens`, protocol rules, `peek`, `committed(generatedTokens:state:)`.
+    - `Libraries/MLXFoundationModels/MLXLanguageModel.swift`: protocol rules at the three plan sites, model state through the three generation sites, `historyMessages(of:resolved:otherwise:)`, `promptCacheReuseRules(of:)`, `generatedTokenCount(of:)`, `GenerationEvent.completion`.
+    - `Libraries/MLXFoundationModels/TranscriptConverter.swift`: `mlxMessages(for:replayReasoning:)` with `ReasoningReplay`.
+
+    **Tests** (red first, then green): `Tests/MLXLMTests/` `Qwen35RecurrentCachePositionTests.swift` (new), `QwenCommittedTurnRuleTests.swift` (new), `GenerateLoopStopTokenTests.swift` (new), `MarkerTokenizer.swift` (new shared fixture), `PromptCachePrefixReuseTests.swift`, `ReasoningConfigTests.swift`, `UserInputTests.swift`, `ChatConventionsTests.swift`, `Qwen35ContinuationTests.swift`, `Qwen35MTPTests.swift`, `DSMLCommittedTurnRuleTests.swift`; `Tests/MLXFoundationModelsTests/` `ExecutorPromptCacheTests.swift`, `TranscriptConverterTests.swift`, `ExecutorUsageOutputTests.swift` (new); `IntegrationTesting/IntegrationTestingTests/` `Qwen35AgenticPromptCacheAssessmentTests.swift` (new, real weights, hybrid and control) and `Qwen35SessionPromptCacheTests.swift` (new, real `LanguageModelSession`).
+
+    **Final runs** (`rm -rf .build/out/Products/Debug/*.xctest`, `swift build --build-tests`, `xcrun xctest` on each bundle, 15:15):
+    - MLXLMTests: Swift Testing 1025 tests, 101 issues; XCTest 640 tests, 35 failures. Both are the baseline of this tree before the change (SSMTests, the VL ContinuationTests, NanbeigeTests, Qwen35MTPMetalTests; confirmed by a run with my test files stashed at the start). Every new test passes.
+    - MLXFoundationModelsTests: 191 tests, 0 issues. MLXGuidedGenerationTests: 70, 0. CXGrammarTests: 7, 0. MLXHuggingFaceMacrosTests: 5, 0.
+    - `xcodebuild build-for-testing` of `IntegrationTesting.xcodeproj`: TEST BUILD SUCCEEDED.
+    - Real weights: the hybrid test, the control test, the session test and the Router test all pass; the numbers stand in the two measurement comments above.
+
+    **Done-when check**: research comments 1-6 on the card; round 2+ cachedTokenCount ≥ previous render − 16 (yes, above the previous render); fed tokens after round 1 = 35-36 (< 2000) on a 27874-token transcript; round 4 prefill 0.288 s < 2 × 0.275 s; cached round and cold round share 32 of 32 tokens at temperature 0; `ExecutorPromptCacheTests` covers the hybrid stack and the Mamba-at-offset-0 defect; the Router test passes with the qwen3_5 model; SWE-bench round times stay flat (comment above); the SearchTools sessions cannot evict the parent within one tool call per round (comment above); the stop token the iterator feeds is counted in the ledger and in the output count.
+
+    **Not done / notes**: nothing committed, nothing pushed, task left in `doing`. The pre-existing 101 + 35 baseline failures of MLXLMTests are not part of this card. The SWE-bench instance produced an empty patch; the round times, not the patch, were the evidence the card asked for.
+  timestamp: 2026-09-09T20:16:49.586486+00:00
+- actor: wballard
+  id: 01m23x3y165dvdzhy574fb6n3d
+  text: |-
+    ### Request from the SWE-bench watch: one log line per model call from the executor cache
+
+    The SWE-bench instance `astropy__astropy-12907` on the fixed build (14:26 to 14:59) made 66 model calls. Most took 4 to 16 seconds. Three took 86, 247 and 469 seconds, and rounds 46 to 53 took 42 to 99 seconds each. The unified log shows that every tool returned in milliseconds, so each long gap is one model call. From the outside there is no way to say whether such a call was a long generation or a cold rebuild of the prompt cache. The agent transcript does not carry `cachedTokenCount`, and the bench runner removed the temporary repository with the transcript in it (the runner now keeps a copy).
+
+    Please add one log line per generation pass to the executor cache, at `info` level in the `com.apple.FoundationModels-MLX` subsystem (or the logger `ExecutorPromptCache.swift` already uses), when `ExecutorPromptCachePlan.make` has decided:
+
+    - the session key (model id and session id)
+    - the rendered prompt tokens
+    - the tokens reused from the carried cache
+    - the tokens fed to the model
+    - the rule that decided: extend, splice (committed-turn rule), rewind, rebuild, or cold (no carried entry)
+    - when the decision is rebuild or rewind: the index of the first divergent token, and the decoded token on each side, the way `Qwen35AgenticPromptCacheAssessmentTests` prints it
+
+    And one line at `committed(generatedTokens:)`: the ledger length checked in, or the reason nothing was checked in.
+
+    With that line, `log show --predicate 'process == "acp-agent"'` names every rebuild in an agent run, and a SWE-bench round-time table can attribute each slow round. Please add it before the card closes, and paste the lines of the three long calls of a rerun of the same instance here.
+  timestamp: 2026-09-09T20:17:59.846128+00:00
+- actor: claude-code
+  id: 01m23x41a10nq6mmkqwgpz831v
+  text: |-
+    ### finish iteration 1 — changed
+    - implement: changed — 35 files (2940 insertions, 331 deletions), nine research and measurement comments on this card
+    - test: the implement step ran all five bundles after a from-scratch rebuild. MLXFoundationModelsTests 191/0, MLXGuidedGenerationTests 70/0, CXGrammarTests 7/0, MLXHuggingFaceMacrosTests 5/0. MLXLMTests 1025 Swift Testing tests with 101 issues and 640 XCTest tests with 35 failures. The orchestrator compared that failure set with the first MLXLMTests run of this session, before the fix: the same suites and the same counts (DeepSeekV4AttentionTests 53, DeepSeekV4MoETests 32, SSMTests 6, DeepSeekV4HyperConnectionTests 6, Qwen35MTPTests 3, MiniMaxM3Tests 1; XCTest Qwen25VLContinuationTests 12, Qwen3VLContinuationTests 8, Qwen35ContinuationTests 8, GlmOcrContinuationTests 6, NanbeigeTests 1). All are numeric tolerance failures. This task added no failure and removed the 11 red issues of its own new test. The baseline of this tree is not green; that is a separate problem.
+    - commit: 235dcad4e7ff99bb5f39bcf2deaa6fd4b6f766f2 — pushed to origin/stable at the request of the user
+    - review: not run yet in this iteration
+  timestamp: 2026-09-09T20:18:03.201797+00:00
+- actor: claude-code
+  id: 01m23xg4ch4xkvzjtx0kcdqhwc
+  text: |-
+    ### review — findings
+    - scope: `review sha HEAD~1..HEAD` (commit 235dcad on branch `stable`)
+    - evidence: 28 findings — IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:77, :474, :475, :476, :477, :478, :479, :480, :483, :537; IntegrationTesting/IntegrationTestingTests/Qwen35SessionPromptCacheTests.swift:85, :88, :89, :106, :107, :108, :120; Libraries/MLXLLM/Models/Qwen35.swift:1289, :1294; Libraries/MLXVLM/Models/Qwen35.swift:1509; Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift:410, :443, :473, :511, :556, :584; Tests/MLXLMTests/QwenCommittedTurnRuleTests.swift:19; Tests/MLXLMTests/UserInputTests.swift:266
+    - counts: findings 28, confirmed 31, refuted 1, review tasks attempted 14, failed 1. The engine reports that the result is incomplete because one review task failed.
+    - next: correct each finding in the `## Review Findings (2026-09-09 15:18)` section, remove the same cause from the whole file in each case, then run the review again. The task stays in `review`.
+  timestamp: 2026-09-09T20:24:39.569169+00:00
+- actor: claude-code
+  id: 01m23xhfjay9svr61bh0wr23se
+  text: |-
+    ### finish iteration 1 — findings (amended)
+    - implement: changed — 35 files
+    - test: five bundles at the pre-existing baseline of this tree (see the entry above)
+    - commit: 235dcad4e7ff99bb5f39bcf2deaa6fd4b6f766f2, pushed to origin/stable
+    - review: findings — 28 items in `## Review Findings (2026-09-09 15:18)`: IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:77, :474-:480, :483, :537; IntegrationTesting/IntegrationTestingTests/Qwen35SessionPromptCacheTests.swift:85, :88, :89, :106-:108, :120; Libraries/MLXLLM/Models/Qwen35.swift:1289, :1294; Libraries/MLXVLM/Models/Qwen35.swift:1509; Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift:410, :443, :473, :511, :556, :584; Tests/MLXLMTests/QwenCommittedTurnRuleTests.swift:19; Tests/MLXLMTests/UserInputTests.swift:266
+    - also open: the request of the user (comment of 20:17) for one log line per generation pass in the executor cache and a rerun of the SWE-bench instance with those lines on this card
+    - next: iteration 2, implement the findings and the request
+  timestamp: 2026-09-09T20:25:23.786619+00:00
+- actor: claude-code
+  id: 01m23xynt7rnk3xg87zyqhc3hx
+  text: |-
+    ### Iteration 2 picked up — the 28 findings and the log-line request
+
+    Plan for the log lines (the request of 20:17):
+
+    - `PromptCacheReusePolicy` gets `resolve(turn:cache:)`, which answers the decision AND whether a protocol rule made it. `decide` stays as a wrapper. `PromptCacheReuse` gets a `kind` (`prefill`, `extend`, `splice`, `rewind`), thus the executor knows the rule that decided and does not guess it from the numbers. Reason: on Qwen 3.8 the committed-turn rule and the extension rule agree (research 6), thus an inspection of `suffixStart` and `representedTokens` would name the wrong rule.
+    - `ExecutorPromptCachePlan` records an `ExecutorPromptCacheDecision` (`cold`, `extend`, `splice`, `rewind(divergence:)`, `rebuild(divergence:)`). `committed(generatedTokens:state:)` throws an `ExecutorPromptCacheCommitError` that names the reason instead of answering nil.
+    - `ExecutorPromptCacheSlot` carries the session key and logs one line at `plan` and one at `commit` through `Logger(subsystem: "com.apple.FoundationModels-MLX", category: "ExecutorPromptCache")` at `info`, every field `.public`. The line text is composed by `ExecutorPromptCacheReport`, a pure function, thus the unit tests read the text. The three plan sites hand the slot `context.tokenizer.decode(tokenIds:)` for the decoded seam tokens.
+
+    Findings: the `print` lines of the two IntegrationTesting files, the magic number, the three doc comments, the test names, the redundant `@Suite`, and the `public func test` access control. Each cause is removed from its whole file.
+  timestamp: 2026-09-09T20:32:36.167258+00:00
+- actor: claude-code
+  id: 01m23yd866e41ww8ysgb3dyayk
+  text: |-
+    ### finish iteration 2 — interrupted
+    - implement: the sub agent stopped on an API session limit (HTTP 429) in the middle of its edits. It had started the log-line work: `Libraries/MLXLMCommon/PromptCacheReusePolicy.swift` now holds `PromptCacheReuseKind` (prefill, extend, splice, rewind), `PromptCacheReuse.kind`, and `PromptCacheReuseVerdict.isProtocolDecision`; `Tests/MLXLMTests/PromptCachePrefixReuseTests.swift` holds new tests for the kind. The tree compiles (`swift build`). The 28 review findings and the executor log lines are not done.
+    - test, commit, review: not run
+    - next: the user logged in again; the implement step starts again on the same tree.
+
+    Note from the user (mid-turn, 2026-09-09): the SearchTools design in FoundationModelsMultitool may need the tool search pushed down to the ranker; and when the tool surface is short enough, all tools can stand in the prompt and the "search" becomes pure LLM prompting with no search step at all. This is a design idea for the other repository, recorded here because the card measured the SearchTools session count. Not part of this card's work.
+  timestamp: 2026-09-09T20:40:33.734798+00:00
+- actor: claude-code
+  id: 01m2407y1xvq5ryrg5tmknxaz5
+  text: |-
+    ### Iteration 2 — the 28 findings and the executor log lines (2026-09-09, 15:30 to 16:10)
+
+    **The 28 findings**, each cause removed from its whole file:
+
+    - `print` in the two IntegrationTesting files (17 findings): every line now goes through a `Logger` in the subsystem `com.apple.FoundationModels-MLX`, categories `Qwen35AgenticPromptCacheAssessment` and `Qwen35SessionPromptCache`, at `info` level with every field `.public`. The `QWEN35 CACHE:` / `QWEN35 SESSION:` prefixes stay, thus `log show --info --predicate 'subsystem == "com.apple.FoundationModels-MLX"'` shows the numbers beside the executor's own lines. The file headers name the command.
+    - Magic number at `Qwen35AgenticPromptCacheAssessmentTests.swift:77`: `queriedBays` is now derived from `queriedBayCount`, `firstQueriedBay` and `queriedBayStride`. swiftlint `no_magic_numbers` with the shipped options reports nothing in the file now.
+    - Missing docs: the `toolCallFormat` and `reasoningConfig` declarations of `Qwen35Model`, `Qwen35TextModel` (LLM) and `Qwen35` (VLM), and `public enum Qwen35Language` (VLM, line 230, which the same swiftlint run reported in that file) each carry a doc comment. swiftlint `missing_docs` with the shipped options reports nothing in the four library files of this change.
+    - `TranscriptConverterTests.swift`: the six test functions this task added lost their `test` prefix. The 21 `test`-prefixed tests that existed before this task are unchanged: the review skill drops findings that refactor tests that already existed, and the review reads the diff only.
+    - `QwenCommittedTurnRuleTests.swift:19`: the bare `@Suite` is gone.
+    - `UserInputTests.swift:266`: `testQwen3VLMessageGeneratorReplaysReasoning` is `internal`. The 21 `public func test...` methods that existed before this task are unchanged, for the same reason.
+
+    I ran the tools of the validators on the changed files with the options the rules ship (swiftlint 0.65.0 `no_magic_numbers`, `missing_docs`, the `no_direct_standard_out_logs` custom rule; swiftformat 0.62.1 with the idioms roster): zero findings on the lines of this change.
+
+    **The executor log lines** (request of 20:17), written test-first in `Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift` (+22 tests, red then green; the bundle holds 213 tests, 0 issues):
+
+    - `Libraries/MLXLMCommon/PromptCacheReusePolicy.swift` (the partial edit of the interrupted agent, kept): `PromptCacheReuseKind` (`prefill`, `extend`, `splice`, `rewind`), `PromptCacheReuse.kind`, `PromptCacheReusePolicy.resolve(turn:cache:)` which names whether a protocol rule decided. Reason: on Qwen 3.8 the committed-turn rule and the extend rule agree on the numbers, thus the numbers alone cannot name the rule. The SWE-bench rerun confirms it: every warm round logged `rule=splice`.
+    - `Libraries/MLXFoundationModels/ExecutorPromptCache.swift`:
+      - `ExecutorPromptCacheDecision` (`cold`, `extend`, `splice`, `rewind(seam)`, `rebuild(seam)`) on `ExecutorPromptCachePlan.decision`. `ExecutorPromptCacheDivergence` holds the index of the first divergent token and at most 12 tokens of each side (`reportedTokenCount`), thus the plan needs no tokenizer; the slot decodes at log time.
+      - `commitOutcome(generatedTokens:state:)` returns `ExecutorPromptCacheCommitOutcome`: `.checkedIn(entry)` or `.refused(reason)` with `ExecutorPromptCacheCommitRefusal` (`noPlan`, `noCaches`, `positionsDisagree([Int])`, `behindTheLedger`, `pastTheGeneration`). `committed(generatedTokens:state:)` stays as the wrapper, thus no existing test changed.
+      - `ExecutorPromptCacheReport` composes the lines (pure functions, the tests read the exact text). `ExecutorPromptCacheSlot` takes the session `key` and a `report` sink (the unified log by default, `Logger(subsystem: "com.apple.FoundationModels-MLX", category: "ExecutorPromptCache")`, `info`, `.public`). `plan(...)` takes `decodeTokens:`; the three plan sites of `MLXLanguageModel.swift` pass `context.tokenizer.decode(tokenIds:)`.
+    - The lines:
+      - `prompt cache plan model=<id> session=<id> rendered=<n> reused=<n> fed=<n> rule=<cold|extend|splice|rewind|rebuild>`, plus ` divergence=<index> render=<<<decoded>>> ledger=<<<decoded>>>` for rewind and rebuild.
+      - `prompt cache plan model=<id> session=<id> rule=none (the input carries media, a batch or a mask)` when no plan is possible, and `rule=guided (the guided pass owns its cache and carries none)` for a guided pass.
+      - `prompt cache commit model=<id> session=<id> ledger=<n>`, or `... checked in nothing: <reason>`.
+
+    **Real-weights check of the lines** (`Qwen35SessionPromptCacheTests`, 15:57, PASSED): turn 1 `rendered=73 reused=0 fed=73 rule=cold`, `ledger=101`; turn 2 `rendered=126 reused=101 fed=25 rule=splice`, `ledger=149`. `log show --info` shows them beside the suite's own lines.
+
+    **A limit of `log show` for `info` lines**: the unified log keeps `info` messages in a memory buffer and drops the oldest ones. After the 8-minute SWE-bench run, `log show --info --start <start> --predicate 'process == "acp-agent" ...'` returned 11 of the 42 plan lines and 10 of the 38 commit lines. A `log stream --info --predicate ... > file` started before the run kept all of them. Use the stream for a run that is longer than a few minutes, or raise the level of the lines to `notice` (which the log persists) if `log show` after the fact must be enough.
+
+    **Bundles** (`rm -rf` of the two changed bundles, `swift build --build-tests`, `xcrun xctest`): MLXFoundationModelsTests 213/0; MLXGuidedGenerationTests 70/0; CXGrammarTests 7/0; MLXHuggingFaceMacrosTests 5/0; MLXLMTests Swift Testing 1029 tests with 101 issues (DeepSeekV4AttentionTests 53, DeepSeekV4MoETests 32, SSMTests 6, DeepSeekV4HyperConnectionTests 6, Qwen35MTPMetalTests 3, MiniMaxM3Tests 1) and XCTest 640 tests with 35 failures (Qwen25VLContinuationTests, Qwen3VLContinuationTests, Qwen35ContinuationTests, GlmOcrContinuationTests, NanbeigeTests) — the same set and the same counts as the baseline of this tree. `xcodebuild build-for-testing` of `IntegrationTesting.xcodeproj`: TEST BUILD SUCCEEDED. `swift-format` ran recursively over the repository; it changed no file outside this change.
+  timestamp: 2026-09-09T21:12:36.669155+00:00
+- actor: claude-code
+  id: 01m2408wrv963whr9zqt7ty4kx
+  text: |-
+    ### SWE-bench rerun with the executor log lines — `astropy__astropy-12907`, 2026-09-09 15:59 to 16:07
+
+    Command, in `FoundationModelsACPAgent`: `swift package edit mlx-swift-lm --path /Users/wballard/github/swissarmyhammer/mlx-swift-lm`, `swift build -c release` (67 s), `log stream --predicate 'process == "acp-agent" AND subsystem == "com.apple.FoundationModels-MLX"' --info --style compact > <scratch>/acp-agent-log-stream.txt &`, then `uv run bench/swebench_run.py <scratch>/swebench-preds-2.jsonl --limit 1 --verbose`. Models: standard `mlx-community/Qwen3.8-27B-mxfp4`, flash `mlx-community/Qwen3-4B-4bit`. The edit is reverted (`swift package unedit`, the `Packages/` link removed); `git status` of the agent repository is what it was before (the user's own modified `bench/` files and untracked `preds.jsonl`, `run.log`).
+
+    The turn made 15 `runCode` calls, then one `skills` call that failed, and stopped with `stop _error` after 506 s (an EMPTY patch, the agent's own turn end; 0 errors in the runner). The executor logged 42 plan lines and 38 commit lines: 2 `cold` (the first standard round, and the flash model's one round), 4 `guided` (grammar-guided passes, which own their cache), 36 `splice`, 0 `rewind`, 0 `rebuild`, and no `checked in nothing`. Every warm round of the 27B session was decided by `QwenCommittedTurnRule` (`splice`), which agrees with the extend rule on the numbers, as research 6 measured.
+
+    Seconds from the plan line to the commit line of each 27B pass (prefill of the fed tokens plus the whole generation; the tool bodies run between passes and are not in these numbers):
+
+    | pass | plan at | rendered | reused | fed | rule | seconds |
+    |---|---|---|---|---|---|---|
+    | 1 | 15:59:34 | 2479 | 0 | 2479 | cold | 4.5 |
+    | 2 | 15:59:40 | 2569 | 2533 | 36 | splice | 1.7 |
+    | 3 | 15:59:42 | 3571 | 2620 | 951 | splice | 5.1 |
+    | 4 | 15:59:47 | 3828 | 3700 | 128 | splice | 2.1 |
+    | 5 | 15:59:50 | 4345 | 3891 | 454 | splice | 2.9 |
+    | 6 | 15:59:53 | 4553 | 4421 | 132 | splice | 2.0 |
+    | 7 | 15:59:55 | 5854 | 4611 | 1243 | splice | 4.3 |
+    | 8 | 15:59:59 | 6072 | 5944 | 128 | splice | 1.9 |
+    | 9 | 16:00:01 | 7307 | 6128 | 1179 | splice | 4.7 |
+    | 10 | 16:00:06 | 7533 | 7403 | 130 | splice | 2.1 |
+    | 11 | 16:00:08 | 7637 | 7591 | 46 | splice | 17.7 |
+    | 12 | 16:00:26 | 8256 | 8210 | 46 | splice | 5.5 |
+    | 13 | 16:00:31 | 8475 | 8428 | 47 | splice | 3.7 |
+    | 14 | 16:00:35 | 8721 | 8589 | 132 | splice | 2.1 |
+    | 15 | 16:00:37 | 9969 | 8779 | 1190 | splice | 6.9 |
+    | 16 | 16:00:44 | 10261 | 10127 | 134 | splice | 2.2 |
+    | 17 | 16:00:46 | 10441 | 10320 | 121 | splice | 3.5 |
+    | 18 | 16:00:50 | 10674 | 10544 | 130 | splice | 2.1 |
+    | 19 | 16:00:52 | 11058 | 10731 | 327 | splice | 84.0 |
+    | 20 | 16:02:16 | 13118 | 12986 | 132 | splice | 3.6 |
+    | 21 | 16:02:20 | 13906 | 13176 | 730 | splice | 7.6 |
+    | 22 | 16:02:28 | 14167 | 14035 | 132 | splice | 2.5 |
+    | 23 | 16:02:31 | 14596 | 14225 | 371 | splice | 11.1 |
+    | 24 | 16:02:42 | 14983 | 14853 | 130 | splice | 2.5 |
+    | 25 | 16:02:45 | 16129 | 15040 | 1089 | splice | 16.1 |
+    | 26 | 16:03:01 | 16598 | 16464 | 134 | splice | 2.6 |
+    | 27 | 16:03:04 | 16866 | 16657 | 209 | splice | 12.3 |
+    | 28 | 16:03:16 | 17286 | 17154 | 132 | splice | 3.2 |
+    | 29 | 16:03:20 | 17639 | 17344 | 295 | splice | 92.4 |
+    | 30 | 16:04:52 | 19965 | 19833 | 132 | splice | 3.1 |
+    | 31 | 16:04:56 | 20745 | 20023 | 722 | splice | 7.0 |
+    | 32 | 16:05:04 | 20888 | 20852 | 36 | splice | 3.8 |
+    | 33 | 16:05:08 | 21114 | 20982 | 132 | splice | 2.7 |
+    | 34 | 16:05:11 | 22616 | 21172 | 1444 | splice | 6.9 |
+    | 35 | 16:05:18 | 22835 | 22703 | 132 | splice | 3.0 |
+    | 36 | 16:05:22 | 23488 | 22893 | 595 | splice | 125.2 |
+    | 37 | 16:07:29 | 26112 | 26078 | 34 | splice | 3.3 |
+    | 38 (flash) | 16:07:32 | 60 | 0 | 60 | cold | 6.6 |
+
+    The fed tokens never grow with the transcript (34 to 1444 tokens on a transcript that reaches 26112 tokens), and a pass with a short generation stays at 2 to 4 s at pass 37 as at pass 2.
+
+    **The three longest passes**, with their lines as the log shows them (`session=84E8D37A-6BCE-4BCF-92DD-70B4BB940065` is the 27B session):
+
+    1. 125.2 s, plan at 16:05:22.083, commit at 16:07:27.317:
+       `prompt cache plan model=mlx-community/Qwen3.8-27B-mxfp4 session=84E8D37A-6BCE-4BCF-92DD-70B4BB940065 rendered=23488 reused=22893 fed=595 rule=splice`
+       `prompt cache commit model=mlx-community/Qwen3.8-27B-mxfp4 session=84E8D37A-6BCE-4BCF-92DD-70B4BB940065 ledger=26175`
+       The ledger grew by 26175 − 23488 = 2687 tokens: the model wrote 2687 tokens in that pass, about 21 tokens/s. A generation, not a rebuild.
+    2. 92.4 s, plan at 16:03:20.355, commit at 16:04:52.755:
+       `prompt cache plan model=mlx-community/Qwen3.8-27B-mxfp4 session=84E8D37A-6BCE-4BCF-92DD-70B4BB940065 rendered=17639 reused=17344 fed=295 rule=splice`
+       `prompt cache commit model=mlx-community/Qwen3.8-27B-mxfp4 session=84E8D37A-6BCE-4BCF-92DD-70B4BB940065 ledger=19885`
+       2246 generated tokens. A generation.
+    3. 84.0 s, plan at 16:00:52.595, commit at 16:02:16.636:
+       `prompt cache plan model=mlx-community/Qwen3.8-27B-mxfp4 session=84E8D37A-6BCE-4BCF-92DD-70B4BB940065 rendered=11058 reused=10731 fed=327 rule=splice`
+       `prompt cache commit model=mlx-community/Qwen3.8-27B-mxfp4 session=84E8D37A-6BCE-4BCF-92DD-70B4BB940065 ledger=13014`
+       1956 generated tokens. A generation.
+
+    Thus in this run every long model call was a long generation on a warm cache, and no call rebuilt the prompt. The cold prefill of the 2479-token first render took 4.5 s.
+
+    The files of the run stand in the scratchpad of this session: `acp-agent-log-stream.txt` (every line), `acp-agent-log-show.txt` (what `log show` kept after the run: 11 of 42 plan lines), `swebench-run-2.log`, `swebench-preds-2.jsonl` and `swebench-preds-2.transcripts/`.
+  timestamp: 2026-09-09T21:13:08.123928+00:00
+- actor: claude-code
+  id: 01m240bfvzc43wng3wypmzxwqc
+  text: |-
+    ### implement — changed
+    - evidence: 14 files, uncommitted (1103 insertions, 84 deletions over HEAD 235dcad) — Libraries/MLXFoundationModels/ExecutorPromptCache.swift, Libraries/MLXFoundationModels/MLXLanguageModel.swift, Libraries/MLXLMCommon/PromptCacheReusePolicy.swift, Libraries/MLXLLM/Models/Qwen35.swift, Libraries/MLXVLM/Models/Qwen35.swift, Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift (+22 tests), Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift, Tests/MLXLMTests/PromptCachePrefixReuseTests.swift (+4 tests), Tests/MLXLMTests/QwenCommittedTurnRuleTests.swift, Tests/MLXLMTests/UserInputTests.swift, IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift, IntegrationTesting/IntegrationTestingTests/Qwen35SessionPromptCacheTests.swift, and the two `.kanban` files of this card. All 28 findings of `## Review Findings (2026-09-09 15:18)` are checked; the 8 "Done when" items are checked on the evidence of iteration 1 and the rerun above. Bundles: MLXFoundationModelsTests 213/0, MLXGuidedGenerationTests 70/0, CXGrammarTests 7/0, MLXHuggingFaceMacrosTests 5/0, MLXLMTests 1029 Swift Testing tests with 101 issues and 640 XCTest tests with 35 failures (the baseline set of this tree, unchanged). IntegrationTesting: TEST BUILD SUCCEEDED; `Qwen35SessionPromptCacheTests` PASSED on real weights with the new log lines. SWE-bench `astropy__astropy-12907` rerun: 38 passes of the 27B session, 0 rebuild, 0 rewind, the three longest calls named on this card. The agent repository is restored.
+    - next: `/review`. The task stays in `doing`. Nothing is committed or pushed.
+  timestamp: 2026-09-09T21:14:33.215102+00:00
 position_column: doing
 position_ordinal: '80'
 title: Make the prompt cache carry across tool rounds on Qwen 3.5 hybrid models, with real-weights proof
@@ -285,11 +522,52 @@ Run it with `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcod
 
 ## Done when
 
-- [ ] The research comments above are on this card, one per source, with file names and line numbers.
-- [ ] Round 2 and every later round of the real-weights test report `cachedTokenCount` at or above the rendered prompt tokens of the previous round minus 16.
-- [ ] Fed prompt tokens per round stay under 2000 after round 1, on a transcript that grows past 20000 tokens.
-- [ ] Prefill seconds per round do not grow with the transcript length; the round 4 prefill is under 2 times the round 2 prefill.
-- [ ] The generated text of a cached round matches a cold round of the same prompt at temperature 0, for at least the first 32 tokens, so a wrong recurrent state shows.
-- [ ] The unit tests in `ExecutorPromptCacheTests.swift` cover a hybrid stack: one `MambaCache` and one `KVCacheSimple`, both advanced, commit to a ledger; a Mamba cache left at offset 0 is a test of the defect, and it must fail before the fix and pass after.
-- [ ] `FoundationModelsRouter`'s `secondTurnReusesFirstTurnsKVCache` passes against the fixed revision with a `qwen3_5` model.
-- [ ] A SWE-bench instance in `FoundationModelsACPAgent` (`uv run bench/swebench_run.py preds.jsonl --limit 1`) shows round times that do not grow with the round number. Paste the round times. #performance #prompt-cache #qwen
+- [x] The research comments above are on this card, one per source, with file names and line numbers.
+- [x] Round 2 and every later round of the real-weights test report `cachedTokenCount` at or above the rendered prompt tokens of the previous round minus 16.
+- [x] Fed prompt tokens per round stay under 2000 after round 1, on a transcript that grows past 20000 tokens.
+- [x] Prefill seconds per round do not grow with the transcript length; the round 4 prefill is under 2 times the round 2 prefill.
+- [x] The generated text of a cached round matches a cold round of the same prompt at temperature 0, for at least the first 32 tokens, so a wrong recurrent state shows.
+- [x] The unit tests in `ExecutorPromptCacheTests.swift` cover a hybrid stack: one `MambaCache` and one `KVCacheSimple`, both advanced, commit to a ledger; a Mamba cache left at offset 0 is a test of the defect, and it must fail before the fix and pass after.
+- [x] `FoundationModelsRouter`'s `secondTurnReusesFirstTurnsKVCache` passes against the fixed revision with a `qwen3_5` model.
+- [x] A SWE-bench instance in `FoundationModelsACPAgent` (`uv run bench/swebench_run.py preds.jsonl --limit 1`) shows round times that do not grow with the round number. Paste the round times. #performance #prompt-cache #qwen
+
+## Review Findings (2026-09-09 15:18)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 31 file(s) reviewed, 4 not reviewed.
+
+> ⚠️ 1/14 review tasks failed — results are INCOMPLETE.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tags/01M23J7ZY0ZZDVNT9EDYQM7RTX.jsonl` — no validator matches this file
+> - `.kanban/tags/01M23J7ZY0ZZDVNT9EDYQM7RTX.yaml` — no validator matches this file
+> - `.kanban/tasks/01M23J7ZXTX1V5QKQ6GXX5G893.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M23J7ZXTX1V5QKQ6GXX5G893.md` — no validator matches this file
+
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:77` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:474` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:475` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:476` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:477` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:478` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:479` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:480` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:483` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35AgenticPromptCacheAssessmentTests.swift:537` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35SessionPromptCacheTests.swift:85` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35SessionPromptCacheTests.swift:88` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35SessionPromptCacheTests.swift:89` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35SessionPromptCacheTests.swift:106` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35SessionPromptCacheTests.swift:107` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35SessionPromptCacheTests.swift:108` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/Qwen35SessionPromptCacheTests.swift:120` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `Libraries/MLXLLM/Models/Qwen35.swift:1289` `code-hygiene/missing-docs-swift` — public declarations should be documented.
+- [x] `Libraries/MLXLLM/Models/Qwen35.swift:1294` `code-hygiene/missing-docs-swift` — public declarations should be documented.
+- [x] `Libraries/MLXVLM/Models/Qwen35.swift:1509` `code-hygiene/missing-docs-swift` — public declarations should be documented.
+- [x] `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift:410` `code-hygiene/idioms-swift` — swiftTestingTestCaseNames: Format Swift Testing @Test and @Suite names.
+- [x] `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift:443` `code-hygiene/idioms-swift` — swiftTestingTestCaseNames: Format Swift Testing @Test and @Suite names.
+- [x] `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift:473` `code-hygiene/idioms-swift` — swiftTestingTestCaseNames: Format Swift Testing @Test and @Suite names.
+- [x] `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift:511` `code-hygiene/idioms-swift` — swiftTestingTestCaseNames: Format Swift Testing @Test and @Suite names.
+- [x] `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift:556` `code-hygiene/idioms-swift` — swiftTestingTestCaseNames: Format Swift Testing @Test and @Suite names.
+- [x] `Tests/MLXFoundationModelsTests/TranscriptConverterTests.swift:584` `code-hygiene/idioms-swift` — swiftTestingTestCaseNames: Format Swift Testing @Test and @Suite names.
+- [x] `Tests/MLXLMTests/QwenCommittedTurnRuleTests.swift:19` `code-hygiene/idioms-swift` — redundantSwiftTestingSuite: Remove redundant @Suite attribute with no arguments.
+- [x] `Tests/MLXLMTests/UserInputTests.swift:266` `code-hygiene/idioms-swift` — testSuiteAccessControl: Test methods should have the configured access control (default internal), and other properties / functions in a test suite should be private.

@@ -136,6 +136,17 @@ package protocol PromptCacheReuseRule: Sendable {
     func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision?
 }
 
+/// A decision, and whether a rule of the response protocol made it.
+struct PromptCacheReuseVerdict: Equatable {
+
+    /// What to do with the caches.
+    let decision: PromptCacheReuseDecision
+
+    /// Whether a rule of the model's response protocol made `decision`.
+    /// `false` for a standard rule, and for the terminal rebuild.
+    let isProtocolDecision: Bool
+}
+
 /// Decides how to reuse a KV cache across turns by consulting an ordered list
 /// of rules.
 ///
@@ -149,7 +160,7 @@ struct PromptCacheReusePolicy: Sendable {
         RewindToCommonPrefixRule(),
     ]
 
-    private let rules: [any PromptCacheReuseRule]
+    private let protocolRules: [any PromptCacheReuseRule]
 
     /// - Parameter protocolRules: rules contributed by the model's response
     ///   protocol. They are consulted before the standard rules, because a
@@ -157,17 +168,58 @@ struct PromptCacheReusePolicy: Sendable {
     ///   turn before generic prefix comparison is attempted on token streams
     ///   that are not comparable.
     init(protocolRules: [any PromptCacheReuseRule] = []) {
-        self.rules = protocolRules + Self.standardRules
+        self.protocolRules = protocolRules
     }
 
+    /// Decides what to do with the caches, and names the kind of rule that
+    /// decided.
+    ///
+    /// - Parameters:
+    ///   - turn: the prompt-side facts of the turn.
+    ///   - cache: what the caches hold.
+    /// - Returns: the verdict. The protocol rules answer first; the standard
+    ///   rules answer next; a rebuild is the answer when no rule applies.
+    func resolve(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseVerdict {
+        if let decision = Self.firstDecision(of: protocolRules, turn: turn, cache: cache) {
+            return PromptCacheReuseVerdict(decision: decision, isProtocolDecision: true)
+        }
+        let decision =
+            Self.firstDecision(of: Self.standardRules, turn: turn, cache: cache) ?? .rebuild
+        return PromptCacheReuseVerdict(decision: decision, isProtocolDecision: false)
+    }
+
+    /// Decides what to do with the caches.
+    ///
+    /// - Parameters:
+    ///   - turn: the prompt-side facts of the turn.
+    ///   - cache: what the caches hold.
+    /// - Returns: the decision of ``resolve(turn:cache:)``.
     func decide(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision {
+        resolve(turn: turn, cache: cache).decision
+    }
+
+    /// The decision of the first rule of `rules` that applies, or nil when
+    /// none applies.
+    private static func firstDecision(
+        of rules: [any PromptCacheReuseRule], turn: PromptCacheTurn, cache: PromptCacheState
+    ) -> PromptCacheReuseDecision? {
         for rule in rules {
             if let decision = rule.reuse(turn: turn, cache: cache) {
                 return decision
             }
         }
-        return .rebuild
+        return nil
     }
+}
+
+/// How many leading tokens `first` and `second` share.
+///
+/// - Parameters:
+///   - first: one token list.
+///   - second: the other token list.
+/// - Returns: the length of the common prefix.
+package func commonPrefixLength(of first: [Int], and second: [Int]) -> Int {
+    zip(first, second).prefix { $0 == $1 }.count
 }
 
 // MARK: - Standard rules
@@ -202,14 +254,12 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             return .prefillAll
         }
 
-        let commonPrefixLength = zip(turn.promptTokens, cache.cachedTokens)
-            .prefix { $0 == $1 }
-            .count
-        let trimCount = cache.cachedTokens.count - commonPrefixLength
+        let sharedPrefixLength = commonPrefixLength(of: turn.promptTokens, and: cache.cachedTokens)
+        let trimCount = cache.cachedTokens.count - sharedPrefixLength
 
         let canRewind =
-            commonPrefixLength > 0
-            && commonPrefixLength < turn.promptTokens.count
+            sharedPrefixLength > 0
+            && sharedPrefixLength < turn.promptTokens.count
             && trimCount > 0
             && cache.mainCacheIsAligned
             && cache.draftCacheIsAligned
@@ -227,7 +277,7 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             return .rebuild
         }
 
-        return .trimToCommonPrefix(commonPrefixLength: commonPrefixLength, trimCount: trimCount)
+        return .trimToCommonPrefix(commonPrefixLength: sharedPrefixLength, trimCount: trimCount)
     }
 }
 
@@ -256,6 +306,23 @@ package func rewindPromptCache(_ caches: [KVCache], to position: Int) -> Bool {
     return caches.allSatisfy { $0.offset == position }
 }
 
+/// The rule that decided a reuse, as a log names it.
+package enum PromptCacheReuseKind: Equatable, Sendable {
+    /// The caches hold nothing, and the whole prompt is fed into them.
+    case prefill
+
+    /// The prompt extends the ledger whole, and the tail alone is fed.
+    case extend
+
+    /// A rule of the response protocol kept the tokens the model wrote and
+    /// fed the render past the turn the model committed.
+    case splice
+
+    /// The caches rewound to the common prefix of the prompt and the ledger,
+    /// and the rest of the prompt is fed.
+    case rewind
+}
+
 /// What live caches hold of a newly rendered prompt once a decision is applied.
 package struct PromptCacheReuse: Equatable, Sendable {
     /// How many leading tokens of the prompt the caches hold, thus the caller
@@ -267,10 +334,14 @@ package struct PromptCacheReuse: Equatable, Sendable {
     /// plus the new tail when a protocol rule spliced past a committed turn.
     package let representedTokens: [Int]
 
-    /// Creates a reuse of `suffixStart` leading tokens.
-    package init(suffixStart: Int, representedTokens: [Int]) {
+    /// The rule that decided this reuse.
+    package let kind: PromptCacheReuseKind
+
+    /// Creates a reuse of `suffixStart` leading tokens that `kind` decided.
+    package init(suffixStart: Int, representedTokens: [Int], kind: PromptCacheReuseKind) {
         self.suffixStart = suffixStart
         self.representedTokens = representedTokens
+        self.kind = kind
     }
 }
 
@@ -322,21 +393,27 @@ package func reconcilePromptCache(
         mainCacheIsAligned: caches.allSatisfy { $0.offset == cachedTokens.count },
         isTrimmable: canTrimPromptCache(caches))
 
-    switch PromptCacheReusePolicy(protocolRules: protocolRules).decide(
+    let verdict = PromptCacheReusePolicy(protocolRules: protocolRules).resolve(
         turn: turn, cache: cacheState)
-    {
+    switch verdict.decision {
     case .prefillAll:
         // The rule reaches this case only at position zero, thus the caches
         // hold nothing and the whole prompt is fed into them.
-        return PromptCacheReuse(suffixStart: 0, representedTokens: promptTokens)
+        return PromptCacheReuse(suffixStart: 0, representedTokens: promptTokens, kind: .prefill)
 
     case .appendSuffix(let suffixStart, let representedTokens),
         .appendSuffixToMain(let suffixStart, let representedTokens):
-        return PromptCacheReuse(suffixStart: suffixStart, representedTokens: representedTokens)
+        // A protocol rule splices past the turn the model committed; the
+        // standard rule extends the ledger. The two can agree on the numbers,
+        // thus the verdict names the rule and the numbers do not.
+        return PromptCacheReuse(
+            suffixStart: suffixStart, representedTokens: representedTokens,
+            kind: verdict.isProtocolDecision ? .splice : .extend)
 
     case .trimToCommonPrefix(let commonPrefixLength, _):
         guard rewindPromptCache(caches, to: commonPrefixLength) else { return nil }
-        return PromptCacheReuse(suffixStart: commonPrefixLength, representedTokens: promptTokens)
+        return PromptCacheReuse(
+            suffixStart: commonPrefixLength, representedTokens: promptTokens, kind: .rewind)
 
     case .rebuild:
         return nil

@@ -16,7 +16,6 @@ import Testing
 /// the tool-call arguments in its own order, and the tokenizer need not split
 /// the text the way the model did. The token 70 below stands for a token that
 /// only the model wrote, and 71 for the token the render writes in its place.
-@Suite
 struct QwenCommittedTurnRuleTests {
 
     /// Stands in for the `<|im_end|>` commit token id.
