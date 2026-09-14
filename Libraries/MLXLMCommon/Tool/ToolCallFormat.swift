@@ -25,6 +25,9 @@ public protocol ToolCallParser: Sendable {
     /// Defaults to `false`.
     var buffersEntireResponse: Bool { get }
 
+    /// Whether an unframed JSON object is native call syntax for this parser.
+    var supportsBareJSON: Bool { get }
+
     /// Parse the content into a `ToolCall`.
     /// - Parameters:
     ///   - content: The text content to parse (may include tags)
@@ -46,6 +49,8 @@ extension ToolCallParser {
     /// found one chunk at a time as text comes in. Only formats with no
     /// marker set this to `true`.
     public var buffersEntireResponse: Bool { false }
+
+    public var supportsBareJSON: Bool { false }
 
     public func parseEOS(_ toolCallBuffer: String, tools: [[String: any Sendable]]?) -> [ToolCall] {
         if let startTag {
@@ -154,7 +159,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     public func createParser() -> any ToolCallParser {
         switch self {
         case .json:
-            return JSONToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
+            return JSONToolCallParser(
+                startTag: "<tool_call>", endTag: "</tool_call>", supportsBareJSON: true)
         case .lfm2:
             return PythonicToolCallParser(
                 startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
@@ -198,15 +204,18 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     package func makeTokenStreamDecoder(
         tokenizer: any Tokenizer,
         tools: [[String: any Sendable]]?,
-        stopStrings: Set<String>
+        stopStrings: Set<String>,
+        toolCallPolicy: ToolCallPolicy = .init()
     ) -> any TokenStreamDecoder {
         if let decoder = makeProtocolTokenStreamDecoder(
-            tokenizer: tokenizer, tools: tools, stopStrings: stopStrings)
+            tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
+            toolCallPolicy: toolCallPolicy)
         {
             return decoder
         }
         return StandardTokenStreamDecoder(
-            tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings)
+            tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings,
+            toolCallPolicy: toolCallPolicy)
     }
 
     /// Builds a decoder only for formats which own a framed token protocol.
@@ -216,16 +225,19 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     package func makeProtocolTokenStreamDecoder(
         tokenizer: any Tokenizer,
         tools: [[String: any Sendable]]?,
-        stopStrings: Set<String>
+        stopStrings: Set<String>,
+        toolCallPolicy: ToolCallPolicy = .init()
     ) -> (any TokenStreamDecoder)? {
         switch self {
         case .gptOSS:
             return HarmonyStreamAdapter(
-                tokenizer: tokenizer, tools: tools, stopStrings: stopStrings)
+                tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
+                toolCallPolicy: toolCallPolicy)
 
         case .atem:
             return OnyxStreamAdapter(
-                tokenizer: tokenizer, tools: tools, stopStrings: stopStrings)
+                tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
+                toolCallPolicy: toolCallPolicy)
 
         case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2,
             .minimaxM2, .minimaxM3, .mistral, .llama3, .dsml:

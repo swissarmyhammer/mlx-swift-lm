@@ -654,7 +654,8 @@ public enum Qwen35Language {
                     aLog: aLog,
                     dtBias: dtBias,
                     state: state,
-                    mask: prefixMask)
+                    mask: prefixMask,
+                    useKernel: !training)
                 let (suffixOut, suffixState) = gatedDeltaUpdate(
                     q: qNormed[0..., split..., 0..., 0...],
                     k: kNormed[0..., split..., 0..., 0...],
@@ -664,7 +665,8 @@ public enum Qwen35Language {
                     aLog: aLog,
                     dtBias: dtBias,
                     state: prefixState,
-                    mask: suffixMask)
+                    mask: suffixMask,
+                    useKernel: !training)
                 out = concatenated([prefixOut, suffixOut], axis: 1)
                 state = suffixState
 
@@ -693,7 +695,8 @@ public enum Qwen35Language {
                     aLog: aLog,
                     dtBias: dtBias,
                     state: state,
-                    mask: mask)
+                    mask: mask,
+                    useKernel: !training)
             }
 
             if let cache {

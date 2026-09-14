@@ -71,17 +71,29 @@ struct AllowedToolOutputRouter {
         route(toolProcessor.processChunkOutputs(text))
     }
 
+    /// Converts processor outputs to events, and joins adjacent responses.
+    ///
+    /// The recovery scanner of ``ToolCallProcessor`` can divide one span of
+    /// response text at a `<` that does not start a call. The division is not
+    /// a boundary that a consumer can see, thus contiguous response text must
+    /// come out as one event.
     private func route(_ outputs: [ToolCallProcessor.Output]) -> [Event] {
-        outputs.map { output in
+        var events: [Event] = []
+        for output in outputs {
             switch output {
             case .response(let text):
-                .response(text)
+                if case .response(let previous) = events.last {
+                    events[events.count - 1] = .response(previous + text)
+                } else {
+                    events.append(.response(text))
+                }
             case .toolCall(let call):
-                .toolCall(call)
+                events.append(.toolCall(call))
             case .rejectedToolCall(let rejection):
-                .rejectedToolCall(rejection)
+                events.append(.rejectedToolCall(rejection))
             }
         }
+        return events
     }
 }
 
