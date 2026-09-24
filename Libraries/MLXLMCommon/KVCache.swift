@@ -2378,10 +2378,17 @@ private enum PromptCacheTemplateRestore {
     /// The meta-state places that hold configuration that a cache sets in `init` and that no
     /// setter writes. The saved values must equal the values of the template.
     private static let fixedConfigurationIndices: [String: [Int]] = [
-        "VarianceNormalizedKVCache": [0, 2, 3, 4],
-        "TurboQuantKVCache": [1, 2, 3, 4],
-        "ArraysCache": [0],
-        "MambaCache": [0],
+        "VarianceNormalizedKVCache": [
+            VarianceNormalizedSavedLayout.tileSizeIndex, VarianceNormalizedSavedLayout.keyBitsIndex,
+            VarianceNormalizedSavedLayout.valueBitsIndex,
+            VarianceNormalizedSavedLayout.sinkhornIterationsIndex,
+        ],
+        "TurboQuantKVCache": [
+            SavedMetaStateIndex.turboQuantBits, SavedMetaStateIndex.turboQuantKeyBits,
+            SavedMetaStateIndex.turboQuantValueBits, SavedMetaStateIndex.turboQuantSeed,
+        ],
+        "ArraysCache": [SavedMetaStateIndex.arraysSlotCount],
+        "MambaCache": [SavedMetaStateIndex.arraysSlotCount],
     ]
 
     /// Checks one saved layer against its template, and makes the step that restores it.
@@ -2683,21 +2690,46 @@ private enum SavedMetaStateIndex {
 
 /// The array counts and meta-state counts that the built-in classes save.
 private enum SavedValueCounts {
+    /// The array count of a cache that holds no value yet.
+    private static let noArrays = 0
+    /// The array count of the keys and the values.
+    private static let keysAndValues = 2
+    /// The array count of quantized keys and values without biases: the packed values and
+    /// the scales of each.
+    private static let quantizedWithoutBiases = 4
+    /// The array count of quantized keys and values with biases.
+    private static let quantizedWithBiases = 6
+    /// The meta-state count of a `QuantizedKVCache`: the step, the offset, the group size and
+    /// the bit width.
+    private static let quantizedMetaStateCount = 4
+    /// The meta-state count of a `ChunkedKVCache`: the chunk size and the start position.
+    private static let chunkedMetaStateCount = 2
+    /// The smallest meta-state count of an `ArraysCache`: the slot count and the present slots.
+    private static let arraysMinimumMetaStateCount = 2
+    /// The largest meta-state count of an `ArraysCache`: the left padding and the lengths
+    /// follow.
+    private static let arraysMaximumMetaStateCount = 4
+    /// The rank of a saved key, value or quantized tensor: `[batch, heads, tokens, width]`.
+    static let tensorRank = 4
+
     /// No arrays, or the keys and the values.
-    static let keyValueStates: Set<Int> = [0, 2]
+    static let keyValueStates: Set<Int> = [noArrays, keysAndValues]
     /// The one empty placeholder of a `KVCacheSimple` meta state.
     static let simpleMetaStates: Set<Int> = [1]
     /// Five integers, then an optional capacity origin and an optional wrapped flag.
-    static let rotatingMetaStates: Set<Int> = [5, 6, 7]
+    static let rotatingMetaStates: Set<Int> = [
+        SavedMetaStateIndex.rotatingIntegerCount, SavedMetaStateIndex.rotatingCapacityOrigin + 1,
+        SavedMetaStateIndex.rotatingWrapped + 1,
+    ]
     /// No arrays, or the packed values and the scales of keys and values, with or without
     /// biases.
-    static let quantizedStates: Set<Int> = [0, 4, 6]
+    static let quantizedStates: Set<Int> = [noArrays, quantizedWithoutBiases, quantizedWithBiases]
     /// The step, the offset, the group size and the bit width.
-    static let quantizedMetaStates: Set<Int> = [4]
+    static let quantizedMetaStates: Set<Int> = [quantizedMetaStateCount]
     /// The chunk size and the start position.
-    static let chunkedMetaStates: Set<Int> = [2]
+    static let chunkedMetaStates: Set<Int> = [chunkedMetaStateCount]
     /// The slot count, the present slots, then optional left padding and lengths.
-    static let arraysMetaStates = 2 ... 4
+    static let arraysMetaStates = arraysMinimumMetaStateCount ... arraysMaximumMetaStateCount
 }
 
 /// Checks the saved values of one built-in cache class before any setter reads them.
@@ -2807,7 +2839,7 @@ private func validateVarianceNormalizedCache(state: [MLXArray], metaState: [Stri
         layout.hasConsistentOffset,
         state.count >= tailStateCount,
         hasValidTileStateCount,
-        state.allSatisfy({ $0.ndim == 4 })
+        state.allSatisfy({ $0.ndim == SavedValueCounts.tensorRank })
     else {
         throw KVCacheError(
             message: "Corrupt prompt cache: invalid VarianceNormalizedKVCache state."
@@ -2830,15 +2862,15 @@ private struct VarianceNormalizedSavedLayout {
     /// The name that the versioned layout writes for "no element type yet".
     private static let noDType = "none"
     /// The place of the tile size.
-    private static let tileSizeIndex = 0
+    fileprivate static let tileSizeIndex = 0
     /// The place of the offset.
     private static let offsetIndex = 1
     /// The place of the key bit width.
-    private static let keyBitsIndex = 2
+    fileprivate static let keyBitsIndex = 2
     /// The place of the value bit width.
-    private static let valueBitsIndex = 3
+    fileprivate static let valueBitsIndex = 3
     /// The place of the Sinkhorn iteration count.
-    private static let sinkhornIterationsIndex = 4
+    fileprivate static let sinkhornIterationsIndex = 4
     /// The place of the complete tile count.
     private static let tileCountIndex = 5
     /// The place of the raw tail length.
@@ -3019,13 +3051,34 @@ private struct TurboQuantSavedConfiguration {
     /// The array count of a cache that holds raw keys and raw values, in every key mode.
     private static let rawStateCount = 2
 
-    /// The compressed array counts of the modes that a key bit width selects: raw-key mode
-    /// (key bit width 0) and affine-key mode (key bit width 8).
-    private static let compressedStateCountsByKeyBits: [Int: Set<Int>] = [0: [3], 8: [5]]
+    /// The key bit width that selects raw-key mode.
+    private static let rawKeyBits = 0
+
+    /// The key bit width that selects affine-key mode.
+    private static let affineKeyBits = 8
+
+    /// The compressed array count of raw-key mode: the raw keys, the packed values and the
+    /// value norms.
+    private static let rawKeyCompressedCount = 3
+
+    /// The compressed array count of the standard mode: the packed keys, the key norms, the
+    /// packed values and the value norms.
+    private static let standardCompressedCount = 4
+
+    /// The compressed array count of affine-key mode, and of the standard mode with the key
+    /// calibration scale.
+    private static let fiveArrayCompressedCount = 5
+
+    /// The compressed array counts of the modes that a key bit width selects.
+    private static let compressedStateCountsByKeyBits: [Int: Set<Int>] = [
+        rawKeyBits: [rawKeyCompressedCount], affineKeyBits: [fiveArrayCompressedCount],
+    ]
 
     /// The compressed array counts of the standard mode, with and without the key calibration
     /// scale.
-    private static let standardCompressedStateCounts: Set<Int> = [4, 5]
+    private static let standardCompressedStateCounts: Set<Int> = [
+        standardCompressedCount, fiveArrayCompressedCount,
+    ]
 
     /// The bit width.
     let bits: Int
@@ -3133,7 +3186,7 @@ private func validatePromptCache(
     metadataCounts: Set<Int>
 ) throws {
     guard stateCounts.contains(state.count), metadataCounts.contains(metadata.count),
-        state.allSatisfy({ $0.ndim == 4 })
+        state.allSatisfy({ $0.ndim == SavedValueCounts.tensorRank })
     else {
         throw KVCacheError(
             message: "Corrupt prompt cache: invalid \(className) state or metadata shape."

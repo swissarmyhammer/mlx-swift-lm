@@ -527,7 +527,10 @@ public final class DeepSeekV4Cache: KVCache {
                 "a DeepSeek-V4 cache state ends in \(Self.stateSlotCount) branch arrays, and "
                     + "this one holds \(newValue.count) arrays")
             let parts = Self.stateParts(newValue)
-            local.state = parts.window
+            // A window that has not written a key saves no array, and its setter needs two.
+            if !parts.window.isEmpty {
+                local.state = parts.window
+            }
             attentionChunks.restore(state: parts.attention)
             indexerChunks?.restore(state: parts.indexer)
         }
@@ -643,20 +646,12 @@ extension DeepSeekV4Cache: PromptCacheRestorable {
 
     /// Writes a checked saved state and meta state into this cache.
     ///
-    /// The window receives its arrays only when the file holds them: a window that has not
-    /// written a key saves no array, and its setter needs two.
-    ///
     /// - Parameters:
     ///   - state: The saved arrays: the window arrays, then the slots of each branch.
     ///   - metaState: The saved meta state of the window.
     public func restorePromptCache(state: [MLXArray], metaState: [String]) {
-        let parts = Self.stateParts(state)
-        if !parts.window.isEmpty {
-            local.state = parts.window
-        }
-        local.metaState = metaState
-        attentionChunks.restore(state: parts.attention)
-        indexerChunks?.restore(state: parts.indexer)
+        self.state = state
+        self.metaState = metaState
     }
 
     /// Splits a saved state into the window arrays and the slots of each branch.
