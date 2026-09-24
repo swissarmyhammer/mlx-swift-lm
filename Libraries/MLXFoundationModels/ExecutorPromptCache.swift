@@ -57,6 +57,14 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// under it.
     let state: LMOutput.State?
 
+    /// The bytes this entry holds in memory: the resident bytes of every
+    /// cache, plus the arrays of `state`.
+    ///
+    /// The count reads only shapes and element types, thus it evaluates
+    /// nothing. It is computed one time, when the entry is made, because the
+    /// store reads it at each check-in and each eviction.
+    let byteCount: Int
+
     /// Creates an entry for caches that hold `tokens`.
     ///
     /// - Parameters:
@@ -73,6 +81,8 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
         self.tokens = tokens
         self.renderTokens = renderTokens
         self.state = state
+        self.byteCount =
+            caches.reduce(0) { $0 + $1.residentByteCount } + (state?.residentByteCount ?? 0)
     }
 }
 
@@ -85,33 +95,83 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
 /// checks an entry back in when the turn ends. Two turns of one session thus
 /// never write the same caches at the same time: a second turn that starts
 /// while the first still runs finds nothing and starts cold.
+///
+/// Each entry holds the whole key/value state of one conversation, which is
+/// large, and the framework never tells this executor that a session ended.
+/// The store thus limits the bytes it holds in memory to
+/// ``memoryBudgetBytes``. A count of sessions is the wrong unit, because one
+/// long session can be larger than many short ones. When a check-in takes the
+/// total past the budget, the least recently used entries leave first, each
+/// through ``spill(_:_:)``.
 actor ExecutorPromptCacheStore {
 
     /// The store every executor shares.
     static let shared = ExecutorPromptCacheStore()
 
-    /// How many sessions hold a cache at the same time.
+    /// The store the executor uses: ``shared``, unless a task binds another.
     ///
-    /// Each entry holds the whole key/value state of one conversation, which is
-    /// large. The framework never tells this executor that a session ended, thus
-    /// this bound is the only thing that releases the memory of a session nobody
-    /// uses again. The least recently used entry leaves first.
-    static let maximumRetainedSessions = 4
+    /// Swift Testing runs suites in parallel, thus a test binds its own store
+    /// with `$current.withValue(store) { ... }` and never shares entries or a
+    /// budget with another test.
+    @TaskLocal static var current: ExecutorPromptCacheStore = .shared
 
+    /// The part of the free working set the default budget takes: one
+    /// quarter. The rest stays free for the weights and the live pass.
+    static let defaultBudgetDivisor = 4
+
+    /// The most bytes the checked-in entries may hold in memory.
+    ///
+    /// The host sets it with ``configure(memoryBudgetBytes:)``. When no host
+    /// sets one, the store reads the device at its first use and takes
+    /// ``defaultMemoryBudgetBytes(workingSet:active:)``.
+    private(set) lazy var memoryBudgetBytes: Int = Self.defaultMemoryBudgetBytes(
+        workingSet: Int(clamping: GPU.deviceInfo().maxRecommendedWorkingSetSize),
+        active: Memory.activeMemory)
+
+    /// The checked-in entries, by session.
     private var entries: [ExecutorPromptCacheKey: ExecutorPromptCacheEntry] = [:]
 
     /// The checked-in keys, least recently used first.
     private var usageOrder: [ExecutorPromptCacheKey] = []
 
+    /// The sum of ``ExecutorPromptCacheEntry/byteCount`` over the checked-in
+    /// entries.
+    private(set) var retainedByteCount = 0
+
     /// How many sessions hold a cache. Read by tests.
     var retainedSessionCount: Int { entries.count }
+
+    /// The budget the store takes when no host sets one: one quarter of the
+    /// working set that is not active yet.
+    ///
+    /// - Parameters:
+    ///   - workingSet: the recommended maximum working set of the device, in
+    ///     bytes.
+    ///   - active: the bytes MLX holds active now.
+    /// - Returns: the budget in bytes, or zero when `active` is larger than
+    ///   `workingSet`.
+    static func defaultMemoryBudgetBytes(workingSet: Int, active: Int) -> Int {
+        let (free, overflow) = workingSet.subtractingReportingOverflow(active)
+        guard !overflow else { return 0 }
+        return max(0, free) / defaultBudgetDivisor
+    }
+
+    /// Sets the byte budget and applies it at once: the least recently used
+    /// entries leave until the total is at or below `budget`. A larger budget
+    /// removes nothing.
+    ///
+    /// - Parameter budget: the most bytes the entries may hold. Zero or less
+    ///   keeps no entry in memory.
+    func configure(memoryBudgetBytes budget: Int) {
+        memoryBudgetBytes = budget
+        evictToBudget()
+    }
 
     /// Takes the entry of `key` out of the store.
     ///
     /// - Returns: the entry, or nil when the store holds none for `key`.
     func checkOut(_ key: ExecutorPromptCacheKey) -> ExecutorPromptCacheEntry? {
-        usageOrder.removeAll { $0 == key }
-        return entries.removeValue(forKey: key)
+        remove(key)
     }
 
     /// Reads the entry of `key` and leaves it in the store. Read by tests that
@@ -122,32 +182,71 @@ actor ExecutorPromptCacheStore {
         entries[key]
     }
 
-    /// Puts `entry` back under `key`, or drops the key when `entry` is nil.
+    /// Puts `entry` back under `key` as the most recently used entry, or
+    /// drops the key when `entry` is nil.
+    ///
+    /// After the insert, the least recently used entries leave until the
+    /// total is at or below ``memoryBudgetBytes``. An entry larger than the
+    /// whole budget is not kept, and no other entry leaves for it.
     func checkIn(_ key: ExecutorPromptCacheKey, _ entry: ExecutorPromptCacheEntry?) {
-        usageOrder.removeAll { $0 == key }
-        guard let entry else {
-            entries.removeValue(forKey: key)
+        remove(key)
+        guard let entry else { return }
+        guard entry.byteCount <= memoryBudgetBytes else {
+            spill(key, entry)
             return
         }
         entries[key] = entry
         usageOrder.append(key)
-        while usageOrder.count > Self.maximumRetainedSessions {
-            entries.removeValue(forKey: usageOrder.removeFirst())
-        }
+        retainedByteCount += entry.byteCount
+        evictToBudget()
     }
 
     /// Releases the cache of every session of `modelID`, or of every session
     /// when `modelID` is nil.
+    ///
+    /// This is a release that the host asked for, not an eviction for the
+    /// budget, thus the entries do not go through ``spill(_:_:)``.
     func evict(modelID: String?) {
-        guard let modelID else {
-            entries.removeAll()
-            usageOrder.removeAll()
-            return
+        let released = entries.keys.filter { modelID == nil || $0.modelID == modelID }
+        for key in released {
+            remove(key)
         }
-        for key in entries.keys.filter({ $0.modelID == modelID }) {
-            entries.removeValue(forKey: key)
+    }
+
+    /// Removes the entry of `key` from the entries, the usage order and the
+    /// byte total.
+    ///
+    /// - Returns: the entry, or nil when the store holds none for `key`.
+    @discardableResult
+    private func remove(_ key: ExecutorPromptCacheKey) -> ExecutorPromptCacheEntry? {
+        guard let entry = entries.removeValue(forKey: key) else { return nil }
+        usageOrder.removeAll { $0 == key }
+        retainedByteCount -= entry.byteCount
+        return entry
+    }
+
+    /// Removes the least recently used entries until the total is at or below
+    /// ``memoryBudgetBytes``, and gives each one to ``spill(_:_:)``.
+    private func evictToBudget() {
+        while retainedByteCount > memoryBudgetBytes, let oldest = usageOrder.first,
+            let entry = remove(oldest)
+        {
+            spill(oldest, entry)
         }
-        usageOrder.removeAll { $0.modelID == modelID }
+    }
+
+    /// Takes an entry that leaves memory for the budget. Every eviction for
+    /// the budget comes through here.
+    ///
+    /// The entry is already out of the store. This function logs the eviction
+    /// and drops the entry, thus the next turn of that session starts cold.
+    ///
+    /// - Parameters:
+    ///   - key: the session of the entry.
+    ///   - entry: the entry that leaves memory.
+    private func spill(_ key: ExecutorPromptCacheKey, _ entry: ExecutorPromptCacheEntry) {
+        ExecutorPromptCacheLog.info(
+            ExecutorPromptCacheReport.evictionLine(key: key, byteCount: entry.byteCount))
     }
 }
 
@@ -610,10 +709,39 @@ enum ExecutorPromptCacheReport {
         }
     }
 
+    /// The line that names an entry the store evicted for its byte budget.
+    ///
+    /// - Parameters:
+    ///   - key: the session of the evicted entry.
+    ///   - byteCount: the bytes the entry held in memory.
+    /// - Returns: one line with the session and the bytes.
+    static func evictionLine(key: ExecutorPromptCacheKey, byteCount: Int) -> String {
+        "prompt cache evict \(session(key)) bytes=\(byteCount)"
+    }
+
     /// The model and the session of `key`, or `none` for each when the
     /// request names no session.
     private static func session(_ key: ExecutorPromptCacheKey?) -> String {
         "model=\(key?.modelID ?? "none") session=\(key?.sessionID ?? "none")"
+    }
+}
+
+/// The unified log of the executor prompt cache: `info` level, in the
+/// `ExecutorPromptCache` category of the `com.apple.FoundationModels-MLX`
+/// subsystem.
+enum ExecutorPromptCacheLog {
+
+    /// The log every line of the prompt cache goes to.
+    private static let logger = Logger(
+        subsystem: "com.apple.FoundationModels-MLX", category: "ExecutorPromptCache")
+
+    /// Writes `line` to the unified log at `info` level. Every field is
+    /// public: the line carries token counts, byte counts, a session
+    /// identifier and a short decoded seam, and `log show` must show them.
+    ///
+    /// - Parameter line: the line to write.
+    static func info(_ line: String) {
+        logger.info("\(line, privacy: .public)")
     }
 }
 
@@ -634,10 +762,6 @@ enum ExecutorPromptCacheReport {
 /// written by one task at a time, and the `@unchecked Sendable` conformance
 /// rests on that.
 final class ExecutorPromptCacheSlot: @unchecked Sendable {
-
-    /// The log every slot writes its lines to.
-    private static let logger = Logger(
-        subsystem: "com.apple.FoundationModels-MLX", category: "ExecutorPromptCache")
 
     /// The cache the session carries into its next turn, or nil when the next
     /// turn must start cold.
@@ -667,7 +791,7 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     ///   - report: receives each log line of the response.
     init(
         _ entry: ExecutorPromptCacheEntry?, key: ExecutorPromptCacheKey? = nil,
-        report: @escaping (String) -> Void = ExecutorPromptCacheSlot.log
+        report: @escaping (String) -> Void = ExecutorPromptCacheLog.info
     ) {
         self.entry = entry
         self.key = key
@@ -728,13 +852,6 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
             ?? .refused(.noPlan)
         entry = outcome.entry
         report(ExecutorPromptCacheReport.commitLine(key: key, outcome: outcome))
-    }
-
-    /// Writes `line` to the unified log at `info` level. Every field is
-    /// public: the line carries token counts, a session identifier and a
-    /// short decoded seam, and `log show` must show them.
-    private static func log(_ line: String) {
-        logger.info("\(line, privacy: .public)")
     }
 }
 

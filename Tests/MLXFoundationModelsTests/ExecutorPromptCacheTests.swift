@@ -15,7 +15,8 @@ import Testing
 /// pass.
 ///
 /// No weights are needed. The store holds whatever entry it is given, thus the
-/// entries here carry empty caches and a token ledger alone.
+/// entries here carry small zero-filled caches and a token ledger alone. The
+/// caches hold real bytes, because the store limits its memory by bytes.
 @Suite("A session carries its prompt cache between turns")
 struct ExecutorPromptCacheTests {
 
@@ -25,9 +26,12 @@ struct ExecutorPromptCacheTests {
     /// A second model, to prove that two models never share one cache.
     private static let otherModelID = "test/prompt-cache-other"
 
-    /// An entry that names `tokens` and carries one empty cache.
+    /// An entry that names `tokens` and carries one cache fed with one
+    /// position for each token, thus the entry holds real bytes.
     private func entry(tokens: [Int]) -> ExecutorPromptCacheEntry {
-        ExecutorPromptCacheEntry(caches: [KVCacheSimple()], tokens: tokens)
+        let caches: [KVCache] = [KVCacheSimple()]
+        feed(caches, tokenCount: tokens.count)
+        return ExecutorPromptCacheEntry(caches: caches, tokens: tokens)
     }
 
     /// A key for `sessionID` under ``modelID``.
@@ -149,17 +153,21 @@ struct ExecutorPromptCacheTests {
         #expect(await store.checkOut(key("b"))?.tokens == [7, 8])
     }
 
-    @Test("the least recently used session loses its cache past the bound")
-    func theLeastRecentlyUsedSessionLosesItsCachePastTheBound() async {
+    @Test("the least recently used session loses its cache past the byte budget")
+    func theLeastRecentlyUsedSessionLosesItsCachePastTheByteBudget() async {
         let store = ExecutorPromptCacheStore()
-        let bound = ExecutorPromptCacheStore.maximumRetainedSessions
-        for session in 0 ... bound {
+        let sessionsInBudget = Self.smallSessionsInBudget
+        await store.configure(
+            memoryBudgetBytes: sessionsInBudget * entry(tokens: [0]).byteCount)
+        for session in 0 ... sessionsInBudget {
             await store.checkIn(key("session-\(session)"), entry(tokens: [session]))
         }
 
-        #expect(await store.retainedSessionCount == bound)
+        #expect(await store.retainedSessionCount == sessionsInBudget)
         #expect(await store.checkOut(key("session-0")) == nil)
-        #expect(await store.checkOut(key("session-\(bound)"))?.tokens == [bound])
+        #expect(
+            await store.checkOut(key("session-\(sessionsInBudget)"))?.tokens
+                == [sessionsInBudget])
     }
 
     @Test("evicting one model releases only the caches of that model")
@@ -181,6 +189,279 @@ struct ExecutorPromptCacheTests {
         await store.checkIn(key("a", modelID: Self.otherModelID), entry(tokens: [2]))
 
         await store.evict(modelID: nil)
+
+        #expect(await store.retainedSessionCount == 0)
+    }
+
+    // MARK: - Limiting the store by bytes
+
+    /// How many small sessions the budget of the byte tests holds together.
+    private static let smallSessionsInBudget = 3
+
+    /// The token count of a large session. `KVCacheSimple` allocates its
+    /// positions in steps of 256, thus this session holds four steps and a
+    /// one-token session holds one.
+    private static let largeSessionTokenCount = 1024
+
+    /// A session that holds one allocation step of `KVCacheSimple`.
+    private func smallEntry() -> ExecutorPromptCacheEntry {
+        entry(tokens: [1])
+    }
+
+    /// A session that holds ``largeSessionTokenCount`` positions.
+    private func largeEntry() -> ExecutorPromptCacheEntry {
+        entry(tokens: Array(repeating: 1, count: Self.largeSessionTokenCount))
+    }
+
+    /// A store whose memory budget is `budget` bytes.
+    private func store(budget: Int) async -> ExecutorPromptCacheStore {
+        let store = ExecutorPromptCacheStore()
+        await store.configure(memoryBudgetBytes: budget)
+        return store
+    }
+
+    @Test("an entry counts the bytes its caches hold")
+    func anEntryCountsTheBytesItsCachesHold() {
+        let caches: [KVCache] = [KVCacheSimple(), KVCacheSimple()]
+        feed(caches, tokenCount: Self.largeSessionTokenCount)
+
+        let entry = ExecutorPromptCacheEntry(
+            caches: caches, tokens: Array(repeating: 1, count: Self.largeSessionTokenCount))
+
+        #expect(entry.byteCount > 0)
+        #expect(entry.byteCount == caches[0].residentByteCount + caches[1].residentByteCount)
+    }
+
+    @Test("an entry counts the arrays of the model state it carries")
+    func anEntryCountsTheArraysOfTheModelStateItCarries() {
+        let caches: [KVCache] = [KVCacheSimple()]
+        feed(caches, tokenCount: 1)
+        var state = LMOutput.State()
+        let anchor = MLXArray.zeros([Self.largeSessionTokenCount])
+        state[Self.arrayStateKey] = anchor
+
+        let entry = ExecutorPromptCacheEntry(caches: caches, tokens: [1], state: state)
+
+        #expect(entry.byteCount == caches[0].residentByteCount + anchor.nbytes)
+    }
+
+    /// A state key that holds an array, the way a VL model keeps an anchor.
+    private static let arrayStateKey = LMOutput.Key<MLXArray>("test.array-anchor")
+
+    @Test("the store never holds more bytes than its budget after a check-in")
+    func theStoreNeverHoldsMoreBytesThanItsBudgetAfterACheckIn() async {
+        let budget = largeEntry().byteCount + smallEntry().byteCount
+        let store = await store(budget: budget)
+        let entries = [largeEntry(), smallEntry(), largeEntry(), smallEntry(), largeEntry()]
+
+        for (index, entry) in entries.enumerated() {
+            await store.checkIn(key("session-\(index)"), entry)
+            #expect(await store.retainedByteCount <= budget)
+        }
+    }
+
+    @Test("many small sessions stay in memory together")
+    func manySmallSessionsStayInMemoryTogether() async {
+        let smallSessionsInOneLarge = largeEntry().byteCount / smallEntry().byteCount
+        let store = await store(budget: largeEntry().byteCount)
+
+        for session in 0 ..< smallSessionsInOneLarge {
+            await store.checkIn(key("session-\(session)"), smallEntry())
+        }
+
+        #expect(await store.retainedSessionCount == smallSessionsInOneLarge)
+        #expect(
+            await store.retainedByteCount == smallSessionsInOneLarge * smallEntry().byteCount)
+    }
+
+    @Test("a few large sessions push each other out")
+    func aFewLargeSessionsPushEachOtherOut() async {
+        let store = await store(budget: largeEntry().byteCount + smallEntry().byteCount)
+
+        await store.checkIn(key("first"), largeEntry())
+        await store.checkIn(key("second"), largeEntry())
+
+        #expect(await store.retainedSessionCount == 1)
+        #expect(await store.peek(key("first")) == nil)
+        #expect(await store.peek(key("second")) != nil)
+    }
+
+    @Test("the least recently used bytes leave first, and a check-out renews a session")
+    func theLeastRecentlyUsedBytesLeaveFirstAndACheckOutRenewsASession() async {
+        let store = await store(
+            budget: Self.smallSessionsInBudget * smallEntry().byteCount)
+        await store.checkIn(key("a"), smallEntry())
+        await store.checkIn(key("b"), smallEntry())
+        await store.checkIn(key("c"), smallEntry())
+
+        // The turn of "a" takes its cache out and puts it back, thus "a" is
+        // now the most recently used and "b" the least.
+        let renewed = await store.checkOut(key("a"))
+        await store.checkIn(key("a"), renewed)
+        await store.checkIn(key("d"), smallEntry())
+
+        #expect(await store.peek(key("b")) == nil)
+        #expect(await store.peek(key("a")) != nil)
+        #expect(await store.peek(key("c")) != nil)
+        #expect(await store.peek(key("d")) != nil)
+    }
+
+    @Test("an entry larger than the whole budget is not kept, and evicts nothing")
+    func anEntryLargerThanTheWholeBudgetIsNotKeptAndEvictsNothing() async {
+        let small = smallEntry()
+        let store = await store(budget: Self.smallSessionsInBudget * small.byteCount)
+        await store.checkIn(key("small"), small)
+
+        await store.checkIn(key("oversize"), largeEntry())
+
+        #expect(await store.peek(key("oversize")) == nil)
+        #expect(await store.peek(key("small")) != nil)
+        #expect(await store.retainedByteCount == small.byteCount)
+    }
+
+    @Test("a lower budget evicts at once, least recently used first")
+    func aLowerBudgetEvictsAtOnceLeastRecentlyUsedFirst() async {
+        let store = await store(budget: largeEntry().byteCount)
+        await store.checkIn(key("a"), smallEntry())
+        await store.checkIn(key("b"), smallEntry())
+        await store.checkIn(key("c"), smallEntry())
+
+        await store.configure(memoryBudgetBytes: smallEntry().byteCount)
+
+        #expect(await store.memoryBudgetBytes == smallEntry().byteCount)
+        #expect(await store.retainedSessionCount == 1)
+        #expect(await store.peek(key("c")) != nil)
+        #expect(await store.retainedByteCount <= smallEntry().byteCount)
+    }
+
+    @Test("a higher budget evicts nothing")
+    func aHigherBudgetEvictsNothing() async {
+        let budget = Self.smallSessionsInBudget * smallEntry().byteCount
+        let store = await store(budget: budget)
+        await store.checkIn(key("a"), smallEntry())
+        await store.checkIn(key("b"), smallEntry())
+        let bytesBefore = await store.retainedByteCount
+
+        await store.configure(memoryBudgetBytes: budget + largeEntry().byteCount)
+
+        #expect(await store.retainedSessionCount == 2)
+        #expect(await store.retainedByteCount == bytesBefore)
+    }
+
+    @Test("check-in, check-out and eviction keep the byte total correct")
+    func checkInCheckOutAndEvictionKeepTheByteTotalCorrect() async {
+        let store = await store(budget: largeEntry().byteCount * Self.smallSessionsInBudget)
+        let large = largeEntry()
+        let small = smallEntry()
+        await store.checkIn(key("a"), large)
+        await store.checkIn(key("b", modelID: Self.otherModelID), small)
+        #expect(await store.retainedByteCount == large.byteCount + small.byteCount)
+
+        // Checking in a new entry under a key already held replaces the old
+        // bytes and does not add to them.
+        await store.checkIn(key("a"), smallEntry())
+        #expect(await store.retainedByteCount == small.byteCount * 2)
+
+        _ = await store.checkOut(key("a"))
+        #expect(await store.retainedByteCount == small.byteCount)
+
+        await store.checkIn(key("a"), large)
+        await store.evict(modelID: Self.modelID)
+        #expect(await store.retainedByteCount == small.byteCount)
+
+        await store.evict(modelID: nil)
+        #expect(await store.retainedByteCount == 0)
+    }
+
+    @Test("the default budget is a quarter of the free working set")
+    func theDefaultBudgetIsAQuarterOfTheFreeWorkingSet() {
+        let workingSet = Self.largeSessionTokenCount * Self.smallSessionsInBudget
+        let active = Self.largeSessionTokenCount
+
+        #expect(
+            ExecutorPromptCacheStore.defaultMemoryBudgetBytes(
+                workingSet: workingSet, active: active)
+                == (workingSet - active) / Self.quarter)
+    }
+
+    /// The divisor that takes a quarter of a value.
+    private static let quarter = 4
+
+    @Test("the default budget is zero when more memory is active than the working set")
+    func theDefaultBudgetIsZeroWhenMoreMemoryIsActiveThanTheWorkingSet() {
+        #expect(
+            ExecutorPromptCacheStore.defaultMemoryBudgetBytes(
+                workingSet: Self.largeSessionTokenCount,
+                active: Self.largeSessionTokenCount * Self.smallSessionsInBudget) == 0)
+        #expect(
+            ExecutorPromptCacheStore.defaultMemoryBudgetBytes(workingSet: 0, active: Int.max)
+                == 0)
+    }
+
+    @Test("a store with no budget from the host sets one from the device")
+    func aStoreWithNoBudgetFromTheHostSetsOneFromTheDevice() async {
+        // The test process holds far less active memory than the working set
+        // of the device, thus a quarter of the free part is more than zero.
+        #expect(await ExecutorPromptCacheStore().memoryBudgetBytes > 0)
+    }
+
+    @Test("the eviction line names the session and its bytes")
+    func theEvictionLineNamesTheSessionAndItsBytes() {
+        #expect(
+            ExecutorPromptCacheReport.evictionLine(
+                key: key("session-1"), byteCount: Self.largeSessionTokenCount)
+                == "prompt cache evict model=test/prompt-cache session=session-1 bytes=1024")
+    }
+
+    // MARK: - The store a task binds
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("an executor pass inside a bound store uses that store and not the shared one")
+    func anExecutorPassInsideABoundStoreUsesThatStore() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        // A fresh identity keeps the process-wide model cache and the shared
+        // store out of every other test.
+        let modelID = "probe/bound-prompt-cache-store-\(UUID().uuidString)"
+        let model = MLXLanguageModel(
+            configuration: ModelConfiguration(id: modelID),
+            capabilities: [],
+            weightsLocation: { _ in weights },
+            load: { _, _ in makeScriptedContainer(modelID: modelID, rounds: ["A"]) })
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeRequest(transcript: transcript(firstEntryID: "bound-session"))
+        let sessionKey = key("bound-session", modelID: modelID)
+        let store = ExecutorPromptCacheStore()
+        await store.checkIn(sessionKey, entry(tokens: [1, 2, 3]))
+        let channel = LanguageModelExecutorGenerationChannel()
+        // The channel is a rendezvous, thus a consumer must run beside the
+        // executor or every send parks it.
+        let consumer = Task<Void, Never> {
+            do { for try await _ in channel {} } catch {}
+        }
+        defer { consumer.cancel() }
+
+        try await ExecutorPromptCacheStore.$current.withValue(store) {
+            try await executor.respond(to: request, model: model, streamingInto: channel)
+        }
+
+        // The pass checked the seeded entry out of the bound store. The
+        // scripted model holds no key/value cache, thus the pass checked
+        // nothing back in.
+        #expect(await store.peek(sessionKey) == nil)
+        #expect(await ExecutorPromptCacheStore.shared.peek(sessionKey) == nil)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("evicting a model inside a bound store releases the caches of that store")
+    func evictingAModelInsideABoundStoreReleasesTheCachesOfThatStore() async {
+        let model = makeStubModel("probe/bound-evict-\(UUID().uuidString)")
+        let store = ExecutorPromptCacheStore()
+        await store.checkIn(key("a", modelID: model.modelID), smallEntry())
+
+        await ExecutorPromptCacheStore.$current.withValue(store) {
+            await model.evict()
+        }
 
         #expect(await store.retainedSessionCount == 0)
     }

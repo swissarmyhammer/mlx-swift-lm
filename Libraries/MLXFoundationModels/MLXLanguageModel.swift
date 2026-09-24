@@ -242,7 +242,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// never asked for an eviction.
     public static func evictAll() async {
         await cache.evictAll()
-        await ExecutorPromptCacheStore.shared.evict(modelID: nil)
+        await ExecutorPromptCacheStore.current.evict(modelID: nil)
     }
 
     /// Drops this model from the shared cache, freeing the GPU memory held by its
@@ -257,7 +257,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// may not be `CancellationError`.
     public func evict() async {
         await Self.cache.remove(modelID: modelID)
-        await ExecutorPromptCacheStore.shared.evict(modelID: modelID)
+        await ExecutorPromptCacheStore.current.evict(modelID: modelID)
     }
 
     /// Whether the shared cache has a *genuine download* in flight for the
@@ -973,7 +973,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let promptCacheKey = Self.sessionCacheKey(for: request, modelID: modelID)
             let carriedPromptCache: ExecutorPromptCacheEntry?
             if let promptCacheKey {
-                carriedPromptCache = await ExecutorPromptCacheStore.shared.checkOut(promptCacheKey)
+                carriedPromptCache = await ExecutorPromptCacheStore.current.checkOut(promptCacheKey)
             } else {
                 carriedPromptCache = nil
             }
@@ -1105,7 +1105,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // could not represent itself checked in nothing, and the next turn
             // of that session starts cold.
             if let promptCacheKey {
-                await ExecutorPromptCacheStore.shared.checkIn(promptCacheKey, promptCache.entry)
+                await ExecutorPromptCacheStore.current.checkIn(promptCacheKey, promptCache.entry)
             }
             try outcome.get()
         }
