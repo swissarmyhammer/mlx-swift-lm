@@ -74,6 +74,16 @@ XCTest.
 No test is skipped. `Libraries/MLXCXGrammar/xgrammar/VERSION` pins v0.1.34,
 which supplies `GrammarMatcher::Fork()`, thus `ConstraintCachingTests` runs.
 
+### Float32 tests and TF32
+
+On a GPU with neural accelerators (NAX, for example the Apple M5), MLX computes
+float32 matrix operations in TF32 when `MLX_ENABLE_TF32` is not `0`. It uses
+the NAX kernel for some shapes only. Thus two float32 paths that must agree
+(for example a warm continuation and a cold prefill) differ by approximately
+2e-3, and the float32 tolerances of `MLXLMTests` fail. The `MLXTestPrecision`
+target sets `MLX_ENABLE_TF32=0` when the `MLXLMTests` bundle loads, if the
+variable is not set. Do not set `MLX_ENABLE_TF32=1` for a test run.
+
 ## How to build
 
 `swift build` is correct for the libraries alone. `swift build --build-tests`
