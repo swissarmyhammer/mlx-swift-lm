@@ -12,8 +12,14 @@ import Testing
 /// The shape and the values of the fixture caches of ``PromptCacheSpoolFixtures``.
 enum PromptCacheSpoolFixtureShape {
 
-    /// The ledger of each entry.
-    static let tokens = [1, 42, 7]
+    /// The number of tokens in the ledger of each entry.
+    static let tokenCount = 3
+
+    /// The ledger of each entry: the token identifiers from zero up to ``tokenCount``.
+    static let tokens = Array(0 ..< tokenCount)
+
+    /// The batch dimension of the cache: one sequence.
+    static let batchSize = 1
 
     /// The number of key/value heads of the cache.
     static let headCount = 2
@@ -49,13 +55,14 @@ extension PromptCacheSpoolFixtures {
     /// - Parameters:
     ///   - tokenCount: The number of tokens of the block.
     ///   - array: The fixture array. It sets the first value.
-    /// - Returns: An array of shape `(1, heads, tokens, headDimension)`, as `float16`.
+    /// - Returns: An array of shape `(batchSize, headCount, tokenCount, headDimension)`, as
+    ///   `float16`.
     static func block(tokenCount: Int, array: PromptCacheSpoolFixtureArray) -> MLXArray {
-        let shape = [
-            1, PromptCacheSpoolFixtureShape.headCount, tokenCount,
-            PromptCacheSpoolFixtureShape.headDimension,
-        ]
-        let count = shape.reduce(1, *)
+        let batchSize = PromptCacheSpoolFixtureShape.batchSize
+        let headCount = PromptCacheSpoolFixtureShape.headCount
+        let headDimension = PromptCacheSpoolFixtureShape.headDimension
+        let shape = [batchSize, headCount, tokenCount, headDimension]
+        let count = batchSize * headCount * tokenCount * headDimension
         let start = Float(array.rawValue) * PromptCacheSpoolFixtureShape.valueStride
         return MLXArray((0 ..< count).map { start + Float($0) }).reshaped(shape).asType(.float16)
     }

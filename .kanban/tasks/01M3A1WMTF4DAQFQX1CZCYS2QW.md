@@ -21,6 +21,19 @@ comments:
     - Note: the files tool `replace_all` made only one replacement per call in this session. Check the result count after each replace_all.
     - next: /test
   timestamp: 2026-09-24T21:04:07.344508+00:00
+- actor: claude-code
+  id: 01m3am1n8c41adbjywysq89azw
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD — 1 finding: Tests/MLXFoundationModelsTests/PromptCacheSpoolTestSupport.swift:16 `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+    - next: /implement to remove the cause from the file.
+
+    ### finish iteration 1 — findings
+    - implement: changed (5 files; 7 new tests)
+    - test: green (swift build --build-tests: only the known `missing creator` warning; MLXFoundationModelsTests 291/291 passed on 4 runs)
+    - commit: 19f65cd feat(prompt-cache): add public API to set the prompt cache budgets, release one session and read the usage
+    - review: findings (1) — PromptCacheSpoolTestSupport.swift:16 code-hygiene/magic-numbers-swift
+  timestamp: 2026-09-24T21:09:50.988255+00:00
 depends_on:
 - 01M3A2BAA6N6SF1647TFZVH9GX
 - 01M3A1W91WSM28W94MS2MK47NR
@@ -57,15 +70,25 @@ public static var promptCacheUsage: (memoryBytes: Int, spillingBytes: Int, diskB
 - Document the default budgets (from ^ddjhenh and ^fzvh9gx) on the functions.
 
 ## Acceptance Criteria
-- [ ] `configurePromptCache(memoryBudgetBytes:)` changes the budget of the current store and evicts at once when the new budget is smaller.
-- [ ] `configurePromptCache(diskBudgetBytes:)` changes the disk budget and deletes files at once when the new budget is smaller.
-- [ ] After `releasePromptCache(sessionID:)`, the store holds nothing for that key in memory, in the spill, or on disk, and the file is gone; other sessions and other models are unchanged.
-- [ ] A release of an unknown session is a no-op and does not throw.
-- [ ] `promptCacheUsage` reports the store's three byte totals.
+- [x] `configurePromptCache(memoryBudgetBytes:)` changes the budget of the current store and evicts at once when the new budget is smaller.
+- [x] `configurePromptCache(diskBudgetBytes:)` changes the disk budget and deletes files at once when the new budget is smaller.
+- [x] After `releasePromptCache(sessionID:)`, the store holds nothing for that key in memory, in the spill, or on disk, and the file is gone; other sessions and other models are unchanged.
+- [x] A release of an unknown session is a no-op and does not throw.
+- [x] `promptCacheUsage` reports the store's three byte totals.
 
 ## Tests
-- [ ] New `Tests/MLXFoundationModelsTests/PromptCachePublicAPITests.swift`. Each test binds its own store with `ExecutorPromptCacheStore.$current.withValue(store)` (never the shared store): release of an entry in memory, on disk, and during a spill (slow writer); an unknown session; each budget change; the usage totals.
-- [ ] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` — all pass.
+- [x] New `Tests/MLXFoundationModelsTests/PromptCachePublicAPITests.swift`. Each test binds its own store with `ExecutorPromptCacheStore.$current.withValue(store)` (never the shared store): release of an entry in memory, on disk, and during a spill (slow writer); an unknown session; each budget change; the usage totals.
+- [x] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` — all pass.
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass.
+
+## Review Findings (2026-09-24 16:05)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 5 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M3A1WMTF4DAQFQX1CZCYS2QW.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M3A1WMTF4DAQFQX1CZCYS2QW.md` — no validator matches this file
+
+- [x] `Tests/MLXFoundationModelsTests/PromptCacheSpoolTestSupport.swift:16` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
