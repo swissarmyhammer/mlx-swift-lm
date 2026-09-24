@@ -27,12 +27,28 @@ comments:
     - Discovery: the safetensors writer places the arrays in the order of its own hash map, thus two writes of one input can differ in byte order. The first test run failed on raw byte compares for that reason. The tests now compare a content digest (every metadata entry and every array byte, in name order). The golden digest `1ba2a6a1...c424` was written by the OLD code (HEAD `KVCache.swift`) in two separate runs, with the same value.
     - next: /commit
   timestamp: 2026-09-24T18:44:06.938119+00:00
+- actor: claude-code
+  id: 01m3abwd7yhseep0rsahxek88y
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (45a339f) — 0 findings, 0 confirmed, 0 refuted; 7 validator runs attempted, 0 failed. No prior review findings on the task.
+    - next: move to done
+  timestamp: 2026-09-24T18:47:10.334792+00:00
+- actor: claude-code
+  id: 01m3abwfw8e95qvtgres8r3z76
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — KVCache.swift, ExecutorPromptCacheFile.swift (new), PromptCacheSaveInputTests.swift (new), ExecutorPromptCacheFileTests.swift (new)
+    - test: green — MLXLMTests at baseline (36 XCTest failures, 101 Swift Testing issues), new suites pass; MLXFoundationModelsTests 258, MLXGuidedGenerationTests 70, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 pass; only the known build warning
+    - commit: 45a339f
+    - review: clean (0 findings)
+  timestamp: 2026-09-24T18:47:13.032830+00:00
 depends_on:
 - 01M3A1PX65M12926Y4BJVAG56K
 - 01M3A29W6YK4F0VMGBCB28DXZ2
 - 01M3A1QAFD56F5TEPPADDJHENH
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ff9880
 title: Write an executor prompt cache entry to one file and read it back
 ---
 #prompt-cache
