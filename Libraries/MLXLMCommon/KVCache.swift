@@ -2149,17 +2149,24 @@ public struct PromptCacheSnapshot {
 
 /// Save a pre-computed prompt cache to a file.
 ///
+/// The file also records the `offset` of each top-level cache, because the `metaState` of some
+/// classes (for example `MambaCache`) does not hold it. The load functions apply the record and
+/// do not give it back in the user metadata.
+///
 /// - Parameters:
 ///   - url: The URL to the `.safetensors` file
 ///   - cache: The model cache state
 ///   - metadata: Optional metadata to save along with cache state
 ///   - state: Optional model state associated with the cache
+/// - Throws: ``KVCacheError`` when a key of `metadata` uses a reserved prefix
+///   (`__mlx_lm_state_` or `__mlx_lm_offset_`), or when `state` has values and `cache` is empty.
 public func savePromptCache(
     url: URL,
     cache: [KVCache],
     metadata: [String: String] = [:],
     state: LMOutput.State? = nil
 ) throws {
+    try PromptCacheOffsetRecord.validateUserMetadata(metadata)
     let stateArrays = try promptCacheStateArrays(state, userMetadata: metadata)
     guard stateArrays.isEmpty || !cache.isEmpty else {
         throw KVCacheError(message: "Model state requires at least one prompt cache")
@@ -2189,8 +2196,12 @@ public func savePromptCache(
         }
     }
 
-    // Flatten user metadata as "1.key" (second element of cache_metadata)
-    for (key, value) in metadata {
+    // Flatten user metadata as "1.key" (second element of cache_metadata). The offset record
+    // goes in the same part, under its reserved prefix, which no user key uses.
+    let recordedMetadata = metadata.merging(PromptCacheOffsetRecord.entries(for: cache)) {
+        user, _ in user
+    }
+    for (key, value) in recordedMetadata {
         flattenedMetadata["1.\(key)"] = value
     }
 
@@ -2215,7 +2226,8 @@ public func savePromptCache(
 /// - Parameters:
 ///   - url: The URL to the `.safetensors` file
 /// - Returns: The prompt cache and the metadata
-/// - Throws: If the file contains model state that this tuple return value cannot represent
+/// - Throws: If the file contains model state that this tuple return value cannot represent, or
+///   for each error of ``loadPromptCacheSnapshot(url:)``
 public func loadPromptCache(
     url: URL
 ) throws -> ([KVCache], [String: String]) {
@@ -2230,12 +2242,19 @@ public func loadPromptCache(
 }
 
 /// Load a prompt cache and its associated model state from a file.
+///
+/// - Parameter url: The URL of the `.safetensors` file.
+/// - Returns: The snapshot. Each cache has the offset that the file records, when the file has
+///   an offset record.
+/// - Throws: ``KVCacheError`` when the file is not a prompt cache that this reader can restore,
+///   or when a restored offset is not the offset that the file records.
 public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
     let contents = try PromptCacheFileContents(url: url)
     let caches = try contents.layers.map {
         try restoreCacheFromMetaState(
             className: $0.className, state: $0.state, metaState: $0.metaState)
     }
+    try PromptCacheOffsetRecord.apply(contents.offsets, to: caches)
     return PromptCacheSnapshot(
         cache: caches, metadata: contents.userMetadata, state: contents.state)
 }
@@ -2263,8 +2282,9 @@ public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
 ///   - url: The URL of the `.safetensors` file.
 ///   - templates: The fresh caches of the model, one for each saved layer.
 /// - Returns: The snapshot. Its caches are the templates, or the new converted caches.
-/// - Throws: ``KVCacheError`` on a layer-count mismatch, a class mismatch, or saved values that
-///   do not fit a class. After a throw the state of the templates is not defined. Discard them.
+/// - Throws: ``KVCacheError`` on a layer-count mismatch, a class mismatch, saved values that
+///   do not fit a class, or a restored offset that is not the offset that the file records.
+///   After a throw the state of the templates is not defined. Discard them.
 public func loadPromptCacheSnapshot(
     url: URL, into templates: [KVCache]
 ) throws -> PromptCacheSnapshot {
@@ -2279,6 +2299,7 @@ public func loadPromptCacheSnapshot(
         try PromptCacheTemplateRestore.prepare(layer, into: template)
     }
     let caches = restoreSteps.map { $0() }
+    try PromptCacheOffsetRecord.apply(contents.offsets, to: caches)
     eval(contents.fileArrays)
     return PromptCacheSnapshot(
         cache: caches, metadata: contents.userMetadata, state: contents.state)
@@ -2317,6 +2338,9 @@ private struct PromptCacheFileContents {
     /// The caller metadata.
     let userMetadata: [String: String]
 
+    /// The recorded offset of each layer, or `nil` when the file has no offset record.
+    let offsets: [Int]?
+
     /// The model state, when the file holds one.
     let state: LMOutput.State?
 
@@ -2346,10 +2370,11 @@ private struct PromptCacheFileContents {
         let (loadedState, loadedUserMetadata) = try loadPromptCacheState(
             arrays: &arrays, metadata: storedUserMetadata)
         state = loadedState
-        userMetadata = loadedUserMetadata
         let storedCacheClasses = unflattenedMetadata[Self.classNamesPart] as? [String] ?? []
         let cacheClasses = try loadPromptCacheClasses(
             storedCacheClasses, hasState: loadedState != nil)
+        (offsets, userMetadata) = try PromptCacheOffsetRecord.read(
+            from: loadedUserMetadata, layerCount: cacheClasses.count)
 
         guard cacheInfo.count == cacheClasses.count else {
             throw KVCacheError(message: "Mismatch in cache counts")
@@ -2505,6 +2530,118 @@ private enum PromptCacheTemplateRestore {
                 message:
                     "The saved \(layer.className) configuration is not the configuration of the model cache."
             )
+        }
+    }
+}
+
+/// The record of the offset of each top-level cache in a prompt cache file.
+///
+/// The `metaState` of some classes does not hold the offset: an `ArraysCache` or a
+/// `MambaCache` comes back at offset 0, and a `ChunkedKVCache` after a front trim comes back at
+/// the number of rows that it keeps. The save thus writes the offset of each top-level cache in
+/// the user-metadata part, under a reserved key prefix. The load removes the record from the
+/// user metadata that it gives back, and applies it after the restore. A file without the record
+/// loads as before.
+private enum PromptCacheOffsetRecord {
+    /// The reserved prefix of the metadata keys of the record. User metadata cannot use it.
+    static let metadataPrefix = "__mlx_lm_offset_"
+
+    /// The metadata key of the record of one layer.
+    ///
+    /// - Parameter layer: The index of the top-level cache.
+    /// - Returns: The key, without the prefix of the user-metadata part.
+    static func key(layer: Int) -> String {
+        "\(metadataPrefix)\(layer)"
+    }
+
+    /// Refuses user metadata that uses the reserved prefix.
+    ///
+    /// - Parameter metadata: The caller metadata of a save.
+    /// - Throws: ``KVCacheError`` when a key starts with ``metadataPrefix``.
+    static func validateUserMetadata(_ metadata: [String: String]) throws {
+        guard !metadata.keys.contains(where: { $0.hasPrefix(metadataPrefix) }) else {
+            throw KVCacheError(
+                message: "User metadata uses the reserved prompt cache offset namespace")
+        }
+    }
+
+    /// Makes the record of a list of caches.
+    ///
+    /// - Parameter caches: The top-level caches of a save.
+    /// - Returns: One metadata entry for each cache.
+    static func entries(for caches: [KVCache]) -> [String: String] {
+        Dictionary(
+            uniqueKeysWithValues: caches.enumerated().map { layer, cache in
+                (key(layer: layer), String(cache.offset))
+            })
+    }
+
+    /// Reads the record from the user metadata of a file, and removes it.
+    ///
+    /// - Parameters:
+    ///   - metadata: The user metadata of the file, which can hold the record.
+    ///   - layerCount: The number of top-level caches in the file.
+    /// - Returns: The offset of each layer, or `nil` when the file has no record, and the user
+    ///   metadata without the record.
+    /// - Throws: ``KVCacheError`` when the record does not have exactly one non-negative integer
+    ///   for each layer.
+    static func read(
+        from metadata: [String: String], layerCount: Int
+    ) throws -> (offsets: [Int]?, userMetadata: [String: String]) {
+        let record = metadata.filter { $0.key.hasPrefix(metadataPrefix) }
+        let userMetadata = metadata.filter { !$0.key.hasPrefix(metadataPrefix) }
+        guard !record.isEmpty else { return (nil, userMetadata) }
+        guard record.count == layerCount else {
+            throw KVCacheError(
+                message:
+                    "The prompt cache offset record has \(record.count) entries for \(layerCount) caches."
+            )
+        }
+        let offsets = try (0 ..< layerCount).map { layer in
+            guard let value = record[key(layer: layer)], let offset = Int(value), offset >= 0
+            else {
+                throw KVCacheError(
+                    message: "The prompt cache offset record of cache \(layer) is not valid.")
+            }
+            return offset
+        }
+        return (offsets, userMetadata)
+    }
+
+    /// Applies the record to the restored caches.
+    ///
+    /// `KVCache.offset` has no setter, and some classes compute it from inner caches. Thus the
+    /// function sets the offset only of a class whose saved values do not hold it. For each
+    /// other class it checks that the restored offset equals the recorded offset.
+    ///
+    /// - Parameters:
+    ///   - offsets: The recorded offsets, or `nil` when the file has no record.
+    ///   - caches: The restored top-level caches, in the order of the record.
+    /// - Throws: ``KVCacheError`` when a restored offset is not the recorded offset.
+    static func apply(_ offsets: [Int]?, to caches: [KVCache]) throws {
+        guard let offsets else { return }
+        for (layer, (cache, offset)) in zip(caches, offsets).enumerated() {
+            if let settable = offsetSettableCache(cache) {
+                settable.offset = offset
+            } else if cache.offset != offset {
+                throw KVCacheError(
+                    message:
+                        "The restored cache \(layer) has offset \(cache.offset) and the prompt cache records \(offset)."
+                )
+            }
+        }
+    }
+
+    /// Gives the cache as a `BaseKVCache` when its saved values do not hold its offset.
+    ///
+    /// - Parameter cache: A restored cache.
+    /// - Returns: The cache for an `ArraysCache` (thus also a `MambaCache`) or a
+    ///   `ChunkedKVCache`, and `nil` for each other class.
+    private static func offsetSettableCache(_ cache: KVCache) -> BaseKVCache? {
+        switch cache {
+        case let arrays as ArraysCache: arrays
+        case let chunked as ChunkedKVCache: chunked
+        default: nil
         }
     }
 }

@@ -95,6 +95,36 @@ struct PromptCacheTemplateRestoreTests {
     /// The first seed of the fixture tensors.
     fileprivate static let firstSeed: UInt64 = 7
 
+    /// The number of tokens that the front-trimmed `ChunkedKVCache` fixture receives before
+    /// its front trim. It is more than one chunk, thus the trim removes tokens.
+    fileprivate static let frontTrimmedTokenCount = 24
+
+    /// The reserved prefix of the metadata keys that record the offset of each cache.
+    fileprivate static let offsetRecordPrefix = "__mlx_lm_offset_"
+
+    /// The prefix of the flattened keys of the user-metadata part of a prompt cache file.
+    fileprivate static let userMetadataPart = "1."
+
+    /// The kinds whose restored offset the load checks against the record: every kind that
+    /// ``OffsetCacheKind`` does not cover.
+    fileprivate static let checkedOffsetKinds = CacheKind.allCases.filter {
+        ![.mamba, .arrays, .chunked].contains($0)
+    }
+
+    /// The checked kinds that `loadPromptCacheSnapshot(url:)` can build without a template.
+    fileprivate static let checkedBuiltInKinds: [CacheKind] = [
+        .simple, .rotatingBeforeWrap, .rotatingAfterWrap, .quantized, .turboQuant,
+        .varianceNormalized, .cacheList,
+    ]
+
+    /// The flattened file key of the offset record of one layer.
+    ///
+    /// - Parameter layer: The index of the layer.
+    /// - Returns: The key, in the user-metadata part.
+    fileprivate static func offsetRecordKey(layer: Int) -> String {
+        "\(userMetadataPart)\(offsetRecordPrefix)\(layer)"
+    }
+
     // MARK: - Fixture builders
 
     /// Makes a reproducible tensor.
@@ -449,6 +479,150 @@ struct PromptCacheTemplateRestoreTests {
             try loadPromptCacheSnapshot(url: url, into: templates)
         }
     }
+
+    // MARK: - Offset record
+
+    @Test(
+        "A recurrent or front-trimmed cache comes back with its offset through each load function",
+        arguments: OffsetCacheKind.allCases)
+    func offsetComesBackThroughEachLoad(kind: OffsetCacheKind) throws {
+        let source = try kind.makeFilled()
+        let url = Self.temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try savePromptCache(url: url, cache: [source])
+
+        let restoredCaches: [(String, any KVCache)] = [
+            (
+                "loadPromptCacheSnapshot(url:)",
+                try #require(try loadPromptCacheSnapshot(url: url).cache.first)
+            ),
+            ("loadPromptCache(url:)", try #require(try loadPromptCache(url: url).0.first)),
+            (
+                "loadPromptCacheSnapshot(url:into:)",
+                try #require(
+                    try loadPromptCacheSnapshot(url: url, into: [kind.makeTemplate()]).cache.first)
+            ),
+        ]
+
+        #expect(source.offset == kind.savedOffset, "\(kind): the fixture offset")
+        for (load, restored) in restoredCaches {
+            #expect(restored.offset == source.offset, "\(kind) through \(load): offset")
+            Self.expectSameContents(restored, source, "\(kind) through \(load)")
+            let fresh = try kind.makeFilled()
+            try Self.expectSameStep(kind.stepKind, restored, fresh)
+            #expect(restored.offset == fresh.offset, "\(kind) through \(load): offset after a step")
+        }
+    }
+
+    @Test(
+        "A record that disagrees with the restored offset throws KVCacheError on a template restore",
+        arguments: checkedOffsetKinds)
+    func disagreeingRecordThrowsOnTemplateRestore(kind: CacheKind) throws {
+        let url = try Self.fileWithDisagreeingRecord(kind)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let templates = [try kind.makeTemplate()]
+
+        #expect(throws: KVCacheError.self) {
+            try loadPromptCacheSnapshot(url: url, into: templates)
+        }
+    }
+
+    @Test(
+        "A record that disagrees with the restored offset throws KVCacheError on a load",
+        arguments: checkedBuiltInKinds)
+    func disagreeingRecordThrowsOnLoad(kind: CacheKind) throws {
+        let url = try Self.fileWithDisagreeingRecord(kind)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(throws: KVCacheError.self) {
+            try loadPromptCacheSnapshot(url: url)
+        }
+        #expect(throws: KVCacheError.self) {
+            try loadPromptCache(url: url)
+        }
+    }
+
+    @Test("The offset record is in the file and not in the user metadata of any load function")
+    func offsetRecordStaysOutOfUserMetadata() throws {
+        let source = try OffsetCacheKind.mamba.makeFilled()
+        let metadata = ["source": "offset-record"]
+        let url = Self.temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try savePromptCache(url: url, cache: [source], metadata: metadata)
+
+        let (_, storedMetadata) = try loadArraysAndMetadata(url: url)
+        #expect(storedMetadata[Self.offsetRecordKey(layer: 0)] == String(source.offset))
+        #expect(try loadPromptCacheSnapshot(url: url).metadata == metadata)
+        #expect(try loadPromptCache(url: url).1 == metadata)
+        #expect(try loadPromptCacheSnapshot(url: url, into: [MambaCache()]).metadata == metadata)
+    }
+
+    @Test("savePromptCache refuses user metadata that uses the reserved offset prefix")
+    func reservedOffsetPrefixThrows() throws {
+        let source = try CacheKind.simple.makeFilled()
+        let url = Self.temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(throws: KVCacheError.self) {
+            try savePromptCache(
+                url: url, cache: [source], metadata: ["\(Self.offsetRecordPrefix)0": "0"])
+        }
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test("A file with no offset record loads as before", arguments: OffsetCacheKind.allCases)
+    func fileWithoutRecordLoadsAsBefore(kind: OffsetCacheKind) throws {
+        let source = try kind.makeFilled()
+        let url = try Self.tamperedFile([source]) { _, metadata in
+            metadata = metadata.filter {
+                !$0.key.hasPrefix("\(Self.userMetadataPart)\(Self.offsetRecordPrefix)")
+            }
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let snapshot = try loadPromptCacheSnapshot(url: url)
+        let loaded = try #require(snapshot.cache.first)
+        let intoSnapshot = try loadPromptCacheSnapshot(url: url, into: [kind.makeTemplate()])
+        let restored = try #require(intoSnapshot.cache.first)
+
+        #expect(snapshot.metadata.isEmpty)
+        #expect(intoSnapshot.metadata.isEmpty)
+        for (load, cache) in [("load", loaded), ("template restore", restored)] {
+            #expect(cache.offset == kind.offsetWithoutRecord, "\(kind) \(load): offset")
+            Self.expectSameContents(cache, source, "\(kind) \(load)")
+        }
+    }
+
+    @Test(
+        "A malformed offset record throws KVCacheError",
+        arguments: [(0, "not-an-offset"), (0, "-1"), (1, "0")])
+    func malformedRecordThrows(layer: Int, value: String) throws {
+        let source = try CacheKind.simple.makeFilled()
+        let url = try Self.tamperedFile([source]) { _, metadata in
+            metadata[Self.offsetRecordKey(layer: layer)] = value
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(throws: KVCacheError.self) {
+            try loadPromptCacheSnapshot(url: url)
+        }
+        #expect(throws: KVCacheError.self) {
+            try loadPromptCacheSnapshot(url: url, into: [KVCacheSimple()])
+        }
+    }
+
+    /// Saves a filled cache of one kind, and writes a second file whose offset record is one
+    /// more than the saved offset.
+    ///
+    /// - Parameter kind: The kind of the cache.
+    /// - Returns: The URL of the second file. The caller removes it.
+    fileprivate static func fileWithDisagreeingRecord(_ kind: CacheKind) throws -> URL {
+        let source = try kind.makeFilled()
+        let key = offsetRecordKey(layer: 0)
+        return try tamperedFile([source]) { _, metadata in
+            metadata[key] = String(source.offset + 1)
+        }
+    }
 }
 
 // MARK: - Cache kinds
@@ -658,6 +832,79 @@ enum CacheKind: String, CaseIterable, CustomTestStringConvertible, Sendable {
         _ = miniMax.update(keys: prompt(seed: seed), values: prompt(seed: seed + 1))
         if self == .miniMaxWithIndex {
             _ = miniMax.updateIndexAndFetch(prompt(seed: seed))
+        }
+    }
+}
+
+// MARK: - Offset cache kinds
+
+/// One kind of cache whose `state` and `metaState` do not hold its offset. Only the offset
+/// record of the file brings the offset back.
+enum OffsetCacheKind: String, CaseIterable, CustomTestStringConvertible, Sendable {
+    case mamba
+    case arrays
+    case chunkedFrontTrimmed
+
+    /// The name of the kind in the test report.
+    var testDescription: String { rawValue }
+
+    /// The fixture sizes and builders.
+    private typealias Fixture = PromptCacheTemplateRestoreTests
+
+    /// The kind of ``CacheKind`` that takes the same step as this kind.
+    var stepKind: CacheKind {
+        switch self {
+        case .mamba: .mamba
+        case .arrays: .arrays
+        case .chunkedFrontTrimmed: .chunked
+        }
+    }
+
+    /// The offset of a filled cache of this kind.
+    var savedOffset: Int {
+        switch self {
+        case .mamba, .arrays: Fixture.promptTokenCount
+        case .chunkedFrontTrimmed: Fixture.frontTrimmedTokenCount
+        }
+    }
+
+    /// The offset that a load gives a cache of this kind when the file has no offset record.
+    var offsetWithoutRecord: Int {
+        switch self {
+        case .mamba, .arrays: 0
+        case .chunkedFrontTrimmed: Fixture.chunkSize
+        }
+    }
+
+    /// Makes the fresh cache that a model makes for this kind.
+    ///
+    /// - Returns: An empty cache.
+    func makeTemplate() throws -> any KVCache {
+        try stepKind.makeTemplate()
+    }
+
+    /// Makes a cache of this kind that holds data and has the offset ``savedOffset``.
+    ///
+    /// - Returns: The filled cache.
+    func makeFilled() throws -> any KVCache {
+        switch self {
+        case .mamba:
+            let mamba = try #require(try CacheKind.mamba.makeFilled() as? MambaCache)
+            mamba.advancePosition(by: savedOffset)
+            return mamba
+        case .arrays:
+            let arrays = try #require(try CacheKind.arrays.makeFilled() as? ArraysCache)
+            arrays.offset = savedOffset
+            return arrays
+        case .chunkedFrontTrimmed:
+            let chunked = ChunkedKVCache(chunkSize: Fixture.chunkSize)
+            let seed = Fixture.firstSeed
+            chunked.state = [
+                Fixture.block(tokenCount: savedOffset, seed: seed),
+                Fixture.block(tokenCount: savedOffset, seed: seed + 1),
+            ]
+            chunked.maybeTrimFront()
+            return chunked
         }
     }
 }
