@@ -27,9 +27,32 @@ comments:
     - evidence: `swift build --build-tests` — only the known warning `missing creator for mutated node`. MLXFoundationModelsTests 3 runs: 279/279 passed each time. MLXGuidedGenerationTests 70 passed, CXGrammarTests 7 passed, MLXHuggingFaceMacrosTests 5 passed. MLXLMTests: 694 XCTest with 36 failures (GlmOcr 6, Qwen25VL 13, Qwen35 8, Qwen3VL 8 ContinuationTests, NanbeigeTests 1) and 1207 Swift Testing with 101 issues, which is the baseline of 2026-09-24. No new failure, no new warning.
     - next: /commit
   timestamp: 2026-09-24T19:49:55.444461+00:00
+- actor: claude-code
+  id: 01m3afrasj54ndevnfhkgs6757
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD — 2 findings (2 confirmed, 2 refuted) — Libraries/MLXFoundationModels/ExecutorPromptCache.swift:584 (code-hygiene/magic-numbers-swift), Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift:528 (code-hygiene/data-driven)
+    - next: /implement fzvh9gx
+
+    ### finish iteration 1 — findings
+    - implement: changed (ExecutorPromptCache.swift, ExecutorPromptCacheSpoolTests.swift)
+    - test: green (MLXFoundationModelsTests 279/279 x3; MLXLMTests at baseline 36 XCTest failures, 101 issues; other 3 bundles pass)
+    - commit: e71bbe1
+    - review: findings — `Libraries/MLXFoundationModels/ExecutorPromptCache.swift:584` Magic numbers should be replaced by named constants.; `Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift:528` The switch statement over pid is a table written as control flow.
+  timestamp: 2026-09-24T19:54:51.058546+00:00
+- actor: claude-code
+  id: 01m3ag0a3t6q6dk8d1spmtwp4e
+  text: |-
+    ### implement — changed
+    - evidence: 2 files. ExecutorPromptCache.swift: the literal 2 in `processIdentifier(ofSpoolFolder:)` is now `spoolFolderNamePartCount`; the `-` separator is now `spoolFolderNameSeparator`, used where the folder name is written and where it is read. ExecutorPromptCacheSpoolTests.swift: the probe `switch` is now the table `probeResults` with the default `liveProbeResult`.
+
+    ### test — green
+    - evidence: build has only the known `missing creator for mutated node` warning. MLXFoundationModelsTests 279/279 passed 3 times. MLXLMTests at baseline (36 XCTest failures in the same 5 suites, 101 Swift Testing issues). MLXGuidedGenerationTests 70, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 passed.
+    - next: /commit
+  timestamp: 2026-09-24T19:59:12.506105+00:00
 depends_on:
 - 01M3A1RHPV3CV6Q7Q59W0S77DT
-position_column: doing
+position_column: review
 position_ordinal: '80'
 title: 'Disk spool, part 2: disk budget, clean-up of dead-process folders, and removal of one key or one session'
 ---
@@ -62,3 +85,14 @@ In `Libraries/MLXFoundationModels/ExecutorPromptCache.swift`, on top of the spoo
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass.
+
+## Review Findings (2026-09-24 14:50)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 2 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M3A2BAA6N6SF1647TFZVH9GX.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M3A2BAA6N6SF1647TFZVH9GX.md` — no validator matches this file
+
+- [x] `Libraries/MLXFoundationModels/ExecutorPromptCache.swift:584` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift:528` `code-hygiene/data-driven` — The switch statement over pid is a table written as control flow. Each arm differs only in the constants returned. This should be expressed as data rather than as parallel code paths. Extract the pid-to-result mapping into a dictionary and use dictionary lookup with a default: Create a static dictionary `let probeResults: [pid_t: ProcessProbeResult] = [Self.stalePID: (killResult: -1, errorNumber: ESRCH), Self.unsignalablePID: (killResult: -1, errorNumber: EPERM)]` and replace the switch with `probeResults[pid] ?? (killResult: 0, errorNumber: 0)`.

@@ -68,6 +68,19 @@ struct ExecutorPromptCacheSpoolTests {
     /// The process of the folder that the clean-up test marks live.
     private static let livePID: pid_t = 103
 
+    /// What the probe of the clean-up test gives for a live process: `kill` returns zero.
+    private static let liveProbeResult: ExecutorPromptCacheStore.ProcessProbeResult = (
+        killResult: 0, errorNumber: 0
+    )
+
+    /// What the probe of the clean-up test gives for each process that it marks. A process that
+    /// is not in the table gets ``liveProbeResult``.
+    private static let probeResults: [pid_t: ExecutorPromptCacheStore.ProcessProbeResult] = [
+        stalePID: (killResult: -1, errorNumber: ESRCH),
+        unsignalablePID: (killResult: -1, errorNumber: EPERM),
+        livePID: liveProbeResult,
+    ]
+
     /// The fixture arrays, in the order of their first values.
     private enum FixtureArray: Int {
         case keys
@@ -525,11 +538,7 @@ struct ExecutorPromptCacheSpoolTests {
         let foreign = try Self.makeFolder("not-a-spool-folder", in: root)
 
         ExecutorPromptCacheStore.removeStaleSpoolFolders(in: root) { pid in
-            switch pid {
-            case Self.stalePID: (killResult: -1, errorNumber: ESRCH)
-            case Self.unsignalablePID: (killResult: -1, errorNumber: EPERM)
-            default: (killResult: 0, errorNumber: 0)
-            }
+            Self.probeResults[pid] ?? Self.liveProbeResult
         }
 
         #expect(try Self.fileNames(in: root) == [live, foreign, unsignalable].sorted())

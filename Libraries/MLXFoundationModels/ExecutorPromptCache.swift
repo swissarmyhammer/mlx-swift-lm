@@ -267,8 +267,17 @@ actor ExecutorPromptCacheStore {
     /// one time in each process, thus a new process never reads the folder of
     /// an old process that had the same process identifier.
     static let processSpoolDirectory = spoolRootDirectory.appendingPathComponent(
-        "\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)",
+        "\(ProcessInfo.processInfo.processIdentifier)\(spoolFolderNameSeparator)\(UUID().uuidString)",
         isDirectory: true)
+
+    /// The character between the process identifier and the UUID in the name
+    /// of a spool folder.
+    static let spoolFolderNameSeparator: Character = "-"
+
+    /// The number of parts that the name of a spool folder has when it is cut
+    /// at the first ``spoolFolderNameSeparator``: the process identifier and
+    /// the UUID.
+    private static let spoolFolderNamePartCount = 2
 
     /// The result of `kill(pid, 0)` for one process: the return value, and
     /// `errno` immediately after the call.
@@ -580,8 +589,11 @@ actor ExecutorPromptCacheStore {
     /// - Returns: the process identifier, or nil when the name does not start
     ///   with a positive number and a `-`.
     private static func processIdentifier(ofSpoolFolder name: String) -> pid_t? {
-        let parts = name.split(separator: "-", maxSplits: 1)
-        guard parts.count == 2, let pid = pid_t(parts[0]), pid > 0 else { return nil }
+        let parts = name.split(
+            separator: spoolFolderNameSeparator, maxSplits: spoolFolderNamePartCount - 1)
+        guard parts.count == spoolFolderNamePartCount, let pid = pid_t(parts[0]), pid > 0 else {
+            return nil
+        }
         return pid
     }
 
