@@ -127,14 +127,6 @@ struct KVCacheByteCountTests {
         return available
     }
 
-    /// The sum of `nbytes` over some arrays.
-    ///
-    /// - Parameter arrays: The arrays to count.
-    /// - Returns: The byte count.
-    private static func byteCount(of arrays: [MLXArray]) -> Int {
-        arrays.reduce(0) { $0 + $1.nbytes }
-    }
-
     /// Feeds one short lazy prefill into a cache.
     ///
     /// - Parameter cache: The cache to feed.
@@ -181,7 +173,7 @@ struct KVCacheByteCountTests {
 
         #expect(
             cache.residentByteCount == Self.keysAndValues * Self.paddedBufferBytes(dtype: .float16))
-        #expect(Self.byteCount(of: cache.state) < cache.residentByteCount)
+        #expect(cache.state.totalByteCount < cache.residentByteCount)
     }
 
     @Test("ChunkedKVCache counts the full step-padded buffers")
@@ -253,7 +245,7 @@ struct KVCacheByteCountTests {
         let cache = Self.prefilled(VarianceNormalizedKVCache())
 
         #expect(cache.residentByteCount > 0)
-        #expect(cache.residentByteCount == Self.byteCount(of: cache.state))
+        #expect(cache.residentByteCount == cache.state.totalByteCount)
     }
 
     @Test("VarianceNormalizedKVCache counts the compact tiles and the raw tail")
@@ -263,7 +255,7 @@ struct KVCacheByteCountTests {
         _ = cache.update(keys: Self.lazyArray(shape), values: Self.lazyArray(shape))
 
         #expect(cache.compactStorageByteCount > 0)
-        #expect((cache as any KVCache).residentByteCount == Self.byteCount(of: cache.state))
+        #expect((cache as any KVCache).residentByteCount == cache.state.totalByteCount)
     }
 
     @Test("TurboQuantKVCache with data counts its raw prefill buffers")
@@ -306,7 +298,7 @@ struct KVCacheByteCountTests {
         let window = [Self.lazyArray(Self.promptShape), Self.lazyArray(Self.promptShape)]
         cache.state = window + Self.deepSeekBranchSlots() + Self.deepSeekBranchSlots()
 
-        let windowBytes = Self.byteCount(of: window)
+        let windowBytes = window.totalByteCount
         let branchRows = Self.deepSeekChunkCount + Self.deepSeekCarryRowCount
         let branchBytes =
             Self.batchSize * branchRows * Self.deepSeekChunkWidth * DType.float16.size

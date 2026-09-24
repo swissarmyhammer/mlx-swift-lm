@@ -42,8 +42,30 @@ comments:
     - evidence: `swift build --build-tests` — no new warning (only the SwiftPM `missing creator for mutated node` line and the `maskedFill` never-used warning that were there before). `xcrun xctest` MLXLMTests: XCTest 694 run, 36 failures; Swift Testing 1184 tests, 101 issues — equal to the 2026-09-24 baseline; KVCacheByteCountTests 14/14 pass. The XCTest failures are the continuation tolerance tests (Qwen35/Qwen3VL/Qwen25VL/GlmOcr/Nanbeige `...ContinuationTests`, for example "0.002961278 is greater than 0.001"); none reads `residentByteCount`. MLXGuidedGenerationTests 70 pass, MLXFoundationModelsTests 228 pass, CXGrammarTests 7 pass, MLXHuggingFaceMacrosTests 5 pass. No skipped test.
     - next: /commit (the orchestrator permits only baseline failures)
   timestamp: 2026-09-24T16:23:15.711889+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3a3wxw4nwvnkdr0y7xnhsp7
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD — 1 finding (1 confirmed, 0 refuted): Tests/MLXLMTests/KVCacheByteCountTests.swift:134 `reuse/reuse`
+    - next: /implement works the unchecked finding
+
+    ### finish iteration 1 — findings
+    - implement: changed (5 files)
+    - test: baseline failures only (MLXLMTests XCTest 36 failures / Swift Testing 101 issues, same as baseline; new suite 14/14 pass; other 4 bundles pass)
+    - commit: e5d93ff
+    - review: findings — `Tests/MLXLMTests/KVCacheByteCountTests.swift:134` `reuse/reuse` — The test utility function `byteCount(of:)` reimplements the same logic as the newly added `totalByteCount` extension on `Array<MLXArray>` in KVCache.swift.
+  timestamp: 2026-09-24T16:27:38.756570+00:00
+- actor: claude-code
+  id: 01m3a45vn1f7w3bxx0yy9pgdv6
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed (1 file — Tests/MLXLMTests/KVCacheByteCountTests.swift: removed `byteCount(of:)`, the four calls now use `totalByteCount`; the reuse finding is checked)
+    - test: baseline failures only (MLXLMTests XCTest 694 run / 36 failures, Swift Testing 1184 tests / 101 issues, same as baseline; KVCacheByteCountTests pass; no new warning)
+    - commit: e187c28
+    - review: clean — review sha HEAD~1..HEAD, 0 findings; every prior finding is checked; task moved to done
+  timestamp: 2026-09-24T16:32:31.393821+00:00
+position_column: done
+position_ordinal: ff9480
 title: Measure the resident bytes of a KV cache for each cache type, with no evaluation
 ---
 #prompt-cache
@@ -61,14 +83,20 @@ The byte-limited memory tier (^ddjhenh) needs the real size of an entry. `KVCach
 - Add `public extension LMOutput.State { var residentByteCount: Int }` over its array values (`Libraries/MLXLMCommon/LanguageModel.swift:242`). Count only array values; do not throw.
 
 ## Acceptance Criteria
-- [ ] For each type above, `residentByteCount` read through `any KVCache` equals the sum of the sizes of the buffers the cache holds, including the step padding of `KVCacheSimple`.
-- [ ] `TurboQuantKVCache` with data gives a value greater than 0.
-- [ ] An empty cache gives 0.
-- [ ] No evaluation: build a cache from a lazy operation (for example `MLXArray.ones(...) * 2` not evaluated), read `residentByteCount`, then assert that each array is still not available with `_mlx_array_is_available` from the mlx-c header. If `Cmlx` cannot be imported from the test target, the implementer names the replacement check on this task before the tests are written.
+- [x] For each type above, `residentByteCount` read through `any KVCache` equals the sum of the sizes of the buffers the cache holds, including the step padding of `KVCacheSimple`.
+- [x] `TurboQuantKVCache` with data gives a value greater than 0.
+- [x] An empty cache gives 0.
+- [x] No evaluation: build a cache from a lazy operation (for example `MLXArray.ones(...) * 2` not evaluated), read `residentByteCount`, then assert that each array is still not available with `_mlx_array_is_available` from the mlx-c header. If `Cmlx` cannot be imported from the test target, the implementer names the replacement check on this task before the tests are written.
 
 ## Tests
-- [ ] New `Tests/MLXLMTests/KVCacheByteCountTests.swift` (Swift Testing): one case for each type through `any KVCache`, one for `LMOutput.State`, and the no-evaluation case.
-- [ ] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` — the new tests pass. (On 2026-09-24, `stable` already has 36 XCTest failures and 101 Swift Testing issues in DeepSeekV4*, MiniMaxM3, Qwen35MTPMetal and the chunked SSM test. Do not add to that list.)
+- [x] New `Tests/MLXLMTests/KVCacheByteCountTests.swift` (Swift Testing): one case for each type through `any KVCache`, one for `LMOutput.State`, and the no-evaluation case.
+- [x] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` — the new tests pass. (On 2026-09-24, `stable` already has 36 XCTest failures and 101 Swift Testing issues in DeepSeekV4*, MiniMaxM3, Qwen35MTPMetal and the chunked SSM test. Do not add to that list.)
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass.
+
+## Review Findings (2026-09-24 11:23)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 5 file(s) reviewed, 22 not reviewed (the `.kanban/tasks/*` files: no validator matches them).
+
+- [x] `Tests/MLXLMTests/KVCacheByteCountTests.swift:134` `reuse/reuse` — The test utility function `byteCount(of:)` reimplements the same logic as the newly added `totalByteCount` extension on `Array<MLXArray>` in KVCache.swift. Both compute the sum of `nbytes` across an array of MLXArray values using identical reduce logic, so the test should reuse the shared extension instead. Remove the `byteCount(of arrays: [MLXArray]) -> Int` static function (lines 134-136) and update all test calls from `Self.byteCount(of: array)` to `array.totalByteCount` to reuse the shared extension property.
