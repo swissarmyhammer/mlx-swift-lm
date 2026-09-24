@@ -68,11 +68,23 @@ comments:
     - commit: 3d3ec21
     - review: findings — ExecutorPromptCacheRestoreTests.swift:402 magic-numbers-swift
   timestamp: 2026-09-24T21:49:26.865150+00:00
+- actor: claude-code
+  id: 01m3apfdt19cfq37c5evtksyf8
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (2285041) — 0 findings, 0 refuted; the finding of 16:46 (magic-numbers-swift, ExecutorPromptCacheRestoreTests.swift:402) is fixed in 2285041 and checked.
+
+    ### finish iteration 2 — clean
+    - implement: changed — `holdLimitSeconds`, `reportedRestoreMilliseconds` and `spoolSuiteTimeLimitMinutes` are named constants
+    - test: MLXFoundationModelsTests 299 passed x3; MLXGuidedGenerationTests, CXGrammarTests, MLXHuggingFaceMacrosTests passed; IntegrationTesting TEST BUILD SUCCEEDED; PromptCacheSpoolIntegrationTests 1 passed, Qwen35SessionPromptCacheTests 2 passed; MLXLMTests failures were there before this change (^fbhgd7k)
+    - commit: 2285041
+    - review: clean
+  timestamp: 2026-09-24T21:52:19.265245+00:00
 depends_on:
 - 01M3A1RHPV3CV6Q7Q59W0S77DT
 - 01M3A29W6YK4F0VMGBCB28DXZ2
-position_column: review
-position_ordinal: '80'
+position_column: done
+position_ordinal: ff9e80
 title: Restore a spilled prompt cache in MLXLanguageModel.Executor, and prove warm restores on a real model
 ---
 #prompt-cache
@@ -119,4 +131,4 @@ In `Libraries/MLXFoundationModels/MLXLanguageModel.swift`, `runRespond` checks o
 > - `.kanban/tasks/01M3AP3BWPDHQFEQWQDFBHGD7K.jsonl` — no validator matches this file
 > - `.kanban/tasks/01M3AP3BWPDHQFEQWQDFBHGD7K.md` — no validator matches this file
 
-- [ ] `Tests/MLXFoundationModelsTests/ExecutorPromptCacheRestoreTests.swift:402` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXFoundationModelsTests/ExecutorPromptCacheRestoreTests.swift:402` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
