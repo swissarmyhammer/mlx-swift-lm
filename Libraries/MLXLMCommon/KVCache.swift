@@ -2153,6 +2153,10 @@ public struct PromptCacheSnapshot {
 /// classes (for example `MambaCache`) does not hold it. The load functions apply the record and
 /// do not give it back in the user metadata.
 ///
+/// This is ``preparePromptCacheSave(cache:metadata:state:)`` and then
+/// ``writePromptCache(_:url:)``. A caller that must give the caches to another task before the
+/// file write ends calls the two steps itself.
+///
 /// - Parameters:
 ///   - url: The URL to the `.safetensors` file
 ///   - cache: The model cache state
@@ -2166,6 +2170,48 @@ public func savePromptCache(
     metadata: [String: String] = [:],
     state: LMOutput.State? = nil
 ) throws {
+    try writePromptCache(
+        preparePromptCacheSave(cache: cache, metadata: metadata, state: state), url: url)
+}
+
+/// The arrays and the metadata of one prompt cache file, read from the caches and ready to write.
+///
+/// ``preparePromptCacheSave(cache:metadata:state:)`` makes it, and
+/// ``writePromptCache(_:url:)`` writes it. Each array is a new `MLXArray` handle, and the input
+/// holds no reference to a cache. Thus a cache can take more tokens after the prepare step, and
+/// the file still holds the values that the cache held at that step.
+// swiftlint:disable:next no_unchecked_sendable The input is immutable, and each MLXArray in it is a handle that only this input holds: no cache writes it, and the write only reads it.
+public struct PromptCacheSaveInput: @unchecked Sendable {
+    /// The flat arrays of the file: `"i.j"` for array `j` of cache `i`, and the model-state
+    /// tensors under their reserved prefix.
+    public let arrays: [String: MLXArray]
+
+    /// The flat metadata of the file: the meta state of each cache, the user metadata with the
+    /// offset record and the model-state keys, and the class name of each cache.
+    public let metadata: [String: String]
+
+    /// The class name of each top-level cache, in cache order, as the file writes it.
+    public let classNames: [String]
+}
+
+/// Reads the caches and the model state that a prompt cache file saves, and makes the input of
+/// ``writePromptCache(_:url:)``.
+///
+/// The function reads `state` and `metaState` of each cache at once, thus the caller runs it
+/// while it owns the caches. It does not evaluate the arrays and it does not write a file.
+///
+/// - Parameters:
+///   - cache: The model cache state.
+///   - metadata: Optional metadata to save along with cache state.
+///   - state: Optional model state associated with the cache.
+/// - Returns: The input, which holds new array handles and no reference to a cache.
+/// - Throws: ``KVCacheError`` when a key of `metadata` uses a reserved prefix
+///   (`__mlx_lm_state_` or `__mlx_lm_offset_`), or when `state` has values and `cache` is empty.
+public func preparePromptCacheSave(
+    cache: [KVCache],
+    metadata: [String: String] = [:],
+    state: LMOutput.State? = nil
+) throws -> PromptCacheSaveInput {
     try PromptCacheOffsetRecord.validateUserMetadata(metadata)
     let stateArrays = try promptCacheStateArrays(state, userMetadata: metadata)
     guard stateArrays.isEmpty || !cache.isEmpty else {
@@ -2213,7 +2259,25 @@ public func savePromptCache(
     addPromptCacheState(
         stateArrays, flattenedData: &flattenedData, flattenedMetadata: &flattenedMetadata)
 
-    try save(arrays: flattenedData, metadata: flattenedMetadata, url: url)
+    // A cache can write into the array object that its `state` gave back (a full
+    // `RotatingKVCache` does), thus the input takes a new handle of each array.
+    return PromptCacheSaveInput(
+        arrays: flattenedData.mapValues { $0[.ellipsis] }, metadata: flattenedMetadata,
+        classNames: cacheClasses)
+}
+
+/// Writes a prompt cache file that ``preparePromptCacheSave(cache:metadata:state:)`` prepared.
+///
+/// The function reads no cache, thus it can run on another task after the caches have
+/// taken more tokens.
+///
+/// - Parameters:
+///   - input: The prepared arrays and metadata.
+///   - url: The URL of the `.safetensors` file.
+/// - Throws: The error of the safetensors writer, for example when `url` does not end in
+///   `.safetensors` or the file cannot be written.
+public func writePromptCache(_ input: PromptCacheSaveInput, url: URL) throws {
+    try save(arrays: input.arrays, metadata: input.metadata, url: url)
 }
 
 /// Load a prompt cache from a file, without model state.
