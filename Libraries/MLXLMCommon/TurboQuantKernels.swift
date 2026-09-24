@@ -270,7 +270,12 @@ enum TurboQuantMetalKernels {
         }
 
         // Phase 2: Cross-SIMD-group butterfly via shared memory (stages 5..LogDim-1)
-        // Only needed when Dim > 32, these stages cross SIMD group boundaries
+        // Only needed when Dim > 32, these stages cross SIMD group boundaries.
+        // The partner of thread d is in a different SIMD group. Each stage
+        // thus has two barriers: all threads read the old values, then all
+        // threads write the new values. With one barrier only, a thread can
+        // write its new value before its partner reads the old value, and
+        // the encoded indices then change from run to run.
         threadgroup float shared_buf[1024];  // max Dim = 1024
         if (log_dim_u > 5u) {
             shared_buf[d] = wht_val;
@@ -278,23 +283,12 @@ enum TurboQuantMetalKernels {
 
             for (uint s = simd_stages; s < log_dim_u; s++) {
                 uint half_block = 1u << s;
-                uint block_size = half_block << 1;
-                uint block_id = d / block_size;
-                uint pos_in_block = d % block_size;
-
-                float a, b;
-                if (pos_in_block < half_block) {
-                    a = shared_buf[block_id * block_size + pos_in_block];
-                    b = shared_buf[block_id * block_size + pos_in_block + half_block];
-                    shared_buf[d] = a + b;
-                } else {
-                    a = shared_buf[block_id * block_size + pos_in_block - half_block];
-                    b = shared_buf[block_id * block_size + pos_in_block];
-                    shared_buf[d] = a - b;
-                }
+                float partner = shared_buf[d ^ half_block];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                wht_val = (d & half_block) ? (partner - wht_val) : (partner + wht_val);
+                shared_buf[d] = wht_val;
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }
-            wht_val = shared_buf[d];
         }
 
         // Normalize: WHT has scale factor sqrt(Dim)

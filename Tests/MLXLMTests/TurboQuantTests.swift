@@ -2368,4 +2368,58 @@ final class TurboQuantIntegrationTests: XCTestCase {
         }
     }
 
+    // MARK: - WHT encode kernel parity and repeatability
+    //
+    // The cross-SIMD-group butterfly stages of the WHT encode kernel had one
+    // barrier for each stage. A thread could then write its new value before
+    // its partner in a different SIMD group read the old value. The encoded
+    // indices changed from call to call, and on some runs the attention
+    // output of testStandardAttentionRepeatFactors fell to cos 0.888.
+
+    /// The WHT encode kernel must give bit-identical output on each repeated
+    /// call, and almost all of its indices must agree with the MLX butterfly
+    /// (`TurboQuantRotation.fwhtForward`) followed by the boundary compare.
+    /// The dimensions 64, 128 and 256 have one, two and three butterfly
+    /// stages that cross a SIMD group.
+    ///
+    /// The kernel sums the norm with `simd_sum` and the reference sums it
+    /// with MLX, in a different order. A coordinate that is within one ulp
+    /// of a boundary can thus go to the adjacent index: 1 index in 1048576
+    /// was measured. The race gave 0.4 % to 3 % of the indices.
+    func testWHTEncodeKernelMatchesButterflyAndRepeats() throws {
+        let bits = 4
+        let rowCount = 8192
+        let repeatCount = 20
+        let maximumMismatchFraction = 1e-5
+        for dim in [64, 128, 256] {
+            let codec = MSECodec(dim: dim, bits: bits, seed: 42)
+            let signs = try XCTUnwrap(codec.whtSigns, "dim=\(dim) must use WHT")
+            let input = MLXRandom.normal([rowCount, dim], key: MLXRandom.key(231))
+            let encode = {
+                TurboQuantKernelOps.fusedEncodeWHT(
+                    input: input, whtSigns: signs, boundaries: codec.boundaries,
+                    codebook: codec.codebook, bits: bits, dim: dim
+                ).packed
+            }
+            let firstPacked = encode()
+            eval(firstPacked)
+
+            let unit = input / sqrt((input * input).sum(axis: -1, keepDims: true))
+            let referenceIndices = codec.boundaryQuantize(
+                TurboQuantRotation.fwhtForward(unit, signs: signs))
+            let kernelIndices = TurboQuantPacking.unpackLowBit(
+                firstPacked, bits: bits, count: dim)
+            let mismatches = (kernelIndices .!= referenceIndices).asType(.int32).sum()
+                .item(Int.self)
+            XCTAssertLessThanOrEqual(
+                Double(mismatches), maximumMismatchFraction * Double(rowCount * dim),
+                "dim=\(dim): \(mismatches) indices differ from the MLX butterfly")
+
+            let changedCalls = (0 ..< repeatCount).filter { _ in
+                (encode() .!= firstPacked).any().item(Bool.self)
+            }.count
+            XCTAssertEqual(changedCalls, 0, "dim=\(dim): repeated encode calls must not change")
+        }
+    }
+
 }
