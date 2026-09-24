@@ -27,10 +27,26 @@ comments:
     - evidence: `swift build --build-tests` — one known warning `missing creator for mutated node`, no new warning. MLXLMTests: 694 XCTest, 36 failures (baseline: GlmOcr/Qwen25VL/Qwen35/Qwen3VL ContinuationTests, NanbeigeTests); 1202 Swift Testing tests, 101 issues (baseline: DeepSeekV4Attention/HyperConnection/MoE, MiniMaxM3, Qwen35MTP, SSM). MLXGuidedGenerationTests 70 passed; MLXFoundationModelsTests 244 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 5 XCTest passed. No skipped test.
     - next: /commit
   timestamp: 2026-09-24T18:11:28.293971+00:00
+- actor: claude-code
+  id: 01m3aa08cb0d93h66d3twwjqzd
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` — 0 findings (0 confirmed, 0 refuted, 7 validator runs, 0 failed). No prior `## Review Findings` section. Task moved review → done.
+    - next: none
+  timestamp: 2026-09-24T18:14:19.275816+00:00
+- actor: claude-code
+  id: 01m3aa0am6ar8fa4q9f9szpd2k
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — Libraries/MLXLMCommon/KVCache.swift, Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift
+    - test: green against the baseline — MLXLMTests 694 XCTest / 36 baseline failures, 1202 Swift Testing / 101 baseline issues; the other four bundles pass fully (70, 244, 7, 5)
+    - commit: 8001f42 fix(prompt-cache): keep the offset of each cache through a prompt cache file
+    - review: clean — 0 findings on HEAD~1..HEAD; task in done
+  timestamp: 2026-09-24T18:14:21.574627+00:00
 depends_on:
 - 01M3A1PX65M12926Y4BJVAG56K
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ff9780
 title: Keep the offset of each cache through a prompt cache file (recurrent caches and front-trimmed chunked caches)
 ---
 #prompt-cache
@@ -47,16 +63,16 @@ title: Keep the offset of each cache through a prompt cache file (recurrent cach
 - Apply the record after the restore. `KVCache.offset` has only a getter in the protocol, and `DeepSeekV4Cache.offset` / `MiniMaxM3KVCache.offset` are computed from inner caches. Thus: SET the offset (through `BaseKVCache`) only for `ArraysCache`/`MambaCache` and for `ChunkedKVCache`; for every other type, CHECK that the restored offset equals the recorded one and throw `KVCacheError` if it does not.
 
 ## Acceptance Criteria
-- [ ] `MambaCache`, `ArraysCache`, and `ChunkedKVCache` after a front trim come back with the offset they had before the save, through both load functions.
-- [ ] For every other type, a file whose record disagrees with the restored offset throws `KVCacheError`.
-- [ ] The record does not appear in the user `metadata` of any load function.
-- [ ] `savePromptCache` with user metadata that uses the reserved prefix throws.
-- [ ] A file written before this change (no record) loads as before.
-- [ ] All existing tests in `Tests/MLXLMTests/KVCacheTests.swift` pass without changes (they assert `snapshot.metadata == ["source": "test"]` and that no reserved key appears).
+- [x] `MambaCache`, `ArraysCache`, and `ChunkedKVCache` after a front trim come back with the offset they had before the save, through both load functions.
+- [x] For every other type, a file whose record disagrees with the restored offset throws `KVCacheError`.
+- [x] The record does not appear in the user `metadata` of any load function.
+- [x] `savePromptCache` with user metadata that uses the reserved prefix throws.
+- [x] A file written before this change (no record) loads as before.
+- [x] All existing tests in `Tests/MLXLMTests/KVCacheTests.swift` pass without changes (they assert `snapshot.metadata == ["source": "test"]` and that no reserved key appears).
 
 ## Tests
-- [ ] Extend `Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift` (from ^jvag56k) with the offset cases, the disagreement case, the reserved-prefix refusal, and an old-format file.
-- [ ] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` — the new tests pass, and no test in `KVCacheTests.swift` changes result. (On 2026-09-24, `stable` already has 36 XCTest failures and 101 Swift Testing issues in DeepSeekV4*, MiniMaxM3, Qwen35MTPMetal and the chunked SSM test. Do not add to that list.)
+- [x] Extend `Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift` (from ^jvag56k) with the offset cases, the disagreement case, the reserved-prefix refusal, and an old-format file.
+- [x] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` — the new tests pass, and no test in `KVCacheTests.swift` changes result. (On 2026-09-24, `stable` already has 36 XCTest failures and 101 Swift Testing issues in DeepSeekV4*, MiniMaxM3, Qwen35MTPMetal and the chunked SSM test. Do not add to that list.)
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass.
