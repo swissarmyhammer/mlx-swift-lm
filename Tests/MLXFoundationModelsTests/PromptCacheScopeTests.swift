@@ -54,10 +54,19 @@ struct PromptCacheScopeTests {
         }
     }
 
-    @Test("a pass with no scope takes no cache and leaves none")
-    func aPassWithNoScopeTakesNoCacheAndLeavesNone() async throws {
+    @Test("an uncached pass takes no cache and leaves none")
+    func anUncachedPassTakesNoCacheAndLeavesNone() async throws {
         if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
-            try await expectAPassWithNoScopeTakesNoCacheAndLeavesNone()
+            try await expectAnUncachedPassTakesNoCacheAndLeavesNone()
+        } else {
+            Issue.record(Self.unsupportedSystem)
+        }
+    }
+
+    @Test("binding nil inside an uncached scope gives the first-entry rule")
+    func bindingNilInsideAnUncachedScopeGivesTheFirstEntryRule() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectBindingNilInsideAnUncachedScopeGivesTheFirstEntryRule()
         } else {
             Issue.record(Self.unsupportedSystem)
         }
@@ -122,11 +131,11 @@ struct PromptCacheScopeTests {
         #expect(await store.retainedSessionCount == 2)
     }
 
-    /// A pass with the scope `.none` reuses nothing, although the store holds
-    /// a cache of its first entry that its render extends, and it leaves the
-    /// session count and the byte count of the store as they were.
+    /// A pass with the scope `.uncached` reuses nothing, although the store
+    /// holds a cache of its first entry that its render extends, and it leaves
+    /// the session count and the byte count of the store as they were.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func expectAPassWithNoScopeTakesNoCacheAndLeavesNone() async throws {
+    private func expectAnUncachedPassTakesNoCacheAndLeavesNone() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
         let model = makeModel(weights: weights)
@@ -137,14 +146,39 @@ struct PromptCacheScopeTests {
         let bytesBefore = await store.retainedByteCount
 
         let reused = try await respond(
-            over: transcript(firstEntryID: "entry-1", turns: 2),
-            scope: MLXLanguageModel.PromptCacheScope.none, model: model, inside: store)
+            over: transcript(firstEntryID: "entry-1", turns: 2), scope: .uncached,
+            model: model, inside: store)
 
-        #expect(reused == 0, "A pass with no scope must reuse nothing.")
+        #expect(reused == 0, "An uncached pass must reuse nothing.")
         #expect(sessionsBefore == 1)
         #expect(await store.retainedSessionCount == sessionsBefore)
         #expect(await store.retainedByteCount == bytesBefore)
         #expect(await store.peek(key("entry-1", of: model)) != nil)
+    }
+
+    /// A pass that binds `nil` inside an outer `.uncached` binding has no
+    /// scope, thus the first entry names its session: it reuses the cache of
+    /// its first entry, and it checks its cache in under that first entry.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectBindingNilInsideAnUncachedScopeGivesTheFirstEntryRule() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let model = makeModel(weights: weights)
+        let store = makeStore()
+        try await respond(
+            over: transcript(firstEntryID: "entry-1"), scope: nil, model: model, inside: store)
+        let entryBefore = try #require(await store.peek(key("entry-1", of: model)))
+
+        let reused = try await MLXLanguageModel.$promptCacheScope.withValue(.uncached) {
+            try await respond(
+                over: transcript(firstEntryID: "entry-1", turns: 2), scope: nil,
+                model: model, inside: store)
+        }
+
+        #expect(reused > 0, "A pass that binds nil must reuse the cache of its first entry.")
+        let entryAfter = try #require(await store.peek(key("entry-1", of: model)))
+        #expect(entryAfter !== entryBefore, "The pass must check its cache in.")
+        #expect(await store.retainedSessionCount == 1)
     }
 
     /// With no scope bound, the first entry names the session: a second pass

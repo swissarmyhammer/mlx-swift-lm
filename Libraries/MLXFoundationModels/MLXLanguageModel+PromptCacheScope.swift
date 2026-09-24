@@ -19,7 +19,7 @@ extension MLXLanguageModel {
         /// The pass belongs to this session. The host owns the identifier.
         case session(String)
         /// The pass takes no carried cache and leaves none.
-        case none
+        case uncached
     }
 
     /// The prompt cache scope of the executor passes that the current task
@@ -34,10 +34,7 @@ extension MLXLanguageModel {
     /// ```
     ///
     /// - `.session(id)`: the pass uses the cache of session `id`.
-    /// - `.none`: the pass checks out no cache and checks in no cache. Write
-    ///   `MLXLanguageModel.PromptCacheScope.none` in full. The binding holds an
-    ///   optional, thus a bare `.none` is the optional `nil`, which sets no
-    ///   scope.
+    /// - `.uncached`: the pass checks out no cache and checks in no cache.
     /// - nil: the identifier of the first transcript entry names the session.
     ///
     /// The binding is guaranteed to reach the executor only when the host calls

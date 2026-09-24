@@ -683,8 +683,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///
         /// The host sets the session first, through
         /// ``MLXLanguageModel/promptCacheScope``: `.session(id)` names session
-        /// `id`, and `.none` names no session, thus the pass checks out no cache
-        /// and checks in no cache.
+        /// `id`, and `.uncached` names no session, thus the pass checks out no
+        /// cache and checks in no cache.
         ///
         /// When the host sets no scope, the identity comes from the transcript:
         /// the framework hands this executor no session identity, but a
@@ -695,7 +695,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Parameters:
         ///   - request: the request whose session is named.
         ///   - modelID: the model the cache belongs to.
-        /// - Returns: the key, or nil when the scope is `.none` or, with no
+        /// - Returns: the key, or nil when the scope is `.uncached` or, with no
         ///   scope, for an empty transcript. A request that names no session
         ///   carries no cache.
         static func sessionCacheKey(
@@ -704,7 +704,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             switch MLXLanguageModel.promptCacheScope {
             case .some(.session(let sessionID)):
                 return ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID)
-            case .some(.none):
+            case .some(.uncached):
                 return nil
             case nil:
                 guard let firstEntry = request.transcript.first else { return nil }
