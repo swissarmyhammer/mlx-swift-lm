@@ -25,10 +25,33 @@ comments:
     - evidence: `swift build --build-tests` (only the known warning `missing creator for mutated node`); `xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` — Swift Testing: 284 tests in 32 suites passed, 0 failed, 0 skipped (baseline 283 + 1 new); XCTest: 0 tests in this bundle.
     - next: commit
   timestamp: 2026-09-24T20:54:58.248842+00:00
+- actor: claude-code
+  id: 01m3ak701n7bg3kx8tntva8t1f
+  text: |-
+    ### commit — changed
+    - evidence: ad3d1d3 refactor(prompt-cache): rename PromptCacheScope.none to .uncached
+    - next: review HEAD~1..HEAD
+  timestamp: 2026-09-24T20:55:17.301523+00:00
+- actor: claude-code
+  id: 01m3akavja50s69jdc6s51v0zc
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (ad3d1d3) — findings 0, confirmed 0, refuted 0; 7 validator runs attempted, 0 failed. No earlier Review Findings sections.
+    - next: done
+  timestamp: 2026-09-24T20:57:23.786271+00:00
+- actor: claude-code
+  id: 01m3akaxev73d0wa3wky3fa1zt
+  text: |-
+    ### finish iteration 1 — review clean
+    - implement: changed — 3 files (MLXLanguageModel+PromptCacheScope.swift, MLXLanguageModel.swift, PromptCacheScopeTests.swift)
+    - test: green — MLXFoundationModelsTests 284 passed, 0 failed, 0 skipped; build has only the known warning
+    - commit: ad3d1d3
+    - review: clean — 0 findings
+  timestamp: 2026-09-24T20:57:25.723195+00:00
 depends_on:
 - 01M3A1W91WSM28W94MS2MK47NR
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ff9c80
 title: Rename PromptCacheScope.none to .uncached, because .none collides with Optional.none
 ---
 #prompt-cache
