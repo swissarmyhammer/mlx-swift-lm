@@ -681,22 +681,35 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Names the session a request belongs to, for the prompt cache that
         /// session carries between its turns.
         ///
-        /// The framework hands this executor no session identity. The identity
-        /// comes from the transcript instead: a `LanguageModelSession` keeps the
-        /// entries of its transcript and appends to them, thus the FIRST entry
-        /// is the same entry on every turn of one session, and two sessions
-        /// never hold one entry identifier.
+        /// The host sets the session first, through
+        /// ``MLXLanguageModel/promptCacheScope``: `.session(id)` names session
+        /// `id`, and `.none` names no session, thus the pass checks out no cache
+        /// and checks in no cache.
+        ///
+        /// When the host sets no scope, the identity comes from the transcript:
+        /// the framework hands this executor no session identity, but a
+        /// `LanguageModelSession` keeps the entries of its transcript and
+        /// appends to them, thus the FIRST entry is the same entry on every turn
+        /// of one session, and two sessions never hold one entry identifier.
         ///
         /// - Parameters:
         ///   - request: the request whose session is named.
         ///   - modelID: the model the cache belongs to.
-        /// - Returns: the key, or nil for an empty transcript. A request with no
-        ///   entry names no session, thus it carries no cache.
+        /// - Returns: the key, or nil when the scope is `.none` or, with no
+        ///   scope, for an empty transcript. A request that names no session
+        ///   carries no cache.
         static func sessionCacheKey(
             for request: LanguageModelExecutorGenerationRequest, modelID: String
         ) -> ExecutorPromptCacheKey? {
-            guard let firstEntry = request.transcript.first else { return nil }
-            return ExecutorPromptCacheKey(modelID: modelID, sessionID: firstEntry.id)
+            switch MLXLanguageModel.promptCacheScope {
+            case .some(.session(let sessionID)):
+                return ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID)
+            case .some(.none):
+                return nil
+            case nil:
+                guard let firstEntry = request.transcript.first else { return nil }
+                return ExecutorPromptCacheKey(modelID: modelID, sessionID: firstEntry.id)
+            }
         }
 
         /// Checks the prompt cache of a session out of the store the task uses.

@@ -13,6 +13,7 @@ import FoundationModels
 import MLX
 import MLXLMCommon
 import MLXNN
+import Synchronization
 
 @testable import MLXFoundationModels
 
@@ -127,12 +128,21 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     /// Logit of every token the script does not select.
     private static let rejectedLogit: Float = -100
 
-    /// No attention layers, thus no KV cache to allocate.
-    var kvHeads: [Int] { [] }
+    /// The key/value heads of each cache layer. One head is enough: the
+    /// caches only have to count the positions the model saw.
+    private static let cacheHeadCount = 1
+
+    /// The width of each key and value the model writes into its caches.
+    private static let cacheHeadDimension = 1
+
+    /// One key/value head for each cache layer. A model with no cache layers
+    /// allocates no KV cache.
+    var kvHeads: [Int] { Array(repeating: Self.cacheHeadCount, count: cacheLayerCount) }
 
     private let rounds: [[Int]]
     private let forwardSteps: ForwardStepCounter?
     private let forwardDelay: TimeInterval
+    private let cacheLayerCount: Int
     private var roundIndex = -1
     private var step = 0
 
@@ -142,13 +152,19 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     /// `forwardDelay` slows each forward pass by that many seconds, so a
     /// test can reproduce the decode speed of a real model. The default of
     /// zero keeps the scripted decode as fast as the arrays allow.
+    ///
+    /// `cacheLayerCount` gives the model that many KV cache layers. Each
+    /// forward pass writes one position into each layer for each input
+    /// token, thus the executor can carry the caches of a pass into the next
+    /// pass. The default of zero gives the model no cache.
     init(
         rounds: [[Int]], forwardSteps: ForwardStepCounter? = nil,
-        forwardDelay: TimeInterval = 0
+        forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0
     ) {
         self.rounds = rounds
         self.forwardSteps = forwardSteps
         self.forwardDelay = forwardDelay
+        self.cacheLayerCount = cacheLayerCount
         super.init()
     }
 
@@ -167,6 +183,7 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
             // Blocks the generation thread the way a real forward pass does.
             Thread.sleep(forTimeInterval: forwardDelay)
         }
+        write(tokenCount: inputs.size, into: cache ?? [])
         let positions = Swift.max(inputs.size, 1)
         var logits = Array(
             repeating: Self.rejectedLogit,
@@ -174,6 +191,23 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
         // Only the last row is read as the next-token distribution.
         logits[(positions - 1) * Self.vocabularySize + nextToken()] = Self.selectedLogit
         return MLXArray(logits, [1, positions, Self.vocabularySize])
+    }
+
+    /// Writes one zero key and one zero value for each of `tokenCount` tokens
+    /// into each of `caches`, thus the offset of each cache counts the tokens
+    /// the model saw.
+    ///
+    /// - Parameters:
+    ///   - tokenCount: the number of tokens in the input of the forward pass.
+    ///   - caches: the caches of the forward pass.
+    private func write(tokenCount: Int, into caches: [KVCache]) {
+        guard tokenCount > 0 else { return }
+        let keyValues = MLXArray.zeros([
+            1, Self.cacheHeadCount, tokenCount, Self.cacheHeadDimension,
+        ])
+        for cache in caches {
+            _ = cache.update(keys: keyValues, values: keyValues)
+        }
     }
 
     /// The token this round emits next, or end-of-text once the script is spent.
@@ -208,21 +242,42 @@ struct FixedPromptInputProcessor: UserInputProcessor {
     }
 }
 
+/// A processor that renders the text of the prompt as its UTF-8 bytes, one
+/// token for each byte.
+///
+/// A later turn of a conversation renders the text of the earlier turns
+/// first, thus its tokens start with the tokens of the earlier render, as a
+/// chat template render does. The executor can then reuse the cache of the
+/// earlier turn.
+struct PromptBytesInputProcessor: UserInputProcessor {
+
+    /// Renders the text of the prompt of `input` as one token for each byte.
+    func prepare(input: UserInput) async throws -> LMInput {
+        let tokens = ScriptedByteTokenizer().encode(
+            text: input.prompt.description, addSpecialTokens: false)
+        return LMInput(tokens: MLXArray(tokens.map(Int32.init)))
+    }
+}
+
 /// Builds a container over the scripted doubles. No download, no weights.
 ///
-/// `forwardSteps` and `forwardDelay` pass through to
-/// ``ScriptedLanguageModel/init(rounds:forwardSteps:forwardDelay:)``.
+/// `forwardSteps`, `forwardDelay` and `cacheLayerCount` pass through to
+/// ``ScriptedLanguageModel/init(rounds:forwardSteps:forwardDelay:cacheLayerCount:)``.
+/// `processor` renders the prompt of each pass. The default renders the same
+/// tokens for every prompt.
 func makeScriptedContainer(
     modelID: String, rounds: [String], forwardSteps: ForwardStepCounter? = nil,
-    forwardDelay: TimeInterval = 0
+    forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0,
+    processor: any UserInputProcessor = FixedPromptInputProcessor()
 ) -> ModelContainer {
     let context = ModelContext(
         configuration: ModelConfiguration(id: modelID),
         model: ScriptedLanguageModel(
             rounds: rounds.map { ScriptedByteTokenizer.tokenIDs(for: $0) },
             forwardSteps: forwardSteps,
-            forwardDelay: forwardDelay),
-        processor: FixedPromptInputProcessor(),
+            forwardDelay: forwardDelay,
+            cacheLayerCount: cacheLayerCount),
+        processor: processor,
         tokenizer: ScriptedByteTokenizer())
     return ModelContainer(context: context)
 }
@@ -260,20 +315,70 @@ func respondOnce(
         capabilities: [],
         weightsLocation: { _ in weights },
         load: { _, _ in makeScriptedContainer(modelID: modelID, rounds: ["A"]) })
-    let executor = try makeMLXExecutor(for: model)
     let prompt = Transcript.Prompt(
         id: sessionID, segments: [.text(Transcript.TextSegment(content: "first turn"))])
-    let request = makeExecutorRequest(transcript: Transcript(entries: [.prompt(prompt)]))
-    let channel = LanguageModelExecutorGenerationChannel()
-    // The channel is a rendezvous, thus a consumer must run beside the
-    // executor or every send parks it.
-    let consumer = Task<Void, Never> {
-        do { for try await _ in channel {} } catch {}
-    }
-    defer { consumer.cancel() }
+    try await ScriptedExecutorPass.run(
+        over: Transcript(entries: [.prompt(prompt)]), model: model, inside: store)
+}
 
-    try await ExecutorPromptCacheStore.$current.withValue(store) {
-        try await executor.respond(to: request, model: model, streamingInto: channel)
+/// Runs one executor pass directly, on the task that calls it, the way a host
+/// that binds a task-local around its call to the executor runs it.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+enum ScriptedExecutorPass {
+
+    /// Runs one executor pass of `model` over `transcript` inside `store`.
+    ///
+    /// The pass runs on the task that calls this method, thus every
+    /// task-local the caller binds reaches the executor.
+    ///
+    /// - Parameters:
+    ///   - transcript: the transcript of the request.
+    ///   - model: the model of the pass.
+    ///   - store: the prompt cache store the pass binds.
+    /// - Returns: the prompt tokens the pass reused from the cache its session
+    ///   carried, as the usage of the pass reports them.
+    /// - Throws: the error of the executor.
+    @discardableResult
+    static func run(
+        over transcript: Transcript, model: MLXLanguageModel,
+        inside store: ExecutorPromptCacheStore
+    ) async throws -> Int {
+        let executor = try makeMLXExecutor(for: model)
+        let request = makeExecutorRequest(transcript: transcript)
+        let channel = LanguageModelExecutorGenerationChannel()
+        // The channel is a rendezvous, thus a consumer must run beside the
+        // executor or every send parks it.
+        let consumer = Task<Void, Never> {
+            do { for try await _ in channel {} } catch {}
+        }
+        defer { consumer.cancel() }
+
+        let usage = ReusedTokenLog()
+        try await MLXLanguageModel.Executor.$generationObserver.withValue({ usage.record($0) }) {
+            try await ExecutorPromptCacheStore.$current.withValue(store) {
+                try await executor.respond(to: request, model: model, streamingInto: channel)
+            }
+        }
+        return usage.reusedTokenCount
+    }
+
+    /// The prompt tokens that the usage events of one pass report as reused.
+    ///
+    /// The executor reports the usage on the generation path, and the test
+    /// reads the count from its own task, thus a mutex guards the count.
+    private final class ReusedTokenLog: Sendable {
+        private let count = Mutex(0)
+
+        /// Adds the reused prompt tokens of `event` when it is a usage event.
+        ///
+        /// - Parameter event: one event the executor streamed.
+        func record(_ event: MLXLanguageModel.Executor.GenerationEvent) {
+            guard case .updateUsage(let input, _, _) = event else { return }
+            count.withLock { $0 += input.cachedTokenCount }
+        }
+
+        /// The reused prompt tokens of every usage event so far.
+        var reusedTokenCount: Int { count.withLock { $0 } }
     }
 }
 
