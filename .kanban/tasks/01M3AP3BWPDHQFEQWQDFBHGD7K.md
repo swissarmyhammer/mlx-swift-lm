@@ -38,8 +38,21 @@ comments:
     - evidence: `swift build --build-tests` (only the known warning `missing creator for mutated node`); `swift-format format` clean. `xcrun xctest` with no MLX variable in the environment: MLXLMTests 695 XCTest 0 failures + 1208 Swift Testing tests in 92 suites passed; MLXGuidedGenerationTests 70 passed; MLXFoundationModelsTests 299 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 5 XCTest 0 failures. No skipped test.
     - next: /commit.
   timestamp: 2026-09-24T22:41:13.302284+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3asewt2sn24bwmjj1eyfryf
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` — 0 findings, 0 confirmed, 0 refuted (8 attempted, 0 failed). 4 files reviewed; CLAUDE.md and the .kanban files have no matching validator. No prior Review Findings section.
+    - next: done.
+
+    ### finish iteration 1 — clean
+    - implement: changed — C target MLXTestPrecision sets MLX_ENABLE_TF32=0 at bundle load; Float32PrecisionTests; CLAUDE.md. Root cause: TF32 on the NAX kernels of the Apple M5 GPU (mlx 0.31.6 default).
+    - test: green — MLXLMTests 695 XCTest + 1208 Swift Testing, 0 failures; MLXGuidedGenerationTests 70; MLXFoundationModelsTests 299; CXGrammarTests 7; MLXHuggingFaceMacrosTests 5.
+    - commit: a691739
+    - review: clean (0 findings)
+  timestamp: 2026-09-24T22:44:27.586155+00:00
+position_column: done
+position_ordinal: ffa180
 title: 'MLXLMTests: 36 XCTest failures and 101 Swift Testing issues in numeric model tests on this machine'
 ---
 ## What
