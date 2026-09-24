@@ -80,12 +80,30 @@ comments:
     - The SwiftPM bundles were not run again: this iteration changes one file under `IntegrationTesting/`, which no SwiftPM target holds, thus the products are the same as in iteration 1 (4 bundles green; MLXLMTests 36 + 101 numeric tolerance failures, ^fbhgd7k).
     - next: /commit
   timestamp: 2026-09-24T22:09:10.539624+00:00
+- actor: claude-code
+  id: 01m3aqfm5gym7ssjtzqpdk4gf4
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (51fe9cf) — 0 findings, 0 confirmed, 0 refuted, 7 validators attempted, 0 failed. The one prior finding (PromptCacheSpoolCostAssessmentTests.swift:61) is checked.
+    - next: done
+  timestamp: 2026-09-24T22:09:54.352716+00:00
+- actor: claude-code
+  id: 01m3aqfqrk36m9mzngh50d6mst
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — named the two context sizes (shortContextTokenCount, longContextTokenCount)
+    - test: red — the suite passed again (3 tests, 82.157 s); swift build --build-tests with the known warning only; the MLXLMTests failures of ^fbhgd7k were there before this change and do not come from it
+    - commit: 51fe9cf
+    - review: clean — 0 findings; task moved to done
+
+    Second run numbers (51fe9cf): qwen3-4b 4k prefill 0.738 s, write 0.080 s, read 0.021 s; 32k prefill 13.201 s, write 0.533 s, read 0.175 s. qwen3.8-27b 4k prefill 5.133 s, write 0.053 s, read 0.016 s; 32k prefill 55.695 s, write 0.240 s, read 0.075 s. The next tokens are equal at each model and context. The verdicts of the numbers comment do not change.
+  timestamp: 2026-09-24T22:09:58.035171+00:00
 depends_on:
 - 01M3A1PX65M12926Y4BJVAG56K
 - 01M3A29W6YK4F0VMGBCB28DXZ2
 - 01M3A1T3CK0SMNZKTTP375ZMCS
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ff9f80
 title: Measure a prompt cache file write and read against a prefill, at 4k and 32k tokens, on real weights
 ---
 #prompt-cache
