@@ -1033,17 +1033,20 @@ struct ExecutorPromptCacheTests {
     /// The session every report line of this section names.
     private var reportedKey: ExecutorPromptCacheKey { key("session-1") }
 
+    /// The restore time the plan line of a restored pass reports.
+    private static let reportedRestoreDuration: Duration = .milliseconds(1_250)
+
     @Test("the plan line of an extension names the counts and the rule")
     func thePlanLineOfAnExtensionNamesTheCountsAndTheRule() throws {
         let planned = try plan(batchedInput([1, 2, 3, 4]), cachedTokens: [1, 2, 3])
 
         let line = ExecutorPromptCacheReport.planLine(
-            key: reportedKey, plan: planned, decodeTokens: decodeAsNumbers)
+            key: reportedKey, source: .memory, plan: planned, decodeTokens: decodeAsNumbers)
 
         #expect(
             line
                 == "prompt cache plan model=test/prompt-cache session=session-1 "
-                + "rendered=4 reused=3 fed=1 rule=extend")
+                + "source=memory rendered=4 reused=3 fed=1 rule=extend")
     }
 
     @Test("the plan line of a rebuild names the seam and decodes each side")
@@ -1052,12 +1055,12 @@ struct ExecutorPromptCacheTests {
             render: [1, 2, 9, 9], reusing: recurrentEntry(ledger: [1, 2, 3, 4]))
 
         let line = ExecutorPromptCacheReport.planLine(
-            key: reportedKey, plan: planned, decodeTokens: decodeAsNumbers)
+            key: reportedKey, source: .memory, plan: planned, decodeTokens: decodeAsNumbers)
 
         #expect(
             line
                 == "prompt cache plan model=test/prompt-cache session=session-1 "
-                + "rendered=4 reused=0 fed=4 rule=rebuild divergence=2 "
+                + "source=memory rendered=4 reused=0 fed=4 rule=rebuild divergence=2 "
                 + "render=<<<9 9>>> ledger=<<<3 4>>>")
     }
 
@@ -1066,42 +1069,56 @@ struct ExecutorPromptCacheTests {
         let planned = try plan(batchedInput([1, 2, 9]), cachedTokens: [1, 2, 3, 4])
 
         let line = ExecutorPromptCacheReport.planLine(
-            key: reportedKey, plan: planned, decodeTokens: decodeAsNumbers)
+            key: reportedKey, source: .memory, plan: planned, decodeTokens: decodeAsNumbers)
 
         #expect(
             line
                 == "prompt cache plan model=test/prompt-cache session=session-1 "
-                + "rendered=3 reused=2 fed=1 rule=rewind divergence=2 "
+                + "source=memory rendered=3 reused=2 fed=1 rule=rewind divergence=2 "
                 + "render=<<<9>>> ledger=<<<3 4>>>")
     }
 
     @Test("the plan line of a cold pass names the cold rule")
     func thePlanLineOfAColdPassNamesTheColdRule() throws {
         let line = ExecutorPromptCacheReport.planLine(
-            key: reportedKey, plan: try plan(render: [1, 2, 3], reusing: nil),
+            key: reportedKey, source: .none, plan: try plan(render: [1, 2, 3], reusing: nil),
             decodeTokens: decodeAsNumbers)
 
         #expect(
             line
                 == "prompt cache plan model=test/prompt-cache session=session-1 "
-                + "rendered=3 reused=0 fed=3 rule=cold")
+                + "source=none rendered=3 reused=0 fed=3 rule=cold")
+    }
+
+    @Test("the plan line of a restored pass names the disk and the restore time")
+    func thePlanLineOfARestoredPassNamesTheDiskAndTheRestoreTime() throws {
+        let planned = try plan(batchedInput([1, 2, 3, 4]), cachedTokens: [1, 2, 3])
+
+        let line = ExecutorPromptCacheReport.planLine(
+            key: reportedKey, source: .disk(restoreDuration: Self.reportedRestoreDuration),
+            plan: planned, decodeTokens: decodeAsNumbers)
+
+        #expect(
+            line
+                == "prompt cache plan model=test/prompt-cache session=session-1 "
+                + "source=disk restoreSeconds=1.250 rendered=4 reused=3 fed=1 rule=extend")
     }
 
     @Test("the plan line of a pass with no plan says why")
     func thePlanLineOfAPassWithNoPlanSaysWhy() {
         let line = ExecutorPromptCacheReport.planLine(
-            key: reportedKey, plan: nil, decodeTokens: decodeAsNumbers)
+            key: reportedKey, source: .memory, plan: nil, decodeTokens: decodeAsNumbers)
 
         #expect(
             line
                 == "prompt cache plan model=test/prompt-cache session=session-1 "
-                + "rule=none (the input carries media, a batch or a mask)")
+                + "source=memory rule=none (the input carries media, a batch or a mask)")
     }
 
     @Test("a pass with no session key names no session")
     func aPassWithNoSessionKeyNamesNoSession() {
         let line = ExecutorPromptCacheReport.planLine(
-            key: nil, plan: nil, decodeTokens: decodeAsNumbers)
+            key: nil, source: .none, plan: nil, decodeTokens: decodeAsNumbers)
 
         #expect(line.hasPrefix("prompt cache plan model=none session=none "))
     }
@@ -1159,7 +1176,7 @@ struct ExecutorPromptCacheTests {
         #expect(
             lines == [
                 "prompt cache plan model=test/prompt-cache session=session-1 "
-                    + "rendered=4 reused=3 fed=1 rule=extend",
+                    + "source=memory rendered=4 reused=3 fed=1 rule=extend",
                 "prompt cache commit model=test/prompt-cache session=session-1 ledger=4",
             ])
     }

@@ -772,27 +772,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
         /// Checks the prompt cache of a session out of the store the task uses.
         ///
-        /// A cache on disk starts the turn cold, and the executor deletes its
-        /// file: this executor cannot read a spilled cache back yet.
+        /// A `.spilled` result gives the file of the cache to the caller: the
+        /// store forgot the file, thus the caller must delete it.
         ///
         /// - Parameter key: the session of the request, or nil when the request
         ///   names no session.
-        /// - Returns: the entry in memory, or nil when the turn starts cold.
+        /// - Returns: what the store holds for the session, or `.none` when the
+        ///   request names no session.
         static func checkOutPromptCache(
             _ key: ExecutorPromptCacheKey?
-        ) async -> ExecutorPromptCacheEntry? {
-            guard let key else { return nil }
-            switch await ExecutorPromptCacheStore.current.checkOut(key) {
-            case .memory(let entry):
-                return entry
-            case .spilled(let handle):
-                ExecutorPromptCacheLog.info(
-                    ExecutorPromptCacheReport.spilledColdStartLine(key: handle.key))
-                ExecutorPromptCacheFile.removeFile(at: handle.url)
-                return nil
-            case .none:
-                return nil
-            }
+        ) async -> ExecutorPromptCacheCheckout {
+            guard let key else { return .none }
+            return await ExecutorPromptCacheStore.current.checkOut(key)
         }
 
         /// Map FoundationModels' optional `Double` `GenerationOptions.temperature`
@@ -1067,8 +1058,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // run and a second response on the same session starts cold rather
             // than writing the same caches.
             let promptCacheKey = Self.sessionCacheKey(for: request, modelID: modelID)
-            let carriedPromptCache = await Self.checkOutPromptCache(promptCacheKey)
-            let promptCache = ExecutorPromptCacheSlot(carriedPromptCache, key: promptCacheKey)
+            let checkout = await Self.checkOutPromptCache(promptCacheKey)
+            // A cache on disk is now the file of this response alone. The slot
+            // reads it before the first plan, inside the container. The file is
+            // deleted on every exit path: after the read, after a failed read,
+            // and when the response throws or is cancelled before the read.
+            defer {
+                if let handle = checkout.spilledHandle {
+                    ExecutorPromptCacheFile.removeFile(at: handle.url)
+                }
+            }
+            let promptCache = ExecutorPromptCacheSlot(checkout, key: promptCacheKey)
 
             let outcome: Result<Void, any Error>
             do {
@@ -2041,6 +2041,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 maxTokens: requestedMaxTokens ?? Self.defaultMaxTokens,
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration)
+            promptCache.restoreIfPending(model: context.model, parameters: params)
             let plan = try promptCache.plan(
                 input: input, model: context.model, parameters: params,
                 protocolRules: Self.promptCacheReuseRules(of: context),
@@ -2328,6 +2329,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration
             )
+            promptCache.restoreIfPending(model: context.model, parameters: params)
             let plan = try promptCache.plan(
                 input: input, model: context.model, parameters: params,
                 protocolRules: Self.promptCacheReuseRules(of: context),
@@ -2445,6 +2447,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration
             )
+            promptCache.restoreIfPending(model: context.model, parameters: params)
             let plan = try promptCache.plan(
                 input: input, model: context.model, parameters: params,
                 protocolRules: Self.promptCacheReuseRules(of: context),

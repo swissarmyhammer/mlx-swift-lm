@@ -293,6 +293,68 @@ func makeScriptedWeightsDirectory() throws -> URL {
     return directory
 }
 
+/// A scripted model with one KV cache layer, and the transcripts of the
+/// turns of one session. A later turn renders the text of the earlier turns
+/// first, thus it can reuse the cache of an earlier turn.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+enum ScriptedSessionModel {
+
+    /// The KV cache layers of the model. One layer is enough for a pass to
+    /// check a cache in.
+    static let cacheLayerCount = 1
+
+    /// The most passes one model runs. Each pass replays one script round.
+    static let maximumPassCount = 3
+
+    /// The text each pass generates before it stops.
+    static let scriptedResponse = "A"
+
+    /// Makes the model under a fresh identity, thus the process-wide model
+    /// cache keeps it apart from every other test.
+    ///
+    /// - Parameters:
+    ///   - weights: the directory that makes the model available.
+    ///   - processor: renders the prompt of each pass.
+    /// - Returns: the model.
+    static func make(
+        weights: URL, processor: any UserInputProcessor = PromptBytesInputProcessor()
+    ) -> MLXLanguageModel {
+        let modelID = "probe/scripted-session-\(UUID().uuidString)"
+        let rounds = Array(repeating: scriptedResponse, count: maximumPassCount)
+        return MLXLanguageModel(
+            configuration: ModelConfiguration(id: modelID),
+            capabilities: [],
+            weightsLocation: { _ in weights },
+            load: { _, _ in
+                makeScriptedContainer(
+                    modelID: modelID, rounds: rounds, cacheLayerCount: cacheLayerCount,
+                    processor: processor)
+            })
+    }
+
+    /// A transcript of `turns` prompts whose first entry identifier is
+    /// `firstEntryID`.
+    ///
+    /// The render of a transcript of more turns starts with the render of a
+    /// transcript of fewer turns, thus a later pass can reuse the cache of an
+    /// earlier pass.
+    ///
+    /// - Parameters:
+    ///   - firstEntryID: the identifier of the first entry.
+    ///   - turns: the number of prompts.
+    /// - Returns: the transcript.
+    static func transcript(firstEntryID: String, turns: Int = 1) -> Transcript {
+        let first = Transcript.Prompt(
+            id: firstEntryID, segments: [.text(Transcript.TextSegment(content: "first turn"))])
+        let later = (1 ..< turns).map { turn in
+            Transcript.Entry.prompt(
+                Transcript.Prompt(
+                    segments: [.text(Transcript.TextSegment(content: "turn \(turn)"))]))
+        }
+        return Transcript(entries: [.prompt(first)] + later)
+    }
+}
+
 /// Runs one executor pass of a scripted model inside `store`, for a
 /// transcript whose first entry is `sessionID`.
 ///
@@ -343,6 +405,25 @@ enum ScriptedExecutorPass {
         over transcript: Transcript, model: MLXLanguageModel,
         inside store: ExecutorPromptCacheStore
     ) async throws -> Int {
+        try await respond(over: transcript, model: model, inside: store).reusedTokenCount
+    }
+
+    /// Runs one executor pass of `model` over `transcript` inside `store`, and
+    /// gives what the pass streamed.
+    ///
+    /// The pass runs on the task that calls this method, thus every
+    /// task-local the caller binds reaches the executor.
+    ///
+    /// - Parameters:
+    ///   - transcript: the transcript of the request.
+    ///   - model: the model of the pass.
+    ///   - store: the prompt cache store the pass binds.
+    /// - Returns: the reused prompt tokens and the response text of the pass.
+    /// - Throws: the error of the executor.
+    static func respond(
+        over transcript: Transcript, model: MLXLanguageModel,
+        inside store: ExecutorPromptCacheStore
+    ) async throws -> ScriptedPassResult {
         let executor = try makeMLXExecutor(for: model)
         let request = makeExecutorRequest(transcript: transcript)
         let channel = LanguageModelExecutorGenerationChannel()
@@ -353,33 +434,50 @@ enum ScriptedExecutorPass {
         }
         defer { consumer.cancel() }
 
-        let usage = ReusedTokenLog()
-        try await MLXLanguageModel.Executor.$generationObserver.withValue({ usage.record($0) }) {
+        let events = PassEventLog()
+        try await MLXLanguageModel.Executor.$generationObserver.withValue({ events.record($0) }) {
             try await ExecutorPromptCacheStore.$current.withValue(store) {
                 try await executor.respond(to: request, model: model, streamingInto: channel)
             }
         }
-        return usage.reusedTokenCount
+        return events.result
     }
 
-    /// The prompt tokens that the usage events of one pass report as reused.
+    /// The reused prompt tokens and the response text of the events of one pass.
     ///
-    /// The executor reports the usage on the generation path, and the test
-    /// reads the count from its own task, thus a mutex guards the count.
-    private final class ReusedTokenLog: Sendable {
-        private let count = Mutex(0)
+    /// The executor reports the events on the generation path, and the test
+    /// reads the result from its own task, thus a mutex guards the result.
+    private final class PassEventLog: Sendable {
+        private let collected = Mutex(ScriptedPassResult())
 
-        /// Adds the reused prompt tokens of `event` when it is a usage event.
+        /// Adds the reused prompt tokens of `event` when it is a usage event,
+        /// and its text when it is response text.
         ///
         /// - Parameter event: one event the executor streamed.
         func record(_ event: MLXLanguageModel.Executor.GenerationEvent) {
-            guard case .updateUsage(let input, _, _) = event else { return }
-            count.withLock { $0 += input.cachedTokenCount }
+            switch event {
+            case .updateUsage(let input, _, _):
+                collected.withLock { $0.reusedTokenCount += input.cachedTokenCount }
+            case .appendText(let text, _, .response):
+                collected.withLock { $0.responseText += text }
+            case .appendText, .toolCall, .updateMetadata, .completion:
+                break
+            }
         }
 
-        /// The reused prompt tokens of every usage event so far.
-        var reusedTokenCount: Int { count.withLock { $0 } }
+        /// What the events so far give.
+        var result: ScriptedPassResult { collected.withLock { $0 } }
     }
+}
+
+/// What one scripted executor pass streamed.
+struct ScriptedPassResult: Sendable {
+
+    /// The prompt tokens that the usage events of the pass report as reused.
+    var reusedTokenCount = 0
+
+    /// The response text of the pass, in the order the pass streamed it.
+    var responseText = ""
 }
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)

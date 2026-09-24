@@ -295,7 +295,7 @@ struct PromptCacheReuseChannelTests {
 }
 
 /// What one response sent into the generation channel.
-private struct ChannelResponse {
+struct ChannelResponse {
 
     /// The concatenated `.response` text of the whole answer.
     var text = ""
@@ -331,7 +331,7 @@ private actor ChannelEventCollector {
 /// event already handed to the loop is appended before the loop asks for the
 /// next one.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-private func respondReadingTheChannel(
+func respondReadingTheChannel(
     _ executor: MLXLanguageModel.Executor,
     request: LanguageModelExecutorGenerationRequest,
     model: MLXLanguageModel

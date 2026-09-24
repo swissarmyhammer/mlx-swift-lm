@@ -114,6 +114,64 @@ struct Qwen35SessionPromptCacheTests {
         await releaseAllGPUMemory()
     }
 
+    /// A framework session whose cache went to disk between its turns comes back warm: the
+    /// hybrid caches (`MambaCache` and `KVCacheSimple`) read back from the file, and the second
+    /// turn reuses the whole first turn.
+    ///
+    /// The test binds its own store, whose memory budget is zero, thus the check-in of the
+    /// first turn goes to disk at once.
+    @Test func aSecondTurnOfAFrameworkSessionComesBackWarmFromDisk() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectASecondTurnComesBackWarmFromDisk()
+        } else {
+            Issue.record("The executor needs iOS 27, macOS 27 or visionOS 27.")
+        }
+    }
+
+    /// Runs two turns of one framework session inside a store that spills each check-in, and
+    /// records an issue unless the second turn restores the first turn from disk.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectASecondTurnComesBackWarmFromDisk() async throws {
+        await releaseAllGPUMemory()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Qwen35SessionPromptCacheTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ExecutorPromptCacheStore(directory: directory)
+        await store.configure(memoryBudgetBytes: 0)
+        let model = makeReasoningTestModel(hybridModelID)
+        let options = GenerationOptions(
+            samplingMode: .greedy, temperature: 0, maximumResponseTokens: generatedTokenBudget)
+
+        try await ExecutorPromptCacheStore.$current.withValue(store) {
+            let session = LanguageModelSession(
+                model: model, tools: [], instructions: sessionInstructions)
+            let first = try await session.respond(to: firstPrompt, options: options)
+            await store.waitForSpills()
+            let firstEntryID = try #require(session.transcript.first?.id)
+            let key = ExecutorPromptCacheKey(modelID: model.modelID, sessionID: firstEntryID)
+            let wasInMemory = await store.peek(key) != nil
+            let diskBytes = await store.diskByteCount
+            report(turn: 1, usage: first.usage, transcript: session.transcript)
+
+            let second = try await session.respond(to: secondPrompt, options: options)
+            report(turn: 2, usage: second.usage, transcript: session.transcript)
+            let line =
+                "\(measurementPrefix) disk restore: disk bytes after turn 1 = \(diskBytes), "
+                + "turn 2 cached \(second.usage.input.cachedTokenCount) of "
+                + "\(second.usage.input.totalTokenCount), turn 1 rendered "
+                + "\(first.usage.input.totalTokenCount)"
+            measurementLog.info("\(line, privacy: .public)")
+
+            #expect(!wasInMemory, "The cache of turn 1 must leave memory. \(line)")
+            #expect(diskBytes > 0, "The cache of turn 1 must be on disk. \(line)")
+            #expect(
+                second.usage.input.cachedTokenCount >= first.usage.input.totalTokenCount,
+                "Turn 2 must reuse the whole render of turn 1. \(line)")
+            #expect(second.content.lowercased().contains("teal"))
+        }
+        await releaseAllGPUMemory()
+    }
+
     /// Logs the usage of one turn and the entries the transcript holds.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func report(turn: Int, usage: LanguageModelSession.Usage, transcript: Transcript) {

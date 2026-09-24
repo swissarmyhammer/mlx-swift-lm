@@ -1345,6 +1345,19 @@ enum ExecutorPromptCacheCommitOutcome {
 
 // MARK: - The log line of one pass
 
+/// Where the cache that a pass plans with came from.
+enum ExecutorPromptCacheSource: Equatable {
+
+    /// The pass carries no cache from an earlier turn.
+    case none
+
+    /// The cache stayed in memory since the earlier turn.
+    case memory
+
+    /// The cache went to disk, and the pass read it back. The value is how long the read took.
+    case disk(restoreDuration: Duration)
+}
+
 /// Composes the log lines of one generation pass.
 ///
 /// Every function here is pure, thus a unit test reads the exact text that
@@ -1356,15 +1369,16 @@ enum ExecutorPromptCacheReport {
     /// - Parameters:
     ///   - key: the session the cache belongs to, or nil when the request
     ///     names no session.
+    ///   - source: where the carried cache came from.
     ///   - plan: the plan of the pass, or nil when the pass carries no cache.
     ///   - decodeTokens: decodes a token window to the text the seam shows.
-    /// - Returns: one line, with the seam and its decoded sides when the
-    ///   decision names one.
+    /// - Returns: one line, with the source, the restore time for a cache from
+    ///   disk, and the seam and its decoded sides when the decision names one.
     static func planLine(
-        key: ExecutorPromptCacheKey?, plan: ExecutorPromptCachePlan?,
-        decodeTokens: ([Int]) -> String
+        key: ExecutorPromptCacheKey?, source: ExecutorPromptCacheSource,
+        plan: ExecutorPromptCachePlan?, decodeTokens: ([Int]) -> String
     ) -> String {
-        let head = "prompt cache plan \(session(key)) "
+        let head = "prompt cache plan \(session(key)) \(field(of: source)) "
         guard let plan else {
             return head + "rule=none (the input carries media, a batch or a mask)"
         }
@@ -1439,19 +1453,35 @@ enum ExecutorPromptCacheReport {
         key: ExecutorPromptCacheKey, byteCount: Int, duration: Duration,
         outcome: ExecutorPromptCacheSpillOutcome
     ) -> String {
-        let seconds = String(format: "%.3f", duration / .seconds(1))
-        return "prompt cache spill \(session(key)) bytes=\(byteCount) seconds=\(seconds) "
+        "prompt cache spill \(session(key)) bytes=\(byteCount) seconds=\(seconds(duration)) "
             + "result=\(outcome.description)"
     }
 
-    /// The line of a turn that found its cache on disk and starts cold,
-    /// because this executor cannot read a spilled cache back yet.
+    /// The line of a turn whose spilled cache did not read back. The turn
+    /// starts cold.
     ///
-    /// - Parameter key: the session of the turn.
-    /// - Returns: one line.
-    static func spilledColdStartLine(key: ExecutorPromptCacheKey) -> String {
-        "prompt cache spilled \(session(key)) starts cold: the file is deleted, "
-            + "because a restore from disk is not available"
+    /// - Parameters:
+    ///   - key: the session of the turn.
+    ///   - error: why the read failed.
+    /// - Returns: one line with the session and the error.
+    static func restoreFailureLine(key: ExecutorPromptCacheKey, error: any Error) -> String {
+        "prompt cache restore \(session(key)) failed, the turn starts cold: \(error)"
+    }
+
+    /// The source field of a plan line: `source=none`, `source=memory`, or
+    /// `source=disk` and the seconds of the restore.
+    private static func field(of source: ExecutorPromptCacheSource) -> String {
+        switch source {
+        case .none: "source=none"
+        case .memory: "source=memory"
+        case .disk(let restoreDuration):
+            "source=disk restoreSeconds=\(seconds(restoreDuration))"
+        }
+    }
+
+    /// `duration` in seconds, with three decimals.
+    private static func seconds(_ duration: Duration) -> String {
+        String(format: "%.3f", duration / .seconds(1))
     }
 
     /// The model and the session of `key`, or `none` for each when the
@@ -1492,15 +1522,55 @@ enum ExecutorPromptCacheLog {
 /// committed, at `info` level in the `com.apple.FoundationModels-MLX`
 /// subsystem, thus `log show` names every rebuild of an agent run.
 ///
+/// A session whose cache went to disk gives the slot a pending restore. The
+/// restore reads the file into the fresh caches of the model, thus it runs
+/// inside the model container: ``restoreIfPending(model:parameters:)`` runs it
+/// one time, before the first plan. The executor, not the slot, deletes the
+/// file.
+///
 /// A response runs one generation pass at a time, and every pass runs inside the
 /// model container, which serializes the passes of one model. This box is thus
 /// written by one task at a time, and the `@unchecked Sendable` conformance
 /// rests on that.
 final class ExecutorPromptCacheSlot: @unchecked Sendable {
 
+    /// What the slot holds for the next pass.
+    private enum Carried {
+
+        /// No cache: the next pass starts cold.
+        case none
+
+        /// A cache that stayed in memory.
+        case memory(ExecutorPromptCacheEntry)
+
+        /// A cache that the slot read back from disk, and how long the read took.
+        case restored(ExecutorPromptCacheEntry, restoreDuration: Duration)
+
+        /// A cache on disk that the slot did not read yet.
+        case pendingRestore(ExecutorPromptCacheSpilledHandle)
+    }
+
+    /// What the slot holds for the next pass.
+    private var carried: Carried
+
     /// The cache the session carries into its next turn, or nil when the next
-    /// turn must start cold.
-    private(set) var entry: ExecutorPromptCacheEntry?
+    /// turn must start cold. A cache on disk that the slot did not read is not
+    /// an entry.
+    var entry: ExecutorPromptCacheEntry? {
+        switch carried {
+        case .memory(let entry), .restored(let entry, _): entry
+        case .none, .pendingRestore: nil
+        }
+    }
+
+    /// Where the cache of the next pass comes from.
+    private var source: ExecutorPromptCacheSource {
+        switch carried {
+        case .memory: .memory
+        case .restored(_, let restoreDuration): .disk(restoreDuration: restoreDuration)
+        case .none, .pendingRestore: .none
+        }
+    }
 
     /// The prompt tokens the last planned pass did not feed to the model.
     ///
@@ -1524,13 +1594,75 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     ///   - key: the session the entry belongs to, or nil when the request
     ///     names no session.
     ///   - report: receives each log line of the response.
-    init(
+    convenience init(
         _ entry: ExecutorPromptCacheEntry?, key: ExecutorPromptCacheKey? = nil,
         report: @escaping (String) -> Void = ExecutorPromptCacheLog.info
     ) {
-        self.entry = entry
+        self.init(carrying: entry.map { .memory($0) } ?? .none, key: key, report: report)
+    }
+
+    /// Creates a slot whose session found its cache on disk. The slot reads
+    /// the file at ``restoreIfPending(model:parameters:)``.
+    ///
+    /// - Parameters:
+    ///   - handle: the file of the cache, which the check-out gave.
+    ///   - key: the session the cache belongs to.
+    ///   - report: receives each log line of the response.
+    convenience init(
+        spilled handle: ExecutorPromptCacheSpilledHandle, key: ExecutorPromptCacheKey?,
+        report: @escaping (String) -> Void = ExecutorPromptCacheLog.info
+    ) {
+        self.init(carrying: .pendingRestore(handle), key: key, report: report)
+    }
+
+    /// Creates a slot holding what a check-out of the session gave.
+    ///
+    /// - Parameters:
+    ///   - checkout: the result of the check-out.
+    ///   - key: the session of the request, or nil when the request names no
+    ///     session.
+    convenience init(_ checkout: ExecutorPromptCacheCheckout, key: ExecutorPromptCacheKey?) {
+        switch checkout {
+        case .memory(let entry): self.init(entry, key: key)
+        case .spilled(let handle): self.init(spilled: handle, key: key)
+        case .none: self.init(nil, key: key)
+        }
+    }
+
+    /// Creates a slot that holds `carried`.
+    private init(
+        carrying carried: Carried, key: ExecutorPromptCacheKey?,
+        report: @escaping (String) -> Void
+    ) {
+        self.carried = carried
         self.key = key
         self.report = report
+    }
+
+    /// Reads the cache on disk into the fresh caches of `model`, when the
+    /// slot holds a cache on disk that it did not read yet.
+    ///
+    /// The executor calls this method before each plan. Only the first call
+    /// reads. A file that does not read back -- a missing file, a corrupt
+    /// file, another cache class, a wrong offset -- writes one log line, and
+    /// the pass starts cold: a failed restore never fails the turn.
+    ///
+    /// - Parameters:
+    ///   - model: the model that makes the fresh caches.
+    ///   - parameters: the generation parameters the fresh caches must match.
+    func restoreIfPending(model: any LanguageModel, parameters: GenerateParameters) {
+        guard case .pendingRestore(let handle) = carried else { return }
+        carried = .none
+        let clock = ContinuousClock()
+        let start = clock.now
+        do {
+            let restored = try ExecutorPromptCacheFile.read(
+                from: handle.url, key: handle.key,
+                templates: model.newCache(parameters: parameters))
+            carried = .restored(restored, restoreDuration: clock.now - start)
+        } catch {
+            report(ExecutorPromptCacheReport.restoreFailureLine(key: handle.key, error: error))
+        }
     }
 
     /// Plans the pass that is about to run, records what that pass reuses,
@@ -1553,12 +1685,15 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
         protocolRules: [any PromptCacheReuseRule] = [],
         decodeTokens: ([Int]) -> String
     ) throws -> ExecutorPromptCachePlan? {
+        let carriedSource = source
         let plan = try ExecutorPromptCachePlan.make(
             reusing: entry, input: input, model: model, parameters: parameters,
             protocolRules: protocolRules)
-        entry = nil
+        carried = .none
         reusedTokenCount = plan?.reusedTokenCount ?? 0
-        report(ExecutorPromptCacheReport.planLine(key: key, plan: plan, decodeTokens: decodeTokens))
+        report(
+            ExecutorPromptCacheReport.planLine(
+                key: key, source: carriedSource, plan: plan, decodeTokens: decodeTokens))
         return plan
     }
 
@@ -1585,7 +1720,7 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
         let outcome =
             plan?.commitOutcome(generatedTokens: generatedTokens, state: state)
             ?? .refused(.noPlan)
-        entry = outcome.entry
+        carried = outcome.entry.map { .memory($0) } ?? .none
         report(ExecutorPromptCacheReport.commitLine(key: key, outcome: outcome))
     }
 }

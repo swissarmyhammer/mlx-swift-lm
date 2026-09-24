@@ -22,16 +22,6 @@ import Testing
 @Suite("A host sets or disables the prompt cache key of a pass")
 struct PromptCacheScopeTests {
 
-    /// The KV cache layers of the scripted model. One layer is enough for a
-    /// pass to check a cache in.
-    private static let cacheLayerCount = 1
-
-    /// The most passes one test runs. Each pass replays one script round.
-    private static let maximumPassCount = 3
-
-    /// The text each pass generates before it stops.
-    private static let scriptedResponse = "A"
-
     /// The issue a test records on a system that has no executor.
     private static let unsupportedSystem: Comment =
         "The executor needs iOS 27, macOS 27 or visionOS 27."
@@ -89,14 +79,15 @@ struct PromptCacheScopeTests {
     private func expectABoundSessionSharesOneCacheAcrossFirstEntries() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let model = makeModel(weights: weights)
+        let model = ScriptedSessionModel.make(weights: weights)
         let store = makeStore()
 
         let first = try await respond(
-            over: transcript(firstEntryID: "entry-1"), scope: .session("A"),
+            over: ScriptedSessionModel.transcript(firstEntryID: "entry-1"), scope: .session("A"),
             model: model, inside: store)
         let second = try await respond(
-            over: transcript(firstEntryID: "entry-2", turns: 2), scope: .session("A"),
+            over: ScriptedSessionModel.transcript(firstEntryID: "entry-2", turns: 2),
+            scope: .session("A"),
             model: model, inside: store)
 
         #expect(first == 0)
@@ -114,14 +105,15 @@ struct PromptCacheScopeTests {
     private func expectTwoBoundSessionsOverOneTranscriptDoNotShareAnEntry() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let model = makeModel(weights: weights)
+        let model = ScriptedSessionModel.make(weights: weights)
         let store = makeStore()
 
         try await respond(
-            over: transcript(firstEntryID: "entry-1"), scope: .session("A"),
+            over: ScriptedSessionModel.transcript(firstEntryID: "entry-1"), scope: .session("A"),
             model: model, inside: store)
         let forked = try await respond(
-            over: transcript(firstEntryID: "entry-1", turns: 2), scope: .session("B"),
+            over: ScriptedSessionModel.transcript(firstEntryID: "entry-1", turns: 2),
+            scope: .session("B"),
             model: model, inside: store)
 
         #expect(forked == 0, "Session B must not reuse the cache of session A.")
@@ -138,15 +130,17 @@ struct PromptCacheScopeTests {
     private func expectAnUncachedPassTakesNoCacheAndLeavesNone() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let model = makeModel(weights: weights)
+        let model = ScriptedSessionModel.make(weights: weights)
         let store = makeStore()
         try await respond(
-            over: transcript(firstEntryID: "entry-1"), scope: nil, model: model, inside: store)
+            over: ScriptedSessionModel.transcript(firstEntryID: "entry-1"), scope: nil,
+            model: model, inside: store)
         let sessionsBefore = await store.retainedSessionCount
         let bytesBefore = await store.retainedByteCount
 
         let reused = try await respond(
-            over: transcript(firstEntryID: "entry-1", turns: 2), scope: .uncached,
+            over: ScriptedSessionModel.transcript(firstEntryID: "entry-1", turns: 2),
+            scope: .uncached,
             model: model, inside: store)
 
         #expect(reused == 0, "An uncached pass must reuse nothing.")
@@ -163,15 +157,17 @@ struct PromptCacheScopeTests {
     private func expectBindingNilInsideAnUncachedScopeGivesTheFirstEntryRule() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let model = makeModel(weights: weights)
+        let model = ScriptedSessionModel.make(weights: weights)
         let store = makeStore()
         try await respond(
-            over: transcript(firstEntryID: "entry-1"), scope: nil, model: model, inside: store)
+            over: ScriptedSessionModel.transcript(firstEntryID: "entry-1"), scope: nil,
+            model: model, inside: store)
         let entryBefore = try #require(await store.peek(key("entry-1", of: model)))
 
         let reused = try await MLXLanguageModel.$promptCacheScope.withValue(.uncached) {
             try await respond(
-                over: transcript(firstEntryID: "entry-1", turns: 2), scope: nil,
+                over: ScriptedSessionModel.transcript(firstEntryID: "entry-1", turns: 2),
+                scope: nil,
                 model: model, inside: store)
         }
 
@@ -188,16 +184,17 @@ struct PromptCacheScopeTests {
     private func expectWithNothingBoundTheFirstEntryNamesTheSession() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let model = makeModel(weights: weights)
+        let model = ScriptedSessionModel.make(weights: weights)
         let store = makeStore()
 
         let first = try await respond(
-            over: transcript(firstEntryID: "entry-1"), scope: nil, model: model, inside: store)
+            over: ScriptedSessionModel.transcript(firstEntryID: "entry-1"), scope: nil,
+            model: model, inside: store)
         let second = try await respond(
-            over: transcript(firstEntryID: "entry-1", turns: 2), scope: nil,
+            over: ScriptedSessionModel.transcript(firstEntryID: "entry-1", turns: 2), scope: nil,
             model: model, inside: store)
         let other = try await respond(
-            over: transcript(firstEntryID: "entry-2", turns: 2), scope: nil,
+            over: ScriptedSessionModel.transcript(firstEntryID: "entry-2", turns: 2), scope: nil,
             model: model, inside: store)
 
         #expect(first == 0)
@@ -218,49 +215,6 @@ struct PromptCacheScopeTests {
             directory: FileManager.default.temporaryDirectory
                 .appendingPathComponent("PromptCacheScopeTests-\(UUID().uuidString)"),
             writer: { _, _ in })
-    }
-
-    /// A scripted model with a KV cache, under a fresh identity, thus the
-    /// process-wide model cache keeps it apart from every other test.
-    ///
-    /// - Parameter weights: the directory that makes the model available.
-    /// - Returns: the model.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func makeModel(weights: URL) -> MLXLanguageModel {
-        let modelID = "probe/prompt-cache-scope-\(UUID().uuidString)"
-        let rounds = Array(repeating: Self.scriptedResponse, count: Self.maximumPassCount)
-        return MLXLanguageModel(
-            configuration: ModelConfiguration(id: modelID),
-            capabilities: [],
-            weightsLocation: { _ in weights },
-            load: { _, _ in
-                makeScriptedContainer(
-                    modelID: modelID, rounds: rounds, cacheLayerCount: Self.cacheLayerCount,
-                    processor: PromptBytesInputProcessor())
-            })
-    }
-
-    /// A transcript of `turns` prompts whose first entry identifier is
-    /// `firstEntryID`.
-    ///
-    /// The render of a transcript of more turns starts with the render of a
-    /// transcript of fewer turns, thus a later pass can reuse the cache of an
-    /// earlier pass.
-    ///
-    /// - Parameters:
-    ///   - firstEntryID: the identifier of the first entry.
-    ///   - turns: the number of prompts.
-    /// - Returns: the transcript.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func transcript(firstEntryID: String, turns: Int = 1) -> Transcript {
-        let first = Transcript.Prompt(
-            id: firstEntryID, segments: [.text(Transcript.TextSegment(content: "first turn"))])
-        let later = (1 ..< turns).map { turn in
-            Transcript.Entry.prompt(
-                Transcript.Prompt(
-                    segments: [.text(Transcript.TextSegment(content: "turn \(turn)"))]))
-        }
-        return Transcript(entries: [.prompt(first)] + later)
     }
 
     /// Runs one pass of `model` over `transcript` inside `store`, with `scope`
