@@ -57,8 +57,14 @@ private let measurementLog = Logger(
 /// The hybrid checkpoint, which `Qwen35AgenticPromptCacheAssessmentTests` also measures.
 private let hybridModelID = "mlx-community/Qwen3.8-27B-mxfp4"
 
+/// The short context, in tokens.
+private let shortContextTokenCount = 4_096
+
+/// The long context, in tokens.
+private let longContextTokenCount = 32_768
+
 /// The contexts that the suite measures, in tokens.
-private let contextTokenCounts = [4_096, 32_768]
+private let contextTokenCounts = [shortContextTokenCount, longContextTokenCount]
 
 /// The time limit of each test, in minutes. One test prefills 36 864 tokens of one model and
 /// writes and reads two cache files.
