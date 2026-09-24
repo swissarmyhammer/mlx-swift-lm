@@ -237,7 +237,8 @@ final class ExecutorPromptCacheSpoolWriter: Sendable {
 /// total past the budget, the least recently used entries leave first, each
 /// through ``spill(_:_:)``.
 ///
-/// An entry that leaves memory goes to one file in ``directory``. It has three
+/// An entry that leaves memory goes to one file in the spool folder of the
+/// store. It has three
 /// states: in memory, spilling (its write has not ended) and on disk. Each
 /// spill gets a new generation number, and the file name holds it. A write
 /// that ends changes the records of its key only when its generation is still
@@ -296,7 +297,7 @@ actor ExecutorPromptCacheStore {
 
     /// The folder of the spill files. The spool writer makes it at the first
     /// write.
-    let directory: URL
+    private let directory: URL
 
     /// Runs the writes of the spill files, one at a time.
     private let spoolWriter: ExecutorPromptCacheSpoolWriter

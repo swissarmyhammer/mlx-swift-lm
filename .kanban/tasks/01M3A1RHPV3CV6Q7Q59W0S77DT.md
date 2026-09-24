@@ -30,10 +30,19 @@ comments:
     - evidence: `swift build --build-tests` — only the known `missing creator for mutated node` warning. `xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` — 267 tests in 31 suites pass (7 runs, no flaky test). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` — 694 XCTest with 36 failures (GlmOcr/Qwen25VL/Qwen35/Qwen3VL ContinuationTests + NanbeigeTests) and 1207 Swift Testing tests with 101 issues: equal to the 2026-09-24 baseline. The change touches only MLXFoundationModels, thus the other three bundles do not change.
     - next: /commit
   timestamp: 2026-09-24T19:11:29.185268+00:00
+- actor: claude-code
+  id: 01m3adyprvsp231wg089s7mdz3
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed (6 files: ExecutorPromptCache.swift, ExecutorPromptCacheFile.swift, MLXLanguageModel.swift, ExecutorPromptCacheTests.swift, new ExecutorPromptCacheSpoolTests.swift, task files)
+    - test: green against the baseline (MLXFoundationModelsTests 267/267 pass; MLXLMTests 36 XCTest failures + 101 Swift Testing issues, equal to the baseline; only the known build warning)
+    - commit: 7c1aac5 feat(prompt-cache): spill evicted entries to disk with one serial writer
+    - review: findings — 2: `Libraries/MLXFoundationModels/ExecutorPromptCache.swift:299` swift/access-control (`directory` must be `private let`); `Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift:483` test-integrity/test-partitioning (the executor test with file I/O must move to `ExecutorPromptCacheSpoolTests.swift`)
+  timestamp: 2026-09-24T19:23:22.779441+00:00
 depends_on:
 - 01M3A1QAFD56F5TEPPADDJHENH
 - 01M3A1QND68R1PN6K74Z6AV3EP
-position_column: doing
+position_column: review
 position_ordinal: '80'
 title: 'Disk spool, part 1: spill evicted entries with one serial writer, and hand out a spilled handle on check-out'
 ---
@@ -63,18 +72,29 @@ In `Libraries/MLXFoundationModels/ExecutorPromptCache.swift`, give `ExecutorProm
 - Update every caller of `checkOut`: the executor in `Libraries/MLXFoundationModels/MLXLanguageModel.swift` (`carriedPromptCache = await ...checkOut(...)`, about `:976`) and the call sites in `Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift`. Until task ^jar6qq9 lands, the executor treats `.spilled` as a cold start and deletes the file.
 
 ## Acceptance Criteria
-- [ ] An entry evicted by the byte budget is on disk, and a later `checkOut` returns `.spilled`.
-- [ ] A check-out during a spill of the same key returns `.memory` with the same entry; after the write ends, no `onDisk` record and no file remain for that key.
-- [ ] A check-out during a spill, followed by a cache `update` on the returned entry, does not change the bytes of the file that the writer writes.
-- [ ] Spill A (slow writer), check-out, check-in, spill B: after both writes end, B's file exists and is the only file for the key.
-- [ ] At most one write runs at a time (assert with an injected writer that counts concurrent calls).
-- [ ] Other check-outs and check-ins complete while a write runs (the actor is free).
-- [ ] `checkIn` of a key removes that key's older file.
-- [ ] `swift build --build-tests` compiles with no new warnings.
+- [x] An entry evicted by the byte budget is on disk, and a later `checkOut` returns `.spilled`.
+- [x] A check-out during a spill of the same key returns `.memory` with the same entry; after the write ends, no `onDisk` record and no file remain for that key.
+- [x] A check-out during a spill, followed by a cache `update` on the returned entry, does not change the bytes of the file that the writer writes.
+- [x] Spill A (slow writer), check-out, check-in, spill B: after both writes end, B's file exists and is the only file for the key.
+- [x] At most one write runs at a time (assert with an injected writer that counts concurrent calls).
+- [x] Other check-outs and check-ins complete while a write runs (the actor is free).
+- [x] `checkIn` of a key removes that key's older file.
+- [x] `swift build --build-tests` compiles with no new warnings.
 
 ## Tests
-- [ ] New `Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift`, one test for each criterion, each with its own `ExecutorPromptCacheStore(directory:)` in a temporary folder. For in-flight cases, inject a slow writer (an internal writer closure that tests replace).
-- [ ] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` — all pass.
+- [x] New `Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift`, one test for each criterion, each with its own `ExecutorPromptCacheStore(directory:)` in a temporary folder. For in-flight cases, inject a slow writer (an internal writer closure that tests replace).
+- [x] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` — all pass.
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass.
+
+## Review Findings (2026-09-24 14:13)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 5 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M3A1RHPV3CV6Q7Q59W0S77DT.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M3A1RHPV3CV6Q7Q59W0S77DT.md` — no validator matches this file
+
+- [ ] `Libraries/MLXFoundationModels/ExecutorPromptCache.swift:299` `swift/access-control` — Internal storage detail should be explicitly declared private, not implicitly internal. The `directory` property is only used within the actor and is not intended as part of the API surface; all other similar properties on this actor explicitly declare their access level. Change line 299 to `private let directory: URL`.
+- [ ] `Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift:483` `test-integrity/test-partitioning` — The test `anExecutorPassThatFindsItsCacheOnDiskStartsColdAndDeletesTheFile` uses real file I/O to disk (a real external system). According to test-partitioning rules, integration tests that use real external systems belong in a separate integration test target, not the unit test target. The documented convention for this file (lines 37-41) explicitly states: 'These tests read the memory tier alone, and `ExecutorPromptCacheSpoolTests` reads the files.'. Either move this test to `ExecutorPromptCacheSpoolTests.swift` (if it fits the spool testing scope), create a separate integration test target for it, or refactor to test the executor behavior without direct file I/O assertions. The test name suggests it belongs with executor behavior, not file I/O tests — consider if the assertion can be rephrased to test executor behavior rather than file system side effects.

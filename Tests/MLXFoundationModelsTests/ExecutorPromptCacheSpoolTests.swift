@@ -383,6 +383,24 @@ struct ExecutorPromptCacheSpoolTests {
         #expect(await store.checkOut(Self.key("a")) == .memory(newer))
     }
 
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("an executor pass that finds its cache on disk starts cold and deletes the file")
+    func anExecutorPassThatFindsItsCacheOnDiskStartsColdAndDeletesTheFile() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let modelID = "probe/spilled-prompt-cache-\(UUID().uuidString)"
+        let sessionKey = ExecutorPromptCacheKey(modelID: modelID, sessionID: "spilled-session")
+        let store = await Self.store(in: directory)
+        await store.checkIn(sessionKey, Self.entry())
+        await store.waitForSpills()
+        #expect(try Self.fileNames(in: directory).count == 1)
+
+        try await respondOnce(inside: store, modelID: modelID, sessionID: sessionKey.sessionID)
+
+        #expect(try Self.fileNames(in: directory).isEmpty)
+        #expect(await store.checkOut(sessionKey) == .none)
+    }
+
     @Test("the spill line names the session, its bytes and the write duration")
     func theSpillLineNamesTheSessionTheBytesAndTheDuration() {
         let line = ExecutorPromptCacheReport.spillLine(

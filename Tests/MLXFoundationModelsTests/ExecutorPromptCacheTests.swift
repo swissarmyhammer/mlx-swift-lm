@@ -427,41 +427,6 @@ struct ExecutorPromptCacheTests {
 
     // MARK: - The store a task binds
 
-    /// Runs one executor pass of a scripted model inside `store`, for a
-    /// transcript whose first entry is `sessionID`.
-    ///
-    /// - Parameters:
-    ///   - store: the store the pass binds.
-    ///   - modelID: the model of the pass. A fresh identity keeps the
-    ///     process-wide model cache and the shared store out of every other
-    ///     test.
-    ///   - sessionID: the first entry of the transcript.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func respondOnce(
-        inside store: ExecutorPromptCacheStore, modelID: String, sessionID: String
-    ) async throws {
-        let weights = try makeScriptedWeightsDirectory()
-        defer { try? FileManager.default.removeItem(at: weights) }
-        let model = MLXLanguageModel(
-            configuration: ModelConfiguration(id: modelID),
-            capabilities: [],
-            weightsLocation: { _ in weights },
-            load: { _, _ in makeScriptedContainer(modelID: modelID, rounds: ["A"]) })
-        let executor = try makeMLXExecutor(for: model)
-        let request = makeRequest(transcript: transcript(firstEntryID: sessionID))
-        let channel = LanguageModelExecutorGenerationChannel()
-        // The channel is a rendezvous, thus a consumer must run beside the
-        // executor or every send parks it.
-        let consumer = Task<Void, Never> {
-            do { for try await _ in channel {} } catch {}
-        }
-        defer { consumer.cancel() }
-
-        try await ExecutorPromptCacheStore.$current.withValue(store) {
-            try await executor.respond(to: request, model: model, streamingInto: channel)
-        }
-    }
-
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test("an executor pass inside a bound store uses that store and not the shared one")
     func anExecutorPassInsideABoundStoreUsesThatStore() async throws {
@@ -477,26 +442,6 @@ struct ExecutorPromptCacheTests {
         // nothing back in.
         #expect(await store.peek(sessionKey) == nil)
         #expect(await ExecutorPromptCacheStore.shared.peek(sessionKey) == nil)
-    }
-
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    @Test("an executor pass that finds its cache on disk starts cold and deletes the file")
-    func anExecutorPassThatFindsItsCacheOnDiskStartsColdAndDeletesTheFile() async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ExecutorPromptCacheTests-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let modelID = "probe/spilled-prompt-cache-\(UUID().uuidString)"
-        let sessionKey = key("spilled-session", modelID: modelID)
-        let store = ExecutorPromptCacheStore(directory: directory)
-        await store.configure(memoryBudgetBytes: 0)
-        await store.checkIn(sessionKey, entry(tokens: [1, 2, 3]))
-        await store.waitForSpills()
-        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 1)
-
-        try await respondOnce(inside: store, modelID: modelID, sessionID: "spilled-session")
-
-        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
-        #expect(await store.checkOut(sessionKey) == .none)
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)

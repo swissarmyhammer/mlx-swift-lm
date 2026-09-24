@@ -9,6 +9,7 @@
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 import Foundation
+import FoundationModels
 import MLX
 import MLXLMCommon
 import MLXNN
@@ -235,6 +236,45 @@ func makeScriptedWeightsDirectory() throws -> URL {
         at: directory, withIntermediateDirectories: true)
     try Data().write(to: directory.appendingPathComponent("config.json"))
     return directory
+}
+
+/// Runs one executor pass of a scripted model inside `store`, for a
+/// transcript whose first entry is `sessionID`.
+///
+/// The scripted model holds no key/value cache, thus the pass checks nothing
+/// back in.
+///
+/// - Parameters:
+///   - store: the prompt cache store the pass binds.
+///   - modelID: the model of the pass. A fresh identity keeps the
+///     process-wide model cache and the shared store out of every other test.
+///   - sessionID: the first entry of the transcript, which names the session.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func respondOnce(
+    inside store: ExecutorPromptCacheStore, modelID: String, sessionID: String
+) async throws {
+    let weights = try makeScriptedWeightsDirectory()
+    defer { try? FileManager.default.removeItem(at: weights) }
+    let model = MLXLanguageModel(
+        configuration: ModelConfiguration(id: modelID),
+        capabilities: [],
+        weightsLocation: { _ in weights },
+        load: { _, _ in makeScriptedContainer(modelID: modelID, rounds: ["A"]) })
+    let executor = try makeMLXExecutor(for: model)
+    let prompt = Transcript.Prompt(
+        id: sessionID, segments: [.text(Transcript.TextSegment(content: "first turn"))])
+    let request = makeExecutorRequest(transcript: Transcript(entries: [.prompt(prompt)]))
+    let channel = LanguageModelExecutorGenerationChannel()
+    // The channel is a rendezvous, thus a consumer must run beside the
+    // executor or every send parks it.
+    let consumer = Task<Void, Never> {
+        do { for try await _ in channel {} } catch {}
+    }
+    defer { consumer.cancel() }
+
+    try await ExecutorPromptCacheStore.$current.withValue(store) {
+        try await executor.respond(to: request, model: model, streamingInto: channel)
+    }
 }
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)
