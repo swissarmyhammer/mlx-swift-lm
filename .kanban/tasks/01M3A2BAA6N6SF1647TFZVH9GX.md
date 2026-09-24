@@ -1,10 +1,36 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m3af11sg8gzbh2jwnkwfmdwf
+  text: |-
+    Research (implement, iteration 1):
+    - The store already has a private `remove(_:) -> ExecutorPromptCacheEntry?` (memory tier only). The new internal `remove(_ key:)` has the same name, thus the private function gets the name `removeEntry(_:)`.
+    - `checkIn` already removes memory, spill and disk state of its key at its start. It will call the new `remove(_:)`.
+    - `onDisk` records only a handle. The disk budget needs the byte count of each file and an LRU order, thus each disk record gets the file size (read with `URLResourceValues.fileSize` when the write ends) and the store keeps `diskUsageOrder` and `diskByteCount`.
+    - `ExecutorPromptCacheTests.makeStore()` uses a writer that writes no file. A disk record for such a write has a size that cannot be read; the store logs that and records zero bytes.
+    - The stale-folder clean-up must not run for test stores (their folder is directly in the temporary directory). Thus only the default `init()` gives a root (`<tmp>/mlx-prompt-cache/`) to clean. The clean-up function takes a process probe, thus tests cover ESRCH, EPERM and kill == 0 without real processes.
+  timestamp: 2026-09-24T19:42:08.176143+00:00
+- actor: claude-code
+  id: 01m3af8bkh2gxfe49q2kz274ta
+  text: |-
+    ### implement — changed
+    - evidence: 2 files — Libraries/MLXFoundationModels/ExecutorPromptCache.swift (disk budget with LRU disk order and known disk total, `configure(diskBudgetBytes:)`, `defaultDiskBudgetBytes(availableCapacity:)`, `isStaleProcess(killResult:errorNumber:)`, `removeStaleSpoolFolders(in:probe:)` at first use of the default store, `remove(_:)`, `evict(sessionID:)`, `evict(modelID:)` over all three tiers, `diskEvictionLine`), Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift (13 new tests). Red first (compile errors), then green: MLXFoundationModelsTests 279 tests passed.
+    - note: the private memory-tier `remove(_:) -> Entry?` is now `removeEntry(_:)`.
+    - next: /test
+  timestamp: 2026-09-24T19:46:07.601545+00:00
+- actor: claude-code
+  id: 01m3affa3mkw6qgag3n1bmpnbq
+  text: |-
+    ### test — green
+    - evidence: `swift build --build-tests` — only the known warning `missing creator for mutated node`. MLXFoundationModelsTests 3 runs: 279/279 passed each time. MLXGuidedGenerationTests 70 passed, CXGrammarTests 7 passed, MLXHuggingFaceMacrosTests 5 passed. MLXLMTests: 694 XCTest with 36 failures (GlmOcr 6, Qwen25VL 13, Qwen35 8, Qwen3VL 8 ContinuationTests, NanbeigeTests 1) and 1207 Swift Testing with 101 issues, which is the baseline of 2026-09-24. No new failure, no new warning.
+    - next: /commit
+  timestamp: 2026-09-24T19:49:55.444461+00:00
 depends_on:
 - 01M3A1RHPV3CV6Q7Q59W0S77DT
-position_column: todo
-position_ordinal: 8a80
+position_column: doing
+position_ordinal: '80'
 title: 'Disk spool, part 2: disk budget, clean-up of dead-process folders, and removal of one key or one session'
 ---
 #prompt-cache
@@ -22,17 +48,17 @@ In `Libraries/MLXFoundationModels/ExecutorPromptCache.swift`, on top of the spoo
 - `evict(modelID:)` also removes spilling entries and files of that model; `evict(modelID: nil)` removes all.
 
 ## Acceptance Criteria
-- [ ] The disk budget deletes files, least recently used first, and the known disk total stays at or below the budget.
-- [ ] The default-disk-budget function gives 25% of the value it receives.
-- [ ] Stale-folder check: `ESRCH` → stale (deleted); `EPERM` → live (kept); `kill` returns 0 → live (kept).
-- [ ] `remove(key)` of an entry in memory, of an entry being spilled (slow writer), and of an entry on disk leaves no memory entry, no `onDisk` record, and no file for that key after all writes end.
-- [ ] `remove(key)` of an unknown key does nothing and does not throw.
-- [ ] `evict(sessionID:)` removes that session for every model and leaves other sessions.
-- [ ] `evict(modelID:)` removes memory, spilling and disk state of one model and leaves other models.
+- [x] The disk budget deletes files, least recently used first, and the known disk total stays at or below the budget.
+- [x] The default-disk-budget function gives 25% of the value it receives.
+- [x] Stale-folder check: `ESRCH` → stale (deleted); `EPERM` → live (kept); `kill` returns 0 → live (kept).
+- [x] `remove(key)` of an entry in memory, of an entry being spilled (slow writer), and of an entry on disk leaves no memory entry, no `onDisk` record, and no file for that key after all writes end.
+- [x] `remove(key)` of an unknown key does nothing and does not throw.
+- [x] `evict(sessionID:)` removes that session for every model and leaves other sessions.
+- [x] `evict(modelID:)` removes memory, spilling and disk state of one model and leaves other models.
 
 ## Tests
-- [ ] Extend `Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift` (from ^w0s77dt) with one test for each criterion, each with its own `ExecutorPromptCacheStore(directory:)` in a temporary folder.
-- [ ] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` — all pass.
+- [x] Extend `Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift` (from ^w0s77dt) with one test for each criterion, each with its own `ExecutorPromptCacheStore(directory:)` in a temporary folder.
+- [x] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` — all pass.
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass.

@@ -49,6 +49,25 @@ struct ExecutorPromptCacheSpoolTests {
     /// The write duration that the spill-line test reports.
     private static let reportedWriteDuration: Duration = .milliseconds(1_250)
 
+    /// A second model, for the tests that remove the state of one model or one session.
+    private static let otherModelID = "test-org/prompt-cache-spool-other"
+
+    /// How many files the disk-budget test keeps, and how many entries the memory budget of the
+    /// eviction test keeps.
+    private static let keptFileCount = 2
+
+    /// The free space that the default-disk-budget test gives.
+    private static let availableCapacity = 400_000
+
+    /// The process of the folder that the clean-up test marks stale.
+    private static let stalePID: pid_t = 101
+
+    /// The process of the folder that the clean-up test marks live but not signalable.
+    private static let unsignalablePID: pid_t = 102
+
+    /// The process of the folder that the clean-up test marks live.
+    private static let livePID: pid_t = 103
+
     /// The fixture arrays, in the order of their first values.
     private enum FixtureArray: Int {
         case keys
@@ -123,6 +142,36 @@ struct ExecutorPromptCacheSpoolTests {
             return []
         }
         return try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+    }
+
+    /// Makes the folder `name` in `root`, and makes `root` when it is not there.
+    ///
+    /// - Parameters:
+    ///   - name: The name of the folder.
+    ///   - root: The folder that holds it.
+    /// - Returns: `name`.
+    private static func makeFolder(_ name: String, in root: URL) throws -> String {
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent(name, isDirectory: true),
+            withIntermediateDirectories: true)
+        return name
+    }
+
+    /// Records an issue unless `store` holds nothing for `key` and no file stays in `directory`:
+    /// no entry in memory, no write that has not ended, no disk record and no byte on any tier.
+    ///
+    /// - Parameters:
+    ///   - key: The key that the test removed.
+    ///   - store: The store.
+    ///   - directory: The spool folder of the store.
+    private static func expectNothingStored(
+        for key: ExecutorPromptCacheKey, in store: ExecutorPromptCacheStore, directory: URL
+    ) async throws {
+        #expect(await store.retainedByteCount == 0)
+        #expect(await store.spillingByteCount == 0)
+        #expect(await store.diskByteCount == 0)
+        #expect(try fileNames(in: directory).isEmpty)
+        #expect(await store.checkOut(key) == .none)
     }
 
     /// Records an issue unless two lists of arrays have equal shapes, types and values.
@@ -399,6 +448,233 @@ struct ExecutorPromptCacheSpoolTests {
 
         #expect(try Self.fileNames(in: directory).isEmpty)
         #expect(await store.checkOut(sessionKey) == .none)
+    }
+
+    // MARK: - Disk budget
+
+    @Test(
+        "the disk budget deletes the least recently used files, and the disk total stays at or below it"
+    )
+    func theDiskBudgetDeletesTheLeastRecentlyUsedFiles() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = await Self.store(in: directory)
+        await store.checkIn(Self.key("s1"), Self.entry())
+        await store.waitForSpills()
+        let fileByteCount = await store.diskByteCount
+        #expect(fileByteCount > 0)
+
+        await store.configure(diskBudgetBytes: Self.keptFileCount * fileByteCount)
+        await store.checkIn(Self.key("s2"), Self.entry())
+        await store.checkIn(Self.key("s3"), Self.entry())
+        await store.waitForSpills()
+
+        #expect(await store.diskByteCount == Self.keptFileCount * fileByteCount)
+        let budget = await store.diskBudgetBytes
+        #expect(await store.diskByteCount <= budget)
+        #expect(try Self.fileNames(in: directory).count == Self.keptFileCount)
+        #expect(await store.checkOut(Self.key("s1")) == .none)
+        #expect(await store.checkOut(Self.key("s2")).spilledHandle != nil)
+        #expect(await store.checkOut(Self.key("s3")).spilledHandle != nil)
+    }
+
+    @Test("a smaller disk budget deletes files at once")
+    func aSmallerDiskBudgetDeletesFilesAtOnce() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = await Self.store(in: directory)
+        await store.checkIn(Self.key("s1"), Self.entry())
+        await store.waitForSpills()
+
+        await store.configure(diskBudgetBytes: 0)
+
+        #expect(await store.diskByteCount == 0)
+        #expect(try Self.fileNames(in: directory).isEmpty)
+        #expect(await store.checkOut(Self.key("s1")) == .none)
+    }
+
+    @Test("the default disk budget is one quarter of the free space it receives")
+    func theDefaultDiskBudgetIsOneQuarterOfTheFreeSpace() {
+        #expect(
+            ExecutorPromptCacheStore.defaultDiskBudgetBytes(
+                availableCapacity: Self.availableCapacity)
+                == 100_000)
+        #expect(ExecutorPromptCacheStore.defaultDiskBudgetBytes(availableCapacity: 0) == 0)
+        #expect(ExecutorPromptCacheStore.defaultDiskBudgetBytes(availableCapacity: -1) == 0)
+    }
+
+    // MARK: - Folders of processes that do not run
+
+    @Test("a process is stale only when kill fails with ESRCH")
+    func aProcessIsStaleOnlyWhenKillFailsWithESRCH() {
+        #expect(ExecutorPromptCacheStore.isStaleProcess(killResult: -1, errorNumber: ESRCH))
+        #expect(!ExecutorPromptCacheStore.isStaleProcess(killResult: -1, errorNumber: EPERM))
+        #expect(!ExecutorPromptCacheStore.isStaleProcess(killResult: 0, errorNumber: 0))
+    }
+
+    @Test(
+        "the clean-up deletes the folder of a stale process and keeps the folders of live processes"
+    )
+    func theCleanUpDeletesOnlyTheFoldersOfStaleProcesses() throws {
+        let root = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let stale = try Self.makeFolder("\(Self.stalePID)-\(UUID().uuidString)", in: root)
+        let unsignalable = try Self.makeFolder(
+            "\(Self.unsignalablePID)-\(UUID().uuidString)", in: root)
+        let live = try Self.makeFolder("\(Self.livePID)-\(UUID().uuidString)", in: root)
+        let foreign = try Self.makeFolder("not-a-spool-folder", in: root)
+
+        ExecutorPromptCacheStore.removeStaleSpoolFolders(in: root) { pid in
+            switch pid {
+            case Self.stalePID: (killResult: -1, errorNumber: ESRCH)
+            case Self.unsignalablePID: (killResult: -1, errorNumber: EPERM)
+            default: (killResult: 0, errorNumber: 0)
+            }
+        }
+
+        #expect(try Self.fileNames(in: root) == [live, foreign, unsignalable].sorted())
+        #expect(!(try Self.fileNames(in: root).contains(stale)))
+    }
+
+    // MARK: - Removal of one key
+
+    @Test("remove of a key in memory leaves nothing for that key")
+    func removeOfAKeyInMemoryLeavesNothing() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let entry = Self.entry()
+        let store = await Self.store(in: directory, budget: entry.byteCount)
+        await store.checkIn(Self.key("a"), entry)
+
+        await store.remove(Self.key("a"))
+        await store.waitForSpills()
+
+        try await Self.expectNothingStored(for: Self.key("a"), in: store, directory: directory)
+    }
+
+    @Test("remove of a key whose write has not ended leaves nothing after the write ends")
+    func removeOfASpillingKeyLeavesNothing() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = try HeldWriter(copies: Self.temporaryDirectory())
+        defer { try? FileManager.default.removeItem(at: writer.copies) }
+        let store = await Self.store(in: directory, writer: writer.write)
+        var starts = writer.startedWrites.makeAsyncIterator()
+        await store.checkIn(Self.key("a"), Self.entry())
+        _ = await starts.next()
+
+        await store.remove(Self.key("a"))
+        writer.release()
+        await store.waitForSpills()
+
+        try await Self.expectNothingStored(for: Self.key("a"), in: store, directory: directory)
+    }
+
+    @Test("remove of a key on disk deletes its file")
+    func removeOfAKeyOnDiskDeletesItsFile() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = await Self.store(in: directory)
+        await store.checkIn(Self.key("a"), Self.entry())
+        await store.waitForSpills()
+        #expect(try Self.fileNames(in: directory).count == 1)
+
+        await store.remove(Self.key("a"))
+
+        try await Self.expectNothingStored(for: Self.key("a"), in: store, directory: directory)
+    }
+
+    @Test("remove of an unknown key changes nothing")
+    func removeOfAnUnknownKeyChangesNothing() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let kept = Self.entry()
+        let store = await Self.store(in: directory, budget: kept.byteCount)
+        await store.checkIn(Self.key("kept"), kept)
+
+        await store.remove(Self.key("unknown"))
+
+        #expect(await store.retainedByteCount == kept.byteCount)
+        #expect(await store.checkOut(Self.key("kept")) == .memory(kept))
+    }
+
+    // MARK: - Removal of one session or one model
+
+    @Test("evict(sessionID:) removes that session for every model and keeps other sessions")
+    func evictSessionRemovesTheSessionForEveryModel() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let other = Self.entry()
+        let store = await Self.store(in: directory, budget: other.byteCount)
+        let firstModel = ExecutorPromptCacheKey(modelID: Self.modelID, sessionID: "shared")
+        let secondModel = ExecutorPromptCacheKey(modelID: Self.otherModelID, sessionID: "shared")
+        // Each check-in sends the one before it to disk.
+        await store.checkIn(firstModel, Self.entry())
+        await store.checkIn(secondModel, Self.entry())
+        await store.checkIn(Self.key("other"), other)
+        await store.waitForSpills()
+        #expect(try Self.fileNames(in: directory).count == 2)
+
+        await store.evict(sessionID: "shared")
+
+        #expect(try Self.fileNames(in: directory).isEmpty)
+        #expect(await store.diskByteCount == 0)
+        #expect(await store.checkOut(firstModel) == .none)
+        #expect(await store.checkOut(secondModel) == .none)
+        #expect(await store.checkOut(Self.key("other")) == .memory(other))
+    }
+
+    @Test(
+        "evict(modelID:) removes the memory, spilling and disk state of one model and keeps other models"
+    )
+    func evictModelRemovesEveryStateOfThatModel() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = try HeldWriter(copies: Self.temporaryDirectory())
+        defer { try? FileManager.default.removeItem(at: writer.copies) }
+        let store = await Self.store(in: directory, writer: writer.write)
+        let evicted = { ExecutorPromptCacheKey(modelID: Self.modelID, sessionID: $0) }
+        let kept = { ExecutorPromptCacheKey(modelID: Self.otherModelID, sessionID: $0) }
+        // The first two writes run at once. The third write waits.
+        writer.release()
+        writer.release()
+        await store.checkIn(evicted("disk"), Self.entry())
+        await store.checkIn(kept("disk"), Self.entry())
+        await store.waitForSpills()
+        await store.checkIn(evicted("spilling"), Self.entry())
+        let keptEntry = Self.entry()
+        await store.configure(memoryBudgetBytes: Self.keptFileCount * keptEntry.byteCount)
+        await store.checkIn(evicted("memory"), Self.entry())
+        await store.checkIn(kept("memory"), keptEntry)
+
+        await store.evict(modelID: Self.modelID)
+        writer.release()
+        await store.waitForSpills()
+
+        #expect(await store.checkOut(evicted("disk")) == .none)
+        #expect(await store.checkOut(evicted("spilling")) == .none)
+        #expect(await store.checkOut(evicted("memory")) == .none)
+        #expect(await store.spillingByteCount == 0)
+        let keptFile = try #require(await store.checkOut(kept("disk")).spilledHandle)
+        #expect(try Self.fileNames(in: directory) == [keptFile.url.lastPathComponent])
+        #expect(await store.checkOut(kept("memory")) == .memory(keptEntry))
+    }
+
+    @Test("evict(modelID: nil) removes the files of every model")
+    func evictOfEveryModelRemovesEveryFile() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = await Self.store(in: directory)
+        await store.checkIn(Self.key("a"), Self.entry())
+        await store.checkIn(
+            ExecutorPromptCacheKey(modelID: Self.otherModelID, sessionID: "a"), Self.entry())
+        await store.waitForSpills()
+        #expect(try Self.fileNames(in: directory).count == 2)
+
+        await store.evict(modelID: nil)
+
+        #expect(try Self.fileNames(in: directory).isEmpty)
+        #expect(await store.diskByteCount == 0)
     }
 
     @Test("the spill line names the session, its bytes and the write duration")
