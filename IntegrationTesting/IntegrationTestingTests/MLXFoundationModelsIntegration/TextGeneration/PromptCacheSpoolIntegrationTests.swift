@@ -24,12 +24,15 @@ import os
 
 @testable import MLXFoundationModels
 
+/// The time limit of the suite, in minutes.
+private let spoolSuiteTimeLimitMinutes = 10
+
 /// Proves, with real weights, that sessions whose caches went to disk come back warm.
 ///
 /// The suite binds its own store with `ExecutorPromptCacheStore.$current`, thus it never
 /// touches the shared store. The numbers are read from the channel, the way
 /// `PromptCacheReuseChannelTests` reads them.
-@Suite(.serialized, .timeLimit(.minutes(10)))
+@Suite(.serialized, .timeLimit(.minutes(spoolSuiteTimeLimitMinutes)))
 struct PromptCacheSpoolIntegrationTests {
 
     /// A small instruction-tuned model whose chat template lets a later turn extend the render

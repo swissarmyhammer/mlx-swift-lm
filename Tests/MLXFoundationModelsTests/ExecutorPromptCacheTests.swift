@@ -1033,8 +1033,12 @@ struct ExecutorPromptCacheTests {
     /// The session every report line of this section names.
     private var reportedKey: ExecutorPromptCacheKey { key("session-1") }
 
+    /// The restore time, in milliseconds, that the plan line of a restored pass reports.
+    private static let reportedRestoreMilliseconds = 1_250
+
     /// The restore time the plan line of a restored pass reports.
-    private static let reportedRestoreDuration: Duration = .milliseconds(1_250)
+    private static let reportedRestoreDuration: Duration = .milliseconds(
+        reportedRestoreMilliseconds)
 
     @Test("the plan line of an extension names the counts and the rule")
     func thePlanLineOfAnExtensionNamesTheCountsAndTheRule() throws {

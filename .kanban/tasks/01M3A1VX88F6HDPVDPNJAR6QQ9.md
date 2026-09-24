@@ -55,10 +55,23 @@ comments:
     - From memory (existing test): turn 2 `source=memory rendered=126 reused=101 fed=25 rule=splice`.
     - From disk (new test, memory budget 0): turn 1 spilled 170 722 160 bytes in 0.298 s (file 160 581 757 bytes). Turn 2 `source=disk restoreSeconds=0.061 rendered=126 reused=101 fed=25 rule=splice`; cachedTokenCount 101 of 126, turn 1 rendered 73; answer contains "teal".
   timestamp: 2026-09-24T21:45:59.830027+00:00
+- actor: claude-code
+  id: 01m3apa5ehdvbthvwydfdwsfnj
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD — 1 finding (1 confirmed, 0 refuted): Tests/MLXFoundationModelsTests/ExecutorPromptCacheRestoreTests.swift:402 `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+    - next: /implement
+
+    ### finish iteration 1 — findings
+    - implement: changed (9 source files)
+    - test: MLXFoundationModelsTests 299 passed x3; MLXGuidedGenerationTests 70, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 passed; MLXLMTests failures were there before this change (^fbhgd7k); both integration suites passed
+    - commit: 3d3ec21
+    - review: findings — ExecutorPromptCacheRestoreTests.swift:402 magic-numbers-swift
+  timestamp: 2026-09-24T21:49:26.865150+00:00
 depends_on:
 - 01M3A1RHPV3CV6Q7Q59W0S77DT
 - 01M3A29W6YK4F0VMGBCB28DXZ2
-position_column: doing
+position_column: review
 position_ordinal: '80'
 title: Restore a spilled prompt cache in MLXLanguageModel.Executor, and prove warm restores on a real model
 ---
@@ -95,3 +108,15 @@ In `Libraries/MLXFoundationModels/MLXLanguageModel.swift`, `runRespond` checks o
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass.
 - After the run, write the integration results as a comment on this task.
+
+## Review Findings (2026-09-24 16:46)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 9 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M3A1VX88F6HDPVDPNJAR6QQ9.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M3A1VX88F6HDPVDPNJAR6QQ9.md` — no validator matches this file
+> - `.kanban/tasks/01M3AP3BWPDHQFEQWQDFBHGD7K.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M3AP3BWPDHQFEQWQDFBHGD7K.md` — no validator matches this file
+
+- [ ] `Tests/MLXFoundationModelsTests/ExecutorPromptCacheRestoreTests.swift:402` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.

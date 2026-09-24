@@ -398,8 +398,11 @@ private enum ScriptedRenderError: Error, Equatable {
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 private final class ScriptedRenderGate: Sendable {
 
+    /// How many seconds a held render waits for its cancellation before it fails.
+    static let holdLimitSeconds = 60
+
     /// How long a held render waits for its cancellation before it fails.
-    static let holdLimit: Duration = .seconds(60)
+    static let holdLimit: Duration = .seconds(holdLimitSeconds)
 
     /// One element for each render that starts to hold.
     let heldRenders: AsyncStream<Void>
