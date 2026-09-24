@@ -1,11 +1,40 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m3ac1nn2hgxahs5jkw5acpmw
+  text: |-
+    Research before the change:
+    - `ExecutorPromptCacheStore.spill(_:_:)` only logs `evictionLine` now. `checkIn` calls it for an entry larger than the budget, and `evictToBudget` calls it for each LRU entry. `evict(modelID:)` does not use it.
+    - `ExecutorPromptCacheFile.prepare` makes new array handles (`$0[.ellipsis]`) and does not evaluate. `ExecutorPromptCacheFile.write` calls `writePromptCache` -> `save(arrays:)`, which evaluates the arrays under `evalLock`. Thus the writer task evaluates, not the actor.
+    - `write` does not make the folder. The spool must make the folder before the first write.
+    - Package is Swift 6 language mode (tools 6.2).
+    - Existing store tests use `ExecutorPromptCacheStore()`. With a spool, all of those stores share one process folder, and file names are `<digest>-<generation>`. Two stores with a per-store generation counter can write the same file name for the same key. Thus the existing test file must give each store its own folder through `init(directory:)`.
+    - The test "the least recently used session loses its cache past the byte budget" expects `checkOut == nil` for the evicted key. After this change the evicted key is spilling or on disk, thus that test must read `peek` (memory only).
+    - A stale write completion (spill A, then check-out, check-in, spill B) must delete ITS OWN file (A's generation name), else B is not the only file. It never changes `onDisk` and never deletes B's file.
+  timestamp: 2026-09-24T18:50:02.786385+00:00
+- actor: claude-code
+  id: 01m3acgp3epa1gk3erexpw8wr8
+  text: |-
+    ### implement — changed
+    - evidence: 6 files — Libraries/MLXFoundationModels/ExecutorPromptCache.swift (spool: `ExecutorPromptCacheCheckout`, `ExecutorPromptCacheSpilledHandle`, `ExecutorPromptCacheSpoolWriter` with one AsyncStream consumer task, `spilling`/`onDisk`/`spillingByteCount`, generation numbers, `init(directory:writer:)`, `waitForSpills()`, `spillLine`), Libraries/MLXFoundationModels/ExecutorPromptCacheFile.swift (`removePartialFile` becomes internal `removeFile(at:)`), Libraries/MLXFoundationModels/MLXLanguageModel.swift (`checkOutPromptCache`: `.spilled` starts cold and deletes the file), Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift (call sites; each store has its own folder and a writer that writes nothing; executor test for `.spilled`), Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift (new, one test for each criterion).
+    - Notes: the folder is made by the default writer `ExecutorPromptCacheStore.writeSpillFile`, not by the consumer, thus a test writer that writes nothing makes no folder. A stale write (its generation is not the current generation of its key) deletes only its own file and changes no record.
+    - `swift build --build-tests`: only the known `missing creator for mutated node` warning. MLXFoundationModelsTests: 267 Swift Testing tests in 31 suites pass, 6 runs in a row.
+    - next: /test
+  timestamp: 2026-09-24T18:58:14.766609+00:00
+- actor: claude-code
+  id: 01m3ad8xx1bfar2zg86gjwz8yz
+  text: |-
+    ### test — green (baseline only)
+    - evidence: `swift build --build-tests` — only the known `missing creator for mutated node` warning. `xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` — 267 tests in 31 suites pass (7 runs, no flaky test). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` — 694 XCTest with 36 failures (GlmOcr/Qwen25VL/Qwen35/Qwen3VL ContinuationTests + NanbeigeTests) and 1207 Swift Testing tests with 101 issues: equal to the 2026-09-24 baseline. The change touches only MLXFoundationModels, thus the other three bundles do not change.
+    - next: /commit
+  timestamp: 2026-09-24T19:11:29.185268+00:00
 depends_on:
 - 01M3A1QAFD56F5TEPPADDJHENH
 - 01M3A1QND68R1PN6K74Z6AV3EP
-position_column: todo
-position_ordinal: '8380'
+position_column: doing
+position_ordinal: '80'
 title: 'Disk spool, part 1: spill evicted entries with one serial writer, and hand out a spilled handle on check-out'
 ---
 #prompt-cache

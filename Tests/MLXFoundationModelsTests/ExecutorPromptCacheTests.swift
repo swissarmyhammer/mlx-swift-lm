@@ -34,6 +34,18 @@ struct ExecutorPromptCacheTests {
         return ExecutorPromptCacheEntry(caches: caches, tokens: tokens)
     }
 
+    /// A store in a folder of its own, whose writer writes nothing.
+    ///
+    /// These tests read the memory tier alone, and
+    /// `ExecutorPromptCacheSpoolTests` reads the files. A writer that writes
+    /// nothing thus leaves no file, and two stores never share a file name.
+    private func makeStore() -> ExecutorPromptCacheStore {
+        ExecutorPromptCacheStore(
+            directory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("ExecutorPromptCacheTests-\(UUID().uuidString)"),
+            writer: { _, _ in })
+    }
+
     /// A key for `sessionID` under ``modelID``.
     private func key(
         _ sessionID: String, modelID: String = ExecutorPromptCacheTests.modelID
@@ -117,45 +129,45 @@ struct ExecutorPromptCacheTests {
 
     @Test("a checked-in cache comes back to the next turn of its session")
     func aCheckedInCacheComesBackToTheNextTurnOfItsSession() async {
-        let store = ExecutorPromptCacheStore()
+        let store = makeStore()
         await store.checkIn(key("a"), entry(tokens: [1, 2, 3]))
 
-        #expect(await store.checkOut(key("a"))?.tokens == [1, 2, 3])
+        #expect(await store.checkOut(key("a")).entry?.tokens == [1, 2, 3])
     }
 
     @Test("a check-out takes the cache away, thus a second turn starts cold")
     func aCheckOutTakesTheCacheAwayThusASecondTurnStartsCold() async {
-        let store = ExecutorPromptCacheStore()
+        let store = makeStore()
         await store.checkIn(key("a"), entry(tokens: [1, 2, 3]))
 
         _ = await store.checkOut(key("a"))
 
-        #expect(await store.checkOut(key("a")) == nil)
+        #expect(await store.checkOut(key("a")) == .none)
     }
 
     @Test("checking in nothing releases the cache of that session")
     func checkingInNothingReleasesTheCacheOfThatSession() async {
-        let store = ExecutorPromptCacheStore()
+        let store = makeStore()
         await store.checkIn(key("a"), entry(tokens: [1, 2, 3]))
 
         await store.checkIn(key("a"), nil)
 
-        #expect(await store.checkOut(key("a")) == nil)
+        #expect(await store.checkOut(key("a")) == .none)
     }
 
     @Test("two sessions never read each other's cache")
     func twoSessionsNeverReadEachOthersCache() async {
-        let store = ExecutorPromptCacheStore()
+        let store = makeStore()
         await store.checkIn(key("a"), entry(tokens: [1, 2, 3]))
         await store.checkIn(key("b"), entry(tokens: [7, 8]))
 
-        #expect(await store.checkOut(key("a"))?.tokens == [1, 2, 3])
-        #expect(await store.checkOut(key("b"))?.tokens == [7, 8])
+        #expect(await store.checkOut(key("a")).entry?.tokens == [1, 2, 3])
+        #expect(await store.checkOut(key("b")).entry?.tokens == [7, 8])
     }
 
-    @Test("the least recently used session loses its cache past the byte budget")
-    func theLeastRecentlyUsedSessionLosesItsCachePastTheByteBudget() async {
-        let store = ExecutorPromptCacheStore()
+    @Test("the least recently used session leaves memory past the byte budget")
+    func theLeastRecentlyUsedSessionLeavesMemoryPastTheByteBudget() async {
+        let store = makeStore()
         let sessionsInBudget = Self.smallSessionsInBudget
         await store.configure(
             memoryBudgetBytes: sessionsInBudget * entry(tokens: [0]).byteCount)
@@ -164,27 +176,27 @@ struct ExecutorPromptCacheTests {
         }
 
         #expect(await store.retainedSessionCount == sessionsInBudget)
-        #expect(await store.checkOut(key("session-0")) == nil)
+        #expect(await store.peek(key("session-0")) == nil)
         #expect(
-            await store.checkOut(key("session-\(sessionsInBudget)"))?.tokens
+            await store.checkOut(key("session-\(sessionsInBudget)")).entry?.tokens
                 == [sessionsInBudget])
     }
 
     @Test("evicting one model releases only the caches of that model")
     func evictingOneModelReleasesOnlyTheCachesOfThatModel() async {
-        let store = ExecutorPromptCacheStore()
+        let store = makeStore()
         await store.checkIn(key("a"), entry(tokens: [1]))
         await store.checkIn(key("a", modelID: Self.otherModelID), entry(tokens: [2]))
 
         await store.evict(modelID: Self.modelID)
 
-        #expect(await store.checkOut(key("a")) == nil)
-        #expect(await store.checkOut(key("a", modelID: Self.otherModelID))?.tokens == [2])
+        #expect(await store.checkOut(key("a")) == .none)
+        #expect(await store.checkOut(key("a", modelID: Self.otherModelID)).entry?.tokens == [2])
     }
 
     @Test("evicting every model releases every cache")
     func evictingEveryModelReleasesEveryCache() async {
-        let store = ExecutorPromptCacheStore()
+        let store = makeStore()
         await store.checkIn(key("a"), entry(tokens: [1]))
         await store.checkIn(key("a", modelID: Self.otherModelID), entry(tokens: [2]))
 
@@ -215,7 +227,7 @@ struct ExecutorPromptCacheTests {
 
     /// A store whose memory budget is `budget` bytes.
     private func store(budget: Int) async -> ExecutorPromptCacheStore {
-        let store = ExecutorPromptCacheStore()
+        let store = makeStore()
         await store.configure(memoryBudgetBytes: budget)
         return store
     }
@@ -296,7 +308,7 @@ struct ExecutorPromptCacheTests {
 
         // The turn of "a" takes its cache out and puts it back, thus "a" is
         // now the most recently used and "b" the least.
-        let renewed = await store.checkOut(key("a"))
+        let renewed = await store.checkOut(key("a")).entry
         await store.checkIn(key("a"), renewed)
         await store.checkIn(key("d"), smallEntry())
 
@@ -402,7 +414,7 @@ struct ExecutorPromptCacheTests {
     func aStoreWithNoBudgetFromTheHostSetsOneFromTheDevice() async {
         // The test process holds far less active memory than the working set
         // of the device, thus a quarter of the free part is more than zero.
-        #expect(await ExecutorPromptCacheStore().memoryBudgetBytes > 0)
+        #expect(await makeStore().memoryBudgetBytes > 0)
     }
 
     @Test("the eviction line names the session and its bytes")
@@ -415,24 +427,28 @@ struct ExecutorPromptCacheTests {
 
     // MARK: - The store a task binds
 
+    /// Runs one executor pass of a scripted model inside `store`, for a
+    /// transcript whose first entry is `sessionID`.
+    ///
+    /// - Parameters:
+    ///   - store: the store the pass binds.
+    ///   - modelID: the model of the pass. A fresh identity keeps the
+    ///     process-wide model cache and the shared store out of every other
+    ///     test.
+    ///   - sessionID: the first entry of the transcript.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    @Test("an executor pass inside a bound store uses that store and not the shared one")
-    func anExecutorPassInsideABoundStoreUsesThatStore() async throws {
+    private func respondOnce(
+        inside store: ExecutorPromptCacheStore, modelID: String, sessionID: String
+    ) async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        // A fresh identity keeps the process-wide model cache and the shared
-        // store out of every other test.
-        let modelID = "probe/bound-prompt-cache-store-\(UUID().uuidString)"
         let model = MLXLanguageModel(
             configuration: ModelConfiguration(id: modelID),
             capabilities: [],
             weightsLocation: { _ in weights },
             load: { _, _ in makeScriptedContainer(modelID: modelID, rounds: ["A"]) })
         let executor = try makeMLXExecutor(for: model)
-        let request = makeRequest(transcript: transcript(firstEntryID: "bound-session"))
-        let sessionKey = key("bound-session", modelID: modelID)
-        let store = ExecutorPromptCacheStore()
-        await store.checkIn(sessionKey, entry(tokens: [1, 2, 3]))
+        let request = makeRequest(transcript: transcript(firstEntryID: sessionID))
         let channel = LanguageModelExecutorGenerationChannel()
         // The channel is a rendezvous, thus a consumer must run beside the
         // executor or every send parks it.
@@ -444,6 +460,17 @@ struct ExecutorPromptCacheTests {
         try await ExecutorPromptCacheStore.$current.withValue(store) {
             try await executor.respond(to: request, model: model, streamingInto: channel)
         }
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("an executor pass inside a bound store uses that store and not the shared one")
+    func anExecutorPassInsideABoundStoreUsesThatStore() async throws {
+        let modelID = "probe/bound-prompt-cache-store-\(UUID().uuidString)"
+        let sessionKey = key("bound-session", modelID: modelID)
+        let store = makeStore()
+        await store.checkIn(sessionKey, entry(tokens: [1, 2, 3]))
+
+        try await respondOnce(inside: store, modelID: modelID, sessionID: "bound-session")
 
         // The pass checked the seeded entry out of the bound store. The
         // scripted model holds no key/value cache, thus the pass checked
@@ -453,10 +480,30 @@ struct ExecutorPromptCacheTests {
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("an executor pass that finds its cache on disk starts cold and deletes the file")
+    func anExecutorPassThatFindsItsCacheOnDiskStartsColdAndDeletesTheFile() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ExecutorPromptCacheTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let modelID = "probe/spilled-prompt-cache-\(UUID().uuidString)"
+        let sessionKey = key("spilled-session", modelID: modelID)
+        let store = ExecutorPromptCacheStore(directory: directory)
+        await store.configure(memoryBudgetBytes: 0)
+        await store.checkIn(sessionKey, entry(tokens: [1, 2, 3]))
+        await store.waitForSpills()
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 1)
+
+        try await respondOnce(inside: store, modelID: modelID, sessionID: "spilled-session")
+
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+        #expect(await store.checkOut(sessionKey) == .none)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test("evicting a model inside a bound store releases the caches of that store")
     func evictingAModelInsideABoundStoreReleasesTheCachesOfThatStore() async {
         let model = makeStubModel("probe/bound-evict-\(UUID().uuidString)")
-        let store = ExecutorPromptCacheStore()
+        let store = makeStore()
         await store.checkIn(key("a", modelID: model.modelID), smallEntry())
 
         await ExecutorPromptCacheStore.$current.withValue(store) {
@@ -873,12 +920,12 @@ struct ExecutorPromptCacheTests {
 
     @Test("a peek reads the entry of a session and leaves it in the store")
     func aPeekReadsTheEntryOfASessionAndLeavesItInTheStore() async {
-        let store = ExecutorPromptCacheStore()
+        let store = makeStore()
         await store.checkIn(key("a"), entry(tokens: [1, 2, 3]))
 
         #expect(await store.peek(key("a"))?.tokens == [1, 2, 3])
         #expect(await store.retainedSessionCount == 1)
-        #expect(await store.checkOut(key("a"))?.tokens == [1, 2, 3])
+        #expect(await store.checkOut(key("a")).entry?.tokens == [1, 2, 3])
     }
 
     // MARK: - Naming the rule that decided a pass

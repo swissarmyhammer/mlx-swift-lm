@@ -113,7 +113,7 @@ enum ExecutorPromptCacheFile {
             try writePromptCache(input, url: partialURL)
             try rename(partialURL, to: url)
         } catch {
-            removePartialFile(at: partialURL)
+            removeFile(at: partialURL)
             throw error
         }
     }
@@ -198,13 +198,15 @@ enum ExecutorPromptCacheFile {
         }
     }
 
-    /// Removes the partial file of a failed write, when it is there.
+    /// Removes a prompt cache file, when it is there: the partial file of a failed write, or a
+    /// file that no session needs.
     ///
-    /// The error of the write is the error the caller must see, thus a failed removal goes to
-    /// the log and is not thrown.
+    /// A failed removal leaves a file that nobody reads, and the caller can do nothing about it.
+    /// The error of a failed write is the error that the caller must see. Thus a failed removal
+    /// goes to the log and is not thrown.
     ///
-    /// - Parameter url: The URL of the partial file.
-    private static func removePartialFile(at url: URL) {
+    /// - Parameter url: The URL of the file.
+    static func removeFile(at url: URL) {
         guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else {
             return
         }

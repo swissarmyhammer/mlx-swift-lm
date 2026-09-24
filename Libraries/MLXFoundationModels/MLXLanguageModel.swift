@@ -699,6 +699,31 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             return ExecutorPromptCacheKey(modelID: modelID, sessionID: firstEntry.id)
         }
 
+        /// Checks the prompt cache of a session out of the store the task uses.
+        ///
+        /// A cache on disk starts the turn cold, and the executor deletes its
+        /// file: this executor cannot read a spilled cache back yet.
+        ///
+        /// - Parameter key: the session of the request, or nil when the request
+        ///   names no session.
+        /// - Returns: the entry in memory, or nil when the turn starts cold.
+        static func checkOutPromptCache(
+            _ key: ExecutorPromptCacheKey?
+        ) async -> ExecutorPromptCacheEntry? {
+            guard let key else { return nil }
+            switch await ExecutorPromptCacheStore.current.checkOut(key) {
+            case .memory(let entry):
+                return entry
+            case .spilled(let handle):
+                ExecutorPromptCacheLog.info(
+                    ExecutorPromptCacheReport.spilledColdStartLine(key: handle.key))
+                ExecutorPromptCacheFile.removeFile(at: handle.url)
+                return nil
+            case .none:
+                return nil
+            }
+        }
+
         /// Map FoundationModels' optional `Double` `GenerationOptions.temperature`
         /// to MLXLMCommon's `Float` `GenerateParameters.temperature`, clamping
         /// negatives to 0.
@@ -971,12 +996,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // run and a second response on the same session starts cold rather
             // than writing the same caches.
             let promptCacheKey = Self.sessionCacheKey(for: request, modelID: modelID)
-            let carriedPromptCache: ExecutorPromptCacheEntry?
-            if let promptCacheKey {
-                carriedPromptCache = await ExecutorPromptCacheStore.current.checkOut(promptCacheKey)
-            } else {
-                carriedPromptCache = nil
-            }
+            let carriedPromptCache = await Self.checkOutPromptCache(promptCacheKey)
             let promptCache = ExecutorPromptCacheSlot(carriedPromptCache, key: promptCacheKey)
 
             let outcome: Result<Void, any Error>

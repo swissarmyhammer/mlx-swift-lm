@@ -86,6 +86,139 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     }
 }
 
+// MARK: - What a check-out gives
+
+/// The file of one entry that the store wrote to disk, and the session it
+/// belongs to.
+///
+/// The turn that gets a handle owns the file: the store keeps no record of it.
+struct ExecutorPromptCacheSpilledHandle: Equatable, Sendable {
+
+    /// The URL of the file.
+    let url: URL
+
+    /// The session the file belongs to.
+    let key: ExecutorPromptCacheKey
+}
+
+/// What ``ExecutorPromptCacheStore/checkOut(_:)`` finds for one session.
+enum ExecutorPromptCacheCheckout: Sendable {
+
+    /// The entry was in memory, or its write to disk had not ended.
+    case memory(ExecutorPromptCacheEntry)
+
+    /// The entry is on disk, in the file of the handle.
+    case spilled(ExecutorPromptCacheSpilledHandle)
+
+    /// The store holds nothing for the session.
+    case none
+
+    /// The entry in memory, or nil when the check-out found no entry in
+    /// memory.
+    var entry: ExecutorPromptCacheEntry? {
+        switch self {
+        case .memory(let entry): entry
+        case .spilled, .none: nil
+        }
+    }
+
+    /// The file on disk, or nil when the check-out found no file.
+    var spilledHandle: ExecutorPromptCacheSpilledHandle? {
+        switch self {
+        case .spilled(let handle): handle
+        case .memory, .none: nil
+        }
+    }
+}
+
+extension ExecutorPromptCacheCheckout: Equatable {
+
+    /// Two check-outs are equal when they give the same entry object, equal
+    /// handles, or both give nothing.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        switch (lhs, rhs) {
+        case (.memory(let lhsEntry), .memory(let rhsEntry)): lhsEntry === rhsEntry
+        case (.spilled(let lhsHandle), .spilled(let rhsHandle)): lhsHandle == rhsHandle
+        case (.none, .none): true
+        case (.memory, _), (.spilled, _), (.none, _): false
+        }
+    }
+}
+
+// MARK: - The spool writer
+
+/// Writes a prepared entry to a URL. The spool calls it off the store actor,
+/// one write at a time.
+typealias ExecutorPromptCacheFileWriter = @Sendable (PromptCacheSaveInput, URL) throws -> Void
+
+/// One write of the spool, and what to do when it ends.
+struct ExecutorPromptCacheSpillJob: Sendable {
+
+    /// The prepared entry.
+    let input: PromptCacheSaveInput
+
+    /// The URL of the file.
+    let url: URL
+
+    /// Receives the result of the write and the time it took.
+    let didEnd: @Sendable (Result<Void, any Error>, Duration) async -> Void
+}
+
+/// Runs the writes of one store in order, one at a time, on a task of its own.
+///
+/// A write holds the process-wide evaluation lock of MLX for its whole run,
+/// because the safetensors save evaluates the arrays. Two writes at the same
+/// time thus gain nothing, and one write at a time keeps the store actor free:
+/// the actor only puts a job in the queue.
+final class ExecutorPromptCacheSpoolWriter: Sendable {
+
+    /// The queue of the writes.
+    private let jobs: AsyncStream<ExecutorPromptCacheSpillJob>.Continuation
+
+    /// The task that runs the writes.
+    private let consumer: Task<Void, Never>
+
+    /// Creates a writer and starts the task that runs its writes.
+    ///
+    /// - Parameter write: writes one prepared entry to one URL.
+    init(write: @escaping ExecutorPromptCacheFileWriter) {
+        let (stream, jobs) = AsyncStream.makeStream(of: ExecutorPromptCacheSpillJob.self)
+        self.jobs = jobs
+        self.consumer = Task.detached {
+            for await job in stream {
+                await Self.run(job, write: write)
+            }
+        }
+    }
+
+    deinit {
+        jobs.finish()
+        consumer.cancel()
+    }
+
+    /// Puts `job` at the end of the queue.
+    ///
+    /// - Parameter job: the write to run.
+    func enqueue(_ job: ExecutorPromptCacheSpillJob) {
+        jobs.yield(job)
+    }
+
+    /// Writes the file of `job`, and gives the result and the duration to the
+    /// job.
+    ///
+    /// - Parameters:
+    ///   - job: the write to run.
+    ///   - write: writes one prepared entry to one URL.
+    private static func run(
+        _ job: ExecutorPromptCacheSpillJob, write: ExecutorPromptCacheFileWriter
+    ) async {
+        let clock = ContinuousClock()
+        let start = clock.now
+        let result = Result<Void, any Error> { try write(job.input, job.url) }
+        await job.didEnd(result, start.duration(to: clock.now))
+    }
+}
+
 // MARK: - The store
 
 /// Holds the prompt cache of each live session between the turns of that
@@ -103,10 +236,30 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
 /// long session can be larger than many short ones. When a check-in takes the
 /// total past the budget, the least recently used entries leave first, each
 /// through ``spill(_:_:)``.
+///
+/// An entry that leaves memory goes to one file in ``directory``. It has three
+/// states: in memory, spilling (its write has not ended) and on disk. Each
+/// spill gets a new generation number, and the file name holds it. A write
+/// that ends changes the records of its key only when its generation is still
+/// the generation of that key. An older write only deletes its own file.
 actor ExecutorPromptCacheStore {
 
     /// The store every executor shares.
     static let shared = ExecutorPromptCacheStore()
+
+    /// The name of the folder, in the temporary directory, that holds the spool
+    /// folder of each process.
+    static let spoolFolderName = "mlx-prompt-cache"
+
+    /// The spool folder of this process:
+    /// `<temporary directory>/mlx-prompt-cache/<pid>-<UUID>/`. The UUID is made
+    /// one time in each process, thus a new process never reads the folder of
+    /// an old process that had the same process identifier.
+    static let processSpoolDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(spoolFolderName, isDirectory: true)
+        .appendingPathComponent(
+            "\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)",
+            isDirectory: true)
 
     /// The store the executor uses: ``shared``, unless a task binds another.
     ///
@@ -141,6 +294,86 @@ actor ExecutorPromptCacheStore {
     /// How many sessions hold a cache. Read by tests.
     var retainedSessionCount: Int { entries.count }
 
+    /// The folder of the spill files. The spool writer makes it at the first
+    /// write.
+    let directory: URL
+
+    /// Runs the writes of the spill files, one at a time.
+    private let spoolWriter: ExecutorPromptCacheSpoolWriter
+
+    /// One entry whose write to disk has not ended.
+    private struct SpillingEntry {
+
+        /// The entry. It is still in memory, thus a check-out gives it back.
+        let entry: ExecutorPromptCacheEntry
+
+        /// The input the writer writes. It holds its own array handles, thus a
+        /// turn that takes `entry` back and writes into its caches does not
+        /// change the file.
+        let input: PromptCacheSaveInput
+
+        /// The generation of this spill.
+        let generation: UInt64
+
+        /// The bytes the entry holds in memory until the write ends.
+        let byteCount: Int
+    }
+
+    /// The entries whose write to disk has not ended, by session.
+    private var spilling: [ExecutorPromptCacheKey: SpillingEntry] = [:]
+
+    /// The sum of the bytes of the entries in ``spilling``. They are still in
+    /// memory until their writes end, but they are not in
+    /// ``retainedByteCount``.
+    private(set) var spillingByteCount = 0
+
+    /// The files of the entries on disk, by session.
+    private var onDisk: [ExecutorPromptCacheKey: ExecutorPromptCacheSpilledHandle] = [:]
+
+    /// The generation of the last spill. Each spill takes the next number.
+    private var lastGeneration: UInt64 = 0
+
+    /// The writes that are in the queue or that run now.
+    private var pendingWriteCount = 0
+
+    /// The tasks that wait in ``waitForSpills()``.
+    private var spillWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Creates a store that spills to the folder of this process,
+    /// ``processSpoolDirectory``.
+    init() {
+        self.init(directory: Self.processSpoolDirectory)
+    }
+
+    /// Creates a store that spills to `directory`.
+    ///
+    /// - Parameters:
+    ///   - directory: the folder of the spill files. The default writer makes
+    ///     it at the first write.
+    ///   - writer: writes one prepared entry to one file. Tests give a writer
+    ///     that holds or counts the writes.
+    init(
+        directory: URL,
+        writer: @escaping ExecutorPromptCacheFileWriter = ExecutorPromptCacheStore.writeSpillFile
+    ) {
+        self.directory = directory
+        self.spoolWriter = ExecutorPromptCacheSpoolWriter(write: writer)
+    }
+
+    /// Makes the folder of `url`, when it is not there, and writes `input` to
+    /// `url`. This is the default writer of a store.
+    ///
+    /// - Parameters:
+    ///   - input: the prepared entry.
+    ///   - url: the URL of the spill file.
+    /// - Throws: the error of the file system, or the error of
+    ///   ``ExecutorPromptCacheFile/write(_:to:)``.
+    static func writeSpillFile(_ input: PromptCacheSaveInput, to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try ExecutorPromptCacheFile.write(input, to: url)
+    }
+
     /// The budget the store takes when no host sets one: one quarter of the
     /// working set that is not active yet.
     ///
@@ -169,9 +402,32 @@ actor ExecutorPromptCacheStore {
 
     /// Takes the entry of `key` out of the store.
     ///
-    /// - Returns: the entry, or nil when the store holds none for `key`.
-    func checkOut(_ key: ExecutorPromptCacheKey) -> ExecutorPromptCacheEntry? {
-        remove(key)
+    /// The store looks in memory first, then in the spills that have not
+    /// ended, then on disk. An entry whose write has not ended comes back as
+    /// `.memory`: the write then records nothing and deletes its own file. A
+    /// file on disk comes back as `.spilled`, and the caller then owns it.
+    ///
+    /// - Parameter key: the session of the turn.
+    /// - Returns: the entry, its file, or `.none` when the store holds nothing
+    ///   for `key`.
+    func checkOut(_ key: ExecutorPromptCacheKey) -> ExecutorPromptCacheCheckout {
+        if let entry = remove(key) {
+            return .memory(entry)
+        }
+        if let spill = removeSpill(of: key) {
+            return .memory(spill.entry)
+        }
+        if let handle = onDisk.removeValue(forKey: key) {
+            return .spilled(handle)
+        }
+        return .none
+    }
+
+    /// Returns when every write in the queue has ended. Tests call it before
+    /// they read the spool folder.
+    func waitForSpills() async {
+        guard pendingWriteCount > 0 else { return }
+        await withCheckedContinuation { spillWaiters.append($0) }
     }
 
     /// Reads the entry of `key` and leaves it in the store. Read by tests that
@@ -185,11 +441,23 @@ actor ExecutorPromptCacheStore {
     /// Puts `entry` back under `key` as the most recently used entry, or
     /// drops the key when `entry` is nil.
     ///
+    /// A check-in is newer than any spill of `key`, thus the store first drops
+    /// the spill that has not ended and deletes the file on disk of `key`.
+    ///
     /// After the insert, the least recently used entries leave until the
     /// total is at or below ``memoryBudgetBytes``. An entry larger than the
-    /// whole budget is not kept, and no other entry leaves for it.
+    /// whole budget is not kept in memory, and no other entry leaves for it.
+    ///
+    /// - Parameters:
+    ///   - key: the session of the turn.
+    ///   - entry: the entry the turn leaves, or nil when the next turn must
+    ///     start cold.
     func checkIn(_ key: ExecutorPromptCacheKey, _ entry: ExecutorPromptCacheEntry?) {
         remove(key)
+        removeSpill(of: key)
+        if let handle = onDisk.removeValue(forKey: key) {
+            ExecutorPromptCacheFile.removeFile(at: handle.url)
+        }
         guard let entry else { return }
         guard entry.byteCount <= memoryBudgetBytes else {
             spill(key, entry)
@@ -238,8 +506,15 @@ actor ExecutorPromptCacheStore {
     /// Takes an entry that leaves memory for the budget. Every eviction for
     /// the budget comes through here.
     ///
-    /// The entry is already out of the store. This function logs the eviction
-    /// and drops the entry, thus the next turn of that session starts cold.
+    /// The entry is already out of the store. This function logs the eviction,
+    /// prepares the entry on the actor, and puts its write in the queue of the
+    /// spool writer. `prepare` copies the array handles and the metadata, thus
+    /// the writer holds no reference to the caches: a turn that checks the
+    /// entry out during the write can write into the caches, and the file does
+    /// not change. The writer, not the actor, evaluates the arrays.
+    ///
+    /// An entry that cannot be prepared is dropped, thus the next turn of that
+    /// session starts cold.
     ///
     /// - Parameters:
     ///   - key: the session of the entry.
@@ -247,6 +522,119 @@ actor ExecutorPromptCacheStore {
     private func spill(_ key: ExecutorPromptCacheKey, _ entry: ExecutorPromptCacheEntry) {
         ExecutorPromptCacheLog.info(
             ExecutorPromptCacheReport.evictionLine(key: key, byteCount: entry.byteCount))
+        let input: PromptCacheSaveInput
+        do {
+            input = try ExecutorPromptCacheFile.prepare(entry, key: key)
+        } catch {
+            ExecutorPromptCacheLog.info(
+                ExecutorPromptCacheReport.spillLine(
+                    key: key, byteCount: entry.byteCount, duration: .zero,
+                    outcome: .failed(error)))
+            return
+        }
+        lastGeneration += 1
+        let spill = SpillingEntry(
+            entry: entry, input: input, generation: lastGeneration, byteCount: entry.byteCount)
+        let url = directory.appendingPathComponent(
+            ExecutorPromptCacheFile.fileName(for: key, generation: spill.generation))
+        spilling[key] = spill
+        spillingByteCount += spill.byteCount
+        pendingWriteCount += 1
+        spoolWriter.enqueue(
+            ExecutorPromptCacheSpillJob(input: spill.input, url: url) {
+                [weak self] result, duration in
+                await self?.writeDidEnd(
+                    ExecutorPromptCacheSpilledHandle(url: url, key: key),
+                    generation: spill.generation, byteCount: spill.byteCount,
+                    result: result, duration: duration)
+            })
+    }
+
+    /// Removes the spill of `key` that has not ended, and its bytes from
+    /// ``spillingByteCount``. The write of that spill then finds another
+    /// generation, or none, and only deletes its own file.
+    ///
+    /// - Parameter key: the session of the spill.
+    /// - Returns: the spill, or nil when no write of `key` is in the queue.
+    @discardableResult
+    private func removeSpill(of key: ExecutorPromptCacheKey) -> SpillingEntry? {
+        guard let spill = spilling.removeValue(forKey: key) else { return nil }
+        spillingByteCount -= spill.byteCount
+        return spill
+    }
+
+    /// Records the end of one write.
+    ///
+    /// When `generation` is still the generation of the key, the spill ends:
+    /// a written file goes on disk, and a failed write leaves nothing. When a
+    /// check-out or a check-in removed the spill, the write is stale: its file
+    /// is deleted, and no record changes. A stale write never touches the
+    /// file of a later spill, because each generation has its own file name.
+    ///
+    /// - Parameters:
+    ///   - handle: the file of the write and its session.
+    ///   - generation: the generation of the write.
+    ///   - byteCount: the bytes of the entry, for the log line.
+    ///   - result: the result of the write.
+    ///   - duration: how long the write took.
+    private func writeDidEnd(
+        _ handle: ExecutorPromptCacheSpilledHandle, generation: UInt64, byteCount: Int,
+        result: Result<Void, any Error>, duration: Duration
+    ) {
+        defer { finishPendingWrite() }
+        let isCurrent = spilling[handle.key]?.generation == generation
+        if isCurrent {
+            removeSpill(of: handle.key)
+        }
+        let outcome: ExecutorPromptCacheSpillOutcome
+        switch (result, isCurrent) {
+        case (.success, true):
+            onDisk[handle.key] = handle
+            outcome = .onDisk
+        case (.success, false):
+            ExecutorPromptCacheFile.removeFile(at: handle.url)
+            outcome = .superseded
+        case (.failure(let error), _):
+            outcome = .failed(error)
+        }
+        ExecutorPromptCacheLog.info(
+            ExecutorPromptCacheReport.spillLine(
+                key: handle.key, byteCount: byteCount, duration: duration, outcome: outcome))
+    }
+
+    /// Counts one write as ended, and wakes the tasks in ``waitForSpills()``
+    /// when no write is left.
+    private func finishPendingWrite() {
+        pendingWriteCount -= 1
+        guard pendingWriteCount == 0 else { return }
+        let waiters = spillWaiters
+        spillWaiters = []
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+}
+
+/// What one write of the spool gave.
+enum ExecutorPromptCacheSpillOutcome: CustomStringConvertible {
+
+    /// The file is on disk, and a check-out hands it out.
+    case onDisk
+
+    /// A check-out or a check-in took the entry back during the write, thus
+    /// the file was deleted.
+    case superseded
+
+    /// The entry could not be prepared or written, thus nothing is on disk.
+    case failed(any Error)
+
+    /// The result as the log line states it.
+    var description: String {
+        switch self {
+        case .onDisk: "on disk"
+        case .superseded: "superseded, file deleted"
+        case .failed(let error): "failed: \(error)"
+        }
     }
 }
 
@@ -717,6 +1105,34 @@ enum ExecutorPromptCacheReport {
     /// - Returns: one line with the session and the bytes.
     static func evictionLine(key: ExecutorPromptCacheKey, byteCount: Int) -> String {
         "prompt cache evict \(session(key)) bytes=\(byteCount)"
+    }
+
+    /// The line that names the end of one write of the spool.
+    ///
+    /// - Parameters:
+    ///   - key: the session of the entry.
+    ///   - byteCount: the bytes the entry held in memory.
+    ///   - duration: how long the write took.
+    ///   - outcome: what the write gave.
+    /// - Returns: one line with the session, the bytes, the seconds of the
+    ///   write and its result.
+    static func spillLine(
+        key: ExecutorPromptCacheKey, byteCount: Int, duration: Duration,
+        outcome: ExecutorPromptCacheSpillOutcome
+    ) -> String {
+        let seconds = String(format: "%.3f", duration / .seconds(1))
+        return "prompt cache spill \(session(key)) bytes=\(byteCount) seconds=\(seconds) "
+            + "result=\(outcome.description)"
+    }
+
+    /// The line of a turn that found its cache on disk and starts cold,
+    /// because this executor cannot read a spilled cache back yet.
+    ///
+    /// - Parameter key: the session of the turn.
+    /// - Returns: one line.
+    static func spilledColdStartLine(key: ExecutorPromptCacheKey) -> String {
+        "prompt cache spilled \(session(key)) starts cold: the file is deleted, "
+            + "because a restore from disk is not available"
     }
 
     /// The model and the session of `key`, or `none` for each when the
