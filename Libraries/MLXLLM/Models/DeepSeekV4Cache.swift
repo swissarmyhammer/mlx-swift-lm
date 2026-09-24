@@ -122,8 +122,21 @@ final class DeepSeekV4ChunkCache {
     /// The state slots a branch that is not there writes, so that the slot
     /// count of a serialized state never changes.
     static var absentState: [MLXArray] {
-        [MLXArray.zeros([0]), MLXArray.zeros([0]), MLXArray([Int32(0)])]
+        [noValuePlaceholder, noValuePlaceholder, MLXArray([Int32(0)])]
     }
+
+    /// The array that stands for "no value" in a chunks or rows slot of a serialized state.
+    ///
+    /// The safetensors writer refuses an array that holds no element, thus a prompt cache file
+    /// cannot hold an empty array. The placeholder holds one element, and its rank of 1 tells
+    /// it apart from a `(batch, rows, width)` tensor.
+    private static var noValuePlaceholder: MLXArray {
+        MLXArray.zeros([1])
+    }
+
+    /// The largest element count of a one-axis array that stands for "no value": the empty
+    /// array that earlier states held, or ``noValuePlaceholder``.
+    private static let noValueMaximumSize = 1
 
     /// Builds an empty pooled cache.
     ///
@@ -230,6 +243,69 @@ final class DeepSeekV4ChunkCache {
         [Self.serializable(chunks), Self.serializable(carry), MLXArray([Int32(carryStart)])]
     }
 
+    /// Checks a serialized state before ``restore(state:)`` reads it.
+    ///
+    /// ``restore(state:)`` stops the process on a wrong array count and reads the carry
+    /// position as one `Int32`, thus a prompt cache file must pass this check first.
+    ///
+    /// - Parameter state: The arrays of one branch, as ``state`` wrote them.
+    /// - Throws: `KVCacheError` when the arrays are not a state of this cache.
+    func validateRestore(state: [MLXArray]) throws {
+        guard state.count == Self.stateSlotCount,
+            Self.isRowTensor(state[Self.chunksSlot]) || Self.isNoValue(state[Self.chunksSlot]),
+            Self.isRowTensor(state[Self.carrySlot]) || Self.isNoValue(state[Self.carrySlot])
+        else {
+            throw KVCacheError(
+                message: "Corrupt prompt cache: invalid DeepSeek-V4 pooled-cache arrays.")
+        }
+        let carryStartArray = state[Self.carryStartSlot]
+        guard carryStartArray.ndim == 1, carryStartArray.size == 1,
+            carryStartArray.dtype == .int32
+        else {
+            throw KVCacheError(
+                message: "Corrupt prompt cache: the DeepSeek-V4 carry position is not one Int32.")
+        }
+        let carryStart = Int(carryStartArray.asArray(Int32.self)[0])
+        guard carryStart >= 0, carryStart.isMultiple(of: chunkWidth) else {
+            throw KVCacheError(
+                message:
+                    "Corrupt prompt cache: the DeepSeek-V4 carry position \(carryStart) is not a chunk boundary."
+            )
+        }
+    }
+
+    /// True when a serialized branch state is the state of a branch that is not there, as
+    /// ``absentState`` writes it.
+    ///
+    /// - Parameter state: The arrays of one branch.
+    /// - Returns: True when the chunks and the rows stand for no value and the carry position
+    ///   is 0.
+    static func isAbsentState(_ state: [MLXArray]) -> Bool {
+        state.count == stateSlotCount && isNoValue(state[chunksSlot])
+            && isNoValue(state[carrySlot]) && state[carryStartSlot].size == 1
+            && state[carryStartSlot].dtype == .int32
+            && state[carryStartSlot].asArray(Int32.self)[0] == 0
+    }
+
+    /// True when a chunks or rows slot holds a `(batch, rows, width)` tensor.
+    ///
+    /// - Parameter array: The array of the slot.
+    /// - Returns: True when the array has the rank of a pool tensor or a carry tensor.
+    private static func isRowTensor(_ array: MLXArray) -> Bool {
+        array.ndim == rowTensorRank
+    }
+
+    /// True when a chunks or rows slot holds the one-axis array that stands for no value.
+    ///
+    /// - Parameter array: The array of the slot.
+    /// - Returns: True for ``noValuePlaceholder`` and for the empty array of earlier states.
+    private static func isNoValue(_ array: MLXArray) -> Bool {
+        array.ndim == 1 && array.size <= noValueMaximumSize
+    }
+
+    /// The rank of a pool tensor and of a carry tensor: `(batch, rows, width)`.
+    private static let rowTensorRank = 3
+
     /// Reads a serialized state back.
     ///
     /// - Parameter state: The arrays ``state`` wrote, in that order.
@@ -329,20 +405,20 @@ final class DeepSeekV4ChunkCache {
     /// The array a serialized state carries for one slot.
     ///
     /// - Parameter array: The array, or `nil`.
-    /// - Returns: The array, or an empty one-axis array standing for `nil`.
+    /// - Returns: The array, or ``noValuePlaceholder`` standing for `nil`.
     private static func serializable(_ array: MLXArray?) -> MLXArray {
-        array ?? MLXArray.zeros([0])
+        array ?? noValuePlaceholder
     }
 
     /// The array one slot of a serialized state stood for.
     ///
     /// An empty pool and no pool hold the same chunks, thus both read back as
-    /// `nil`.
+    /// `nil`. So does the one-axis array that stands for no value.
     ///
     /// - Parameter array: The array a serialized state carried.
     /// - Returns: The array, or `nil` when it holds no value.
     private static func nullable(_ array: MLXArray) -> MLXArray? {
-        array.size > 0 ? array : nil
+        isRowTensor(array) && array.size > 0 ? array : nil
     }
 }
 
@@ -450,11 +526,10 @@ public final class DeepSeekV4Cache: KVCache {
                 newValue.count >= Self.stateSlotCount,
                 "a DeepSeek-V4 cache state ends in \(Self.stateSlotCount) branch arrays, and "
                     + "this one holds \(newValue.count) arrays")
-            let split = newValue.count - Self.stateSlotCount
-            let slots = DeepSeekV4ChunkCache.stateSlotCount
-            local.state = Array(newValue[0 ..< split])
-            attentionChunks.restore(state: Array(newValue[split ..< (split + slots)]))
-            indexerChunks?.restore(state: Array(newValue[(split + slots)...]))
+            let parts = Self.stateParts(newValue)
+            local.state = parts.window
+            attentionChunks.restore(state: parts.attention)
+            indexerChunks?.restore(state: parts.indexer)
         }
     }
 
@@ -527,5 +602,75 @@ public final class DeepSeekV4Cache: KVCache {
             local: window,
             attentionChunks: attentionChunks.copy(),
             indexerChunks: indexerChunks?.copy())
+    }
+}
+
+// MARK: - Restore into the cache of the model
+
+extension DeepSeekV4Cache: PromptCacheRestorable {
+    /// The class name that `savePromptCache` writes for this cache.
+    public static let promptCacheClassName = "DeepSeekV4Cache"
+
+    /// Checks a saved state and meta state before any setter reads them.
+    ///
+    /// The window part must fit a `RotatingKVCache`, each branch part must be a pooled-cache
+    /// state, and a layer with no indexer accepts only the absent branch state.
+    ///
+    /// - Parameters:
+    ///   - state: The saved arrays: the window arrays, then the slots of each branch.
+    ///   - metaState: The saved meta state of the window.
+    /// - Throws: `KVCacheError` when the values are not a state of this cache.
+    public func validatePromptCacheRestore(state: [MLXArray], metaState: [String]) throws {
+        guard state.count >= Self.stateSlotCount else {
+            throw KVCacheError(
+                message:
+                    "Corrupt prompt cache: a DeepSeek-V4 state ends in \(Self.stateSlotCount) branch arrays, and this one holds \(state.count) arrays."
+            )
+        }
+        let parts = Self.stateParts(state)
+        try KVCacheSerializationRegistry.validate(
+            state: parts.window, metaState: metaState, for: local)
+        try attentionChunks.validateRestore(state: parts.attention)
+        if let indexerChunks {
+            try indexerChunks.validateRestore(state: parts.indexer)
+        } else if !DeepSeekV4ChunkCache.isAbsentState(parts.indexer) {
+            throw KVCacheError(
+                message:
+                    "The prompt cache holds indexer data for a DeepSeek-V4 layer that has no indexer."
+            )
+        }
+    }
+
+    /// Writes a checked saved state and meta state into this cache.
+    ///
+    /// The window receives its arrays only when the file holds them: a window that has not
+    /// written a key saves no array, and its setter needs two.
+    ///
+    /// - Parameters:
+    ///   - state: The saved arrays: the window arrays, then the slots of each branch.
+    ///   - metaState: The saved meta state of the window.
+    public func restorePromptCache(state: [MLXArray], metaState: [String]) {
+        let parts = Self.stateParts(state)
+        if !parts.window.isEmpty {
+            local.state = parts.window
+        }
+        local.metaState = metaState
+        attentionChunks.restore(state: parts.attention)
+        indexerChunks?.restore(state: parts.indexer)
+    }
+
+    /// Splits a saved state into the window arrays and the slots of each branch.
+    ///
+    /// - Parameter state: The saved arrays. It holds at least the branch slots.
+    /// - Returns: The window arrays, the attention branch slots and the indexer branch slots.
+    private static func stateParts(
+        _ state: [MLXArray]
+    ) -> (window: [MLXArray], attention: [MLXArray], indexer: [MLXArray]) {
+        let split = state.count - stateSlotCount
+        let slots = DeepSeekV4ChunkCache.stateSlotCount
+        return (
+            Array(state[0 ..< split]), Array(state[split ..< (split + slots)]),
+            Array(state[(split + slots)...])
+        )
     }
 }

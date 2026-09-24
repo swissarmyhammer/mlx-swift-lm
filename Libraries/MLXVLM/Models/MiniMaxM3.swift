@@ -1520,8 +1520,9 @@ public final class MiniMaxM3KVCache: KVCache {
     /// present). Triggered once, lazily, from `init()` below -- guaranteed to
     /// run before any instance could be saved.
     private static let registerSerialization: Void = {
-        KVCacheSerializationRegistry.register(MiniMaxM3KVCache.self, className: "MiniMaxM3KVCache")
-        {
+        KVCacheSerializationRegistry.register(
+            MiniMaxM3KVCache.self, className: promptCacheClassName
+        ) {
             state, metaState in
             let cache = MiniMaxM3KVCache()
             cache.state = state
@@ -1666,6 +1667,62 @@ public final class MiniMaxM3KVCache: KVCache {
             new.state = s.map { $0[.ellipsis] }
         }
         return new
+    }
+}
+
+extension MiniMaxM3KVCache: PromptCacheRestorable {
+    /// The class name that `savePromptCache` writes for this cache. It is the name that
+    /// `KVCacheSerializationRegistry` holds for this type.
+    public static let promptCacheClassName = "MiniMaxM3KVCache"
+
+    /// The rank of the keys, the values and the index keys: `[batch, heads, tokens, headDim]`.
+    private static let savedArrayRank = 4
+
+    /// The axis that holds the tokens of the index keys.
+    private static let indexTokenAxis = 2
+
+    /// Checks a saved state and meta state before any setter reads them.
+    ///
+    /// The state setter stops the process on an array count other than 2 or 3, thus this check
+    /// comes first. An empty cache saves no array. The meta state holds the index-key count,
+    /// which must equal the token count of the saved index keys, or 0 when there are none.
+    ///
+    /// - Parameters:
+    ///   - state: The saved arrays: the keys and the values, then the index keys when present.
+    ///   - metaState: The saved meta state: the index-key count.
+    /// - Throws: `KVCacheError` when the values are not a state of this cache.
+    public func validatePromptCacheRestore(state: [MLXArray], metaState: [String]) throws {
+        let acceptedCounts = [
+            0, Self.expectedStateComponentsWithoutIndex, Self.expectedStateComponentsWithIndex,
+        ]
+        guard acceptedCounts.contains(state.count),
+            state.allSatisfy({ $0.ndim == Self.savedArrayRank }),
+            metaState.count == 1, let savedIndexOffset = Int(metaState[0])
+        else {
+            throw KVCacheError(
+                message: "Corrupt prompt cache: invalid MiniMaxM3KVCache state or metadata shape.")
+        }
+        let indexTokenCount =
+            state.count == Self.expectedStateComponentsWithIndex
+            ? state[Self.expectedStateComponentsWithoutIndex].dim(Self.indexTokenAxis) : 0
+        guard savedIndexOffset == indexTokenCount else {
+            throw KVCacheError(
+                message:
+                    "Corrupt prompt cache: MiniMaxM3KVCache index offset \(savedIndexOffset) does not match \(indexTokenCount) saved index keys."
+            )
+        }
+    }
+
+    /// Writes a checked saved state and meta state into this cache.
+    ///
+    /// - Parameters:
+    ///   - state: The saved arrays. An empty list leaves the cache empty.
+    ///   - metaState: The saved meta state: the index-key count.
+    public func restorePromptCache(state: [MLXArray], metaState: [String]) {
+        if !state.isEmpty {
+            self.state = state
+        }
+        self.metaState = metaState
     }
 }
 

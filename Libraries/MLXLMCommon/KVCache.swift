@@ -1838,48 +1838,132 @@ public class CacheList: BaseKVCache {
 
     /// Reconstruct a CacheList from flattened state + metaState, like Python's from_state()
     internal static func fromState(state: [MLXArray], metaState: [String]) throws -> CacheList {
-        guard let childCount = metaState.first.flatMap({ Int($0) }) else {
+        let children = try savedChildren(state: state, metaState: metaState).map {
+            try restoreCacheFromMetaState(
+                className: $0.className, state: $0.state, metaState: $0.metaState)
+        }
+        return CacheList(caches: children)
+    }
+
+    /// Replaces the children after a prompt cache restore. A restore can give a child another
+    /// cache class, for example a `QuantizedKVCache` in place of a `KVCacheSimple`.
+    ///
+    /// - Parameter children: The new children, one for each old child, in the same order.
+    internal func replaceChildren(with children: [KVCache]) {
+        precondition(
+            children.count == caches.count,
+            "a CacheList has \(caches.count) children and the restore gave \(children.count)")
+        caches = children
+    }
+}
+
+/// One child of a saved `CacheList`: its class name, its arrays and its meta state.
+private struct SavedCacheListChild {
+    /// The class name that the save wrote for the child.
+    let className: String
+
+    /// The saved arrays of the child.
+    let state: [MLXArray]
+
+    /// The saved meta state of the child.
+    let metaState: [String]
+}
+
+extension CacheList {
+    /// The number of meta-state values in front of each child: its class name, its array
+    /// count and its meta-state count.
+    private static let childHeaderCount = 3
+
+    /// The place of the array count in the header of a child.
+    private static let childStateCountOffset = 1
+
+    /// The place of the meta-state count in the header of a child.
+    private static let childMetaStateCountOffset = 2
+
+    /// Splits the flat `state` and `metaState` of a saved `CacheList` into its children.
+    ///
+    /// The format is `[childCount, (className, stateCount, metaStateCount, metaState...)*]`.
+    /// Every count is checked against the values that are there, and every value must belong
+    /// to a child, thus no slice can start past an end.
+    ///
+    /// - Parameters:
+    ///   - state: The saved arrays of the whole list.
+    ///   - metaState: The saved meta state of the whole list.
+    /// - Returns: The children, in order.
+    /// - Throws: ``KVCacheError`` when a count does not fit the saved values.
+    fileprivate static func savedChildren(
+        state: [MLXArray], metaState: [String]
+    ) throws -> [SavedCacheListChild] {
+        guard let childCount = metaState.first.flatMap({ Int($0) }), childCount >= 0 else {
             throw KVCacheError(message: "CacheList metaState missing child count")
         }
-
-        var children: [KVCache] = []
-        var metaIdx = 1  // skip childCount
-        var stateIdx = 0
-
+        var children: [SavedCacheListChild] = []
+        var metaIndex = 1
+        var stateIndex = 0
         for _ in 0 ..< childCount {
-            guard metaIdx + 2 < metaState.count else {
-                throw KVCacheError(message: "CacheList metaState truncated")
-            }
-            let className = metaState[metaIdx]
-            guard let stateCount = Int(metaState[metaIdx + 1]) else {
-                throw KVCacheError(message: "CacheList: invalid stateCount for child")
-            }
-            guard let metaCount = Int(metaState[metaIdx + 2]) else {
-                throw KVCacheError(message: "CacheList: invalid metaStateCount for child")
-            }
-            metaIdx += 3
-
-            let childMeta = Array(metaState[metaIdx ..< min(metaIdx + metaCount, metaState.count)])
-            metaIdx += metaCount
-
-            let childState = Array(state[stateIdx ..< min(stateIdx + stateCount, state.count)])
-            stateIdx += stateCount
-
-            let child = try restoreCacheFromMetaState(
-                className: className, state: childState, metaState: childMeta)
+            let child = try savedChild(
+                state: state, metaState: metaState, metaIndex: metaIndex, stateIndex: stateIndex)
             children.append(child)
+            metaIndex += childHeaderCount + child.metaState.count
+            stateIndex += child.state.count
         }
+        guard metaIndex == metaState.count, stateIndex == state.count else {
+            throw KVCacheError(
+                message: "Corrupt prompt cache: CacheList holds values that no child owns.")
+        }
+        return children
+    }
 
-        return CacheList(caches: children)
+    /// Reads one child of a saved `CacheList`.
+    ///
+    /// - Parameters:
+    ///   - state: The saved arrays of the whole list.
+    ///   - metaState: The saved meta state of the whole list.
+    ///   - metaIndex: The place of the header of the child in `metaState`.
+    ///   - stateIndex: The place of the first array of the child in `state`.
+    /// - Returns: The child.
+    /// - Throws: ``KVCacheError`` when the header is truncated or a count is out of range.
+    private static func savedChild(
+        state: [MLXArray], metaState: [String], metaIndex: Int, stateIndex: Int
+    ) throws -> SavedCacheListChild {
+        let metaStart = metaIndex + childHeaderCount
+        guard metaStart <= metaState.count else {
+            throw KVCacheError(message: "CacheList metaState truncated")
+        }
+        guard let stateCount = Int(metaState[metaIndex + childStateCountOffset]),
+            let metaCount = Int(metaState[metaIndex + childMetaStateCountOffset]),
+            stateCount >= 0, metaCount >= 0,
+            stateIndex + stateCount <= state.count, metaStart + metaCount <= metaState.count
+        else {
+            throw KVCacheError(message: "CacheList: invalid array or metaState count for child")
+        }
+        return SavedCacheListChild(
+            className: metaState[metaIndex],
+            state: Array(state[stateIndex ..< stateIndex + stateCount]),
+            metaState: Array(metaState[metaStart ..< metaStart + metaCount]))
     }
 }
 
 // MARK: - Error Types
 
-struct KVCacheError: Error, LocalizedError {
-    let message: String
+/// The error that a prompt cache operation throws: for example a corrupt file, or a file that
+/// does not fit the caches it is restored into.
+///
+/// A cache type outside `MLXLMCommon` throws it from
+/// ``PromptCacheRestorable/validatePromptCacheRestore(state:metaState:)``.
+public struct KVCacheError: Error, LocalizedError {
+    /// The description of the problem.
+    public let message: String
 
-    var errorDescription: String? { message }
+    /// Makes an error.
+    ///
+    /// - Parameter message: The description of the problem.
+    public init(message: String) {
+        self.message = message
+    }
+
+    /// The description of the problem, as `LocalizedError` gives it.
+    public var errorDescription: String? { message }
 }
 
 // MARK: - Utility Functions
@@ -1938,8 +2022,69 @@ public enum KVCacheSerializationRegistry {
     }
 }
 
-/// Map a cache instance to its Python-compatible class name for serialization.
-private func cacheClassName(_ cache: KVCache) -> String {
+extension KVCacheSerializationRegistry {
+    /// Checks the saved `state` and `metaState` of one built-in cache class before a setter
+    /// reads them.
+    ///
+    /// A cache type outside `MLXLMCommon` that holds a built-in cache (for example a
+    /// `RotatingKVCache` window) calls this from
+    /// ``PromptCacheRestorable/validatePromptCacheRestore(state:metaState:)``. The built-in
+    /// setters stop the process on bad input, thus the check must come first.
+    ///
+    /// - Parameters:
+    ///   - state: The saved arrays of the built-in part.
+    ///   - metaState: The saved meta state of the built-in part.
+    ///   - cache: The built-in cache that will receive the values. Its class selects the rules.
+    /// - Throws: ``KVCacheError`` when the values do not fit the class of `cache`.
+    public static func validate(
+        state: [MLXArray], metaState: [String], for cache: KVCache
+    ) throws {
+        guard let className = builtInCacheClassName(cache),
+            builtInLeafClassNames.contains(className)
+        else {
+            throw KVCacheError(
+                message: "\(type(of: cache)) is not a built-in cache class that has a check.")
+        }
+        try validateBuiltInCache(className: className, state: state, metaState: metaState)
+    }
+}
+
+/// A cache type outside `MLXLMCommon` that ``loadPromptCacheSnapshot(url:into:)`` restores in
+/// place.
+///
+/// Such a type often needs model configuration to build, thus a `(state, metaState)` factory
+/// in ``KVCacheSerializationRegistry`` cannot make it. The template restore writes the saved
+/// values into an instance that the model made. The setters of a cache usually stop the process
+/// on bad input, thus the restore calls
+/// ``validatePromptCacheRestore(state:metaState:)`` for every layer before it calls
+/// ``restorePromptCache(state:metaState:)`` for any layer.
+public protocol PromptCacheRestorable: KVCache {
+    /// The class name that `savePromptCache` writes for this type.
+    static var promptCacheClassName: String { get }
+
+    /// Checks saved values before any setter reads them.
+    ///
+    /// - Parameters:
+    ///   - state: The saved arrays.
+    ///   - metaState: The saved meta state.
+    /// - Throws: ``KVCacheError`` when ``restorePromptCache(state:metaState:)`` cannot accept
+    ///   the values.
+    func validatePromptCacheRestore(state: [MLXArray], metaState: [String]) throws
+
+    /// Writes values into this cache. The values passed the check of
+    /// ``validatePromptCacheRestore(state:metaState:)``.
+    ///
+    /// - Parameters:
+    ///   - state: The saved arrays.
+    ///   - metaState: The saved meta state.
+    func restorePromptCache(state: [MLXArray], metaState: [String])
+}
+
+/// Map a built-in cache instance to its Python-compatible class name.
+///
+/// - Parameter cache: The cache to name.
+/// - Returns: The class name, or `nil` when `cache` is not a built-in class.
+private func builtInCacheClassName(_ cache: KVCache) -> String? {
     switch cache {
     case is ChunkedKVCache: return "ChunkedKVCache"
     case is MambaCache: return "MambaCache"
@@ -1950,8 +2095,19 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is TurboQuantKVCache: return "TurboQuantKVCache"
     case is KVCacheSimple: return "KVCache"
     case is CacheList: return "CacheList"
-    default: return KVCacheSerializationRegistry.className(for: cache) ?? "KVCache"
+    default: return nil
     }
+}
+
+/// Map a cache instance to its Python-compatible class name for serialization.
+private func cacheClassName(_ cache: KVCache) -> String {
+    if let className = builtInCacheClassName(cache) {
+        return className
+    }
+    if let restorable = cache as? PromptCacheRestorable {
+        return type(of: restorable).promptCacheClassName
+    }
+    return KVCacheSerializationRegistry.className(for: cache) ?? "KVCache"
 }
 
 /// A prompt cache and the model state that belongs with it.
@@ -2075,44 +2231,275 @@ public func loadPromptCache(
 
 /// Load a prompt cache and its associated model state from a file.
 public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
-    var (arrays, metadata) = try loadArraysAndMetadata(url: url)
+    let contents = try PromptCacheFileContents(url: url)
+    let caches = try contents.layers.map {
+        try restoreCacheFromMetaState(
+            className: $0.className, state: $0.state, metaState: $0.metaState)
+    }
+    return PromptCacheSnapshot(
+        cache: caches, metadata: contents.userMetadata, state: contents.state)
+}
 
-    // Unflatten metadata using tree_unflatten compatible logic
-    let unflattenedMetadata = unflattenMetadata(metadata)
+/// Load a prompt cache and its model state from a file into the fresh caches that the model
+/// made, for example with `model.newCache(parameters:)`.
+///
+/// A cache type that needs model configuration to build (for example `DeepSeekV4Cache`) has no
+/// `(state, metaState)` factory, thus ``loadPromptCacheSnapshot(url:)`` cannot build it. This
+/// function writes the saved values into the caches in `templates` instead:
+///
+/// - The saved class of each layer must be the class of its template. One conversion is
+///   accepted: generation can change a `KVCacheSimple` layer into a `QuantizedKVCache` or a
+///   `TurboQuantKVCache`, and a model never makes those classes. For a `KVCacheSimple`
+///   template, a saved layer of one of these two classes is built new from the file, and the
+///   snapshot holds that new cache in place of the template. The same rule applies to each
+///   child of a `CacheList`.
+/// - Every layer is checked before any setter runs, because the cache setters stop the process
+///   on bad input.
+/// - The function evaluates every array that it read from the file before it returns. The
+///   safetensors load is lazy, thus without this step the file must stay until the first use.
+///   After the return the caller can delete the file.
+///
+/// - Parameters:
+///   - url: The URL of the `.safetensors` file.
+///   - templates: The fresh caches of the model, one for each saved layer.
+/// - Returns: The snapshot. Its caches are the templates, or the new converted caches.
+/// - Throws: ``KVCacheError`` on a layer-count mismatch, a class mismatch, or saved values that
+///   do not fit a class. After a throw the state of the templates is not defined. Discard them.
+public func loadPromptCacheSnapshot(
+    url: URL, into templates: [KVCache]
+) throws -> PromptCacheSnapshot {
+    let contents = try PromptCacheFileContents(url: url)
+    guard contents.layers.count == templates.count else {
+        throw KVCacheError(
+            message:
+                "The prompt cache holds \(contents.layers.count) layers and the model gave \(templates.count) caches."
+        )
+    }
+    let restoreSteps = try zip(contents.layers, templates).map { layer, template in
+        try PromptCacheTemplateRestore.prepare(layer, into: template)
+    }
+    let caches = restoreSteps.map { $0() }
+    eval(contents.fileArrays)
+    return PromptCacheSnapshot(
+        cache: caches, metadata: contents.userMetadata, state: contents.state)
+}
 
-    // Extract cache_info, user_metadata, and cache_classes from unflattened structure
-    // Structure: [cache_info, user_metadata, cache_classes]
-    guard unflattenedMetadata.count >= 3 else {
-        throw KVCacheError(message: "Invalid cache metadata format")
+/// The saved values of one layer of a prompt cache file.
+private struct SavedPromptCacheLayer {
+    /// The class name that the save wrote for the layer.
+    let className: String
+
+    /// The saved arrays of the layer.
+    let state: [MLXArray]
+
+    /// The saved meta state of the layer.
+    let metaState: [String]
+}
+
+/// The contents of a prompt cache file, before any cache is built.
+private struct PromptCacheFileContents {
+    /// The number of top-level parts of the metadata: the cache information, the user
+    /// metadata and the class names.
+    private static let metadataPartCount = 3
+
+    /// The place of the cache information (the meta state of each layer) in the metadata.
+    private static let cacheInfoPart = 0
+
+    /// The place of the user metadata in the metadata.
+    private static let userMetadataPart = 1
+
+    /// The place of the class names in the metadata.
+    private static let classNamesPart = 2
+
+    /// The saved layers, in order.
+    let layers: [SavedPromptCacheLayer]
+
+    /// The caller metadata.
+    let userMetadata: [String: String]
+
+    /// The model state, when the file holds one.
+    let state: LMOutput.State?
+
+    /// Every array that the file holds: the cache arrays and the model-state arrays.
+    let fileArrays: [MLXArray]
+
+    /// Reads a prompt cache file.
+    ///
+    /// The arrays are not evaluated: the safetensors load is lazy.
+    ///
+    /// - Parameter url: The URL of the `.safetensors` file.
+    /// - Throws: ``KVCacheError`` when the metadata is not a prompt cache layout.
+    init(url: URL) throws {
+        var (arrays, metadata) = try loadArraysAndMetadata(url: url)
+        fileArrays = Array(arrays.values)
+
+        // Unflatten metadata using tree_unflatten compatible logic.
+        // Structure: [cache_info, user_metadata, cache_classes]
+        let unflattenedMetadata = unflattenMetadata(metadata)
+        guard unflattenedMetadata.count >= Self.metadataPartCount else {
+            throw KVCacheError(message: "Invalid cache metadata format")
+        }
+
+        let cacheInfo = unflattenedMetadata[Self.cacheInfoPart] as? [[String]] ?? []
+        let storedUserMetadata =
+            unflattenedMetadata[Self.userMetadataPart] as? [String: String] ?? [:]
+        let (loadedState, loadedUserMetadata) = try loadPromptCacheState(
+            arrays: &arrays, metadata: storedUserMetadata)
+        state = loadedState
+        userMetadata = loadedUserMetadata
+        let storedCacheClasses = unflattenedMetadata[Self.classNamesPart] as? [String] ?? []
+        let cacheClasses = try loadPromptCacheClasses(
+            storedCacheClasses, hasState: loadedState != nil)
+
+        guard cacheInfo.count == cacheClasses.count else {
+            throw KVCacheError(message: "Mismatch in cache counts")
+        }
+
+        // Metadata carries the cache count even when one or more valid caches have no arrays.
+        // State tensors were removed from `arrays` above, so only cache arrays remain here.
+        let cacheData = try unflattenArrays(arrays, cacheCount: cacheClasses.count)
+        layers = cacheData.indices.map {
+            SavedPromptCacheLayer(
+                className: cacheClasses[$0], state: cacheData[$0], metaState: cacheInfo[$0])
+        }
+    }
+}
+
+/// The steps of ``loadPromptCacheSnapshot(url:into:)`` for one layer.
+private enum PromptCacheTemplateRestore {
+    /// A restore step that runs after every layer passed its check. It writes the saved values
+    /// and gives back the cache that holds them.
+    typealias Step = () -> KVCache
+
+    /// The saved classes that can take the place of a `KVCacheSimple` template. Generation
+    /// makes them from a `KVCacheSimple` layer, and a model never makes them itself.
+    private static let convertedClassNames: Set<String> = ["QuantizedKVCache", "TurboQuantKVCache"]
+
+    /// The meta-state places that hold configuration that a cache sets in `init` and that no
+    /// setter writes. The saved values must equal the values of the template.
+    private static let fixedConfigurationIndices: [String: [Int]] = [
+        "VarianceNormalizedKVCache": [0, 2, 3, 4],
+        "TurboQuantKVCache": [1, 2, 3, 4],
+        "ArraysCache": [0],
+        "MambaCache": [0],
+    ]
+
+    /// Checks one saved layer against its template, and makes the step that restores it.
+    ///
+    /// No setter runs here, thus a throw leaves the template as it was.
+    ///
+    /// - Parameters:
+    ///   - layer: The saved layer.
+    ///   - template: The fresh cache that the model made for this layer.
+    /// - Returns: The step that writes the values.
+    /// - Throws: ``KVCacheError`` when the layer does not fit the template.
+    static func prepare(_ layer: SavedPromptCacheLayer, into template: KVCache) throws -> Step {
+        let templateClassName = cacheClassName(template)
+        guard layer.className == templateClassName else {
+            return try prepareConverted(layer, into: template, templateClassName: templateClassName)
+        }
+        if let list = template as? CacheList {
+            return try prepareCacheList(layer, into: list)
+        }
+        if let restorable = template as? PromptCacheRestorable {
+            try restorable.validatePromptCacheRestore(
+                state: layer.state, metaState: layer.metaState)
+            return {
+                restorable.restorePromptCache(state: layer.state, metaState: layer.metaState)
+                return restorable
+            }
+        }
+        guard builtInCacheClassName(template) != nil else {
+            throw KVCacheError(
+                message: "\(type(of: template)) cannot receive a restore into a template.")
+        }
+        try validateBuiltInCache(
+            className: layer.className, state: layer.state, metaState: layer.metaState)
+        try validateFixedConfiguration(layer, template: template)
+        return {
+            applySavedValues(state: layer.state, metaState: layer.metaState, to: template)
+            return template
+        }
     }
 
-    let cacheInfo = unflattenedMetadata[0] as? [[String]] ?? []
-    let storedUserMetadata = unflattenedMetadata[1] as? [String: String] ?? [:]
-    let (state, userMetadata) = try loadPromptCacheState(
-        arrays: &arrays, metadata: storedUserMetadata)
-    let storedCacheClasses = unflattenedMetadata[2] as? [String] ?? []
-    let cacheClasses = try loadPromptCacheClasses(storedCacheClasses, hasState: state != nil)
-
-    guard cacheInfo.count == cacheClasses.count else {
-        throw KVCacheError(message: "Mismatch in cache counts")
+    /// Makes the step for a saved layer whose class is not the class of its template.
+    ///
+    /// - Parameters:
+    ///   - layer: The saved layer.
+    ///   - template: The fresh cache that the model made for this layer.
+    ///   - templateClassName: The class name of `template`.
+    /// - Returns: The step, which gives back a new cache of the saved class.
+    /// - Throws: ``KVCacheError`` unless the template is a `KVCacheSimple` and the saved class
+    ///   is a class that generation converts it to.
+    private static func prepareConverted(
+        _ layer: SavedPromptCacheLayer, into template: KVCache, templateClassName: String
+    ) throws -> Step {
+        guard templateClassName == "KVCache", convertedClassNames.contains(layer.className)
+        else {
+            throw KVCacheError(
+                message:
+                    "The prompt cache holds a \(layer.className) layer and the model gave a \(templateClassName) cache."
+            )
+        }
+        let converted = try restoreCacheFromMetaState(
+            className: layer.className, state: layer.state, metaState: layer.metaState)
+        return { converted }
     }
 
-    // Metadata carries the cache count even when one or more valid caches have no arrays.
-    // State tensors were removed from `arrays` above, so only cache arrays remain here.
-    let cacheData = try unflattenArrays(arrays, cacheCount: cacheClasses.count)
-
-    // Reconstruct cache instances
-    var caches: [KVCache] = []
-    for i in 0 ..< cacheData.count {
-        let className = cacheClasses[i]
-        let info = i < cacheInfo.count ? cacheInfo[i] : []
-
-        let cache = try restoreCacheFromMetaState(
-            className: className, state: cacheData[i], metaState: info)
-        caches.append(cache)
+    /// Makes the step for a saved `CacheList` layer. Each child restores into the child of the
+    /// template at the same place.
+    ///
+    /// - Parameters:
+    ///   - layer: The saved layer.
+    ///   - list: The template list.
+    /// - Returns: The step, which gives back `list`.
+    /// - Throws: ``KVCacheError`` when the children do not fit the children of `list`.
+    private static func prepareCacheList(
+        _ layer: SavedPromptCacheLayer, into list: CacheList
+    ) throws -> Step {
+        let savedChildren = try CacheList.savedChildren(
+            state: layer.state, metaState: layer.metaState)
+        let templateChildren = list.children
+        guard savedChildren.count == templateChildren.count else {
+            throw KVCacheError(
+                message:
+                    "The prompt cache holds a CacheList of \(savedChildren.count) children and the model gave \(templateChildren.count)."
+            )
+        }
+        let childSteps = try zip(savedChildren, templateChildren).map { saved, child in
+            try prepare(
+                SavedPromptCacheLayer(
+                    className: saved.className, state: saved.state, metaState: saved.metaState),
+                into: child)
+        }
+        return {
+            list.replaceChildren(with: childSteps.map { $0() })
+            return list
+        }
     }
 
-    return PromptCacheSnapshot(cache: caches, metadata: userMetadata, state: state)
+    /// Checks that the saved configuration values equal the values of the template.
+    ///
+    /// - Parameters:
+    ///   - layer: The saved layer. Its values passed the check of its class.
+    ///   - template: The fresh cache that the model made for this layer.
+    /// - Throws: ``KVCacheError`` when a configuration value is different.
+    private static func validateFixedConfiguration(
+        _ layer: SavedPromptCacheLayer, template: KVCache
+    ) throws {
+        guard let indices = fixedConfigurationIndices[layer.className] else { return }
+        let templateMetaState = template.metaState
+        let matches = indices.allSatisfy { index in
+            index < layer.metaState.count && index < templateMetaState.count
+                && layer.metaState[index] == templateMetaState[index]
+        }
+        guard matches else {
+            throw KVCacheError(
+                message:
+                    "The saved \(layer.className) configuration is not the configuration of the model cache."
+            )
+        }
+    }
 }
 
 private func promptCacheStateArrays(
@@ -2237,77 +2624,263 @@ private func restoreCacheFromMetaState(
     state: [MLXArray],
     metaState: [String]
 ) throws -> KVCache {
+    if className == "CacheList" {
+        return try CacheList.fromState(state: state, metaState: metaState)
+    }
+    guard builtInLeafClassNames.contains(className) else {
+        if let restored = KVCacheSerializationRegistry.restore(
+            className: className, state: state, metaState: metaState)
+        {
+            return restored
+        }
+        throw KVCacheError(message: "Unknown cache class: \(className)")
+    }
+    try validateBuiltInCache(className: className, state: state, metaState: metaState)
+    let cache = try makeEmptyBuiltInCache(className: className, metaState: metaState)
+    applySavedValues(state: state, metaState: metaState, to: cache)
+    return cache
+}
+
+/// The class names of the built-in caches that hold no child cache. `KVCacheSimple` is the
+/// name that older files wrote for `KVCache`.
+private let builtInLeafClassNames: Set<String> = [
+    "KVCache", "KVCacheSimple", "RotatingKVCache", "QuantizedKVCache",
+    "VarianceNormalizedKVCache", "ChunkedKVCache", "MambaCache", "ArraysCache",
+    "TurboQuantKVCache",
+]
+
+/// The places of the values in the saved meta state of the built-in classes.
+private enum SavedMetaStateIndex {
+    /// The window size of a `RotatingKVCache`.
+    static let rotatingMaxSize = 1
+    /// The number of integer values at the start of a `RotatingKVCache` meta state.
+    static let rotatingIntegerCount = 5
+    /// The capacity origin of a `RotatingKVCache`, when the meta state holds one.
+    static let rotatingCapacityOrigin = 5
+    /// The wrapped flag of a `RotatingKVCache`, when the meta state holds one.
+    static let rotatingWrapped = 6
+    /// The group size of a `QuantizedKVCache`.
+    static let quantizedGroupSize = 2
+    /// The bit width of a `QuantizedKVCache`.
+    static let quantizedBits = 3
+    /// The chunk size of a `ChunkedKVCache`.
+    static let chunkedChunkSize = 0
+    /// The start position of a `ChunkedKVCache`.
+    static let chunkedStartPosition = 1
+    /// The bit width of a `TurboQuantKVCache`.
+    static let turboQuantBits = 1
+    /// The key bit width of a `TurboQuantKVCache`.
+    static let turboQuantKeyBits = 2
+    /// The value bit width of a `TurboQuantKVCache`.
+    static let turboQuantValueBits = 3
+    /// The seed of a `TurboQuantKVCache`.
+    static let turboQuantSeed = 4
+    /// The slot count of an `ArraysCache`.
+    static let arraysSlotCount = 0
+    /// The present slots of an `ArraysCache`.
+    static let arraysPresentSlots = 1
+}
+
+/// The array counts and meta-state counts that the built-in classes save.
+private enum SavedValueCounts {
+    /// No arrays, or the keys and the values.
+    static let keyValueStates: Set<Int> = [0, 2]
+    /// The one empty placeholder of a `KVCacheSimple` meta state.
+    static let simpleMetaStates: Set<Int> = [1]
+    /// Five integers, then an optional capacity origin and an optional wrapped flag.
+    static let rotatingMetaStates: Set<Int> = [5, 6, 7]
+    /// No arrays, or the packed values and the scales of keys and values, with or without
+    /// biases.
+    static let quantizedStates: Set<Int> = [0, 4, 6]
+    /// The step, the offset, the group size and the bit width.
+    static let quantizedMetaStates: Set<Int> = [4]
+    /// The chunk size and the start position.
+    static let chunkedMetaStates: Set<Int> = [2]
+    /// The slot count, the present slots, then optional left padding and lengths.
+    static let arraysMetaStates = 2 ... 4
+}
+
+/// Checks the saved values of one built-in cache class before any setter reads them.
+///
+/// - Parameters:
+///   - className: The saved class name.
+///   - state: The saved arrays.
+///   - metaState: The saved meta state.
+/// - Throws: ``KVCacheError`` when the values do not fit the class, or the class is unknown.
+private func validateBuiltInCache(
+    className: String, state: [MLXArray], metaState: [String]
+) throws {
     switch className {
     case "KVCache", "KVCacheSimple":
-        try validatePromptCache(
-            className: "KVCacheSimple", state: state, stateCounts: [0, 2],
-            metadata: metaState, metadataCounts: [1])
-        guard metaState == [""] else {
-            throw KVCacheError(
-                message:
-                    "Corrupt prompt cache: KVCacheSimple metadata must contain its single empty placeholder."
-            )
-        }
-        let cache = KVCacheSimple()
-        if !state.isEmpty {
-            cache.state = state
-        }
-        return cache
-
+        try validateSimpleCache(state: state, metaState: metaState)
     case "RotatingKVCache":
-        try validatePromptCache(
-            className: className, state: state, stateCounts: [0, 2],
-            metadata: metaState, metadataCounts: [5, 6, 7])
-        let values = try promptCacheIntegers(metaState.prefix(5), className: className)
-        if metaState.count >= 6,
-            RotatingKVCache.CapacityOrigin(rawValue: metaState[5]) == nil
-        {
-            throw KVCacheError(
-                message:
-                    "Corrupt prompt cache: invalid RotatingKVCache capacity origin '\(metaState[5])'."
-            )
-        }
-        if metaState.count == 7, Bool(metaState[6]) == nil {
-            throw KVCacheError(
-                message:
-                    "Corrupt prompt cache: invalid RotatingKVCache wrapped flag '\(metaState[6])'."
-            )
-        }
-
-        let cache = RotatingKVCache(maxSize: values[1])
-        if !state.isEmpty {
-            cache.state = state
-        }
-        cache.metaState = metaState
-        return cache
-
+        try validateRotatingCache(state: state, metaState: metaState)
     case "QuantizedKVCache":
         try validatePromptCache(
-            className: className, state: state, stateCounts: [0, 4, 6],
-            metadata: metaState, metadataCounts: [4])
-        let values = try promptCacheIntegers(metaState, className: className)
-        let cache = QuantizedKVCache(groupSize: values[2], bits: values[3])
-        if !state.isEmpty {
-            cache.state = state
-        }
-        cache.metaState = metaState
-        return cache
-
+            className: className, state: state, stateCounts: SavedValueCounts.quantizedStates,
+            metadata: metaState, metadataCounts: SavedValueCounts.quantizedMetaStates)
+        _ = try promptCacheIntegers(metaState, className: className)
     case "VarianceNormalizedKVCache":
-        guard metaState.count == 7 || metaState.count == 10 else {
+        try validateVarianceNormalizedCache(state: state, metaState: metaState)
+    case "ChunkedKVCache":
+        try validateChunkedCache(state: state, metaState: metaState)
+    case "MambaCache", "ArraysCache":
+        try validateArraysCache(className: className, state: state, metaState: metaState)
+    case "TurboQuantKVCache":
+        try validateTurboQuantCache(state: state, metaState: metaState)
+    default:
+        throw KVCacheError(message: "Unknown cache class: \(className)")
+    }
+}
+
+/// Checks the saved values of a `KVCacheSimple`.
+///
+/// - Parameters:
+///   - state: The saved arrays.
+///   - metaState: The saved meta state.
+/// - Throws: ``KVCacheError`` when the values do not fit the class.
+private func validateSimpleCache(state: [MLXArray], metaState: [String]) throws {
+    try validatePromptCache(
+        className: "KVCacheSimple", state: state, stateCounts: SavedValueCounts.keyValueStates,
+        metadata: metaState, metadataCounts: SavedValueCounts.simpleMetaStates)
+    guard metaState == [""] else {
+        throw KVCacheError(
+            message:
+                "Corrupt prompt cache: KVCacheSimple metadata must contain its single empty placeholder."
+        )
+    }
+}
+
+/// Checks the saved values of a `RotatingKVCache`.
+///
+/// - Parameters:
+///   - state: The saved arrays.
+///   - metaState: The saved meta state.
+/// - Throws: ``KVCacheError`` when the values do not fit the class.
+private func validateRotatingCache(state: [MLXArray], metaState: [String]) throws {
+    let className = "RotatingKVCache"
+    try validatePromptCache(
+        className: className, state: state, stateCounts: SavedValueCounts.keyValueStates,
+        metadata: metaState, metadataCounts: SavedValueCounts.rotatingMetaStates)
+    _ = try promptCacheIntegers(
+        metaState.prefix(SavedMetaStateIndex.rotatingIntegerCount), className: className)
+    let originIndex = SavedMetaStateIndex.rotatingCapacityOrigin
+    if metaState.count > originIndex,
+        RotatingKVCache.CapacityOrigin(rawValue: metaState[originIndex]) == nil
+    {
+        throw KVCacheError(
+            message:
+                "Corrupt prompt cache: invalid RotatingKVCache capacity origin '\(metaState[originIndex])'."
+        )
+    }
+    let wrappedIndex = SavedMetaStateIndex.rotatingWrapped
+    if metaState.count > wrappedIndex, Bool(metaState[wrappedIndex]) == nil {
+        throw KVCacheError(
+            message:
+                "Corrupt prompt cache: invalid RotatingKVCache wrapped flag '\(metaState[wrappedIndex])'."
+        )
+    }
+}
+
+/// Checks the saved values of a `VarianceNormalizedKVCache`.
+///
+/// - Parameters:
+///   - state: The saved arrays.
+///   - metaState: The saved meta state.
+/// - Throws: ``KVCacheError`` when the values do not fit the class.
+private func validateVarianceNormalizedCache(state: [MLXArray], metaState: [String]) throws {
+    let layout = try VarianceNormalizedSavedLayout(metaState: metaState)
+    let tailStateCount =
+        layout.tailLength > 0 ? VarianceNormalizedKVCache.tailStateCount : 0
+    let tileStateCount = state.count - min(state.count, tailStateCount)
+    let hasValidTileStateCount =
+        if layout.tileCount == 0 {
+            tileStateCount == 0
+        } else {
+            tileStateCount.isMultiple(of: layout.tileCount)
+                && [
+                    VarianceNormalizedKVCache.compactTileStateCount,
+                    VarianceNormalizedKVCache.legacyTileStateCount,
+                ].contains(tileStateCount / layout.tileCount)
+        }
+    guard
+        layout.hasConsistentOffset,
+        state.count >= tailStateCount,
+        hasValidTileStateCount,
+        state.allSatisfy({ $0.ndim == 4 })
+    else {
+        throw KVCacheError(
+            message: "Corrupt prompt cache: invalid VarianceNormalizedKVCache state."
+        )
+    }
+}
+
+/// The numbers of a saved `VarianceNormalizedKVCache` meta state.
+private struct VarianceNormalizedSavedLayout {
+    /// The meta-state count of the legacy layout.
+    private static let legacyCount = 7
+    /// The meta-state count of the versioned layout.
+    private static let versionedCount = 10
+    /// The place of the metadata version in the versioned layout.
+    private static let versionIndex = 7
+    /// The place of the key element type in the versioned layout.
+    private static let keyDTypeIndex = 8
+    /// The place of the value element type in the versioned layout.
+    private static let valueDTypeIndex = 9
+    /// The name that the versioned layout writes for "no element type yet".
+    private static let noDType = "none"
+    /// The place of the tile size.
+    private static let tileSizeIndex = 0
+    /// The place of the offset.
+    private static let offsetIndex = 1
+    /// The place of the key bit width.
+    private static let keyBitsIndex = 2
+    /// The place of the value bit width.
+    private static let valueBitsIndex = 3
+    /// The place of the Sinkhorn iteration count.
+    private static let sinkhornIterationsIndex = 4
+    /// The place of the complete tile count.
+    private static let tileCountIndex = 5
+    /// The place of the raw tail length.
+    private static let tailLengthIndex = 6
+
+    /// The number of tokens in one tile.
+    let tileSize: Int
+    /// The number of tokens that the cache holds.
+    let offset: Int
+    /// The key bit width.
+    let keyBits: Int
+    /// The value bit width.
+    let valueBits: Int
+    /// The Sinkhorn iteration count.
+    let sinkhornIterations: Int
+    /// The number of complete tiles.
+    let tileCount: Int
+    /// The number of tokens in the raw tail.
+    let tailLength: Int
+
+    /// Reads the numbers and checks the configuration and the element-type names.
+    ///
+    /// - Parameter metaState: The saved meta state.
+    /// - Throws: ``KVCacheError`` when the meta state is not a valid layout.
+    init(metaState: [String]) throws {
+        let className = "VarianceNormalizedKVCache"
+        guard metaState.count == Self.legacyCount || metaState.count == Self.versionedCount
+        else {
             throw KVCacheError(
                 message:
                     "Corrupt prompt cache: VarianceNormalizedKVCache metadata must contain 7 legacy or 10 versioned values."
             )
         }
-        let values = try promptCacheIntegers(Array(metaState.prefix(7)), className: className)
-        let tileSize = values[0]
-        let offset = values[1]
-        let keyBits = values[2]
-        let valueBits = values[3]
-        let sinkhornIterations = values[4]
-        let tileCount = values[5]
-        let tailLength = values[6]
+        let values = try promptCacheIntegers(
+            Array(metaState.prefix(Self.legacyCount)), className: className)
+        tileSize = values[Self.tileSizeIndex]
+        offset = values[Self.offsetIndex]
+        keyBits = values[Self.keyBitsIndex]
+        valueBits = values[Self.valueBitsIndex]
+        sinkhornIterations = values[Self.sinkhornIterationsIndex]
+        tileCount = values[Self.tileCountIndex]
+        tailLength = values[Self.tailLengthIndex]
         guard
             (try? VarianceNormalizedKVCacheConfiguration(
                 keyBits: keyBits,
@@ -2317,113 +2890,239 @@ private func restoreCacheFromMetaState(
             offset >= 0,
             tileCount >= 0,
             (0 ..< tileSize).contains(tailLength),
-            metaState.count == 7
-                || (Int(metaState[7]) == VarianceNormalizedKVCache.metadataVersion
-                    && (metaState[8] == "none"
-                        || varianceNormalizedDType(named: metaState[8])
-                            .map(isSupportedVarianceNormalizedDType) == true)
-                    && (metaState[9] == "none"
-                        || varianceNormalizedDType(named: metaState[9])
-                            .map(isSupportedVarianceNormalizedDType) == true))
+            metaState.count == Self.legacyCount || Self.hasValidVersionFields(metaState)
         else {
             throw KVCacheError(
                 message: "Corrupt prompt cache: invalid VarianceNormalizedKVCache metadata."
             )
         }
+    }
+
+    /// True when the offset equals the tokens of the tiles and the tail, with no overflow.
+    var hasConsistentOffset: Bool {
         let (tiledLength, tileLengthOverflow) = tileCount.multipliedReportingOverflow(
             by: tileSize)
         let (representedLength, offsetOverflow) = tiledLength.addingReportingOverflow(tailLength)
-        let tailStateCount =
-            tailLength > 0 ? VarianceNormalizedKVCache.tailStateCount : 0
-        let tileStateCount = state.count - min(state.count, tailStateCount)
-        let hasValidTileStateCount =
-            if tileCount == 0 {
-                tileStateCount == 0
-            } else {
-                tileStateCount.isMultiple(of: tileCount)
-                    && [
-                        VarianceNormalizedKVCache.compactTileStateCount,
-                        VarianceNormalizedKVCache.legacyTileStateCount,
-                    ].contains(tileStateCount / tileCount)
-            }
-        guard
-            !tileLengthOverflow,
-            !offsetOverflow,
-            offset == representedLength,
-            state.count >= tailStateCount,
-            hasValidTileStateCount,
-            state.allSatisfy({ $0.ndim == 4 })
-        else {
-            throw KVCacheError(
-                message: "Corrupt prompt cache: invalid VarianceNormalizedKVCache state."
-            )
-        }
-        let cache = VarianceNormalizedKVCache(
-            tileSize: tileSize,
-            keyBits: keyBits,
-            valueBits: valueBits,
-            sinkhornIterations: sinkhornIterations)
-        cache.metaState = metaState
-        cache.state = state
-        return cache
-
-    case "ChunkedKVCache":
-        try validatePromptCache(
-            className: className, state: state, stateCounts: [0, 2],
-            metadata: metaState, metadataCounts: [2])
-
-        let chunkSize: Int? =
-            if metaState[0] == "None" {
-                nil
-            } else {
-                try promptCacheInteger(metaState[0], className: className)
-            }
-        _ = try promptCacheInteger(metaState[1], className: className)
-
-        let cache = ChunkedKVCache(chunkSize: chunkSize)
-        if !state.isEmpty {
-            cache.state = state
-        }
-        cache.metaState = metaState
-        return cache
-
-    case "MambaCache":
-        let cache = MambaCache()
-        cache.restoreFromMetaState(state: state, savedMetaState: metaState)
-        return cache
-
-    case "ArraysCache":
-        let cache = ArraysCache(size: 0)
-        cache.restoreFromMetaState(state: state, savedMetaState: metaState)
-        return cache
-
-    case "TurboQuantKVCache":
-        guard metaState.count >= 5,
-            let bits = Int(metaState[1]),
-            let keyBits = Int(metaState[2]),
-            let valueBits = Int(metaState[3]),
-            let seed = UInt64(metaState[4])
-        else {
-            throw KVCacheError(
-                message: "Invalid TurboQuantKVCache metaState")
-        }
-        let cache = TurboQuantKVCache(
-            bits: bits, keyBits: keyBits, valueBits: valueBits, seed: seed)
-        cache.state = state
-        cache.metaState = metaState
-        return cache
-
-    case "CacheList":
-        return try CacheList.fromState(state: state, metaState: metaState)
-
-    default:
-        if let restored = KVCacheSerializationRegistry.restore(
-            className: className, state: state, metaState: metaState)
-        {
-            return restored
-        }
-        throw KVCacheError(message: "Unknown cache class: \(className)")
+        return !tileLengthOverflow && !offsetOverflow && offset == representedLength
     }
+
+    /// Checks the version and the element-type names of a versioned layout.
+    ///
+    /// - Parameter metaState: The saved meta state, which holds the versioned count.
+    /// - Returns: True when the version is known and each element-type name is supported.
+    private static func hasValidVersionFields(_ metaState: [String]) -> Bool {
+        let isSupportedName = { (name: String) in
+            name == noDType
+                || varianceNormalizedDType(named: name).map(isSupportedVarianceNormalizedDType)
+                    == true
+        }
+        return Int(metaState[versionIndex]) == VarianceNormalizedKVCache.metadataVersion
+            && isSupportedName(metaState[keyDTypeIndex])
+            && isSupportedName(metaState[valueDTypeIndex])
+    }
+}
+
+/// Checks the saved values of a `ChunkedKVCache`.
+///
+/// - Parameters:
+///   - state: The saved arrays.
+///   - metaState: The saved meta state.
+/// - Throws: ``KVCacheError`` when the values do not fit the class.
+private func validateChunkedCache(state: [MLXArray], metaState: [String]) throws {
+    let className = "ChunkedKVCache"
+    try validatePromptCache(
+        className: className, state: state, stateCounts: SavedValueCounts.keyValueStates,
+        metadata: metaState, metadataCounts: SavedValueCounts.chunkedMetaStates)
+    _ = try savedChunkSize(metaState)
+    _ = try promptCacheInteger(
+        metaState[SavedMetaStateIndex.chunkedStartPosition], className: className)
+}
+
+/// Reads the chunk size of a saved `ChunkedKVCache`.
+///
+/// - Parameter metaState: The saved meta state, which holds two values.
+/// - Returns: The chunk size, or `nil` for a cache with no chunk size.
+/// - Throws: ``KVCacheError`` when the value is not an integer or `None`.
+private func savedChunkSize(_ metaState: [String]) throws -> Int? {
+    let value = metaState[SavedMetaStateIndex.chunkedChunkSize]
+    return value == "None" ? nil : try promptCacheInteger(value, className: "ChunkedKVCache")
+}
+
+/// Checks the saved values of an `ArraysCache` or a `MambaCache`.
+///
+/// The legacy meta state `[""]` holds no slot list. The restore then writes the arrays into
+/// the slots in order, thus any array count fits it.
+///
+/// - Parameters:
+///   - className: The saved class name.
+///   - state: The saved arrays.
+///   - metaState: The saved meta state.
+/// - Throws: ``KVCacheError`` when the values do not fit the class.
+private func validateArraysCache(
+    className: String, state: [MLXArray], metaState: [String]
+) throws {
+    guard metaState != [""] else { return }
+    let slotIndex = SavedMetaStateIndex.arraysSlotCount
+    let presentIndex = SavedMetaStateIndex.arraysPresentSlots
+    guard SavedValueCounts.arraysMetaStates.contains(metaState.count) else {
+        throw KVCacheError(
+            message: "Corrupt prompt cache: invalid \(className) state or metadata shape.")
+    }
+    let slotCount = try promptCacheInteger(metaState[slotIndex], className: className)
+    let presentSlots =
+        metaState[presentIndex].isEmpty
+        ? []
+        : try metaState[presentIndex].split(separator: ",").map {
+            try promptCacheInteger(String($0), className: className)
+        }
+    guard slotCount >= 0, presentSlots.count == state.count,
+        Set(presentSlots).count == presentSlots.count,
+        presentSlots.allSatisfy({ (0 ..< slotCount).contains($0) })
+    else {
+        throw KVCacheError(
+            message: "Corrupt prompt cache: \(className) slots do not fit its arrays.")
+    }
+}
+
+/// Checks the saved values of a `TurboQuantKVCache`.
+///
+/// The array count depends on the key mode that the key bit width selects: 2 raw arrays in
+/// every mode, 3 in raw-key mode, 5 in affine-key mode, and 4 or 5 in the standard mode.
+///
+/// - Parameters:
+///   - state: The saved arrays.
+///   - metaState: The saved meta state.
+/// - Throws: ``KVCacheError`` when the values do not fit the class.
+private func validateTurboQuantCache(state: [MLXArray], metaState: [String]) throws {
+    let configuration = try TurboQuantSavedConfiguration(metaState: metaState)
+    let acceptedCounts = configuration.acceptedStateCounts
+    // The setter reads the token axis of the first array, and of the second array in
+    // raw-key mode.
+    let firstRank = 4
+    let secondMinimumRank = 3
+    guard
+        state.isEmpty
+            || (acceptedCounts.contains(state.count)
+                && state[0].ndim == firstRank && state[1].ndim >= secondMinimumRank)
+    else {
+        throw KVCacheError(
+            message: "Corrupt prompt cache: invalid TurboQuantKVCache state or metadata shape.")
+    }
+}
+
+/// The configuration numbers of a saved `TurboQuantKVCache` meta state.
+private struct TurboQuantSavedConfiguration {
+    /// The meta-state count: the offset, the bit width, the key and value bit widths, and the
+    /// seed.
+    private static let metaStateCount = 5
+
+    /// The array count of a cache that holds raw keys and raw values, in every key mode.
+    private static let rawStateCount = 2
+
+    /// The compressed array counts of the modes that a key bit width selects: raw-key mode
+    /// (key bit width 0) and affine-key mode (key bit width 8).
+    private static let compressedStateCountsByKeyBits: [Int: Set<Int>] = [0: [3], 8: [5]]
+
+    /// The compressed array counts of the standard mode, with and without the key calibration
+    /// scale.
+    private static let standardCompressedStateCounts: Set<Int> = [4, 5]
+
+    /// The bit width.
+    let bits: Int
+    /// The key bit width.
+    let keyBits: Int
+    /// The value bit width.
+    let valueBits: Int
+    /// The seed of the rotation.
+    let seed: UInt64
+
+    /// Reads the configuration numbers.
+    ///
+    /// - Parameter metaState: The saved meta state.
+    /// - Throws: ``KVCacheError`` when the meta state is not a valid layout.
+    init(metaState: [String]) throws {
+        guard metaState.count == Self.metaStateCount,
+            Int(metaState[0]) != nil,
+            let bits = Int(metaState[SavedMetaStateIndex.turboQuantBits]),
+            let keyBits = Int(metaState[SavedMetaStateIndex.turboQuantKeyBits]),
+            let valueBits = Int(metaState[SavedMetaStateIndex.turboQuantValueBits]),
+            let seed = UInt64(metaState[SavedMetaStateIndex.turboQuantSeed])
+        else {
+            throw KVCacheError(message: "Invalid TurboQuantKVCache metaState")
+        }
+        (self.bits, self.keyBits, self.valueBits, self.seed) = (bits, keyBits, valueBits, seed)
+    }
+
+    /// The array counts that the state setter accepts for the key mode of this configuration.
+    var acceptedStateCounts: Set<Int> {
+        let compressed =
+            Self.compressedStateCountsByKeyBits[keyBits] ?? Self.standardCompressedStateCounts
+        return compressed.union([Self.rawStateCount])
+    }
+}
+
+/// Makes the empty built-in cache that a saved layer describes. The values passed the check
+/// of ``validateBuiltInCache(className:state:metaState:)``.
+///
+/// - Parameters:
+///   - className: The saved class name.
+///   - metaState: The saved meta state.
+/// - Returns: The empty cache, with the configuration of the saved meta state.
+/// - Throws: ``KVCacheError`` when a configuration value cannot be read.
+private func makeEmptyBuiltInCache(className: String, metaState: [String]) throws -> KVCache {
+    switch className {
+    case "RotatingKVCache":
+        return RotatingKVCache(
+            maxSize: try promptCacheInteger(
+                metaState[SavedMetaStateIndex.rotatingMaxSize], className: className))
+    case "QuantizedKVCache":
+        let values = try promptCacheIntegers(metaState, className: className)
+        return QuantizedKVCache(
+            groupSize: values[SavedMetaStateIndex.quantizedGroupSize],
+            bits: values[SavedMetaStateIndex.quantizedBits])
+    case "VarianceNormalizedKVCache":
+        let layout = try VarianceNormalizedSavedLayout(metaState: metaState)
+        return VarianceNormalizedKVCache(
+            tileSize: layout.tileSize, keyBits: layout.keyBits, valueBits: layout.valueBits,
+            sinkhornIterations: layout.sinkhornIterations)
+    case "ChunkedKVCache":
+        return ChunkedKVCache(chunkSize: try savedChunkSize(metaState))
+    case "MambaCache":
+        return MambaCache()
+    case "ArraysCache":
+        return ArraysCache(size: 0)
+    case "TurboQuantKVCache":
+        let configuration = try TurboQuantSavedConfiguration(metaState: metaState)
+        return TurboQuantKVCache(
+            bits: configuration.bits, keyBits: configuration.keyBits,
+            valueBits: configuration.valueBits, seed: configuration.seed)
+    default:
+        return KVCacheSimple()
+    }
+}
+
+/// Writes checked saved values into a built-in cache, in the order that its setters need.
+///
+/// - Parameters:
+///   - state: The saved arrays.
+///   - metaState: The saved meta state.
+///   - cache: The built-in cache that receives the values.
+private func applySavedValues(state: [MLXArray], metaState: [String], to cache: KVCache) {
+    if let arrays = cache as? ArraysCache {
+        arrays.restoreFromMetaState(state: state, savedMetaState: metaState)
+        return
+    }
+    var target = cache
+    if cache is VarianceNormalizedKVCache {
+        // The state setter reads the tile and tail counts that the meta-state setter writes.
+        target.metaState = metaState
+        target.state = state
+        return
+    }
+    if !state.isEmpty {
+        target.state = state
+    }
+    target.metaState = metaState
 }
 
 private func validatePromptCache(
@@ -2729,7 +3428,7 @@ public func quantizedScaledDotProductAttention(
         let kIndices = MLXArray(0 ..< kL)
         let causalMask = greaterEqual(
             expandedDimensions(qIndices, axis: -1), expandedDimensions(kIndices, axis: -2))
-        scores = MLX.where(causalMask, scores, MLXArray.maskFill(for: scores.dtype))
+        scores = MLX.where(causalMask, scores, maskedFill)
 
     case .array(let maskArray):
         scores = applyMask(maskArray, to: scores)
