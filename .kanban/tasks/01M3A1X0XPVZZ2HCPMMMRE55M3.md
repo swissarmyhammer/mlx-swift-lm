@@ -1,12 +1,41 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m3aps4h4ssxqz9dr3nj2mat8
+  text: |-
+    Research notes:
+    - `PromptCacheSpoolIntegrationTests.swift` is at `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/`, not at the top of the folder.
+    - The xcodeproj uses file-system synchronized groups, thus a new test file needs no project edit.
+    - The suite drives the prefill with the public `LanguageModel.prepare(_:cache:state:prefill:)` and one forward on the remainder, then `eval(logits, caches)`. `TokenIterator.next()` does not suit: it prefetches the next decode step into the caches.
+    - `MLXLanguageModel.modelExistsOnDisk()` (internal, reached through `@testable import`) is the local-cache check. The suite throws `MissingLocalModelError`, which names the model, before any load; a third test holds that message with an absent model id.
+    - Validator rules that apply here: no `print` (use `Logger`), no unnamed numeric literal except 0, 1, -1 and 100, no top-level `func`, no `guard` in a test.
+  timestamp: 2026-09-24T21:57:37.444981+00:00
+- actor: claude-code
+  id: 01m3apw8y5n967pry3cp1jw5vh
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — IntegrationTesting/IntegrationTestingTests/PromptCacheSpoolCostAssessmentTests.swift. `xcodebuild build-for-testing` gives TEST BUILD SUCCEEDED with no warning in the new file. `xcodebuild test -only-testing:IntegrationTestingTests/PromptCacheSpoolCostAssessmentTests` gives 3 tests passed in 80.75 s.
+    - next: test
+  timestamp: 2026-09-24T21:59:20.261471+00:00
+- actor: claude-code
+  id: 01m3aq4p42kf2hetvgs04myfa9
+  text: |-
+    ### test — red (the failures were there before this change; this change adds no failure and no warning)
+    - evidence: `swift build --build-tests` — exit 0, only the known warning `missing creator for mutated node`.
+    - `xcodebuild build-for-testing -skipPackagePluginValidation -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS'` — TEST BUILD SUCCEEDED, no warning in the new file.
+    - `xcodebuild test ... -only-testing:IntegrationTestingTests/PromptCacheSpoolCostAssessmentTests` — 3 tests in 1 suite passed after 80.750 s.
+    - MLXGuidedGenerationTests: 70 passed. MLXFoundationModelsTests: 299 passed. CXGrammarTests: 7 passed. MLXHuggingFaceMacrosTests: 5 passed.
+    - MLXLMTests: 694 XCTest tests with 36 failures, and 1207 Swift Testing tests with 101 issues, the same result in 2 runs. These are the numeric tolerance failures that task ^fbhgd7k records. This change adds one file under `IntegrationTesting/`, which no SwiftPM target holds, thus the SwiftPM test products are the same as at HEAD.
+    - next: /commit
+  timestamp: 2026-09-24T22:03:55.906327+00:00
 depends_on:
 - 01M3A1PX65M12926Y4BJVAG56K
 - 01M3A29W6YK4F0VMGBCB28DXZ2
 - 01M3A1T3CK0SMNZKTTP375ZMCS
-position_column: todo
-position_ordinal: '8880'
+position_column: doing
+position_ordinal: '80'
 title: Measure a prompt cache file write and read against a prefill, at 4k and 32k tokens, on real weights
 ---
 #prompt-cache
