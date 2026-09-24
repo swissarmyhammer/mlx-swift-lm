@@ -50,10 +50,22 @@ comments:
     - evidence: build has only the known `missing creator for mutated node` warning. MLXFoundationModelsTests 279/279 passed 3 times. MLXLMTests at baseline (36 XCTest failures in the same 5 suites, 101 Swift Testing issues). MLXGuidedGenerationTests 70, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 passed.
     - next: /commit
   timestamp: 2026-09-24T19:59:12.506105+00:00
+- actor: claude-code
+  id: 01m3ag4knvat5s8sv3j9g0vbkb
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD — 0 findings, 0 confirmed, 0 refuted; both prior findings are checked. Task moved to done.
+
+    ### finish iteration 2 — clean
+    - implement: changed (spoolFolderNamePartCount and spoolFolderNameSeparator in ExecutorPromptCache.swift; probe table in ExecutorPromptCacheSpoolTests.swift)
+    - test: green (MLXFoundationModelsTests 279/279 x3; MLXLMTests at baseline 36 XCTest failures, 101 issues; other 3 bundles pass)
+    - commit: 4bfe42b
+    - review: clean
+  timestamp: 2026-09-24T20:01:33.371869+00:00
 depends_on:
 - 01M3A1RHPV3CV6Q7Q59W0S77DT
-position_column: review
-position_ordinal: '80'
+position_column: done
+position_ordinal: ff9a80
 title: 'Disk spool, part 2: disk budget, clean-up of dead-process folders, and removal of one key or one session'
 ---
 #prompt-cache
