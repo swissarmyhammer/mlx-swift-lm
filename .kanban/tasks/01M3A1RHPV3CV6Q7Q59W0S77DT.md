@@ -39,11 +39,20 @@ comments:
     - commit: 7c1aac5 feat(prompt-cache): spill evicted entries to disk with one serial writer
     - review: findings — 2: `Libraries/MLXFoundationModels/ExecutorPromptCache.swift:299` swift/access-control (`directory` must be `private let`); `Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift:483` test-integrity/test-partitioning (the executor test with file I/O must move to `ExecutorPromptCacheSpoolTests.swift`)
   timestamp: 2026-09-24T19:23:22.779441+00:00
+- actor: claude-code
+  id: 01m3aew5b0sfaev0jd62bpdxvy
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — `directory` is now `private let` in ExecutorPromptCache.swift; the executor test with spill-file I/O moved from ExecutorPromptCacheTests.swift to ExecutorPromptCacheSpoolTests.swift; one shared `respondOnce(inside:modelID:sessionID:)` helper in ScriptedModelTestSupport.swift serves both suites.
+    - test: green against the baseline (MLXFoundationModelsTests 267/267 pass, 4 runs; MLXLMTests 36 XCTest failures + 101 Swift Testing issues, equal to the baseline; only the known build warning)
+    - commit: 30c27ee refactor(prompt-cache): keep the spool folder private and move the spilled executor test to the spool suite
+    - review: clean — `review sha HEAD~1..HEAD`, 0 findings; both findings of iteration 1 are ticked. Task moved to done.
+  timestamp: 2026-09-24T19:39:27.968462+00:00
 depends_on:
 - 01M3A1QAFD56F5TEPPADDJHENH
 - 01M3A1QND68R1PN6K74Z6AV3EP
-position_column: review
-position_ordinal: '80'
+position_column: done
+position_ordinal: ff9980
 title: 'Disk spool, part 1: spill evicted entries with one serial writer, and hand out a spilled handle on check-out'
 ---
 #prompt-cache
@@ -96,5 +105,5 @@ In `Libraries/MLXFoundationModels/ExecutorPromptCache.swift`, give `ExecutorProm
 > - `.kanban/tasks/01M3A1RHPV3CV6Q7Q59W0S77DT.jsonl` — no validator matches this file
 > - `.kanban/tasks/01M3A1RHPV3CV6Q7Q59W0S77DT.md` — no validator matches this file
 
-- [ ] `Libraries/MLXFoundationModels/ExecutorPromptCache.swift:299` `swift/access-control` — Internal storage detail should be explicitly declared private, not implicitly internal. The `directory` property is only used within the actor and is not intended as part of the API surface; all other similar properties on this actor explicitly declare their access level. Change line 299 to `private let directory: URL`.
-- [ ] `Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift:483` `test-integrity/test-partitioning` — The test `anExecutorPassThatFindsItsCacheOnDiskStartsColdAndDeletesTheFile` uses real file I/O to disk (a real external system). According to test-partitioning rules, integration tests that use real external systems belong in a separate integration test target, not the unit test target. The documented convention for this file (lines 37-41) explicitly states: 'These tests read the memory tier alone, and `ExecutorPromptCacheSpoolTests` reads the files.'. Either move this test to `ExecutorPromptCacheSpoolTests.swift` (if it fits the spool testing scope), create a separate integration test target for it, or refactor to test the executor behavior without direct file I/O assertions. The test name suggests it belongs with executor behavior, not file I/O tests — consider if the assertion can be rephrased to test executor behavior rather than file system side effects.
+- [x] `Libraries/MLXFoundationModels/ExecutorPromptCache.swift:299` `swift/access-control` — Internal storage detail should be explicitly declared private, not implicitly internal. The `directory` property is only used within the actor and is not intended as part of the API surface; all other similar properties on this actor explicitly declare their access level. Change line 299 to `private let directory: URL`.
+- [x] `Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift:483` `test-integrity/test-partitioning` — The test `anExecutorPassThatFindsItsCacheOnDiskStartsColdAndDeletesTheFile` uses real file I/O to disk (a real external system). According to test-partitioning rules, integration tests that use real external systems belong in a separate integration test target, not the unit test target. The documented convention for this file (lines 37-41) explicitly states: 'These tests read the memory tier alone, and `ExecutorPromptCacheSpoolTests` reads the files.'. Either move this test to `ExecutorPromptCacheSpoolTests.swift` (if it fits the spool testing scope), create a separate integration test target for it, or refactor to test the executor behavior without direct file I/O assertions. The test name suggests it belongs with executor behavior, not file I/O tests — consider if the assertion can be rephrased to test executor behavior rather than file system side effects.
