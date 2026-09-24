@@ -36,8 +36,21 @@ comments:
     - evidence: `swift build --build-tests`: only the known warning `missing creator for mutated node`. `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: XCTest 695 tests, 36 failures (all baseline: GlmOcrContinuationTests 6, NanbeigeTests 1, Qwen25VLContinuationTests 13, Qwen35ContinuationTests 8, Qwen3VLContinuationTests 8); Swift Testing 1207 tests, 101 issues (baseline). 0 TurboQuant failures. MLXGuidedGenerationTests 70 pass, MLXFoundationModelsTests 299 pass, CXGrammarTests 7 pass, MLXHuggingFaceMacrosTests 5 pass.
     - next: /commit
   timestamp: 2026-09-24T22:30:22.971817+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3arqzz15jkzgt2ba3q3v4zf
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (commit 561e9e6): 0 findings, 0 confirmed, 0 refuted, 7 validators attempted, 0 failed. 2 files reviewed (TurboQuantKernels.swift, TurboQuantTests.swift); the 2 .kanban files have no validator. No prior Review Findings sections.
+    - next: move to done
+
+    ### finish iteration 1 — clean
+    - implement: changed (TurboQuantKernels.swift: two barriers in each cross-SIMD WHT butterfly stage; TurboQuantTests.swift: testWHTEncodeKernelMatchesButterflyAndRepeats)
+    - test: green against the baseline (MLXLMTests: XCTest 695 tests / 36 baseline failures, Swift Testing 1207 tests / 101 baseline issues; other 4 bundles pass; TurboQuantIntegrationTests suite 20 of 20 runs pass)
+    - commit sha: 561e9e6
+    - review: clean (0 findings)
+  timestamp: 2026-09-24T22:31:57.153044+00:00
+position_column: done
+position_ordinal: ffa080
 title: TurboQuantIntegrationTests.testStandardAttentionRepeatFactors fails intermittently (cos 0.888 < 0.95 at rep=2)
 ---
 ## What
