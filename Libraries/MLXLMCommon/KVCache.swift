@@ -70,6 +70,20 @@ public protocol KVCache: Evaluatable, Updatable {
     /// get/set metadata state as string array for serialization
     var metaState: [String] { get set }
 
+    /// The number of bytes that the buffers of this cache hold.
+    ///
+    /// This count includes the full allocated buffers, for example the step
+    /// padding of ``KVCacheSimple``. It can thus be larger than the size of
+    /// ``state``. An empty cache gives 0.
+    ///
+    /// The count reads only the shape and the element type of each array
+    /// (`MLXArray.nbytes`), thus it evaluates nothing.
+    ///
+    /// This is a requirement and not only an extension member, so that a call
+    /// through `any KVCache` goes to the implementation of the dynamic type.
+    /// The default implementation is the sum of `nbytes` over ``innerState()``.
+    var residentByteCount: Int { get }
+
     /// whether this cache can be trimmed
     var isTrimmable: Bool { get }
 
@@ -125,6 +139,21 @@ extension KVCache {
     public func prepare(lengths: MLXArray?) {}
 
     public func finalize() {}
+
+    /// The sum of `nbytes` over ``innerState()``.
+    ///
+    /// This default is correct for a cache whose ``innerState()`` gives every
+    /// buffer the cache holds, at its full allocated size.
+    public var residentByteCount: Int {
+        innerState().totalByteCount
+    }
+}
+
+extension Array where Element == MLXArray {
+    /// The sum of `nbytes` over the arrays. It evaluates nothing.
+    var totalByteCount: Int {
+        reduce(0) { $0 + $1.nbytes }
+    }
 }
 
 public func withPreparedCache<Result>(
@@ -215,6 +244,15 @@ open class BaseKVCache: KVCache {
     open var ropeOffset: RoPEOffset { .scalar(offset) }
 
     public func innerState() -> [MLXArray] { [] }
+
+    /// The sum of `nbytes` over ``innerState()``.
+    ///
+    /// `open` so that a subclass whose ``innerState()`` does not give its full
+    /// buffers can override it. A call through `any KVCache` then reaches the
+    /// override by dynamic dispatch.
+    open var residentByteCount: Int {
+        innerState().totalByteCount
+    }
 
     open func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         fatalError("update(keys:values:) must be implemented by subclass")
@@ -1674,6 +1712,12 @@ public class CacheList: BaseKVCache {
 
     public override func innerState() -> [MLXArray] {
         caches.flatMap { $0.innerState() }
+    }
+
+    /// The sum of ``KVCache/residentByteCount`` over the children, so that each
+    /// child counts with its own rule.
+    public override var residentByteCount: Int {
+        caches.reduce(0) { $0 + $1.residentByteCount }
     }
 
     public subscript(index: Int) -> KVCache {

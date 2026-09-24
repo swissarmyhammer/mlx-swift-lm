@@ -289,6 +289,17 @@ public struct LMOutput {
     }
 }
 
+extension LMOutput.State {
+    /// The sum of `nbytes` over the array values of this state.
+    ///
+    /// A value that is not an `MLXArray` does not count. The count reads only
+    /// shapes and element types, thus it evaluates nothing and it does not
+    /// throw.
+    public var residentByteCount: Int {
+        contents.values.compactMap { $0 as? MLXArray }.totalByteCount
+    }
+}
+
 /// The result of the call to ``LanguageModel/prepare(_:cache:state:prefill:)``
 public enum PrepareResult {
     /// tokens to process by the ``TokenIterator``

@@ -24,19 +24,6 @@ import Foundation
 import MLX
 import MLXNN
 
-extension DType {
-    fileprivate var bytesPerElement: Int {
-        switch self {
-        case .bfloat16, .float16: return 2
-        case .float32: return 4
-        case .int32, .uint32: return 4
-        case .int16, .uint16: return 2
-        case .int8, .uint8: return 1
-        default: return 4
-        }
-    }
-}
-
 // MARK: - Codebook Generation
 
 /// Optimal Lloyd-Max codebook centroids for Beta-distributed coordinates.
@@ -1452,20 +1439,24 @@ public class TurboQuantKVCache: BaseKVCache {
     /// Does NOT include codec overhead (rotation matrices, codebooks) which is shared across layers.
     /// In rawKeyMode: rawKeys is always present (FP16 keys), no keyPackedMSE/keyNorms.
     public var memoryBytes: Int {
-        var total = 0
-        // Raw FP16 buffers (always present in rawKeyMode for keys, or during prefill)
-        if let rk = rawKeys { total += rk.shape.reduce(1, *) * rk.dtype.bytesPerElement }
-        if let rv = rawValues { total += rv.shape.reduce(1, *) * rv.dtype.bytesPerElement }
-        // Compressed storage (K only present when NOT rawKeyMode)
-        if let kw = affKeyW { total += kw.shape.reduce(1, *) * kw.dtype.bytesPerElement }
-        if let ks = affKeyScales { total += ks.shape.reduce(1, *) * ks.dtype.bytesPerElement }
-        if let kb = affKeyBiases { total += kb.shape.reduce(1, *) * kb.dtype.bytesPerElement }
-        if let kp = keyPackedMSE { total += kp.shape.reduce(1, *) * kp.dtype.bytesPerElement }
-        if let kn = keyNorms { total += kn.shape.reduce(1, *) * kn.dtype.bytesPerElement }
-        if let vp = valPackedMSE { total += vp.shape.reduce(1, *) * vp.dtype.bytesPerElement }
-        if let vn = valNorms { total += vn.shape.reduce(1, *) * vn.dtype.bytesPerElement }
-        if let kcs = keyCalibScale { total += kcs.shape.reduce(1, *) * kcs.dtype.bytesPerElement }
-        return total
+        residentByteCount
+    }
+
+    /// The sum of `nbytes` over every buffer this cache holds: the raw prefill
+    /// keys and values, the affine key triplet, the packed indices and norms of
+    /// keys and values, and the key calibration scale. Each buffer counts at its
+    /// full allocated size.
+    ///
+    /// The codecs are not counted, because all layers share them.
+    ///
+    /// ``innerState()`` of this cache gives no array, thus this override is
+    /// necessary. The count reads only shapes and element types, and it
+    /// evaluates nothing.
+    override public var residentByteCount: Int {
+        [
+            rawKeys, rawValues, affKeyW, affKeyScales, affKeyBiases, keyPackedMSE, keyNorms,
+            valPackedMSE, valNorms, keyCalibScale,
+        ].compactMap { $0 }.totalByteCount
     }
 
     // MARK: - State / Trim

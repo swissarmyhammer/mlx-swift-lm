@@ -378,6 +378,14 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
             + pendingTiles.reduce(0) { $0 + byteCount($1) }
     }
 
+    /// The compact tiles (``compactStorageByteCount``) plus the raw tail.
+    ///
+    /// This reads the slabs directly, thus it does not build the tile views
+    /// that ``state`` builds. It evaluates nothing.
+    public override var residentByteCount: Int {
+        compactStorageByteCount + [tailKeys, tailValues].compactMap { $0 }.totalByteCount
+    }
+
     var attentionPartitionCount: Int {
         tileSlabs.count + pendingTiles.count
     }
