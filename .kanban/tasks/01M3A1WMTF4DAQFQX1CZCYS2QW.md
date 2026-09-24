@@ -34,11 +34,23 @@ comments:
     - commit: 19f65cd feat(prompt-cache): add public API to set the prompt cache budgets, release one session and read the usage
     - review: findings (1) — PromptCacheSpoolTestSupport.swift:16 code-hygiene/magic-numbers-swift
   timestamp: 2026-09-24T21:09:50.988255+00:00
+- actor: claude-code
+  id: 01m3am8m9222kr13q85z3g1xmw
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD — 0 findings, 0 confirmed, 0 refuted; the one earlier finding is checked.
+
+    ### finish iteration 2 — clean
+    - implement: changed (Tests/MLXFoundationModelsTests/PromptCacheSpoolTestSupport.swift — named tokenCount, batchSize, and a named product; no literal ledger)
+    - test: green (swift build --build-tests: only the known `missing creator` warning; MLXFoundationModelsTests 291/291 passed on 3 runs)
+    - commit: 6a30c0c test(prompt-cache): name the numbers of the spool fixture shape
+    - review: clean — task moved to done
+  timestamp: 2026-09-24T21:13:39.362201+00:00
 depends_on:
 - 01M3A2BAA6N6SF1647TFZVH9GX
 - 01M3A1W91WSM28W94MS2MK47NR
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ff9d80
 title: 'Public API: set the prompt cache budgets, and release the cache of one session'
 ---
 #prompt-cache
