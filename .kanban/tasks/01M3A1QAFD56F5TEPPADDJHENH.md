@@ -27,10 +27,23 @@ comments:
     - evidence: `swift build --build-tests` — Build complete; one warning `missing creator for mutated node ... mlx-swift_Cmlx.bundle/Contents/MacOS` is also present on HEAD without this change (checked with a stash build), thus it is baseline. `xcrun xctest MLXFoundationModelsTests.xctest` — 244 tests in 29 suites passed. `xcrun xctest MLXLMTests.xctest` — 694 XCTest with 36 failures (the baseline continuation failures: GlmOcr/Qwen25VL/Qwen35/Qwen3VL ContinuationTests and NanbeigeTests.testWarmContinuationMatchesFullPrefill) and 1184 Swift Testing tests with 101 issues, equal to the baseline. No new failure, no new warning.
     - next: /commit
   timestamp: 2026-09-24T16:42:14.496406+00:00
+- actor: claude-code
+  id: 01m3a4x8py64r3y476bzt68n6h
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (9e5fb14) — 0 findings, 0 confirmed, 0 refuted; 7 validator runs attempted, 0 failed; 3 source files reviewed. No prior Review Findings sections.
+    - next: task moved to done
+
+    ### finish iteration 1 — clean
+    - implement: changed (ExecutorPromptCache.swift, MLXLanguageModel.swift, ExecutorPromptCacheTests.swift)
+    - test: green vs baseline (MLXFoundationModelsTests 244 passed; MLXLMTests 36 XCTest failures and 101 Swift Testing issues, equal to the baseline)
+    - commit: 9e5fb14
+    - review: clean (0 findings)
+  timestamp: 2026-09-24T16:45:18.430679+00:00
 depends_on:
 - 01M3A1T3CK0SMNZKTTP375ZMCS
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ff9580
 title: Limit the executor prompt cache memory tier by bytes, with a limit the host sets, and remove maximumRetainedSessions
 ---
 #prompt-cache
