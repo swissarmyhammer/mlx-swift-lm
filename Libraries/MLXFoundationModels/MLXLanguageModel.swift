@@ -260,6 +260,64 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         await ExecutorPromptCacheStore.current.evict(modelID: modelID)
     }
 
+    // MARK: - Prompt Cache Budgets and Release
+
+    /// Sets the memory budget of the shared prompt cache, in bytes. Entries
+    /// past the budget go to the disk spool, least recently used first.
+    ///
+    /// The budget applies at once: a smaller budget sends entries to the
+    /// spool before this call returns. A larger budget moves nothing.
+    ///
+    /// When the host sets no budget, the cache takes one quarter of the
+    /// recommended working set of the device that is not active at its first
+    /// use.
+    ///
+    /// - Parameter memoryBudgetBytes: the most bytes the entries in memory may
+    ///   hold. Zero or less keeps no entry in memory.
+    public static func configurePromptCache(memoryBudgetBytes: Int) async {
+        await ExecutorPromptCacheStore.current.configure(memoryBudgetBytes: memoryBudgetBytes)
+    }
+
+    /// Sets the disk budget of the spool, in bytes.
+    ///
+    /// The budget applies at once: a smaller budget deletes the least recently
+    /// used files before this call returns. A larger budget deletes nothing.
+    ///
+    /// When the host sets no budget, the spool takes one quarter of the free
+    /// space of the volume of its folder at its first use.
+    ///
+    /// - Parameter diskBudgetBytes: the most bytes the spill files may hold.
+    ///   Zero or less keeps no file on disk.
+    public static func configurePromptCache(diskBudgetBytes: Int) async {
+        await ExecutorPromptCacheStore.current.configure(diskBudgetBytes: diskBudgetBytes)
+    }
+
+    /// Releases the cache of one session of this model: in memory, while it
+    /// spills, and on disk. A no-op for an unknown session.
+    ///
+    /// The sessions of other models, and the other sessions of this model,
+    /// stay. A spill of the session whose write has not ended deletes its
+    /// file when the write ends.
+    ///
+    /// - Parameter sessionID: the identifier that the host binds with
+    ///   `MLXLanguageModel.$promptCacheScope.withValue(.session(id))`. When the
+    ///   host binds no scope, it is the identifier of the first transcript
+    ///   entry of the session.
+    public func releasePromptCache(sessionID: String) async {
+        await ExecutorPromptCacheStore.current.remove(
+            ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID))
+    }
+
+    /// The bytes the prompt cache holds now, for a host that sizes its pool.
+    /// `spillingBytes` are still resident in memory until their write ends.
+    ///
+    /// - `memoryBytes`: the entries in memory.
+    /// - `spillingBytes`: the entries whose write to disk has not ended.
+    /// - `diskBytes`: the spill files on disk.
+    public static var promptCacheUsage: (memoryBytes: Int, spillingBytes: Int, diskBytes: Int) {
+        get async { await ExecutorPromptCacheStore.current.usage }
+    }
+
     /// Whether the shared cache has a *genuine download* in flight for the
     /// given model — excludes a warmup of an already-present model. Used by
     /// ``availability`` to surface a `.downloading` state.

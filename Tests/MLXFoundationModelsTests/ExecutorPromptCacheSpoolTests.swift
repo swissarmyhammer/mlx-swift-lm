@@ -13,28 +13,15 @@ import Testing
 /// Tests for the spool of ``ExecutorPromptCacheStore``: an entry that leaves memory for the
 /// budget goes to one file through one serial writer, and a later check-out finds it.
 ///
-/// No weights are needed. Each entry carries one `KVCacheSimple` with fixed values. Each test
-/// has its own store in its own temporary folder. A test that must see a write in flight gives
-/// the store a ``HeldWriter``, which holds each write until the test releases it.
+/// The fixtures come from ``PromptCacheSpoolFixtures``. A test that must see a write in flight
+/// gives the store a ``HeldWriter``, which holds each write until the test releases it.
 @Suite("An evicted prompt cache goes to disk through one serial writer")
-struct ExecutorPromptCacheSpoolTests {
+struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
 
     // MARK: - Fixture values
 
     /// The model that each key names. It holds a `/`, as a real model ID does.
     private static let modelID = "test-org/prompt-cache-spool"
-
-    /// The ledger of each entry.
-    private static let tokens = [1, 42, 7]
-
-    /// The number of key/value heads of the cache.
-    private static let headCount = 2
-
-    /// The head dimension of the cache.
-    private static let headDimension = 4
-
-    /// The distance between the first values of two fixture arrays.
-    private static let valueStride: Float = 100
 
     /// How many entries the serial-writer test spills.
     private static let spillCount = 4
@@ -81,80 +68,11 @@ struct ExecutorPromptCacheSpoolTests {
         livePID: liveProbeResult,
     ]
 
-    /// The fixture arrays, in the order of their first values.
-    private enum FixtureArray: Int {
-        case keys
-        case values
-        case nextToken
-    }
-
     // MARK: - Fixture builders
 
     /// The key of `sessionID` under ``modelID``.
     private static func key(_ sessionID: String) -> ExecutorPromptCacheKey {
         ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID)
-    }
-
-    /// Makes the keys or the values of a block of tokens, with consecutive values.
-    ///
-    /// - Parameters:
-    ///   - tokenCount: The number of tokens of the block.
-    ///   - array: The fixture array. It sets the first value.
-    /// - Returns: An array of shape `(1, heads, tokens, headDimension)`, as `float16`.
-    private static func block(tokenCount: Int, array: FixtureArray) -> MLXArray {
-        let shape = [1, headCount, tokenCount, headDimension]
-        let count = shape.reduce(1, *)
-        let start = Float(array.rawValue) * valueStride
-        return MLXArray((0 ..< count).map { start + Float($0) }).reshaped(shape).asType(.float16)
-    }
-
-    /// Makes an entry with one `KVCacheSimple` that holds ``tokens``.
-    ///
-    /// - Returns: The entry.
-    private static func entry() -> ExecutorPromptCacheEntry {
-        let cache = KVCacheSimple()
-        _ = cache.update(
-            keys: block(tokenCount: tokens.count, array: .keys),
-            values: block(tokenCount: tokens.count, array: .values))
-        return ExecutorPromptCacheEntry(caches: [cache], tokens: tokens)
-    }
-
-    /// Makes the name of an empty temporary folder for one test. The folder is not made: the
-    /// store makes it at its first write.
-    ///
-    /// - Returns: The URL of the folder.
-    private static func temporaryDirectory() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("ExecutorPromptCacheSpoolTests-\(UUID().uuidString)")
-    }
-
-    /// Makes a store in `directory` with the budget `budget`.
-    ///
-    /// - Parameters:
-    ///   - directory: The spool folder of the store.
-    ///   - budget: The memory budget in bytes. Zero spills each check-in at once.
-    ///   - writer: The writer of the spill files.
-    /// - Returns: The store.
-    private static func store(
-        in directory: URL, budget: Int = 0,
-        writer: @escaping ExecutorPromptCacheFileWriter = ExecutorPromptCacheStore.writeSpillFile
-    ) async -> ExecutorPromptCacheStore {
-        let store = ExecutorPromptCacheStore(directory: directory, writer: writer)
-        await store.configure(memoryBudgetBytes: budget)
-        return store
-    }
-
-    /// The names of the spill files in `directory`, sorted. A folder that does not exist
-    /// holds none.
-    ///
-    /// - Parameter directory: The spool folder.
-    /// - Returns: The file names.
-    private static func fileNames(in directory: URL) throws -> [String] {
-        guard FileManager.default.fileExists(atPath: directory.path(percentEncoded: false))
-        else {
-            return []
-        }
-        return try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
     }
 
     /// Makes the folder `name` in `root`, and makes `root` when it is not there.
@@ -168,23 +86,6 @@ struct ExecutorPromptCacheSpoolTests {
             at: root.appendingPathComponent(name, isDirectory: true),
             withIntermediateDirectories: true)
         return name
-    }
-
-    /// Records an issue unless `store` holds nothing for `key` and no file stays in `directory`:
-    /// no entry in memory, no write that has not ended, no disk record and no byte on any tier.
-    ///
-    /// - Parameters:
-    ///   - key: The key that the test removed.
-    ///   - store: The store.
-    ///   - directory: The spool folder of the store.
-    private static func expectNothingStored(
-        for key: ExecutorPromptCacheKey, in store: ExecutorPromptCacheStore, directory: URL
-    ) async throws {
-        #expect(await store.retainedByteCount == 0)
-        #expect(await store.spillingByteCount == 0)
-        #expect(await store.diskByteCount == 0)
-        #expect(try fileNames(in: directory).isEmpty)
-        #expect(await store.checkOut(key) == .none)
     }
 
     /// Records an issue unless two lists of arrays have equal shapes, types and values.
@@ -202,61 +103,6 @@ struct ExecutorPromptCacheSpoolTests {
     }
 
     // MARK: - Writers a test controls
-
-    /// A writer that holds each write until the test releases it, and keeps a copy of each
-    /// file that it writes.
-    ///
-    /// The store deletes a file that nobody needs when its write ends. The copy lets a test
-    /// read the bytes that the writer wrote all the same.
-    private final class HeldWriter: Sendable {
-
-        /// The URL of each write, in the order the writes start.
-        let startedWrites: AsyncStream<URL>
-
-        /// Receives the URL of each write that starts.
-        private let starts: AsyncStream<URL>.Continuation
-
-        /// Holds each write until ``release()``.
-        private let releases = DispatchSemaphore(value: 0)
-
-        /// The folder of the copies.
-        let copies: URL
-
-        /// Creates a writer that keeps its copies in `copies`.
-        ///
-        /// - Parameter copies: The folder of the copies. The writer makes it.
-        init(copies: URL) throws {
-            (startedWrites, starts) = AsyncStream.makeStream(of: URL.self)
-            self.copies = copies
-            try FileManager.default.createDirectory(at: copies, withIntermediateDirectories: true)
-        }
-
-        /// Tells the test that a write started, waits for a release, and writes the file and
-        /// its copy.
-        ///
-        /// - Parameters:
-        ///   - input: The prepared entry.
-        ///   - url: The URL of the file.
-        func write(_ input: PromptCacheSaveInput, to url: URL) throws {
-            starts.yield(url)
-            releases.wait()
-            try ExecutorPromptCacheStore.writeSpillFile(input, to: url)
-            try FileManager.default.copyItem(at: url, to: copy(of: url))
-        }
-
-        /// Lets one held write run.
-        func release() {
-            releases.signal()
-        }
-
-        /// The URL of the copy of `url`.
-        ///
-        /// - Parameter url: The URL of a file that the writer wrote.
-        /// - Returns: The URL of its copy.
-        func copy(of url: URL) -> URL {
-            copies.appendingPathComponent(url.lastPathComponent)
-        }
-    }
 
     /// A writer that counts the writes that run at the same time.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)

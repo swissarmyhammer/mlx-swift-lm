@@ -1,11 +1,31 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m3akekt8n4tcfvx67a5cd62c
+  text: |-
+    Research:
+    - `ExecutorPromptCacheStore` (ExecutorPromptCache.swift:251) has `configure(memoryBudgetBytes:)` (:508), `configure(diskBudgetBytes:)` (:519), `remove(_:)` (:704), and the byte totals `retainedByteCount`, `spillingByteCount`, `diskByteCount` (private(set)). `current` is a task-local (:291).
+    - Defaults: memory = one quarter of (recommended working set - active memory) at first use; disk = one quarter of the free space of the spool volume at first use (`defaultBudgetDivisor = 4`).
+    - `evict()`/`evictAll()` are at MLXLanguageModel.swift:243/:258.
+    - ExecutorPromptCacheSpoolTests.swift has private fixtures (`entry()`, `HeldWriter`, `fileNames(in:)`, `expectNothingStored`). The new tests need the same fixtures, thus I move them to a shared test support file and do not copy them.
+    - The store has no single read of the three totals. I add `usage` on the store so that `promptCacheUsage` reads the three totals in one actor hop (one consistent snapshot).
+  timestamp: 2026-09-24T20:59:26.920575+00:00
+- actor: claude-code
+  id: 01m3akq5ng0jrfgjpbs3j65c3t
+  text: |-
+    ### implement — changed
+    - evidence: 5 files — Libraries/MLXFoundationModels/MLXLanguageModel.swift (4 public members), Libraries/MLXFoundationModels/ExecutorPromptCache.swift (`usage` snapshot), Tests/MLXFoundationModelsTests/PromptCachePublicAPITests.swift (7 new tests), Tests/MLXFoundationModelsTests/PromptCacheSpoolTestSupport.swift (shared fixtures: protocol `PromptCacheSpoolFixtures` + `HeldWriter`), Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift (uses the shared fixtures, no copy).
+    - TDD: the new tests did not compile before the API existed (red). After: `swift build --build-tests` has only the known `missing creator` warning; MLXFoundationModelsTests 291/291 passed on 4 runs.
+    - Note: the files tool `replace_all` made only one replacement per call in this session. Check the result count after each replace_all.
+    - next: /test
+  timestamp: 2026-09-24T21:04:07.344508+00:00
 depends_on:
 - 01M3A2BAA6N6SF1647TFZVH9GX
 - 01M3A1W91WSM28W94MS2MK47NR
-position_column: todo
-position_ordinal: '8780'
+position_column: doing
+position_ordinal: '80'
 title: 'Public API: set the prompt cache budgets, and release the cache of one session'
 ---
 #prompt-cache

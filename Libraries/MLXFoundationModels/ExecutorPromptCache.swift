@@ -377,6 +377,12 @@ actor ExecutorPromptCacheStore {
     /// The sum of the sizes of the files in ``onDisk``: the known disk total.
     private(set) var diskByteCount = 0
 
+    /// The three byte totals of the store, read in one step: ``retainedByteCount``,
+    /// ``spillingByteCount`` and ``diskByteCount``.
+    var usage: (memoryBytes: Int, spillingBytes: Int, diskBytes: Int) {
+        (retainedByteCount, spillingByteCount, diskByteCount)
+    }
+
     /// The folder whose spool folders of processes that do not run the store
     /// deletes at its first use, or nil when the clean-up ran or the store has
     /// no such folder.
