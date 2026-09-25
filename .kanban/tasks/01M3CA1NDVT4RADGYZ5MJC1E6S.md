@@ -13,8 +13,21 @@ comments:
     - evidence: 1 file — Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift; MLXFoundationModelsTests 319 tests passed
     - next: test
   timestamp: 2026-09-25T22:53:20.963917+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3dcnjynqrpfpecs2rbxxc05
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (dc2e21d) — 0 findings, 7 validator runs, 0 failed
+    - next: done
+
+    ### finish iteration 1 — clean
+    - implement: changed — Tests/MLXFoundationModelsTests/ExecutorPromptCacheTests.swift (new test aCarriedEntryWhoseCachesHoldNothingPlansAsCold; break check failed as expected, then removed)
+    - test: green — MLXFoundationModelsTests 319 passed (3 runs), MLXLMTests 696 XCTest + 1218 Swift Testing, MLXGuidedGenerationTests 70, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5; 0 failures, 0 skipped; only the known warning `missing creator for mutated node`
+    - commit: dc2e21d
+    - review: clean (0 findings)
+  timestamp: 2026-09-25T22:58:38.677471+00:00
+position_column: done
+position_ordinal: ffb280
 title: Test that a carried cache that holds nothing plans as cold (decision .prefill)
 ---
 ## What
