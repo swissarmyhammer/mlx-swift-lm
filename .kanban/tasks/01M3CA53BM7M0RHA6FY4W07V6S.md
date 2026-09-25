@@ -29,8 +29,24 @@ comments:
     - evidence: `swift build --build-tests` — only the known warning `missing creator for mutated node`. xctest: MLXLMTests 695 XCTest + 1208 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 299, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 — 0 failures, 0 skipped. Integration: Qwen35SessionPromptCacheTests + PromptCacheSpoolCostAssessmentTests — 8 tests in 2 suites passed.
     - next: /commit
   timestamp: 2026-09-25T16:21:13.158034+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3cp24a0afkm1a0dzeettwzt
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (6b058c4) — 0 findings, 0 confirmed, 0 refuted; 7 validators attempted, 0 failed.
+    - next: done
+  timestamp: 2026-09-25T16:23:32.416319+00:00
+- actor: claude-code
+  id: 01m3cp26nr2w12py0gxd5jjvhc
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — Qwen35SessionPromptCacheTests.swift, PromptCacheSpoolCostAssessmentTests.swift (no library bug found; restore is exact: max logit difference 0.0 over 8 steps on both models; restored and uncached turn 2 both "teal")
+    - test: green — 5 SwiftPM bundles 0 failures 0 skipped, only the known warning; integration 8 tests in 2 suites passed
+    - commit: 6b058c4
+    - review: clean — 0 findings
+  timestamp: 2026-09-25T16:23:34.840343+00:00
+position_column: done
+position_ordinal: ffa380
 title: 'Integration: prove cold equivalence and the M-RoPE state of a Qwen3.5 session restored from disk'
 ---
 ## What
@@ -48,10 +64,10 @@ What to test (add new tests; do not change the existing ones):
 
 ## Acceptance Criteria
 
-- [ ] A test proves that the file of a Qwen3.5 turn holds the `qwen35.ropeDeltas` state, the render ledger and offsets equal to the ledger length.
-- [ ] A test proves that the disk-restored second turn gives the text of an uncached second turn.
-- [ ] A test compares restored and original logits over at least 8 decode steps for the hybrid model and for `Qwen3-4B-4bit`.
-- [ ] Each test fails with a clear message when its model is not in the local cache.
+- [x] A test proves that the file of a Qwen3.5 turn holds the `qwen35.ropeDeltas` state, the render ledger and offsets equal to the ledger length.
+- [x] A test proves that the disk-restored second turn gives the text of an uncached second turn.
+- [x] A test compares restored and original logits over at least 8 decode steps for the hybrid model and for `Qwen3-4B-4bit`.
+- [x] Each test fails with a clear message when its model is not in the local cache.
 
 ## Tests
 
