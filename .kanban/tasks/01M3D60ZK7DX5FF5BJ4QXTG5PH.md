@@ -38,8 +38,24 @@ comments:
     - evidence: `swift build --build-tests` has only the known warning `missing creator for mutated node`. `xcrun xctest` for each bundle: MLXLMTests 3 runs, each 696 XCTest 0 failures + 1218 Swift Testing passed (1217 baseline + 1 new); MLXGuidedGenerationTests 70 passed; MLXFoundationModelsTests 312 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 5 XCTest 0 failures. 0 skipped. `TextToolCallRecoveryBenchmark` did not fail.
     - next: /commit
   timestamp: 2026-09-25T22:30:36.500453+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3db6rxmq2emazybww6xj0hg
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (d080716) — 0 findings, 0 confirmed, 0 refuted, 7 validators attempted, 0 failed. The two kanban files matched no validator.
+    - next: done
+  timestamp: 2026-09-25T22:33:04.692722+00:00
+- actor: claude-code
+  id: 01m3db6v24bvbt5fx3yetf7bk7
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — Libraries/MLXLMCommon/Evaluate.swift, Tests/MLXLMTests/SpeculativeDecodingTests.swift
+    - test: green — 5 bundles, 0 failures, 0 skipped; MLXLMTests 3 runs (696 XCTest + 1218 Swift Testing each); only the known build warning
+    - commit: d080716
+    - review: clean — 0 findings (review sha HEAD~1..HEAD)
+  timestamp: 2026-09-25T22:33:06.884421+00:00
+position_column: done
+position_ordinal: ffaf80
 title: SpeculativeTokenIterator.prepare drops the first main token when a model prepare returns .logits
 ---
 ## What
