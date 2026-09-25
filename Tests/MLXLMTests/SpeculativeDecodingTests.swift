@@ -265,6 +265,53 @@ struct SpeculativeDecodingTests {
         #expect(iterator.draftCacheStorage.nativeAttentionOffsetsAreAligned)
     }
 
+    @Test(arguments: PrepareMode.allCases, PrepareMode.allCases)
+    func `Speculative decoding matches TokenIterator for each prepare result`(
+        mainMode: PrepareMode, draftMode: PrepareMode
+    ) throws {
+        // Contract: at temperature 0, the speculative stream is the stream of
+        // `TokenIterator`, also when a `prepare` returns `.logits`. The draft
+        // model is the same function as the main model, thus the verify pass
+        // must accept each draft, and the two caches must end aligned.
+        let vocabularySize = 100
+        let numDraftTokens = 3
+        let prompt = MLXArray([92, 85, 2, 95])
+        let parameters = GenerateParameters(maxTokens: 16, temperature: 0.0)
+
+        var reference = try TokenIterator(
+            input: LMInput(tokens: prompt),
+            model: PrepareModeTransitionModel(vocabularySize: vocabularySize, mode: mainMode),
+            parameters: parameters)
+        var expectedTokens: [Int] = []
+        while let token = reference.next() {
+            expectedTokens.append(token)
+        }
+
+        var iterator = try SpeculativeTokenIterator(
+            input: LMInput(tokens: prompt),
+            mainModel: PrepareModeTransitionModel(vocabularySize: vocabularySize, mode: mainMode),
+            draftModel: PrepareModeTransitionModel(
+                vocabularySize: vocabularySize, mode: draftMode),
+            parameters: parameters,
+            numDraftTokens: numDraftTokens
+        )
+        var speculativeTokens: [Int] = []
+        while let token = iterator.next() {
+            speculativeTokens.append(token)
+        }
+        iterator.finalizeGeneration()
+
+        #expect(expectedTokens.count == parameters.maxTokens)
+        #expect(speculativeTokens == expectedTokens)
+        let telemetry = try #require(iterator.speculativeDecodingTelemetry)
+        #expect(telemetry.draftTokenCount > 0)
+        #expect(telemetry.acceptedDraftTokenCount == telemetry.draftTokenCount)
+        #expect(
+            iterator.mainCacheStorage.processedTokenCount
+                == iterator.draftCacheStorage.processedTokenCount)
+        #expect(iterator.mainCache.first?.offset == iterator.draftCache.first?.offset)
+    }
+
     @Test
     func `SpeculativeTokenIterator scopes class logit processor state via copy`() throws {
         final class RecordingClassProcessor: LogitProcessor, @unchecked Sendable {
@@ -353,6 +400,43 @@ private final class CacheTrackingTransitionModel: Module, LanguageModel,
             logits[position * vocabularySize + (token * 31 + 7) % vocabularySize] = 100
         }
         return MLXArray(logits, [1, tokenIds.count, vocabularySize])
+    }
+}
+
+/// The result that ``PrepareModeTransitionModel`` gives from `prepare`.
+enum PrepareMode: CaseIterable, Sendable {
+    /// `prepare` gives back the whole prompt as `.tokens`.
+    case tokens
+    /// `prepare` processes the whole prompt and gives back `.logits`.
+    case logits
+}
+
+/// ``CacheTrackingTransitionModel`` variant whose `prepare` gives the result
+/// that `mode` selects, as the vision models give `.logits`.
+private final class PrepareModeTransitionModel: Module, LanguageModel, KVCacheDimensionProvider {
+    let transition: CacheTrackingTransitionModel
+    let mode: PrepareMode
+    var kvHeads: [Int] { transition.kvHeads }
+
+    init(vocabularySize: Int, mode: PrepareMode) {
+        self.transition = CacheTrackingTransitionModel(vocabularySize: vocabularySize)
+        self.mode = mode
+        super.init()
+    }
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state _: LMOutput.State?, prefill _: PrefillParameters
+    ) throws -> PrepareResult {
+        switch mode {
+        case .tokens:
+            return .tokens(input.text)
+        case .logits:
+            return .logits(callAsFunction(input.text, cache: cache, state: nil))
+        }
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        transition(inputs, cache: cache)
     }
 }
 

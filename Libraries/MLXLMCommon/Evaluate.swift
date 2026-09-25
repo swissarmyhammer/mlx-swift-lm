@@ -1175,58 +1175,113 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     /// Prefill both main and draft models with the prompt, priming caches for generation
     mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
-        let inputLength = input.text.cacheSequenceLength
 
-        // Prefill main model
-        switch try mainModel.prepare(
-            input, cache: mainCache, state: state, prefill: prefill)
-        {
-        case .tokens(let tokens):
-            let remainingLength = tokens.cacheSequenceLength
-            precondition(
-                remainingLength <= inputLength,
-                "Main model prepare returned more tokens than it received")
-            mainCacheStorage.commitProcessedTokens(inputLength - remainingLength)
-            y = tokens
+        let mainResult = try Self.prefill(
+            mainModel, with: input, into: mainCacheStorage, state: state, prefill: prefill,
+            role: "Main")
+        switch mainResult {
+        case .tokens:
             // the remaining tokens are consumed by the first verify pass; the
             // prompt is as processed as prefill will make it
             let total = input.text.tokens.size
             prefill.progress?(total, total)
-        case .logits(let result):
-            mainCacheStorage.commitProcessedTokens(inputLength)
-            var logits = result.logits[0..., -1, 0...]
-            logits = processor?.process(logits: logits) ?? logits
-            let token = sampler.sample(logits: logits)
-            processor?.didSample(token: token)
-            y = .init(tokens: token)
-            state = result.state
+        case .logits(let output):
+            state = output.state
         }
 
-        // Prefill draft model, don't call didSample here -- processor tracks main model's accepted sequence only
         // The draft prefill gets no progress callback: the main model's prefill
         // already reported the prompt, and a second pass would double-count it.
         var draftPrefill = prefill
         draftPrefill.progress = nil
-        switch try draftModel.prepare(input, cache: draftCache, state: nil, prefill: draftPrefill)
-        {
+        let draftResult = try Self.prefill(
+            draftModel, with: input, into: draftCacheStorage, state: nil, prefill: draftPrefill,
+            role: "Draft")
+
+        startDecoding(main: mainResult, draft: draftResult)
+
+        try kvCachePlan.applyAndValidate(to: mainCacheStorage)
+        try kvCachePlan.applyAndValidate(to: draftCacheStorage)
+    }
+
+    /// Runs the `prepare` of `model` on the prompt, and records in `storage`
+    /// the prompt tokens that the model processed.
+    ///
+    /// - Parameters:
+    ///   - model: the model to prefill.
+    ///   - input: the prompt.
+    ///   - storage: the cache storage of `model`.
+    ///   - state: the model state that belongs with the cache of `storage`.
+    ///   - prefill: the prefill parameters.
+    ///   - role: the name of the model in the precondition message.
+    /// - Returns: the result of the `prepare` of `model`.
+    private static func prefill(
+        _ model: any LanguageModel, with input: LMInput, into storage: KVCacheStorage,
+        state: LMOutput.State?, prefill: PrefillParameters, role: String
+    ) throws -> PrepareResult {
+        let inputLength = input.text.cacheSequenceLength
+        let result = try model.prepare(
+            input, cache: storage.cache, state: state, prefill: prefill)
+        switch result {
         case .tokens(let tokens):
             let remainingLength = tokens.cacheSequenceLength
             precondition(
                 remainingLength <= inputLength,
-                "Draft model prepare returned more tokens than it received")
-            draftCacheStorage.commitProcessedTokens(inputLength - remainingLength)
-            draftY = tokens
-        case .logits(let result):
-            draftCacheStorage.commitProcessedTokens(inputLength)
-            var logits = result.logits[0..., -1, 0...]
-            logits = processor?.process(logits: logits) ?? logits
-            let token = sampler.sample(logits: logits)
-            draftY = .init(tokens: token)
-            asyncEval(draftY.tokens)
+                "\(role) model prepare returned more tokens than it received")
+            storage.commitProcessedTokens(inputLength - remainingLength)
+        case .logits:
+            storage.commitProcessedTokens(inputLength)
         }
+        return result
+    }
 
-        try kvCachePlan.applyAndValidate(to: mainCacheStorage)
-        try kvCachePlan.applyAndValidate(to: draftCacheStorage)
+    /// Sets the first input of each model from the results of the two prefills.
+    ///
+    /// When both models leave a part of the prompt, the first round processes
+    /// it: the draft proposals and the verify pass then start at the same
+    /// position. When one model processes the whole prompt, the two models
+    /// cannot start at the same position that way. Thus both caches then get
+    /// the whole prompt, the main model gives the first token, and each model
+    /// starts from that token.
+    ///
+    /// - Parameters:
+    ///   - mainResult: the result of the `prepare` of the main model.
+    ///   - draftResult: the result of the `prepare` of the draft model.
+    private mutating func startDecoding(
+        main mainResult: PrepareResult, draft draftResult: PrepareResult
+    ) {
+        switch (mainResult, draftResult) {
+        case (.tokens(let mainTokens), .tokens(let draftTokens)):
+            y = mainTokens
+            draftY = draftTokens
+        case (.tokens(let mainTokens), .logits):
+            let output = mainModel(mainTokens[text: .newAxis], cache: mainCache, state: state)
+            mainCacheStorage.commitProcessedTokens(mainTokens.cacheSequenceLength)
+            state = output.state
+            startDecoding(mainLogits: output.logits)
+        case (.logits(let mainOutput), .tokens(let draftTokens)):
+            feedDraftModel(draftTokens)
+            startDecoding(mainLogits: mainOutput.logits)
+        case (.logits(let mainOutput), .logits):
+            startDecoding(mainLogits: mainOutput.logits)
+        }
+    }
+
+    /// Samples the first generated token from the main logits of the last
+    /// prompt position, and makes it the first pending token and the first
+    /// input of each model.
+    ///
+    /// No cache holds the token yet: the first round feeds it to both models,
+    /// as it feeds the final token of each round.
+    ///
+    /// - Parameter mainLogits: the main logits of the prompt.
+    private mutating func startDecoding(mainLogits: MLXArray) {
+        var logits = mainLogits[0..., -1, 0...]
+        logits = processor?.process(logits: logits) ?? logits
+        let token = sampler.sample(logits: logits)
+        processor?.didSample(token: token)
+        pendingTokens.append(token.item(Int.self))
+        y = .init(tokens: token)
+        draftY = y
     }
 
     /// Run one round of speculative decoding: draft, verify, accept/reject
@@ -1409,11 +1464,17 @@ extension SpeculativeTokenIterator: GenerationFinalizingTokenIterator {
         guard !tokens.isEmpty else {
             return
         }
-        let input = LMInput.Text(tokens: MLXArray(Array(tokens)))
-        _ = draftModel(input[text: .newAxis], cache: draftCache, state: nil)
-        draftCacheStorage.commitProcessedTokens(input.cacheSequenceLength)
+        feedDraftModel(LMInput.Text(tokens: MLXArray(Array(tokens))))
         kvCachePlan.apply(to: draftCacheStorage)
         eval(draftCache)
+    }
+
+    /// Runs the draft model on `input`, so that the draft cache holds it.
+    ///
+    /// - Parameter input: the tokens that the draft cache does not hold yet.
+    private func feedDraftModel(_ input: LMInput.Text) {
+        _ = draftModel(input[text: .newAxis], cache: draftCache, state: nil)
+        draftCacheStorage.commitProcessedTokens(input.cacheSequenceLength)
     }
 
     /// Removes the tokens of the current round that `storage` holds after the
