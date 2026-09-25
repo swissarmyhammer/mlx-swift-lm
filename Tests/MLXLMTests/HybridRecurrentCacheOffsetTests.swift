@@ -42,7 +42,7 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     private func makeUnseededModel() throws -> any LanguageModel {
         switch self {
         case .nemotronH:
-            return NemotronHModel(Self.nemotronHConfiguration)
+            return NemotronHModel(try Self.decode(NemotronHConfiguration.self, Self.nemotronHJSON))
         case .jamba:
             return JambaModel(try Self.decode(JambaConfiguration.self, Self.jambaJSON))
         case .mamba2:
@@ -75,12 +75,18 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     // MARK: - Configurations
 
     /// Mamba, attention, Mamba and MLP layers. Only the Mamba and attention layers have a cache.
-    private static let nemotronHConfiguration = NemotronHConfiguration(
-        vocabSize: 32, hiddenSize: 64, numHiddenLayers: 4, numAttentionHeads: 4,
-        numKeyValueHeads: 2, mambaNumHeads: 4, mambaHeadDim: 16, ssmStateSize: 16,
-        convKernel: 4, nGroups: 2, intermediateSize: 128, moeIntermediateSize: 64,
-        moeSharedExpertIntermediateSize: 64, nRoutedExperts: 4, numExpertsPerTok: 2,
-        hybridOverridePattern: "M*M-", layerNormEpsilon: 1e-5, nGroup: 2, topkGroup: 1)
+    private static let nemotronHJSON = """
+        {
+            "vocab_size": 32, "hidden_size": 64, "num_hidden_layers": 4,
+            "num_attention_heads": 4, "num_key_value_heads": 2,
+            "mamba_num_heads": 4, "mamba_head_dim": 16, "ssm_state_size": 16,
+            "conv_kernel": 4, "n_groups": 2, "intermediate_size": 128,
+            "moe_intermediate_size": 64, "moe_shared_expert_intermediate_size": 64,
+            "n_routed_experts": 4, "num_experts_per_tok": 2,
+            "hybrid_override_pattern": "M*M-", "layer_norm_epsilon": 1e-5,
+            "n_group": 2, "topk_group": 1
+        }
+        """
 
     /// Layers 1 and 3 are attention layers, and layers 0 and 2 are Mamba layers.
     private static let jambaJSON = """

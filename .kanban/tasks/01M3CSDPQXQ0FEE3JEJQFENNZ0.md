@@ -45,6 +45,43 @@ comments:
     - evidence: `swift build --build-tests` — only the known warning `missing creator for mutated node`. `xcrun xctest` on all five bundles: MLXLMTests 695 XCTest 0 failures + 1215 Swift Testing passed (3 runs, all green; the flaky ChatSessionTests test of ^k8hm41j did not fail); MLXGuidedGenerationTests 70 passed; MLXFoundationModelsTests 312 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 5 passed. 0 skipped.
     - next: /commit
   timestamp: 2026-09-25T18:31:11.344762+00:00
+- actor: claude-code
+  id: 01m3cxcq4nmktw3vt0j13m5z9w
+  text: |-
+    ### commit — changed
+    - evidence: 314b5a3 fix(hybrid): move the MambaCache offset in each recurrent layer
+    - next: /review qfennz0 HEAD~1..HEAD
+  timestamp: 2026-09-25T18:31:39.413543+00:00
+- actor: claude-code
+  id: 01m3cxhfm5te9bd7semn13kjq2
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD — 5 findings: Tests/MLXLMTests/HybridRecurrentCacheOffsetTests.swift:79, :80, :81, :82, :83 `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+    - next: /implement (name the literals of the NemotronH configuration initializer call)
+  timestamp: 2026-09-25T18:34:15.557989+00:00
+- actor: claude-code
+  id: 01m3cxhhneba8k86r3p003wtt1
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed (7 models call advancePosition(by:); new HybridRecurrentCacheOffsetTests; CachedForwardSmokeTests checks the MambaCache offset; doc comment on ArraysCache.advance(_:))
+    - test: green (all five bundles; MLXLMTests 3 runs)
+    - commit: 314b5a3
+    - review: findings — 5 x code-hygiene/magic-numbers-swift at HybridRecurrentCacheOffsetTests.swift:79-83
+  timestamp: 2026-09-25T18:34:17.646475+00:00
+- actor: claude-code
+  id: 01m3cxpb07jw1yqv7tv6keyajc
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Tests/MLXLMTests/HybridRecurrentCacheOffsetTests.swift. The NemotronH fixture was a `NemotronHConfiguration(...)` initializer call with numeric literals at lines 79-83 (`code-hygiene/magic-numbers-swift`). It is now the JSON text `nemotronHJSON`, decoded with the same `decode` helper as the six other fixtures, with the same values. No other numeric literal in the file stands outside a named `static let` or the carve-out values 0, 1 and -1. MLXLMTests: 695 XCTest 0 failures, 1215 Swift Testing passed.
+    - next: /test
+  timestamp: 2026-09-25T18:36:54.663256+00:00
+- actor: claude-code
+  id: 01m3cxzfdvsan8rfm4ewzctav2
+  text: |-
+    ### test — green
+    - evidence: `swift build --build-tests` — only the known warning `missing creator for mutated node`. All five bundles: MLXLMTests 695 XCTest 0 failures + 1215 Swift Testing passed (3 runs in this iteration, all green); MLXGuidedGenerationTests 70; MLXFoundationModelsTests 312; CXGrammarTests 7; MLXHuggingFaceMacrosTests 5. 0 skipped.
+    - next: /commit
+  timestamp: 2026-09-25T18:41:54.107454+00:00
 position_column: doing
 position_ordinal: '80'
 title: Check the recurrent-cache offset of the other hybrid models (NemotronH, Jamba, Mamba2, GraniteMoeHybrid, LFM2, LFM2MoE, LFM2VL)
@@ -70,3 +107,19 @@ These models also call `advance(_:)` on a recurrent cache and do not move `offse
 - [x] All five unit bundles pass.
 
 #prompt-cache
+
+## Review Findings (2026-09-25 13:31)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 10 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M3CSDPQXQ0FEE3JEJQFENNZ0.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M3CSDPQXQ0FEE3JEJQFENNZ0.md` — no validator matches this file
+> - `.kanban/tasks/01M3CWE2TJSX4H90T9YZNYES82.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M3CWE2TJSX4H90T9YZNYES82.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/HybridRecurrentCacheOffsetTests.swift:79` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/HybridRecurrentCacheOffsetTests.swift:80` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/HybridRecurrentCacheOffsetTests.swift:81` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/HybridRecurrentCacheOffsetTests.swift:82` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/HybridRecurrentCacheOffsetTests.swift:83` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
