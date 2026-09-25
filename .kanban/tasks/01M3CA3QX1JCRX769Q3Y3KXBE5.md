@@ -70,8 +70,22 @@ comments:
     - evidence: swift build --build-tests (only the known warning). All five bundles: MLXLMTests 695 + 1211, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 309, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5, 0 failures, 0 skipped. MLXLMTests and MLXFoundationModelsTests ran 3 times. Run 2 of MLXLMTests had 1 XCTest failure in `ChatSessionTests.testActiveSpeculativeDecodingReusesAlignedStorageAcrossTurns` (main 11, draft 10). That test uses two unseeded random Gemma3 models and does not call the changed code (`loadPromptCacheSnapshot(url:into:)` has one caller, ExecutorPromptCacheFile). Runs 1 and 3 passed. Recorded as a new task ^PPTC3HJ (01M3CVD3FZPPTC3HJ5JK8HM41J) with the evidence.
     - next: commit
   timestamp: 2026-09-25T17:57:01.617783+00:00
-position_column: review
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3cvgjqcnkkccv95v84ngnbq
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (8ad739c) — 0 findings, 0 refuted. The prior finding (PromptCacheTemplateRestoreTests.swift:873 magic-numbers-swift) is fixed in 8ad739c and checked.
+    - note: the flaky test task in the earlier test record is ^k8hm41j (01M3CVD3FZPPTC3HJ5JK8HM41J), not "^PPTC3HJ".
+    - next: done
+
+    ### finish iteration 2 — clean
+    - implement: changed (named the ring window and the decode step values)
+    - test: green (all five bundles; 3 runs of MLXLMTests and MLXFoundationModelsTests; 1 failure in 1 run of an unrelated flaky test, recorded as ^k8hm41j)
+    - commit: 8ad739c
+    - review: clean
+  timestamp: 2026-09-25T17:58:48.812979+00:00
+position_column: done
+position_ordinal: ffa980
 title: Test converted (kvBits, TurboQuant) and wrapped rotating layers inside a tiny Qwen3.5 hybrid restore
 ---
 ## What
@@ -126,4 +140,4 @@ xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest
 > - `.kanban/tasks/01M3CA3QX1JCRX769Q3Y3KXBE5.jsonl` — no validator matches this file
 > - `.kanban/tasks/01M3CA3QX1JCRX769Q3Y3KXBE5.md` — no validator matches this file
 
-- [ ] `Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift:873` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift:873` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
