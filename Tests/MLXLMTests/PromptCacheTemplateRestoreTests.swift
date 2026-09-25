@@ -150,7 +150,7 @@ struct PromptCacheTemplateRestoreTests {
     /// Makes a temporary file URL for one prompt cache file.
     ///
     /// - Returns: The URL, in the temporary directory.
-    fileprivate static func temporaryURL() -> URL {
+    static func temporaryURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("safetensors")
@@ -217,7 +217,7 @@ struct PromptCacheTemplateRestoreTests {
     ///   - restored: The restored cache.
     ///   - source: The cache that was saved.
     ///   - label: The name of the comparison, for the issue text.
-    fileprivate static func expectSameContents(
+    static func expectSameContents(
         _ restored: any KVCache, _ source: any KVCache, _ label: String
     ) {
         expectEqual(restored.state, source.state, "\(label) state")
@@ -246,7 +246,7 @@ struct PromptCacheTemplateRestoreTests {
     ///   - lhs: The first cache.
     ///   - rhs: The second cache.
     /// - Returns: True when both are one object.
-    fileprivate static func isSameInstance(_ lhs: any KVCache, _ rhs: any KVCache) -> Bool {
+    static func isSameInstance(_ lhs: any KVCache, _ rhs: any KVCache) -> Bool {
         (lhs as AnyObject) === (rhs as AnyObject)
     }
 

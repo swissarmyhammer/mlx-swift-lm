@@ -26,7 +26,15 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
         let offsets: [Int]
     }
 
-    private func configuration(
+    /// Decodes the configuration of a tiny Qwen3-Next model with four layers. A full-attention
+    /// layer follows each linear-attention layer.
+    ///
+    /// - Parameters:
+    ///   - headDim: The head dimension of the full-attention layers.
+    ///   - quantizable: True for layer sizes that a group size of 32 can quantize.
+    /// - Returns: The configuration.
+    /// - Throws: The error of the configuration decoder.
+    static func configuration(
         headDim: Int = 8,
         quantizable: Bool = false
     ) throws -> Qwen3NextConfiguration {
@@ -95,7 +103,7 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
     }
 
     func testDecodeConvolutionMatchesGeneralKernelExactly() throws {
-        let config = try configuration()
+        let config = try Self.configuration()
         for dtype in [DType.float16, DType.bfloat16] {
             MLXRandom.seed(29)
             let gdn = Qwen3NextGatedDeltaNet(config)
@@ -119,7 +127,7 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
     func testCompiledDecodeMatchesGeneralPathExactly() throws {
         for dtype in [DType.float16, DType.bfloat16] {
             MLXRandom.seed(31)
-            let model = Qwen3NextModel(try configuration())
+            let model = Qwen3NextModel(try Self.configuration())
             model.update(parameters: model.parameters().mapValues { $0.asType(dtype) })
             let tokens = [Int32(1), 7, 3, 9, 2]
 
@@ -130,7 +138,7 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
             XCTAssertEqual(
                 compiled.cacheState, general.cacheState, "cache state differs for \(dtype)")
             XCTAssertEqual(compiled.offsets, general.offsets)
-            XCTAssertEqual(compiled.offsets, [0, 5, 0, 5])
+            XCTAssertEqual(compiled.offsets, [5, 5, 5, 5])
             if dtype == .float16 {
                 XCTAssertGreaterThan(model.model.compiledDecodeSegmentCount, 0)
             } else {
@@ -141,7 +149,7 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
 
     func testQuantizedCacheKeepsExactGeneralFallback() throws {
         MLXRandom.seed(37)
-        let model = Qwen3NextModel(try configuration(headDim: 32))
+        let model = Qwen3NextModel(try Self.configuration(headDim: 32))
         model.update(parameters: model.parameters().mapValues { $0.asType(.float16) })
         let tokens = [Int32(2), 4, 6]
         let quantizedCache: (Qwen3NextModel) throws -> [KVCache] = { model in
@@ -165,7 +173,7 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
     func testQuantizedWeightsCompileAndMatchExactly() throws {
         MLXRandom.seed(39)
         let model = Qwen3NextModel(
-            try configuration(headDim: 32, quantizable: true))
+            try Self.configuration(headDim: 32, quantizable: true))
         model.update(parameters: model.parameters().mapValues { $0.asType(.float16) })
         quantize(model: model, groupSize: 32, bits: 4)
         let tokens = [Int32(3), 8, 1, 5]
@@ -181,7 +189,7 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
 
     func testModelDeallocatesAfterCompiledDecode() throws {
         MLXRandom.seed(41)
-        var model: Qwen3NextModel? = Qwen3NextModel(try configuration())
+        var model: Qwen3NextModel? = Qwen3NextModel(try Self.configuration())
         model!.update(parameters: model!.parameters().mapValues { $0.asType(.float16) })
         var cache: [KVCache]? = try model!.newCache(parameters: nil)
 
