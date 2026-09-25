@@ -1645,21 +1645,89 @@ public class ChatSessionTests: XCTestCase {
 
     func testActiveSpeculativeDecodingReusesAlignedStorageAcrossTurns() async throws {
         let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
-        var lengthIterator = renderedLengths.makeAsyncIterator()
         let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
         let processor = TestInputProcessor(
             tokenizer: tokenizer,
             configuration: ModelConfiguration(id: "test"),
             messageGenerator: DefaultMessageGenerator())
-        let parameters = GenerateParameters(maxTokens: 3, temperature: 0)
+        // Fixed weights make the accept and reject pattern of the two
+        // different models the same at each run.
+        let (mainContext, draftContext) = withRandomState(
+            MLXRandom.RandomState(seed: Self.speculativeWeightSeed)
+        ) {
+            (model(processor: processor), model())
+        }
         let session = ChatSession(
-            model(processor: processor),
+            mainContext,
             speculativeDecoding: SpeculativeDecodingConfig(
-                draftModel: ModelContainer(context: model()),
-                numDraftTokens: 2),
-            generateParameters: parameters)
+                draftModel: ModelContainer(context: draftContext),
+                numDraftTokens: Self.speculativeDraftTokenCount),
+            generateParameters: Self.speculativeTurnParameters)
 
-        _ = try await collectGeneration(session.streamDetails(to: "first"))
+        _ = try await assertSpeculativeStorageIsReusedAcrossTurns(
+            session, renderedLengths: renderedLengths)
+    }
+
+    /// A draft model that is the main model accepts each draft at temperature 0.
+    /// The first turn (3 tokens, 2 drafts in each round) thus stops after the
+    /// loop took all the tokens of a fully accepted round. That round leaves
+    /// the draft cache one token behind the main cache until the next round,
+    /// and there is no next round. The main and the draft caches must
+    /// nevertheless end the turn aligned, and the second turn must reuse them.
+    func testFullyAcceptedSpeculativeRoundLeavesAlignedStorageAcrossTurns() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let container = withRandomState(MLXRandom.RandomState(seed: Self.speculativeWeightSeed)) {
+            ModelContainer(context: model(processor: processor))
+        }
+        let session = ChatSession(
+            container,
+            speculativeDecoding: SpeculativeDecodingConfig(
+                draftModel: container,
+                numDraftTokens: Self.speculativeDraftTokenCount),
+            generateParameters: Self.speculativeTurnParameters)
+
+        let firstInfo = try await assertSpeculativeStorageIsReusedAcrossTurns(
+            session, renderedLengths: renderedLengths)
+
+        let firstTelemetry = try XCTUnwrap(firstInfo.speculativeDecodingTelemetry)
+        XCTAssertEqual(firstTelemetry.roundCount, 1)
+        XCTAssertEqual(firstTelemetry.acceptedDraftTokenCount, firstTelemetry.draftTokenCount)
+        XCTAssertEqual(firstInfo.generationTokenCount, Self.speculativeTurnParameters.maxTokens)
+    }
+
+    /// The seed of the random weights of the speculative decoding tests.
+    private static let speculativeWeightSeed: UInt64 = 20_260_925
+
+    /// The count of drafts in each round of the speculative decoding tests.
+    private static let speculativeDraftTokenCount = 2
+
+    /// The parameters of each turn of the speculative decoding tests: one
+    /// fully accepted round of ``speculativeDraftTokenCount`` drafts gives
+    /// all the tokens of the turn.
+    private static let speculativeTurnParameters = GenerateParameters(
+        maxTokens: speculativeDraftTokenCount + 1, temperature: 0)
+
+    /// Runs two turns ("first" and "second") on `session` and asserts that the
+    /// first turn leaves the main and the draft caches aligned, and that the
+    /// second turn prefills only the tokens that the caches do not hold.
+    ///
+    /// - Parameters:
+    ///   - session: a session with active speculative decoding and a
+    ///     ``PrefixPreservingTokenizer`` that sends each rendered length.
+    ///   - renderedLengths: the stream of rendered lengths from that tokenizer.
+    /// - Returns: the completion information of the first turn.
+    private func assertSpeculativeStorageIsReusedAcrossTurns(
+        _ session: ChatSession,
+        renderedLengths: AsyncStream<Int>
+    ) async throws -> GenerateCompletionInfo {
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+
+        let first = try await collectGeneration(session.streamDetails(to: "first"))
         let firstRenderedLengthValue = await lengthIterator.next()
         _ = try XCTUnwrap(firstRenderedLengthValue)
         let optionalFirstProgress = await session.cacheProgress()
@@ -1674,6 +1742,7 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertEqual(
             second.info.promptTokenCount,
             secondRenderedLength - firstProgress.main)
+        return first.info
     }
 
     func testSpeculativeDecodingMemoryPolicyFailThrows() async throws {

@@ -1383,16 +1383,52 @@ extension SpeculativeTokenIterator: GenerationFinalizingTokenIterator {
         // Trim through the storages so the model-wide processed-token timeline
         // rewinds with the caches; `ChatSession` reconciles its ledger against
         // that timeline, not against per-entry offsets.
-        let mainConsumed = Swift.min(pendingIndex, mainCommittedPendingTokenCount)
-        let mainLookahead = mainCommittedPendingTokenCount - mainConsumed
-        if mainLookahead > 0 {
-            mainCacheStorage.trim(mainLookahead)
-        }
+        let mainKeptTokenCount = Swift.min(pendingIndex, mainCommittedPendingTokenCount)
+        let draftKeptTokenCount = Swift.min(pendingIndex, draftCommittedPendingTokenCount)
+        Self.trimLookahead(
+            of: mainCacheStorage, beyond: mainKeptTokenCount,
+            committed: mainCommittedPendingTokenCount)
+        Self.trimLookahead(
+            of: draftCacheStorage, beyond: draftKeptTokenCount,
+            committed: draftCommittedPendingTokenCount)
+        feedDraft(pendingTokens[draftKeptTokenCount ..< mainKeptTokenCount])
+    }
 
-        let draftConsumed = Swift.min(pendingIndex, draftCommittedPendingTokenCount)
-        let draftLookahead = draftCommittedPendingTokenCount - draftConsumed
-        if draftLookahead > 0 {
-            draftCacheStorage.trim(draftLookahead)
+    /// Feeds the draft model the returned tokens that the main cache holds and
+    /// the draft cache does not, so that the two caches end the generation
+    /// aligned.
+    ///
+    /// After a round that accepted every draft, the draft cache does not hold
+    /// the last accepted draft: the next round feeds it through `draftY`. When
+    /// the loop stops after it took that draft, there is no next round. Without
+    /// this step the draft cache stays one token behind the main cache, and
+    /// `ChatSession` then cannot reuse the draft cache on the next turn.
+    ///
+    /// - Parameter tokens: the returned tokens that only the main cache holds.
+    private func feedDraft(_ tokens: ArraySlice<Int>) {
+        guard !tokens.isEmpty else {
+            return
+        }
+        let input = LMInput.Text(tokens: MLXArray(Array(tokens)))
+        _ = draftModel(input[text: .newAxis], cache: draftCache, state: nil)
+        draftCacheStorage.commitProcessedTokens(input.cacheSequenceLength)
+        kvCachePlan.apply(to: draftCacheStorage)
+        eval(draftCache)
+    }
+
+    /// Removes the tokens of the current round that `storage` holds after the
+    /// first `keptTokenCount` tokens.
+    ///
+    /// - Parameters:
+    ///   - storage: the cache storage to trim.
+    ///   - keptTokenCount: the count of pending tokens that the cache keeps.
+    ///   - committedTokenCount: the count of pending tokens that the cache holds.
+    private static func trimLookahead(
+        of storage: KVCacheStorage, beyond keptTokenCount: Int, committed committedTokenCount: Int
+    ) {
+        let lookahead = committedTokenCount - keptTokenCount
+        if lookahead > 0 {
+            storage.trim(lookahead)
         }
     }
 }

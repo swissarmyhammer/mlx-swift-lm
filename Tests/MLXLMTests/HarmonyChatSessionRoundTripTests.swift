@@ -366,7 +366,9 @@ final class HarmonyChatSessionRoundTripTests: XCTestCase {
 
         // The cold restart prompt is [start, call, start, message, tool-result, end].
         // The live main cache ends immediately before `call`, so it must receive
-        // the final five tokens as one main-only prefill.
+        // the final five tokens at the head of its first pass.
+        let restartSuffixLength = 5
+        let numDraftTokens = 3
         let timeline =
             [Harmony.start]
             + firstGeneration
@@ -402,7 +404,8 @@ final class HarmonyChatSessionRoundTripTests: XCTestCase {
         let session = ChatSession(
             mainContext,
             speculativeDecoding: SpeculativeDecodingConfig(
-                draftModel: ModelContainer(context: draftContext), numDraftTokens: 3),
+                draftModel: ModelContainer(context: draftContext),
+                numDraftTokens: numDraftTokens),
             generateParameters: GenerateParameters(maxTokens: 32, temperature: 0),
             tools: [Self.weatherTool],
             toolDispatch: { call in
@@ -415,12 +418,21 @@ final class HarmonyChatSessionRoundTripTests: XCTestCase {
         XCTAssertEqual(dispatched.all.count, 1)
         XCTAssertTrue(reply.contains("Sunny in Paris."))
         XCTAssertFalse(reply.contains("Need weather"))
+        // The last round of the first turn accepted each draft and the loop
+        // took all its tokens, thus the finalizer fed the last accepted draft
+        // to the draft model. Both caches end the first turn at the same
+        // position, and the continuation speculates from both: the verify pass
+        // of the main model carries the suffix and the drafts of the round.
         XCTAssertTrue(
-            mainModel.calls.contains { $0.offset == 12 && $0.tokenCount == 5 },
+            mainModel.calls.contains {
+                $0.offset == 12 && $0.tokenCount == restartSuffixLength + numDraftTokens
+            },
             "The main cache should retain private analysis and prefill call + tool result")
-        XCTAssertFalse(
-            draftModel.calls.contains { $0.offset >= 12 },
-            "A lagging draft cache must not be reused for the Harmony continuation")
+        XCTAssertTrue(
+            draftModel.calls.contains {
+                $0.offset == 12 && $0.tokenCount == restartSuffixLength
+            },
+            "The aligned draft cache should resume from the same position as the main cache")
     }
 
     func testRawGenerationDoesNotApplyHarmonySemanticStopTokens() async throws {
