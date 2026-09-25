@@ -33,8 +33,31 @@ comments:
     - evidence: `swift build --build-tests` (one known warning `missing creator for mutated node`, no new warning). `xcrun xctest` MLXLMTests 3 runs: each 695 XCTest + 1210 Swift Testing, 0 failures, 0 skipped. MLXGuidedGenerationTests 70, MLXFoundationModelsTests 307, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5: 0 failures, 0 skipped.
     - next: /commit
   timestamp: 2026-09-25T17:27:08.785969+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3csq0tgey654re451nhjfqa
+  text: |-
+    ### commit — changed
+    - evidence: 92fcb09 fix(qwen3-next): move the MambaCache offset in each linear-attention step
+    - next: /review qr0p806 HEAD~1..HEAD
+  timestamp: 2026-09-25T17:27:22.704352+00:00
+- actor: claude-code
+  id: 01m3csvj341cr6c8j1rbt5r7mm
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD — 0 findings, 0 confirmed, 0 refuted (7 validator runs, 0 failed). No prior Review Findings sections.
+    - next: done
+  timestamp: 2026-09-25T17:29:51.460689+00:00
+- actor: claude-code
+  id: 01m3csvmn748hq6ryskk69erew
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — Qwen3Next.swift (MambaCache.advancePosition(by:) in the general path and the compiled decode step), new Qwen3NextPromptCacheRestoreTests.swift, Qwen3NextCompiledDecodeTests.swift, PromptCacheTemplateRestoreTests.swift
+    - test: green — MLXLMTests 3 runs of 695 XCTest + 1210 Swift Testing; MLXGuidedGenerationTests 70, MLXFoundationModelsTests 307, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5; 0 failures, 0 skipped, only the known warning
+    - commit: 92fcb09
+    - review: clean (0 findings)
+  timestamp: 2026-09-25T17:29:54.087877+00:00
+position_column: done
+position_ordinal: ffa880
 title: Test a tiny Qwen3-Next hybrid cache through the template restore and a warm decode
 ---
 ## What
@@ -51,10 +74,10 @@ What to test:
 
 ## Acceptance Criteria
 
-- [ ] A test proves the Qwen3-Next round trip into `newCache` templates.
-- [ ] The test checks the offset of every layer, the `MambaCache` layers included.
-- [ ] The test checks logits over 4 decode steps, and not only one argmax token.
-- [ ] All five unit bundles pass.
+- [x] A test proves the Qwen3-Next round trip into `newCache` templates.
+- [x] The test checks the offset of every layer, the `MambaCache` layers included.
+- [x] The test checks logits over 4 decode steps, and not only one argmax token.
+- [x] All five unit bundles pass.
 
 ## Tests
 
