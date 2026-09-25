@@ -8,14 +8,15 @@ import XCTest
 /// Cached-forward smoke tests for models with a bespoke `newCache` / hybrid cache layout.
 ///
 /// Each test builds a tiny model from an inline JSON config (no downloads), runs one
-/// prefill, and asserts every attention layer's cache advanced by exactly the token count
-/// (SSM/Mamba caches are checked for populated recurrent state instead).
+/// prefill, and asserts every layer's cache advanced by exactly the token count. An
+/// SSM/Mamba cache must also hold populated recurrent state.
 final class CachedForwardSmokeTests: XCTestCase {
 
-    /// Prefill `tokenCount` tokens and assert each KV cache advanced exactly once.
+    /// Prefill `tokenCount` tokens and assert each cache advanced exactly once.
     ///
-    /// SSM/Mamba caches carry recurrent state rather than a token offset, so they are
-    /// checked for populated state instead.
+    /// An SSM/Mamba cache carries recurrent state, and its offset must also move by the
+    /// token count: the prompt cache keeps a cache only when each offset is the length of
+    /// its token ledger.
     private func assertCacheAdvancesOnce(
         _ model: any LanguageModel,
         tokenCount: Int = 5,
@@ -45,6 +46,7 @@ final class CachedForwardSmokeTests: XCTestCase {
                 XCTAssertFalse(
                     layerCache.innerState().isEmpty,
                     "layer \(i) SSM cache was never written", file: file, line: line)
+                fallthrough
             default:
                 XCTAssertEqual(
                     layerCache.offset, tokenCount,

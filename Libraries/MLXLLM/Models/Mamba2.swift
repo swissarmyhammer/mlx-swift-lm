@@ -205,7 +205,7 @@ private class Mamba2Mixer: Module {
 
         if let cache {
             cache[1] = nextState
-            cache.advance(hiddenStates.dim(1))
+            cache.advancePosition(by: hiddenStates.dim(1))
         }
 
         let flattenedY = y.flattened(start: 2)

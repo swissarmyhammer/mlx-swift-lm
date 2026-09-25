@@ -1521,6 +1521,15 @@ public class ArraysCache: BaseKVCache {
         leftPadding = nil
     }
 
+    /// Moves the batch bookkeeping of this cache past `N` tokens.
+    ///
+    /// This decreases `lengths` and `leftPadding` by `N`, as `ArraysCache.advance` of
+    /// mlx-lm does. It does NOT move `offset`. A layer that feeds tokens through a
+    /// ``MambaCache`` must call ``MambaCache/advancePosition(by:)``, which also moves
+    /// `offset`. The prompt cache keeps a cache only when its offset is the length of the
+    /// token ledger, thus a recurrent cache whose offset stays at 0 starts each round cold.
+    ///
+    /// - Parameter N: the number of tokens the layer fed.
     public func advance(_ N: Int) {
         if let currentLengths = lengths {
             lengths = currentLengths - N
