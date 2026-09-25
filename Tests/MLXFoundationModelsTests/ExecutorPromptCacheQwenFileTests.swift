@@ -79,6 +79,30 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
     /// cold prefill of the whole prompt. A split prefill adds rounding differences.
     private static let coldTolerance: Float = 1e-3
 
+    /// The window of each rotating attention layer. The prompt is longer, thus the ring wraps.
+    private static let ringWindow = 8
+
+    /// A window that is not the window of the saved ring.
+    private static let otherRingWindow = 16
+
+    /// The number of single-token decode steps after the prefill of a converted entry. The
+    /// number is larger than ``ringWindow``, thus a ring wraps again in place.
+    private static let decodeStepCount = 10
+
+    /// The seed of the decode tokens.
+    private static let decodeSeed = 5
+
+    /// The bits of each `QuantizedKVCache` layer.
+    private static let quantizedBits = 8
+
+    /// The group size of each `QuantizedKVCache` layer. It divides the head dimension (32) of
+    /// the tiny Qwen3.5 model. The default group size (64) does not.
+    private static let quantizedGroupSize = 32
+
+    /// The TurboQuant scheme of each `TurboQuantKVCache` layer. The scheme is not fragile, thus
+    /// no boundary layer changes to an 8-bit `QuantizedKVCache`.
+    private static let turboQuantScheme = "turbo0v4"
+
     /// The vision tower of each tiny model. The tests send text only, but the configuration
     /// needs a vision tower.
     private static let visionConfiguration = """
@@ -195,6 +219,69 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
         }
     }
 
+    /// The attention layers of one converted entry of the tiny Qwen3.5 model.
+    enum AttentionLayers: CaseIterable, CustomTestStringConvertible {
+
+        /// Generation converts each `KVCacheSimple` to a `QuantizedKVCache` (`kvBits`).
+        case kvBits
+
+        /// Generation converts each `KVCacheSimple` to a `TurboQuantKVCache`.
+        case turboQuant
+
+        /// `newCache` gives a `RotatingKVCache` (`maxKVSize`), and the ring wraps.
+        case wrappedRing
+
+        /// The parameters of `newCache(parameters:)`, for the live caches and for the templates.
+        var parameters: GenerateParameters? {
+            switch self {
+            case .kvBits, .turboQuant: nil
+            case .wrappedRing:
+                GenerateParameters(maxKVSize: ExecutorPromptCacheQwenFileTests.ringWindow)
+            }
+        }
+
+        /// The class name of each attention layer after the conversion.
+        var attentionClassName: String {
+            switch self {
+            case .kvBits: "QuantizedKVCache"
+            case .turboQuant: "TurboQuantKVCache"
+            case .wrappedRing: "RotatingKVCache"
+            }
+        }
+
+        /// The class names of the converted caches, layer by layer.
+        var cacheClassNames: [String] {
+            ["MambaCache", attentionClassName, "MambaCache", attentionClassName]
+        }
+
+        /// The name of the case in the test report.
+        var testDescription: String {
+            switch self {
+            case .kvBits: "kvBits"
+            case .turboQuant: "TurboQuant"
+            case .wrappedRing: "wrapped ring"
+            }
+        }
+
+        /// Converts the attention layers of `caches` as generation does.
+        ///
+        /// - Parameter caches: The caches after the prefill.
+        func convert(_ caches: inout [KVCache]) {
+            switch self {
+            case .kvBits:
+                maybeQuantizeKVCache(
+                    cache: &caches, kvBits: ExecutorPromptCacheQwenFileTests.quantizedBits,
+                    kvGroupSize: ExecutorPromptCacheQwenFileTests.quantizedGroupSize)
+            case .turboQuant:
+                maybeQuantizeKVCache(
+                    cache: &caches, kvBits: nil,
+                    kvScheme: ExecutorPromptCacheQwenFileTests.turboQuantScheme)
+            case .wrappedRing:
+                break
+            }
+        }
+    }
+
     /// One prefill of a tiny model, written to a file.
     struct WrittenPrefill {
 
@@ -207,7 +294,7 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
         /// The entry that the file holds.
         let entry: ExecutorPromptCacheEntry
 
-        /// The model state of the prefill.
+        /// The model state after the last token of the ledger.
         let state: LMOutput.State
 
         /// The prompt of the prefill, with shape `(1, promptLength)`.
@@ -310,18 +397,98 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
         let prompt = textTokens(promptLength, seed: promptSeed)
         let liveCaches = try model.newCache(parameters: nil)
         let state = try #require(run(model, prompt, caches: liveCaches, state: nil).state)
-        let tokens = ledger(prompt)
+        return try writeEntry(
+            model: model, prompt: prompt, tokens: ledger(prompt), caches: liveCaches, state: state,
+            in: directory)
+    }
+
+    /// Prefills the prompt into the caches of the tiny Qwen3.5 model, decodes
+    /// ``decodeStepCount`` more tokens one at a time, converts the attention layers as
+    /// generation does, and writes the entry to a file in `directory`.
+    ///
+    /// The ledger is the prompt and the decode tokens. The render ledger adds the continuation.
+    ///
+    /// - Parameters:
+    ///   - layers: The attention layers of the entry.
+    ///   - directory: The folder of the file. The function makes it.
+    /// - Returns: The prefill and the URL of its file.
+    /// - Throws: The error of the prefill, of a decode step or of the write.
+    private static func writeConvertedPrefill(
+        _ layers: AttentionLayers, in directory: URL
+    ) throws -> WrittenPrefill {
+        let model = try TinyQwen.qwen35.makeModel()
+        let prompt = textTokens(promptLength, seed: promptSeed)
+        var liveCaches = try model.newCache(parameters: layers.parameters)
+        let prefillState = try #require(run(model, prompt, caches: liveCaches, state: nil).state)
+        let decodeTokens = textTokens(decodeStepCount, seed: decodeSeed)
+        let state = try decode(model, decodeTokens, caches: liveCaches, state: prefillState)
+        layers.convert(&liveCaches)
+        return try writeEntry(
+            model: model, prompt: prompt, tokens: ledger(prompt) + ledger(decodeTokens),
+            caches: liveCaches, state: state, in: directory)
+    }
+
+    /// Runs `tokens` into `caches` one token at a time, as a decode does.
+    ///
+    /// - Parameters:
+    ///   - model: The model.
+    ///   - tokens: The tokens, with shape `(1, count)`.
+    ///   - caches: The caches to fill.
+    ///   - state: The model state of the tokens before `tokens`.
+    /// - Returns: The model state after the last token.
+    /// - Throws: The error of a step, or an issue when a step gives no state.
+    private static func decode(
+        _ model: any LanguageModel, _ tokens: MLXArray, caches: [KVCache], state: LMOutput.State
+    ) throws -> LMOutput.State {
+        var state = state
+        for step in 0 ..< tokens.dim(1) {
+            let token = tokens[0..., step ..< (step + 1)]
+            state = try #require(run(model, token, caches: caches, state: state).state)
+        }
+        return state
+    }
+
+    /// Makes the entry of filled caches and writes it to a file in `directory`.
+    ///
+    /// The render ledger is the ledger and the continuation, as the render of a later pass is.
+    ///
+    /// - Parameters:
+    ///   - model: The model that filled the caches.
+    ///   - prompt: The prompt of the prefill, with shape `(1, promptLength)`.
+    ///   - tokens: The ledger of the caches.
+    ///   - caches: The filled caches.
+    ///   - state: The model state after the last token of `tokens`.
+    ///   - directory: The folder of the file. The function makes it.
+    /// - Returns: The prefill and the URL of its file.
+    /// - Throws: The error of the write.
+    private static func writeEntry(
+        model: any LanguageModel, prompt: MLXArray, tokens: [Int], caches: [KVCache],
+        state: LMOutput.State, in directory: URL
+    ) throws -> WrittenPrefill {
         let continuation = ledger(textTokens(continuationLength, seed: continuationSeed))
         let entry = ExecutorPromptCacheEntry(
-            caches: liveCaches, tokens: tokens, renderTokens: tokens + continuation, state: state)
+            caches: caches, tokens: tokens, renderTokens: tokens + continuation, state: state)
+        let url = try writeFile(entry, in: directory)
+        return WrittenPrefill(
+            model: model, liveCaches: caches, entry: entry, state: state, prompt: prompt, url: url)
+    }
 
+    /// Writes `entry` to the file of ``key`` in `directory`, through
+    /// ``ExecutorPromptCacheFile/prepare(_:key:)`` and ``ExecutorPromptCacheFile/write(_:to:)``.
+    ///
+    /// - Parameters:
+    ///   - entry: The entry to write.
+    ///   - directory: The folder of the file. The function makes it.
+    /// - Returns: The URL of the file.
+    /// - Throws: The error of the folder or of the write.
+    private static func writeFile(_ entry: ExecutorPromptCacheEntry, in directory: URL) throws
+        -> URL
+    {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent(
             ExecutorPromptCacheFile.fileName(for: key, generation: generation))
         try ExecutorPromptCacheFile.write(ExecutorPromptCacheFile.prepare(entry, key: key), to: url)
-        return WrittenPrefill(
-            model: model, liveCaches: liveCaches, entry: entry, state: state, prompt: prompt,
-            url: url)
+        return url
     }
 
     /// The class name of each cache.
@@ -381,6 +548,57 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
 
         #expect(Self.maxAbsDifference(restoredLogits, liveLogits) <= Self.warmTolerance)
         #expect(Self.maxAbsDifference(restoredLogits, coldLogits) <= Self.coldTolerance)
+    }
+
+    // MARK: - Converted and rotating attention layers
+
+    /// The quantized layers are lossy. Thus the restored caches must continue as the live
+    /// converted caches do, and the test does not compare them with a float cold prefill.
+    @Test(
+        "a Qwen3.5 entry with converted or wrapped attention layers restores into the newCache templates and continues as the live caches do",
+        arguments: AttentionLayers.allCases)
+    func aConvertedEntryContinuesAsTheLiveCaches(_ layers: AttentionLayers) throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let written = try Self.writeConvertedPrefill(layers, in: directory)
+        let model = written.model
+        let templates = try model.newCache(parameters: layers.parameters)
+        let templateClassNames = Self.classNames(templates)
+
+        let restored = try ExecutorPromptCacheFile.read(
+            from: written.url, key: Self.key, templates: templates)
+
+        #expect(Self.classNames(written.liveCaches) == layers.cacheClassNames)
+        #expect(Self.classNames(restored.caches) == layers.cacheClassNames)
+        let keepsTemplate = zip(Self.identities(restored.caches), Self.identities(templates))
+            .map(==)
+        #expect(keepsTemplate == zip(templateClassNames, layers.cacheClassNames).map(==))
+        let ledgerLength = written.entry.tokens.count
+        #expect(
+            restored.caches.map(\.offset) == Array(repeating: ledgerLength, count: templates.count))
+        ExecutorPromptCacheFileTests.expectEqualCaches(restored.caches, written.liveCaches)
+        #expect(restored.caches.map(\.metaState) == written.liveCaches.map(\.metaState))
+
+        let continuation = Self.textTokens(Self.continuationLength, seed: Self.continuationSeed)
+        let liveLogits = Self.lastLogits(
+            try Self.run(model, continuation, caches: written.liveCaches, state: written.state))
+        let restoredLogits = Self.lastLogits(
+            try Self.run(model, continuation, caches: restored.caches, state: restored.state))
+
+        #expect(Self.maxAbsDifference(restoredLogits, liveLogits) <= Self.warmTolerance)
+    }
+
+    @Test("a wrapped ring does not restore into the rotating templates of another window")
+    func aWrappedRingIntoAnotherWindowThrows() throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let written = try Self.writeConvertedPrefill(.wrappedRing, in: directory)
+        let templates = try written.model.newCache(
+            parameters: GenerateParameters(maxKVSize: Self.otherRingWindow))
+
+        #expect(throws: KVCacheError.self) {
+            try ExecutorPromptCacheFile.read(from: written.url, key: Self.key, templates: templates)
+        }
     }
 
     // MARK: - The negative control

@@ -2336,6 +2336,9 @@ public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
 ///   template, a saved layer of one of these two classes is built new from the file, and the
 ///   snapshot holds that new cache in place of the template. The same rule applies to each
 ///   child of a `CacheList`.
+/// - The saved configuration of a layer must be the configuration of its template. For
+///   example, a `RotatingKVCache` layer must have the window and the kept prefix of its
+///   template, thus a ring never restores into a model that asks for another window.
 /// - Every layer is checked before any setter runs, because the cache setters stop the process
 ///   on bad input.
 /// - The function evaluates every array that it read from the file before it returns. The
@@ -2464,9 +2467,16 @@ private enum PromptCacheTemplateRestore {
     /// makes them from a `KVCacheSimple` layer, and a model never makes them itself.
     private static let convertedClassNames: Set<String> = ["QuantizedKVCache", "TurboQuantKVCache"]
 
-    /// The meta-state places that hold configuration that a cache sets in `init` and that no
-    /// setter writes. The saved values must equal the values of the template.
+    /// The meta-state places that hold configuration that the model sets in `init` of a cache.
+    /// The saved values must equal the values of the template:
+    ///
+    /// - No setter writes some of these values, thus a different saved value gives saved data
+    ///   in a cache of another configuration.
+    /// - The `metaState` setter of a `RotatingKVCache` writes its window and its kept prefix.
+    ///   A different saved value thus changes the ring that the model made into a ring of
+    ///   another configuration, and the model does not get the window that it asked for.
     private static let fixedConfigurationIndices: [String: [Int]] = [
+        "RotatingKVCache": [SavedMetaStateIndex.rotatingKeep, SavedMetaStateIndex.rotatingMaxSize],
         "VarianceNormalizedKVCache": [
             VarianceNormalizedSavedLayout.tileSizeIndex, VarianceNormalizedSavedLayout.keyBitsIndex,
             VarianceNormalizedSavedLayout.valueBitsIndex,
@@ -2859,6 +2869,8 @@ private let builtInLeafClassNames: Set<String> = [
 
 /// The places of the values in the saved meta state of the built-in classes.
 private enum SavedMetaStateIndex {
+    /// The number of leading tokens that a `RotatingKVCache` keeps in its window.
+    static let rotatingKeep = 0
     /// The window size of a `RotatingKVCache`.
     static let rotatingMaxSize = 1
     /// The number of integer values at the start of a `RotatingKVCache` meta state.

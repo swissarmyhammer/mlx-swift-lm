@@ -403,6 +403,22 @@ struct PromptCacheTemplateRestoreTests {
         }
     }
 
+    @Test(
+        "A ring does not restore into a ring of another configuration",
+        arguments: RingConfigurationMismatch.allCases)
+    func ringConfigurationMismatchThrows(mismatch: RingConfigurationMismatch) throws {
+        let url = Self.temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try savePromptCache(url: url, cache: [try CacheKind.rotatingAfterWrap.makeFilled()])
+        let template = mismatch.makeTemplate()
+        let templateMetaState = template.metaState
+
+        #expect(throws: KVCacheError.self) {
+            try loadPromptCacheSnapshot(url: url, into: [template])
+        }
+        #expect(template.metaState == templateMetaState)
+    }
+
     @Test("A DeepSeek-V4 layer with indexer data does not restore into a layer with no indexer")
     func deepSeekIndexerMismatchThrows() throws {
         let url = Self.temporaryURL()
@@ -832,6 +848,40 @@ enum CacheKind: String, CaseIterable, CustomTestStringConvertible, Sendable {
         _ = miniMax.update(keys: prompt(seed: seed), values: prompt(seed: seed + 1))
         if self == .miniMaxWithIndex {
             _ = miniMax.updateIndexAndFetch(prompt(seed: seed))
+        }
+    }
+}
+
+// MARK: - Ring configuration mismatches
+
+/// One `RotatingKVCache` template whose configuration is not the configuration of the saved
+/// ring of ``CacheKind/rotatingAfterWrap``.
+enum RingConfigurationMismatch: String, CaseIterable, CustomTestStringConvertible, Sendable {
+    /// The template has a larger window.
+    case window
+
+    /// The template keeps leading tokens in the window. The saved ring keeps none.
+    case keep
+
+    /// The name of the case in the test report.
+    var testDescription: String { rawValue }
+
+    /// The fixture sizes and builders.
+    private typealias Fixture = PromptCacheTemplateRestoreTests
+
+    /// The window of the ``window`` template: two times the window of the saved ring.
+    private static let otherWindow = Fixture.rotatingWindow * 2
+
+    /// The number of leading tokens that the ``keep`` template keeps.
+    private static let otherKeep = 1
+
+    /// Makes the fresh ring that a model of another configuration makes.
+    ///
+    /// - Returns: An empty ring.
+    func makeTemplate() -> RotatingKVCache {
+        switch self {
+        case .window: RotatingKVCache(maxSize: Self.otherWindow)
+        case .keep: RotatingKVCache(maxSize: Fixture.rotatingWindow, keep: Self.otherKeep)
         }
     }
 }

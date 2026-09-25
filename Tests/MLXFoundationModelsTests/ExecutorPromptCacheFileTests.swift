@@ -209,7 +209,7 @@ struct ExecutorPromptCacheFileTests {
     ///   - actual: The arrays to check.
     ///   - expected: The arrays they must equal.
     ///   - label: The name of the comparison, for the issue text.
-    private static func expectEqual(
+    static func expectEqual(
         _ actual: [MLXArray], _ expected: [MLXArray], _ label: String
     ) {
         #expect(actual.count == expected.count, "\(label): array count")
@@ -226,7 +226,7 @@ struct ExecutorPromptCacheFileTests {
     /// - Parameters:
     ///   - actual: The caches that a read gave back.
     ///   - expected: The caches that were written.
-    private static func expectEqualCaches(_ actual: [KVCache], _ expected: [KVCache]) {
+    static func expectEqualCaches(_ actual: [KVCache], _ expected: [KVCache]) {
         #expect(actual.map(\.offset) == expected.map(\.offset))
         for (index, (lhs, rhs)) in zip(actual, expected).enumerated() {
             expectEqual(lhs.state, rhs.state, "cache \(index)")
