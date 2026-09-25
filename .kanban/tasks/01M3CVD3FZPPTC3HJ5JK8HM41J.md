@@ -50,8 +50,21 @@ comments:
     - Loop: 40 runs of `xcrun xctest -XCTest MLXLMTests.ChatSessionTests/testActiveSpeculativeDecodingReusesAlignedStorageAcrossTurns,MLXLMTests.ChatSessionTests/testFullyAcceptedSpeculativeRoundLeavesAlignedStorageAcrossTurns,MLXLMTests.HarmonyChatSessionRoundTripTests/testSpeculativeFinalCallTokenResumesFromTheLiveMainCache` — pass=40 fail=0.
     - next: /commit
   timestamp: 2026-09-25T22:11:35.521016+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3da4h392485adpdwszzydwx
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (8db2ef8) — 0 findings, 0 confirmed, 0 refuted; 7 validator runs attempted, 0 failed; 4 Swift files reviewed, 6 kanban files not matched by a validator.
+    - next: done
+
+    ### finish iteration 1 — clean
+    - implement: changed — `SpeculativeTokenIterator.finalizeGeneration()` feeds the last accepted draft to the draft cache (new `feedDraft(_:)`), so both caches end the generation aligned; deterministic ChatSession test added; random test weights seeded; expected values of 2 tests that recorded the misaligned state corrected.
+    - test: green — five bundles 0 failures 0 skipped (MLXLMTests 696 XCTest + 1217 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 312, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5); only the known warning `missing creator for mutated node`; loop 40/40 pass.
+    - commit: 8db2ef8
+    - review: clean (0 findings)
+  timestamp: 2026-09-25T22:14:22.569099+00:00
+position_column: done
+position_ordinal: ffae80
 title: 'ChatSessionTests.testActiveSpeculativeDecodingReusesAlignedStorageAcrossTurns fails sometimes: main 11, draft 10'
 ---
 ## What
