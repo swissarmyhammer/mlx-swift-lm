@@ -26,8 +26,21 @@ comments:
     - evidence: `swift build --build-tests` — only the known warning `missing creator for mutated node`. `xcrun xctest` on each bundle: MLXLMTests 695 XCTest + 1217 Swift Testing (one new test), 0 failures, 3 runs; MLXGuidedGenerationTests 70; MLXFoundationModelsTests 312; CXGrammarTests 7; MLXHuggingFaceMacrosTests 5. 0 failures, 0 skipped.
     - next: /commit.
   timestamp: 2026-09-25T20:53:21.614819+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3d5nr7q4gvzm43vfsd851js
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` — 0 findings, 0 confirmed, 0 refuted (7 validator runs, 0 failed). The two kanban files have no validator.
+    - next: done.
+
+    ### finish iteration 1 — clean
+    - implement: changed — Libraries/MLXLLM/Models/BaichuanM1.swift, Tests/MLXLMTests/HybridRecurrentCacheOffsetTests.swift
+    - test: green — MLXLMTests 695 XCTest + 1217 Swift Testing (3 runs), MLXGuidedGenerationTests 70, MLXFoundationModelsTests 312, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5; 0 failures, 0 skipped; only the known build warning
+    - commit sha: e0a2850
+    - review: clean (0 findings); task moved to done
+  timestamp: 2026-09-25T20:56:24.055419+00:00
+position_column: done
+position_ordinal: ffad80
 title: Check the attention mask of the BaichuanM1 sliding-window layers
 ---
 ## What
