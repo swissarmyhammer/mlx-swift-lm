@@ -105,6 +105,33 @@ struct PromptCacheTemplateRestoreTests {
     /// The prefix of the flattened keys of the user-metadata part of a prompt cache file.
     fileprivate static let userMetadataPart = "1."
 
+    /// The place of the header of the first child in the meta state of a saved `CacheList`.
+    /// The child count is in front of it.
+    fileprivate static let cacheListFirstChildHeader = 1
+
+    /// The number of values in the header of each child of a saved `CacheList`: its class
+    /// name, its array count and its meta-state count.
+    fileprivate static let cacheListChildHeaderCount = 3
+
+    /// The place of the array count in the header of a child of a saved `CacheList`.
+    fileprivate static let cacheListStateCountOffset = 1
+
+    /// The place of the meta-state count in the header of a child of a saved `CacheList`.
+    fileprivate static let cacheListMetaStateCountOffset = 2
+
+    /// The place of the second child of ``CacheKind/cacheList``.
+    fileprivate static let cacheListSecondChild = 1
+
+    /// The message of the `CacheList` check that finds no valid child count.
+    fileprivate static let missingChildCountMessage = "CacheList metaState missing child count"
+
+    /// The message of the `CacheList` check that finds a child header cut short.
+    fileprivate static let truncatedHeaderMessage = "CacheList metaState truncated"
+
+    /// The message of the `CacheList` check that finds a child count past the saved values.
+    fileprivate static let invalidChildCountMessage =
+        "CacheList: invalid array or metaState count for child"
+
     /// The kinds whose restored offset the load checks against the record: every kind that
     /// ``OffsetCacheKind`` does not cover.
     fileprivate static let checkedOffsetKinds = CacheKind.allCases.filter {
@@ -270,6 +297,72 @@ struct PromptCacheTemplateRestoreTests {
         let tamperedURL = temporaryURL()
         try save(arrays: arrays, metadata: metadata, url: tamperedURL)
         return tamperedURL
+    }
+
+    // MARK: - Tampered CacheList files
+
+    /// The flattened file key of one meta-state value of the first layer.
+    ///
+    /// - Parameter index: The place of the value in the meta state of the layer.
+    /// - Returns: The key, in the cache-information part.
+    fileprivate static func firstLayerMetaStateKey(index: Int) -> String {
+        "0.0.\(index)"
+    }
+
+    /// Makes a filled ``CacheKind/cacheList``: a `KVCacheSimple` and a `MambaCache` that hold
+    /// data.
+    ///
+    /// - Returns: The filled list.
+    fileprivate static func filledCacheList() throws -> CacheList {
+        try #require(try CacheKind.cacheList.makeFilled() as? CacheList)
+    }
+
+    /// Makes the template of ``CacheKind/cacheList``: an empty `KVCacheSimple` and an empty
+    /// `MambaCache`.
+    ///
+    /// - Returns: The template list.
+    fileprivate static func cacheListTemplate() throws -> CacheList {
+        try #require(try CacheKind.cacheList.makeTemplate() as? CacheList)
+    }
+
+    /// Finds the header of one child in the meta state of a saved `CacheList`.
+    ///
+    /// - Parameters:
+    ///   - list: The list that the file saves.
+    ///   - child: The place of the child in the list.
+    /// - Returns: The place of the class name of the child in the meta state of the list.
+    fileprivate static func cacheListChildHeader(_ list: CacheList, child: Int) -> Int {
+        list.children.prefix(child).reduce(cacheListFirstChildHeader) { place, earlier in
+            place + cacheListChildHeaderCount + earlier.metaState.count
+        }
+    }
+
+    /// Restores a file into a template list, and records an issue unless the restore throws
+    /// ``KVCacheError`` with the expected message and the template list still holds its own
+    /// empty children.
+    ///
+    /// The message tells which check threw. Another check can also reject a damaged file, thus
+    /// the error type alone does not prove that the restore reached the expected check.
+    ///
+    /// - Parameters:
+    ///   - url: The URL of the file.
+    ///   - template: The template list.
+    ///   - message: The message of the check that must reject the file.
+    fileprivate static func expectRejected(
+        _ url: URL, into template: CacheList, message: String
+    ) {
+        let templateChildren = template.children
+        let error = #expect(throws: KVCacheError.self) {
+            try loadPromptCacheSnapshot(url: url, into: [template])
+        }
+        #expect(error?.message == message, "the check that rejects the file")
+        #expect(template.children.count == templateChildren.count, "the child count")
+        for (index, (child, templateChild)) in zip(template.children, templateChildren)
+            .enumerated()
+        {
+            #expect(isSameInstance(child, templateChild), "child \(index) is the template child")
+            #expect(child.state.isEmpty, "child \(index) holds no saved array")
+        }
     }
 
     // MARK: - Round trip for each cache type
@@ -485,7 +578,7 @@ struct PromptCacheTemplateRestoreTests {
         let savedCount = source.metaState.count
         let url = try Self.tamperedFile([source]) { _, metadata in
             for index in savedCount ..< savedCount + Self.extraMetaStateCount {
-                metadata["0.0.\(index)"] = "0"
+                metadata[Self.firstLayerMetaStateKey(index: index)] = "0"
             }
         }
         defer { try? FileManager.default.removeItem(at: url) }
@@ -494,6 +587,72 @@ struct PromptCacheTemplateRestoreTests {
         #expect(throws: KVCacheError.self) {
             try loadPromptCacheSnapshot(url: url, into: templates)
         }
+    }
+
+    // MARK: - CacheList rejections
+
+    @Test(
+        "A saved CacheList with no valid child count throws KVCacheError",
+        arguments: [nil, "-1", "not-a-count"] as [String?])
+    func badCacheListChildCountThrows(childCount: String?) throws {
+        let url = try Self.tamperedFile([try Self.filledCacheList()]) { _, metadata in
+            metadata[Self.firstLayerMetaStateKey(index: 0)] = childCount
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        Self.expectRejected(
+            url, into: try Self.cacheListTemplate(), message: Self.missingChildCountMessage)
+    }
+
+    @Test("A saved CacheList cut inside the header of its second child throws KVCacheError")
+    func truncatedCacheListChildHeaderThrows() throws {
+        let source = try Self.filledCacheList()
+        let savedCount = source.metaState.count
+        let secondHeader = Self.cacheListChildHeader(source, child: Self.cacheListSecondChild)
+        let url = try Self.tamperedFile([source]) { _, metadata in
+            for index in secondHeader + 1 ..< savedCount {
+                metadata[Self.firstLayerMetaStateKey(index: index)] = nil
+            }
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        Self.expectRejected(
+            url, into: try Self.cacheListTemplate(), message: Self.truncatedHeaderMessage)
+    }
+
+    @Test(
+        "A saved CacheList child count past the saved values throws KVCacheError",
+        arguments: [cacheListStateCountOffset, cacheListMetaStateCountOffset])
+    func overrunCacheListChildCountThrows(countOffset: Int) throws {
+        let source = try Self.filledCacheList()
+        let savedCount = source.metaState.count
+        let countPlace =
+            Self.cacheListChildHeader(source, child: Self.cacheListSecondChild) + countOffset
+        let url = try Self.tamperedFile([source]) { _, metadata in
+            metadata[Self.firstLayerMetaStateKey(index: countPlace)] = String(savedCount)
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(savedCount > source.state.count, "the count is past the saved arrays also")
+        Self.expectRejected(
+            url, into: try Self.cacheListTemplate(), message: Self.invalidChildCountMessage)
+    }
+
+    @Test(
+        "A saved CacheList does not restore into a template list of another child count",
+        arguments: [[CacheKind.simple], [.simple, .mamba, .simple]])
+    func cacheListChildCountMismatchThrows(templateKinds: [CacheKind]) throws {
+        let url = Self.temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = try Self.filledCacheList()
+        try savePromptCache(url: url, cache: [source])
+        let template = CacheList(caches: try templateKinds.map { try $0.makeTemplate() })
+
+        Self.expectRejected(
+            url, into: template,
+            message:
+                "The prompt cache holds a CacheList of \(source.children.count) children and the model gave \(templateKinds.count)."
+        )
     }
 
     // MARK: - Offset record
