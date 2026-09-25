@@ -160,9 +160,10 @@ let package = Package(
             path: "Libraries/IntegrationTestHelpers",
             exclude: ["README.md"]
         ),
-        // Sets MLX_ENABLE_TF32=0 when the MLXLMTests bundle loads. On a GPU
-        // with neural accelerators (for example the Apple M5), MLX computes
-        // float32 matrix operations in TF32 for some shapes only. The float32
+        // Sets MLX_ENABLE_TF32=0 when the MLXLMTests bundle or the
+        // MLXFoundationModelsTests bundle loads. On a GPU with neural
+        // accelerators (for example the Apple M5), MLX computes float32
+        // matrix operations in TF32 for some shapes only. The float32
         // tests compare two paths with float32 tolerances, thus they need
         // float32 arithmetic on all paths. C, because Swift has no load-time
         // constructor.
@@ -326,6 +327,9 @@ let package = Package(
                 // discovery is by design and unchanged.
                 "MLXVLM",
                 .product(name: "MLX", package: "mlx-swift"),
+                // Float32 arithmetic for the float32 comparisons of this
+                // bundle (for example the cold check of the Qwen file tests).
+                "MLXTestPrecision",
             ],
             path: "Tests/MLXFoundationModelsTests"
         ),

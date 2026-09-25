@@ -24,12 +24,10 @@ import Testing
 /// must continue the prompt as the live caches do, and as a cold prefill of the whole prompt
 /// does.
 ///
-/// The cold comparison has a noise floor. On a GPU with neural accelerators, MLX multiplies
-/// `float32` matrices in TF32 (`MLX_ENABLE_TF32`, on by default), and this bundle uses that path.
-/// A split forward and a single forward then differ by approximately 3e-3, also for the decode
-/// path, which positions each token correctly. Thus the cold bound is the rule of the shared
-/// continuation assertions of MLXLMTests: ten times the difference between the decode path and
-/// the cold prefill, and never less than 1e-3.
+/// The cold comparison needs float32 arithmetic on all paths. The `MLXTestPrecision` target
+/// sets `MLX_ENABLE_TF32=0` when this bundle loads, thus a split forward and a single forward
+/// agree to approximately 1e-6 also on a GPU with neural accelerators (see
+/// `Float32PrecisionTests`).
 @Suite("A tiny Qwen entry goes through the executor prompt cache file into newCache templates")
 struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
 
@@ -77,12 +75,9 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
     /// noise.
     private static let warmTolerance: Float = 1e-6
 
-    /// The smallest bound on the difference between the logits of the restored caches and the
-    /// logits of a cold prefill of the whole prompt. A split prefill adds rounding differences.
+    /// The largest difference between the logits of the restored caches and the logits of a
+    /// cold prefill of the whole prompt. A split prefill adds rounding differences.
     private static let coldTolerance: Float = 1e-3
-
-    /// The factor on the noise floor of the decode path that the cold bound allows.
-    private static let coldNoiseFactor: Float = 10
 
     /// The vision tower of each tiny model. The tests send text only, but the configuration
     /// needs a vision tower.
@@ -287,30 +282,6 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
         output.logits[0..., -1, 0...]
     }
 
-    /// Prefills `prompt` into fresh caches, then runs `continuation` one token at a time, as
-    /// the decode loop does. Each step reads the position from the state of the step before it,
-    /// thus this path positions each token correctly. Its difference to a cold prefill is the
-    /// noise floor of a split forward.
-    ///
-    /// - Parameters:
-    ///   - model: The model.
-    ///   - prompt: The prompt, with shape `(1, count)`.
-    ///   - continuation: The tokens after the prompt, with shape `(1, count)`.
-    /// - Returns: The logits of the last token.
-    /// - Throws: The error of the prefill.
-    private static func decodeLogits(
-        _ model: any LanguageModel, _ prompt: MLXArray, _ continuation: MLXArray
-    ) throws -> MLXArray {
-        let caches = try model.newCache(parameters: nil)
-        var output = try run(model, prompt, caches: caches, state: nil)
-        for index in 0 ..< continuation.dim(1) {
-            output = model(
-                LMInput.Text(tokens: continuation[0..., index ..< (index + 1)]), cache: caches,
-                state: output.state)
-        }
-        return lastLogits(output)
-    }
-
     /// The largest absolute difference between two arrays.
     ///
     /// - Parameters:
@@ -408,12 +379,8 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
                 model, concatenated([written.prompt, continuation], axis: 1),
                 caches: model.newCache(parameters: nil), state: nil))
 
-        let noiseFloor = Self.maxAbsDifference(
-            try Self.decodeLogits(model, written.prompt, continuation), coldLogits)
-        let coldBound = max(Self.coldNoiseFactor * noiseFloor, Self.coldTolerance)
-
         #expect(Self.maxAbsDifference(restoredLogits, liveLogits) <= Self.warmTolerance)
-        #expect(Self.maxAbsDifference(restoredLogits, coldLogits) <= coldBound)
+        #expect(Self.maxAbsDifference(restoredLogits, coldLogits) <= Self.coldTolerance)
     }
 
     // MARK: - The negative control

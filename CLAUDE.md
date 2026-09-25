@@ -80,9 +80,18 @@ On a GPU with neural accelerators (NAX, for example the Apple M5), MLX computes
 float32 matrix operations in TF32 when `MLX_ENABLE_TF32` is not `0`. It uses
 the NAX kernel for some shapes only. Thus two float32 paths that must agree
 (for example a warm continuation and a cold prefill) differ by approximately
-2e-3, and the float32 tolerances of `MLXLMTests` fail. The `MLXTestPrecision`
-target sets `MLX_ENABLE_TF32=0` when the `MLXLMTests` bundle loads, if the
-variable is not set. Do not set `MLX_ENABLE_TF32=1` for a test run.
+2e-3, and the float32 tolerances of the tests fail. The `MLXTestPrecision`
+target sets `MLX_ENABLE_TF32=0` when a bundle that links it loads, if the
+variable is not set. These bundles link it:
+
+- `MLXLMTests`
+- `MLXFoundationModelsTests`
+
+Each of these bundles has a `Float32PrecisionTests` suite that makes sure that
+the setting is in effect. The other bundles do not compare float32 results
+(`MLXGuidedGenerationTests`, `CXGrammarTests`, `MLXHuggingFaceMacrosTests`).
+Give the target to a bundle when you add a float32 comparison to it. Do not
+set `MLX_ENABLE_TF32=1` for a test run.
 
 ## How to build
 
