@@ -20,6 +20,12 @@
 //   5. It runs one greedy decode step on the restored caches and one on the original caches.
 //      The two tokens must be equal.
 //
+// One greedy token can hide a wrong restore: two different logit vectors can have the same
+// largest entry. Thus, for each model, the suite also saves and restores the caches of the short
+// context, runs 8 greedy decode steps on the restored caches and on the original caches, and
+// compares the last logits of each step. The largest absolute difference must not be more than
+// 1e-3.
+//
 // The models are `mlx-community/Qwen3-4B-4bit` (pure attention) and
 // `mlx-community/Qwen3.8-27B-mxfp4` (hybrid). The suite downloads nothing. When a model is not
 // in the local Hugging Face cache, the suite fails with a message that names the model.
@@ -74,6 +80,14 @@ private let suiteTimeLimitMinutes = 60
 /// sufficient rows for the largest context when each row gives this number of tokens or more.
 private let minimumTokensPerContextRow = 8
 
+/// The greedy decode steps that the logit comparison runs on the restored caches and on the
+/// original caches.
+private let logitComparisonStepCount = 8
+
+/// The largest absolute difference that the logit comparison accepts between the last logits of
+/// the restored caches and the last logits of the original caches, at each step.
+private let logitTolerance: Float = 1e-3
+
 /// A model identifier that no Hugging Face cache holds.
 private let absentModelID = "mlx-community/PromptCacheSpoolCostAssessment-absent-model"
 
@@ -127,6 +141,30 @@ private struct PrefilledContext {
     let seconds: TimeInterval
 }
 
+/// One side of a decode comparison: caches, the model state that belongs to them, and the model
+/// that decodes on them.
+private struct DecodeLane {
+    /// The model that decodes.
+    let model: any LanguageModel
+    /// The caches that hold the context. Each step adds one token to them.
+    let caches: [KVCache]
+    /// The model state of the last step. Each step replaces it with the state of its output.
+    var state: LMOutput.State?
+
+    /// Runs one decode step of `token`, and keeps the model state of the step.
+    ///
+    /// - Parameter token: the token to feed.
+    /// - Returns: the last logits of the step, as `float32`.
+    mutating func logits(after token: Int) -> MLXArray {
+        let input = LMInput.Text(tokens: MLXArray([token]))
+        let output = model(input[text: .newAxis], cache: caches, state: state)
+        state = output.state ?? state
+        let logits = output.logits[0, -1].asType(.float32)
+        eval(logits)
+        return logits
+    }
+}
+
 /// Runs the five steps of one measurement inside `ModelContainer.perform`.
 private struct SpoolCostProbe {
     /// The loaded model and its tokenizer.
@@ -164,6 +202,37 @@ private struct SpoolCostProbe {
             contextTokenCount: contextTokenCount, prefillSeconds: prefilled.seconds,
             residentBytes: residentBytes, fileBytes: fileBytes, writeSeconds: writeSeconds,
             readSeconds: readSeconds, restoredToken: restoredToken, originalToken: originalToken)
+    }
+
+    /// Saves and restores the caches of one context, then runs `stepCount` greedy decode steps
+    /// on the restored caches and on the original caches.
+    ///
+    /// Each step gives the same token to the two sides: the greedy token of the original caches.
+    /// Thus the two sides stay on one path, and each step compares the logits of one input.
+    ///
+    /// - Parameters:
+    ///   - contextTokenCount: the tokens in the context.
+    ///   - stepCount: the decode steps to compare.
+    /// - Returns: for each step, the largest absolute difference between the last logits of the
+    ///   restored caches and the last logits of the original caches.
+    func logitDifferences(contextTokenCount: Int, stepCount: Int) throws -> [Float] {
+        let prefilled = try prefill(tokens: try contextTokens(count: contextTokenCount))
+        let url = directory.appendingPathComponent("logits-\(contextTokenCount).safetensors")
+        try savePromptCache(url: url, cache: prefilled.caches, state: prefilled.state)
+        let snapshot = try loadPromptCacheSnapshot(
+            url: url, into: try context.model.newCache(parameters: nil))
+
+        var restored = DecodeLane(
+            model: context.model, caches: snapshot.cache, state: snapshot.state)
+        var original = DecodeLane(
+            model: context.model, caches: prefilled.caches, state: prefilled.state)
+        var token = prefilled.nextToken
+        return (0 ..< stepCount).map { _ in
+            let restoredLogits = restored.logits(after: token)
+            let originalLogits = original.logits(after: token)
+            token = originalLogits.argMax().item(Int.self)
+            return abs(restoredLogits - originalLogits).max().item(Float.self)
+        }
     }
 
     /// The first `count` tokens of a long plain text.
@@ -264,6 +333,27 @@ struct PromptCacheSpoolCostAssessmentTests {
         }
     }
 
+    /// The pure-attention model gives the logits of its original caches on its restored caches.
+    @Test("a pure-attention model decodes the logits of the original caches on restored caches")
+    func pureAttentionModelRestoredLogits() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await compareLogits(modelID: TestFixtures.qwen3ModelID, label: "qwen3-4b")
+        } else {
+            Issue.record(.unsupportedSystem)
+        }
+    }
+
+    /// The hybrid model gives the logits of its original caches and model state on its restored
+    /// caches and model state.
+    @Test("a hybrid model decodes the logits of the original caches on restored caches")
+    func hybridModelRestoredLogits() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await compareLogits(modelID: hybridModelID, label: "qwen3.8-27b")
+        } else {
+            Issue.record(.unsupportedSystem)
+        }
+    }
+
     /// A model that is not in the local cache stops the measurement with an error that names it.
     @Test("a model that is not in the local cache fails with its name")
     func absentModelFailsWithItsName() throws {
@@ -286,13 +376,8 @@ struct PromptCacheSpoolCostAssessmentTests {
     ///   - label: the greppable label of every line.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func measure(modelID: String, label: String) async throws {
-        await releaseAllGPUMemory()
-        let model = makeTestModel(modelID)
-        try model.requireLocalWeights()
-        let container = try await model.loadContainer()
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PromptCacheSpoolCostAssessmentTests-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let container = try await loadLocalModel(modelID)
+        let directory = try makeScratchDirectory(prefix: "PromptCacheSpoolCostAssessmentTests")
         defer { try? FileManager.default.removeItem(at: directory) }
 
         for contextTokenCount in contextTokenCounts {
@@ -308,6 +393,67 @@ struct PromptCacheSpoolCostAssessmentTests {
             Memory.clearCache()
         }
         await releaseAllGPUMemory()
+    }
+
+    /// Compares the logits of restored caches with the logits of the original caches over
+    /// ``logitComparisonStepCount`` greedy decode steps of the short context, and records an
+    /// issue for each step whose difference is more than ``logitTolerance``.
+    ///
+    /// One greedy token can hide a wrong restore, because two different logit vectors can have
+    /// the same largest entry. The comparison of the logits of each step cannot.
+    ///
+    /// - Parameters:
+    ///   - modelID: the model to compare.
+    ///   - label: the greppable label of the line.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func compareLogits(modelID: String, label: String) async throws {
+        let container = try await loadLocalModel(modelID)
+        let directory = try makeScratchDirectory(prefix: "PromptCacheSpoolLogitTests")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let differences = try await container.perform { context in
+            try SpoolCostProbe(context: context, directory: directory)
+                .logitDifferences(
+                    contextTokenCount: shortContextTokenCount, stepCount: logitComparisonStepCount)
+        }
+        let line =
+            "\(measurementPrefix) \(label) context=\(shortContextTokenCount) "
+            + "maxAbsLogitDifferences=\(differences)"
+        measurementLog.info("\(line, privacy: .public)")
+        #expect(differences.count == logitComparisonStepCount, "\(line)")
+        for (step, difference) in differences.enumerated() {
+            #expect(
+                difference <= logitTolerance,
+                "Step \(step): the restored logits differ by \(difference). \(line)")
+        }
+        await releaseAllGPUMemory()
+    }
+
+    /// Releases the GPU memory of earlier tests, and loads a model from the local Hugging Face
+    /// cache.
+    ///
+    /// - Parameter modelID: the model to load.
+    /// - Returns: the container of the loaded model.
+    /// - Throws: ``MissingLocalModelError`` when the model is not in the local cache, which names
+    ///   the model, or the error of the load.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func loadLocalModel(_ modelID: String) async throws -> ModelContainer {
+        await releaseAllGPUMemory()
+        let model = makeTestModel(modelID)
+        try model.requireLocalWeights()
+        return try await model.loadContainer()
+    }
+
+    /// Makes a new empty folder in the temporary directory. The caller removes it.
+    ///
+    /// - Parameter prefix: the start of the folder name. A UUID follows it.
+    /// - Returns: the URL of the folder.
+    /// - Throws: the error of the file system.
+    private func makeScratchDirectory(prefix: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
     }
 }
 
