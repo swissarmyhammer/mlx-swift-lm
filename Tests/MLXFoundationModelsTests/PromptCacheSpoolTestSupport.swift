@@ -67,15 +67,21 @@ extension PromptCacheSpoolFixtures {
         return MLXArray((0 ..< count).map { start + Float($0) }).reshaped(shape).asType(.float16)
     }
 
-    /// Makes an entry with one `KVCacheSimple` that holds ``tokens``.
+    /// Makes an entry with one `KVCacheSimple` that holds `ledger`.
     ///
+    /// - Parameters:
+    ///   - ledger: The tokens of the entry. The cache holds one position for each token.
+    ///   - renderTokens: The render that the entry records, or empty for no render.
     /// - Returns: The entry.
-    static func entry() -> ExecutorPromptCacheEntry {
+    static func entry(
+        tokens ledger: [Int] = PromptCacheSpoolFixtureShape.tokens, renderTokens: [Int] = []
+    ) -> ExecutorPromptCacheEntry {
         let cache = KVCacheSimple()
         _ = cache.update(
-            keys: block(tokenCount: tokens.count, array: .keys),
-            values: block(tokenCount: tokens.count, array: .values))
-        return ExecutorPromptCacheEntry(caches: [cache], tokens: tokens)
+            keys: block(tokenCount: ledger.count, array: .keys),
+            values: block(tokenCount: ledger.count, array: .values))
+        return ExecutorPromptCacheEntry(
+            caches: [cache], tokens: ledger, renderTokens: renderTokens)
     }
 
     /// Makes the name of an empty temporary folder for one test. The folder is not made: the

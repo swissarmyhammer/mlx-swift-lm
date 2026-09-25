@@ -5,12 +5,12 @@
 import Foundation
 import FoundationModels
 import MLX
-import MLXLMCommon
 import MLXNN
 import Synchronization
 import Testing
 
 @testable import MLXFoundationModels
+@testable import MLXLMCommon
 
 /// Proves that `MLXLanguageModel.Executor` restores a prompt cache that went to disk, and that
 /// the file of that cache never stays after the turn.
@@ -133,7 +133,61 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
         }
     }
 
+    @Test("a committed Qwen turn restored from disk splices, and its plan line names the disk")
+    func aCommittedTurnRestoredFromDiskSplices() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectACommittedTurnRestoredFromDiskSplices()
+        } else {
+            Issue.record(Self.unsupportedSystem)
+        }
+    }
+
+    @Test("a committed turn restored from disk with no render on record does not splice")
+    func aCommittedTurnWithNoRenderDoesNotSplice() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectACommittedTurnWithNoRenderDoesNotSplice()
+        } else {
+            Issue.record(Self.unsupportedSystem)
+        }
+    }
+
     // MARK: - The checks
+
+    /// An entry that holds a committed Qwen turn goes to disk and comes back through the slot.
+    /// The Qwen rule then keeps the tokens that the model wrote and feeds only the tool
+    /// response. Thus the file carries the render that the rule needs.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectACommittedTurnRestoredFromDiskSplices() async throws {
+        let turn = try await CommittedTurn.planAfterRestore(
+            renderTokens: CommittedTurn.previousRender)
+
+        #expect(turn.restoredRenderTokens == CommittedTurn.previousRender)
+        #expect(turn.plan.decision == .splice)
+        #expect(turn.plan.reusedTokenCount == CommittedTurn.ledger.count)
+        #expect(turn.plan.representedTokens == CommittedTurn.ledger + CommittedTurn.toolResponse)
+        #expect(turn.plan.input.text.tokens.asArray(Int.self) == CommittedTurn.toolResponse)
+        let line = try #require(turn.lines.first)
+        #expect(turn.lines.count == 1)
+        #expect(line.hasPrefix(Self.planLinePrefix(of: CommittedTurn.key) + "source=disk "))
+        #expect(
+            line.hasSuffix(
+                "rendered=\(CommittedTurn.nextRender.count) reused=\(CommittedTurn.ledger.count) "
+                    + "fed=\(CommittedTurn.toolResponse.count) rule=splice"))
+    }
+
+    /// Control: the same chain with an entry that records no render. The Qwen rule declines,
+    /// thus the plan does not keep the committed turn.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectACommittedTurnWithNoRenderDoesNotSplice() async throws {
+        let turn = try await CommittedTurn.planAfterRestore(renderTokens: [])
+
+        #expect(turn.restoredRenderTokens.isEmpty)
+        #expect(turn.plan.decision != .splice)
+        #expect(turn.plan.reusedTokenCount < CommittedTurn.ledger.count)
+        let line = try #require(turn.lines.first)
+        #expect(line.hasPrefix(Self.planLinePrefix(of: CommittedTurn.key) + "source=disk "))
+        #expect(!line.contains("rule=splice"))
+    }
 
     /// A slot reads its spilled entry at the first restore call and not at the second, and the
     /// plan line of its first pass names the disk and the restore time.
@@ -421,6 +475,101 @@ private struct SpilledSession: PromptCacheSpoolFixtures {
     func remove() {
         try? FileManager.default.removeItem(at: directory)
         try? FileManager.default.removeItem(at: weights)
+    }
+}
+
+// MARK: - A committed Qwen turn that went to disk
+
+/// What the first pass after the restore of a ``CommittedTurn`` entry planned.
+private struct CommittedTurnPlan {
+
+    /// The render that the restored entry records.
+    let restoredRenderTokens: [Int]
+
+    /// The plan of the pass.
+    let plan: ExecutorPromptCachePlan
+
+    /// Each log line of the slot, in order.
+    let lines: [String]
+}
+
+/// A Qwen agent round whose entry goes to disk between two turns.
+///
+/// The fixture has the shape of `QwenCommittedTurnRuleTests`. The ledger holds the render of
+/// the last pass and the turn that the model wrote, which ends at the commit token. The next
+/// render writes that turn again in its own tokens, and adds a tool response after the commit.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+private enum CommittedTurn: PromptCacheSpoolFixtures {
+
+    /// Stands in for the `<|im_end|>` commit token.
+    static let commit = 1
+
+    /// Stands in for a token that only the model wrote.
+    static let generatedOnly = 70
+
+    /// Stands in for the token that the render writes where the model wrote ``generatedOnly``.
+    static let renderedOnly = 71
+
+    /// The render of the last pass. It ends at the generation prompt.
+    static let previousRender = [10, 11]
+
+    /// The tool response that the next render adds after the commit.
+    static let toolResponse = [20, 21]
+
+    /// The tokens of the entry: the last render and the turn that the model wrote.
+    static let ledger = previousRender + [generatedOnly, commit]
+
+    /// The next render: the committed turn in the tokens of the template, then the tool
+    /// response.
+    static let nextRender = previousRender + [renderedOnly, commit] + toolResponse
+
+    /// The session of the entry.
+    static let key = ExecutorPromptCacheKey(
+        modelID: "test-org/prompt-cache-committed-turn", sessionID: "committed-turn-session")
+
+    /// Checks an entry of ``ledger`` into a store whose memory budget is zero, waits for the
+    /// spill, checks it out, restores it through a slot, and plans ``nextRender`` with the Qwen
+    /// rule.
+    ///
+    /// - Parameter renderTokens: The render that the entry records, or empty for no render.
+    /// - Returns: What the pass planned.
+    /// - Throws: An issue when the check-out gives no file or the slot gives no plan, or the
+    ///   error of the plan.
+    static func planAfterRestore(renderTokens: [Int]) async throws -> CommittedTurnPlan {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = await store(in: directory)
+        await store.checkIn(key, entry(tokens: ledger, renderTokens: renderTokens))
+        await store.waitForSpills()
+        let handle = try #require(
+            await store.checkOut(key).spilledHandle, "The entry must come back from disk.")
+        return try plan(restoring: handle)
+    }
+
+    /// Restores the file of `handle` through a slot, and plans ``nextRender`` with the Qwen
+    /// rule.
+    ///
+    /// - Parameter handle: The spilled file of the entry.
+    /// - Returns: What the pass planned.
+    /// - Throws: An issue when the slot gives no plan, or the error of the plan.
+    private static func plan(
+        restoring handle: ExecutorPromptCacheSpilledHandle
+    ) throws -> CommittedTurnPlan {
+        var lines: [String] = []
+        let slot = ExecutorPromptCacheSlot(spilled: handle, key: key) { lines.append($0) }
+        let model = ScriptedLanguageModel(
+            rounds: [], cacheLayerCount: ScriptedSessionModel.cacheLayerCount)
+
+        slot.restoreIfPending(model: model, parameters: GenerateParameters())
+        let restored = try #require(slot.entry, "The spilled file must read back.")
+        let plan = try #require(
+            try slot.plan(
+                input: LMInput(tokens: MLXArray(nextRender)), model: model,
+                parameters: GenerateParameters(),
+                protocolRules: [QwenCommittedTurnRule(endOfTurnToken: commit)],
+                decodeTokens: { _ in "" }))
+        return CommittedTurnPlan(
+            restoredRenderTokens: restored.renderTokens, plan: plan, lines: lines)
     }
 }
 
