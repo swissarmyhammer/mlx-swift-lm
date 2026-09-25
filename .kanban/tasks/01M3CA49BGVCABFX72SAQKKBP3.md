@@ -30,8 +30,24 @@ comments:
     - evidence: `swift build --build-tests` (only the known warning `missing creator for mutated node`); `xcrun xctest` for each bundle: MLXLMTests 695 XCTest + 1208 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 301 (3 runs, all pass), CXGrammarTests 7, MLXHuggingFaceMacrosTests 5. 0 failures, 0 skipped.
     - next: commit
   timestamp: 2026-09-25T16:30:50.864460+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3cpjrrwsjcnraz076n7dya4
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` — 0 findings, 0 confirmed, 0 refuted, 7 validators attempted, 0 failed. No prior review findings on the task.
+    - next: move to done
+  timestamp: 2026-09-25T16:32:37.660995+00:00
+- actor: claude-code
+  id: 01m3cpjvd07qbyd99xcfr8a64n
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — Tests/MLXFoundationModelsTests/ExecutorPromptCacheRestoreTests.swift (new cache-echo model, disk-vs-memory test, negative control). No library bug found.
+    - test: green — MLXLMTests 695 + 1208, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 301 (3 runs), CXGrammarTests 7, MLXHuggingFaceMacrosTests 5; 0 failures, 0 skipped; only the known build warning.
+    - commit: 4818182 test(prompt-cache): prove that a disk restore gives the output of a memory restore
+    - review: clean — review sha HEAD~1..HEAD, 0 findings
+  timestamp: 2026-09-25T16:32:40.352800+00:00
+position_column: done
+position_ordinal: ffa480
 title: Add an executor disk-restore test whose output depends on the restored cache content
 ---
 ## What
@@ -47,9 +63,9 @@ What to test (add a new test; do not change the existing tests):
 
 ## Acceptance Criteria
 
-- [ ] A test proves that the disk-restored turn gives the output of the memory-only turn with a model whose output depends on the cache.
-- [ ] The negative control proves that the test fails when the restored values are wrong.
-- [ ] All five unit bundles pass.
+- [x] A test proves that the disk-restored turn gives the output of the memory-only turn with a model whose output depends on the cache.
+- [x] The negative control proves that the test fails when the restored values are wrong.
+- [x] All five unit bundles pass.
 
 ## Tests
 
