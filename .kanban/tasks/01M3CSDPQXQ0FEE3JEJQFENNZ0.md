@@ -82,8 +82,31 @@ comments:
     - evidence: `swift build --build-tests` — only the known warning `missing creator for mutated node`. All five bundles: MLXLMTests 695 XCTest 0 failures + 1215 Swift Testing passed (3 runs in this iteration, all green); MLXGuidedGenerationTests 70; MLXFoundationModelsTests 312; CXGrammarTests 7; MLXHuggingFaceMacrosTests 5. 0 skipped.
     - next: /commit
   timestamp: 2026-09-25T18:41:54.107454+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3cy05rrbdbd6vr7d2bdhdk3
+  text: |-
+    ### commit — changed
+    - evidence: 20a347b test(hybrid): give the NemotronH fixture as JSON text
+    - next: /review qfennz0 HEAD~1..HEAD
+  timestamp: 2026-09-25T18:42:16.984217+00:00
+- actor: claude-code
+  id: 01m3cy27fpmfr2cc18cv6v7ar0
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (20a347b) — 0 findings, 0 confirmed, 0 refuted; all 5 prior items of 2026-09-25 13:31 are checked.
+    - next: none (task moved to done)
+  timestamp: 2026-09-25T18:43:24.278619+00:00
+- actor: claude-code
+  id: 01m3cy29kx33jb7hqt6hd863yd
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed (NemotronH fixture as JSON text; removes the magic-numbers-swift findings at HybridRecurrentCacheOffsetTests.swift:79-83)
+    - test: green (all five bundles; MLXLMTests 3 runs)
+    - commit: 20a347b
+    - review: clean (0 findings) — task moved to done
+  timestamp: 2026-09-25T18:43:26.461562+00:00
+position_column: done
+position_ordinal: ffab80
 title: Check the recurrent-cache offset of the other hybrid models (NemotronH, Jamba, Mamba2, GraniteMoeHybrid, LFM2, LFM2MoE, LFM2VL)
 ---
 ## What
