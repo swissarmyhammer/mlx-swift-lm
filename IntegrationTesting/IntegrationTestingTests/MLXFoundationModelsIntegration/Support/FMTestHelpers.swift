@@ -447,6 +447,41 @@ func releaseAllGPUMemory() async {
     Memory.clearCache()
 }
 
+// MARK: - Local Weights
+
+/// The error of a model that is not in the local Hugging Face cache.
+struct MissingLocalModelError: Error, CustomStringConvertible {
+    /// The model that is not in the cache.
+    let modelID: String
+
+    /// The message, which names the model.
+    var description: String {
+        "The model \(modelID) is not in the local Hugging Face cache. This suite downloads "
+            + "nothing: download the model, then run the suite again."
+    }
+}
+
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+extension MLXLanguageModel {
+    /// Throws when the weights of this model are not in the local Hugging Face cache.
+    ///
+    /// A suite that downloads nothing calls it before it loads the model, thus a missing
+    /// model gives an error that names the model, and not a download.
+    ///
+    /// - Throws: ``MissingLocalModelError``, which names the model.
+    func requireLocalWeights() throws {
+        guard modelExistsOnDisk() else {
+            throw MissingLocalModelError(modelID: modelID)
+        }
+    }
+}
+
+extension Comment {
+    /// The issue that a test records on a system that has no executor.
+    static let unsupportedSystem: Comment =
+        "The model loader needs iOS 27, macOS 27 or visionOS 27."
+}
+
 #endif  // FoundationModelsIntegration
 
 // MARK: - Shared Test Fixtures

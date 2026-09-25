@@ -77,9 +77,6 @@ private let minimumTokensPerContextRow = 8
 /// A model identifier that no Hugging Face cache holds.
 private let absentModelID = "mlx-community/PromptCacheSpoolCostAssessment-absent-model"
 
-/// The issue a test records on a system that has no executor.
-private let unsupportedSystem: Comment = "The model loader needs iOS 27, macOS 27 or visionOS 27."
-
 // MARK: - The measurement
 
 /// The numbers of one model at one context.
@@ -115,18 +112,6 @@ private struct SpoolCostMeasurement: Sendable {
             + "longestLockHoldSeconds=\(longestLockHoldSeconds) "
             + "spoolCheaperThanPrefill=\(spoolIsCheaperThanPrefill) "
             + "restoredToken=\(restoredToken) originalToken=\(originalToken)"
-    }
-}
-
-/// The error of a model that is not in the local Hugging Face cache.
-private struct MissingLocalModelError: Error, CustomStringConvertible {
-    /// The model that is not in the cache.
-    let modelID: String
-
-    /// The message, which names the model.
-    var description: String {
-        "The model \(modelID) is not in the local Hugging Face cache. This suite downloads "
-            + "nothing: download the model, then run the suite again."
     }
 }
 
@@ -265,7 +250,7 @@ struct PromptCacheSpoolCostAssessmentTests {
         if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
             try await measure(modelID: TestFixtures.qwen3ModelID, label: "qwen3-4b")
         } else {
-            Issue.record(unsupportedSystem)
+            Issue.record(.unsupportedSystem)
         }
     }
 
@@ -275,7 +260,7 @@ struct PromptCacheSpoolCostAssessmentTests {
         if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
             try await measure(modelID: hybridModelID, label: "qwen3.8-27b")
         } else {
-            Issue.record(unsupportedSystem)
+            Issue.record(.unsupportedSystem)
         }
     }
 
@@ -284,11 +269,11 @@ struct PromptCacheSpoolCostAssessmentTests {
     func absentModelFailsWithItsName() throws {
         if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
             let error = #expect(throws: MissingLocalModelError.self) {
-                try requireLocalWeights(of: makeTestModel(absentModelID))
+                try makeTestModel(absentModelID).requireLocalWeights()
             }
             #expect(error?.description.contains(absentModelID) == true)
         } else {
-            Issue.record(unsupportedSystem)
+            Issue.record(.unsupportedSystem)
         }
     }
 
@@ -303,7 +288,7 @@ struct PromptCacheSpoolCostAssessmentTests {
     private func measure(modelID: String, label: String) async throws {
         await releaseAllGPUMemory()
         let model = makeTestModel(modelID)
-        try requireLocalWeights(of: model)
+        try model.requireLocalWeights()
         let container = try await model.loadContainer()
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("PromptCacheSpoolCostAssessmentTests-\(UUID().uuidString)")
@@ -323,17 +308,6 @@ struct PromptCacheSpoolCostAssessmentTests {
             Memory.clearCache()
         }
         await releaseAllGPUMemory()
-    }
-
-    /// Throws when the weights of `model` are not in the local Hugging Face cache.
-    ///
-    /// - Parameter model: the model to look for.
-    /// - Throws: ``MissingLocalModelError``, which names the model.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func requireLocalWeights(of model: MLXLanguageModel) throws {
-        guard model.modelExistsOnDisk() else {
-            throw MissingLocalModelError(modelID: model.modelID)
-        }
     }
 }
 

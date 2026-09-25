@@ -9,8 +9,17 @@
 // numbers come from the CHANNEL (`updateUsage`) and from the executor's test
 // mirror (`GenerationEvent.completion`, which carries the prefill seconds the
 // channel has no event for). The session's ledger comes from
-// `ExecutorPromptCacheStore.shared.peek`, which lets each round name the first
+// `ExecutorPromptCacheStore.current.peek`, which lets each round name the first
 // token where its render parts from the ledger the round before it left.
+//
+// A second hybrid test runs the same rounds two times, each time with its own
+// store. The first store keeps no entry in memory (a memory budget of zero),
+// thus each round spills its cache to disk, and each round after the first
+// restores the cache from the file. The file must hold the ledger and the
+// render of the round for `QwenCommittedTurnRule`, the `MambaCache` offsets,
+// and the Qwen VL state `qwen35.ropeDeltas`. The second store keeps every
+// entry in memory. Under greedy sampling, the two runs must give the same
+// reasoning, the same text and the same tool calls.
 //
 // A unit test cannot answer this question. Three things stand between a hybrid
 // model and a carried cache, and each shows only on real weights:
@@ -75,7 +84,8 @@ private let controlModelID = TestFixtures.qwen3ModelID
 
 /// The per-test time limit, in minutes. One measurement runs five rounds of
 /// a 27B model over a prompt of twenty thousand tokens, and then one cold
-/// control of the last round.
+/// control of the last round. The disk test runs the five rounds two times,
+/// and each prefill after round 1 feeds the new tail alone.
 private let suiteTimeLimitMinutes = 90
 
 /// Rows in the stock report the agent reads. Sized so the first render alone
@@ -139,6 +149,17 @@ private let coldControlRoundIndex = roundCount - 1
 /// The pallet count planted on every queried row, thus a tool answer that
 /// names it agrees with the report.
 private let plantedPalletCount = 4172
+
+/// The memory budget of the disk run: zero keeps no entry in memory, thus
+/// each round spills its cache to disk.
+private let diskOnlyMemoryBudgetBytes = 0
+
+/// The memory budget of the memory run: no entry is too large for it, thus
+/// no round spills its cache to disk.
+private let unlimitedMemoryBudgetBytes = Int.max
+
+/// The label of the hybrid model in every measurement line.
+private let hybridLabel = "qwen3.8-27b"
 
 /// The system turn of the agent. The tool name is `stockToolName`, which
 /// `DeepseekV4IntegrationTests.swift` declares for the whole target.
@@ -269,6 +290,12 @@ private struct RoundMeasurement {
     let roundSeconds: TimeInterval
     /// Where this round's render parted from the ledger before it.
     let seam: LedgerSeam
+    /// Whether the store held the session's cache in memory after the round
+    /// and after its spills ended.
+    let isInMemoryAfterRound: Bool
+    /// The bytes of the store's spill files after the round and after its
+    /// spills ended.
+    let diskByteCountAfterRound: Int
 
     /// The generated stream as one text, for the cold comparison.
     var generatedText: String {
@@ -373,7 +400,8 @@ private struct SessionDriver {
             contextOptions: ContextOptions(reasoningLevel: .moderate))
         let key = try #require(
             MLXLanguageModel.Executor.sessionCacheKey(for: request, modelID: model.modelID))
-        let ledgerBefore = await ExecutorPromptCacheStore.shared.peek(key)?.tokens ?? []
+        let store = ExecutorPromptCacheStore.current
+        let ledgerBefore = await store.peek(key)?.tokens ?? []
 
         let start = Date()
         var events = RoundEvents()
@@ -383,7 +411,9 @@ private struct SessionDriver {
         }
         let roundSeconds = Date().timeIntervalSince(start)
 
-        let entryAfter = await ExecutorPromptCacheStore.shared.peek(key)
+        await store.waitForSpills()
+        let entryAfter = await store.peek(key)
+        let diskByteCountAfterRound = await store.diskByteCount
         let seam = try await describeLedgerSeam(
             ledger: ledgerBefore, render: entryAfter?.renderTokens ?? [])
         let completion = try #require(
@@ -399,7 +429,9 @@ private struct SessionDriver {
             prefillSeconds: completion.promptTime,
             generatedTokenCount: events.generatedTokenCount,
             roundSeconds: roundSeconds,
-            seam: seam)
+            seam: seam,
+            isInMemoryAfterRound: entryAfter != nil,
+            diskByteCountAfterRound: diskByteCountAfterRound)
     }
 
     /// Measures where `render` parts from `ledger`, and decodes both sides.
@@ -520,7 +552,18 @@ struct Qwen35AgenticPromptCacheAssessmentTests {
     /// same tokens as a cold one.
     @Test func hybridModelCarriesThePromptCacheAcrossToolRounds() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        try await measure(label: "qwen3.8-27b") { makeReasoningTestModel(hybridModelID) }
+        try await measure(label: hybridLabel) { makeReasoningTestModel(hybridModelID) }
+    }
+
+    /// Five rounds on the hybrid model with a spill to disk after each round:
+    /// each round after the first restores the render of the round before it
+    /// from disk, and the disk run gives the output of a memory run.
+    @Test func hybridModelRestoresEachToolRoundFromDisk() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await compareDiskRunWithMemoryRun()
+        } else {
+            Issue.record(.unsupportedSystem)
+        }
     }
 
     /// The same driver on the pure-attention control.
@@ -577,6 +620,109 @@ struct Qwen35AgenticPromptCacheAssessmentTests {
         await releaseAllGPUMemory()
     }
 
+    /// Runs the rounds of the hybrid model one time with a spill to disk
+    /// after each round, and one time in memory, and holds the requirements
+    /// of both runs.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func compareDiskRunWithMemoryRun() async throws {
+        await releaseAllGPUMemory()
+        let model = makeReasoningTestModel(hybridModelID)
+        try model.requireLocalWeights()
+        let executor = try makeMLXExecutor(for: model)
+        let container = try await model.loadContainer()
+        let diskDriver = SessionDriver(
+            model: model, executor: executor, container: container, label: "\(hybridLabel) disk")
+        let memoryDriver = SessionDriver(
+            model: model, executor: executor, container: container,
+            label: "\(hybridLabel) memory")
+
+        let diskRounds = try await runSession(
+            diskDriver, memoryBudgetBytes: diskOnlyMemoryBudgetBytes)
+        let memoryRounds = try await runSession(
+            memoryDriver, memoryBudgetBytes: unlimitedMemoryBudgetBytes)
+
+        expectToolRounds(diskRounds, label: diskDriver.label)
+        expectEachRoundReusesThePreviousRender(diskRounds, label: diskDriver.label)
+        expectEachRoundSpilledToDisk(diskRounds, label: diskDriver.label)
+        expectEachRoundStayedInMemory(memoryRounds, label: memoryDriver.label)
+        expectSameOutput(disk: diskRounds, memory: memoryRounds)
+        await releaseAllGPUMemory()
+    }
+
+    /// Runs every round of one session with its own store, in a temporary
+    /// folder that the function deletes after the session.
+    ///
+    /// - Parameters:
+    ///   - driver: the driver of the session.
+    ///   - memoryBudgetBytes: the memory budget of the store.
+    /// - Returns: the measurements of the rounds.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func runSession(
+        _ driver: SessionDriver, memoryBudgetBytes: Int
+    ) async throws -> [RoundMeasurement] {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Qwen35AgenticPromptCacheAssessmentTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ExecutorPromptCacheStore(directory: directory)
+        await store.configure(memoryBudgetBytes: memoryBudgetBytes)
+        return try await ExecutorPromptCacheStore.$current.withValue(store) {
+            try await driver.runSession().rounds
+        }
+    }
+
+    /// Holds that each round spilled its cache: after the round and its
+    /// spills, the store holds no entry in memory and holds a file on disk.
+    private func expectEachRoundSpilledToDisk(_ rounds: [RoundMeasurement], label: String) {
+        for round in rounds {
+            #expect(
+                !round.isInMemoryAfterRound,
+                "\(label): round \(round.number) left its cache in memory, not on disk")
+            #expect(
+                round.diskByteCountAfterRound > 0,
+                "\(label): round \(round.number) left no spill file on disk")
+        }
+    }
+
+    /// Holds that each round kept its cache in memory and wrote no file, thus
+    /// the memory run is a true control of the disk run.
+    private func expectEachRoundStayedInMemory(_ rounds: [RoundMeasurement], label: String) {
+        for round in rounds {
+            #expect(
+                round.isInMemoryAfterRound,
+                "\(label): round \(round.number) did not keep its cache in memory")
+            #expect(
+                round.diskByteCountAfterRound == 0,
+                """
+                \(label): round \(round.number) left \(round.diskByteCountAfterRound) bytes \
+                on disk
+                """)
+        }
+    }
+
+    /// Holds that the disk run and the memory run gave the same reasoning,
+    /// the same text and the same tool calls in each round.
+    private func expectSameOutput(disk: [RoundMeasurement], memory: [RoundMeasurement]) {
+        #expect(
+            disk.count == memory.count,
+            "the disk run ran \(disk.count) rounds and the memory run ran \(memory.count)")
+        for (diskRound, memoryRound) in zip(disk, memory) {
+            #expect(
+                diskRound.toolCall?.name == memoryRound.toolCall?.name,
+                """
+                round \(diskRound.number): the disk run called \
+                \(diskRound.toolCall?.name ?? "no tool") and the memory run called \
+                \(memoryRound.toolCall?.name ?? "no tool")
+                """)
+            #expect(
+                diskRound.generatedText == memoryRound.generatedText,
+                """
+                round \(diskRound.number): the disk run and the memory run gave different \
+                output. Disk: <<<\(diskRound.generatedText)>>> \
+                Memory: <<<\(memoryRound.generatedText)>>>
+                """)
+        }
+    }
+
     /// Holds the per-round requirements of the card.
     private func expectRounds(_ rounds: [RoundMeasurement], label: String) {
         let last = rounds[rounds.count - 1]
@@ -586,17 +732,9 @@ struct Qwen35AgenticPromptCacheAssessmentTests {
             \(label): the last round rendered \(last.renderedTokenCount) tokens, under \
             \(minimumTranscriptTokenCount)
             """)
-        #expect(
-            rounds.filter { $0.toolCall != nil }.count >= queriedBays.count,
-            "\(label): fewer than \(queriedBays.count) rounds emitted a tool call")
-        for (previous, round) in zip(rounds, rounds.dropFirst()) {
-            #expect(
-                round.cachedTokenCount >= previous.renderedTokenCount - cacheSeamSlack,
-                """
-                \(label): round \(round.number) cached \(round.cachedTokenCount) tokens, under the \
-                \(previous.renderedTokenCount) tokens round \(previous.number) rendered minus \
-                \(cacheSeamSlack). First divergent token: \(round.seam.summary)
-                """)
+        expectToolRounds(rounds, label: label)
+        expectEachRoundReusesThePreviousRender(rounds, label: label)
+        for round in rounds.dropFirst() {
             #expect(
                 round.fedTokenCount < maximumFedTokensAfterRoundOne,
                 """
@@ -612,6 +750,30 @@ struct Qwen35AgenticPromptCacheAssessmentTests {
             \(label): round 4 prefill \(roundFour.prefillSeconds) s is not under \
             \(prefillGrowthLimit) times round 2 prefill \(roundTwo.prefillSeconds) s
             """)
+    }
+
+    /// Holds that the rounds emitted one tool call for each queried bay.
+    private func expectToolRounds(_ rounds: [RoundMeasurement], label: String) {
+        #expect(
+            rounds.filter { $0.toolCall != nil }.count >= queriedBays.count,
+            "\(label): fewer than \(queriedBays.count) rounds emitted a tool call")
+    }
+
+    /// Holds that each round after the first found the cache of the round
+    /// before it: the round cached the whole render of that round, less the
+    /// seam of the committed turn.
+    private func expectEachRoundReusesThePreviousRender(
+        _ rounds: [RoundMeasurement], label: String
+    ) {
+        for (previous, round) in zip(rounds, rounds.dropFirst()) {
+            #expect(
+                round.cachedTokenCount >= previous.renderedTokenCount - cacheSeamSlack,
+                """
+                \(label): round \(round.number) cached \(round.cachedTokenCount) tokens, under the \
+                \(previous.renderedTokenCount) tokens round \(previous.number) rendered minus \
+                \(cacheSeamSlack). First divergent token: \(round.seam.summary)
+                """)
+        }
     }
 }
 
