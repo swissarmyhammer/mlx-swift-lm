@@ -17,8 +17,11 @@ import Testing
 ///
 /// Each test binds its own store with `ExecutorPromptCacheStore.$current`. The memory budget
 /// of the store is zero, thus each check-in goes to disk at once, and a later turn of the
-/// session finds its cache on disk only. The memory control of the cache-echo tests is the
-/// one exception: its budget keeps the cache in memory.
+/// session finds its cache on disk only. The memory control of the cache-echo tests and the
+/// memory test of the reasoning path are the exceptions: their budget keeps the cache in memory.
+///
+/// The reasoning tests send each turn through the reasoning path of the executor, which a Qwen
+/// model takes when thinking is on.
 ///
 /// The executor is available from iOS 27, macOS 27 and visionOS 27. On an earlier system each
 /// executor test records an issue, thus it fails and does not pass with no assertion.
@@ -47,6 +50,10 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
     /// The issue a test records on a system that has no executor.
     private static let unsupportedSystem: Comment =
         "The executor needs iOS 27, macOS 27 or visionOS 27."
+
+    /// The reasoning protocol of the reasoning tests. The model always thinks, as Qwen does when
+    /// thinking is on, thus each turn takes the reasoning path of the executor.
+    private static let reasoningConfig = ReasoningConfig.alwaysOnThinking
 
     // MARK: - The executor
 
@@ -108,6 +115,39 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
     func aDiskRestoreOfChangedValuesGivesADifferentOutput() async throws {
         if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
             try await expectADiskRestoreOfChangedValuesGivesADifferentOutput()
+        } else {
+            Issue.record(Self.unsupportedSystem)
+        }
+    }
+
+    // MARK: - The reasoning path
+
+    @Test("turn 2 of a reasoning session in memory reuses the prompt of turn 1")
+    func aReasoningTurnFromMemoryComesBackWarm() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectAReasoningTurnFromMemoryComesBackWarm()
+        } else {
+            Issue.record(Self.unsupportedSystem)
+        }
+    }
+
+    @Test("turn 2 of a reasoning session on disk reuses the prompt of turn 1 and deletes the file")
+    func aReasoningTurnFromDiskComesBackWarm() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            let turn = try await expectASuccessfulRestoreDeletesTheSpilledFile(
+                reasoningConfig: Self.reasoningConfig)
+            Self.expectTheReasoningAnswer(of: turn)
+        } else {
+            Issue.record(Self.unsupportedSystem)
+        }
+    }
+
+    @Test("a corrupt spilled file gives a cold reasoning turn that succeeds")
+    func aCorruptSpilledFileGivesAColdReasoningTurn() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            let turn = try await expectACorruptSpilledFileGivesAColdTurn(
+                reasoningConfig: Self.reasoningConfig)
+            Self.expectTheReasoningAnswer(of: turn)
         } else {
             Issue.record(Self.unsupportedSystem)
         }
@@ -268,8 +308,8 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
     /// values.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func expectADiskRestoreGivesTheOutputOfAMemoryRestore() async throws {
-        let memory = try await CacheEchoSession.run(budget: CacheEchoSession.memoryBudgetBytes)
-        let disk = try await CacheEchoSession.run(budget: 0)
+        let memory = try await TwoTurnSession.run(budget: TwoTurnSession.memoryBudgetBytes)
+        let disk = try await TwoTurnSession.run(budget: 0)
 
         #expect(memory.spilledFileCount == 0, "The memory run must keep its cache in memory.")
         #expect(memory.retainedByteCount > 0, "The memory run must keep its cache in memory.")
@@ -288,8 +328,8 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
     /// check of ``expectADiskRestoreGivesTheOutputOfAMemoryRestore()`` sees wrong values.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func expectADiskRestoreOfChangedValuesGivesADifferentOutput() async throws {
-        let memory = try await CacheEchoSession.run(budget: CacheEchoSession.memoryBudgetBytes)
-        let changed = try await CacheEchoSession.run(budget: 0, changesSpilledValues: true)
+        let memory = try await TwoTurnSession.run(budget: TwoTurnSession.memoryBudgetBytes)
+        let changed = try await TwoTurnSession.run(budget: 0, changesSpilledValues: true)
 
         #expect(changed.spilledFileCount == 1, "The changed run must spill its cache to one file.")
         #expect(
@@ -300,9 +340,17 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
 
     /// A turn that restores the spilled cache deletes the file of that cache. The check-in of
     /// the turn writes a new file under a new name.
+    ///
+    /// - Parameter reasoningConfig: the reasoning protocol of the model, or `nil` for a model
+    ///   that does not reason.
+    /// - Returns: what the restored turn streamed.
+    /// - Throws: the error of a turn, or an issue when the first turn spilled no file.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func expectASuccessfulRestoreDeletesTheSpilledFile() async throws {
-        let session = try await SpilledSession.make()
+    @discardableResult
+    private func expectASuccessfulRestoreDeletesTheSpilledFile(
+        reasoningConfig: ReasoningConfig? = nil
+    ) async throws -> ScriptedPassResult {
+        let session = try await SpilledSession.make(reasoningConfig: reasoningConfig)
         defer { session.remove() }
 
         let warm = try await session.respond(firstEntryID: SpilledSessionValues.sessionID)
@@ -312,13 +360,23 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
         let files = try Self.fileNames(in: session.directory)
         #expect(!files.contains(session.spilledFileName))
         #expect(files.count == 1, "The check-in of the restored turn spills one new file.")
+        return warm
     }
 
     /// A spilled file that does not read back gives a cold turn that succeeds, and the turn
     /// deletes the file.
+    ///
+    /// - Parameter reasoningConfig: the reasoning protocol of the model, or `nil` for a model
+    ///   that does not reason.
+    /// - Returns: what the cold turn streamed.
+    /// - Throws: the error of a turn or of the file write, or an issue when the first turn
+    ///   spilled no file.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func expectACorruptSpilledFileGivesAColdTurn() async throws {
-        let session = try await SpilledSession.make()
+    @discardableResult
+    private func expectACorruptSpilledFileGivesAColdTurn(
+        reasoningConfig: ReasoningConfig? = nil
+    ) async throws -> ScriptedPassResult {
+        let session = try await SpilledSession.make(reasoningConfig: reasoningConfig)
         defer { session.remove() }
         try Self.corruptBytes.write(to: session.spilledFileURL)
 
@@ -328,6 +386,33 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
         #expect(turn.reusedTokenCount == 0, "A cache that does not read back gives a cold turn.")
         #expect(turn.responseText == ScriptedSessionModel.scriptedResponse)
         #expect(try !Self.fileNames(in: session.directory).contains(session.spilledFileName))
+        return turn
+    }
+
+    /// The later turn of a reasoning session whose cache stayed in memory reuses the prompt of
+    /// the first turn, and the reasoning path routes the thinking of the model apart from the
+    /// answer.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectAReasoningTurnFromMemoryComesBackWarm() async throws {
+        let memory = try await TwoTurnSession.run(budget: TwoTurnSession.memoryBudgetBytes) {
+            ScriptedSessionModel.make(weights: $0, reasoningConfig: Self.reasoningConfig)
+        }
+
+        #expect(memory.spilledFileCount == 0, "The memory run must keep its cache in memory.")
+        #expect(memory.retainedByteCount > 0, "The first turn must check its cache in.")
+        #expect(memory.turn.reusedTokenCount > 0, "The later turn must start warm.")
+        Self.expectTheReasoningAnswer(of: memory.turn)
+    }
+
+    /// Records an issue unless `turn` streamed the thinking of the scripted model as reasoning
+    /// text and its answer as response text. A turn off the reasoning path streams the
+    /// delimiters and the thinking as response text.
+    ///
+    /// - Parameter turn: what a turn of a reasoning model streamed.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func expectTheReasoningAnswer(of turn: ScriptedPassResult) {
+        #expect(turn.reasoningText == ScriptedSessionModel.scriptedThinking)
+        #expect(turn.responseText == ScriptedSessionModel.scriptedResponse)
     }
 
     /// A turn that is cancelled while the render holds -- after the check-out gave the spilled
@@ -436,14 +521,17 @@ private struct SpilledSession: PromptCacheSpoolFixtures {
 
     /// Runs the first turn of a new session, and waits until its cache is on disk.
     ///
+    /// - Parameter reasoningConfig: the reasoning protocol of the model, or `nil` for a model
+    ///   that does not reason.
     /// - Returns: the session.
     /// - Throws: the error of the turn, or an issue when the turn spilled no file.
-    static func make() async throws -> SpilledSession {
+    static func make(reasoningConfig: ReasoningConfig? = nil) async throws -> SpilledSession {
         let directory = temporaryDirectory()
         let weights = try makeScriptedWeightsDirectory()
         let gate = ScriptedRenderGate()
         let model = ScriptedSessionModel.make(
-            weights: weights, processor: GatedPromptBytesInputProcessor(gate: gate))
+            weights: weights, processor: GatedPromptBytesInputProcessor(gate: gate),
+            reasoningConfig: reasoningConfig)
         let store = await store(in: directory)
 
         try await ScriptedExecutorPass.run(
@@ -587,8 +675,8 @@ private enum CommittedTurn: PromptCacheSpoolFixtures {
 
 // MARK: - A session whose output depends on the restored cache
 
-/// What one ``CacheEchoSession`` run measured.
-private struct CacheEchoRun {
+/// What one ``TwoTurnSession`` run measured.
+private struct TwoTurnRun {
 
     /// The bytes that the store held in memory after the first turn.
     let retainedByteCount: Int
@@ -600,16 +688,16 @@ private struct CacheEchoRun {
     let turn: ScriptedPassResult
 }
 
-/// Runs a two-turn session of a ``CacheEchoLanguageModel`` inside a store of a given memory
-/// budget. The later turn restores the cache of the first turn from memory or from disk.
+/// Runs a two-turn session of a model inside a store of a given memory budget. The later turn
+/// restores the cache of the first turn from memory or from disk.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-private enum CacheEchoSession: PromptCacheSpoolFixtures {
+private enum TwoTurnSession: PromptCacheSpoolFixtures {
 
     /// A memory budget that keeps the cache of each run in memory.
     static let memoryBudgetBytes = 1 << 30
 
     /// The first entry of the session.
-    private static let sessionID = "cache-echo-session"
+    private static let sessionID = "two-turn-session"
 
     /// The number of prompts of the later turn of the session.
     private static let laterTurnCount = 2
@@ -623,16 +711,21 @@ private enum CacheEchoSession: PromptCacheSpoolFixtures {
     ///   - budget: The memory budget of the store in bytes. Zero spills each check-in at once.
     ///   - changesSpilledValues: When true, adds ``valueChange`` to each value of each spill
     ///     file before the later turn. The header of each file stays valid.
+    ///   - makeModel: Makes the model of the session from the directory that makes the model
+    ///     available. The default makes a ``CacheEchoLanguageModel``.
     /// - Returns: What the run measured.
     /// - Throws: The error of a turn or of the file change.
-    static func run(budget: Int, changesSpilledValues: Bool = false) async throws -> CacheEchoRun {
+    static func run(
+        budget: Int, changesSpilledValues: Bool = false,
+        makeModel: (URL) -> MLXLanguageModel = CacheEchoLanguageModel.make(weights:)
+    ) async throws -> TwoTurnRun {
         let directory = temporaryDirectory()
         let weights = try makeScriptedWeightsDirectory()
         defer {
             try? FileManager.default.removeItem(at: directory)
             try? FileManager.default.removeItem(at: weights)
         }
-        let model = CacheEchoLanguageModel.make(weights: weights)
+        let model = makeModel(weights)
         let store = await store(in: directory, budget: budget)
 
         try await ScriptedExecutorPass.run(
@@ -648,7 +741,7 @@ private enum CacheEchoSession: PromptCacheSpoolFixtures {
         let turn = try await ScriptedExecutorPass.respond(
             over: ScriptedSessionModel.transcript(firstEntryID: sessionID, turns: laterTurnCount),
             model: model, inside: store)
-        return CacheEchoRun(
+        return TwoTurnRun(
             retainedByteCount: retainedByteCount, spilledFileCount: files.count, turn: turn)
     }
 

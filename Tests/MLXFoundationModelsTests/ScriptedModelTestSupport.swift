@@ -264,14 +264,16 @@ struct PromptBytesInputProcessor: UserInputProcessor {
 /// `forwardSteps`, `forwardDelay` and `cacheLayerCount` pass through to
 /// ``ScriptedLanguageModel/init(rounds:forwardSteps:forwardDelay:cacheLayerCount:)``.
 /// `processor` renders the prompt of each pass. The default renders the same
-/// tokens for every prompt.
+/// tokens for every prompt. `reasoningConfig` goes into the configuration of
+/// the context. The default of `nil` gives a model that does not reason.
 func makeScriptedContainer(
     modelID: String, rounds: [String], forwardSteps: ForwardStepCounter? = nil,
     forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0,
-    processor: any UserInputProcessor = FixedPromptInputProcessor()
+    processor: any UserInputProcessor = FixedPromptInputProcessor(),
+    reasoningConfig: ReasoningConfig? = nil
 ) -> ModelContainer {
     let context = ModelContext(
-        configuration: ModelConfiguration(id: modelID),
+        configuration: ModelConfiguration(id: modelID, reasoningConfig: reasoningConfig),
         model: ScriptedLanguageModel(
             rounds: rounds.map { ScriptedByteTokenizer.tokenIDs(for: $0) },
             forwardSteps: forwardSteps,
@@ -309,27 +311,52 @@ enum ScriptedSessionModel {
     /// The text each pass generates before it stops.
     static let scriptedResponse = "A"
 
+    /// The thinking that each pass of a reasoning model writes before
+    /// ``scriptedResponse``.
+    static let scriptedThinking = "plan"
+
     /// Makes the model under a fresh identity, thus the process-wide model
     /// cache keeps it apart from every other test.
     ///
     /// - Parameters:
     ///   - weights: the directory that makes the model available.
     ///   - processor: renders the prompt of each pass.
+    ///   - reasoningConfig: the reasoning protocol of the model. When it is
+    ///     set, the model declares `.reasoning`, and each pass writes
+    ///     ``scriptedThinking`` between the delimiters of the protocol before
+    ///     ``scriptedResponse``. The default of `nil` gives a model that does
+    ///     not reason.
     /// - Returns: the model.
     static func make(
-        weights: URL, processor: any UserInputProcessor = PromptBytesInputProcessor()
+        weights: URL, processor: any UserInputProcessor = PromptBytesInputProcessor(),
+        reasoningConfig: ReasoningConfig? = nil
     ) -> MLXLanguageModel {
         let modelID = "probe/scripted-session-\(UUID().uuidString)"
-        let rounds = Array(repeating: scriptedResponse, count: maximumPassCount)
+        let rounds = Array(
+            repeating: script(reasoningConfig: reasoningConfig), count: maximumPassCount)
+        let capabilities: [LanguageModelCapabilities.Capability] =
+            reasoningConfig == nil ? [] : [.reasoning]
         return MLXLanguageModel(
-            configuration: ModelConfiguration(id: modelID),
-            capabilities: [],
+            configuration: ModelConfiguration(id: modelID, reasoningConfig: reasoningConfig),
+            capabilities: capabilities,
             weightsLocation: { _ in weights },
             load: { _, _ in
                 makeScriptedContainer(
                     modelID: modelID, rounds: rounds, cacheLayerCount: cacheLayerCount,
-                    processor: processor)
+                    processor: processor, reasoningConfig: reasoningConfig)
             })
+    }
+
+    /// The text that each pass of the model generates.
+    ///
+    /// - Parameter reasoningConfig: the reasoning protocol of the model, or
+    ///   `nil` for a model that does not reason.
+    /// - Returns: ``scriptedResponse``, after ``scriptedThinking`` between the
+    ///   delimiters of `reasoningConfig` when it is set.
+    private static func script(reasoningConfig: ReasoningConfig?) -> String {
+        guard let reasoningConfig else { return scriptedResponse }
+        return reasoningConfig.startDelimiter + scriptedThinking + reasoningConfig.endDelimiter
+            + scriptedResponse
     }
 
     /// A transcript of `turns` prompts whose first entry identifier is
@@ -418,7 +445,8 @@ enum ScriptedExecutorPass {
     ///   - transcript: the transcript of the request.
     ///   - model: the model of the pass.
     ///   - store: the prompt cache store the pass binds.
-    /// - Returns: the reused prompt tokens and the response text of the pass.
+    /// - Returns: the reused prompt tokens, the response text and the
+    ///   reasoning text of the pass.
     /// - Throws: the error of the executor.
     static func respond(
         over transcript: Transcript, model: MLXLanguageModel,
@@ -443,7 +471,8 @@ enum ScriptedExecutorPass {
         return events.result
     }
 
-    /// The reused prompt tokens and the response text of the events of one pass.
+    /// The reused prompt tokens, the response text and the reasoning text of
+    /// the events of one pass.
     ///
     /// The executor reports the events on the generation path, and the test
     /// reads the result from its own task, thus a mutex guards the result.
@@ -451,7 +480,7 @@ enum ScriptedExecutorPass {
         private let collected = Mutex(ScriptedPassResult())
 
         /// Adds the reused prompt tokens of `event` when it is a usage event,
-        /// and its text when it is response text.
+        /// and its text when it is response text or reasoning text.
         ///
         /// - Parameter event: one event the executor streamed.
         func record(_ event: MLXLanguageModel.Executor.GenerationEvent) {
@@ -460,7 +489,9 @@ enum ScriptedExecutorPass {
                 collected.withLock { $0.reusedTokenCount += input.cachedTokenCount }
             case .appendText(let text, _, .response):
                 collected.withLock { $0.responseText += text }
-            case .appendText, .toolCall, .updateMetadata, .completion:
+            case .appendText(let text, _, .reasoning):
+                collected.withLock { $0.reasoningText += text }
+            case .toolCall, .updateMetadata, .completion:
                 break
             }
         }
@@ -478,6 +509,9 @@ struct ScriptedPassResult: Sendable {
 
     /// The response text of the pass, in the order the pass streamed it.
     var responseText = ""
+
+    /// The reasoning text of the pass, in the order the pass streamed it.
+    var reasoningText = ""
 }
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)
