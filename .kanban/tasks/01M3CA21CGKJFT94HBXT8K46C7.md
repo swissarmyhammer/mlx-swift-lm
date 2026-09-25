@@ -33,6 +33,30 @@ comments:
     - evidence: swift build --build-tests (only the known warning "missing creator for mutated node"); MLXLMTests 3 runs, each 696 XCTest + 1222 Swift Testing, 0 failures, 0 skipped; MLXGuidedGenerationTests 70, MLXFoundationModelsTests 323, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5, all pass. TextToolCallRecoveryBenchmark passed.
     - next: /commit
   timestamp: 2026-09-25T23:43:25.934491+00:00
+- actor: claude-code
+  id: 01m3dfdn96kktgnxkd1y9v2p65
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD — 2 findings (2 confirmed, 0 refuted): Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift:316 swift/fluent-usage (filledCacheList -> makeFilledCacheList), :324 swift/fluent-usage (cacheListTemplate -> makeCacheListTemplate)
+    - next: /implement
+
+    ### finish iteration 1 — findings
+    - implement: changed (Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift)
+    - test: green (MLXLMTests 3 runs 696 + 1222, other four bundles pass)
+    - commit: 9b192fb
+    - review: findings (2, swift/fluent-usage at :316 and :324)
+  timestamp: 2026-09-25T23:46:44.646123+00:00
+- actor: claude-code
+  id: 01m3dfzw44z3e9bj9avzy01sg4
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift: renamed `filledCacheList()` to `makeFilledCacheList()` and `cacheListTemplate()` to `makeCacheListTemplate()`, with all call sites (swift/fluent-usage findings). No other new factory function in the file needed the `make` prefix.
+    - next: /test
+
+    ### test — green
+    - evidence: swift build --build-tests (only the known warning "missing creator for mutated node"); MLXLMTests 3 runs, each 696 XCTest + 1222 Swift Testing, 0 failures, 0 skipped; MLXGuidedGenerationTests 70, MLXFoundationModelsTests 323, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5, all pass.
+    - next: /commit
+  timestamp: 2026-09-25T23:56:41.476848+00:00
 position_column: doing
 position_ordinal: '80'
 title: Test the rejections of the saved CacheList parser and of a CacheList template restore
@@ -73,3 +97,14 @@ xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest
 ## Workflow
 
 - Use `/tdd` #coverage-gap #prompt-cache
+
+## Review Findings (2026-09-25 18:43)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 1 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M3CA21CGKJFT94HBXT8K46C7.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M3CA21CGKJFT94HBXT8K46C7.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift:316` `swift/fluent-usage` — Factory method should follow the `make*` naming convention; `filledCacheList()` creates and returns a `CacheList` instance. Rename to `makeFilledCacheList()` and update call sites at lines 598, 609, 627, 647.
+- [x] `Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift:324` `swift/fluent-usage` — Factory method should follow the `make*` naming convention; `cacheListTemplate()` creates and returns a `CacheList` instance. Rename to `makeCacheListTemplate()` and update call sites at lines 604, 620, 638, 651.
