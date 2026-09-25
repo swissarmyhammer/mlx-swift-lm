@@ -36,8 +36,24 @@ comments:
     - note: MLXLMTests run 2 had 1 issue in a wall-clock benchmark outside this change: `TextToolCallRecoveryBenchmark` "Incomplete candidate processing scales near-linearly" (`large < small * 3.5`, large 45925916, small * 3.5 30555875). Other processes held the load average at 20 to 24 during the runs. Runs 3 and 4 passed that test. `ChatSessionTests.testActiveSpeculativeDecodingReusesAlignedStorageAcrossTurns` (^k8hm41j) passed in each run.
     - next: /commit
   timestamp: 2026-09-25T20:09:47.296692+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3d38qpj3k9w2nkpkm32j2z4
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (2d459aa) — 0 findings, 0 confirmed, 1 refuted, 7 attempted, 0 failed. 3 source files reviewed; 4 kanban files had no validator.
+    - next: done
+  timestamp: 2026-09-25T20:14:20.370335+00:00
+- actor: claude-code
+  id: 01m3d38xxh4fq8a3m6fvqt6tmc
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — KVCache.swift (computed `CacheList.offset`, offset record applied into `CacheList` children), BaichuanM1.swift (conv `MambaCache` moves its offset), HybridRecurrentCacheOffsetTests.swift (BaichuanM1 and FalconH1 fixtures, leaf offsets, warm continuation test). Defect proved real for both models before the fix.
+    - test: green — all five bundles pass; MLXLMTests passed in runs 1, 3 and 4 (695 XCTest + 1216 Swift Testing); run 2 had one wall-clock benchmark issue under load average 20 to 24 (TextToolCallRecoveryBenchmark), outside this change.
+    - commit: 2d459aa fix(prompt-cache): read the offset of a CacheList from its children
+    - review: clean — 0 findings
+  timestamp: 2026-09-25T20:14:26.737842+00:00
+position_column: done
+position_ordinal: ffac80
 title: Check the top-level offset of a CacheList (BaichuanM1, FalconH1) against the prompt cache ledger
 ---
 ## What
