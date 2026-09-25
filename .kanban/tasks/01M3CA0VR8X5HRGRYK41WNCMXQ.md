@@ -44,8 +44,21 @@ comments:
     - evidence: `swift build --build-tests` exit 0, one known warning `missing creator for mutated node` only. `xcrun xctest`: MLXLMTests 696 XCTest + 1218 Swift Testing passed; MLXGuidedGenerationTests 70 passed; MLXFoundationModelsTests 323 passed (3 runs, all green); CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 5 passed. 0 failed, 0 skipped.
     - next: /commit
   timestamp: 2026-09-25T23:15:16.551766+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3ddyszc4s0har96qtabxkwg
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` — 0 findings, 0 confirmed, 0 refuted, 7 attempted, 0 failed (only the two .kanban files not reviewed: no validator matches them).
+    - next: done
+
+    ### finish iteration 1 — clean
+    - implement: changed — 4 files (ExecutorPromptCache.swift, MLXLanguageModel.swift, ExecutorPromptCacheTests.swift, ScriptedModelTestSupport.swift); 2 library bugs fixed with TDD
+    - test: green — MLXLMTests 696 + 1218, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 323 (3 runs), CXGrammarTests 7, MLXHuggingFaceMacrosTests 5; 0 failed, 0 skipped; only the known `missing creator for mutated node` warning
+    - commit: d841f85
+    - review: clean (0 findings)
+  timestamp: 2026-09-25T23:21:09.356800+00:00
+position_column: done
+position_ordinal: ffb380
 title: Test that a failed stream body and a guided pass check in no prompt cache
 ---
 ## What
