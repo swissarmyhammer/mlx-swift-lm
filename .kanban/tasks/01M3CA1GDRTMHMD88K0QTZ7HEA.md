@@ -30,8 +30,24 @@ comments:
     - evidence: `swift build --build-tests` clean (only the known `missing creator for mutated node` warning). `xcrun xctest`: MLXLMTests 696 XCTest + 1218 Swift Testing passed; MLXGuidedGenerationTests 70 passed; MLXFoundationModelsTests 315 passed (312 + 3 new), run 3 times, all passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 5 passed. 0 failures, 0 skipped. TextToolCallRecoveryBenchmark passed.
     - next: /commit
   timestamp: 2026-09-25T22:40:15.721716+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3dbpatvtbvt42b3tzhx7h1a
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (b187399) — 0 findings, 0 confirmed, 0 refuted; 7 validators attempted, 0 failed. The two .kanban files had no matching validator.
+    - next: done
+  timestamp: 2026-09-25T22:41:34.555970+00:00
+- actor: claude-code
+  id: 01m3dbpd3tyx1gkekwty6wk4x9
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift (3 new tests, no production change)
+    - test: green — all five bundles pass (MLXLMTests 696 + 1218, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 315 x3, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5), 0 failures, 0 skipped
+    - commit: b187399
+    - review: clean (0 findings)
+  timestamp: 2026-09-25T22:41:36.890788+00:00
+position_column: done
+position_ordinal: ffb080
 title: Test the file system edge paths of the spool clean-up and the default disk budget
 ---
 ## What
