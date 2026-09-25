@@ -2,17 +2,21 @@
 
 import Foundation
 import MLX
-import MLXLMCommon
 import MLXVLM
 import Testing
 
 @testable import MLXLLM
+@testable import MLXLMCommon
 
 /// A tiny model with a `MambaCache` for each recurrent layer.
 ///
 /// Each of these models feeds its conv or SSM layer through a `MambaCache`. The executor prompt
 /// cache keeps a cache only when the offset of each cache is the length of its token ledger, thus
 /// the recurrent layer must move the offset of its `MambaCache` as an attention layer does.
+///
+/// BaichuanM1 and FalconH1 put a `MambaCache` and an attention cache in one `CacheList` for each
+/// layer. The executor prompt cache reads the offset of the `CacheList`, thus the offset of the
+/// list must also move.
 enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     case nemotronH
     case jamba
@@ -21,6 +25,8 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     case lfm2
     case lfm2MoE
     case lfm2VL
+    case baichuanM1
+    case falconH1
 
     /// The seed of the initializer weights of each tiny model.
     private static let weightSeed: UInt64 = 43
@@ -56,6 +62,11 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
             return LFM2MoEModel(try Self.decode(LFM2MoEConfiguration.self, Self.lfm2MoEJSON))
         case .lfm2VL:
             return LFM2VL(try Self.decode(LFM2VLConfiguration.self, Self.lfm2VLJSON))
+        case .baichuanM1:
+            return BaichuanM1Model(
+                try Self.decode(BaichuanM1Configuration.self, Self.baichuanM1JSON))
+        case .falconH1:
+            return FalconH1Model(try Self.decode(FalconH1Configuration.self, Self.falconH1JSON))
         }
     }
 
@@ -176,6 +187,29 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
             "projector_hidden_size": 16
         }
         """
+
+    /// Four layers, each with a short-convolution `MambaCache` and an attention cache in one
+    /// `CacheList`. Layers 0 and 2 are sliding-window layers. The window is longer than each
+    /// prompt of the tests, thus the rotating caches keep each token.
+    private static let baichuanM1JSON = """
+        {
+            "vocab_size": 32, "hidden_size": 8, "intermediate_size": 16,
+            "num_hidden_layers": 4, "num_attention_heads": 2, "num_key_value_heads": 1,
+            "rope_theta": 10000.0, "sliding_window": 64, "sliding_window_layers": [0, 2],
+            "conv_window": 2, "rms_norm_eps": 1e-6, "tie_word_embeddings": true
+        }
+        """
+
+    /// Two layers, each with a Mamba2 `MambaCache` and an attention cache in one `CacheList`.
+    private static let falconH1JSON = """
+        {
+            "model_type": "falcon_h1", "hidden_size": 32, "num_hidden_layers": 2,
+            "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 8,
+            "vocab_size": 32, "mamba_d_ssm": 16, "mamba_d_state": 8, "mamba_d_head": 8,
+            "mamba_n_heads": 2, "mamba_n_groups": 1, "mamba_d_conv": 4,
+            "mamba_chunk_size": 64
+        }
+        """
 }
 
 /// Tests that each recurrent layer of a tiny hybrid model moves the offset of its `MambaCache`.
@@ -254,6 +288,9 @@ struct HybridRecurrentCacheOffsetTests {
 
     /// Records an issue for each cache whose offset is not the expected position.
     ///
+    /// The check reads the top-level cache of each layer, which the executor prompt cache reads,
+    /// and each leaf in a `CacheList`, so that the children of a list also agree.
+    ///
     /// - Parameters:
     ///   - caches: The caches, one for each layer that has a cache.
     ///   - position: The expected offset of each cache.
@@ -263,6 +300,12 @@ struct HybridRecurrentCacheOffsetTests {
             #expect(
                 cache.offset == position,
                 "\(label), layer \(layer) (\(type(of: cache))): offset \(cache.offset)")
+        }
+        for leaf in KVCacheTree.leaves(in: caches) {
+            #expect(
+                leaf.cache.offset == position,
+                "\(label), leaf \(leaf.path) (\(type(of: leaf.cache))): offset \(leaf.cache.offset)"
+            )
         }
     }
 
@@ -277,7 +320,9 @@ struct HybridRecurrentCacheOffsetTests {
 
         _ = Self.lastLogits(model, Self.prompt, caches: caches)
 
-        #expect(caches.contains { $0 is MambaCache }, "\(fixture): has a recurrent cache")
+        #expect(
+            KVCacheTree.leaves(in: caches).contains { $0.cache is MambaCache },
+            "\(fixture): has a recurrent cache")
         Self.expectOffsets(caches, Self.prompt.count, "\(fixture) after the prefill")
     }
 
@@ -315,6 +360,32 @@ struct HybridRecurrentCacheOffsetTests {
                 == PromptCacheReuse(
                     suffixStart: Self.prompt.count, representedTokens: nextPrompt, kind: .extend),
             "\(fixture): reuse of the live caches")
+    }
+
+    @Test(
+        "The live caches continue the next prompt as a cold prefill of the whole prompt",
+        arguments: HybridRecurrentModelFixture.allCases)
+    func liveCachesContinueTheNextPrompt(_ fixture: HybridRecurrentModelFixture) throws {
+        let model = try fixture.makeModel()
+        let caches = try model.newCache(parameters: nil)
+        _ = Self.lastLogits(model, Self.prompt, caches: caches)
+        let nextPrompt = Self.prompt + Self.promptTail
+        let reuse = try #require(
+            reconcilePromptCache(
+                promptTokens: nextPrompt.map(Int.init), cachedTokens: Self.prompt.map(Int.init),
+                caches: caches),
+            "\(fixture): reuse of the live caches")
+
+        let warmLogits = Self.lastLogits(
+            model, Array(nextPrompt[reuse.suffixStart...]), caches: caches)
+        let coldLogits = Self.lastLogits(
+            model, nextPrompt, caches: try model.newCache(parameters: nil))
+
+        #expect(reuse.suffixStart == Self.prompt.count, "\(fixture): suffix start")
+        #expect(
+            Self.maxAbsDifference(warmLogits, coldLogits) <= Self.coldTolerance,
+            "\(fixture): warm and cold logits")
+        Self.expectOffsets(caches, nextPrompt.count, "\(fixture) after the warm continuation")
     }
 
     @Test(

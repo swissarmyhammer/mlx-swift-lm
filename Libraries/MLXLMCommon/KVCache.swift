@@ -1723,6 +1723,23 @@ public class CacheList: BaseKVCache {
         caches.flatMap { $0.innerState() }
     }
 
+    /// The number of tokens that the list holds: the largest offset of its children.
+    ///
+    /// Each child moves its own offset when the model feeds tokens through it. The list has no
+    /// tokens of its own, thus it reads the offset from its children. The prompt cache compares
+    /// the offset of each top-level cache with the length of its token ledger, thus a list whose
+    /// offset stays at 0 can never serve a next prompt. An empty list holds no tokens and gives 0.
+    ///
+    /// The offset cannot be set, because it comes from the children. Set the offset of each child
+    /// that does not keep its offset in its state.
+    public override var offset: Int {
+        get { caches.map(\.offset).max() ?? 0 }
+        set {
+            preconditionFailure(
+                "The offset of a CacheList comes from its children. Set the offset of each child.")
+        }
+    }
+
     /// The sum of ``KVCache/residentByteCount`` over the children, so that each
     /// child counts with its own rule.
     public override var residentByteCount: Int {
@@ -2704,14 +2721,32 @@ private enum PromptCacheOffsetRecord {
     static func apply(_ offsets: [Int]?, to caches: [KVCache]) throws {
         guard let offsets else { return }
         for (layer, (cache, offset)) in zip(caches, offsets).enumerated() {
-            if let settable = offsetSettableCache(cache) {
-                settable.offset = offset
-            } else if cache.offset != offset {
-                throw KVCacheError(
-                    message:
-                        "The restored cache \(layer) has offset \(cache.offset) and the prompt cache records \(offset)."
-                )
+            try apply(offset, to: cache, layer: layer)
+        }
+    }
+
+    /// Applies the recorded offset of one layer to its restored cache.
+    ///
+    /// A `CacheList` reads its offset from its children, and each child holds the same tokens
+    /// as the list. Thus the function applies the offset of the layer to each child of a list.
+    ///
+    /// - Parameters:
+    ///   - offset: The recorded offset of the layer.
+    ///   - cache: The restored cache of the layer, or a child of it.
+    ///   - layer: The index of the layer, for the error message.
+    /// - Throws: ``KVCacheError`` when a restored offset is not the recorded offset.
+    private static func apply(_ offset: Int, to cache: KVCache, layer: Int) throws {
+        if let list = cache as? CacheList {
+            for child in list.children {
+                try apply(offset, to: child, layer: layer)
             }
+        } else if let settable = offsetSettableCache(cache) {
+            settable.offset = offset
+        } else if cache.offset != offset {
+            throw KVCacheError(
+                message:
+                    "The restored cache \(layer) has offset \(cache.offset) and the prompt cache records \(offset)."
+            )
         }
     }
 
