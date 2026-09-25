@@ -6,6 +6,7 @@ import Foundation
 import FoundationModels
 import MLX
 import MLXLMCommon
+import MLXNN
 import Synchronization
 import Testing
 
@@ -16,7 +17,8 @@ import Testing
 ///
 /// Each test binds its own store with `ExecutorPromptCacheStore.$current`. The memory budget
 /// of the store is zero, thus each check-in goes to disk at once, and a later turn of the
-/// session finds its cache on disk only.
+/// session finds its cache on disk only. The memory control of the cache-echo tests is the
+/// one exception: its budget keeps the cache in memory.
 ///
 /// The executor is available from iOS 27, macOS 27 and visionOS 27. On an earlier system each
 /// executor test records an issue, thus it fails and does not pass with no assertion.
@@ -88,6 +90,24 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
     func aFailedTurnLeavesNoFile() async throws {
         if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
             try await expectAFailedTurnLeavesNoFile()
+        } else {
+            Issue.record(Self.unsupportedSystem)
+        }
+    }
+
+    @Test("a turn restored from disk gives the output of a turn restored from memory")
+    func aDiskRestoreGivesTheOutputOfAMemoryRestore() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectADiskRestoreGivesTheOutputOfAMemoryRestore()
+        } else {
+            Issue.record(Self.unsupportedSystem)
+        }
+    }
+
+    @Test("a turn restored from a spilled file with changed values gives a different output")
+    func aDiskRestoreOfChangedValuesGivesADifferentOutput() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectADiskRestoreOfChangedValuesGivesADifferentOutput()
         } else {
             Issue.record(Self.unsupportedSystem)
         }
@@ -186,6 +206,42 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
         #expect(warm.reusedTokenCount > 0, "The restored session must start warm.")
         #expect(cold.reusedTokenCount == 0, "The cold control must reuse nothing.")
         #expect(warm.responseText == cold.responseText)
+    }
+
+    /// The later turn of a session whose cache went to disk reuses the tokens and gives the text
+    /// of the same turn of a session whose cache stayed in memory. The model emits the tokens
+    /// that its cache holds, thus the text is correct only when the restore gives the correct
+    /// values.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectADiskRestoreGivesTheOutputOfAMemoryRestore() async throws {
+        let memory = try await CacheEchoSession.run(budget: CacheEchoSession.memoryBudgetBytes)
+        let disk = try await CacheEchoSession.run(budget: 0)
+
+        #expect(memory.spilledFileCount == 0, "The memory run must keep its cache in memory.")
+        #expect(memory.retainedByteCount > 0, "The memory run must keep its cache in memory.")
+        #expect(disk.spilledFileCount == 1, "The disk run must spill its cache to one file.")
+        #expect(disk.retainedByteCount == 0, "The disk run must keep no cache in memory.")
+        #expect(memory.turn.reusedTokenCount > 0, "The memory run must start warm.")
+        #expect(
+            memory.turn.responseText.utf8.count == CacheEchoLanguageModel.responseTokenCount,
+            "The model must emit one token for each position that it echoes.")
+        #expect(disk.turn.reusedTokenCount == memory.turn.reusedTokenCount)
+        #expect(disk.turn.responseText == memory.turn.responseText)
+    }
+
+    /// Negative control: a spilled file whose array values changed, and whose header stays
+    /// valid, restores and reuses the same tokens, but gives a different text. Thus the text
+    /// check of ``expectADiskRestoreGivesTheOutputOfAMemoryRestore()`` sees wrong values.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectADiskRestoreOfChangedValuesGivesADifferentOutput() async throws {
+        let memory = try await CacheEchoSession.run(budget: CacheEchoSession.memoryBudgetBytes)
+        let changed = try await CacheEchoSession.run(budget: 0, changesSpilledValues: true)
+
+        #expect(changed.spilledFileCount == 1, "The changed run must spill its cache to one file.")
+        #expect(
+            changed.turn.reusedTokenCount == memory.turn.reusedTokenCount,
+            "The changed file must restore, thus its header must stay valid.")
+        #expect(changed.turn.responseText != memory.turn.responseText)
     }
 
     /// A turn that restores the spilled cache deletes the file of that cache. The check-in of
@@ -365,6 +421,192 @@ private struct SpilledSession: PromptCacheSpoolFixtures {
     func remove() {
         try? FileManager.default.removeItem(at: directory)
         try? FileManager.default.removeItem(at: weights)
+    }
+}
+
+// MARK: - A session whose output depends on the restored cache
+
+/// What one ``CacheEchoSession`` run measured.
+private struct CacheEchoRun {
+
+    /// The bytes that the store held in memory after the first turn.
+    let retainedByteCount: Int
+
+    /// The number of spill files after the first turn.
+    let spilledFileCount: Int
+
+    /// What the later turn streamed.
+    let turn: ScriptedPassResult
+}
+
+/// Runs a two-turn session of a ``CacheEchoLanguageModel`` inside a store of a given memory
+/// budget. The later turn restores the cache of the first turn from memory or from disk.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+private enum CacheEchoSession: PromptCacheSpoolFixtures {
+
+    /// A memory budget that keeps the cache of each run in memory.
+    static let memoryBudgetBytes = 1 << 30
+
+    /// The first entry of the session.
+    private static let sessionID = "cache-echo-session"
+
+    /// The number of prompts of the later turn of the session.
+    private static let laterTurnCount = 2
+
+    /// The value that ``changeValues(at:)`` adds to each value of a spill file.
+    private static let valueChange = 1
+
+    /// Runs the first turn and the later turn of a new session with a new model.
+    ///
+    /// - Parameters:
+    ///   - budget: The memory budget of the store in bytes. Zero spills each check-in at once.
+    ///   - changesSpilledValues: When true, adds ``valueChange`` to each value of each spill
+    ///     file before the later turn. The header of each file stays valid.
+    /// - Returns: What the run measured.
+    /// - Throws: The error of a turn or of the file change.
+    static func run(budget: Int, changesSpilledValues: Bool = false) async throws -> CacheEchoRun {
+        let directory = temporaryDirectory()
+        let weights = try makeScriptedWeightsDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.removeItem(at: weights)
+        }
+        let model = CacheEchoLanguageModel.make(weights: weights)
+        let store = await store(in: directory, budget: budget)
+
+        try await ScriptedExecutorPass.run(
+            over: ScriptedSessionModel.transcript(firstEntryID: sessionID), model: model,
+            inside: store)
+        await store.waitForSpills()
+        let files = try fileNames(in: directory)
+        for name in files where changesSpilledValues {
+            try changeValues(at: directory.appendingPathComponent(name))
+        }
+        let retainedByteCount = await store.retainedByteCount
+
+        let turn = try await ScriptedExecutorPass.respond(
+            over: ScriptedSessionModel.transcript(firstEntryID: sessionID, turns: laterTurnCount),
+            model: model, inside: store)
+        return CacheEchoRun(
+            retainedByteCount: retainedByteCount, spilledFileCount: files.count, turn: turn)
+    }
+
+    /// Adds ``valueChange`` to each array value of the spill file at `url`. Each array keeps
+    /// its type and its shape, and the metadata stays the same, thus the header stays valid.
+    ///
+    /// - Parameter url: The URL of the spill file.
+    /// - Throws: The error of the safetensors load or save.
+    private static func changeValues(at url: URL) throws {
+        let (arrays, metadata) = try loadArraysAndMetadata(url: url)
+        let changed = arrays.mapValues { ($0 + valueChange).asType($0.dtype) }
+        eval(changed.values)
+        try save(arrays: changed, metadata: metadata, url: url)
+    }
+}
+
+/// A model whose output depends on the values of its cache.
+///
+/// Each forward pass writes the token IDs of its input into each cache as keys and values. The
+/// pass at step `n` of a round emits the token that the first cache holds at position `n`.
+/// Thus a round echoes the start of the cached prompt, and a cache with wrong values gives a
+/// wrong echo.
+private final class CacheEchoLanguageModel: Module, MLXLMCommon.LanguageModel,
+    KVCacheDimensionProvider
+{
+
+    /// The number of tokens that each round emits before it stops.
+    static let responseTokenCount = 4
+
+    /// The key/value heads of the one cache layer.
+    private static let cacheHeadCount = 1
+
+    /// The width of each key and value that the model writes into its cache.
+    private static let cacheHeadDimension = 1
+
+    /// The logit of the token that the model emits.
+    private static let selectedLogit: Float = 100
+
+    /// The logit of each other token.
+    private static let rejectedLogit: Float = -100
+
+    /// One key/value head for the one cache layer.
+    var kvHeads: [Int] { [Self.cacheHeadCount] }
+
+    /// The number of forward passes of the round so far.
+    private var step = 0
+
+    /// Makes the model under a new identity, thus the process-wide model cache keeps it apart
+    /// from each other test.
+    ///
+    /// - Parameter weights: The directory that makes the model available.
+    /// - Returns: The model.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    static func make(weights: URL) -> MLXLanguageModel {
+        let modelID = "probe/cache-echo-\(UUID().uuidString)"
+        let configuration = ModelConfiguration(id: modelID)
+        return MLXLanguageModel(
+            configuration: configuration,
+            capabilities: [],
+            weightsLocation: { _ in weights },
+            load: { _, _ in
+                ModelContainer(
+                    context: ModelContext(
+                        configuration: configuration, model: CacheEchoLanguageModel(),
+                        processor: PromptBytesInputProcessor(),
+                        tokenizer: ScriptedByteTokenizer()))
+            })
+    }
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        step = 0
+        return .tokens(input.text)
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        defer { step += 1 }
+        let cached = write(tokens: inputs, into: cache ?? [])
+        let positions = Swift.max(inputs.size, 1)
+        var logits = Array(
+            repeating: Self.rejectedLogit, count: positions * ScriptedLanguageModel.vocabularySize)
+        // Only the last row is read as the next-token distribution.
+        logits[(positions - 1) * ScriptedLanguageModel.vocabularySize + nextToken(from: cached)] =
+            Self.selectedLogit
+        return MLXArray(logits, [1, positions, ScriptedLanguageModel.vocabularySize])
+    }
+
+    /// Writes the token IDs of `tokens` into each of `caches` as keys and values.
+    ///
+    /// - Parameters:
+    ///   - tokens: The input of the forward pass.
+    ///   - caches: The caches of the forward pass.
+    /// - Returns: All the keys that the first cache holds after the write, in position order.
+    private func write(tokens: MLXArray, into caches: [KVCache]) -> [Float] {
+        let tokenCount = tokens.size
+        guard tokenCount > 0 else { return [] }
+        let keyValues = tokens.asType(.float32).reshaped([
+            1, Self.cacheHeadCount, tokenCount, Self.cacheHeadDimension,
+        ])
+        let allKeys = caches.map { $0.update(keys: keyValues, values: keyValues).0 }
+        return allKeys.first?.asType(.float32).asArray(Float.self) ?? []
+    }
+
+    /// The token that the pass emits: the cached token at the position of ``step``, or
+    /// end-of-text after ``responseTokenCount`` tokens, or when the cache holds no valid token
+    /// at that position.
+    ///
+    /// - Parameter cached: All the keys of the first cache, in position order.
+    /// - Returns: The token ID.
+    private func nextToken(from cached: [Float]) -> Int {
+        guard step < Self.responseTokenCount, cached.indices.contains(step) else {
+            return ScriptedByteTokenizer.endOfTextByte
+        }
+        let token = Int(cached[step])
+        guard (0 ..< ScriptedLanguageModel.vocabularySize).contains(token) else {
+            return ScriptedByteTokenizer.endOfTextByte
+        }
+        return token
     }
 }
 
