@@ -206,6 +206,12 @@ public class BaichuanM1ModelInner: Module {
     fileprivate let layers: [BaichuanM1DecoderLayer]
     let norm: RMSNorm
 
+    /// The index of the first sliding-window layer, or `nil` when no layer has a window.
+    let firstSlidingWindowLayer: Int?
+
+    /// The index of the first global-attention layer, or `nil` when each layer has a window.
+    let firstGlobalLayer: Int?
+
     init(_ config: BaichuanM1Configuration) {
         self.args = config
         _embedTokens.wrappedValue = Embedding(
@@ -214,18 +220,51 @@ public class BaichuanM1ModelInner: Module {
             BaichuanM1DecoderLayer(config, layerIdx: $0)
         }
         norm = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        firstSlidingWindowLayer = layers.firstIndex { $0.attention.isSWA }
+        firstGlobalLayer = layers.firstIndex { !$0.attention.isSWA }
     }
 
+    /// Gives the attention cache of a layer: the second child of the `CacheList` of the layer.
+    ///
+    /// - Parameters:
+    ///   - cache: The caches, one `CacheList` for each layer.
+    ///   - layer: The index of the layer.
+    /// - Returns: The attention cache, or `nil` when there is no cache or no layer.
+    private static func attentionCache(_ cache: [KVCache]?, layer: Int?) -> KVCache? {
+        guard let cache, let layer else { return nil }
+        return (cache[layer] as? CacheList)?[1]
+    }
+
+    /// Runs the decoder layers.
+    ///
+    /// As in mlx-lm, the global-attention layers and the sliding-window layers get different
+    /// masks. The mask of the sliding-window layers has the window of the configuration, thus a
+    /// prefill longer than the window attends to the same tokens as a decode.
+    ///
+    /// - Parameters:
+    ///   - inputs: The token identifiers.
+    ///   - mask: A mask for all layers. When it is `nil`, each kind of layer gets its own mask.
+    ///   - cache: The caches, one `CacheList` for each layer.
+    /// - Returns: The hidden states after the last norm.
     func callAsFunction(
         _ inputs: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: [KVCache]?
     ) -> MLXArray {
         var x = embedTokens(inputs)
 
-        let mask = mask ?? createAttentionMask(h: x, cache: cache?.first)
+        let globalMask =
+            mask
+            ?? createAttentionMask(
+                h: x, cache: Self.attentionCache(cache, layer: firstGlobalLayer))
+        let slidingWindowMask =
+            mask
+            ?? createAttentionMask(
+                h: x, cache: Self.attentionCache(cache, layer: firstSlidingWindowLayer),
+                windowSize: args.slidingWindow)
 
         for (i, layer) in layers.enumerated() {
-            x = layer(x, mask: mask, cache: cache?[i])
+            let layerMask = layer.attention.isSWA ? slidingWindowMask : globalMask
+            x = layer(x, mask: layerMask, cache: cache?[i])
         }
 
         return norm(x)

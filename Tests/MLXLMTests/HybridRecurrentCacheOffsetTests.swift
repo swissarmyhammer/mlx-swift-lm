@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXNN
 import MLXVLM
 import Testing
 
@@ -26,6 +27,7 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     case lfm2MoE
     case lfm2VL
     case baichuanM1
+    case baichuanM1ShortWindow
     case falconH1
 
     /// The seed of the initializer weights of each tiny model.
@@ -63,11 +65,34 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
         case .lfm2VL:
             return LFM2VL(try Self.decode(LFM2VLConfiguration.self, Self.lfm2VLJSON))
         case .baichuanM1:
-            return BaichuanM1Model(
+            return Self.makeBaichuanM1Model(
                 try Self.decode(BaichuanM1Configuration.self, Self.baichuanM1JSON))
+        case .baichuanM1ShortWindow:
+            return Self.makeBaichuanM1Model(
+                try Self.decode(BaichuanM1Configuration.self, Self.baichuanM1ShortWindowJSON))
         case .falconH1:
             return FalconH1Model(try Self.decode(FalconH1Configuration.self, Self.falconH1JSON))
         }
+    }
+
+    /// Makes a BaichuanM1 model whose short-convolution weights are not zero.
+    ///
+    /// The model starts each `conv_k` and `conv_v` weight with zeros, and a checkpoint then
+    /// gives the real values. Zero weights make each key and each value zero, thus each
+    /// attention output is zero, and no mask and no attention cache can change the logits. The
+    /// tiny model thus gets random values from the current random state.
+    ///
+    /// - Parameter configuration: The configuration.
+    /// - Returns: The model.
+    private static func makeBaichuanM1Model(
+        _ configuration: BaichuanM1Configuration
+    ) -> BaichuanM1Model {
+        let model = BaichuanM1Model(configuration)
+        let convolutionWeights = model.parameters().flattened()
+            .filter { key, _ in key.hasSuffix(".conv_k") || key.hasSuffix(".conv_v") }
+            .map { key, weight in (key, MLXRandom.normal(weight.shape)) }
+        model.update(parameters: ModuleParameters.unflattened(convolutionWeights))
+        return model
     }
 
     /// Decodes a configuration from JSON text.
@@ -200,6 +225,18 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
         }
         """
 
+    /// The BaichuanM1 layout of `baichuanM1JSON` with a window of 4 tokens. Each prompt of the
+    /// tests is longer than the window, thus the sliding-window layers 0 and 2 must attend only
+    /// to the last 4 tokens in a prefill as in a decode.
+    private static let baichuanM1ShortWindowJSON = """
+        {
+            "vocab_size": 32, "hidden_size": 8, "intermediate_size": 16,
+            "num_hidden_layers": 4, "num_attention_heads": 2, "num_key_value_heads": 1,
+            "rope_theta": 10000.0, "sliding_window": 4, "sliding_window_layers": [0, 2],
+            "conv_window": 2, "rms_norm_eps": 1e-6, "tie_word_embeddings": true
+        }
+        """
+
     /// Two layers, each with a Mamba2 `MambaCache` and an attention cache in one `CacheList`.
     private static let falconH1JSON = """
         {
@@ -218,6 +255,10 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
 /// The offset of each `MambaCache` thus stayed at 0, and the executor prompt cache refused the
 /// caches of these models in memory and on disk. Each test runs on each model of
 /// ``HybridRecurrentModelFixture``.
+///
+/// The sliding-window tests run on the BaichuanM1 models. BaichuanM1 gave the mask of the
+/// global-attention layers also to its sliding-window layers, thus a prefill longer than the
+/// window attended to more tokens than a decode.
 ///
 /// The models compute in float32. The `MLXTestPrecision` target sets `MLX_ENABLE_TF32=0` when
 /// this bundle loads, thus a split forward and a single forward agree closely also on a GPU with
@@ -240,8 +281,8 @@ struct HybridRecurrentCacheOffsetTests {
     /// live caches. The two decodes run the same arrays, thus they agree to the float noise.
     private static let warmTolerance: Float = 1e-6
 
-    /// The largest difference between the logits of the restored caches and the logits of a
-    /// cold prefill of the prompt and the first token.
+    /// The largest difference between the logits of a split forward (restored caches, live
+    /// caches or a decode of one token at a time) and the logits of a cold prefill.
     ///
     /// A split forward adds rounding differences. The SSM layers of Mamba2 and NemotronH also
     /// send a prompt of many tokens through a chunked scan, and a single token through a step
@@ -339,6 +380,30 @@ struct HybridRecurrentCacheOffsetTests {
             Self.expectOffsets(
                 caches, Self.prompt.count + step, "\(fixture) after decode step \(step)")
         }
+    }
+
+    // MARK: - Sliding window
+
+    /// A decode of one token at a time puts each token through the rotating cache of each
+    /// sliding-window layer, thus each query attends only to the window. A cold prefill must
+    /// attend to the same tokens. The mask of the prefill makes the window, and the test fails
+    /// when the sliding-window layers get the mask of the global-attention layers.
+    @Test(
+        "A cold prefill agrees with a decode of one token at a time",
+        arguments: [HybridRecurrentModelFixture.baichuanM1, .baichuanM1ShortWindow])
+    func coldPrefillAgreesWithSingleTokenDecode(_ fixture: HybridRecurrentModelFixture) throws {
+        let model = try fixture.makeModel()
+        let tokens = Self.prompt + Self.promptTail
+        let stepCaches = try model.newCache(parameters: nil)
+        let stepLogits = try #require(
+            tokens.map { Self.lastLogits(model, [$0], caches: stepCaches) }.last,
+            "\(fixture): logits of the last decode step")
+        let coldLogits = Self.lastLogits(
+            model, tokens, caches: try model.newCache(parameters: nil))
+
+        #expect(
+            Self.maxAbsDifference(stepLogits, coldLogits) <= Self.coldTolerance,
+            "\(fixture): single-token and cold logits")
     }
 
     // MARK: - Warm continuation
