@@ -331,9 +331,33 @@ enum ScriptedSessionModel {
         weights: URL, processor: any UserInputProcessor = PromptBytesInputProcessor(),
         reasoningConfig: ReasoningConfig? = nil
     ) -> MLXLanguageModel {
+        make(
+            weights: weights,
+            scripts: Array(
+                repeating: script(reasoningConfig: reasoningConfig), count: maximumPassCount),
+            processor: processor, reasoningConfig: reasoningConfig)
+    }
+
+    /// Makes the model under a fresh identity, with one script for each pass.
+    ///
+    /// Pass `n` of the model replays `scripts[n]`. A pass past the last script
+    /// generates nothing.
+    ///
+    /// - Parameters:
+    ///   - weights: the directory that makes the model available.
+    ///   - scripts: the text that each pass generates, in the order of the
+    ///     passes.
+    ///   - processor: renders the prompt of each pass.
+    ///   - reasoningConfig: the reasoning protocol of the model. When it is
+    ///     set, the model declares `.reasoning`. The default of `nil` gives a
+    ///     model that does not reason.
+    /// - Returns: the model.
+    static func make(
+        weights: URL, scripts: [String],
+        processor: any UserInputProcessor = PromptBytesInputProcessor(),
+        reasoningConfig: ReasoningConfig? = nil
+    ) -> MLXLanguageModel {
         let modelID = "probe/scripted-session-\(UUID().uuidString)"
-        let rounds = Array(
-            repeating: script(reasoningConfig: reasoningConfig), count: maximumPassCount)
         let capabilities: [LanguageModelCapabilities.Capability] =
             reasoningConfig == nil ? [] : [.reasoning]
         return MLXLanguageModel(
@@ -342,7 +366,7 @@ enum ScriptedSessionModel {
             weightsLocation: { _ in weights },
             load: { _, _ in
                 makeScriptedContainer(
-                    modelID: modelID, rounds: rounds, cacheLayerCount: cacheLayerCount,
+                    modelID: modelID, rounds: scripts, cacheLayerCount: cacheLayerCount,
                     processor: processor, reasoningConfig: reasoningConfig)
             })
     }
@@ -445,15 +469,36 @@ enum ScriptedExecutorPass {
     ///   - transcript: the transcript of the request.
     ///   - model: the model of the pass.
     ///   - store: the prompt cache store the pass binds.
-    /// - Returns: the reused prompt tokens, the response text and the
-    ///   reasoning text of the pass.
+    /// - Returns: the reused prompt tokens, the response text, the reasoning
+    ///   text and the tool calls of the pass.
     /// - Throws: the error of the executor.
     static func respond(
         over transcript: Transcript, model: MLXLanguageModel,
         inside store: ExecutorPromptCacheStore
     ) async throws -> ScriptedPassResult {
+        try await respond(
+            to: makeExecutorRequest(transcript: transcript), model: model, inside: store)
+    }
+
+    /// Runs one executor pass of `model` for `request` inside `store`, and
+    /// gives what the pass streamed.
+    ///
+    /// The pass runs on the task that calls this method, thus every
+    /// task-local the caller binds reaches the executor.
+    ///
+    /// - Parameters:
+    ///   - request: the request of the pass: its transcript, and its schema,
+    ///     tools and options when the pass needs them.
+    ///   - model: the model of the pass.
+    ///   - store: the prompt cache store the pass binds.
+    /// - Returns: the reused prompt tokens, the response text, the reasoning
+    ///   text and the tool calls of the pass.
+    /// - Throws: the error of the executor.
+    static func respond(
+        to request: LanguageModelExecutorGenerationRequest, model: MLXLanguageModel,
+        inside store: ExecutorPromptCacheStore
+    ) async throws -> ScriptedPassResult {
         let executor = try makeMLXExecutor(for: model)
-        let request = makeExecutorRequest(transcript: transcript)
         let channel = LanguageModelExecutorGenerationChannel()
         // The channel is a rendezvous, thus a consumer must run beside the
         // executor or every send parks it.
@@ -471,8 +516,8 @@ enum ScriptedExecutorPass {
         return events.result
     }
 
-    /// The reused prompt tokens, the response text and the reasoning text of
-    /// the events of one pass.
+    /// The reused prompt tokens, the response text, the reasoning text and the
+    /// tool calls of the events of one pass.
     ///
     /// The executor reports the events on the generation path, and the test
     /// reads the result from its own task, thus a mutex guards the result.
@@ -480,7 +525,8 @@ enum ScriptedExecutorPass {
         private let collected = Mutex(ScriptedPassResult())
 
         /// Adds the reused prompt tokens of `event` when it is a usage event,
-        /// and its text when it is response text or reasoning text.
+        /// its text when it is response text or reasoning text, and its tool
+        /// name when it is a tool call.
         ///
         /// - Parameter event: one event the executor streamed.
         func record(_ event: MLXLanguageModel.Executor.GenerationEvent) {
@@ -491,7 +537,9 @@ enum ScriptedExecutorPass {
                 collected.withLock { $0.responseText += text }
             case .appendText(let text, _, .reasoning):
                 collected.withLock { $0.reasoningText += text }
-            case .toolCall, .updateMetadata, .completion:
+            case .toolCall(_, let name, _):
+                collected.withLock { $0.toolCallNames.append(name) }
+            case .updateMetadata, .completion:
                 break
             }
         }
@@ -512,6 +560,10 @@ struct ScriptedPassResult: Sendable {
 
     /// The reasoning text of the pass, in the order the pass streamed it.
     var reasoningText = ""
+
+    /// The tool name of each tool call of the pass, in the order the pass
+    /// streamed the calls.
+    var toolCallNames: [String] = []
 }
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)

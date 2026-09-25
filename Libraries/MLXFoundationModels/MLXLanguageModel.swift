@@ -2808,9 +2808,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             GuidedGenerationDiagnosticSink.current?.recordParse(
                 parsedAsToolCall: true, parsedName: name)
 
+            // The arguments of a tool whose schema is a scalar -- a string, a
+            // number, a Boolean -- are not an object. Without
+            // `.fragmentsAllowed`, `JSONSerialization` raises an Objective-C
+            // exception for such a value, which `try?` cannot catch, and the
+            // process stops.
             guard
                 let arguments = obj["arguments"],
-                let argumentsData = try? JSONSerialization.data(withJSONObject: arguments),
+                let argumentsData = try? JSONSerialization.data(
+                    withJSONObject: arguments, options: [.fragmentsAllowed]),
                 let argumentsJSON = String(data: argumentsData, encoding: .utf8)
             else {
                 return

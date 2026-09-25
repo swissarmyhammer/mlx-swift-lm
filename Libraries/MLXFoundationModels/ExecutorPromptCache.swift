@@ -1702,7 +1702,12 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     /// The guided loop owns its key/value cache and accepts none from a caller,
     /// thus a guided pass reuses nothing and must report nothing, even when an
     /// earlier pass of the same response reused a prefix.
+    ///
+    /// The slot also gives up what it carries. The ledger of that cache does
+    /// not record the guided pass, thus the response checks in nothing and the
+    /// next turn of the session starts cold.
     func carriesNoCache() {
+        carried = .none
         reusedTokenCount = 0
         report(ExecutorPromptCacheReport.guidedLine(key: key))
     }
