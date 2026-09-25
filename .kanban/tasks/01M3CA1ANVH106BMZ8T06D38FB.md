@@ -15,8 +15,30 @@ comments:
     - MLXFoundationModelsTests: 318 Swift Testing tests (315 + 3), 0 failures.
     - next: /test
   timestamp: 2026-09-25T22:44:40.668280+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3dc3wxa2t7n7phwv58c7qwk
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests (only the known warning `missing creator for mutated node`); MLXLMTests 696 XCTest + 1218 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 318 (3 runs, all pass), CXGrammarTests 7, MLXHuggingFaceMacrosTests 5; 0 failures, 0 skipped.
+    ### commit — changed
+    - evidence: db43a28 test(prompt-cache): cover the failed spill outcomes when prepare fails and when the write fails
+    - next: /review
+  timestamp: 2026-09-25T22:48:59.050490+00:00
+- actor: claude-code
+  id: 01m3dc805spxfxp01jq8yb5bsb
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD — 0 findings (7 validator runs attempted, 0 failed); the two kanban files have no matching validator. No prior Review Findings section.
+    - next: none; task moved to done.
+
+    ### finish iteration 1 — clean
+    - implement: changed — Tests/MLXFoundationModelsTests/ExecutorPromptCacheSpoolTests.swift (3 new tests; each break check failed as expected, then the breaks were removed)
+    - test: green — MLXLMTests 696 + 1218, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 318 (3 runs), CXGrammarTests 7, MLXHuggingFaceMacrosTests 5; 0 failures, 0 skipped; only the known build warning
+    - commit: db43a28
+    - review: clean (0 findings)
+  timestamp: 2026-09-25T22:51:13.465489+00:00
+position_column: done
+position_ordinal: ffb180
 title: Test the failed spill outcomes of ExecutorPromptCacheStore (prepare fails, write fails)
 ---
 ## What
@@ -33,10 +55,10 @@ What to test:
 
 ## Acceptance Criteria
 
-- [ ] Lines 838-842 and 907 are covered.
-- [ ] Each test checks the three byte totals and the check-out result.
-- [ ] `waitForSpills()` returns in the failed-write test (no hang).
-- [ ] All five unit bundles pass.
+- [x] Lines 838-842 and 907 are covered.
+- [x] Each test checks the three byte totals and the check-out result.
+- [x] `waitForSpills()` returns in the failed-write test (no hang).
+- [x] All five unit bundles pass.
 
 ## Tests
 
