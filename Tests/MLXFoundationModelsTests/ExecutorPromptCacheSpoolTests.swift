@@ -46,6 +46,13 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
     /// The free space that the default-disk-budget test gives.
     private static let availableCapacity = 400_000
 
+    /// A spool folder whose free space no volume can give. It is not a file URL, thus the file
+    /// system does not know it, and the store cannot read the free space of its volume.
+    private static let unmeasurableSpoolAddress = "https://example.invalid/prompt-cache-spool"
+
+    /// The bytes of the regular file that the clean-up test gives in place of a root folder.
+    private static let rootFileContents = Data("not a folder".utf8)
+
     /// The process of the folder that the clean-up test marks stale.
     private static let stalePID: pid_t = 101
 
@@ -86,6 +93,20 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
             at: root.appendingPathComponent(name, isDirectory: true),
             withIntermediateDirectories: true)
         return name
+    }
+
+    /// Runs the clean-up of `root` with a probe that counts its calls and marks each process
+    /// live.
+    ///
+    /// - Parameter root: The folder that holds the spool folders.
+    /// - Returns: How many processes the clean-up probed.
+    private static func probeCount(ofCleanUpIn root: URL) -> Int {
+        var count = 0
+        ExecutorPromptCacheStore.removeStaleSpoolFolders(in: root) { _ in
+            count += 1
+            return liveProbeResult
+        }
+        return count
     }
 
     /// Records an issue unless two lists of arrays have equal shapes, types and values.
@@ -362,6 +383,14 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
         #expect(ExecutorPromptCacheStore.defaultDiskBudgetBytes(availableCapacity: -1) == 0)
     }
 
+    @Test("the default disk budget is zero when the free space of the spool volume cannot be read")
+    func theDefaultDiskBudgetIsZeroWhenTheFreeSpaceCannotBeRead() async throws {
+        let directory = try #require(URL(string: Self.unmeasurableSpoolAddress))
+        let store = ExecutorPromptCacheStore(directory: directory)
+
+        #expect(await store.diskBudgetBytes == 0)
+    }
+
     // MARK: - Folders of processes that do not run
 
     @Test("a process is stale only when kill fails with ESRCH")
@@ -389,6 +418,24 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
 
         #expect(try Self.fileNames(in: root) == [live, foreign, unsignalable].sorted())
         #expect(!(try Self.fileNames(in: root).contains(stale)))
+    }
+
+    @Test("the clean-up of a root that is not there probes no process")
+    func theCleanUpOfAMissingRootProbesNoProcess() {
+        let root = Self.temporaryDirectory()
+
+        #expect(Self.probeCount(ofCleanUpIn: root) == 0)
+        #expect(!FileManager.default.fileExists(atPath: root.path(percentEncoded: false)))
+    }
+
+    @Test("the clean-up of a root that is a regular file probes no process and keeps the file")
+    func theCleanUpOfARootThatIsAFileProbesNoProcessAndKeepsTheFile() throws {
+        let root = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Self.rootFileContents.write(to: root)
+
+        #expect(Self.probeCount(ofCleanUpIn: root) == 0)
+        #expect(try Data(contentsOf: root) == Self.rootFileContents)
     }
 
     // MARK: - Removal of one key
