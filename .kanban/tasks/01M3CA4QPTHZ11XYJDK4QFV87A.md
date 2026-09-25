@@ -29,8 +29,17 @@ comments:
     - SwiftPM bundles: this task changes no SwiftPM target (only `IntegrationTesting/`), thus the baseline stays.
     - next: /commit
   timestamp: 2026-09-25T15:22:00.783858+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3cjvqkwafckn05yxwsnt7km
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 3 files in IntegrationTesting/ (new test `hybridModelRestoresEachToolRoundFromDisk`, shared `requireLocalWeights` / `MissingLocalModelError` / `Comment.unsupportedSystem` in FMTestHelpers.swift). The new test found no library bug.
+    - test: green — both suites ran: PromptCacheSpoolCostAssessmentTests 3/3 passed; Qwen35AgenticPromptCacheAssessmentTests: new disk test passed (1012 s), control passed, `hybridModelCarriesThePromptCacheAcrossToolRounds` failed one time on the prefill-time bound under an external GPU load (a game) and passed on a re-run with no code change.
+    - commit: 0d049c0 test(prompt-cache): run Qwen3.5 tool rounds with a spill to disk between each round
+    - review: clean — `review sha HEAD~1..HEAD`: 0 findings (7 validators ran, 0 failed). Task moved to done.
+  timestamp: 2026-09-25T15:27:37.084926+00:00
+position_column: done
+position_ordinal: ffa280
 title: 'Integration: Qwen3.5 hybrid agentic tool rounds with a spill to disk between each round'
 ---
 ## What
