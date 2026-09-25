@@ -75,6 +75,20 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
         livePID: liveProbeResult,
     ]
 
+    /// A ledger that the spill file cannot hold: its last token ID does not fit in an Int32,
+    /// thus `ExecutorPromptCacheFile.prepare` throws.
+    private static let unpreparableTokens = [0, 1, Int(Int32.max) + 1]
+
+    /// The text of ``SpillWriteFailure`` in the spill line.
+    private static let writeFailureText = "the spool volume is full"
+
+    /// The error that ``FailingWriter`` throws, with a fixed text for the spill line.
+    private struct SpillWriteFailure: Error, CustomStringConvertible {
+
+        /// The text of the error in the spill line: ``writeFailureText``.
+        var description: String { ExecutorPromptCacheSpoolTests.writeFailureText }
+    }
+
     // MARK: - Fixture builders
 
     /// The key of `sessionID` under ``modelID``.
@@ -150,6 +164,29 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
             defer { counts.withLock { $0.running -= 1 } }
             Thread.sleep(forTimeInterval: ExecutorPromptCacheSpoolTests.overlapWindow)
             try ExecutorPromptCacheStore.writeSpillFile(input, to: url)
+        }
+    }
+
+    /// A writer that counts its calls, writes no file, and throws ``SpillWriteFailure``.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private final class FailingWriter: Sendable {
+
+        /// How many times the store called the writer.
+        private let calls = Mutex(0)
+
+        /// How many times the store called the writer.
+        var callCount: Int {
+            calls.withLock { $0 }
+        }
+
+        /// Counts the call and throws ``SpillWriteFailure``.
+        ///
+        /// - Parameters:
+        ///   - input: The prepared entry. The writer does not read it.
+        ///   - url: The URL of the file. The writer does not make it.
+        func write(_ input: PromptCacheSaveInput, to url: URL) throws {
+            calls.withLock { $0 += 1 }
+            throw SpillWriteFailure()
         }
     }
 
@@ -589,6 +626,47 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
             line
                 == "prompt cache spill model=test-org/prompt-cache-spool session=a bytes=4096 "
                 + "seconds=1.250 result=on disk")
+    }
+
+    // MARK: - Failed spills
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("an entry that cannot be prepared is dropped, and no write goes into the queue")
+    func anEntryThatCannotBePreparedIsDropped() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = FailingWriter()
+        let store = await Self.store(in: directory, writer: writer.write)
+
+        await store.checkIn(Self.key("a"), Self.entry(tokens: Self.unpreparableTokens))
+        await store.waitForSpills()
+
+        #expect(writer.callCount == 0)
+        try await Self.expectNothingStored(for: Self.key("a"), in: store, directory: directory)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("a write that throws records no file, and waitForSpills returns")
+    func aWriteThatThrowsRecordsNoFile() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = FailingWriter()
+        let store = await Self.store(in: directory, writer: writer.write)
+
+        await store.checkIn(Self.key("a"), Self.entry())
+        await store.waitForSpills()
+
+        #expect(writer.callCount == 1)
+        try await Self.expectNothingStored(for: Self.key("a"), in: store, directory: directory)
+    }
+
+    @Test("the spill line of a failed write ends with the error")
+    func theSpillLineOfAFailedWriteEndsWithTheError() {
+        let line = ExecutorPromptCacheReport.spillLine(
+            key: Self.key("a"), byteCount: Self.reportedByteCount,
+            duration: Self.reportedWriteDuration, outcome: .failed(SpillWriteFailure()))
+
+        #expect(line.hasSuffix("result=failed: \(Self.writeFailureText)"))
     }
 }
 
