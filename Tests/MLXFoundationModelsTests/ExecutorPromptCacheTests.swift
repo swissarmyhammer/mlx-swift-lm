@@ -1094,6 +1094,22 @@ struct ExecutorPromptCacheTests {
                 + "source=none rendered=3 reused=0 fed=3 rule=cold")
     }
 
+    @Test("a carried entry whose caches hold nothing plans as cold")
+    func aCarriedEntryWhoseCachesHoldNothingPlansAsCold() throws {
+        let emptyEntry = ExecutorPromptCacheEntry(caches: [KVCacheSimple()], tokens: [])
+
+        let planned = try #require(try plan(render: [1, 2, 3], reusing: emptyEntry))
+        let line = ExecutorPromptCacheReport.planLine(
+            key: reportedKey, source: .memory, plan: planned, decodeTokens: decodeAsNumbers)
+
+        #expect(planned.decision == .cold)
+        #expect(planned.reusedTokenCount == 0)
+        #expect(
+            line
+                == "prompt cache plan model=test/prompt-cache session=session-1 "
+                + "source=memory rendered=3 reused=0 fed=3 rule=cold")
+    }
+
     @Test("the plan line of a restored pass names the disk and the restore time")
     func thePlanLineOfARestoredPassNamesTheDiskAndTheRestoreTime() throws {
         let planned = try plan(batchedInput([1, 2, 3, 4]), cachedTokens: [1, 2, 3])
