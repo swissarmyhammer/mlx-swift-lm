@@ -36,7 +36,41 @@ comments:
     - evidence: swift build --build-tests (only the known warning "missing creator for mutated node"); xcrun xctest of all five bundles: MLXLMTests 695 XCTest + 1211 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 309, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 — 0 failures, 0 skipped. MLXLMTests and MLXFoundationModelsTests ran 3 times, all green.
     - next: commit
   timestamp: 2026-09-25T17:46:09.908974+00:00
-position_column: doing
+- actor: claude-code
+  id: 01m3cttak59wxhwcgzz6nfmsxd
+  text: |-
+    ### commit — changed
+    - evidence: 03d88c0 fix(prompt-cache): refuse a ring of another window in a template restore
+    - next: review HEAD~1..HEAD
+  timestamp: 2026-09-25T17:46:39.589684+00:00
+- actor: claude-code
+  id: 01m3ctxp3rr5mzpr315tz51a1t
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD — 1 finding: Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift:873 `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+    - next: implement (fix the finding)
+  timestamp: 2026-09-25T17:48:29.688758+00:00
+- actor: claude-code
+  id: 01m3ctxr5hxk220vv6a94n3y95
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed (4 files; library fix of the RotatingKVCache configuration check in the template restore, and the new tests)
+    - test: green (all five bundles; MLXLMTests 695 + 1211, MLXFoundationModelsTests 309, 3 runs of the touched bundles)
+    - commit: 03d88c0
+    - review: findings — PromptCacheTemplateRestoreTests.swift:873 code-hygiene/magic-numbers-swift
+  timestamp: 2026-09-25T17:48:31.793283+00:00
+- actor: claude-code
+  id: 01m3cvda1hkz2vpa9ep7t866qh
+  text: |-
+    ### implement — changed
+    - evidence: 2 files — Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift (`otherWindow` is a named value 8, not `rotatingWindow * 2`), Tests/MLXFoundationModelsTests/ExecutorPromptCacheQwenFileTests.swift (the same cause: `tokensPerDecodeStep` and `tokenAxis` in place of the unnamed 1 values in `decode`).
+    - next: test
+
+    ### test — green
+    - evidence: swift build --build-tests (only the known warning). All five bundles: MLXLMTests 695 + 1211, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 309, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5, 0 failures, 0 skipped. MLXLMTests and MLXFoundationModelsTests ran 3 times. Run 2 of MLXLMTests had 1 XCTest failure in `ChatSessionTests.testActiveSpeculativeDecodingReusesAlignedStorageAcrossTurns` (main 11, draft 10). That test uses two unseeded random Gemma3 models and does not call the changed code (`loadPromptCacheSnapshot(url:into:)` has one caller, ExecutorPromptCacheFile). Runs 1 and 3 passed. Recorded as a new task ^PPTC3HJ (01M3CVD3FZPPTC3HJ5JK8HM41J) with the evidence.
+    - next: commit
+  timestamp: 2026-09-25T17:57:01.617783+00:00
+position_column: review
 position_ordinal: '80'
 title: Test converted (kvBits, TurboQuant) and wrapped rotating layers inside a tiny Qwen3.5 hybrid restore
 ---
@@ -63,11 +97,11 @@ What to test, with the tiny Qwen3.5 model of `Qwen35ContinuationTests.makeTinyMo
 
 ## Acceptance Criteria
 
-- [ ] A test proves each of kvBits, TurboQuant and a wrapped ring inside the Qwen3.5 hybrid layer list.
-- [ ] Each test compares continuation logits, not only offsets.
-- [ ] Each case also passes through `ExecutorPromptCacheFile.read`.
-- [ ] The window-mismatch control throws.
-- [ ] All five unit bundles pass.
+- [x] A test proves each of kvBits, TurboQuant and a wrapped ring inside the Qwen3.5 hybrid layer list.
+- [x] Each test compares continuation logits, not only offsets.
+- [x] Each case also passes through `ExecutorPromptCacheFile.read`.
+- [x] The window-mismatch control throws.
+- [x] All five unit bundles pass.
 
 ## Tests
 
@@ -83,3 +117,13 @@ xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest
 ## Workflow
 
 - Use `/tdd` #coverage-gap #prompt-cache
+
+## Review Findings (2026-09-25 12:46)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 4 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M3CA3QX1JCRX769Q3Y3KXBE5.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M3CA3QX1JCRX769Q3Y3KXBE5.md` — no validator matches this file
+
+- [ ] `Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift:873` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.

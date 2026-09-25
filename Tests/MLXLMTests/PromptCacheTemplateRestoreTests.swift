@@ -869,8 +869,9 @@ enum RingConfigurationMismatch: String, CaseIterable, CustomTestStringConvertibl
     /// The fixture sizes and builders.
     private typealias Fixture = PromptCacheTemplateRestoreTests
 
-    /// The window of the ``window`` template: two times the window of the saved ring.
-    private static let otherWindow = Fixture.rotatingWindow * 2
+    /// The window of the ``window`` template. It is larger than the window of the saved ring
+    /// (``PromptCacheTemplateRestoreTests/rotatingWindow``).
+    private static let otherWindow = 8
 
     /// The number of leading tokens that the ``keep`` template keeps.
     private static let otherKeep = 1

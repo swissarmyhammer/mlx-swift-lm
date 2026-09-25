@@ -92,6 +92,12 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
     /// The seed of the decode tokens.
     private static let decodeSeed = 5
 
+    /// The number of tokens of one decode step.
+    private static let tokensPerDecodeStep = 1
+
+    /// The axis of the tokens in a token array of shape `(1, count)`.
+    private static let tokenAxis = 1
+
     /// The bits of each `QuantizedKVCache` layer.
     private static let quantizedBits = 8
 
@@ -441,8 +447,8 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
         _ model: any LanguageModel, _ tokens: MLXArray, caches: [KVCache], state: LMOutput.State
     ) throws -> LMOutput.State {
         var state = state
-        for step in 0 ..< tokens.dim(1) {
-            let token = tokens[0..., step ..< (step + 1)]
+        for step in 0 ..< tokens.dim(tokenAxis) {
+            let token = tokens[0..., step ..< (step + tokensPerDecodeStep)]
             state = try #require(run(model, token, caches: caches, state: state).state)
         }
         return state
