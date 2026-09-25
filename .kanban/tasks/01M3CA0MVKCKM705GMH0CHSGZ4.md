@@ -27,8 +27,24 @@ comments:
     - evidence: `swift build --build-tests` clean (only the known `missing creator for mutated node` warning); `xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` 3 runs — each 312 tests in 36 suites passed, 0 failed, 0 skipped. Only MLXFoundationModelsTests files changed.
     - next: /commit
   timestamp: 2026-09-25T18:04:59.030449+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3cw5pf8mbwqf2q99pmd641b
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` on d788a12 — 0 findings, 0 confirmed, 0 refuted (7 validator runs, 0 failed); no prior Review Findings sections. All five bundles pass before the review: MLXLMTests 695 XCTest + 1211 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 312 (3 runs), CXGrammarTests 7, MLXHuggingFaceMacrosTests 5; 0 failed, 0 skipped.
+    - next: done
+  timestamp: 2026-09-25T18:10:20.776881+00:00
+- actor: claude-code
+  id: 01m3cw5s0p34h09n5ae234r04p
+  text: |-
+    ### finish iteration 1 — review clean
+    - implement: changed — 2 test files (ExecutorPromptCacheRestoreTests.swift, ScriptedModelTestSupport.swift); 3 new reasoning-path tests; no library bug found.
+    - test: green — MLXFoundationModelsTests 312 passed x3; all five bundles pass, 0 failed, 0 skipped; only the known `missing creator for mutated node` warning.
+    - commit: d788a12 test(prompt-cache): send reasoning turns through the executor prompt cache
+    - review: clean — review sha HEAD~1..HEAD, 0 findings.
+  timestamp: 2026-09-25T18:10:23.382728+00:00
+position_column: done
+position_ordinal: ffaa80
 title: Test the prompt cache path of runReasoning (restore, plan, commit)
 ---
 ## What
@@ -49,11 +65,11 @@ What to test:
 
 ## Acceptance Criteria
 
-- [ ] A test runs one reasoning turn through `Executor.respond` and the coverage of `runReasoning` is more than 0.
-- [ ] A test proves that turn 2 in memory has `reusedTokenCount > 0` on the reasoning path.
-- [ ] A test proves that turn 2 from disk has `reusedTokenCount > 0` and that no spilled file stays after the turn.
-- [ ] A test proves that a corrupt spilled file gives `reusedTokenCount == 0` and a successful turn.
-- [ ] All five unit bundles pass.
+- [x] A test runs one reasoning turn through `Executor.respond` and the coverage of `runReasoning` is more than 0.
+- [x] A test proves that turn 2 in memory has `reusedTokenCount > 0` on the reasoning path.
+- [x] A test proves that turn 2 from disk has `reusedTokenCount > 0` and that no spilled file stays after the turn.
+- [x] A test proves that a corrupt spilled file gives `reusedTokenCount == 0` and a successful turn.
+- [x] All five unit bundles pass.
 
 ## Tests
 
