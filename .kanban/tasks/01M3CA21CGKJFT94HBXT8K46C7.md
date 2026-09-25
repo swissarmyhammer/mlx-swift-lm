@@ -57,8 +57,21 @@ comments:
     - evidence: swift build --build-tests (only the known warning "missing creator for mutated node"); MLXLMTests 3 runs, each 696 XCTest + 1222 Swift Testing, 0 failures, 0 skipped; MLXGuidedGenerationTests 70, MLXFoundationModelsTests 323, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5, all pass.
     - next: /commit
   timestamp: 2026-09-25T23:56:41.476848+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3dg17pqdhchdnzg0cdt0m28
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD — 0 findings (0 confirmed, 0 refuted); all prior findings checked
+    - next: none
+
+    ### finish iteration 2 — clean
+    - implement: changed (renamed the two factory functions of Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift)
+    - test: green (MLXLMTests 3 runs 696 + 1222, other four bundles pass)
+    - commit: 91ad721
+    - review: clean (0 findings)
+  timestamp: 2026-09-25T23:57:26.103463+00:00
+position_column: done
+position_ordinal: ffb480
 title: Test the rejections of the saved CacheList parser and of a CacheList template restore
 ---
 ## What
