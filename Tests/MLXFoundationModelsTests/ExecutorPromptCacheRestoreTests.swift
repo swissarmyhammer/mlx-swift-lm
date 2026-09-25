@@ -510,11 +510,23 @@ private enum CommittedTurn: PromptCacheSpoolFixtures {
     /// Stands in for the token that the render writes where the model wrote ``generatedOnly``.
     static let renderedOnly = 71
 
+    /// Stands in for the tokens of the conversation before the model turn.
+    static let conversationToken = 10
+
+    /// Stands in for the generation prompt that opens the model turn.
+    static let generationPromptToken = 11
+
+    /// Stands in for the token that opens the tool response.
+    static let toolResponseOpenToken = 20
+
+    /// Stands in for the result that the tool response carries.
+    static let toolResultToken = 21
+
     /// The render of the last pass. It ends at the generation prompt.
-    static let previousRender = [10, 11]
+    static let previousRender = [conversationToken, generationPromptToken]
 
     /// The tool response that the next render adds after the commit.
-    static let toolResponse = [20, 21]
+    static let toolResponse = [toolResponseOpenToken, toolResultToken]
 
     /// The tokens of the entry: the last render and the turn that the model wrote.
     static let ledger = previousRender + [generatedOnly, commit]
