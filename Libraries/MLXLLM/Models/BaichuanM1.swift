@@ -144,7 +144,7 @@ class BaichuanM1Attention: Module {
                 let convCache = cache[0] as! MambaCache
                 convCache[0] = kInit[0..., 0..., (L - 1)..., 0...]
                 convCache[1] = vInit[0..., 0..., (L - 1)..., 0...]
-                convCache.advancePosition(by: L)
+                convCache.advance(L)
             }
         }
 

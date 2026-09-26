@@ -1502,7 +1502,7 @@ enum OffsetCacheKind: String, CaseIterable, CustomTestStringConvertible, Sendabl
         switch self {
         case .mamba:
             let mamba = try #require(try CacheKind.mamba.makeFilled() as? MambaCache)
-            mamba.advancePosition(by: savedOffset)
+            mamba.advance(savedOffset)
             return mamba
         case .arrays:
             let arrays = try #require(try CacheKind.arrays.makeFilled() as? ArraysCache)

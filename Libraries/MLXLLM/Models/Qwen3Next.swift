@@ -252,7 +252,7 @@ public final class Qwen3NextGatedDeltaNet: Module {
         if let cache {
             cache[0] = newConvState
             cache[1] = newRecState
-            cache.advancePosition(by: inputs.dim(1))
+            cache.advance(inputs.dim(1))
         }
         return output
     }
@@ -690,7 +690,7 @@ public class Qwen3NextModelInner: Module {
                 let mambaCache = mambaCaches[layerIndex]!
                 mambaCache[0] = outputs[1 + 2 * stateIndex]
                 mambaCache[1] = outputs[2 + 2 * stateIndex]
-                mambaCache.advancePosition(by: 1)
+                mambaCache.advance(1)
             }
 
             pendingAttention = []

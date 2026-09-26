@@ -524,7 +524,6 @@ class FalconH1Mixer: Module {
         if let cache = cache {
             cache[1] = state
             cache.advance(y.dim(1))
-            cache.offset += y.dim(1)
         }
 
         if let norm = norm {

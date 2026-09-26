@@ -327,7 +327,7 @@ class JambaMambaMixer: Module {
         if let cache = cache {
             cache[0] = contiguous(newConvState)
             cache[1] = newSsmState
-            cache.advancePosition(by: x.dim(1))
+            cache.advance(x.dim(1))
         }
 
         return output

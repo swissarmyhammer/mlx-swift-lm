@@ -381,14 +381,14 @@ struct KVCacheConfigurationTests {
         #expect(storage.processedTokenCount == 3)
         let recurrent = try #require(storage.cache[0] as? MambaCache)
         let attention = try #require(storage.cache[1] as? KVCacheSimple)
-        #expect(recurrent.offset == 0)
+        #expect(recurrent.offset == storage.processedTokenCount)
         #expect(attention.offset == 3)
         #expect(storage.nativeAttentionOffsetsAreAligned)
 
         _ = iterator.next()
 
         #expect(storage.processedTokenCount == 4)
-        #expect(recurrent.offset == 0)
+        #expect(recurrent.offset == storage.processedTokenCount)
         #expect(attention.offset == 4)
         #expect(storage.nativeAttentionOffsetsAreAligned)
     }

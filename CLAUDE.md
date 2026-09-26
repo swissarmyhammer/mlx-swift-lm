@@ -99,6 +99,24 @@ set `MLX_ENABLE_TF32=1` for a test run.
 builds the test targets also. Use it to find compile errors and warnings in the
 test targets quickly, and to make the bundles that step 2 above runs.
 
+## After an upstream merge
+
+In this fork, `ArraysCache.advance(_:)` also moves `offset` (upstream moves only
+`lengths` and `leftPadding`). The prompt cache keeps a cache only when each
+cache offset equals the length of its token ledger, thus a recurrent layer must
+count its tokens one time. After a merge from `upstream/main`:
+
+1. Search the merged models in `Libraries/MLXLLM/Models` and
+   `Libraries/MLXVLM/Models` for `advance(` followed by a manual
+   `offset +=` on the same cache. Delete the manual line. Upstream FalconH1 had
+   such a line.
+2. Add each new model type whose `newCache` makes a `MambaCache` or an
+   `ArraysCache` to `HybridRecurrentCacheOffsetTests`.
+3. Run `HybridRecurrentCacheOffsetTests` (in `MLXLMTests`) and the three
+   Qwen3.8 suites of `IntegrationTesting`: `Qwen35SessionPromptCacheTests`,
+   `Qwen35AgenticPromptCacheAssessmentTests` and
+   `PromptCacheSpoolCostAssessmentTests`.
+
 ## Before you commit
 
 `.pre-commit-config.yaml` runs `swift-format` on every Swift file:

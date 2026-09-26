@@ -701,7 +701,7 @@ public enum Qwen35Language {
 
             if let cache {
                 cache[1] = state
-                cache.advancePosition(by: S)
+                cache.advance(S)
             }
 
             let gated = norm(out, gate: z)

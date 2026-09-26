@@ -424,17 +424,31 @@ struct Qwen35MTPRegistrationTests {
 }
 
 /// The JSON of a small Qwen 3.5 text configuration. Shared with
-/// `Qwen35RecurrentCachePositionTests`, thus one fixture serves both suites.
+/// `Qwen35RecurrentCachePositionTests` and `HybridRecurrentCacheOffsetTests`, thus one fixture
+/// serves each suite.
+///
+/// - Parameters:
+///   - mtpLayers: The number of multi-token prediction layers.
+///   - mtpUseDedicatedEmbeddings: Whether the prediction layers have their own embeddings.
+///   - numExperts: The number of experts of each MoE block, or 0 for a dense model.
+///   - expertsPerToken: The number of experts that each token uses in an MoE block.
+///   - hiddenLayers: The number of decoder layers.
+///   - fullAttentionInterval: One layer of each interval is a full-attention layer, and each
+///     other layer is a linear (recurrent) layer. 1 makes every layer a full-attention layer.
+/// - Returns: The JSON text.
 func qwen35TextConfigJSON(
     mtpLayers: Int,
     mtpUseDedicatedEmbeddings: Bool = false,
-    numExperts: Int = 0
+    numExperts: Int = 0,
+    expertsPerToken: Int = 1,
+    hiddenLayers: Int = 1,
+    fullAttentionInterval: Int = 1
 ) -> String {
     """
     {
       "model_type": "qwen3_5_text",
       "hidden_size": 16,
-      "num_hidden_layers": 1,
+      "num_hidden_layers": \(hiddenLayers),
       "intermediate_size": 32,
       "num_attention_heads": 2,
       "num_key_value_heads": 1,
@@ -451,11 +465,11 @@ func qwen35TextConfigJSON(
       "max_position_embeddings": 64,
       "tie_word_embeddings": true,
       "attention_bias": false,
-      "full_attention_interval": 1,
+      "full_attention_interval": \(fullAttentionInterval),
       "mtp_num_hidden_layers": \(mtpLayers),
       "mtp_use_dedicated_embeddings": \(mtpUseDedicatedEmbeddings),
       "num_experts": \(numExperts),
-      "num_experts_per_tok": \(numExperts == 0 ? 0 : 1),
+      "num_experts_per_tok": \(numExperts == 0 ? 0 : expertsPerToken),
       "moe_intermediate_size": 16,
       "shared_expert_intermediate_size": 16,
       "rope_parameters": {
@@ -468,10 +482,19 @@ func qwen35TextConfigJSON(
 }
 
 private func qwen35VLMConfigJSON(mtpLayers: Int) -> String {
+    qwen35VLMConfigJSON(textConfigJSON: qwen35TextConfigJSON(mtpLayers: mtpLayers))
+}
+
+/// The JSON of a small Qwen 3.5 vision-language configuration. Shared with
+/// `HybridRecurrentCacheOffsetTests`.
+///
+/// - Parameter textConfigJSON: The JSON of the text configuration, from `qwen35TextConfigJSON`.
+/// - Returns: The JSON text, with a tiny vision tower.
+func qwen35VLMConfigJSON(textConfigJSON: String) -> String {
     """
     {
       "model_type": "qwen3_5",
-      "text_config": \(qwen35TextConfigJSON(mtpLayers: mtpLayers)),
+      "text_config": \(textConfigJSON),
       "vision_config": {
         "model_type": "qwen3_5_vit",
         "depth": 1,
@@ -488,11 +511,20 @@ private func qwen35VLMConfigJSON(mtpLayers: Int) -> String {
     """
 }
 
-private func qwen35WrappedTextConfigJSON(modelType: String) -> String {
+/// The JSON of a Qwen 3.5 configuration that wraps a small text configuration without a vision
+/// tower. Shared with `HybridRecurrentCacheOffsetTests`.
+///
+/// - Parameters:
+///   - modelType: The model type of the wrapper.
+///   - textConfigJSON: The JSON of the text configuration.
+/// - Returns: The JSON text.
+func qwen35WrappedTextConfigJSON(
+    modelType: String, textConfigJSON: String = qwen35TextConfigJSON(mtpLayers: 1)
+) -> String {
     """
     {
       "model_type": "\(modelType)",
-      "text_config": \(qwen35TextConfigJSON(mtpLayers: 1))
+      "text_config": \(textConfigJSON)
     }
     """
 }

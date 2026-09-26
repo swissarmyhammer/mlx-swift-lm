@@ -723,16 +723,77 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
         ])
 }
 
-@Test func testArraysCacheAdvanceUpdatesSequenceMetadataOnly() throws {
-    let cache = ArraysCache(size: 2, leftPadding: [3, 5])
-    cache.offset = 7
-    cache.prepare(lengths: [4, 6])
+/// In this fork, `ArraysCache.advance(_:)` also moves `offset`. Upstream moves only the batch
+/// bookkeeping. The prompt cache of this fork compares the offset of each cache with the length
+/// of its token ledger, thus a recurrent cache must count its tokens as an attention cache does.
+@Test func testArraysCacheAdvanceMovesOffsetAndSequenceMetadata() throws {
+    let slotCount = 2
+    let startOffset = 7
+    let leftPadding = [3, 5]
+    let lengths = [4, 6]
+    let fedTokenCount = 2
+    let cache = ArraysCache(size: slotCount, leftPadding: leftPadding)
+    cache.offset = startOffset
+    cache.prepare(lengths: lengths)
 
-    cache.advance(2)
+    cache.advance(fedTokenCount)
 
-    #expect(cache.offset == 7)
-    #expect(cache.leftPaddingValues == [1, 3])
-    #expect(cache.lengthsValues == [2, 4])
+    #expect(cache.offset == startOffset + fedTokenCount)
+    #expect(cache.leftPaddingValues == leftPadding.map { $0 - fedTokenCount })
+    #expect(cache.lengthsValues == lengths.map { $0 - fedTokenCount })
+}
+
+/// A hybrid layer of a prefill and a few decode steps, without a model.
+private enum RecurrentAdvanceFixture {
+    /// The number of tokens that the prefill feeds.
+    static let prefillTokenCount = 5
+
+    /// The number of single-token decode steps that follow the prefill.
+    static let decodeStepCount = 3
+
+    /// Feeds `tokenCount` tokens through a hybrid layer the way a model layer does: the
+    /// recurrent cache takes new conv and recurrent states and then one `advance`, and the
+    /// attention cache takes one `update(keys:values:)`.
+    ///
+    /// - Parameters:
+    ///   - tokenCount: The number of tokens that the layer feeds.
+    ///   - recurrent: The recurrent cache of the layer.
+    ///   - attention: The attention cache of the layer.
+    static func feed(tokenCount: Int, recurrent: MambaCache, attention: KVCacheSimple) {
+        recurrent[0] = MLXArray.zeros([1, 1, 1])
+        recurrent[1] = MLXArray.zeros([1, 1, 1])
+        recurrent.advance(tokenCount)
+        let block = MLXArray.zeros([1, 1, tokenCount, 1])
+        _ = attention.update(keys: block, values: block)
+    }
+}
+
+@Test func testMambaCacheAdvanceMovesOffsetByTheTokenCount() throws {
+    let cache = MambaCache()
+
+    cache.advance(RecurrentAdvanceFixture.prefillTokenCount)
+
+    #expect(cache.offset == RecurrentAdvanceFixture.prefillTokenCount)
+}
+
+/// A layer that calls `advance` and then also moves the offset by hand counts each token two
+/// times. This test fails for such a layer.
+@Test func testLayerStyleAdvanceCountsEachTokenOnceOverAPrefillAndDecodeSteps() throws {
+    let recurrent = MambaCache()
+    let attention = KVCacheSimple()
+    let layer = CacheList(recurrent, attention)
+
+    RecurrentAdvanceFixture.feed(
+        tokenCount: RecurrentAdvanceFixture.prefillTokenCount, recurrent: recurrent,
+        attention: attention)
+    for _ in 0 ..< RecurrentAdvanceFixture.decodeStepCount {
+        RecurrentAdvanceFixture.feed(tokenCount: 1, recurrent: recurrent, attention: attention)
+    }
+
+    let total = RecurrentAdvanceFixture.prefillTokenCount + RecurrentAdvanceFixture.decodeStepCount
+    #expect(recurrent.offset == total)
+    #expect(attention.offset == total)
+    #expect(layer.offset == total)
 }
 
 @Test func testArraysCacheMaskUsesLengthsWhenLeftPaddingIsAbsent() throws {

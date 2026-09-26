@@ -346,7 +346,7 @@ final class Qwen35GatedDeltaNet: Module {
                     recurrentState: checkpoint.recurrent,
                     advancedBy: checkpointAfter)
             }
-            cache.advancePosition(by: inputs.dim(1))
+            cache.advance(inputs.dim(1))
         }
         return out
     }
@@ -787,7 +787,7 @@ final class Qwen35DecoderLayer: Module {
         let out = compiledLinearLayer(self, [x, convState, recState])
         cache[0] = out[1]
         cache[1] = out[2]
-        cache.advancePosition(by: 1)
+        cache.advance(1)
         return out[0]
     }
 
@@ -1044,7 +1044,7 @@ public class Qwen35TextModelInner: Module {
                 let mambaCache = mambaCaches[layerIndex]!
                 mambaCache[0] = outputs[1 + 2 * i]
                 mambaCache[1] = outputs[2 + 2 * i]
-                mambaCache.advancePosition(by: 1)
+                mambaCache.advance(1)
             }
 
             pendingAttention = []

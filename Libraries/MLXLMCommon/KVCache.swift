@@ -1521,13 +1521,15 @@ public class ArraysCache: BaseKVCache {
         leftPadding = nil
     }
 
-    /// Moves the batch bookkeeping of this cache past `N` tokens.
+    /// Moves this cache past `N` tokens that the layer fed through it.
     ///
     /// This decreases `lengths` and `leftPadding` by `N`, as `ArraysCache.advance` of
-    /// mlx-lm does. It does NOT move `offset`. A layer that feeds tokens through a
-    /// ``MambaCache`` must call ``MambaCache/advancePosition(by:)``, which also moves
-    /// `offset`. The prompt cache keeps a cache only when its offset is the length of the
-    /// token ledger, thus a recurrent cache whose offset stays at 0 starts each round cold.
+    /// mlx-lm does, AND increases `offset` by `N`. The offset is the number of tokens that
+    /// the cache holds. The prompt cache keeps a cache only when its offset is the length of
+    /// the token ledger, thus a recurrent cache whose offset stays at 0 starts each round
+    /// cold. Upstream moves only `lengths` and `leftPadding`, because upstream has no such
+    /// check. A layer calls this one time for each forward pass, and it must not also move
+    /// `offset` itself.
     ///
     /// - Parameter N: the number of tokens the layer fed.
     public func advance(_ N: Int) {
@@ -1537,6 +1539,7 @@ public class ArraysCache: BaseKVCache {
         if let currentLeftPadding = leftPadding {
             leftPadding = currentLeftPadding - N
         }
+        offset += N
     }
 
     public var currentLengths: MLXArray? {
@@ -1644,21 +1647,6 @@ public class MambaCache: ArraysCache {
 
     public init(leftPadding: [Int]? = nil) {
         super.init(size: 2, leftPadding: leftPadding)
-    }
-
-    /// Moves this cache past `tokenCount` tokens the layer fed through it.
-    ///
-    /// The conv and recurrent state already hold those tokens. This moves the
-    /// batch bookkeeping of ``ArraysCache/advance(_:)`` AND the position
-    /// `offset`, thus a prompt cache can compare this cache with the attention
-    /// caches of the same model. A recurrent cache whose position stays at zero
-    /// never agrees with its token ledger, and the model starts every round
-    /// cold.
-    ///
-    /// - Parameter tokenCount: the number of tokens the layer fed.
-    public func advancePosition(by tokenCount: Int) {
-        advance(tokenCount)
-        offset += tokenCount
     }
 
     /// Save the recurrent state at the last unconditionally committed token

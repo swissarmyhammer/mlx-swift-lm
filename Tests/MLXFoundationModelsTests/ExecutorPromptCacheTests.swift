@@ -535,7 +535,7 @@ struct ExecutorPromptCacheTests {
     /// layer places it after `position` tokens.
     private func recurrentCache(at position: Int) -> MambaCache {
         let cache = MambaCache()
-        cache.advancePosition(by: position)
+        cache.advance(position)
         return cache
     }
 
@@ -769,7 +769,7 @@ struct ExecutorPromptCacheTests {
                 model: ScriptedLanguageModel(rounds: []), parameters: GenerateParameters(),
                 protocolRules: [SplicingRule()]))
         // The pass feeds the two-token tail and generates one token.
-        recurrent.advancePosition(by: 2 + 1)
+        recurrent.advance(2 + 1)
 
         let committed = planned.committed(generatedTokens: [30])
 

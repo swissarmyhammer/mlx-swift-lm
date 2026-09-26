@@ -29,9 +29,33 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     case baichuanM1
     case baichuanM1ShortWindow
     case falconH1
+    case qwen3Next
+    case qwen35Text
+    case qwen35
+    case qwen35MoE
+    case qwen35VL
+    case qwen35MoEVL
 
     /// The seed of the initializer weights of each tiny model.
     private static let weightSeed: UInt64 = 43
+
+    /// The number of decoder layers of each tiny Qwen 3.5 model.
+    private static let qwen35LayerCount = 4
+
+    /// One layer of each two is a full-attention layer, thus layers 0 and 2 of each tiny Qwen 3.5
+    /// model are linear (recurrent) layers, and layers 1 and 3 are attention layers.
+    private static let qwen35FullAttentionInterval = 2
+
+    /// The number of experts of each MoE block of the tiny Qwen 3.5 MoE models.
+    private static let qwen35ExpertCount = 4
+
+    /// The number of experts that each token uses in the tiny Qwen 3.5 MoE models. The MoE block
+    /// normalizes the scores of the chosen experts, and a sum over one expert stops the GPU
+    /// reduction with an assertion, thus each token uses two experts.
+    private static let qwen35ExpertsPerToken = 2
+
+    /// The model type of the Qwen 3.5 checkpoints.
+    private static let qwen35ModelType = "qwen3_5"
 
     /// Makes the tiny model with fixed initializer weights.
     ///
@@ -72,7 +96,57 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
                 try Self.decode(BaichuanM1Configuration.self, Self.baichuanM1ShortWindowJSON))
         case .falconH1:
             return FalconH1Model(try Self.decode(FalconH1Configuration.self, Self.falconH1JSON))
+        case .qwen3Next:
+            return Qwen3NextModel(try Qwen3NextCompiledDecodeTests.configuration())
+        case .qwen35Text:
+            return MLXLLM.Qwen35TextModel(
+                try Self.decode(MLXLLM.Qwen35TextConfiguration.self, Self.qwen35TextJSON()))
+        case .qwen35:
+            return MLXLLM.Qwen35Model(
+                try Self.decode(MLXLLM.Qwen35Configuration.self, Self.qwen35WrappedJSON()))
+        case .qwen35MoE:
+            return MLXLLM.Qwen35MoEModel(
+                try Self.decode(
+                    MLXLLM.Qwen35Configuration.self,
+                    Self.qwen35WrappedJSON(experts: Self.qwen35ExpertCount)))
+        case .qwen35VL:
+            return MLXVLM.Qwen35(
+                try Self.decode(MLXVLM.Qwen35Configuration.self, Self.qwen35VLJSON()))
+        case .qwen35MoEVL:
+            return MLXVLM.Qwen35MoE(
+                try Self.decode(
+                    MLXVLM.Qwen35Configuration.self,
+                    Self.qwen35VLJSON(experts: Self.qwen35ExpertCount)))
         }
+    }
+
+    /// The JSON of a tiny Qwen 3.5 text configuration with linear layers 0 and 2 and attention
+    /// layers 1 and 3.
+    ///
+    /// - Parameter experts: The number of experts of each MoE block, or 0 for a dense model.
+    /// - Returns: The JSON text.
+    private static func qwen35TextJSON(experts: Int = 0) -> String {
+        qwen35TextConfigJSON(
+            mtpLayers: 0, numExperts: experts, expertsPerToken: qwen35ExpertsPerToken,
+            hiddenLayers: qwen35LayerCount, fullAttentionInterval: qwen35FullAttentionInterval)
+    }
+
+    /// The JSON of a tiny `qwen3_5` text-only configuration, which wraps ``qwen35TextJSON(experts:)``.
+    ///
+    /// - Parameter experts: The number of experts of each MoE block, or 0 for a dense model.
+    /// - Returns: The JSON text.
+    private static func qwen35WrappedJSON(experts: Int = 0) -> String {
+        qwen35WrappedTextConfigJSON(
+            modelType: qwen35ModelType, textConfigJSON: qwen35TextJSON(experts: experts))
+    }
+
+    /// The JSON of a tiny `qwen3_5` vision-language configuration, which wraps
+    /// ``qwen35TextJSON(experts:)`` and a tiny vision tower. Only the text runs.
+    ///
+    /// - Parameter experts: The number of experts of each MoE block, or 0 for a dense model.
+    /// - Returns: The JSON text.
+    private static func qwen35VLJSON(experts: Int = 0) -> String {
+        qwen35VLMConfigJSON(textConfigJSON: qwen35TextJSON(experts: experts))
     }
 
     /// Makes a BaichuanM1 model whose short-convolution weights are not zero.
@@ -249,12 +323,35 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
         """
 }
 
+/// The caches of one run of a tiny model, and the model state that goes with them.
+///
+/// The vision-language Qwen 3.5 models keep their M-RoPE anchor in the model state, and they
+/// refuse to continue warm caches without it. Each call thus gives the state of the last call
+/// back to the model, as the token iterator does.
+private final class HybridRun {
+    /// The caches, one for each layer that has a cache.
+    let caches: [KVCache]
+
+    /// The model state that the last call gave, or the state that a prompt cache file held.
+    var state: LMOutput.State?
+
+    /// Makes a run.
+    ///
+    /// - Parameters:
+    ///   - caches: The caches of the run.
+    ///   - state: The model state that goes with the caches.
+    init(caches: [KVCache], state: LMOutput.State? = nil) {
+        self.caches = caches
+        self.state = state
+    }
+}
+
 /// Tests that each recurrent layer of a tiny hybrid model moves the offset of its `MambaCache`.
 ///
-/// The recurrent layers called `ArraysCache.advance(_:)`, which moves only the batch bookkeeping.
-/// The offset of each `MambaCache` thus stayed at 0, and the executor prompt cache refused the
-/// caches of these models in memory and on disk. Each test runs on each model of
-/// ``HybridRecurrentModelFixture``.
+/// Before, the recurrent layers of these models moved only the batch bookkeeping of their
+/// `MambaCache`. The offset of each `MambaCache` thus stayed at 0, and the executor prompt cache
+/// refused the caches of these models in memory and on disk. Now `ArraysCache.advance(_:)` also
+/// moves the offset. Each test runs on each model of ``HybridRecurrentModelFixture``.
 ///
 /// The sliding-window tests run on the BaichuanM1 models. BaichuanM1 gave the mask of the
 /// global-attention layers also to its sliding-window layers, thus a prefill longer than the
@@ -293,18 +390,30 @@ struct HybridRecurrentCacheOffsetTests {
 
     // MARK: - Helpers
 
-    /// Runs tokens into caches and gives back the logits of the last position.
+    /// Makes a run with the fresh caches of the model and no model state.
+    ///
+    /// - Parameter model: The model.
+    /// - Returns: The run.
+    /// - Throws: The error of the cache factory of the model.
+    private static func newRun(_ model: any LanguageModel) throws -> HybridRun {
+        HybridRun(caches: try model.newCache(parameters: nil))
+    }
+
+    /// Runs tokens into the caches of a run and gives back the logits of the last position. The
+    /// model state that the call gives goes back into the run.
     ///
     /// - Parameters:
     ///   - model: The model.
     ///   - tokens: The tokens.
-    ///   - caches: The caches to fill.
+    ///   - run: The run whose caches the call fills.
     /// - Returns: The logits, with shape `(1, vocabulary)`.
     private static func lastLogits(
-        _ model: any LanguageModel, _ tokens: [Int32], caches: [KVCache]
+        _ model: any LanguageModel, _ tokens: [Int32], run: HybridRun
     ) -> MLXArray {
-        let logits = model(MLXArray(tokens).expandedDimensions(axis: 0), cache: caches)
-        let last = logits[0..., -1, 0...]
+        let input = LMInput.Text(tokens: MLXArray(tokens).expandedDimensions(axis: 0))
+        let output = model(input, cache: run.caches, state: run.state)
+        run.state = output.state
+        let last = output.logits[0..., -1, 0...]
         eval(last)
         return last
     }
@@ -350,6 +459,44 @@ struct HybridRecurrentCacheOffsetTests {
         }
     }
 
+    /// Records an issue unless the plan for the next prompt reuses exactly the whole ledger of
+    /// `prompt` from `caches` and feeds only `promptTail`.
+    ///
+    /// - Parameters:
+    ///   - caches: The caches after a prefill of `prompt`.
+    ///   - label: The text that names the check in the issue.
+    private static func expectReuseExtendsTheLedger(_ caches: [KVCache], _ label: String) {
+        let nextPrompt = (prompt + promptTail).map(Int.init)
+
+        let reuse = reconcilePromptCache(
+            promptTokens: nextPrompt, cachedTokens: prompt.map(Int.init), caches: caches)
+
+        #expect(
+            reuse
+                == PromptCacheReuse(
+                    suffixStart: prompt.count, representedTokens: nextPrompt, kind: .extend),
+            "\(label)")
+    }
+
+    /// Writes the caches and the model state of a run to a prompt cache file, and reads the file
+    /// into fresh caches of the model.
+    ///
+    /// - Parameters:
+    ///   - run: The run to write.
+    ///   - model: The model that makes the fresh caches.
+    /// - Returns: The restored run, with the caches and the model state of the file.
+    /// - Throws: The error of the write or of the read.
+    private static func savedAndRestored(
+        _ run: HybridRun, model: any LanguageModel
+    ) throws -> HybridRun {
+        let url = PromptCacheTemplateRestoreTests.temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try savePromptCache(url: url, cache: run.caches, state: run.state)
+        let snapshot = try loadPromptCacheSnapshot(
+            url: url, into: model.newCache(parameters: nil))
+        return HybridRun(caches: snapshot.cache, state: snapshot.state)
+    }
+
     // MARK: - Offsets
 
     @Test(
@@ -357,14 +504,14 @@ struct HybridRecurrentCacheOffsetTests {
         arguments: HybridRecurrentModelFixture.allCases)
     func prefillMovesEveryOffset(_ fixture: HybridRecurrentModelFixture) throws {
         let model = try fixture.makeModel()
-        let caches = try model.newCache(parameters: nil)
+        let run = try Self.newRun(model)
 
-        _ = Self.lastLogits(model, Self.prompt, caches: caches)
+        _ = Self.lastLogits(model, Self.prompt, run: run)
 
         #expect(
-            KVCacheTree.leaves(in: caches).contains { $0.cache is MambaCache },
+            KVCacheTree.leaves(in: run.caches).contains { $0.cache is MambaCache },
             "\(fixture): has a recurrent cache")
-        Self.expectOffsets(caches, Self.prompt.count, "\(fixture) after the prefill")
+        Self.expectOffsets(run.caches, Self.prompt.count, "\(fixture) after the prefill")
     }
 
     @Test(
@@ -372,13 +519,13 @@ struct HybridRecurrentCacheOffsetTests {
         arguments: HybridRecurrentModelFixture.allCases)
     func decodeStepsMoveEveryOffset(_ fixture: HybridRecurrentModelFixture) throws {
         let model = try fixture.makeModel()
-        let caches = try model.newCache(parameters: nil)
-        var token = Self.greedyToken(Self.lastLogits(model, Self.prompt, caches: caches))
+        let run = try Self.newRun(model)
+        var token = Self.greedyToken(Self.lastLogits(model, Self.prompt, run: run))
 
         for step in 1 ... Self.decodeStepCount {
-            token = Self.greedyToken(Self.lastLogits(model, [token], caches: caches))
+            token = Self.greedyToken(Self.lastLogits(model, [token], run: run))
             Self.expectOffsets(
-                caches, Self.prompt.count + step, "\(fixture) after decode step \(step)")
+                run.caches, Self.prompt.count + step, "\(fixture) after decode step \(step)")
         }
     }
 
@@ -394,12 +541,11 @@ struct HybridRecurrentCacheOffsetTests {
     func coldPrefillAgreesWithSingleTokenDecode(_ fixture: HybridRecurrentModelFixture) throws {
         let model = try fixture.makeModel()
         let tokens = Self.prompt + Self.promptTail
-        let stepCaches = try model.newCache(parameters: nil)
+        let stepRun = try Self.newRun(model)
         let stepLogits = try #require(
-            tokens.map { Self.lastLogits(model, [$0], caches: stepCaches) }.last,
+            tokens.map { Self.lastLogits(model, [$0], run: stepRun) }.last,
             "\(fixture): logits of the last decode step")
-        let coldLogits = Self.lastLogits(
-            model, tokens, caches: try model.newCache(parameters: nil))
+        let coldLogits = Self.lastLogits(model, tokens, run: try Self.newRun(model))
 
         #expect(
             Self.maxAbsDifference(stepLogits, coldLogits) <= Self.coldTolerance,
@@ -413,18 +559,10 @@ struct HybridRecurrentCacheOffsetTests {
         arguments: HybridRecurrentModelFixture.allCases)
     func liveCachesExtendTheLedger(_ fixture: HybridRecurrentModelFixture) throws {
         let model = try fixture.makeModel()
-        let caches = try model.newCache(parameters: nil)
-        _ = Self.lastLogits(model, Self.prompt, caches: caches)
-        let nextPrompt = (Self.prompt + Self.promptTail).map(Int.init)
+        let run = try Self.newRun(model)
+        _ = Self.lastLogits(model, Self.prompt, run: run)
 
-        let reuse = reconcilePromptCache(
-            promptTokens: nextPrompt, cachedTokens: Self.prompt.map(Int.init), caches: caches)
-
-        #expect(
-            reuse
-                == PromptCacheReuse(
-                    suffixStart: Self.prompt.count, representedTokens: nextPrompt, kind: .extend),
-            "\(fixture): reuse of the live caches")
+        Self.expectReuseExtendsTheLedger(run.caches, "\(fixture): reuse of the live caches")
     }
 
     @Test(
@@ -432,25 +570,24 @@ struct HybridRecurrentCacheOffsetTests {
         arguments: HybridRecurrentModelFixture.allCases)
     func liveCachesContinueTheNextPrompt(_ fixture: HybridRecurrentModelFixture) throws {
         let model = try fixture.makeModel()
-        let caches = try model.newCache(parameters: nil)
-        _ = Self.lastLogits(model, Self.prompt, caches: caches)
+        let run = try Self.newRun(model)
+        _ = Self.lastLogits(model, Self.prompt, run: run)
         let nextPrompt = Self.prompt + Self.promptTail
         let reuse = try #require(
             reconcilePromptCache(
                 promptTokens: nextPrompt.map(Int.init), cachedTokens: Self.prompt.map(Int.init),
-                caches: caches),
+                caches: run.caches),
             "\(fixture): reuse of the live caches")
 
         let warmLogits = Self.lastLogits(
-            model, Array(nextPrompt[reuse.suffixStart...]), caches: caches)
-        let coldLogits = Self.lastLogits(
-            model, nextPrompt, caches: try model.newCache(parameters: nil))
+            model, Array(nextPrompt[reuse.suffixStart...]), run: run)
+        let coldLogits = Self.lastLogits(model, nextPrompt, run: try Self.newRun(model))
 
         #expect(reuse.suffixStart == Self.prompt.count, "\(fixture): suffix start")
         #expect(
             Self.maxAbsDifference(warmLogits, coldLogits) <= Self.coldTolerance,
             "\(fixture): warm and cold logits")
-        Self.expectOffsets(caches, nextPrompt.count, "\(fixture) after the warm continuation")
+        Self.expectOffsets(run.caches, nextPrompt.count, "\(fixture) after the warm continuation")
     }
 
     @Test(
@@ -458,21 +595,16 @@ struct HybridRecurrentCacheOffsetTests {
         arguments: HybridRecurrentModelFixture.allCases)
     func restoredPrefillDecodesAsTheLiveCaches(_ fixture: HybridRecurrentModelFixture) throws {
         let model = try fixture.makeModel()
-        let liveCaches = try model.newCache(parameters: nil)
-        var token = Self.greedyToken(Self.lastLogits(model, Self.prompt, caches: liveCaches))
-        let url = PromptCacheTemplateRestoreTests.temporaryURL()
-        defer { try? FileManager.default.removeItem(at: url) }
-        try savePromptCache(url: url, cache: liveCaches)
-        let restoredCaches = try loadPromptCacheSnapshot(
-            url: url, into: model.newCache(parameters: nil)
-        ).cache
+        let liveRun = try Self.newRun(model)
+        var token = Self.greedyToken(Self.lastLogits(model, Self.prompt, run: liveRun))
+        let restoredRun = try Self.savedAndRestored(liveRun, model: model)
         let coldLogits = Self.lastLogits(
-            model, Self.prompt + [token], caches: try model.newCache(parameters: nil))
+            model, Self.prompt + [token], run: try Self.newRun(model))
 
-        Self.expectOffsets(restoredCaches, Self.prompt.count, "\(fixture) after the restore")
+        Self.expectOffsets(restoredRun.caches, Self.prompt.count, "\(fixture) after the restore")
         for step in 0 ..< Self.decodeStepCount {
-            let liveLogits = Self.lastLogits(model, [token], caches: liveCaches)
-            let restoredLogits = Self.lastLogits(model, [token], caches: restoredCaches)
+            let liveLogits = Self.lastLogits(model, [token], run: liveRun)
+            let restoredLogits = Self.lastLogits(model, [token], run: restoredRun)
             #expect(
                 Self.maxAbsDifference(restoredLogits, liveLogits) <= Self.warmTolerance,
                 "\(fixture) step \(step): restored and live logits")
@@ -484,7 +616,22 @@ struct HybridRecurrentCacheOffsetTests {
             token = Self.greedyToken(liveLogits)
         }
         Self.expectOffsets(
-            restoredCaches, Self.prompt.count + Self.decodeStepCount,
+            restoredRun.caches, Self.prompt.count + Self.decodeStepCount,
             "\(fixture) after the restored decode")
+    }
+
+    /// The executor prompt cache restores a spilled turn from its file and then plans the next
+    /// prompt. The plan must reuse the whole ledger of turn 1, not only a part of it.
+    @Test(
+        "A restored prefill extends exactly the ledger of turn 1 for the next prompt",
+        arguments: HybridRecurrentModelFixture.allCases)
+    func restoredPrefillExtendsExactlyTheLedger(_ fixture: HybridRecurrentModelFixture) throws {
+        let model = try fixture.makeModel()
+        let liveRun = try Self.newRun(model)
+        _ = Self.lastLogits(model, Self.prompt, run: liveRun)
+        let restoredRun = try Self.savedAndRestored(liveRun, model: model)
+
+        Self.expectReuseExtendsTheLedger(
+            restoredRun.caches, "\(fixture): reuse of the restored caches")
     }
 }
