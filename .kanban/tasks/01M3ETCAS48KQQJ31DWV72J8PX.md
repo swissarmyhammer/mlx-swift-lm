@@ -177,8 +177,24 @@ comments:
     - evidence: build only the known warning; MLXLMTests x3: 696 XCTest 0 failures + 1241 Swift Testing passed each run; MLXGuidedGenerationTests 70; MLXFoundationModelsTests 329; CXGrammarTests 7; MLXHuggingFaceMacrosTests 5; 0 skipped. IntegrationTesting TEST BUILD SUCCEEDED; Qwen35SessionPromptCacheTests 3/3 (turn 2 cached 101 of 126, restored 101, warm = uncached "teal"); Qwen35AgenticPromptCacheAssessmentTests 3/3 (rounds 2-5 fed 35/35/36/36, cached 27581/27666/27751/27838 in memory and on disk); PromptCacheSpoolCostAssessmentTests 5/5 (restoredToken=originalToken=15, logit differences 0.0 x 8). All equal to the baseline.
     - next: /commit
   timestamp: 2026-09-26T13:52:36.927309+00:00
-position_column: review
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3ezx7zqwwgd99dm7kgxjvpz
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (256b187) — 0 findings, 0 refuted; every prior finding item is checked
+    - next: move to done
+  timestamp: 2026-09-26T13:54:06.967839+00:00
+- actor: claude-code
+  id: 01m3ezxab1nyz8fpb6fpnjtpyr
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed (KVCacheTests.swift: three new Swift Testing names without the `test` prefix)
+    - test: green (MLXLMTests x3 696 + 1241; 70; 329; 7; 5; 0 skipped; IntegrationTesting build OK; 3 Qwen3.8 suites pass, reuse equal to baseline)
+    - commit: 256b187
+    - review: clean (0 findings)
+  timestamp: 2026-09-26T13:54:09.377291+00:00
+position_column: done
+position_ordinal: ffb880
 title: Make ArraysCache.advance(_:) move offset, remove MambaCache.advancePosition(by:), and prove that every MambaCache model caches (Qwen3.8 first)
 ---
 #prompt-cache
