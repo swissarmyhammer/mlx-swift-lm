@@ -35,8 +35,24 @@ comments:
     - evidence: `swift build --build-tests` exit 0, one known warning (`missing creator for mutated node`). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` 3 runs: each 696 XCTest 0 failures + 1238 Swift Testing passed (1229 + 9 new). MLXGuidedGenerationTests 70 passed, MLXFoundationModelsTests 329 passed, CXGrammarTests 7 passed, MLXHuggingFaceMacrosTests 5 passed. 0 skipped. TextToolCallRecoveryBenchmark passed.
     - next: commit
   timestamp: 2026-09-26T00:50:23.290070+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3dk74r8zmd5tyc77e7j22n7
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` — 0 findings, 0 confirmed, 0 refuted; 7 validators attempted, 0 failed. No prior Review Findings section.
+    - next: done
+  timestamp: 2026-09-26T00:53:05.416816+00:00
+- actor: claude-code
+  id: 01m3dk77219tzv3rk4j1rackjf
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — Libraries/MLXLMCommon/KVCache.swift, Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift, Tests/MLXLMTests/PromptCacheSaveInputTests.swift
+    - test: green — MLXLMTests 3 runs, each 696 XCTest + 1238 Swift Testing, 0 failures; the four other bundles pass (70, 329, 7, 5); 0 skipped; one known build warning
+    - commit: 1e4ccbd
+    - review: clean — review sha HEAD~1..HEAD, 0 findings
+  timestamp: 2026-09-26T00:53:07.777684+00:00
+position_column: done
+position_ordinal: ffb780
 title: Test the prompt cache loader rejections of damaged files and the legacy ArraysCache meta state
 ---
 ## What
@@ -61,11 +77,13 @@ What to test (use `tamperedFile(_:edit:)`):
 - `preparePromptCacheSave(cache: [], state: <state with one array>)` throws (2218).
 - A `MambaCache` whose meta state is `[""]` restores its state arrays into slots 0 and 1 (1610-1612).
 
+Note: line 2428 (the part-count guard, "Invalid cache metadata format") could not fail, because `unflattenMetadata` always gives back three parts. The change removes that dead guard, thus no uncovered line stays there. Lines 2248-2249 (the merge closure) are not reachable, as recorded above.
+
 ## Acceptance Criteria
 
-- [ ] Each uncovered line above is covered, except 2248-2249, which the task records as not reachable.
-- [ ] Each rejection test checks `KVCacheError`.
-- [ ] All five unit bundles pass.
+- [x] Each uncovered line above is covered, except 2248-2249, which the task records as not reachable.
+- [x] Each rejection test checks `KVCacheError`.
+- [x] All five unit bundles pass.
 
 ## Tests
 
