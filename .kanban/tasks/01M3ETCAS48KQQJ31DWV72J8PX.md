@@ -140,7 +140,44 @@ comments:
     - evidence: `swift build --build-tests` only the known warning `missing creator for mutated node`; `xcrun xctest` MLXLMTests x3: 696 XCTest 0 failures + 1241 Swift Testing passed (each run); MLXGuidedGenerationTests 70 passed; MLXFoundationModelsTests 329 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 5 passed; 0 skipped. IntegrationTesting build-for-testing TEST BUILD SUCCEEDED; Qwen35SessionPromptCacheTests 3/3, Qwen35AgenticPromptCacheAssessmentTests 3/3, PromptCacheSpoolCostAssessmentTests 5/5.
     - next: /commit
   timestamp: 2026-09-26T13:25:54.357983+00:00
-position_column: doing
+- actor: claude-code
+  id: 01m3eyb6eate86kk28emasbbcj
+  text: |-
+    ### commit — changed
+    - evidence: 355bcab fix(kv-cache): make ArraysCache.advance(_:) move offset and remove MambaCache.advancePosition(by:)
+    - next: /review v72j8px HEAD~1..HEAD
+  timestamp: 2026-09-26T13:26:46.986508+00:00
+- actor: claude-code
+  id: 01m3eyjj2ksd8ghkvfr3xsr69h
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD — 3 findings (3 confirmed, 1 refuted): Tests/MLXLMTests/KVCacheTests.swift:729, :771, :781 `code-hygiene/idioms-swift` swiftTestingTestCaseNames
+    - next: /implement — drop the `test` prefix of the three new Swift Testing functions
+  timestamp: 2026-09-26T13:30:48.275801+00:00
+- actor: claude-code
+  id: 01m3eyjm8grg57ncegncgq2b90
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed (20 files)
+    - test: green (MLXLMTests x3 696 XCTest + 1241 Swift Testing; 70; 329; 7; 5; 0 skipped; IntegrationTesting build OK; 3 Qwen3.8 suites pass, reuse equal to baseline)
+    - commit: 355bcab
+    - review: findings — 3 × swiftTestingTestCaseNames at KVCacheTests.swift:729, :771, :781
+  timestamp: 2026-09-26T13:30:50.512838+00:00
+- actor: claude-code
+  id: 01m3eyr8fjdrw81c9hgmbmjx5q
+  text: |-
+    ### implement — changed
+    - evidence: Tests/MLXLMTests/KVCacheTests.swift — the three new Swift Testing functions lose the `test` prefix (`arraysCacheAdvanceMovesOffsetAndSequenceMetadata`, `mambaCacheAdvanceMovesOffsetByTheTokenCount`, `layerStyleAdvanceCountsEachTokenOnceOverAPrefillAndDecodeSteps`), as `swiftformat --rules swiftTestingTestCaseNames` writes them. The other `test`-prefixed functions of the file existed before this task; the review skill drops findings that ask to refactor existing tests, and the review reported none on them.
+    - next: /test
+  timestamp: 2026-09-26T13:33:55.058352+00:00
+- actor: claude-code
+  id: 01m3eztg1zbkznq1arxk58hcrv
+  text: |-
+    ### test — green
+    - evidence: build only the known warning; MLXLMTests x3: 696 XCTest 0 failures + 1241 Swift Testing passed each run; MLXGuidedGenerationTests 70; MLXFoundationModelsTests 329; CXGrammarTests 7; MLXHuggingFaceMacrosTests 5; 0 skipped. IntegrationTesting TEST BUILD SUCCEEDED; Qwen35SessionPromptCacheTests 3/3 (turn 2 cached 101 of 126, restored 101, warm = uncached "teal"); Qwen35AgenticPromptCacheAssessmentTests 3/3 (rounds 2-5 fed 35/35/36/36, cached 27581/27666/27751/27838 in memory and on disk); PromptCacheSpoolCostAssessmentTests 5/5 (restoredToken=originalToken=15, logit differences 0.0 x 8). All equal to the baseline.
+    - next: /commit
+  timestamp: 2026-09-26T13:52:36.927309+00:00
+position_column: review
 position_ordinal: '80'
 title: Make ArraysCache.advance(_:) move offset, remove MambaCache.advancePosition(by:), and prove that every MambaCache model caches (Qwen3.8 first)
 ---
@@ -207,3 +244,16 @@ Write a table on this task: for each round/turn, rendered tokens, reused tokens 
 - Use `/tdd` — write failing tests first, then implement to make them pass.
 - Run the Qwen3.8 baseline BEFORE the first code change.
 - Optional follow-up for the user to decide: offer the same change upstream (it is safe there too, and it prevents the same trap for any upstream prompt-cache work).
+
+## Review Findings (2026-09-26 08:26)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 19 file(s) reviewed, 3 not reviewed.
+
+> 3 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M3ETCAS48KQQJ31DWV72J8PX.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M3ETCAS48KQQJ31DWV72J8PX.md` — no validator matches this file
+> - `CLAUDE.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/KVCacheTests.swift:729` `code-hygiene/idioms-swift` — swiftTestingTestCaseNames: Format Swift Testing @Test and @Suite names.
+- [x] `Tests/MLXLMTests/KVCacheTests.swift:771` `code-hygiene/idioms-swift` — swiftTestingTestCaseNames: Format Swift Testing @Test and @Suite names.
+- [x] `Tests/MLXLMTests/KVCacheTests.swift:781` `code-hygiene/idioms-swift` — swiftTestingTestCaseNames: Format Swift Testing @Test and @Suite names.

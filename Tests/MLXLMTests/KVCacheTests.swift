@@ -726,7 +726,7 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 /// In this fork, `ArraysCache.advance(_:)` also moves `offset`. Upstream moves only the batch
 /// bookkeeping. The prompt cache of this fork compares the offset of each cache with the length
 /// of its token ledger, thus a recurrent cache must count its tokens as an attention cache does.
-@Test func testArraysCacheAdvanceMovesOffsetAndSequenceMetadata() throws {
+@Test func arraysCacheAdvanceMovesOffsetAndSequenceMetadata() throws {
     let slotCount = 2
     let startOffset = 7
     let leftPadding = [3, 5]
@@ -768,7 +768,7 @@ private enum RecurrentAdvanceFixture {
     }
 }
 
-@Test func testMambaCacheAdvanceMovesOffsetByTheTokenCount() throws {
+@Test func mambaCacheAdvanceMovesOffsetByTheTokenCount() throws {
     let cache = MambaCache()
 
     cache.advance(RecurrentAdvanceFixture.prefillTokenCount)
@@ -778,7 +778,7 @@ private enum RecurrentAdvanceFixture {
 
 /// A layer that calls `advance` and then also moves the offset by hand counts each token two
 /// times. This test fails for such a layer.
-@Test func testLayerStyleAdvanceCountsEachTokenOnceOverAPrefillAndDecodeSteps() throws {
+@Test func layerStyleAdvanceCountsEachTokenOnceOverAPrefillAndDecodeSteps() throws {
     let recurrent = MambaCache()
     let attention = KVCacheSimple()
     let layer = CacheList(recurrent, attention)
