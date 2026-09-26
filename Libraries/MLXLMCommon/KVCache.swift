@@ -2364,7 +2364,8 @@ public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
 ///   child of a `CacheList`.
 /// - The saved configuration of a layer must be the configuration of its template. For
 ///   example, a `RotatingKVCache` layer must have the window and the kept prefix of its
-///   template, thus a ring never restores into a model that asks for another window.
+///   template, thus a ring never restores into a model that asks for another window. A
+///   `QuantizedKVCache` layer must have the group size and the bit width of its template.
 /// - Every layer is checked before any setter runs, because the cache setters stop the process
 ///   on bad input.
 /// - The function evaluates every array that it read from the file before it returns. The
@@ -2501,8 +2502,14 @@ private enum PromptCacheTemplateRestore {
     /// - The `metaState` setter of a `RotatingKVCache` writes its window and its kept prefix.
     ///   A different saved value thus changes the ring that the model made into a ring of
     ///   another configuration, and the model does not get the window that it asked for.
+    /// - The `metaState` setter of a `QuantizedKVCache` writes its group size and its bit
+    ///   width. A different saved value thus changes the cache that the model made into a cache
+    ///   of another quantization, and the model does not get the quantization that it asked for.
     private static let fixedConfigurationIndices: [String: [Int]] = [
         "RotatingKVCache": [SavedMetaStateIndex.rotatingKeep, SavedMetaStateIndex.rotatingMaxSize],
+        "QuantizedKVCache": [
+            SavedMetaStateIndex.quantizedGroupSize, SavedMetaStateIndex.quantizedBits,
+        ],
         "VarianceNormalizedKVCache": [
             VarianceNormalizedSavedLayout.tileSizeIndex, VarianceNormalizedSavedLayout.keyBitsIndex,
             VarianceNormalizedSavedLayout.valueBitsIndex,

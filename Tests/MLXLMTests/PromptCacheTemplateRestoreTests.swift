@@ -122,6 +122,16 @@ struct PromptCacheTemplateRestoreTests {
     /// The place of the second child of ``CacheKind/cacheList``.
     fileprivate static let cacheListSecondChild = 1
 
+    /// The number of arrays that each filled ``CustomSlotCache`` holds. It is not an array
+    /// count of `KVCacheSimple`.
+    fileprivate static let customSlotCount = 3
+
+    /// The flattened file key of the class name of the first layer, in the class-name part.
+    fileprivate static let firstLayerClassNameKey = "2.0"
+
+    /// A class name that no built-in class and no registry entry uses.
+    fileprivate static let unknownClassName = "UnknownTestCache"
+
     /// The message of the `CacheList` check that finds no valid child count.
     fileprivate static let missingChildCountMessage = "CacheList metaState missing child count"
 
@@ -365,6 +375,56 @@ struct PromptCacheTemplateRestoreTests {
         }
     }
 
+    /// The message of the check that finds a saved configuration value that is not the value of
+    /// the template.
+    ///
+    /// - Parameter className: The saved class name of the layer.
+    /// - Returns: The message.
+    fileprivate static func fixedConfigurationMessage(className: String) -> String {
+        "The saved \(className) configuration is not the configuration of the model cache."
+    }
+
+    /// The message of the check that finds a template that no template restore can write.
+    ///
+    /// - Parameter template: The template.
+    /// - Returns: The message.
+    fileprivate static func unrestorableTemplateMessage(_ template: any KVCache) -> String {
+        "\(type(of: template)) cannot receive a restore into a template."
+    }
+
+    /// Makes a filled ``CustomSlotCache`` or ``RegisteredSlotCache``.
+    ///
+    /// - Parameter cache: The empty cache to fill.
+    /// - Returns: `cache`, which holds ``customSlotCount`` arrays.
+    fileprivate static func filled<Cache: CustomSlotCache>(_ cache: Cache) -> Cache {
+        cache.slots = (0 ..< customSlotCount).map {
+            block(tokenCount: promptTokenCount, seed: firstSeed + UInt64($0))
+        }
+        return cache
+    }
+
+    /// Saves a filled `KVCacheSimple`, then writes a second file whose class name no class uses.
+    ///
+    /// - Returns: The URL of the tampered file. The caller removes it.
+    fileprivate static func fileWithUnknownClassName() throws -> URL {
+        try tamperedFile([try CacheKind.simple.makeFilled()]) { _, metadata in
+            metadata[firstLayerClassNameKey] = unknownClassName
+        }
+    }
+
+    /// Saves caches and reads back the class name that the file writes for the first layer.
+    ///
+    /// - Parameters:
+    ///   - caches: The caches to save.
+    ///   - url: The URL of the file.
+    /// - Returns: The saved class name of the first layer.
+    fileprivate static func savedFirstClassName(_ caches: [any KVCache], url: URL) throws -> String?
+    {
+        try savePromptCache(url: url, cache: caches)
+        let (_, metadata) = try loadArraysAndMetadata(url: url)
+        return metadata[firstLayerClassNameKey]
+    }
+
     // MARK: - Round trip for each cache type
 
     @Test(
@@ -506,10 +566,30 @@ struct PromptCacheTemplateRestoreTests {
         let template = mismatch.makeTemplate()
         let templateMetaState = template.metaState
 
-        #expect(throws: KVCacheError.self) {
+        let error = #expect(throws: KVCacheError.self) {
             try loadPromptCacheSnapshot(url: url, into: [template])
         }
+        #expect(error?.message == Self.fixedConfigurationMessage(className: "RotatingKVCache"))
         #expect(template.metaState == templateMetaState)
+        #expect(template.state.isEmpty)
+    }
+
+    @Test(
+        "A quantized cache does not restore into a quantized cache of another configuration",
+        arguments: QuantizedConfigurationMismatch.allCases)
+    func quantizedConfigurationMismatchThrows(mismatch: QuantizedConfigurationMismatch) throws {
+        let url = Self.temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try savePromptCache(url: url, cache: [try CacheKind.quantized.makeFilled()])
+        let template = mismatch.makeTemplate()
+        let templateMetaState = template.metaState
+
+        let error = #expect(throws: KVCacheError.self) {
+            try loadPromptCacheSnapshot(url: url, into: [template])
+        }
+        #expect(error?.message == Self.fixedConfigurationMessage(className: "QuantizedKVCache"))
+        #expect(template.metaState == templateMetaState)
+        #expect(template.state.isEmpty)
     }
 
     @Test("A DeepSeek-V4 layer with indexer data does not restore into a layer with no indexer")
@@ -653,6 +733,107 @@ struct PromptCacheTemplateRestoreTests {
             message:
                 "The prompt cache holds a CacheList of \(source.children.count) children and the model gave \(templateKinds.count)."
         )
+    }
+
+    // MARK: - Cache classes outside the library
+
+    @Test("A registered cache class saves under its registered name and loads back")
+    func registeredClassRoundTrips() throws {
+        let url = Self.temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = Self.filled(RegisteredSlotCache())
+
+        let className = try Self.savedFirstClassName([source], url: url)
+        let snapshot = try loadPromptCacheSnapshot(url: url)
+
+        #expect(className == RegisteredSlotCache.className)
+        #expect(snapshot.cache.count == 1)
+        let restored = try #require(snapshot.cache.first as? RegisteredSlotCache)
+        Self.expectSameContents(restored, source, "registered cache")
+    }
+
+    @Test("An unregistered cache class saves as KVCache, and its load throws KVCacheError")
+    func unregisteredClassSavesAsSimpleCache() throws {
+        let url = Self.temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let className = try Self.savedFirstClassName([Self.filled(CustomSlotCache())], url: url)
+        let error = #expect(throws: KVCacheError.self) {
+            try loadPromptCacheSnapshot(url: url)
+        }
+
+        #expect(className == "KVCache")
+        #expect(
+            error?.message == "Corrupt prompt cache: invalid KVCacheSimple state or metadata shape."
+        )
+    }
+
+    @Test("The registry check of a built-in part throws for a cache that is not a built-in leaf")
+    func registryValidateRejectsCacheWithoutCheck() throws {
+        let saved = try CacheKind.simple.makeFilled()
+        let caches: [any KVCache] = [
+            CacheList(KVCacheSimple()), CustomSlotCache(), RegisteredSlotCache(),
+        ]
+
+        for cache in caches {
+            let error = #expect(throws: KVCacheError.self) {
+                try KVCacheSerializationRegistry.validate(
+                    state: saved.state, metaState: saved.metaState, for: cache)
+            }
+            #expect(
+                error?.message
+                    == "\(type(of: cache)) is not a built-in cache class that has a check."
+            )
+            #expect(cache.state.isEmpty, "\(type(of: cache)) holds no saved array")
+        }
+    }
+
+    @Test("A template of a class outside the library that is not PromptCacheRestorable throws")
+    func unrestorableTemplateThrows() throws {
+        let cases: [(saved: any KVCache, template: CustomSlotCache)] = [
+            (try CacheKind.simple.makeFilled(), CustomSlotCache()),
+            (Self.filled(RegisteredSlotCache()), RegisteredSlotCache()),
+        ]
+
+        for (saved, template) in cases {
+            let url = Self.temporaryURL()
+            defer { try? FileManager.default.removeItem(at: url) }
+            try savePromptCache(url: url, cache: [saved])
+
+            let error = #expect(throws: KVCacheError.self) {
+                try loadPromptCacheSnapshot(url: url, into: [template])
+            }
+            #expect(error?.message == Self.unrestorableTemplateMessage(template))
+            #expect(template.slots.isEmpty, "\(type(of: template)) holds no saved array")
+        }
+    }
+
+    @Test("A file with an unknown class name throws KVCacheError on the load")
+    func unknownClassNameThrowsOnLoad() throws {
+        let url = try Self.fileWithUnknownClassName()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let error = #expect(throws: KVCacheError.self) {
+            try loadPromptCacheSnapshot(url: url)
+        }
+        #expect(error?.message == "Unknown cache class: \(Self.unknownClassName)")
+    }
+
+    @Test("A file with an unknown class name does not restore into a KVCacheSimple template")
+    func unknownClassNameThrowsOnTemplateRestore() throws {
+        let url = try Self.fileWithUnknownClassName()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let template = KVCacheSimple()
+
+        let error = #expect(throws: KVCacheError.self) {
+            try loadPromptCacheSnapshot(url: url, into: [template])
+        }
+        #expect(
+            error?.message
+                == "The prompt cache holds a \(Self.unknownClassName) layer and the model gave a KVCache cache."
+        )
+        #expect(template.state.isEmpty)
+        #expect(template.offset == 0)
     }
 
     // MARK: - Offset record
@@ -1116,5 +1297,80 @@ enum OffsetCacheKind: String, CaseIterable, CustomTestStringConvertible, Sendabl
             chunked.maybeTrimFront()
             return chunked
         }
+    }
+}
+
+// MARK: - Quantized configuration mismatches
+
+/// One `QuantizedKVCache` template whose configuration is not the configuration of the saved
+/// cache of ``CacheKind/quantized``.
+enum QuantizedConfigurationMismatch: String, CaseIterable, CustomTestStringConvertible, Sendable {
+    /// The template has a smaller group size.
+    case groupSize
+
+    /// The template has a smaller bit width.
+    case bits
+
+    /// The name of the case in the test report.
+    var testDescription: String { rawValue }
+
+    /// The fixture sizes and builders.
+    private typealias Fixture = PromptCacheTemplateRestoreTests
+
+    /// The group size of the ``groupSize`` template. It is smaller than the group size of the
+    /// saved cache (``PromptCacheTemplateRestoreTests/quantizedGroupSize``).
+    private static let otherGroupSize = 32
+
+    /// The bit width of the ``bits`` template. It is smaller than the bit width of the saved
+    /// cache (``PromptCacheTemplateRestoreTests/quantizedBits``).
+    private static let otherBits = 4
+
+    /// Makes the fresh quantized cache that a model of another configuration makes.
+    ///
+    /// - Returns: An empty quantized cache.
+    func makeTemplate() -> QuantizedKVCache {
+        switch self {
+        case .groupSize:
+            QuantizedKVCache(groupSize: Self.otherGroupSize, bits: Fixture.quantizedBits)
+        case .bits:
+            QuantizedKVCache(groupSize: Fixture.quantizedGroupSize, bits: Self.otherBits)
+        }
+    }
+}
+
+// MARK: - Cache classes outside the library
+
+/// A cache class outside the library that no registry entry names, and that is not
+/// `PromptCacheRestorable`. A filled instance holds more arrays than a `KVCacheSimple`.
+class CustomSlotCache: BaseKVCache {
+    /// The arrays of the cache.
+    var slots: [MLXArray] = []
+
+    /// The arrays of the cache, as a save reads them.
+    override var state: [MLXArray] {
+        get { slots }
+        set { slots = newValue }
+    }
+}
+
+/// A cache class outside the library that `KVCacheSerializationRegistry` names, and that is not
+/// `PromptCacheRestorable`.
+final class RegisteredSlotCache: CustomSlotCache {
+    /// The class name that the registry holds for this class.
+    static let className = "RegisteredSlotCache"
+
+    /// Registers the class one time, before the first instance exists.
+    private static let registration: Void = KVCacheSerializationRegistry.register(
+        RegisteredSlotCache.self, className: className
+    ) { state, _ in
+        let cache = RegisteredSlotCache()
+        cache.slots = state
+        return cache
+    }
+
+    /// Makes an empty cache, after the registration of the class.
+    override init() {
+        _ = Self.registration
+        super.init()
     }
 }
