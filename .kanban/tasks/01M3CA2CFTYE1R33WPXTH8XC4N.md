@@ -37,8 +37,31 @@ comments:
     - evidence: `swift build --build-tests` — only the known warning `missing creator for mutated node`. `xcrun xctest` MLXLMTests 3 runs: each 696 XCTest 0 failures + 1229 Swift Testing passed (was 1222; 7 new cases). MLXGuidedGenerationTests 70 passed, MLXFoundationModelsTests 323 passed, CXGrammarTests 7 passed, MLXHuggingFaceMacrosTests 5 XCTest 0 failures. 0 skipped.
     - next: commit
   timestamp: 2026-09-26T00:18:09.110626+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m3dh8273zdz2ms2gjrfshkn1
+  text: |-
+    ### commit — changed
+    - evidence: 7c49a44 fix(prompt-cache): refuse a template restore into a QuantizedKVCache of another quantization
+    - next: review HEAD~1..HEAD. The three acceptance boxes are ticked.
+  timestamp: 2026-09-26T00:18:38.435504+00:00
+- actor: claude-code
+  id: 01m3dhd7z405hysjs1v4n8921m
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD — 0 findings, 0 confirmed, 0 refuted (7 validators attempted, 0 failed). No prior findings.
+    - next: done
+  timestamp: 2026-09-26T00:21:28.164312+00:00
+- actor: claude-code
+  id: 01m3dhdb237mwg2p1d292kjezr
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — fix `fixedConfigurationIndices` (add `QuantizedKVCache` group size and bit width) in Libraries/MLXLMCommon/KVCache.swift; 7 new test cases and a message check on the ring mismatch test in Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift
+    - test: green — MLXLMTests 3 runs (696 XCTest + 1229 Swift Testing, 0 failures), MLXGuidedGenerationTests 70, MLXFoundationModelsTests 323, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5; 0 skipped; only the known warning `missing creator for mutated node`
+    - commit: 7c49a44
+    - review: clean (0 findings)
+  timestamp: 2026-09-26T00:21:31.331651+00:00
+position_column: done
+position_ordinal: ffb580
 title: Test the template restore rejections and the registry class name fallback
 ---
 ## What
@@ -65,9 +88,9 @@ What to test:
 
 ## Acceptance Criteria
 
-- [ ] Each uncovered line above is covered, or the task records which line no public input reaches.
-- [ ] Each rejection test checks `KVCacheError` and that the template keeps its state.
-- [ ] All five unit bundles pass.
+- [x] Each uncovered line above is covered, or the task records which line no public input reaches.
+- [x] Each rejection test checks `KVCacheError` and that the template keeps its state.
+- [x] All five unit bundles pass.
 
 ## Tests
 
