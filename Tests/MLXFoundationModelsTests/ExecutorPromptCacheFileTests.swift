@@ -62,6 +62,30 @@ struct ExecutorPromptCacheFileTests {
     /// The value of the model state of each entry.
     private static let ropeDeltas: [Int32] = [3, -2]
 
+    /// A token ID one above `Int32.max`, which a file cannot hold.
+    private static let outOfRangeToken = Int(Int32.max) + 1
+
+    /// The number of bytes of the header length at the start of a safetensors file.
+    private static let headerLengthByteCount = MemoryLayout<UInt64>.size
+
+    /// The metadata key of the file format.
+    private static let formatKey = "format"
+
+    /// The metadata key of the model of the key.
+    private static let modelIDKey = "modelID"
+
+    /// The metadata key of the session of the key.
+    private static let sessionIDKey = "sessionID"
+
+    /// The metadata text of an empty ledger, which decodes.
+    private static let emptyLedger = ""
+
+    /// The permissions of a folder whose files cannot be removed.
+    private static let readOnlyFolderPermissions = 0o555
+
+    /// The permissions of a folder whose files can be removed.
+    private static let writableFolderPermissions = 0o755
+
     /// The fixture arrays, in the order of their first values.
     private enum FixtureArray: Int {
         case simpleKeys
@@ -95,11 +119,72 @@ struct ExecutorPromptCacheFileTests {
             }
         }
 
+        /// The size that the length check expects of the cut file: the whole file when the cut
+        /// is in the array data, or the end of the header when the cut is in the header.
+        ///
+        /// - Parameters:
+        ///   - size: The size of the whole file.
+        ///   - headerEnd: The offset of the first array byte of the whole file.
+        /// - Returns: The expected byte count of the `.truncated` error.
+        func expectedByteCount(size: UInt64, headerEnd: UInt64) -> UInt64 {
+            switch self {
+            case .lastByte: size
+            case .insideHeader: headerEnd
+            }
+        }
+
         /// The name of the case in the test report.
         var testDescription: String {
             switch self {
             case .lastByte: "the last byte"
             case .insideHeader: "the header"
+            }
+        }
+    }
+
+    /// The metadata key of a token ledger of the file.
+    enum LedgerKey: String, CaseIterable {
+        /// The token ledger of the entry.
+        case tokens
+
+        /// The whole prompt that the last pass rendered.
+        case renderTokens
+    }
+
+    /// The damage that a ledger test gives to one ledger of a file.
+    enum LedgerDamage: CaseIterable, CustomTestStringConvertible {
+        /// The file has no metadata under the key of the ledger.
+        case missing
+
+        /// The text of the ledger is not base64.
+        case notBase64
+
+        /// The ledger holds 3 bytes, which is not a whole Int32 value.
+        case partialToken
+
+        /// The text of a ledger that is not base64.
+        static let notBase64Text = "not base64!"
+
+        /// The number of bytes of a partial token: one less than an Int32.
+        static let partialTokenByteCount = MemoryLayout<Int32>.size - 1
+
+        /// The metadata text of the damaged ledger.
+        ///
+        /// - Returns: The text, or nil when the file has no text under the key.
+        var text: String? {
+            switch self {
+            case .missing: nil
+            case .notBase64: Self.notBase64Text
+            case .partialToken: Data(count: Self.partialTokenByteCount).base64EncodedString()
+            }
+        }
+
+        /// The name of the case in the test report.
+        var testDescription: String {
+            switch self {
+            case .missing: "a missing ledger"
+            case .notBase64: "a ledger that is not base64"
+            case .partialToken: "a ledger of 3 bytes"
             }
         }
     }
@@ -195,10 +280,48 @@ struct ExecutorPromptCacheFileTests {
     ///   - directory: The directory of the file.
     /// - Returns: The URL of the file.
     private static func write(_ entry: ExecutorPromptCacheEntry, in directory: URL) throws -> URL {
-        let url = directory.appendingPathComponent(
-            ExecutorPromptCacheFile.fileName(for: key, generation: generation))
+        let url = fileURL(in: directory)
         try ExecutorPromptCacheFile.write(ExecutorPromptCacheFile.prepare(entry, key: key), to: url)
         return url
+    }
+
+    /// The URL of the file that ``write(_:in:)`` writes into `directory`.
+    ///
+    /// - Parameter directory: The directory of the file.
+    /// - Returns: The URL of the file.
+    private static func fileURL(in directory: URL) -> URL {
+        directory.appendingPathComponent(
+            ExecutorPromptCacheFile.fileName(for: key, generation: generation))
+    }
+
+    /// The partial file that a write to `url` writes first: `<name>.partial.safetensors`.
+    ///
+    /// - Parameter url: The URL of the real file.
+    /// - Returns: The URL of the partial file.
+    private static func partialURL(for url: URL) -> URL {
+        url.deletingPathExtension()
+            .appendingPathExtension(ExecutorPromptCacheFile.partialMarker)
+            .appendingPathExtension(ExecutorPromptCacheFile.fileExtension)
+    }
+
+    /// The offset of the first array byte of a safetensors file: the header length field and
+    /// the header that it names.
+    ///
+    /// - Parameter url: The URL of the whole file.
+    /// - Returns: The end of the header.
+    private static func headerEnd(of url: URL) throws -> UInt64 {
+        let bytes = try Data(contentsOf: url).prefix(headerLengthByteCount)
+        let headerLength = UInt64(
+            littleEndian: bytes.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) })
+        return UInt64(headerLengthByteCount) + headerLength
+    }
+
+    /// The names of the items in `directory`.
+    ///
+    /// - Parameter directory: The directory to list.
+    /// - Returns: The names, in sorted order.
+    private static func names(in directory: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
     }
 
     // MARK: - Comparisons
@@ -273,8 +396,7 @@ struct ExecutorPromptCacheFileTests {
     func anUpdateAfterPrepareDoesNotChangeTheFile() throws {
         let directory = try Self.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let url = directory.appendingPathComponent(
-            ExecutorPromptCacheFile.fileName(for: Self.key, generation: Self.generation))
+        let url = Self.fileURL(in: directory)
         let entry = Self.entry()
 
         let input = try ExecutorPromptCacheFile.prepare(entry, key: Self.key)
@@ -351,7 +473,8 @@ struct ExecutorPromptCacheFileTests {
         try savePromptCache(
             url: url, cache: Self.filledCaches(),
             metadata: [
-                "format": "another-format", "modelID": Self.modelID, "sessionID": Self.sessionID,
+                Self.formatKey: "another-format", Self.modelIDKey: Self.modelID,
+                Self.sessionIDKey: Self.sessionID,
             ])
 
         #expect(throws: ExecutorPromptCacheFileError.formatMismatch("another-format")) {
@@ -371,30 +494,58 @@ struct ExecutorPromptCacheFileTests {
         }
     }
 
-    @Test("a truncated file throws", arguments: Truncation.allCases)
-    func aTruncatedFileThrows(_ truncation: Truncation) throws {
+    @Test("a truncated file throws .truncated with the cut size", arguments: Truncation.allCases)
+    func aTruncatedFileThrowsTruncated(_ truncation: Truncation) throws {
         let directory = try Self.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = try Self.write(Self.entry(), in: directory)
         let size = try #require(
             try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? UInt64)
+        let headerEnd = try Self.headerEnd(of: url)
+        let cutSize = truncation.cutSize(of: size)
         let handle = try FileHandle(forWritingTo: url)
-        try handle.truncate(atOffset: truncation.cutSize(of: size))
+        try handle.truncate(atOffset: cutSize)
         try handle.close()
 
-        #expect(throws: (any Error).self) {
+        #expect(
+            throws: ExecutorPromptCacheFileError.truncated(
+                byteCount: cutSize,
+                expectedByteCount: truncation.expectedByteCount(size: size, headerEnd: headerEnd))
+        ) {
             try ExecutorPromptCacheFile.read(from: url, key: Self.key, templates: Self.templates())
         }
     }
 
-    @Test("a missing file throws")
+    @Test("a missing file throws the no-such-file error of the file system")
     func aMissingFileThrows() throws {
         let directory = try Self.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let url = directory.appendingPathComponent(
-            ExecutorPromptCacheFile.fileName(for: Self.key, generation: Self.generation))
+        let url = Self.fileURL(in: directory)
 
-        #expect(throws: (any Error).self) {
+        let error = #expect(throws: CocoaError.self) {
+            try ExecutorPromptCacheFile.read(from: url, key: Self.key, templates: Self.templates())
+        }
+        #expect(error?.code == .fileNoSuchFile)
+    }
+
+    @Test(
+        "a ledger that does not decode throws .ledgerNotDecodable with its key",
+        arguments: LedgerKey.allCases, LedgerDamage.allCases)
+    func aLedgerThatDoesNotDecodeThrows(_ key: LedgerKey, _ damage: LedgerDamage) throws {
+        let directory = try Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = Self.fileURL(in: directory)
+        var metadata = [
+            Self.formatKey: ExecutorPromptCacheFile.format,
+            Self.modelIDKey: Self.modelID,
+            Self.sessionIDKey: Self.sessionID,
+            LedgerKey.tokens.rawValue: Self.emptyLedger,
+            LedgerKey.renderTokens.rawValue: Self.emptyLedger,
+        ]
+        metadata[key.rawValue] = damage.text
+        try savePromptCache(url: url, cache: Self.filledCaches(), metadata: metadata)
+
+        #expect(throws: ExecutorPromptCacheFileError.ledgerNotDecodable(key.rawValue)) {
             try ExecutorPromptCacheFile.read(from: url, key: Self.key, templates: Self.templates())
         }
     }
@@ -415,6 +566,93 @@ struct ExecutorPromptCacheFileTests {
         ) {
             try ExecutorPromptCacheFile.read(from: url, key: Self.key, templates: Self.templates())
         }
+    }
+
+    // MARK: - A write that must fail
+
+    @Test("prepare of a token that does not fit in an Int32 throws .tokenOutOfRange")
+    func prepareOfAnOutOfRangeTokenThrows() {
+        let entry = ExecutorPromptCacheEntry(
+            caches: Self.filledCaches(), tokens: [Self.outOfRangeToken])
+
+        #expect(throws: ExecutorPromptCacheFileError.tokenOutOfRange(Self.outOfRangeToken)) {
+            try ExecutorPromptCacheFile.prepare(entry, key: Self.key)
+        }
+    }
+
+    @Test("a write into a missing folder throws the safetensors error and leaves no partial file")
+    func aWriteIntoAMissingFolderThrows() throws {
+        let directory = try Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let missingFolder = directory.appendingPathComponent("missing", isDirectory: true)
+        let url = Self.fileURL(in: missingFolder)
+        let partialURL = Self.partialURL(for: url)
+        let input = try ExecutorPromptCacheFile.prepare(Self.entry(), key: Self.key)
+
+        let error = #expect(throws: MLXError.self) {
+            try ExecutorPromptCacheFile.write(input, to: url)
+        }
+
+        let message = try #require(error?.errorDescription)
+        #expect(
+            message.hasPrefix(
+                "MLX Error: [save_safetensors] Failed to open file "
+                    + "\(partialURL.path(percentEncoded: false)) at "))
+        #expect(!FileManager.default.fileExists(atPath: partialURL.path(percentEncoded: false)))
+        #expect(try Self.names(in: directory).isEmpty)
+    }
+
+    @Test("a rename onto a folder throws EISDIR and removes the partial file")
+    func aRenameOntoAFolderThrows() throws {
+        let directory = try Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = Self.fileURL(in: directory)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        let input = try ExecutorPromptCacheFile.prepare(Self.entry(), key: Self.key)
+
+        #expect(throws: POSIXError(.EISDIR)) {
+            try ExecutorPromptCacheFile.write(input, to: url)
+        }
+
+        #expect(try Self.names(in: directory) == [url.lastPathComponent])
+    }
+
+    // MARK: - The removal of a file
+
+    @Test("removeFile of a missing file does nothing and reports nothing")
+    func removeFileOfAMissingFileDoesNothing() throws {
+        let directory = try Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var reports: [String] = []
+
+        ExecutorPromptCacheFile.removeFile(at: Self.fileURL(in: directory)) { reports.append($0) }
+
+        #expect(reports.isEmpty)
+        #expect(try Self.names(in: directory).isEmpty)
+    }
+
+    @Test("a removal that fails keeps the file and reports the error, and does not throw")
+    func aRemovalThatFailsReportsTheError() throws {
+        let directory = try Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = try Self.write(Self.entry(), in: directory)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: Self.readOnlyFolderPermissions], ofItemAtPath: directory.path)
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: Self.writableFolderPermissions], ofItemAtPath: directory.path)
+        }
+        var reports: [String] = []
+
+        ExecutorPromptCacheFile.removeFile(at: url) { reports.append($0) }
+
+        #expect(FileManager.default.fileExists(atPath: url.path(percentEncoded: false)))
+        #expect(reports.count == 1)
+        let report = try #require(reports.first)
+        #expect(report.hasPrefix("prompt cache file cannot remove \(url.lastPathComponent): "))
+        #expect(
+            report.contains(
+                "Domain=NSCocoaErrorDomain Code=\(CocoaError.Code.fileWriteNoPermission.rawValue) "))
     }
 
     // MARK: - The file name

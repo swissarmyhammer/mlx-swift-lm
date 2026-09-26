@@ -205,16 +205,19 @@ enum ExecutorPromptCacheFile {
     /// The error of a failed write is the error that the caller must see. Thus a failed removal
     /// goes to the log and is not thrown.
     ///
-    /// - Parameter url: The URL of the file.
-    static func removeFile(at url: URL) {
+    /// - Parameters:
+    ///   - url: The URL of the file.
+    ///   - report: Receives the log line of a failed removal.
+    static func removeFile(
+        at url: URL, report: (String) -> Void = ExecutorPromptCacheLog.info
+    ) {
         guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else {
             return
         }
         do {
             try FileManager.default.removeItem(at: url)
         } catch {
-            ExecutorPromptCacheLog.info(
-                "prompt cache file cannot remove \(url.lastPathComponent): \(error)")
+            report("prompt cache file cannot remove \(url.lastPathComponent): \(error)")
         }
     }
 }
