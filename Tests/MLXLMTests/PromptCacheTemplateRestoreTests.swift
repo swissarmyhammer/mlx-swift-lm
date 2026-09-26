@@ -132,6 +132,53 @@ struct PromptCacheTemplateRestoreTests {
     /// A class name that no built-in class and no registry entry uses.
     fileprivate static let unknownClassName = "UnknownTestCache"
 
+    /// The prefix of the flattened keys of the class-name part of a prompt cache file.
+    fileprivate static let classNamePart = "2."
+
+    /// The prefix of the flattened keys of the meta state of the second layer, in the
+    /// cache-information part.
+    fileprivate static let secondLayerMetaStatePrefix = "0.1."
+
+    /// The flattened file key of the first array of the first layer.
+    fileprivate static let firstLayerFirstArrayKey = "0.0"
+
+    /// The key of the model-state array that the files with a model state hold.
+    fileprivate static let positionsStateKey = LMOutput.Key<MLXArray>("test.positions")
+
+    /// The flattened file key of the model-state count, in the user-metadata part.
+    fileprivate static let modelStateCountKey = "1.__mlx_lm_state_count"
+
+    /// A flattened file key in the reserved model-state namespace that no reader knows.
+    fileprivate static let unknownModelStateKey = "1.__mlx_lm_state_unknown"
+
+    /// The message of the check that finds a cache-information count that is not the
+    /// class-name count.
+    fileprivate static let cacheCountMismatchMessage = "Mismatch in cache counts"
+
+    /// The message of the check that finds no valid model-state count.
+    fileprivate static let invalidModelStateCountMessage = "Invalid prompt cache state count"
+
+    /// The message of the check that finds a reserved model-state key that the reader does
+    /// not know.
+    fileprivate static let unexpectedModelStateMessage = "Unexpected prompt cache state metadata"
+
+    /// The place of the wrapped flag in the meta state of a saved `RotatingKVCache`.
+    fileprivate static let rotatingWrappedIndex = 6
+
+    /// A wrapped flag that is not `true` or `false`.
+    fileprivate static let invalidWrappedFlag = "maybe"
+
+    /// The place of the offset in the meta state of a saved `VarianceNormalizedKVCache`.
+    fileprivate static let varianceOffsetIndex = 1
+
+    /// The place of the complete tile count in the meta state of a saved
+    /// `VarianceNormalizedKVCache`.
+    fileprivate static let varianceTileCountIndex = 5
+
+    /// The meta state that a `MambaCache` or an `ArraysCache` saved before it recorded its
+    /// slot count. It has no slot numbers, thus the load puts the arrays in the slots in order.
+    fileprivate static let legacyArraysMetaState = [""]
+
     /// The message of the `CacheList` check that finds no valid child count.
     fileprivate static let missingChildCountMessage = "CacheList metaState missing child count"
 
@@ -293,15 +340,17 @@ struct PromptCacheTemplateRestoreTests {
     ///
     /// - Parameters:
     ///   - caches: The caches to save.
+    ///   - state: The model state to save with the caches, or `nil` for no model state.
     ///   - edit: Changes the arrays and the metadata of the saved file.
     /// - Returns: The URL of the tampered file. The caller removes it.
     fileprivate static func tamperedFile(
         _ caches: [any KVCache],
+        state: LMOutput.State? = nil,
         edit: (inout [String: MLXArray], inout [String: String]) -> Void
     ) throws -> URL {
         let savedURL = temporaryURL()
         defer { try? FileManager.default.removeItem(at: savedURL) }
-        try savePromptCache(url: savedURL, cache: caches)
+        try savePromptCache(url: savedURL, cache: caches, state: state)
         var (arrays, metadata) = try loadArraysAndMetadata(url: savedURL)
         edit(&arrays, &metadata)
         let tamperedURL = temporaryURL()
@@ -425,6 +474,57 @@ struct PromptCacheTemplateRestoreTests {
         return metadata[firstLayerClassNameKey]
     }
 
+    // MARK: - Damaged file layouts
+
+    /// Loads a file with no template, and records an issue unless the load throws
+    /// ``KVCacheError`` with the expected message.
+    ///
+    /// The message tells which check threw. Another check can also reject a damaged file, thus
+    /// the error type alone does not prove that the load reached the expected check.
+    ///
+    /// - Parameters:
+    ///   - url: The URL of the file.
+    ///   - message: The message of the check that must reject the file.
+    fileprivate static func expectLoadRejected(_ url: URL, message: String) {
+        let error = #expect(throws: KVCacheError.self) {
+            try loadPromptCacheSnapshot(url: url)
+        }
+        #expect(error?.message == message, "the check that rejects the file")
+    }
+
+    /// Saves a filled `KVCacheSimple` with a model state of one array, then writes a second
+    /// file whose metadata a closure changed.
+    ///
+    /// - Parameter edit: Changes the metadata of the saved file.
+    /// - Returns: The URL of the tampered file. The caller removes it.
+    fileprivate static func tamperedModelStateFile(
+        edit: (inout [String: String]) -> Void
+    ) throws -> URL {
+        var state = LMOutput.State()
+        state[positionsStateKey] = tensor([batchSize, headCount], seed: firstSeed)
+        return try tamperedFile([try CacheKind.simple.makeFilled()], state: state) {
+            _, metadata in
+            edit(&metadata)
+        }
+    }
+
+    /// Saves one filled cache of one kind, then writes a second file whose meta state of the
+    /// first layer has other values at some places.
+    ///
+    /// - Parameters:
+    ///   - kind: The kind of the cache.
+    ///   - values: The new meta-state values, by their place in the meta state.
+    /// - Returns: The URL of the tampered file. The caller removes it.
+    fileprivate static func fileWithFirstLayerMetaState(
+        _ kind: CacheKind, values: [Int: String]
+    ) throws -> URL {
+        try tamperedFile([try kind.makeFilled()]) { _, metadata in
+            for (index, value) in values {
+                metadata[firstLayerMetaStateKey(index: index)] = value
+            }
+        }
+    }
+
     // MARK: - Round trip for each cache type
 
     @Test(
@@ -510,7 +610,7 @@ struct PromptCacheTemplateRestoreTests {
     func fileCanBeDeletedAfterLoad() throws {
         let kinds: [CacheKind] = [.simple, .deepSeekWithIndexer, .miniMaxWithIndex]
         let sources = try kinds.map { try $0.makeFilled() }
-        let key = LMOutput.Key<MLXArray>("test.positions")
+        let key = Self.positionsStateKey
         var state = LMOutput.State()
         state[key] = Self.tensor([Self.batchSize, Self.headCount], seed: Self.firstSeed)
         let url = Self.temporaryURL()
@@ -733,6 +833,127 @@ struct PromptCacheTemplateRestoreTests {
             message:
                 "The prompt cache holds a CacheList of \(source.children.count) children and the model gave \(templateKinds.count)."
         )
+    }
+
+    // MARK: - Damaged file layout rejections
+
+    @Test(
+        "A file whose cache-information count is not its class-name count throws KVCacheError",
+        arguments: [
+            [classNamePart, "\(userMetadataPart)\(offsetRecordPrefix)"],
+            [secondLayerMetaStatePrefix],
+        ])
+    func cacheCountMismatchThrows(removedKeyPrefixes: [String]) throws {
+        // Without its class names the file has a layer count of 0, and the offset records
+        // of the two layers then fail their own check first. Thus that case removes the
+        // offset records also.
+        let sources = [try CacheKind.simple.makeFilled(), try CacheKind.simple.makeFilled()]
+        let url = try Self.tamperedFile(sources) { _, metadata in
+            metadata = metadata.filter { entry in
+                !removedKeyPrefixes.contains(where: { entry.key.hasPrefix($0) })
+            }
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        Self.expectLoadRejected(url, message: Self.cacheCountMismatchMessage)
+    }
+
+    @Test(
+        "A file with no valid model-state count throws KVCacheError",
+        arguments: [nil, "0", "not-a-count"] as [String?])
+    func invalidModelStateCountThrows(count: String?) throws {
+        let url = try Self.tamperedModelStateFile { metadata in
+            metadata[Self.modelStateCountKey] = count
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        Self.expectLoadRejected(url, message: Self.invalidModelStateCountMessage)
+    }
+
+    @Test("A file with a reserved model-state key that the reader does not know throws")
+    func unknownModelStateKeyThrows() throws {
+        let url = try Self.tamperedModelStateFile { metadata in
+            metadata[Self.unknownModelStateKey] = "1"
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        Self.expectLoadRejected(url, message: Self.unexpectedModelStateMessage)
+    }
+
+    @Test(
+        "A file with an array key that is not a layer and an array index throws KVCacheError",
+        arguments: ["x.0", "9.0"])
+    func invalidArrayKeyThrows(key: String) throws {
+        let url = try Self.tamperedFile([try CacheKind.simple.makeFilled()]) { arrays, _ in
+            arrays[key] = arrays.removeValue(forKey: Self.firstLayerFirstArrayKey)
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        Self.expectLoadRejected(url, message: "Corrupt prompt cache: invalid array key '\(key)'.")
+    }
+
+    @Test("A file whose first layer has its second array and not its first throws KVCacheError")
+    func nonContiguousArrayIndicesThrow() throws {
+        let url = try Self.tamperedFile([try CacheKind.simple.makeFilled()]) { arrays, _ in
+            arrays[Self.firstLayerFirstArrayKey] = nil
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        Self.expectLoadRejected(
+            url, message: "Corrupt prompt cache: cache 0 has non-contiguous array indices.")
+    }
+
+    @Test("A saved RotatingKVCache whose wrapped flag is not true or false throws KVCacheError")
+    func invalidRotatingWrappedFlagThrows() throws {
+        let url = try Self.fileWithFirstLayerMetaState(
+            .rotatingAfterWrap, values: [Self.rotatingWrappedIndex: Self.invalidWrappedFlag])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        Self.expectLoadRejected(
+            url,
+            message:
+                "Corrupt prompt cache: invalid RotatingKVCache wrapped flag '\(Self.invalidWrappedFlag)'."
+        )
+    }
+
+    @Test("A saved VarianceNormalizedKVCache with tile arrays and a tile count of 0 throws")
+    func varianceNormalizedTileArraysWithoutTilesThrow() throws {
+        // The offset becomes the tail length, thus the offset agrees with a tile count of 0,
+        // and only the tile arrays do not fit.
+        let tailLength = Self.varianceTokenCount % Self.varianceTileSize
+        let url = try Self.fileWithFirstLayerMetaState(
+            .varianceNormalized,
+            values: [
+                Self.varianceTileCountIndex: "0", Self.varianceOffsetIndex: String(tailLength),
+            ])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        Self.expectLoadRejected(
+            url, message: "Corrupt prompt cache: invalid VarianceNormalizedKVCache state.")
+    }
+
+    @Test(
+        "A saved MambaCache with the legacy meta state restores its arrays into the slots in order")
+    func legacyArraysMetaStateRestoresSlotsInOrder() throws {
+        let source = try #require(try CacheKind.mamba.makeFilled() as? MambaCache)
+        let savedCount = source.metaState.count
+        let url = try Self.tamperedFile([source]) { _, metadata in
+            for index in 0 ..< savedCount {
+                metadata[Self.firstLayerMetaStateKey(index: index)] = nil
+            }
+            for (index, value) in Self.legacyArraysMetaState.enumerated() {
+                metadata[Self.firstLayerMetaStateKey(index: index)] = value
+            }
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let restored = try #require(
+            try loadPromptCacheSnapshot(url: url).cache.first as? MambaCache)
+        let slots = (0 ..< restored.slotCount).map { restored[$0] }
+
+        #expect(restored.slotCount == source.slotCount, "the slot count")
+        #expect(slots.allSatisfy { $0 != nil }, "each slot holds an array")
+        Self.expectEqual(slots.compactMap { $0 }, source.state, "the legacy slots")
     }
 
     // MARK: - Cache classes outside the library

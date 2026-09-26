@@ -234,4 +234,16 @@ struct PromptCacheSaveInputTests {
         let inputArrays = Set(input.arrays.values.map(ObjectIdentifier.init))
         #expect(inputArrays.isDisjoint(with: cacheArrays.map(ObjectIdentifier.init)))
     }
+
+    @Test("prepare refuses a model state with no cache")
+    func prepareRefusesAModelStateWithNoCache() throws {
+        var state = LMOutput.State()
+        state[LMOutput.Key<MLXArray>("test.positions")] = Self.ramp(
+            Self.recurrentSlotShape, start: Self.start(of: .simpleKeys))
+
+        let error = #expect(throws: KVCacheError.self) {
+            try preparePromptCacheSave(cache: [], state: state)
+        }
+        #expect(error?.message == "Model state requires at least one prompt cache")
+    }
 }

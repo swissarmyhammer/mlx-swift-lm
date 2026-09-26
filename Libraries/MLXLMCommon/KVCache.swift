@@ -2413,10 +2413,6 @@ private struct SavedPromptCacheLayer {
 
 /// The contents of a prompt cache file, before any cache is built.
 private struct PromptCacheFileContents {
-    /// The number of top-level parts of the metadata: the cache information, the user
-    /// metadata and the class names.
-    private static let metadataPartCount = 3
-
     /// The place of the cache information (the meta state of each layer) in the metadata.
     private static let cacheInfoPart = 0
 
@@ -2452,12 +2448,9 @@ private struct PromptCacheFileContents {
         fileArrays = Array(arrays.values)
 
         // Unflatten metadata using tree_unflatten compatible logic.
-        // Structure: [cache_info, user_metadata, cache_classes]
+        // Structure: [cache_info, user_metadata, cache_classes]. `unflattenMetadata` always
+        // gives back the three parts, thus no count check is necessary.
         let unflattenedMetadata = unflattenMetadata(metadata)
-        guard unflattenedMetadata.count >= Self.metadataPartCount else {
-            throw KVCacheError(message: "Invalid cache metadata format")
-        }
-
         let cacheInfo = unflattenedMetadata[Self.cacheInfoPart] as? [[String]] ?? []
         let storedUserMetadata =
             unflattenedMetadata[Self.userMetadataPart] as? [String: String] ?? [:]
