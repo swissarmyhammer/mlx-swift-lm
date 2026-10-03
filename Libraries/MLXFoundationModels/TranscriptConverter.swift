@@ -3,17 +3,17 @@
 #if FoundationModelsIntegration
 #if canImport(FoundationModels, _version: 2)
 
+import CoreImage
 import Foundation
 import FoundationModels
+import MLX
 import MLXLMCommon
-import os.log
 
 /// Converts FoundationModels transcript entries to MLX chat message format.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 struct TranscriptConverter {
 
-    private static let logger = Logger(
-        subsystem: "com.apple.FoundationModels-MLX", category: "TranscriptConverter")
+    private static let logger = MLXLogger(label: "TranscriptConverter")
 
     /// The MLX `Chat.Message` array for a collection of transcript entries.
     ///
@@ -37,7 +37,7 @@ struct TranscriptConverter {
     /// - Returns: Array of MLX Chat.Message objects
     static func mlxMessages(
         for entries: some Collection<Transcript.Entry>, replayReasoning: Bool = false
-    ) -> [Chat.Message] {
+    ) throws -> [Chat.Message] {
         var messages: [Chat.Message] = []
         var replay = ReasoningReplay()
         for entry in entries {
@@ -45,7 +45,7 @@ struct TranscriptConverter {
                 replay.hold(extractText(from: reasoning.segments))
                 continue
             }
-            guard var message = convert(entry: entry) else { continue }
+            guard var message = try convert(entry: entry) else { continue }
             replay.settle(before: &message, in: &messages)
             messages.append(message)
             if message.role == .assistant {
@@ -107,33 +107,39 @@ struct TranscriptConverter {
     ///
     /// - Parameter entry: the entry to convert.
     /// - Returns: the message, or `nil` for an entry that produces none.
-    private static func convert(entry: Transcript.Entry) -> Chat.Message? {
+    /// - Throws: `LanguageModelError.unsupportedTranscriptContent` if an
+    ///   attachment is not an image.
+    private static func convert(entry: Transcript.Entry) throws -> Chat.Message? {
         switch entry {
         case .instructions(let instructions):
-            // System message for model instructions. Labeled image
-            // attachments ride along as message images, mirroring the
-            // prompt path, so the `.vision` gate sees them and they are
-            // not silently dropped.
+            // Drop instruction attachments, as FoundationModels does.
+            // Some chat templates, such as Qwen3-VL's, write no image placeholder for a
+            // system message. The processor would then get pixels without a placeholder.
             let text = extractText(from: instructions.segments)
-            let images = extractImages(from: instructions.segments)
-            guard text != nil || !images.isEmpty else {
+            let dropped = try extractImages(from: instructions.segments, in: entry)
+            if !dropped.isEmpty {
                 logger.warning(
-                    "Skipping instructions entry with no text or image content")
+                    "Dropping \(dropped.count) image attachment(s) in an instructions entry; attach images to a prompt instead so the model receives them"
+                )
+            }
+            guard let text else {
+                logger.warning("Skipping instructions entry with no text content")
                 return nil
             }
-            return Chat.Message.system(text ?? "", images: images)
+            return Chat.Message.system(text)
 
         case .prompt(let prompt):
             // User message for prompts. Labeled image attachments
             // (public `.attachment` segments) ride along as message
             // images; text is still concatenated as before.
             let text = extractText(from: prompt.segments)
-            let images = extractImages(from: prompt.segments)
-            guard text != nil || !images.isEmpty else {
+            let images = try extractImages(from: prompt.segments, in: entry)
+            let content = text ?? ""
+            guard !content.isEmpty || !images.isEmpty else {
                 logger.warning("Skipping prompt entry with no text or image content")
                 return nil
             }
-            return Chat.Message.user(text ?? "", images: images)
+            return Chat.Message.user(content, images: images)
 
         case .response(let response):
             // Assistant message for previous responses
@@ -167,7 +173,7 @@ struct TranscriptConverter {
                     arguments = decoded
                 } else {
                     logger.warning(
-                        "Failed to decode arguments for tool: \(call.toolName, privacy: .public)"
+                        "Failed to decode arguments for tool: \(call.toolName)"
                     )
                     arguments = [:]
                 }
@@ -214,6 +220,11 @@ struct TranscriptConverter {
                 return textSegment.content
             case .structure(let structuredSegment):
                 return structuredSegment.content.jsonString
+            case .attachment(let attachment):
+                logger.warning(
+                    "Dropping an attachment in tool output. Tool-output images are not yet forwarded to the model",
+                    metadata: ["label": attachment.label ?? "none"])
+                return nil
             default:
                 logger.debug("Skipping unsupported tool-output segment")
                 return nil
@@ -247,23 +258,60 @@ struct TranscriptConverter {
 
     /// Extracts image inputs from image attachment segments.
     ///
-    /// Each image attachment is handed over as its already-decoded
-    /// `CIImage`. Segments that carry no image produce no input.
+    /// `Transcript.ImageAttachment.ciImage` does not apply `orientation`, so this function
+    /// must apply it.
     ///
     /// - Parameter segments: Array of transcript segments
     /// - Returns: The image inputs found, in segment order
-    private static func extractImages(from segments: [Transcript.Segment])
-        -> [UserInput.Image]
-    {
-        segments.compactMap { segment -> UserInput.Image? in
-            guard case .attachment(let attachment) = segment,
-                case .image(let imageAttachment) = attachment.content
-            else {
-                return nil
+    /// - Throws: `LanguageModelError.unsupportedTranscriptContent` if an attachment is
+    ///   not an image.
+    private static func extractImages(
+        from segments: [Transcript.Segment],
+        in entry: Transcript.Entry
+    ) throws -> [UserInput.Image] {
+        try segments.compactMap { segment -> UserInput.Image? in
+            guard case .attachment(let attachment) = segment else { return nil }
+            switch attachment.content {
+            case .image(let imageAttachment):
+                return .ciImage(
+                    imageAttachment.ciImage.oriented(imageAttachment.orientation),
+                    label: attachment.label)
+            @unknown default:
+                throw LanguageModelError.unsupportedTranscriptContent(
+                    LanguageModelError.UnsupportedTranscriptContent(
+                        unsupportedContent: [entry],
+                        debugDescription:
+                            "This attachment carries content the MLX adapter cannot render. Only image attachments are supported."
+                    ))
             }
-            return .ciImage(imageAttachment.ciImage)
         }
     }
+
+    struct LabeledAttachment: Sendable {
+        let label: String
+        let entry: Transcript.Entry
+    }
+
+    /// Reads only prompt entries, because the adapter drops the attachments of every other entry.
+    static func labeledAttachments(in entries: some Collection<Transcript.Entry>)
+        -> [LabeledAttachment]
+    {
+        var seen = Set<String>()
+        var ordered: [LabeledAttachment] = []
+        for entry in entries {
+            guard case .prompt(let prompt) = entry else { continue }
+            for segment in prompt.segments {
+                guard case .attachment(let attachment) = segment,
+                    let label = attachment.label
+                else { continue }
+                if seen.insert(label).inserted {
+                    ordered.append(LabeledAttachment(label: label, entry: entry))
+                }
+            }
+        }
+        return ordered
+    }
+
 }
 
 #endif  // canImport(FoundationModels)

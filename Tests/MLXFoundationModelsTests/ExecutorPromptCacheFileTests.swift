@@ -652,7 +652,8 @@ struct ExecutorPromptCacheFileTests {
         #expect(report.hasPrefix("prompt cache file cannot remove \(url.lastPathComponent): "))
         #expect(
             report.contains(
-                "Domain=NSCocoaErrorDomain Code=\(CocoaError.Code.fileWriteNoPermission.rawValue) "))
+                "Domain=NSCocoaErrorDomain Code=\(CocoaError.Code.fileWriteNoPermission.rawValue) ")
+        )
     }
 
     // MARK: - The file name
