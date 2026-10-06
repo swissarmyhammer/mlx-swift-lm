@@ -61,6 +61,9 @@ public protocol KVCache: Evaluatable, Updatable {
     /// get the maximum size (if any)
     var maxSize: Int? { get }
 
+    /// Number of historical positions this cache no longer retains.
+    var evictedTokenCount: Int { get }
+
     /// update the cache with new keys and values and return all keys/values
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray)
 
@@ -129,6 +132,8 @@ extension KVCache {
     public var ropeOffset: RoPEOffset {
         .scalar(offset)
     }
+
+    public var evictedTokenCount: Int { 0 }
 
     public func isTrimmable(after positions: Int) -> Bool {
         isTrimmable
@@ -238,6 +243,7 @@ public protocol KVCacheAttentionProtocol: KVCache {
 open class BaseKVCache: KVCache {
     public var offset: Int = 0
     public var maxSize: Int? { nil }
+    open var evictedTokenCount: Int { 0 }
 
     /// RoPE offset for this cache. `open` so subclasses can return a non-scalar
     /// offset (e.g. a batched cache's per-row `.batch(...)`).
@@ -632,6 +638,11 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     package var preservedPrefixTokens: Int { keep }
 
     public override var maxSize: Int? { maxCacheSize }
+
+    public override var evictedTokenCount: Int {
+        let retained = wrapped ? (keys?.dim(2) ?? 0) : idx
+        return Swift.max(0, offset - retained)
+    }
 
     /// Number of leading tokens that are never rotated out of the window.
     var keepCount: Int { keep }
@@ -1732,6 +1743,10 @@ public class CacheList: BaseKVCache {
     /// child counts with its own rule.
     public override var residentByteCount: Int {
         caches.reduce(0) { $0 + $1.residentByteCount }
+    }
+
+    public override var evictedTokenCount: Int {
+        caches.map(\.evictedTokenCount).max() ?? 0
     }
 
     public subscript(index: Int) -> KVCache {

@@ -129,18 +129,21 @@ private final class ConcurrentLoadState: @unchecked Sendable {
         if firstError == nil { firstError = error }
     }
 
-    /// Weights merged in file order (a later file overwrites a duplicate name, matching the
-    /// serial loader) and the first file's metadata.
-    func result() throws -> (weights: [String: MLXArray], metadata: [String: String]) {
+    /// Preserve file order and tensor metadata, including later-file-wins duplicates.
+    func result() throws -> ModelCheckpoint {
         lock.lock()
         defer { lock.unlock() }
         if let firstError { throw firstError }
         var weights = [String: MLXArray]()
-        for fileWeights in perFile {
+        var weightMetadata = [String: [String: String]]()
+        for (index, fileWeights) in perFile.enumerated() {
             weights.merge(fileWeights) { _, new in new }
+            for name in fileWeights.keys {
+                weightMetadata[name] = perFileMetadata[index]
+            }
         }
         let metadata = perFileMetadata.first { !$0.isEmpty } ?? [:]
-        return (weights, metadata)
+        return ModelCheckpoint(weights: weights, metadata: metadata, weightMetadata: weightMetadata)
     }
 }
 
@@ -154,6 +157,11 @@ private final class ConcurrentLoadState: @unchecked Sendable {
 func loadWeightArrays(urls: [URL]) throws -> (
     weights: [String: MLXArray], metadata: [String: String]
 ) {
+    let checkpoint = try loadModelCheckpoint(urls: urls)
+    return (checkpoint.weights, checkpoint.metadata)
+}
+
+func loadModelCheckpoint(urls: [URL]) throws -> ModelCheckpoint {
     struct WorkItem {
         let file: Int
         let url: URL
@@ -486,7 +494,7 @@ package func weightFileBytes(of weightURLs: [URL]) -> Int {
 ///
 /// This is typically called via ``GenericModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
 /// This function loads model weight `safetensor` files in the given `modelDirectory`,
-/// calls ``BaseLanguageModel/sanitize(weights:metadata:)`` to allow per-model preprocessing,
+/// calls ``BaseLanguageModel/prepareCheckpoint(_:)`` to allow per-model preprocessing,
 /// applies optional quantization, and
 /// updates the model with the weights. Derived inference-only state is prepared after the
 /// checkpoint update and before the model is evaluated and returned to callers.
@@ -537,7 +545,7 @@ public func loadWeights(
 
 /// The blocking part of ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:)``.
 ///
-/// Reads the weight files, lets the model sanitize them, applies the optional
+/// Reads the weight files into a checkpoint, lets the model prepare it, applies the optional
 /// quantization, installs the parameters, and then prepares the derived
 /// inference state. Runs on the global queue that `loadWeights` dispatches to,
 /// never on a cooperative thread.
@@ -546,19 +554,18 @@ private func installWeights(
     quantization: BaseConfiguration.Quantization?,
     perLayerQuantization: BaseConfiguration.PerLayerQuantization?
 ) throws {
-    // load the weights and collect metadata from the first safetensor file
-    var weights = [String: MLXArray]()
-    var metadata = [String: String]()
-    (weights, metadata) = try loadWeightArrays(urls: weightURLs)
-
-    // per-model cleanup (models can inspect metadata to customize behavior)
-    weights = model.sanitize(weights: weights, metadata: metadata)
+    var checkpoint = try loadModelCheckpoint(urls: weightURLs)
+    checkpoint.perLayerQuantization =
+        perLayerQuantization
+        ?? quantization.map { .init(quantization: $0, perLayerQuantization: [:]) }
+    checkpoint = try model.prepareCheckpoint(checkpoint)
+    let weights = checkpoint.weights
 
     // quantize if needed
-    if quantization != nil || perLayerQuantization != nil {
+    if let perLayerQuantization = checkpoint.perLayerQuantization {
         quantize(model: model) { path, _ in
             quantizationParameters(
-                forPath: path, weights: weights, quantization: quantization,
+                forPath: path, weights: weights, quantization: nil,
                 perLayerQuantization: perLayerQuantization)
         }
     }

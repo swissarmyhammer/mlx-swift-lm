@@ -1439,27 +1439,17 @@ public class TurboQuantKVCache: BaseKVCache {
     /// Does NOT include codec overhead (rotation matrices, codebooks) which is shared across layers.
     /// In rawKeyMode: rawKeys is always present (FP16 keys), no keyPackedMSE/keyNorms.
     public var memoryBytes: Int {
-        residentByteCount
-    }
-
-    /// The sum of `nbytes` over every buffer this cache holds: the raw prefill
-    /// keys and values, the affine key triplet, the packed indices and norms of
-    /// keys and values, and the key calibration scale. Each buffer counts at its
-    /// full allocated size.
-    ///
-    /// The codecs are not counted, because all layers share them.
-    ///
-    /// ``innerState()`` of this cache gives no array, thus this override is
-    /// necessary. The count reads only shapes and element types, and it
-    /// evaluates nothing.
-    override public var residentByteCount: Int {
-        [
-            rawKeys, rawValues, affKeyW, affKeyScales, affKeyBiases, keyPackedMSE, keyNorms,
-            valPackedMSE, valNorms, keyCalibScale,
-        ].compactMap { $0 }.totalByteCount
+        innerState().reduce(0) { $0 + $1.nbytes }
     }
 
     // MARK: - State / Trim
+
+    override public func innerState() -> [MLXArray] {
+        [
+            rawKeys, rawValues, affKeyW, affKeyScales, affKeyBiases,
+            keyPackedMSE, keyNorms, valPackedMSE, valNorms, keyCalibScale,
+        ].compactMap { $0 }
+    }
 
     override public var state: [MLXArray] {
         get {

@@ -118,6 +118,50 @@ struct SpeculativeDecodingTests {
         #expect(normalTokens == speculativeTokens)
     }
 
+    @Test func `Speculative API keeps the drafter when log probabilities are requested`()
+        async throws
+    {
+        let vocabularySize = 100
+        let tokenizer = TestTokenizer(vocabularySize: vocabularySize)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "log-probability-speculative-test"),
+            messageGenerator: DefaultMessageGenerator()
+        )
+        let context = ModelContext(
+            configuration: processor.configuration,
+            model: CacheTrackingTransitionModel(vocabularySize: vocabularySize),
+            processor: processor,
+            tokenizer: processor.tokenizer
+        )
+        let mainCache = [KVCacheSimple()]
+        let draftCache = [KVCacheSimple()]
+        let parameters = GenerateParameters(maxTokens: 3, temperature: 0, logProbabilities: 2)
+
+        var tokens = [Int]()
+        var completion: GenerateCompletionInfo?
+        for await generation in try generateTokens(
+            input: LMInput(tokens: MLXArray([7])), cache: mainCache,
+            parameters: parameters, context: context,
+            draftModel: CacheTrackingTransitionModel(vocabularySize: vocabularySize),
+            draftCache: draftCache, numDraftTokens: 2)
+        {
+            if let token = generation.token { tokens.append(token) }
+            if let info = generation.info {
+                completion = info
+            }
+        }
+
+        #expect(tokens.count == 3)
+        #expect(completion?.speculativeDecodingTelemetry?.roundCount == 1)
+        // Both caches advanced: prompt + 2 accepted drafts in the main cache.
+        // The generation loop calls `finalizeGeneration()`, which feeds the
+        // last accepted draft to the draft model, thus the draft cache does
+        // not trail and the two caches are aligned.
+        #expect(mainCache.first?.offset == 3)
+        #expect(draftCache.first?.offset == 3)
+    }
+
     @Test(arguments: [2, 8, 48], [false, true])
     func `Speculative decoding Gemma3 smoke test`(
         numDraftTokens: Int,
