@@ -15,7 +15,8 @@ public enum QwenReasoningProtocol {
         implicitEndDelimiters: ["<tool_call>"])
 
     /// The Qwen 3.5 protocol: the tags of ``tagged``, with the reasoning of a
-    /// past turn replayed into the history render.
+    /// past turn replayed into the history render, and thinking off rendered
+    /// as a closed, empty think block.
     ///
     /// The Qwen 3.5 chat template keeps the `<think>` block of a past assistant
     /// turn unless a caller sets `preserve_thinking` to false, and it writes
@@ -26,11 +27,29 @@ public enum QwenReasoningProtocol {
     /// model cannot rewind its recurrent caches, thus that extension is its one
     /// path to reuse. Card `^xx5g893` measured this on
     /// `mlx-community/Qwen3.8-27B-mxfp4`.
+    ///
+    /// The same template writes its reasoning instructions into the system
+    /// block only when `enable_thinking` is undefined or true. A turn with the
+    /// flag `false` thus changes the prompt near its start, and the hybrid model
+    /// fills its caches again from the start, one time when thinking goes off
+    /// and one time when it comes back on. A turn with thinking off therefore
+    /// keeps the flag on and ends its prompt with the block that the template
+    /// writes for the flag `false` (``ThinkingOffRender/closedBlock(_:)``).
+    /// Card `^v3dt28p` measured the two full prefills.
     public static let qwen35: ReasoningConfig = {
         var config = tagged
         config.replaysReasoningIntoHistory = true
+        config.promptStrategy = .templateFlag(
+            key: thinkingFlag, defaultOn: true, thinkingOff: .closedBlock(closedThinkBlock))
         return config
     }()
+
+    /// The chat template flag that turns Qwen thinking on and off.
+    private static let thinkingFlag = "enable_thinking"
+
+    /// The closed, empty think block that the Qwen 3.5 chat template writes
+    /// after its generation prompt when `enable_thinking` is false.
+    private static let closedThinkBlock = "<think>\n\n</think>\n\n"
 
     /// The original hybrid Qwen3 protocol and its published budget transition.
     ///

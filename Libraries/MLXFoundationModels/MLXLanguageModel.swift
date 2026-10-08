@@ -732,7 +732,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
         /// The rank of a batched token tensor (`[1, N]`) from a VLM
         /// processor. LLM processors produce rank-1 tokens (`[N]`).
-        private static let batchedPromptRank = 2
+        static let batchedPromptRank = 2
 
         /// The count of prompt-tail tokens to decode when the executor checks
         /// whether the rendered prompt ends inside an open reasoning block.
@@ -1101,7 +1101,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // would be wasted work here. Continuation rounds run the
                     // tool path (below) like fresh turns: that path renders its
                     // own thinking state into the tool-aware prompt
-                    // (`toolAwareContext`) -- thinking on with the think-then-call
+                    // (`toolAwareRender`) -- thinking on with the think-then-call
                     // phase when reasoning is declared, forced off otherwise.
                     let mayRunReasoningPath =
                         enabledToolDefinitions.isEmpty
@@ -1305,7 +1305,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             {
                 suppressedInput = try await Self.preparedInput(
                     messages: messages, config: suppressionConfig,
-                    thinkingEnabled: false, processor: context.processor,
+                    thinkingEnabled: false, context: context,
                     cannotDisableMessage:
                         "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
                 )
@@ -1321,7 +1321,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     for: request.contextOptions.reasoningLevel)
                 let reasoningInput = try await Self.preparedInput(
                     messages: messages, config: reasoningConfig,
-                    thinkingEnabled: thinkingEnabled, processor: context.processor,
+                    thinkingEnabled: thinkingEnabled, context: context,
                     cannotDisableMessage:
                         "This model always reasons; reasoning cannot be disabled via reasoningLevel."
                 )
@@ -1433,26 +1433,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // arguments can degenerate (Qwen: "1234567890...").
             // `.alwaysOn` models with reasoning undeclared were already
             // rejected by the capability gate above; `.none`/no-config
-            // models take no context.
-            let toolAwareContext: [String: any Sendable]?
-            if case .templateFlag(let key, let defaultOn)? =
-                resolved.reasoningConfig?.promptStrategy
+            // models take no context. A strategy that renders thinking off
+            // as a closed block (Qwen 3.5) keeps the flag on and closes the
+            // block after the render (`ThinkingRender`).
+            let toolAwareRender: ThinkingRender
+            if let config = resolved.reasoningConfig,
+                case .templateFlag = config.promptStrategy
             {
                 let enabled =
                     declaresReasoning
-                    ? (Self.thinkingEnabled(
-                        for: request.contextOptions.reasoningLevel) ?? defaultOn)
+                    ? Self.thinkingEnabled(for: request.contextOptions.reasoningLevel)
                     : false
-                toolAwareContext = [key: enabled]
+                toolAwareRender = try ThinkingRender(config: config, thinkingEnabled: enabled)
             } else {
-                toolAwareContext = nil
+                toolAwareRender = ThinkingRender()
             }
             if ToolCallingModeResolution.usesAllowedBehavior(toolCallingMode) {
                 try await runAllowedToolTurn(
                     request: request,
                     messages: messages,
                     enabledToolDefinitions: enabledToolDefinitions,
-                    toolAwareContext: toolAwareContext,
+                    toolAwareRender: toolAwareRender,
                     thinkThenCallConfig: thinkThenCallConfig,
                     schemaJSON: schemaJSON,
                     baselineInput: baselineInput,
@@ -1471,7 +1472,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 request: request,
                 messages: messages,
                 enabledToolDefinitions: enabledToolDefinitions,
-                toolAwareContext: toolAwareContext,
+                toolAwareRender: toolAwareRender,
                 thinkThenCallConfig: thinkThenCallConfig,
                 modelID: modelID,
                 requestedMaxTokens: requestedMaxTokens,
@@ -1499,7 +1500,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - request: The generation request for this turn
         ///   - messages: The chat messages the tool-aware prompt renders from
         ///   - enabledToolDefinitions: The tool definitions this turn exposes
-        ///   - toolAwareContext: The thinking flag threaded into the template
+        ///   - toolAwareRender: The thinking state the tool-aware render carries
         ///   - thinkThenCallConfig: The reasoning config of the think-then-call phase, when active
         ///   - schemaJSON: The encoded response schema, when the request carries one
         ///   - baselineInput: The prompt rendered without tool awareness
@@ -1516,7 +1517,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             request: LanguageModelExecutorGenerationRequest,
             messages: [Chat.Message],
             enabledToolDefinitions: [Transcript.ToolDefinition],
-            toolAwareContext: [String: any Sendable]?,
+            toolAwareRender: ThinkingRender,
             thinkThenCallConfig: ReasoningConfig?,
             schemaJSON: String?,
             baselineInput: LMInput,
@@ -1532,11 +1533,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) async throws {
             let toolSpecs = try ToolCallingConversions.makeToolSpecs(
                 from: enabledToolDefinitions)
-            let toolAwareInput = try await context.processor.prepare(
-                input: UserInput(
-                    chat: messages,
-                    tools: toolSpecs,
-                    additionalContext: toolAwareContext))
+            let toolAwareInput = try await toolAwareRender.prepare(
+                messages: messages, tools: toolSpecs, context: context)
             let reasoning = thinkThenCallConfig.map {
                 (
                     config: $0,
@@ -1614,7 +1612,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - request: The generation request for this turn
         ///   - messages: The chat messages the tool-aware prompt renders from
         ///   - enabledToolDefinitions: The tool definitions the grammar constrains to
-        ///   - toolAwareContext: The thinking flag threaded into the template
+        ///   - toolAwareRender: The thinking state the tool-aware render carries
         ///   - thinkThenCallConfig: The reasoning config of the think-then-call phase, when active
         ///   - modelID: The model identifier the constraint caches key on
         ///   - requestedMaxTokens: The caller's token budget, when set
@@ -1629,7 +1627,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             request: LanguageModelExecutorGenerationRequest,
             messages: [Chat.Message],
             enabledToolDefinitions: [Transcript.ToolDefinition],
-            toolAwareContext: [String: any Sendable]?,
+            toolAwareRender: ThinkingRender,
             thinkThenCallConfig: ReasoningConfig?,
             modelID: String,
             requestedMaxTokens: Int?,
@@ -1645,11 +1643,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let requiredToolDefinitions = enabledToolDefinitions
             let toolSpecs = try ToolCallingConversions.makeToolSpecs(
                 from: requiredToolDefinitions)
-            let toolAwareInput = try await context.processor.prepare(
-                input: UserInput(
-                    chat: messages,
-                    tools: toolSpecs,
-                    additionalContext: toolAwareContext))
+            let toolAwareInput = try await toolAwareRender.prepare(
+                messages: messages, tools: toolSpecs, context: context)
 
             let toolCallingGrammar =
                 try SchemaConverter.encodeToolCallingGrammar(
@@ -2625,25 +2620,32 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// internal `cannotDisableReasoning` to the framework's
         /// `unsupportedCapability` so always-on models surface a typed error
         /// before generation rather than leaking `<think>` into `.response`.
+        ///
+        /// - Parameters:
+        ///   - messages: The chat messages the prompt renders from
+        ///   - config: The reasoning protocol of the model
+        ///   - thinkingEnabled: `true` / `false` to force thinking on / off, `nil` for the default
+        ///   - context: The loaded model context whose processor renders the prompt
+        ///   - cannotDisableMessage: The description of the error for a model that always reasons
+        /// - Returns: The prepared prompt
+        /// - Throws: `unsupportedCapability` when thinking cannot go off, or the error of the processor
         private static func preparedInput(
             messages: [Chat.Message],
             config: ReasoningConfig,
             thinkingEnabled: Bool?,
-            processor: any UserInputProcessor,
+            context: ModelContext,
             cannotDisableMessage: String
         ) async throws -> LMInput {
-            let additionalContext: [String: any Sendable]?
+            let render: ThinkingRender
             do {
-                additionalContext = try config.promptStrategy
-                    .additionalContext(forThinkingEnabled: thinkingEnabled)
+                render = try ThinkingRender(config: config, thinkingEnabled: thinkingEnabled)
             } catch ReasoningError.cannotDisableReasoning {
                 throw LanguageModelError.unsupportedCapability(
                     LanguageModelError.UnsupportedCapability(
                         capability: .reasoning,
                         debugDescription: cannotDisableMessage))
             }
-            return try await processor.prepare(
-                input: UserInput(chat: messages, additionalContext: additionalContext))
+            return try await render.prepare(messages: messages, tools: nil, context: context)
         }
 
         /// Maps a requested reasoning level to a thinking on/off/unspecified

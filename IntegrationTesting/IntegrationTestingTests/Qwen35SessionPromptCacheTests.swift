@@ -58,6 +58,13 @@ private let sessionInstructions = "You are a terse, literal assistant."
 private let firstPrompt = "My favorite color is teal. Reply with just \"OK\"."
 private let secondPrompt = "What is my favorite color? Answer with just the color, lowercase."
 
+/// The third turn of the recovery sequence, with thinking on again.
+private let thirdPrompt = "Name one fruit with that color. Answer with one word."
+
+/// The reasoning level that turns thinking off for one turn, as the recovery after a
+/// repeat stop asks for it.
+private let thinkingOffLevelName = "no_think"
+
 /// The model state key under which Qwen 3.5 keeps its M-RoPE anchor. The key in
 /// `Libraries/MLXVLM/Models/Qwen35.swift` is private, thus the suite names it again.
 private let ropeDeltasKey = LMOutput.Key<MLXArray>("qwen35.ropeDeltas")
@@ -138,6 +145,74 @@ struct Qwen35SessionPromptCacheTests {
             """)
         #expect(second.content.lowercased().contains("teal"))
         await releaseAllGPUMemory()
+    }
+
+    /// A turn with thinking off after a turn with thinking on, and a turn with thinking on
+    /// after the turn with thinking off, each reuse the whole render of the turn before it.
+    ///
+    /// This is the sequence of a recovery after a repeat stop: thinking on, a recovery turn
+    /// with thinking off, and thinking on again (card `^v3dt28p`). The hybrid caches cannot
+    /// rewind, thus a turn reuses tokens only by the rules `extend` and `splice`, and a turn
+    /// that reuses nothing is the rule `rebuild`. The rule of each turn is in the unified
+    /// log, category `ExecutorPromptCache`.
+    @Test func turnsWithThinkingOffAndOnAgainReuseTheTurnBefore() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectTurnsWithThinkingOffAndOnAgainReuseTheTurnBefore()
+        } else {
+            Issue.record("The executor needs iOS 27, macOS 27 or visionOS 27.")
+        }
+    }
+
+    /// Runs the three turns of a recovery in one framework session, and records an issue
+    /// unless the turn with thinking off (on to off) and the turn after it (off to on) each
+    /// reuse the whole render of the turn before it.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectTurnsWithThinkingOffAndOnAgainReuseTheTurnBefore() async throws {
+        await releaseAllGPUMemory()
+        let model = makeReasoningTestModel(hybridModelID)
+        try model.requireLocalWeights()
+        let session = LanguageModelSession(
+            model: model, tools: [], instructions: sessionInstructions)
+        let options = GenerationOptions(
+            samplingMode: .greedy, temperature: 0, maximumResponseTokens: generatedTokenBudget)
+        var thinkingOff = ContextOptions()
+        thinkingOff.reasoningLevel = .custom(thinkingOffLevelName)
+
+        let first = try await session.respond(to: firstPrompt, options: options)
+        report(turn: 1, usage: first.usage, transcript: session.transcript)
+        let recovery = try await session.respond(
+            to: secondPrompt, options: options, contextOptions: thinkingOff)
+        report(turn: 2, usage: recovery.usage, transcript: session.transcript)
+        let third = try await session.respond(to: thirdPrompt, options: options)
+        report(turn: 3, usage: third.usage, transcript: session.transcript)
+
+        #expect(first.usage.input.cachedTokenCount == 0)
+        expectTheTurnReusesTheTurnBefore(
+            "turn 2 (thinking on to off)", usage: recovery.usage, before: first.usage)
+        expectTheTurnReusesTheTurnBefore(
+            "turn 3 (thinking off to on)", usage: third.usage, before: recovery.usage)
+        #expect(recovery.content.lowercased().contains("teal"))
+        await releaseAllGPUMemory()
+    }
+
+    /// Logs the rule that the reuse of one turn shows, and records an issue unless the turn
+    /// reuses at least the whole render of the turn before it.
+    ///
+    /// - Parameters:
+    ///   - turn: the name of the turn in the log line.
+    ///   - usage: the usage of the turn.
+    ///   - before: the usage of the turn before it.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectTheTurnReusesTheTurnBefore(
+        _ turn: String, usage: LanguageModelSession.Usage, before: LanguageModelSession.Usage
+    ) {
+        let cached = usage.input.cachedTokenCount
+        let rule = cached > 0 ? "extend or splice" : "rebuild"
+        let line =
+            "\(measurementPrefix) \(turn) cached \(cached) of \(usage.input.totalTokenCount); "
+            + "the turn before rendered \(before.input.totalTokenCount); rule \(rule)"
+        measurementLog.info("\(line, privacy: .public)")
+        #expect(cached >= before.input.totalTokenCount, "\(line)")
     }
 
     /// A framework session whose cache went to disk between its turns comes back warm: the

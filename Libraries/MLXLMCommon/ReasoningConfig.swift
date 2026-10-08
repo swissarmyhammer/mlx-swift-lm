@@ -15,6 +15,31 @@ public enum ReasoningError: Error, Equatable {
     case cannotDisableReasoning
 }
 
+// MARK: - ThinkingOffRender
+
+/// How a ``ReasoningPromptStrategy/templateFlag(key:defaultOn:thinkingOff:)``
+/// model renders a turn with thinking off.
+public enum ThinkingOffRender: Sendable, Equatable {
+    /// The render passes the template flag as `false`.
+    case templateFlagOff
+
+    /// The render keeps the template flag on, and the prompt ends with this
+    /// closed, empty reasoning block in place of the open block that the
+    /// template primes after its generation prompt.
+    ///
+    /// A template that writes other text before the generation prompt when the
+    /// flag is `false` changes the start of the prompt. A model that cannot
+    /// rewind its caches (a hybrid recurrent model) must then fill its caches
+    /// again from the start, one time when thinking goes off and one time when
+    /// it comes back on. A render that keeps the flag on keeps that text, thus
+    /// the prompt cache extends or splices. The Qwen 3.5 template is such a
+    /// template: the flag adds the reasoning instructions to its system block.
+    ///
+    /// The value is the exact text that the template writes after its
+    /// generation prompt when the flag is `false`.
+    case closedBlock(String)
+}
+
 // MARK: - ReasoningPromptStrategy
 
 /// How a model's "thinking on / off" preference is expressed to its chat template.
@@ -28,8 +53,10 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
     /// Toggleable via a chat-template keyword argument (e.g. Qwen3's
     /// `enable_thinking`). The `key` is the kwarg name; `defaultOn` is the
     /// value used when the caller expresses no preference, matching the
-    /// model's own template default.
-    case templateFlag(key: String, defaultOn: Bool)
+    /// model's own template default. `thinkingOff` tells how a turn with
+    /// thinking off renders.
+    case templateFlag(
+        key: String, defaultOn: Bool, thinkingOff: ThinkingOffRender = .templateFlagOff)
 
     /// The model always reasons and cannot be turned off (e.g. DeepSeek-R1).
     case alwaysOn
@@ -50,8 +77,12 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
         forThinkingEnabled thinkingEnabled: Bool?
     ) throws -> [String: any Sendable]? {
         switch self {
-        case .templateFlag(let key, let defaultOn):
-            return [key: thinkingEnabled ?? defaultOn]
+        case .templateFlag(let key, let defaultOn, let thinkingOff):
+            let enabled = thinkingEnabled ?? defaultOn
+            if case .closedBlock = thinkingOff, !enabled {
+                return [key: true]
+            }
+            return [key: enabled]
         case .alwaysOn:
             if thinkingEnabled == false {
                 throw ReasoningError.cannotDisableReasoning
@@ -68,6 +99,22 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
             }
             return nil
         }
+    }
+
+    /// The closed, empty reasoning block that ends a prompt for a "thinking
+    /// enabled" preference.
+    ///
+    /// - Parameter thinkingEnabled: `true` / `false` to force thinking on / off,
+    ///   `nil` when the caller expressed no preference.
+    /// - Returns: the block of ``ThinkingOffRender/closedBlock(_:)`` when the
+    ///   preference turns thinking off, else `nil`.
+    public func closedBlock(forThinkingEnabled thinkingEnabled: Bool?) -> String? {
+        guard case .templateFlag(_, let defaultOn, .closedBlock(let block)) = self,
+            !(thinkingEnabled ?? defaultOn)
+        else {
+            return nil
+        }
+        return block
     }
 }
 
@@ -169,4 +216,80 @@ public struct ReasoningConfig: Sendable, Equatable {
     public static let alwaysOnThinking = ReasoningConfig(
         startDelimiter: "<think>", endDelimiter: "</think>",
         promptStrategy: .alwaysOn)
+}
+
+// MARK: - Closing the reasoning of a prompt
+
+extension ReasoningConfig {
+
+    /// The tokens of a rendered prompt, with `closedBlock` in place of the
+    /// open reasoning block at its end.
+    ///
+    /// A template that primes reasoning ends its generation prompt with
+    /// ``startDelimiter`` and whitespace. The result cuts the prompt at the
+    /// token where that open block starts, and appends the tokens of the text
+    /// before the delimiter in that token and of `closedBlock`. A prompt with no
+    /// open block at its end keeps all its tokens, and `closedBlock` follows
+    /// them.
+    ///
+    /// The result encodes the closed block whole. A tokenizer can merge the
+    /// whitespace inside the block (two newlines can be one token), thus the
+    /// result holds the tokens that a render with the block in its text holds,
+    /// and a later render of the turn extends them.
+    ///
+    /// - Parameters:
+    ///   - promptTokens: the tokens of a render with thinking on.
+    ///   - closedBlock: the closed, empty reasoning block that ends the prompt.
+    ///   - tokenizer: the tokenizer of the model.
+    /// - Returns: the tokens of the prompt that ends with `closedBlock`.
+    public func closingReasoning(
+        in promptTokens: [Int], with closedBlock: String, tokenizer: any Tokenizer
+    ) -> [Int] {
+        let cut = openBlockStart(in: promptTokens, tokenizer: tokenizer)
+        let keptCount = cut?.tokenIndex ?? promptTokens.count
+        let text = (cut?.leadingText ?? "") + closedBlock
+        return Array(promptTokens.prefix(keptCount))
+            + tokenizer.encode(text: text, addSpecialTokens: false)
+    }
+
+    /// Where the open reasoning block at the end of `promptTokens` starts.
+    ///
+    /// The search decodes ever longer suffixes of the prompt. It stops at the
+    /// first suffix whose text, without its trailing whitespace, ends with
+    /// ``startDelimiter``. It gives up at the first suffix whose text is not
+    /// whitespace after a part of the delimiter, because the prompt then ends
+    /// outside a reasoning block.
+    ///
+    /// - Parameters:
+    ///   - promptTokens: the tokens of the prompt.
+    ///   - tokenizer: the tokenizer of the model.
+    /// - Returns: the index of the token where the block starts and the text of
+    ///   that token before the delimiter, or `nil` when the prompt does not end
+    ///   in an open block.
+    private func openBlockStart(
+        in promptTokens: [Int], tokenizer: any Tokenizer
+    ) -> (tokenIndex: Int, leadingText: String)? {
+        guard !startDelimiter.isEmpty else { return nil }
+        for tokenIndex in promptTokens.indices.reversed() {
+            let suffix = tokenizer.decode(tokenIds: Array(promptTokens[tokenIndex...]))
+            let core = suffix.droppingTrailingWhitespace()
+            if core.hasSuffix(startDelimiter) {
+                return (tokenIndex, String(core.dropLast(startDelimiter.count)))
+            }
+            guard startDelimiter.hasSuffix(core) else { return nil }
+        }
+        return nil
+    }
+}
+
+extension StringProtocol {
+
+    /// The text without the whitespace at its end.
+    fileprivate func droppingTrailingWhitespace() -> SubSequence {
+        var end = endIndex
+        while end > startIndex, self[index(before: end)].isWhitespace {
+            end = index(before: end)
+        }
+        return self[startIndex ..< end]
+    }
 }
