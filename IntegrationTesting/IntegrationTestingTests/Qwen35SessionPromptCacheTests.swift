@@ -215,6 +215,60 @@ struct Qwen35SessionPromptCacheTests {
         #expect(cached >= before.input.totalTokenCount, "\(line)")
     }
 
+    /// A turn whose transcript drops the turn the model generated, and adds a user message in
+    /// its place, reuses the first turn up to the checkpoint the executor took at the end of its
+    /// last message (card `^8qkdk0b`). Router writes this shape when it rejects a repeated tool
+    /// call. The hybrid caches cannot rewind into the generation prompt, thus without the
+    /// checkpoint the turn is the rule `rebuild` and reuses nothing.
+    @Test func aTurnThatDropsTheGeneratedTurnRestoresTheCheckpoint() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectATurnThatDropsTheGeneratedTurnRestoresTheCheckpoint()
+        } else {
+            Issue.record("The executor needs iOS 27, macOS 27 or visionOS 27.")
+        }
+    }
+
+    /// Runs one turn, then a turn over the same transcript without the entries the model wrote,
+    /// and records an issue unless the second turn reuses exactly the checkpoint of the first.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectATurnThatDropsTheGeneratedTurnRestoresTheCheckpoint() async throws {
+        await releaseAllGPUMemory()
+        let model = makeReasoningTestModel(hybridModelID)
+        try model.requireLocalWeights()
+        let session = LanguageModelSession(
+            model: model, tools: [], instructions: sessionInstructions)
+        let options = GenerationOptions(
+            samplingMode: .greedy, temperature: 0, maximumResponseTokens: generatedTokenBudget)
+
+        let first = try await session.respond(to: firstPrompt, options: options)
+        report(turn: 1, usage: first.usage, transcript: session.transcript)
+        let firstEntryID = try #require(session.transcript.first?.id)
+        let key = ExecutorPromptCacheKey(modelID: model.modelID, sessionID: firstEntryID)
+        let checkpoint = try #require(
+            await ExecutorPromptCacheStore.shared.peek(key)?.checkpoint?.tokens.count)
+
+        let entries = Array(session.transcript)
+        let lastPrompt = try #require(
+            entries.lastIndex { entry in
+                if case .prompt = entry { return true }
+                return false
+            })
+        let dropped = LanguageModelSession(
+            model: model, tools: [], transcript: Transcript(entries: Array(entries[...lastPrompt])))
+        let second = try await dropped.respond(to: secondPrompt, options: options)
+        report(turn: 2, usage: second.usage, transcript: dropped.transcript)
+        let line =
+            "\(measurementPrefix) dropped turn cached \(second.usage.input.cachedTokenCount) of "
+            + "\(second.usage.input.totalTokenCount); checkpoint \(checkpoint); turn 1 rendered "
+            + "\(first.usage.input.totalTokenCount)"
+        measurementLog.info("\(line, privacy: .public)")
+
+        #expect(first.usage.input.cachedTokenCount == 0)
+        #expect(second.usage.input.cachedTokenCount == checkpoint, "\(line)")
+        #expect(second.content.lowercased().contains("teal"))
+        await releaseAllGPUMemory()
+    }
+
     /// A framework session whose cache went to disk between its turns comes back warm: the
     /// hybrid caches (`MambaCache` and `KVCacheSimple`) read back from the file, and the second
     /// turn reuses the whole first turn.

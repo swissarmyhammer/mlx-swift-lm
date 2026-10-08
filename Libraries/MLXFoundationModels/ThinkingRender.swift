@@ -74,6 +74,57 @@ extension MLXLanguageModel.Executor {
                 tokenizer: context.tokenizer)
         }
 
+        /// The text of the user message that
+        /// ``transcriptBoundary(of:messages:tools:context:)`` adds to the
+        /// messages. The text does not matter: the render parts from the
+        /// prompt before it.
+        static let boundaryProbeText = "."
+
+        /// The index of `prompt` where a next render of the same messages
+        /// plus one new user message parts from it, for a hybrid model.
+        ///
+        /// A chat template writes a generation prompt after the last message
+        /// (Qwen 3.5: `<|im_start|>assistant\n<think>\n\n</think>\n\n`). A
+        /// next turn that drops the turn the model generated, and adds a
+        /// user message in its place, renders the same messages and then
+        /// that user message, not the generation prompt. The recurrent layers
+        /// of a hybrid model cannot rewind into the generation prompt, thus
+        /// the executor keeps a checkpoint at the point where the two
+        /// renders part.
+        ///
+        /// This method finds that point: it renders `messages` plus one user
+        /// message with the same template variables, tools and closed block
+        /// as `prompt`, and takes the prefix the two renders share. With no
+        /// generation prompt, the point is the end of `prompt`.
+        ///
+        /// - Parameters:
+        ///   - prompt: the prepared prompt of `messages`, which this render
+        ///     made.
+        ///   - messages: the chat messages `prompt` renders from.
+        ///   - tools: the tool specifications `prompt` describes, or nil.
+        ///   - context: the loaded model context whose processor renders the
+        ///     prompt.
+        /// - Returns: the index, or nil when the model is not hybrid, when
+        ///   `prompt` carries media (the prompt cache carries no cache for
+        ///   such a prompt), or when the second render fails. A template can
+        ///   refuse two user messages after each other, and then the pass
+        ///   takes no checkpoint.
+        func transcriptBoundary(
+            of prompt: LMInput, messages: [Chat.Message], tools: [ToolSpec]?,
+            context: ModelContext
+        ) async -> Int? {
+            guard prompt.image == nil, prompt.video == nil, prompt.audio == nil,
+                ExecutorPromptCacheCheckpoint.applies(to: context.model),
+                let probe = try? await prepare(
+                    messages: messages + [.user(Self.boundaryProbeText)], tools: tools,
+                    context: context)
+            else {
+                return nil
+            }
+            return commonPrefixLength(
+                of: prompt.text.tokens.asArray(Int.self), and: probe.text.tokens.asArray(Int.self))
+        }
+
         /// `input` with `block` in place of the open reasoning block at its
         /// end, in the rank and the mask presence of `input`, thus the model
         /// sees the shape its processor makes.

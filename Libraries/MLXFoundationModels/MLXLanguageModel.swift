@@ -578,11 +578,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// a completion info, or the size of the input the pass handed to the
         /// model -- counts the tokens that pass FED. The whole prompt is thus
         /// that count plus the prefix the cache already held, and the held part
-        /// is the cached part.
+        /// is the cached part. A pass that takes a checkpoint of a hybrid model
+        /// feeds part of the prompt before its generation starts; the
+        /// generation does not count that part, thus it is added back.
         ///
         /// - Parameters:
-        ///   - fedTokenCount: the prompt tokens the pass fed to the model.
-        ///   - promptCache: the slot that carries the prefix the pass reused.
+        ///   - fedTokenCount: the prompt tokens the generation of the pass fed
+        ///     to the model.
+        ///   - promptCache: the slot that carries the prefix the pass reused,
+        ///     and the tokens the pass fed before its generation.
         /// - Returns: the whole prompt count, and the part of it the cache
         ///   served.
         static func usageInput(
@@ -590,7 +594,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             promptCache: ExecutorPromptCacheSlot
         ) -> LanguageModelExecutorGenerationChannel.Usage.Input {
             .init(
-                totalTokenCount: fedTokenCount + promptCache.reusedTokenCount,
+                totalTokenCount: fedTokenCount + promptCache.prefilledTokenCount
+                    + promptCache.reusedTokenCount,
                 cachedTokenCount: promptCache.reusedTokenCount)
         }
 
@@ -1114,6 +1119,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         resolved: resolved,
                         declaresReasoning: declaresReasoning,
                         mayRunReasoningPath: mayRunReasoningPath,
+                        baselineInput: input,
                         context: context)
 
                     // The prompt actually fed into generation: the suppressed
@@ -1158,6 +1164,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         try await runTextGeneration(
                             reasoningSetup: reasoningPlan.reasoningSetup,
                             fallbackInput: effectiveInput,
+                            transcriptBoundary: reasoningPlan.transcriptBoundary,
                             requestedMaxTokens: requestedMaxTokens,
                             requestedTemperature: request.generationOptions.temperature,
                             samplingConfiguration: requestedSamplingConfiguration,
@@ -1246,6 +1253,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             /// primed generation inside the think block; nil when this turn
             /// does not run the reasoning path.
             let reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
+            /// The index of the prompt the unconstrained path feeds where a
+            /// hybrid model takes its checkpoint, or nil when the pass takes
+            /// none.
+            let transcriptBoundary: Int?
         }
 
         /// Gates the reasoning capability and prepares the reasoning inputs.
@@ -1272,6 +1283,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - resolved: The resolver-patched configuration carrying the reasoning config
         ///   - declaresReasoning: Whether `.reasoning` was declared at init
         ///   - mayRunReasoningPath: Whether this turn takes the unconstrained path
+        ///   - baselineInput: The prompt rendered with no thinking state, which
+        ///     the unconstrained path feeds when no other prompt applies
         ///   - context: The loaded model context whose processor renders the prompts
         private func makeReasoningPlan(
             request: LanguageModelExecutorGenerationRequest,
@@ -1279,6 +1292,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             resolved: ModelConfiguration,
             declaresReasoning: Bool,
             mayRunReasoningPath: Bool,
+            baselineInput: LMInput,
             context: ModelContext
         ) async throws -> ReasoningPlan {
             if !declaresReasoning, let suppressionConfig = resolved.reasoningConfig {
@@ -1299,44 +1313,59 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // re-render the prompt with thinking off so the model
             // doesn't emit `<think>`. Toggleable-only;
             // .alwaysOn was already rejected above.
-            let suppressedInput: LMInput?
+            let suppressed: (render: ThinkingRender, input: LMInput)?
             if mayRunReasoningPath, !declaresReasoning,
                 let suppressionConfig = resolved.reasoningConfig
             {
-                suppressedInput = try await Self.preparedInput(
+                suppressed = try await Self.preparedInput(
                     messages: messages, config: suppressionConfig,
                     thinkingEnabled: false, context: context,
                     cannotDisableMessage:
                         "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
                 )
             } else {
-                suppressedInput = nil
+                suppressed = nil
             }
 
+            let reasoning: (render: ThinkingRender, input: LMInput)?
             let reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
             if mayRunReasoningPath, declaresReasoning,
                 let reasoningConfig = resolved.reasoningConfig
             {
                 let thinkingEnabled = Self.thinkingEnabled(
                     for: request.contextOptions.reasoningLevel)
-                let reasoningInput = try await Self.preparedInput(
+                let prepared = try await Self.preparedInput(
                     messages: messages, config: reasoningConfig,
                     thinkingEnabled: thinkingEnabled, context: context,
                     cannotDisableMessage:
                         "This model always reasons; reasoning cannot be disabled via reasoningLevel."
                 )
+                reasoning = prepared
                 reasoningSetup = (
-                    reasoningInput, reasoningConfig,
+                    prepared.input, reasoningConfig,
                     Self.reasoningPrimedInside(
-                        input: reasoningInput, config: reasoningConfig,
+                        input: prepared.input, config: reasoningConfig,
                         tokenizer: context.tokenizer)
                 )
             } else {
+                reasoning = nil
                 reasoningSetup = nil
             }
 
+            // The text path feeds the reasoning input, else the suppressed
+            // input, else the baseline input. Its checkpoint goes where a
+            // next render of the same messages plus a new message parts from
+            // the input it feeds.
+            let fed = reasoning ?? suppressed ?? (ThinkingRender(), baselineInput)
+            let transcriptBoundary =
+                mayRunReasoningPath
+                ? await fed.render.transcriptBoundary(
+                    of: fed.input, messages: messages, tools: nil, context: context)
+                : nil
+
             return ReasoningPlan(
-                suppressedInput: suppressedInput, reasoningSetup: reasoningSetup)
+                suppressedInput: suppressed?.input, reasoningSetup: reasoningSetup,
+                transcriptBoundary: transcriptBoundary)
         }
 
         /// Runs the tool path of one generation turn — fresh turns and
@@ -1535,6 +1564,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 from: enabledToolDefinitions)
             let toolAwareInput = try await toolAwareRender.prepare(
                 messages: messages, tools: toolSpecs, context: context)
+            let transcriptBoundary = await toolAwareRender.transcriptBoundary(
+                of: toolAwareInput, messages: messages, tools: toolSpecs, context: context)
             let reasoning = thinkThenCallConfig.map {
                 (
                     config: $0,
@@ -1546,6 +1577,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
             let result = try await runAllowedToolGeneration(
                 input: toolAwareInput,
+                transcriptBoundary: transcriptBoundary,
                 toolSpecs: toolSpecs,
                 reasoning: reasoning,
                 requestedMaxTokens: requestedMaxTokens,
@@ -2021,6 +2053,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
         private func runAllowedToolGeneration(
             input: LMInput,
+            transcriptBoundary: Int?,
             toolSpecs: [[String: any Sendable]],
             reasoning: (config: ReasoningConfig, primedInside: Bool)?,
             requestedMaxTokens: Int?,
@@ -2039,6 +2072,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let plan = try promptCache.plan(
                 input: input, model: context.model, parameters: params,
                 protocolRules: Self.promptCacheReuseRules(of: context),
+                transcriptBoundary: transcriptBoundary,
                 decodeTokens: context.tokenizer.decode(tokenIds:))
             let format = context.configuration.toolCallFormat ?? .json
             var router = AllowedToolOutputRouter(
@@ -2060,7 +2094,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     parameters: params,
                     context: context,
                     decoder: protocolDecoder,
-                    preparedState: { preparedState = $0 })
+                    preparedState: {
+                        preparedState = $0
+                        promptCache.prefillDidEnd(state: $0)
+                    })
             }
 
             try await withPromptCacheCommit(
@@ -2309,6 +2346,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// path when the model has no reasoning config to route through.
         private func runUnconstrained(
             input: LMInput,
+            transcriptBoundary: Int?,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
@@ -2328,6 +2366,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let plan = try promptCache.plan(
                 input: input, model: context.model, parameters: params,
                 protocolRules: Self.promptCacheReuseRules(of: context),
+                transcriptBoundary: transcriptBoundary,
                 decodeTokens: context.tokenizer.decode(tokenIds:))
 
             // The token-recording form is what lets this pass leave a prompt
@@ -2342,7 +2381,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     state: plan?.state,
                     parameters: params,
                     context: context,
-                    preparedState: { preparedState = $0 })
+                    preparedState: {
+                        preparedState = $0
+                        promptCache.prefillDidEnd(state: $0)
+                    })
             }
 
             try await withPromptCacheCommit(
@@ -2379,9 +2421,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
         /// Dispatches the no-tools/no-schema path: reasoning routing when a
         /// config resolved, otherwise plain unconstrained text.
+        ///
+        /// `transcriptBoundary` is the checkpoint position of the input this
+        /// method feeds: the reasoning input when `reasoningSetup` is set,
+        /// and `fallbackInput` otherwise.
         private func runTextGeneration(
             reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?,
             fallbackInput: LMInput,
+            transcriptBoundary: Int?,
             requestedMaxTokens: Int?,
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
@@ -2394,6 +2441,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if let reasoning = reasoningSetup {
                 try await runReasoning(
                     input: reasoning.input,
+                    transcriptBoundary: transcriptBoundary,
                     reasoningConfig: reasoning.config,
                     primedInside: reasoning.primedInside,
                     requestedMaxTokens: requestedMaxTokens,
@@ -2407,6 +2455,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } else {
                 try await runUnconstrained(
                     input: fallbackInput,
+                    transcriptBoundary: transcriptBoundary,
                     requestedMaxTokens: requestedMaxTokens,
                     requestedTemperature: requestedTemperature,
                     samplingConfiguration: samplingConfiguration,
@@ -2426,6 +2475,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// sees real token IDs for an accurate reasoning token count.
         private func runReasoning(
             input: LMInput,
+            transcriptBoundary: Int?,
             reasoningConfig: ReasoningConfig,
             primedInside: Bool,
             requestedMaxTokens: Int?,
@@ -2446,6 +2496,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let plan = try promptCache.plan(
                 input: input, model: context.model, parameters: params,
                 protocolRules: Self.promptCacheReuseRules(of: context),
+                transcriptBoundary: transcriptBoundary,
                 decodeTokens: context.tokenizer.decode(tokenIds:))
 
             var emitter = ReasoningEventEmitter(
@@ -2471,7 +2522,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     parameters: params,
                     context: context,
                     decoder: protocolDecoder,
-                    preparedState: { preparedState = $0 })
+                    preparedState: {
+                        preparedState = $0
+                        promptCache.prefillDidEnd(state: $0)
+                    })
             }
 
             try await withPromptCacheCommit(
@@ -2627,7 +2681,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - thinkingEnabled: `true` / `false` to force thinking on / off, `nil` for the default
         ///   - context: The loaded model context whose processor renders the prompt
         ///   - cannotDisableMessage: The description of the error for a model that always reasons
-        /// - Returns: The prepared prompt
+        /// - Returns: The render that made the prompt, and the prepared prompt
         /// - Throws: `unsupportedCapability` when thinking cannot go off, or the error of the processor
         private static func preparedInput(
             messages: [Chat.Message],
@@ -2635,7 +2689,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             thinkingEnabled: Bool?,
             context: ModelContext,
             cannotDisableMessage: String
-        ) async throws -> LMInput {
+        ) async throws -> (render: ThinkingRender, input: LMInput) {
             let render: ThinkingRender
             do {
                 render = try ThinkingRender(config: config, thinkingEnabled: thinkingEnabled)
@@ -2645,7 +2699,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         capability: .reasoning,
                         debugDescription: cannotDisableMessage))
             }
-            return try await render.prepare(messages: messages, tools: nil, context: context)
+            return (
+                render, try await render.prepare(messages: messages, tools: nil, context: context)
+            )
         }
 
         /// Maps a requested reasoning level to a thinking on/off/unspecified

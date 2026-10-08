@@ -139,10 +139,16 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     /// allocates no KV cache.
     var kvHeads: [Int] { Array(repeating: Self.cacheHeadCount, count: cacheLayerCount) }
 
+    /// The shape of the state that the model writes into each recurrent
+    /// layer. One value is enough: the caches only have to count the
+    /// positions the model saw.
+    private static let recurrentStateShape = [1, 1]
+
     private let rounds: [[Int]]
     private let forwardSteps: ForwardStepCounter?
     private let forwardDelay: TimeInterval
     private let cacheLayerCount: Int
+    private let recurrentLayerCount: Int
     private var roundIndex = -1
     private var step = 0
 
@@ -157,15 +163,33 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     /// forward pass writes one position into each layer for each input
     /// token, thus the executor can carry the caches of a pass into the next
     /// pass. The default of zero gives the model no cache.
+    ///
+    /// `recurrentLayerCount` gives the model that many recurrent layers
+    /// after the KV cache layers, the way the linear layers of a Qwen 3.5
+    /// model sit beside its attention layers. A recurrent layer cannot
+    /// rewind, thus a model with one is a hybrid model. The default of zero
+    /// gives the model no recurrent layer.
     init(
         rounds: [[Int]], forwardSteps: ForwardStepCounter? = nil,
-        forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0
+        forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0,
+        recurrentLayerCount: Int = 0
     ) {
         self.rounds = rounds
         self.forwardSteps = forwardSteps
         self.forwardDelay = forwardDelay
         self.cacheLayerCount = cacheLayerCount
+        self.recurrentLayerCount = recurrentLayerCount
         super.init()
+    }
+
+    /// One attention cache for each KV cache layer, then one recurrent cache
+    /// for each recurrent layer.
+    func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        let attention = try (0 ..< cacheLayerCount).map { _ in
+            try makeAttentionKVCache(parameters: parameters)
+        }
+        let recurrent: [KVCache] = (0 ..< recurrentLayerCount).map { _ in MambaCache() }
+        return attention + recurrent
     }
 
     func prepare(
@@ -194,8 +218,9 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     }
 
     /// Writes one zero key and one zero value for each of `tokenCount` tokens
-    /// into each of `caches`, thus the offset of each cache counts the tokens
-    /// the model saw.
+    /// into each attention cache of `caches`, and a new zero state into each
+    /// recurrent cache, thus the offset of each cache counts the tokens the
+    /// model saw.
     ///
     /// - Parameters:
     ///   - tokenCount: the number of tokens in the input of the forward pass.
@@ -206,7 +231,15 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
             1, Self.cacheHeadCount, tokenCount, Self.cacheHeadDimension,
         ])
         for cache in caches {
-            _ = cache.update(keys: keyValues, values: keyValues)
+            if let recurrent = cache as? MambaCache {
+                // A linear layer puts new state arrays in its slots and does
+                // not write into the old ones, as Qwen 3.5 does.
+                recurrent[0] = MLXArray.zeros(Self.recurrentStateShape)
+                recurrent[1] = MLXArray.zeros(Self.recurrentStateShape)
+                recurrent.advance(tokenCount)
+            } else {
+                _ = cache.update(keys: keyValues, values: keyValues)
+            }
         }
     }
 
@@ -259,16 +292,40 @@ struct PromptBytesInputProcessor: UserInputProcessor {
     }
 }
 
+/// A processor that renders the text of the prompt as its UTF-8 bytes, one
+/// token for each byte, and then a generation prompt on a line of its own.
+///
+/// A chat template writes a generation prompt after the last message (for
+/// Qwen 3.5, `<|im_start|>assistant\n<think>\n\n</think>\n\n`). The next
+/// render writes the messages again but not that generation prompt, thus
+/// the next render agrees with the earlier prompt only up to the start of
+/// the generation prompt. The line break before the generation prompt
+/// stands for `<|im_start|>`: the next message starts with it too.
+struct GenerationPromptBytesInputProcessor: UserInputProcessor {
+
+    /// The text that the render writes after the last message.
+    let generationPrompt: String
+
+    /// Renders the text of the prompt of `input`, a line break and
+    /// ``generationPrompt``, as one token for each byte.
+    func prepare(input: UserInput) async throws -> LMInput {
+        let tokens = ScriptedByteTokenizer().encode(
+            text: input.prompt.description + "\n" + generationPrompt, addSpecialTokens: false)
+        return LMInput(tokens: MLXArray(tokens.map(Int32.init)))
+    }
+}
+
 /// Builds a container over the scripted doubles. No download, no weights.
 ///
-/// `forwardSteps`, `forwardDelay` and `cacheLayerCount` pass through to
-/// ``ScriptedLanguageModel/init(rounds:forwardSteps:forwardDelay:cacheLayerCount:)``.
+/// `forwardSteps`, `forwardDelay`, `cacheLayerCount` and
+/// `recurrentLayerCount` pass through to
+/// ``ScriptedLanguageModel/init(rounds:forwardSteps:forwardDelay:cacheLayerCount:recurrentLayerCount:)``.
 /// `processor` renders the prompt of each pass. The default renders the same
 /// tokens for every prompt. `reasoningConfig` goes into the configuration of
 /// the context. The default of `nil` gives a model that does not reason.
 func makeScriptedContainer(
     modelID: String, rounds: [String], forwardSteps: ForwardStepCounter? = nil,
-    forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0,
+    forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0, recurrentLayerCount: Int = 0,
     processor: any UserInputProcessor = FixedPromptInputProcessor(),
     reasoningConfig: ReasoningConfig? = nil
 ) -> ModelContainer {
@@ -278,7 +335,8 @@ func makeScriptedContainer(
             rounds: rounds.map { ScriptedByteTokenizer.tokenIDs(for: $0) },
             forwardSteps: forwardSteps,
             forwardDelay: forwardDelay,
-            cacheLayerCount: cacheLayerCount),
+            cacheLayerCount: cacheLayerCount,
+            recurrentLayerCount: recurrentLayerCount),
         processor: processor,
         tokenizer: ScriptedByteTokenizer())
     return ModelContainer(context: context)
@@ -351,11 +409,14 @@ enum ScriptedSessionModel {
     ///   - reasoningConfig: the reasoning protocol of the model. When it is
     ///     set, the model declares `.reasoning`. The default of `nil` gives a
     ///     model that does not reason.
+    ///   - recurrentLayerCount: the recurrent layers of the model beside its
+    ///     KV cache layer. The default of zero gives a model that is not
+    ///     hybrid.
     /// - Returns: the model.
     static func make(
         weights: URL, scripts: [String],
         processor: any UserInputProcessor = PromptBytesInputProcessor(),
-        reasoningConfig: ReasoningConfig? = nil
+        reasoningConfig: ReasoningConfig? = nil, recurrentLayerCount: Int = 0
     ) -> MLXLanguageModel {
         let modelID = "probe/scripted-session-\(UUID().uuidString)"
         let capabilities: [LanguageModelCapabilities.Capability] =
@@ -367,7 +428,8 @@ enum ScriptedSessionModel {
             load: { _, _ in
                 makeScriptedContainer(
                     modelID: modelID, rounds: scripts, cacheLayerCount: cacheLayerCount,
-                    processor: processor, reasoningConfig: reasoningConfig)
+                    recurrentLayerCount: recurrentLayerCount, processor: processor,
+                    reasoningConfig: reasoningConfig)
             })
     }
 
@@ -508,8 +570,11 @@ enum ScriptedExecutorPass {
         defer { consumer.cancel() }
 
         let events = PassEventLog()
-        try await MLXLanguageModel.Executor.$generationObserver.withValue({ events.record($0) }) {
-            try await ExecutorPromptCacheStore.$current.withValue(store) {
+        let observer: @Sendable (MLXLanguageModel.Executor.GenerationEvent) -> Void = {
+            events.record($0)
+        }
+        try await ExecutorPromptCacheStore.$current.withValue(store) {
+            try await MLXLanguageModel.Executor.$generationObserver.withValue(observer) {
                 try await executor.respond(to: request, model: model, streamingInto: channel)
             }
         }
@@ -532,7 +597,10 @@ enum ScriptedExecutorPass {
         func record(_ event: MLXLanguageModel.Executor.GenerationEvent) {
             switch event {
             case .updateUsage(let input, _, _):
-                collected.withLock { $0.reusedTokenCount += input.cachedTokenCount }
+                collected.withLock {
+                    $0.reusedTokenCount += input.cachedTokenCount
+                    $0.promptTokenCount += input.totalTokenCount
+                }
             case .appendText(let text, _, .response):
                 collected.withLock { $0.responseText += text }
             case .appendText(let text, _, .reasoning):
@@ -554,6 +622,10 @@ struct ScriptedPassResult: Sendable {
 
     /// The prompt tokens that the usage events of the pass report as reused.
     var reusedTokenCount = 0
+
+    /// Every prompt token that the usage events of the pass report: the
+    /// reused tokens and the fed tokens together.
+    var promptTokenCount = 0
 
     /// The response text of the pass, in the order the pass streamed it.
     var responseText = ""
