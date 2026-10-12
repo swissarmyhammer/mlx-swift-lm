@@ -1151,11 +1151,19 @@ public struct TokenIterator: TokenIteratorProtocol {
         return y
     }
 
+    /// Schedules the first token and the cache state at the end of prefill.
+    ///
+    /// The cache state goes with the token, as in ``next()``. Some caches hold
+    /// state that the token does not read (the DeepSeek-V4 compressor rows, for
+    /// example). That state must not stay lazy: decode runs on the
+    /// `GenerationWorker` thread, and MLX cannot evaluate a graph that names the
+    /// stream of the prefill thread.
     private func evaluateTokenAndLogProbabilities(_ token: MLXArray) {
+        let cacheState = cache.flatMap { $0.state }
         if let deferredLogProbabilities {
-            asyncEval([token] + deferredLogProbabilities.arrays)
+            asyncEval([token] + cacheState + deferredLogProbabilities.arrays)
         } else {
-            asyncEval(token)
+            asyncEval([token] + cacheState)
         }
     }
 

@@ -1,0 +1,1 @@
+{"id":"01M4RH90CH75W782YFYJEZQBV3","timestamp":"2026-10-12T17:06:29.905109Z","op":"create","item_id":"01M4RH90CG59SJDCYXXFYFBX2Y","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: d876e3\n+tag_name: '1192'\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: d876e3\n-tag_name: '1192'\n","transaction_id":null}
