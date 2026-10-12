@@ -556,10 +556,12 @@ struct DeepseekV4IntegrationTests {
     /// thinking mode. Two causes, both from the encoder: round 2 re-renders
     /// round 1's generation tail as `<assistant></think>` where round 1
     /// primed `<assistant><think>`, and round 2 drops the round-1 reasoning
-    /// (`dropsEarlierReasoning`). This is the honest record the card asks
-    /// for: thinking-mode conversations are not prefix-cacheable, and a
-    /// cache must instead persist the KV state itself, as `ChatSession`
-    /// does.
+    /// (`dropsEarlierReasoning`). This is the honest record of the encoder
+    /// default, which is the default of the published reference. The
+    /// prompt tokenizer of a loaded model (`DeepSeekV4EncodingTokenizer`)
+    /// renders with `dropsEarlierReasoning: false` for this reason, thus a
+    /// thinking-mode `ChatSession` keeps its transcript as a prefix (card
+    /// ^6ytd2tg).
     @Test func thinkingModeRoundOneTranscriptIsNotARoundTwoPrefix() {
         let encoder = DeepSeekV4ChatEncoder()
         let question = "What is the sea?"

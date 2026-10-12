@@ -340,6 +340,18 @@ public struct DeepSeekV4EncodingTokenizer: Tokenizer {
     /// thus the encode step adds no special tokens of its own: the marker is
     /// in the text, and the tokenizer maps it to its single token id.
     ///
+    /// The render keeps the reasoning of every earlier assistant turn
+    /// (`dropsEarlierReasoning: false`). A live conversation feeds the tokens
+    /// the model wrote, its reasoning included, and the next render must
+    /// extend those tokens, or a prompt cache cannot carry across the turn.
+    /// With the reasoning dropped, the render of the next turn writes
+    /// `</think>` where the live turn primed `<think>`, and the whole turn
+    /// prefills again (card ^6ytd2tg). This render is the text that the
+    /// published reference `encoding_dsv4.py` writes for
+    /// `drop_thinking=False`, which is also the mode the reference selects
+    /// for every conversation that offers tools. The encoder keeps the
+    /// reference default for a caller that renders with it directly.
+    ///
     /// - Parameters:
     ///   - messages: array of message dictionaries representing the conversation.
     ///   - tools: optional array of tool specifications available to the model.
@@ -354,7 +366,8 @@ public struct DeepSeekV4EncodingTokenizer: Tokenizer {
         let thinking = additionalContext?[Self.thinkingKey] as? Bool ?? true
         let prompt = DeepSeekV4ChatEncoder().encode(
             messages: DeepSeekV4ChatEncoder.Message.messages(from: messages, tools: tools),
-            thinkingMode: thinking ? .thinking : .chat)
+            thinkingMode: thinking ? .thinking : .chat,
+            dropsEarlierReasoning: false)
         return tokenization.identifiers(of: prompt)
     }
 }

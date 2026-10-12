@@ -131,6 +131,74 @@ struct DeepSeekV4EncoderWiringTests {
         #expect(renderedText(of: input).hasSuffix(DeepSeekV4ChatEncoder.SpecialToken.thinkEnd))
     }
 
+    // MARK: - Thinking-mode history (card ^6ytd2tg)
+
+    /// The system prompt of the thinking-mode history tests.
+    private static let historyInstructions = "Be brief."
+
+    /// The question of the first turn in the thinking-mode history tests.
+    private static let firstQuestion = "What is the sea?"
+
+    /// The chain of thought that the model writes in the first turn.
+    private static let firstReasoning = "The user asks a short question."
+
+    /// The answer that the model writes in the first turn.
+    private static let firstAnswer = "The sea is a large body of salt water."
+
+    /// The question of the second turn in the thinking-mode history tests.
+    private static let secondQuestion = "Say it again."
+
+    @Test("a thinking-mode render of turn 1 is a prefix of the render of turn 2")
+    func thinkingModeTurnOneRenderIsATurnTwoPrefix() throws {
+        let processor = try makeDeepSeekV4Processor()
+        // `ChatSession` records the whole generated text as the content of
+        // the turn, because DeepSeek-V4 declares no reasoning decoder.
+        let generated =
+            Self.firstReasoning + DeepSeekV4ChatEncoder.SpecialToken.thinkEnd + Self.firstAnswer
+
+        let turnOne = try processor.prepare(
+            input: UserInput(
+                chat: [.system(Self.historyInstructions), .user(Self.firstQuestion)]))
+        let turnTwo = try processor.prepare(
+            input: UserInput(
+                chat: [
+                    .system(Self.historyInstructions), .user(Self.firstQuestion),
+                    .assistant(generated),
+                    .user(Self.secondQuestion),
+                ]))
+
+        let turnOneTranscript =
+            renderedText(of: turnOne) + generated
+            + DeepSeekV4ChatEncoder.SpecialToken.endOfSentence
+        #expect(renderedText(of: turnOne).hasSuffix(DeepSeekV4ChatEncoder.SpecialToken.thinkStart))
+        #expect(
+            renderedText(of: turnTwo).hasPrefix(turnOneTranscript),
+            "the turn-2 render must extend the tokens that turn 1 fed and generated")
+    }
+
+    @Test("a replayed reasoning renders as the reference renders a kept reasoning")
+    func replayedReasoningRendersAsTheReferenceKeepsIt() throws {
+        let processor = try makeDeepSeekV4Processor()
+
+        let input = try processor.prepare(
+            input: UserInput(
+                chat: [
+                    .user(Self.firstQuestion),
+                    .assistant(Self.firstAnswer, reasoning: Self.firstReasoning),
+                    .user(Self.secondQuestion),
+                ]))
+
+        let expected = DeepSeekV4ChatEncoder().encode(
+            messages: [
+                .user(content: Self.firstQuestion),
+                .assistant(content: Self.firstAnswer, reasoning: Self.firstReasoning),
+                .user(content: Self.secondQuestion),
+            ],
+            thinkingMode: .thinking, dropsEarlierReasoning: false)
+        #expect(renderedText(of: input) == expected)
+        #expect(renderedText(of: input).contains(Self.firstReasoning))
+    }
+
     @Test("tool specifications render into the system turn")
     func toolsRenderIntoTheSystemTurn() throws {
         let processor = try makeDeepSeekV4Processor()
