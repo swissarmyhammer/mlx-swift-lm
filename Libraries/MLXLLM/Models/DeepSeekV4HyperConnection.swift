@@ -34,7 +34,11 @@
 //     Libraries/MLXLLM/Models/DeepSeekV4MathHelpers.swift, which is the
 //     transcription of the Python `hc_split_sinkhorn`, and it hands that
 //     routine the `hc_eps` of the checkpoint. The routine holds no epsilon
-//     of its own.
+//     of its own. On the GPU the collapse calls the split half of that
+//     routine, `DeepSeekV4Math.hcSplitFields`, and gives the Sinkhorn steps
+//     and the weighted sum to one fused Metal kernel,
+//     Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift. A parity test
+//     holds the kernel to the numbers of the op path.
 //
 // The names of the three checkpoint tensors are `fn`, `base` and `scale`,
 // which are the names the Python gives them. A DeepSeek-V4 checkpoint spells
@@ -72,7 +76,11 @@ private enum StreamAxis {
 /// The two layers read one mixes projection and one weighted sum over the
 /// copies. They differ only in what they do with the mixes vector, thus the
 /// steps live here and each layer calls them.
-private enum ManifoldStream {
+///
+/// The enum is internal, not private, because the parity test of
+/// ``DeepSeekV4SinkhornKernel`` reads ``weightedSum(of:weights:)`` as the op
+/// path the kernel must agree with.
+enum ManifoldStream {
 
     /// Stops a residual stream whose shape is not the one the layer expects.
     ///
@@ -237,6 +245,10 @@ class DeepSeekV4HyperConnection: Module {
     /// that the mixes projection runs one time for each sub-layer rather than
     /// two times.
     ///
+    /// On the GPU one fused kernel, ``DeepSeekV4SinkhornKernel``, takes the
+    /// Sinkhorn steps and the weighted sum. On another device, or with no
+    /// Sinkhorn step, the collapse takes them as separate MLX operations.
+    ///
     /// - Parameter stream: The residual stream, shape
     ///   `(batch, tokens, hcMult, hiddenSize)`.
     /// - Returns: `collapsed`, the single stream the block reads, shape
@@ -252,12 +264,22 @@ class DeepSeekV4HyperConnection: Module {
             of: streamF32, projection: mixProjection, normWeight: _normWeight,
             normEps: normEps)
 
-        let (pre, post, comb) = DeepSeekV4Math.hcSplitSinkhorn(
-            mixes: mixes, scale: mixScale, base: mixBias,
-            hcMult: hcMult, iters: sinkhornIterations, eps: hcEps)
+        guard DeepSeekV4SinkhornKernel.canRun(on: streamF32, iters: sinkhornIterations) else {
+            let (pre, post, comb) = DeepSeekV4Math.hcSplitSinkhorn(
+                mixes: mixes, scale: mixScale, base: mixBias,
+                hcMult: hcMult, iters: sinkhornIterations, eps: hcEps)
+            let collapsed = ManifoldStream.weightedSum(of: streamF32, weights: pre)
+            return (collapsed: collapsed.asType(stream.dtype), post: post, comb: comb)
+        }
 
-        let collapsed = ManifoldStream.weightedSum(of: streamF32, weights: pre)
-        return (collapsed: collapsed.asType(stream.dtype), post: post, comb: comb)
+        let fields = DeepSeekV4Math.hcSplitFields(
+            mixes: mixes, scale: mixScale, base: mixBias, hcMult: hcMult, eps: hcEps)
+        let fused = DeepSeekV4SinkhornKernel.sinkhornCollapse(
+            comb: fields.comb, pre: fields.pre, stream: streamF32,
+            iters: sinkhornIterations, eps: hcEps)
+        return (
+            collapsed: fused.collapsed.asType(stream.dtype), post: fields.post, comb: fused.comb
+        )
     }
 
     /// Writes the block output back into the parallel copies of the residual

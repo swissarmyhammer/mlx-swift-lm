@@ -74,6 +74,11 @@ enum DeepSeekV4Math {
     /// is doubly stochastic, thus the expand step it drives holds the norm of
     /// the residual stream.
     ///
+    /// This function is the op path: ``hcSplitFields(mixes:scale:base:hcMult:eps:)``
+    /// and then ``sinkhorn(_:iters:eps:)``. On the GPU the hyper-connection
+    /// collapse takes the same split and gives the Sinkhorn steps to one fused
+    /// kernel, ``DeepSeekV4SinkhornKernel``.
+    ///
     /// Every value moves to float32 first. The Sinkhorn steps divide by sums
     /// of small numbers, and float16 loses those sums.
     ///
@@ -92,6 +97,35 @@ enum DeepSeekV4Math {
         base: MLXArray,
         hcMult: Int,
         iters: Int,
+        eps: Float
+    ) -> (pre: MLXArray, post: MLXArray, comb: MLXArray) {
+        let fields = hcSplitFields(
+            mixes: mixes, scale: scale, base: base, hcMult: hcMult, eps: eps)
+        return (
+            pre: fields.pre, post: fields.post,
+            comb: sinkhorn(fields.comb, iters: iters, eps: eps)
+        )
+    }
+
+    /// Splits the mHC mixes vector into `pre`, `post` and the row softmax of
+    /// `comb`, which is all of
+    /// ``hcSplitSinkhorn(mixes:scale:base:hcMult:iters:eps:)`` but the
+    /// Sinkhorn steps.
+    ///
+    /// - Parameters:
+    ///   - mixes: The projected mixes, shape `(..., (2 + hcMult) * hcMult)`.
+    ///   - scale: The three learned scales, one for each field, shape `(3)`.
+    ///   - base: The learned bias, shape `((2 + hcMult) * hcMult)`.
+    ///   - hcMult: The number of parallel copies of the residual stream.
+    ///   - eps: The epsilon the split adds, from `hc_eps`.
+    /// - Returns: `pre` and `post`, each shape `(..., hcMult)`, and `comb`, the
+    ///   row softmax of the mixing logits plus `eps`, shape
+    ///   `(..., hcMult, hcMult)`. All three are float32.
+    static func hcSplitFields(
+        mixes: MLXArray,
+        scale: MLXArray,
+        base: MLXArray,
+        hcMult: Int,
         eps: Float
     ) -> (pre: MLXArray, post: MLXArray, comb: MLXArray) {
         let mixWidth = (splitFieldCount + hcMult) * hcMult
@@ -121,14 +155,34 @@ enum DeepSeekV4Math {
             (combFlat * scaleF32[combScaleIndex]).reshaped(combShape)
             + baseF32[splitWidth...].reshaped([hcMult, hcMult])
 
-        var comb = softmax(combLogits, axis: rowSumAxis, precise: true) + eps
-        comb = normalized(comb, summingOver: columnSumAxis, eps: eps)
-        for _ in 0 ..< max(iters - 1, 0) {
-            comb = normalized(comb, summingOver: rowSumAxis, eps: eps)
-            comb = normalized(comb, summingOver: columnSumAxis, eps: eps)
-        }
+        let comb = softmax(combLogits, axis: rowSumAxis, precise: true) + eps
 
         return (pre: pre, post: post, comb: comb)
+    }
+
+    /// Takes the Sinkhorn steps of ``hcSplitSinkhorn(mixes:scale:base:hcMult:iters:eps:)``
+    /// as separate MLX operations.
+    ///
+    /// The steps are one column normalization, then `iters - 1` pairs of a
+    /// row normalization and a column normalization. Each normalization
+    /// divides by the sum plus `eps`.
+    ///
+    /// ``DeepSeekV4SinkhornKernel`` takes the same steps in one Metal kernel,
+    /// and a parity test holds the two paths together.
+    ///
+    /// - Parameters:
+    ///   - comb: The row softmax of the mixing logits plus `eps`, shape
+    ///     `(..., hcMult, hcMult)`.
+    ///   - iters: The number of Sinkhorn steps, from `hc_sinkhorn_iters`.
+    ///   - eps: The epsilon the Sinkhorn steps add, from `hc_eps`.
+    /// - Returns: The doubly stochastic matrix, of the shape of `comb`.
+    static func sinkhorn(_ comb: MLXArray, iters: Int, eps: Float) -> MLXArray {
+        var balanced = normalized(comb, summingOver: columnSumAxis, eps: eps)
+        for _ in 0 ..< max(iters - 1, 0) {
+            balanced = normalized(balanced, summingOver: rowSumAxis, eps: eps)
+            balanced = normalized(balanced, summingOver: columnSumAxis, eps: eps)
+        }
+        return balanced
     }
 
     /// Divides `x` by its own sum over `axis`, keeping the shape of `x`.

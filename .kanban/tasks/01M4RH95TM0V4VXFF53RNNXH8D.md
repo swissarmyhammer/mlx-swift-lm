@@ -1,6 +1,15 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m4rzcbvfde73qv29ajxjtfxa
+  text: |-
+    ### Research 2026-10-12 (session scratchpad dl/, Python sources)
+    - Give the position offset to a compiled function as an `MLXArray` input. Never capture it as a Swift `Int`. A captured Int either adds one compile-cache entry for each token, which made Python slow down linearly (PR #1189 comments, `c1189.md:1039-1094`), or freezes the value.
+    - Compile targets: gate select, SwiGLU, hyper-connection expand, compressor pooling (`mlx_vlm .../language.py:390-414`), and the split softmax.
+    - The gate weight cast and the query norm moved to task ^tj8ds2m. Do not do them twice.
+  timestamp: 2026-10-12T21:13:00.015334+00:00
 position_column: todo
 position_ordinal: '8280'
 title: 'DeepSeek-V4 speed: compile the small hot functions of the decode step'

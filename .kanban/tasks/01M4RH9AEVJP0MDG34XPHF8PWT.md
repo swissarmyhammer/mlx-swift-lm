@@ -1,6 +1,15 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m4rzce08r3nj65ygamxwe756
+  text: |-
+    ### Research 2026-10-12 (session scratchpad dl/, Python sources)
+    - Put `+inf` in the freqs table for the 224 no-position pairs. Then one `fast.rope` turns the full 512-wide head with no slice or concatenation (`mlx_vlm .../language.py:308-339`).
+    - Inverse rotation: use the negated table, kept after the first build.
+    - Pooled rows: use `freq_scale = ratio` and `offset / ratio` (`mlx_vlm .../language.py:610-616, 646-649`).
+  timestamp: 2026-10-12T21:13:02.216881+00:00
 position_column: todo
 position_ordinal: '8380'
 title: 'DeepSeek-V4 speed: one MLXFast.rope call with a freqs table'

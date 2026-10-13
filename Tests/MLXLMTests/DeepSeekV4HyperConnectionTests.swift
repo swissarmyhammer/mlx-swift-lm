@@ -308,6 +308,25 @@ struct DeepSeekV4HyperConnectionTests {
 
     // MARK: - The collapse and the expand agree with the Python
 
+    /// `HyperConnection.hc_pre` on the fixture: the collapsed residual stream,
+    /// shape `(1, 2, 2)`.
+    private static let expectedCollapsed: [Float] = [
+        0.132681459113, -0.069480802154, -0.203221420882, 0.489406275467,
+    ]
+
+    /// `hc_split_sinkhorn` on the fixture: the Sinkhorn mixing matrix of each
+    /// token, shape `(1, 2, 4, 4)`.
+    private static let expectedComb: [Float] = [
+        0.590084624295, 0.143665093484, 0.144884801764, 0.112767435943,
+        0.136913068912, 0.206273795792, 0.497560755446, 0.161911275252,
+        0.197746065177, 0.422278138960, 0.164603056872, 0.216190378482,
+        0.075255259938, 0.227781967938, 0.192950379851, 0.509129901423,
+        0.351760072042, 0.122842927371, 0.302132279339, 0.223130038934,
+        0.143401230560, 0.215600705070, 0.249640167126, 0.391614181704,
+        0.332987412513, 0.329424865966, 0.173083749132, 0.164315614668,
+        0.171850286008, 0.332130501588, 0.275142804257, 0.220939163721,
+    ]
+
     @Test
     func theCollapseAgreesWithThePythonReference() throws {
         let hyperConnection = try Self.fixtureHyperConnection(
@@ -316,10 +335,24 @@ struct DeepSeekV4HyperConnectionTests {
         let (collapsed, _, _) = hyperConnection.collapse(Self.hiddenStateFixture())
 
         #expect(collapsed.shape == [1, Self.tokenCount, Self.hiddenSize])
-        expectMatches(
-            collapsed,
-            [0.132681459113, -0.069480802154, -0.203221420882, 0.489406275467],
-            "the collapsed residual stream")
+        expectMatches(collapsed, Self.expectedCollapsed, "the collapsed residual stream")
+    }
+
+    @Test
+    func theCollapseOnTheCPUAgreesWithThePythonReference() throws {
+        // The fused Sinkhorn kernel is a Metal kernel, thus the CPU device
+        // must take the op path and still give the reference numbers.
+        let hyperConnection = try Self.fixtureHyperConnection(
+            configuration: Self.configuration())
+
+        let (collapsed, _, comb) = Device.withDefaultDevice(.cpu) {
+            let fields = hyperConnection.collapse(Self.hiddenStateFixture())
+            eval(fields.collapsed, fields.comb)
+            return fields
+        }
+
+        expectMatches(collapsed, Self.expectedCollapsed, "the collapsed residual stream")
+        expectMatches(comb, Self.expectedComb, "the Sinkhorn mixing matrix")
     }
 
     @Test
@@ -352,19 +385,7 @@ struct DeepSeekV4HyperConnectionTests {
         let (_, _, comb) = hyperConnection.collapse(Self.hiddenStateFixture())
 
         #expect(comb.shape == [1, Self.tokenCount, Self.hcMult, Self.hcMult])
-        expectMatches(
-            comb,
-            [
-                0.590084624295, 0.143665093484, 0.144884801764, 0.112767435943,
-                0.136913068912, 0.206273795792, 0.497560755446, 0.161911275252,
-                0.197746065177, 0.422278138960, 0.164603056872, 0.216190378482,
-                0.075255259938, 0.227781967938, 0.192950379851, 0.509129901423,
-                0.351760072042, 0.122842927371, 0.302132279339, 0.223130038934,
-                0.143401230560, 0.215600705070, 0.249640167126, 0.391614181704,
-                0.332987412513, 0.329424865966, 0.173083749132, 0.164315614668,
-                0.171850286008, 0.332130501588, 0.275142804257, 0.220939163721,
-            ],
-            "the Sinkhorn mixing matrix")
+        expectMatches(comb, Self.expectedComb, "the Sinkhorn mixing matrix")
     }
 
     @Test
@@ -515,6 +536,47 @@ struct DeepSeekV4HyperConnectionTests {
         #expect(comb.shape == [1, Self.wideTokenCount, Self.hcMult, Self.hcMult])
         #expect(expanded.shape == [1, Self.wideTokenCount, Self.hcMult, Self.wideHiddenSize])
         #expect(floats(expanded).allSatisfy { $0.isFinite })
+    }
+
+    // MARK: - The fused Sinkhorn kernel
+
+    /// The leading shape of the parity input: two sequences of five tokens.
+    private static let parityLeadingShape = [2, 5]
+
+    /// The cases the parity test reads: the number of copies, the number of
+    /// Sinkhorn steps and the width of one copy. The first case is the
+    /// DeepSeek-V4-Flash `hc_mult` and step count. One step is only the first
+    /// column normalization. An odd copy count catches an index that takes
+    /// the count as 4, and a width that is not a multiple of 4 takes the
+    /// scalar path of the weighted sum.
+    private static let parityCases: [(copies: Int, iters: Int, width: Int)] = [
+        (4, 20, 64), (3, 1, 6), (3, 7, 8),
+    ]
+
+    @Test(arguments: parityCases)
+    func theFusedSinkhornKernelAgreesWithTheOpPath(copies: Int, iters: Int, width: Int) {
+        // The kernel runs the float32 operations of the op path in the same
+        // order and rounds each product before it adds it, thus the two give
+        // the same bits. A kernel that fused a multiply and an add into one
+        // `fma` moved the weighted sum by one unit in the last place.
+        let leading = Self.parityLeadingShape
+        let seed = UInt64(copies * iters * width)
+        let stream = Self.randomArray(leading + [copies, width], seed: seed)
+        let pre = sigmoid(Self.randomArray(leading + [copies], seed: seed + 1)) + Self.hcEps
+        let logits = Self.randomArray(leading + [copies, copies], seed: seed + 2)
+        let comb = softmax(logits, axis: -1, precise: true) + Self.hcEps
+
+        let opComb = DeepSeekV4Math.sinkhorn(comb, iters: iters, eps: Self.hcEps)
+        let opCollapsed = ManifoldStream.weightedSum(of: stream, weights: pre)
+        let fused = DeepSeekV4SinkhornKernel.sinkhornCollapse(
+            comb: comb, pre: pre, stream: stream, iters: iters, eps: Self.hcEps)
+
+        #expect(fused.comb.shape == comb.shape)
+        #expect(fused.collapsed.shape == leading + [width])
+        #expect(fused.comb.dtype == .float32)
+        #expect(fused.collapsed.dtype == .float32)
+        #expect(floats(fused.comb) == floats(opComb), "the Sinkhorn mixing matrix")
+        #expect(floats(fused.collapsed) == floats(opCollapsed), "the collapsed residual stream")
     }
 
     // MARK: - The head reduce

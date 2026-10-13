@@ -1,6 +1,16 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m4rzchkqgg8566y5qk2k205c
+  text: |-
+    ### Research 2026-10-12 (session scratchpad dl/, Python sources)
+    - This is probably most of the decode growth from 104 ms at 128 context to about 128 ms at 16k.
+    - `DeepSeekV4Cache.swift:210-213, 359-366` runs `concatenated([chunks, added])` on each step, also when no chunk is complete. `DeepSeekV4Attention.swift:516-518` concatenates all pooled chunks behind the window again. The buffer size changes, thus the MLX buffer cache cannot reuse it. At 16k that is about 0.4 GB of new buffers for each step.
+    - Python adds a pooled row only when a chunk is complete (`mlx_vlm .../language.py:426-473, 1011-1028`; `pr1195 deepseek_v4.py:1073-1086`).
+    - Project only the new token, in BF16. Python uses float32 only in the softmax (`mlx_vlm .../language.py:390-394, 618-654`). Remove the float32 cast before `wkv` / `wgate` (`DeepSeekV4Compressor.swift:223`). This changes numbers, so record the decision.
+  timestamp: 2026-10-12T21:13:05.911731+00:00
 position_column: todo
 position_ordinal: '8480'
 title: 'DeepSeek-V4 speed: compressor decode state that does not pool the raw rows again on each step'
