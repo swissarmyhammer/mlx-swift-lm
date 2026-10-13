@@ -187,6 +187,12 @@ comments:
     - commit: 4809494
     - review: clean — review sha HEAD~1..HEAD, 0 findings, 5/5 prior items checked
   timestamp: 2026-10-13T19:12:09.881213+00:00
+- actor: claude-code
+  id: 01m4vhyw1vkba9n9jgqy7r4wrz
+  text: |-
+    ### Correction — 2026-10-13
+    The research comment above says that the gate weight cast and the query norm moved to "task ^tj8ds2m". That short id is wrong. The correct task is ^3q35p00 (01M4RZC0KGA9V80D4EN3Q35P00, "DeepSeek-V4 speed: remove per-step overhead ops in the decode step"). ^tj8ds2m is the indexer scatter task for prefill.
+  timestamp: 2026-10-13T21:16:09.659105+00:00
 position_column: done
 position_ordinal: ffbd80
 title: 'DeepSeek-V4 speed: compile the small hot functions of the decode step'
