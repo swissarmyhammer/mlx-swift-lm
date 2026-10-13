@@ -40,6 +40,11 @@
 //     Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift. A parity test
 //     holds the kernel to the numbers of the op path.
 //
+// The Python reference above does not decide how the expand reads the mixing
+// matrix `comb`. Its `hc_post` reads `comb` the wrong way round. The official
+// DeepSeek-V4 code decides that reading, and
+// `DeepSeekV4HyperConnection.expand` states the source.
+//
 // The names of the three checkpoint tensors are `fn`, `base` and `scale`,
 // which are the names the Python gives them. A DeepSeek-V4 checkpoint spells
 // them `hc_attn_fn`, `hc_ffn_fn` and `hc_head_fn` and so on, and the Python
@@ -68,6 +73,17 @@ private enum StreamAxis {
     static let width = 3
     /// The number of axes a parallel residual stream carries.
     static let count = 4
+}
+
+/// The axes of a `(batch, tokens, copies, copies)` mixing matrix `comb`.
+///
+/// `comb[j][k]` is the weight that copy `j` of the residual stream gives to
+/// copy `k` of the answer of the expand.
+private enum MixingAxis {
+    /// The axis that holds the copy of the residual stream the weight reads.
+    static let source = 2
+    /// The axis that holds the copy of the answer the weight writes.
+    static let target = 3
 }
 
 /// The two steps the collapse of ``DeepSeekV4HyperConnection`` and the
@@ -285,14 +301,26 @@ class DeepSeekV4HyperConnection: Module {
     /// Writes the block output back into the parallel copies of the residual
     /// stream.
     ///
-    /// The answer is the sum of two terms. The new term gives copy `i` the
-    /// block output scaled by `post[i]`. The residual term mixes the copies
-    /// the matching collapse read: copy `i` of the answer takes
-    /// `sum over j of comb[i][j] * residual[j]`, thus row `i` of the mixing
-    /// matrix decides answer copy `i`, and column `j` decides how far residual
-    /// copy `j` reaches. That reading is the one the Python
-    /// `einsum("bsij,bsjd->bsid", comb, residual)` makes, and it is the whole
-    /// axis alignment of the manifold hyper-connections.
+    /// The answer is the sum of two terms. The new term gives copy `k` the
+    /// block output scaled by `post[k]`. The residual term mixes the copies
+    /// the matching collapse read: copy `k` of the answer takes
+    /// `sum over j of comb[j][k] * residual[j]`, thus column `k` of the mixing
+    /// matrix decides answer copy `k`, and row `j` decides how far residual
+    /// copy `j` reaches. The residual term is therefore `comb` transposed,
+    /// times `residual`.
+    ///
+    /// That reading is the one the official DeepSeek-V4 code makes:
+    /// deepseek-ai/DeepSeek-V4-Flash @
+    /// 60d8d70770c6776ff598c94bb586a859a38244f1, `inference/model.py`,
+    /// `Block.hc_post`, which adds
+    /// `torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2)`. The
+    /// sum runs over the first matrix axis of `comb`. Apple mlx-lm and
+    /// Blaizzy mlx-vlm read `comb` the same way. The Thump604 reference that
+    /// the header of this file names reads `comb` without the transpose, and
+    /// that reading is wrong. The layout of `comb` is the same in the
+    /// official code and in this file: `DeepSeekV4Math.hcSplitFields`
+    /// reshapes the mixes row-major and takes the softmax over the last axis,
+    /// as the official `hc_split_sinkhorn` kernel does.
     ///
     /// - Parameters:
     ///   - blockOutput: The output of the sub-layer, shape
@@ -315,7 +343,9 @@ class DeepSeekV4HyperConnection: Module {
         let newTerm =
             post.asType(.float32).expandedDimensions(axis: -1)
             * blockOutput.asType(.float32).expandedDimensions(axis: StreamAxis.copy)
-        let residualTerm = comb.asType(.float32).matmul(residual.asType(.float32))
+        let residualTerm = comb.asType(.float32)
+            .swappedAxes(MixingAxis.source, MixingAxis.target)
+            .matmul(residual.asType(.float32))
         return (newTerm + residualTerm).asType(outputDType)
     }
 }

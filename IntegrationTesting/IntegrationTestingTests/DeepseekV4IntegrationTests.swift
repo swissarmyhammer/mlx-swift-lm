@@ -140,13 +140,15 @@ let stockToolSpec: ToolSpec = [
 
 /// The number of leading fixture tokens the parity test compares.
 ///
-/// The user pinned this window to 32 on 2026-08-12. The measured stable
-/// window on these weights is 36 tokens: at generation step 36 the Python
-/// reference holds an exact bf16 tie between its top two candidates
-/// (both at logit 29.75, the Swift pick 0.375 below), thus every token
-/// from there on is a coin flip that floating-point noise decides. An
-/// exact 64-token match is not a stable target across two
-/// implementations; the first 32 tokens are.
+/// The user pinned this window to 32 on 2026-08-12. On the fixture of
+/// 2026-10-13 the reference holds an exact tie between its top two
+/// candidates at generation step 37 (counted from 0), and again at steps 40
+/// and 54, thus every token from step 37 on is a coin flip that
+/// floating-point noise decides. Measured on 2026-10-13: the Swift
+/// `TokenIterator` gave all 64 fixture tokens, and a Swift full forward for
+/// each step gave the first 37 and then took the other side of the tie. An
+/// exact 64-token match is not a stable target across two implementations;
+/// the first 32 tokens are.
 private let parityTokenCount = 32
 
 /// The number of tokens each turn of the two-round test asks for.
@@ -157,18 +159,23 @@ private let recallNumber = "4172"
 
 // MARK: - Parity fixture
 
-/// The greedy-parity fixture, produced by the Python reference
-/// (`ml-explore/mlx-lm` PR 1189) against the same checkpoint, with one full
-/// forward over the growing sequence for each step:
+/// The greedy-parity fixture, produced on 2026-10-13 by the Python reference
+/// `Blaizzy/mlx-vlm` @ 2b93e7782e20f1883138402db12bc1c1428cfe93 (MLX 0.32.3)
+/// against snapshot 38c0bd20a6fba70f22c5ee2940ec0092b36ab936 of the same
+/// checkpoint, with one full forward over the growing sequence for each step.
+/// The prompt token identifiers are the ones of the earlier fixture, which
+/// encoded `<|user|>Write one sentence about the sea.<|assistant|><think>`:
 ///
 /// ```python
-/// from mlx_lm import load
+/// from mlx_vlm import load
 /// import json, mlx.core as mx
-/// model, tokenizer = load("mlx-community/DeepSeek-V4-Flash-4bit")
-/// prompt = tokenizer.encode("<|user|>Write one sentence about the sea.<|assistant|><think>")
+/// model, _ = load("<snapshot directory>")
+/// lm = model.language_model
+/// prompt = json.load(open("deepseek-v4-flash-4bit-greedy-parity.json"))["prompt_token_ids"]
 /// sequence, ids = list(prompt), []
 /// for _ in range(64):
-///     logits = model(mx.array(sequence)[None], cache=model.make_cache())
+///     out = lm(mx.array(sequence)[None], cache=lm.make_cache())
+///     logits = getattr(out, "logits", out)
 ///     token = int(mx.argmax(logits[0, -1].astype(mx.float32)))
 ///     ids.append(token)
 ///     sequence.append(token)
@@ -176,12 +183,18 @@ private let recallNumber = "4172"
 ///           open("deepseek-v4-flash-4bit-greedy-parity.json", "w"))
 /// ```
 ///
-/// Do NOT produce the fixture with `mlx_lm.generate.generate_step`. Its
-/// cached S=1 decode path diverges from the model's own full-prompt
-/// forward (measured 2026-08-12 on these weights: step-0 argmax 671
-/// against 455, with a 2.0-logit margin in the full forward). The
-/// full-forward stream is self-consistent, and the Swift `TokenIterator`
-/// reproduces it token for token.
+/// The reference must read the mixing matrix of the hyper-connection expand
+/// the way the official DeepSeek-V4 code reads it: transposed, as
+/// `DeepSeekV4HyperConnection.expand` states. mlx-vlm does. The earlier
+/// fixture came from `ml-explore/mlx-lm` PR 1189, which reads it without the
+/// transpose, thus that fixture held the wrong tokens.
+///
+/// Do NOT produce the fixture with a cached S=1 decode in Python. On these
+/// weights the cached decode of mlx-vlm leaves the full-forward stream at
+/// step 20, where its top-two margin is 0.25 (measured 2026-10-13). The
+/// cached decode of PR 1189 left it at step 0. The full-forward stream is
+/// self-consistent, and the Swift `TokenIterator` reproduces it token for
+/// token.
 private struct DeepseekV4ParityFixture: Decodable {
     /// The prompt token identifiers the reference fed the model.
     let promptTokenIDs: [Int]
@@ -346,7 +359,7 @@ struct DeepseekV4IntegrationTests {
             print(
                 "Skipping greedyFirstTokensMatchThePythonFixture: no fixture at "
                     + "\(fixtureURL.path). Generate it with the Python reference "
-                    + "(ml-explore/mlx-lm PR 1189) — see DeepseekV4ParityFixture "
+                    + "(Blaizzy/mlx-vlm) — see DeepseekV4ParityFixture "
                     + "in this file for the exact script and schema.")
             return
         }

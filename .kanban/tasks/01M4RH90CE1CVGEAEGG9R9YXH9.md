@@ -61,8 +61,26 @@ comments:
     - warnings: only the old SwiftPM "missing creator for mutated node" (mlx-swift_Cmlx.bundle). No Metal kernel warning in test output. SwiftPM compiled 0 files in this run (cache), so the compiler check of the changed files comes from xcodebuild.
     - next: review.
   timestamp: 2026-10-13T17:03:37.988962+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m4v3m4j7z552n7thrd3d2j9h
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (commit 05475ad): 0 findings, 0 confirmed, 0 refuted, 7 attempted, 0 failed. 4 source files reviewed. 14 `.kanban/tasks` files were not reviewed, because no validator matches them. No prior `## Review Findings` section.
+    - acceptance criteria: all 4 boxes ticked. Evidence: the "Implementation" comment (one `MLXFast.metalKernel` dispatch does the Sinkhorn loop and the collapse; bit-exact parity test `theFusedSinkhornKernelAgreesWithTheOpPath`; step bench before and after), the "Baseline" comment (step bench before, GPU idle), and the "test — green" comment (MLXLMTests 716 XCTest + 1364 Swift Testing, 0 failures).
+    - next: done.
+  timestamp: 2026-10-13T17:05:37.863348+00:00
+- actor: claude-code
+  id: 01m4v3mmkykxqhjbxjhdzfaek2
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — DeepSeekV4SinkhornKernel.swift (new), DeepSeekV4HyperConnection.swift, DeepSeekV4MathHelpers.swift, DeepSeekV4HyperConnectionTests.swift
+    - test: green — MLXLMTests 716 XCTest + 1364 Swift Testing, 0 failures; IntegrationTesting build-for-testing succeeded
+    - commit: 05475ad
+    - review: clean — review sha HEAD~1..HEAD, 0 findings
+    - speed: one decode step 104 -> 53 ms @128, 110 -> 56 ms @4k, ~130 -> 68 ms @16k (idle GPU)
+  timestamp: 2026-10-13T17:05:54.302648+00:00
+position_column: done
+position_ordinal: ffba80
 title: 'DeepSeek-V4 speed: fused Metal kernel for the hyper-connection Sinkhorn steps'
 ---
 ## What
@@ -73,15 +91,15 @@ Our code: `Libraries/MLXLLM/Models/DeepSeekV4MathHelpers.swift:89-132` (the Sink
 
 ## Evidence from other ports
 
-- ml-explore/mlx-lm PR #1189: the fused Sinkhorn kernel took decode on an M3 Ultra (4-bit) from 11 to 20 tok/s.
-- mlx-lm PR #1192: the changes that include Sinkhorn fusion took decode from 22.4 to 26.7 tok/s.
-- Reference kernels: `deepseek_v41_sinkhorn` in mlx-lm main `mlx_lm/models/deepseek_v41.py:150-216` (merged PR #1895), and `hc_sinkhorn_split` / `hc_sinkhorn_collapse` in Blaizzy/mlx-vlm `mlx_vlm/models/deepseek_v4/hyper_connection.py`.
+- ml-explore/mlx-lm PR 1189: the fused Sinkhorn kernel took decode on an M3 Ultra (4-bit) from 11 to 20 tok/s.
+- mlx-lm PR 1192: the changes that include Sinkhorn fusion took decode from 22.4 to 26.7 tok/s.
+- Reference kernels: `deepseek_v41_sinkhorn` in mlx-lm main `mlx_lm/models/deepseek_v41.py:150-216` (merged PR 1895), and `hc_sinkhorn_split` / `hc_sinkhorn_collapse` in Blaizzy/mlx-vlm `mlx_vlm/models/deepseek_v4/hyper_connection.py`.
 - This repo already uses `MLXFast.metalKernel` in `Libraries/MLXLMCommon/TurboQuantKernels.swift`.
 
 ## Acceptance Criteria
 
-- [ ] One Metal kernel (or a small fixed number) does all Sinkhorn iterations of one hyper-connection.
-- [ ] A parity test shows that the kernel gives the same result as the current op path, within float32 tolerance.
-- [ ] The existing DeepSeek-V4 unit tests pass.
-- [ ] A decode-step measurement on the real checkpoint, with the GPU otherwise idle, shows the speed before and after.
+- [x] One Metal kernel (or a small fixed number) does all Sinkhorn iterations of one hyper-connection.
+- [x] A parity test shows that the kernel gives the same result as the current op path, within float32 tolerance.
+- [x] The existing DeepSeek-V4 unit tests pass.
+- [x] A decode-step measurement on the real checkpoint, with the GPU otherwise idle, shows the speed before and after.
 #deepseek-v4 #performance

@@ -28,7 +28,7 @@ Blaizzy/mlx-vlm `deepseek_v4/language.py:258-339` gives an infinite period to th
 
 ## Evidence
 
-In mlx-lm PR #1192, the Apple (angeloskath) RoPE changes took decode on an M3 Ultra from 30.2 to 33.6 tok/s.
+In mlx-lm PR 1192, the Apple (angeloskath) RoPE changes took decode on an M3 Ultra from 30.2 to 33.6 tok/s.
 
 ## Acceptance Criteria
 

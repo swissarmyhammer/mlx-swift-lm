@@ -2,13 +2,22 @@
 //
 // Tests for the DeepSeek-V4 manifold hyper-connections.
 //
-// Every expected number below comes from the DeepSeek-V4 Python reference,
-// `Thump604/mlx-lm` @ `deepseek-v4-support-fixes`,
-// `mlx_lm/models/deepseek_v4.py` -- `hc_split_sinkhorn`,
-// `HyperConnection.hc_pre`, `HyperConnection.hc_post` and
-// `HyperHead.__call__`. Each routine was transcribed into NumPy one line at a
-// time -- `mx.*` became `np.*` and nothing else changed -- and run in float64.
+// The expected numbers come from two NumPy transcriptions, each run in
+// float64:
 //
+//  - The official DeepSeek-V4 code, deepseek-ai/DeepSeek-V4-Flash @
+//    60d8d70770c6776ff598c94bb586a859a38244f1, `inference/model.py` --
+//    `Block.hc_pre` and `Block.hc_post` -- and `inference/kernel.py` --
+//    `hc_split_sinkhorn_kernel`. The numbers of the expand come from this
+//    transcription. On the fixture below it also gives the numbers of the
+//    collapse, of `post` and of `comb` that the second transcription gives.
+//  - The Python reference `Thump604/mlx-lm` @ `deepseek-v4-support-fixes`,
+//    `mlx_lm/models/deepseek_v4.py` -- `hc_split_sinkhorn`,
+//    `HyperConnection.hc_pre` and `HyperHead.__call__`. All the other numbers
+//    come from this transcription. Its `hc_post` reads `comb` the wrong way
+//    round, thus no number of the expand comes from it.
+//
+// Each routine was transcribed one line at a time, and nothing else changed.
 // A fixture that a Swift function produced itself proves nothing, thus no
 // number below was read out of this repository.
 //
@@ -389,10 +398,12 @@ struct DeepSeekV4HyperConnectionTests {
     }
 
     @Test
-    func theExpandAgreesWithThePythonReference() throws {
-        // This is the guard on the axis alignment. The NumPy transcription
-        // reads the same expand with `comb` transposed and answers numbers
-        // that are 0.153 away from the list below, at the same shape.
+    func theExpandAgreesWithTheOfficialReference() throws {
+        // This is the guard on the axis alignment. The numbers below come from
+        // the transcription of the official `Block.hc_post`. The same expand
+        // with `comb` read the other way round, which is the `hc_post` of the
+        // Thump604 reference, answers numbers that are 0.153 away from the
+        // list below, at the same shape.
         let hyperConnection = try Self.fixtureHyperConnection(
             configuration: Self.configuration())
         let stream = Self.hiddenStateFixture()
@@ -406,10 +417,10 @@ struct DeepSeekV4HyperConnectionTests {
         expectMatches(
             expanded,
             [
-                0.793950685795, -0.376485884744, 0.340712309223, -0.159033532150,
-                0.959163147540, -0.359801587275, 0.738789650477, -0.458486953044,
-                0.122497700068, -0.593840592871, 0.072697090372, -0.585236116784,
-                -0.088586166242, -0.320313216728, -0.005128220010, -0.609490999706,
+                0.733255017878, -0.338750826033, 0.426428284106, -0.221887865818,
+                0.983384478540, -0.325555945046, 0.687807720164, -0.467383834145,
+                0.115444663058, -0.607956474046, 0.101468410328, -0.662821413081,
+                -0.017964051117, -0.381702489049, -0.097711145309, -0.456125940531,
             ],
             "the expanded residual stream")
     }
@@ -425,17 +436,19 @@ struct DeepSeekV4HyperConnectionTests {
         0.125, 0.125, 0.125, 0.625,
     ]
 
-    /// Column 0 of ``asymmetricMixing``, which is the weight each answer copy
+    /// Row 0 of ``asymmetricMixing``, which is the weight each answer copy
     /// gives to copy 0 of the residual stream.
-    private static let asymmetricMixingFirstColumn: [Float] = [0.5, 0.125, 0.25, 0.125]
+    private static let asymmetricMixingFirstRow: [Float] = [0.5, 0.25, 0.125, 0.125]
 
     @Test
-    func theExpandTakesTheRowOfTheMixingMatrixForEachAnswerCopy() throws {
-        // `comb[i][j]` weighs copy `j` of the residual stream into copy `i` of
-        // the answer. A residual stream that holds a value in copy 0 and zero
-        // in every other copy therefore answers column 0 of the matrix, one
-        // value for each answer copy. A transposed read answers row 0 instead,
-        // and the two lists differ.
+    func theExpandTakesTheColumnOfTheMixingMatrixForEachAnswerCopy() throws {
+        // `comb[j][k]` weighs copy `j` of the residual stream into copy `k` of
+        // the answer, which is the reading of the official `Block.hc_post`:
+        // `sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2)`. A residual
+        // stream that holds a value in copy 0 and zero in every other copy
+        // therefore answers row 0 of the matrix, one value for each answer
+        // copy. A transposed read answers column 0 instead, and the two lists
+        // differ.
         let hyperConnection = try Self.fixtureHyperConnection(
             configuration: Self.configuration(hiddenSize: 1))
         let residual = Self.array([1, 0, 0, 0], [1, 1, Self.hcMult, 1])
@@ -446,7 +459,7 @@ struct DeepSeekV4HyperConnectionTests {
             blockOutput: MLXArray.zeros([1, 1, 1]),
             residual: residual, post: post, comb: comb)
 
-        #expect(floats(expanded) == Self.asymmetricMixingFirstColumn)
+        #expect(floats(expanded) == Self.asymmetricMixingFirstRow)
     }
 
     /// One gain for each copy, which the expand test reads as its `post`.

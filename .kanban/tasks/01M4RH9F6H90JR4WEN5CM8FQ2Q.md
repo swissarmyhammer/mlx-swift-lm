@@ -19,7 +19,7 @@ title: 'DeepSeek-V4 speed: compressor decode state that does not pool the raw ro
 
 At each decode step, the pooled cache joins up to 127-255 raw hidden rows with the new token and pools them through the compressor again: `DeepSeekV4Cache.swift:201-221`. Each step also copies all pooled chunks: `DeepSeekV4Cache.swift:359-367`. This cost grows with the context length.
 
-mlx-lm PR #1195 keeps the projected rows and makes a chunk only when a window is full (Metal kernel `dsv4_compressor_overlap_emit`).
+mlx-lm PR 1195 keeps the projected rows and makes a chunk only when a window is full (Metal kernel `dsv4_compressor_overlap_emit`).
 
 ## Approach
 
