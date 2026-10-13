@@ -89,6 +89,47 @@ comments:
     - verify-docs: scripts/verify-docs.sh exit 1. It builds DocC for Swift targets only. It does not read docs/deepseek-v4-support.md. Every DocC error is in code that is not in this change (for example DeepSeekV4.swift symbol link from commit fdfdecf, DeepSeekV4Cache.swift, Tokenization, SwitchLayers). One more error: ExtractAPI of MLXCXGrammar fails with picojson.h 'algorithm' file not found (toolchain). No error in DeepSeekV4CompiledDecode.swift or in the changed hunks.
     - next: none for this change. Pre-existing DocC link errors need their own task.
   timestamp: 2026-10-13T18:32:53.296778+00:00
+- actor: claude-code
+  id: 01m4v8vp44fz8663qfcs7k46bp
+  text: |-
+    ### review — findings
+    - evidence: `review sha HEAD~1..HEAD` (commit ebd865d). Counts: 1 finding, 1 confirmed, 2 refuted, 7 files reviewed, 0 failed. Finding: Tests/MLXLMTests/DeepSeekV4CompiledDecodeTests.swift:87 (reuse/reuse, private helper `floats` is a copy of the helper in sibling test files).
+    - acceptance criteria: each of the 4 items has evidence in the comments ("Compiled decoder layer evaluated and kept", "Small compiled functions landed", "test - green"). Rope tables are trace arguments, bit parity tests pass, 716 XCTest + 1375 Swift Testing pass, step bench before/after at 128 and 16k with the GPU idle.
+    - next: fix the finding (move `floats` to a shared test helper and use it in this file and in the sibling test files), then run /review again. The task stays in review.
+  timestamp: 2026-10-13T18:37:08.100571+00:00
+- actor: claude-code
+  id: 01m4v8w5pp8wvh2dfnkzztgwns
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — DeepSeekV4CompiledDecode.swift (new), DeepSeekV4.swift, DeepSeekV4Attention.swift, DeepSeekV4HyperConnection.swift, DeepSeekV4MoE.swift, DeepSeekV4CompiledDecodeTests.swift (new), DeepSeekV4ModelTests.swift, docs/deepseek-v4-support.md
+    - test: green — MLXLMTests 716 XCTest + 1375 Swift Testing, 0 failures; IntegrationTesting build-for-testing succeeded
+    - commit: ebd865d
+    - review: findings — Tests/MLXLMTests/DeepSeekV4CompiledDecodeTests.swift:87
+  timestamp: 2026-10-13T18:37:24.054366+00:00
+- actor: claude-code
+  id: 01m4v9j49kh7n12mbh0adqw419
+  text: |-
+    ### Review finding fixed: shared array reader for the DeepSeek-V4 tests — 2026-10-13
+    - New file `Tests/MLXLMTests/DeepSeekV4TestArrays.swift`: `enum DeepSeekV4TestArrays` with `static func floats(_:)` (`asType(.float32).asArray(Float.self)`) and `static func integers(_:)` (`asType(.int32).asArray(Int32.self)`). The bodies are the same as the private copies, thus each call keeps its behaviour. An `enum` namespace, because the swift/immutability rule forbids a top-level `func`; it follows the pattern of `DeepSeekV4SyntheticCheckpoint`.
+    - The private `floats` copies are gone from CompiledDecodeTests, MoETests, MathHelpersTests, HyperConnectionTests and AttentionTests. `integers` was the same cause in CompiledDecodeTests (an identical copy of the MoETests helper), thus it moved too. Every call now names `DeepSeekV4TestArrays.floats` / `.integers`.
+    - Not changed: ModelTests, CacheTests and CompressorTests hold a different `private static func floats` (`eval` + `reshaped(-1)`). The card asked to keep each call's behaviour identical, thus they stay. Follow-up task ^9py7art.
+    - What did not work: the `files` tool `edit file` with `replace_all: true` (and `replaceAll`) replaced only the first match each time (checked on a scratch file). I wrote the four large files in full and then checked `git diff -U0`: the only changed lines are the removed helpers, the changed calls, and the swift-format line wraps. No fixture value moved.
+    - swift-format (`.swift-format` of the repo) ran on the six files.
+  timestamp: 2026-10-13T18:49:23.507525+00:00
+- actor: claude-code
+  id: 01m4v9j7s0jzzfxhhj74frysdm
+  text: |-
+    ### implement — changed
+    - evidence: 6 files — Tests/MLXLMTests/DeepSeekV4TestArrays.swift (new), Tests/MLXLMTests/DeepSeekV4CompiledDecodeTests.swift, Tests/MLXLMTests/DeepSeekV4MoETests.swift, Tests/MLXLMTests/DeepSeekV4MathHelpersTests.swift, Tests/MLXLMTests/DeepSeekV4HyperConnectionTests.swift, Tests/MLXLMTests/DeepSeekV4AttentionTests.swift. `swift build --build-tests` exit 0 (only the known "missing creator for mutated node" warning); `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 716 XCTest, 0 failures; 1375 Swift Testing tests in 110 suites passed. Finding at DeepSeekV4CompiledDecodeTests.swift:87 checked.
+    - next: /review. Not committed. Follow-up ^9py7art for the static `floats` variant.
+  timestamp: 2026-10-13T18:49:27.072859+00:00
+- actor: claude-code
+  id: 01m4v9thkd3r3tx9g8jy0ma1py
+  text: |-
+    ### test — green (iteration 2)
+    - evidence: swift build --build-tests complete, only the known warning (missing creator for mutated node, mlx-swift_Cmlx.bundle). xcrun xctest on all 5 bundles, all exit 0. MLXLMTests: 716 XCTest and 1375 Swift Testing pass, 0 failures. Same counts as the previous run, so no DeepSeek-V4 test was lost. CXGrammarTests 7, MLXFoundationModelsTests 367, MLXGuidedGenerationTests 70 pass. 0 skipped, 0 new warnings.
+    - next: review.
+  timestamp: 2026-10-13T18:53:59.277784+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'DeepSeek-V4 speed: compile the small hot functions of the decode step'
@@ -118,3 +159,18 @@ Give the position offset to a compiled function as an array, not as an `Int`. In
 - [x] The existing DeepSeek-V4 unit tests pass.
 - [x] A decode-step measurement on the real checkpoint, with the GPU otherwise idle, shows the speed before and after, at 128 and at 16k context.
 #deepseek-v4 #performance
+
+## Review Findings (2026-10-13 13:33)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 7 file(s) reviewed, 7 not reviewed.
+
+> 7 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4RH95TM0V4VXFF53RNNXH8D.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4RH95TM0V4VXFF53RNNXH8D.md` — no validator matches this file
+> - `.kanban/tasks/01M4V88GSVC1BBY9QFR4DX93AF.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4V88GSVC1BBY9QFR4DX93AF.md` — no validator matches this file
+> - `.kanban/tasks/01M4V8MCDS3Y4RMDRBN5243KGJ.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4V8MCDS3Y4RMDRBN5243KGJ.md` — no validator matches this file
+> - `docs/deepseek-v4-support.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/DeepSeekV4CompiledDecodeTests.swift:87` `reuse/reuse` — The new private helper `floats` copies a helper that already exists in the same test suite family. It reads an MLXArray as a flat [Float] by casting to float32 and calling asArray. Copies of this helper appear in several sibling test files, so the same reading logic now lives in many places and can diverge. Move `floats` into a shared internal test helper (for example beside `DeepSeekV4SyntheticCheckpoint`) and call it from this file and from the sibling test files. If a shared helper is not wanted, the same body as the existing private copies is acceptable, but then the duplication should be recorded as a deliberate convention, not left unstated.

@@ -83,16 +83,6 @@ struct DeepSeekV4CompiledDecodeTests {
             .asType(dtype)
     }
 
-    /// Reads an array back as a flat list of `Float`, in row-major order.
-    private func floats(_ array: MLXArray) -> [Float] {
-        array.asType(.float32).asArray(Float.self)
-    }
-
-    /// Reads an array back as a flat list of `Int32`, in row-major order.
-    private func integers(_ array: MLXArray) -> [Int32] {
-        array.asType(.int32).asArray(Int32.self)
-    }
-
     /// Checks that two arrays hold the same dtype, the same shape and the
     /// same bits.
     private func expectSameBits(
@@ -101,8 +91,8 @@ struct DeepSeekV4CompiledDecodeTests {
     ) {
         #expect(compiled.dtype == reference.dtype, "\(what): dtype", sourceLocation: sourceLocation)
         #expect(compiled.shape == reference.shape, "\(what): shape", sourceLocation: sourceLocation)
-        let compiledValues = floats(compiled)
-        let referenceValues = floats(reference)
+        let compiledValues = DeepSeekV4TestArrays.floats(compiled)
+        let referenceValues = DeepSeekV4TestArrays.floats(reference)
         let firstGap = zip(compiledValues, referenceValues).enumerated().first {
             $0.element.0 != $0.element.1
         }
@@ -209,7 +199,9 @@ struct DeepSeekV4CompiledDecodeTests {
         let reference = routing.topK(x, weight: weight, bias: bias)
 
         #expect(compiled.0.dtype == reference.indices.dtype)
-        #expect(integers(compiled.0) == integers(reference.indices), "the selected experts")
+        #expect(
+            DeepSeekV4TestArrays.integers(compiled.0)
+                == DeepSeekV4TestArrays.integers(reference.indices), "the selected experts")
         expectSameBits(compiled.1, reference.weights, "the routed weights")
     }
 
@@ -227,7 +219,9 @@ struct DeepSeekV4CompiledDecodeTests {
         let reference = routing.hashed(x, weight: weight, table: table, inputIds: inputIds)
 
         #expect(compiled.0.dtype == reference.indices.dtype)
-        #expect(integers(compiled.0) == integers(reference.indices), "the hashed experts")
+        #expect(
+            DeepSeekV4TestArrays.integers(compiled.0)
+                == DeepSeekV4TestArrays.integers(reference.indices), "the hashed experts")
         expectSameBits(compiled.1, reference.weights, "the routed weights")
     }
 

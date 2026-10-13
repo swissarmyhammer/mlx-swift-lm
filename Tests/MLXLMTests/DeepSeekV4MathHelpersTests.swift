@@ -39,11 +39,6 @@ struct DeepSeekV4MathHelpersTests {
     /// The largest relative gap allowed against every other fixture.
     private static let relativeTolerance: Float = 1e-5
 
-    /// Reads an array back as a flat list of `Float`, in row-major order.
-    private func floats(_ array: MLXArray) -> [Float] {
-        array.asType(.float32).asArray(Float.self)
-    }
-
     /// Checks each element against `expected` with an absolute limit.
     private func expectClose(
         _ got: [Float], _ expected: [Float], within tolerance: Float,
@@ -141,9 +136,15 @@ struct DeepSeekV4MathHelpersTests {
         #expect(post.shape == [1, hcMult])
         #expect(comb.shape == [1, hcMult, hcMult])
 
-        expectClose(floats(pre), Self.expectedPre, within: Self.sinkhornTolerance, "pre")
-        expectClose(floats(post), Self.expectedPost, within: Self.sinkhornTolerance, "post")
-        expectClose(floats(comb), Self.expectedComb, within: Self.sinkhornTolerance, "comb")
+        expectClose(
+            DeepSeekV4TestArrays.floats(pre), Self.expectedPre, within: Self.sinkhornTolerance,
+            "pre")
+        expectClose(
+            DeepSeekV4TestArrays.floats(post), Self.expectedPost, within: Self.sinkhornTolerance,
+            "post")
+        expectClose(
+            DeepSeekV4TestArrays.floats(comb), Self.expectedComb, within: Self.sinkhornTolerance,
+            "comb")
     }
 
     /// The gap allowed on a Sinkhorn row or column sum. Twenty iterations end
@@ -166,9 +167,12 @@ struct DeepSeekV4MathHelpersTests {
         eval(rowSums, columnSums)
 
         let ones = [Float](repeating: 1, count: hcMult)
-        expectClose(floats(rowSums), ones, within: Self.doublyStochasticTolerance, "row sums")
         expectClose(
-            floats(columnSums), ones, within: Self.doublyStochasticTolerance, "column sums")
+            DeepSeekV4TestArrays.floats(rowSums), ones, within: Self.doublyStochasticTolerance,
+            "row sums")
+        expectClose(
+            DeepSeekV4TestArrays.floats(columnSums), ones, within: Self.doublyStochasticTolerance,
+            "column sums")
     }
 
     // MARK: - Partial RoPE
@@ -228,7 +232,8 @@ struct DeepSeekV4MathHelpersTests {
 
         #expect(rotated.shape == x.shape)
         expectCloseRelative(
-            floats(rotated), Self.expectedRoPEForward, within: Self.relativeTolerance,
+            DeepSeekV4TestArrays.floats(rotated), Self.expectedRoPEForward,
+            within: Self.relativeTolerance,
             "partial rope forward")
     }
 
@@ -262,12 +267,12 @@ struct DeepSeekV4MathHelpersTests {
 
         #expect(rotated.shape == x.shape)
 
-        let keptBefore = floats(x[.ellipsis, 0 ..< noPositionDim])
-        let keptAfter = floats(rotated[.ellipsis, 0 ..< noPositionDim])
+        let keptBefore = DeepSeekV4TestArrays.floats(x[.ellipsis, 0 ..< noPositionDim])
+        let keptAfter = DeepSeekV4TestArrays.floats(rotated[.ellipsis, 0 ..< noPositionDim])
         #expect(keptBefore == keptAfter, "the leading \(noPositionDim) dimensions must not move")
 
-        let rotatedBefore = floats(x[.ellipsis, noPositionDim...])
-        let rotatedAfter = floats(rotated[.ellipsis, noPositionDim...])
+        let rotatedBefore = DeepSeekV4TestArrays.floats(x[.ellipsis, noPositionDim...])
+        let rotatedAfter = DeepSeekV4TestArrays.floats(rotated[.ellipsis, noPositionDim...])
         #expect(rotatedBefore != rotatedAfter, "the trailing rotary dimensions must move")
     }
 
@@ -284,9 +289,12 @@ struct DeepSeekV4MathHelpersTests {
             rotated, cos: cosine, sin: sine, ropeDim: Self.deepseekV4RopeDim)
         eval(rotated, restored)
 
-        #expect(floats(rotated) != floats(x), "the forward rotation must change the input")
+        #expect(
+            DeepSeekV4TestArrays.floats(rotated) != DeepSeekV4TestArrays.floats(x),
+            "the forward rotation must change the input")
         expectClose(
-            floats(restored), floats(x), within: Self.roundTripTolerance, "inverse round trip")
+            DeepSeekV4TestArrays.floats(restored), DeepSeekV4TestArrays.floats(x),
+            within: Self.roundTripTolerance, "inverse round trip")
     }
 
     // MARK: - yarnInvFreq
@@ -319,7 +327,8 @@ struct DeepSeekV4MathHelpersTests {
 
         #expect(invFreq.shape == [Self.deepseekV4RopeDim / 2])
         expectCloseRelative(
-            floats(invFreq), Self.expectedYarnInvFreq, within: Self.relativeTolerance,
+            DeepSeekV4TestArrays.floats(invFreq), Self.expectedYarnInvFreq,
+            within: Self.relativeTolerance,
             "yarn inverse frequency")
     }
 
@@ -350,7 +359,8 @@ struct DeepSeekV4MathHelpersTests {
         eval(invFreq)
 
         expectCloseRelative(
-            floats(invFreq), Self.expectedYarnInvFreqClamped, within: Self.relativeTolerance,
+            DeepSeekV4TestArrays.floats(invFreq), Self.expectedYarnInvFreqClamped,
+            within: Self.relativeTolerance,
             "clamped yarn inverse frequency")
     }
 
@@ -370,7 +380,8 @@ struct DeepSeekV4MathHelpersTests {
         eval(scores)
 
         expectCloseRelative(
-            floats(scores), Self.expectedSqrtSoftplus, within: Self.relativeTolerance,
+            DeepSeekV4TestArrays.floats(scores), Self.expectedSqrtSoftplus,
+            within: Self.relativeTolerance,
             "sqrt softplus")
     }
 
@@ -382,7 +393,7 @@ struct DeepSeekV4MathHelpersTests {
     @Test func sqrtSoftplusStaysFiniteAtTheExtremes() {
         let scores = DeepSeekV4Math.sqrtSoftplus(MLXArray([Float(-100), 0, 100]))
         eval(scores)
-        let got = floats(scores)
+        let got = DeepSeekV4TestArrays.floats(scores)
 
         for (index, value) in got.enumerated() {
             #expect(value.isFinite, "sqrt softplus[\(index)] is \(value)")
@@ -434,11 +445,12 @@ struct DeepSeekV4MathHelpersTests {
         eval(output)
 
         expectCloseRelative(
-            floats(output), Self.expectedSwiGLU, within: Self.relativeTolerance, "clamped swiglu")
+            DeepSeekV4TestArrays.floats(output), Self.expectedSwiGLU,
+            within: Self.relativeTolerance, "clamped swiglu")
     }
 
     @Test func clampedSwiGLUSaturatesBeyondTheLimit() {
-        let output = floats(
+        let output = DeepSeekV4TestArrays.floats(
             DeepSeekV4Math.clampedSwiGLU(
                 gate: MLXArray(Self.swiGLUGate), up: MLXArray(Self.swiGLUUp),
                 limit: Self.swiGLULimit))
@@ -479,8 +491,8 @@ struct DeepSeekV4MathHelpersTests {
         }
         eval(running)
 
-        let fp32Sum = floats(reduced)[0]
-        let bfloat16Sum = floats(running)[0]
+        let fp32Sum = DeepSeekV4TestArrays.floats(reduced)[0]
+        let bfloat16Sum = DeepSeekV4TestArrays.floats(running)[0]
         let fp32Error = abs(fp32Sum - Self.exactRoutedSum)
         let bfloat16Error = abs(bfloat16Sum - Self.exactRoutedSum)
 

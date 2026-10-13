@@ -285,18 +285,13 @@ struct DeepSeekV4HyperConnectionTests {
 
     // MARK: - Comparison helpers
 
-    /// Reads an array back as a flat list of `Float`, in row-major order.
-    private func floats(_ array: MLXArray) -> [Float] {
-        array.asType(.float32).asArray(Float.self)
-    }
-
     /// Checks every element of `got` against `expected` and names the worst
     /// element when one is too far away.
     private func expectMatches(
         _ got: MLXArray, _ expected: [Float], _ what: String,
         limit: Float = tolerance, sourceLocation: SourceLocation = #_sourceLocation
     ) {
-        let values = floats(got)
+        let values = DeepSeekV4TestArrays.floats(got)
         guard values.count == expected.count else {
             #expect(
                 values.count == expected.count,
@@ -459,7 +454,7 @@ struct DeepSeekV4HyperConnectionTests {
             blockOutput: MLXArray.zeros([1, 1, 1]),
             residual: residual, post: post, comb: comb)
 
-        #expect(floats(expanded) == Self.asymmetricMixingFirstRow)
+        #expect(DeepSeekV4TestArrays.floats(expanded) == Self.asymmetricMixingFirstRow)
     }
 
     /// One gain for each copy, which the expand test reads as its `post`.
@@ -480,7 +475,7 @@ struct DeepSeekV4HyperConnectionTests {
             post: post,
             comb: MLXArray.zeros([1, 1, Self.hcMult, Self.hcMult]))
 
-        #expect(floats(expanded) == Self.postGains)
+        #expect(DeepSeekV4TestArrays.floats(expanded) == Self.postGains)
     }
 
     // MARK: - The round trip
@@ -529,7 +524,8 @@ struct DeepSeekV4HyperConnectionTests {
 
         #expect(expanded.shape == stream.shape)
         expectMatches(
-            expanded, floats(stream), "the round trip", limit: Self.looseTolerance)
+            expanded, DeepSeekV4TestArrays.floats(stream), "the round trip",
+            limit: Self.looseTolerance)
     }
 
     // MARK: - Shapes on the wide checkpoint
@@ -548,7 +544,7 @@ struct DeepSeekV4HyperConnectionTests {
         #expect(post.shape == [1, Self.wideTokenCount, Self.hcMult])
         #expect(comb.shape == [1, Self.wideTokenCount, Self.hcMult, Self.hcMult])
         #expect(expanded.shape == [1, Self.wideTokenCount, Self.hcMult, Self.wideHiddenSize])
-        #expect(floats(expanded).allSatisfy { $0.isFinite })
+        #expect(DeepSeekV4TestArrays.floats(expanded).allSatisfy { $0.isFinite })
     }
 
     // MARK: - The fused Sinkhorn kernel
@@ -588,8 +584,12 @@ struct DeepSeekV4HyperConnectionTests {
         #expect(fused.collapsed.shape == leading + [width])
         #expect(fused.comb.dtype == .float32)
         #expect(fused.collapsed.dtype == .float32)
-        #expect(floats(fused.comb) == floats(opComb), "the Sinkhorn mixing matrix")
-        #expect(floats(fused.collapsed) == floats(opCollapsed), "the collapsed residual stream")
+        #expect(
+            DeepSeekV4TestArrays.floats(fused.comb) == DeepSeekV4TestArrays.floats(opComb),
+            "the Sinkhorn mixing matrix")
+        #expect(
+            DeepSeekV4TestArrays.floats(fused.collapsed)
+                == DeepSeekV4TestArrays.floats(opCollapsed), "the collapsed residual stream")
     }
 
     // MARK: - The head reduce
@@ -627,7 +627,7 @@ struct DeepSeekV4HyperConnectionTests {
         let reduced = head(stream)
 
         #expect(reduced.shape == [1, Self.wideTokenCount, Self.wideHiddenSize])
-        #expect(floats(reduced).allSatisfy { $0.isFinite })
+        #expect(DeepSeekV4TestArrays.floats(reduced).allSatisfy { $0.isFinite })
     }
 
     // MARK: - The two epsilons
@@ -650,8 +650,11 @@ struct DeepSeekV4HyperConnectionTests {
             mixes: mixes, scale: scale, base: bias,
             hcMult: Self.hcMult, iters: Self.sinkhornIterations, eps: Self.hcEps)
 
-        #expect(floats(withoutEps.comb) != floats(withEps.comb))
-        #expect(floats(withoutEps.pre) != floats(withEps.pre))
+        #expect(
+            DeepSeekV4TestArrays.floats(withoutEps.comb)
+                != DeepSeekV4TestArrays.floats(withEps.comb))
+        #expect(
+            DeepSeekV4TestArrays.floats(withoutEps.pre) != DeepSeekV4TestArrays.floats(withEps.pre))
     }
 
     /// A logit far enough below its neighbours that the softmax of its row
@@ -713,7 +716,9 @@ struct DeepSeekV4HyperConnectionTests {
         let withEps = try Self.fixtureHyperConnection(
             configuration: Self.configuration(hcEps: Self.hcEps))
 
-        #expect(floats(withoutEps.collapse(stream).comb) != floats(withEps.collapse(stream).comb))
+        #expect(
+            DeepSeekV4TestArrays.floats(withoutEps.collapse(stream).comb)
+                != DeepSeekV4TestArrays.floats(withEps.collapse(stream).comb))
     }
 
     @Test
@@ -730,7 +735,8 @@ struct DeepSeekV4HyperConnectionTests {
             configuration: Self.configuration(normEps: Self.normEps))
 
         #expect(
-            floats(small.collapse(stream).collapsed) != floats(large.collapse(stream).collapsed))
+            DeepSeekV4TestArrays.floats(small.collapse(stream).collapsed)
+                != DeepSeekV4TestArrays.floats(large.collapse(stream).collapsed))
     }
 
     @Test
@@ -745,7 +751,9 @@ struct DeepSeekV4HyperConnectionTests {
         let threeSteps = try Self.fixtureHyperConnection(
             configuration: Self.configuration(sinkhornIterations: Self.sinkhornIterations))
 
-        #expect(floats(oneStep.collapse(stream).comb) != floats(threeSteps.collapse(stream).comb))
+        #expect(
+            DeepSeekV4TestArrays.floats(oneStep.collapse(stream).comb)
+                != DeepSeekV4TestArrays.floats(threeSteps.collapse(stream).comb))
     }
 
     @Test
@@ -757,6 +765,8 @@ struct DeepSeekV4HyperConnectionTests {
         let large = try Self.fixtureHyperHead(
             configuration: Self.configuration(normEps: Self.normEps))
 
-        #expect(floats(small(stream)) != floats(large(stream)))
+        #expect(
+            DeepSeekV4TestArrays.floats(small(stream)) != DeepSeekV4TestArrays.floats(large(stream))
+        )
     }
 }

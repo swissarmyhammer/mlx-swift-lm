@@ -194,22 +194,12 @@ struct DeepSeekV4MoETests {
 
     // MARK: - Comparison helpers
 
-    /// Reads an array back as a flat list of `Float`, in row-major order.
-    private func floats(_ array: MLXArray) -> [Float] {
-        array.asType(.float32).asArray(Float.self)
-    }
-
-    /// Reads an array back as a flat list of `Int32`, in row-major order.
-    private func integers(_ array: MLXArray) -> [Int32] {
-        array.asType(.int32).asArray(Int32.self)
-    }
-
     /// Checks every element of `got` against `expected`.
     private func expectClose(
         _ got: MLXArray, _ expected: [Float], _ what: String,
         limit: Float = tolerance, sourceLocation: SourceLocation = #_sourceLocation
     ) {
-        let values = floats(got)
+        let values = DeepSeekV4TestArrays.floats(got)
         #expect(values.count == expected.count, "\(what): length", sourceLocation: sourceLocation)
         let worst = zip(values, expected).map { abs($0 - $1) / max(1, abs($1)) }.max() ?? 0
         #expect(
@@ -222,7 +212,9 @@ struct DeepSeekV4MoETests {
     /// the expert index, so that a test never depends on the order
     /// `argPartition` answers in.
     private func routesByExpert(_ indices: MLXArray, _ weights: MLXArray) -> [(Int32, Float)] {
-        zip(integers(indices), floats(weights)).sorted { $0.0 < $1.0 }
+        zip(DeepSeekV4TestArrays.integers(indices), DeepSeekV4TestArrays.floats(weights)).sorted {
+            $0.0 < $1.0
+        }
     }
 
     // MARK: - The gate: the bias picks, the unbiased score weighs
@@ -282,8 +274,8 @@ struct DeepSeekV4MoETests {
         #expect(indices.shape == [1, 3, Self.expertsPerToken])
         #expect(weights.shape == [1, 3, Self.expertsPerToken])
         for token in 0 ..< 3 {
-            let selected = integers(indices[0, token])
-            let selectedWeights = floats(weights[0, token])
+            let selected = DeepSeekV4TestArrays.integers(indices[0, token])
+            let selectedWeights = DeepSeekV4TestArrays.floats(weights[0, token])
             let everyWeightIsPositive = selectedWeights.allSatisfy { $0 > 0 }
             #expect(Set(selected).count == Self.expertsPerToken, "token \(token) repeats an expert")
             #expect(everyWeightIsPositive, "token \(token) holds a weight of zero or less")
@@ -308,8 +300,8 @@ struct DeepSeekV4MoETests {
             inputIds: tokens)
 
         // Rows 1, 4 and 1 of the table, whatever the hidden state holds.
-        #expect(integers(first) == [1, 4, 2, 5, 1, 4])
-        #expect(integers(second) == integers(first))
+        #expect(DeepSeekV4TestArrays.integers(first) == [1, 4, 2, 5, 1, 4])
+        #expect(DeepSeekV4TestArrays.integers(second) == DeepSeekV4TestArrays.integers(first))
     }
 
     @Test
@@ -325,7 +317,7 @@ struct DeepSeekV4MoETests {
         let (indices, weights) = gate(Self.routingInput(), inputIds: MLXArray([Int32(0)], [1, 1]))
 
         // Row 0 of the table names experts 5 and 2.
-        #expect(integers(indices) == [5, 2])
+        #expect(DeepSeekV4TestArrays.integers(indices) == [5, 2])
         expectClose(
             weights, [Self.routingScores[5], Self.routingScores[2]],
             "the hashed experts take their own scores")
@@ -343,7 +335,7 @@ struct DeepSeekV4MoETests {
 
         let (indices, _) = gate(Self.routingInput(), inputIds: MLXArray([Int32(0)], [1, 1]))
 
-        #expect(integers(indices).sorted() == [6, 7])
+        #expect(DeepSeekV4TestArrays.integers(indices).sorted() == [6, 7])
     }
 
     // MARK: - The asymmetric SwiGLU clamp
@@ -364,7 +356,7 @@ struct DeepSeekV4MoETests {
 
     /// Runs ``splitProjectionMLP()`` and reads back the clamped activation.
     private func activation(_ mlp: DeepSeekV4MLP, gate: Float, up: Float) -> Float {
-        floats(mlp(Self.array([gate, up], [1, 1, 2])))[0]
+        DeepSeekV4TestArrays.floats(mlp(Self.array([gate, up], [1, 1, 2])))[0]
     }
 
     @Test
@@ -431,7 +423,7 @@ struct DeepSeekV4MoETests {
         let saturated = experts(Self.array([50, 1], [1, 1, 2]), indices)
         let atTheLimit = experts(Self.array([10, 1], [1, 1, 2]), indices)
 
-        #expect(floats(saturated) == floats(atTheLimit))
+        #expect(DeepSeekV4TestArrays.floats(saturated) == DeepSeekV4TestArrays.floats(atTheLimit))
         expectClose(saturated[0, 0, 0, 0], [9.999546021313], "a routed gate over the limit")
     }
 
@@ -479,7 +471,9 @@ struct DeepSeekV4MoETests {
             let one = experts(
                 input[0..., token ..< (token + 1), 0...],
                 indices[0..., token ..< (token + 1), 0...])
-            expectClose(one.flattened(), floats(sorted[0, token].flattened()), "token \(token)")
+            expectClose(
+                one.flattened(), DeepSeekV4TestArrays.floats(sorted[0, token].flattened()),
+                "token \(token)")
         }
     }
 
@@ -522,7 +516,7 @@ struct DeepSeekV4MoETests {
         let saturated = moe(Self.array([50, 1], [1, 1, 2]), inputIds: tokens)
         let atTheLimit = moe(Self.array([10, 1], [1, 1, 2]), inputIds: tokens)
 
-        #expect(floats(saturated) == floats(atTheLimit))
+        #expect(DeepSeekV4TestArrays.floats(saturated) == DeepSeekV4TestArrays.floats(atTheLimit))
         expectClose(saturated[0, 0, 0], [9.999546021313], "a shared gate over the limit")
     }
 
@@ -591,7 +585,7 @@ struct DeepSeekV4MoETests {
 
         let output = moe(input, inputIds: tokens)
 
-        let everyValueIsFinite = floats(output).allSatisfy { $0.isFinite }
+        let everyValueIsFinite = DeepSeekV4TestArrays.floats(output).allSatisfy { $0.isFinite }
         #expect(output.shape == input.shape)
         #expect(everyValueIsFinite)
     }
@@ -604,7 +598,7 @@ struct DeepSeekV4MoETests {
         let routedOnly = try Self.randomLayer(layer: Self.topKLayer, sharedScale: 0)
         let withShared = try Self.randomLayer(layer: Self.topKLayer, sharedScale: 1)
 
-        let difference = floats(
+        let difference = DeepSeekV4TestArrays.floats(
             withShared(input, inputIds: tokens) - routedOnly(input, inputIds: tokens))
         let sharedExpertMovedTheOutput = difference.contains { abs($0) > 1e-3 }
 
@@ -646,7 +640,7 @@ struct DeepSeekV4MoETests {
             verify: [])
 
         let output = moe(bfloat16([1], [1, 1, 1]), inputIds: MLXArray([Int32(0)], [1, 1]))
-        let value = floats(output)[0]
+        let value = DeepSeekV4TestArrays.floats(output)[0]
 
         #expect(abs(value) > 1e-4, "the reduction collapsed to zero, thus it ran in bfloat16")
         #expect(

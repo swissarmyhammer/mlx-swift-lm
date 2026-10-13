@@ -203,10 +203,6 @@ struct DeepSeekV4AttentionTests {
 
     // MARK: - Comparison helpers
 
-    private func floats(_ array: MLXArray) -> [Float] {
-        array.asType(.float32).asArray(Float.self)
-    }
-
     private func expectClose(
         _ got: [Float], _ expected: [Float], _ what: String,
         sourceLocation: SourceLocation = #_sourceLocation
@@ -295,7 +291,7 @@ struct DeepSeekV4AttentionTests {
         let output = block(Self.prefillInput(), mask: .causal, cache: nil)
 
         #expect(output.shape == [Self.batchSize, Self.prefillLength, Self.hiddenSize])
-        expectClose(floats(output), Self.prefillWithSink, "prefill with sink")
+        expectClose(DeepSeekV4TestArrays.floats(output), Self.prefillWithSink, "prefill with sink")
     }
 
     @Test
@@ -303,8 +299,10 @@ struct DeepSeekV4AttentionTests {
         let withSink = try Self.attention(layer: Self.plainLayer, useAttnSink: true)
         let withoutSink = try Self.attention(layer: Self.plainLayer, useAttnSink: false)
 
-        let sinkOutput = floats(withSink(Self.prefillInput(), mask: .causal, cache: nil))
-        let plainOutput = floats(withoutSink(Self.prefillInput(), mask: .causal, cache: nil))
+        let sinkOutput = DeepSeekV4TestArrays.floats(
+            withSink(Self.prefillInput(), mask: .causal, cache: nil))
+        let plainOutput = DeepSeekV4TestArrays.floats(
+            withoutSink(Self.prefillInput(), mask: .causal, cache: nil))
 
         expectClose(plainOutput, Self.prefillWithoutSink, "prefill without sink")
         let sinkEffect = largestGap(sinkOutput, plainOutput)
@@ -316,7 +314,8 @@ struct DeepSeekV4AttentionTests {
     @Test
     func compressedLayerReadsTheCompressRopeTheta() throws {
         let block = try Self.attention(layer: Self.compressedLayer, useAttnSink: true)
-        let output = floats(block(Self.prefillInput(), mask: .causal, cache: nil))
+        let output = DeepSeekV4TestArrays.floats(
+            block(Self.prefillInput(), mask: .causal, cache: nil))
 
         expectClose(output, Self.prefillCompressedLayer, "prefill, compressed layer")
         #expect(
@@ -333,7 +332,7 @@ struct DeepSeekV4AttentionTests {
         let output = block(Self.decodeInput(), mask: .causal, cache: cache)
 
         #expect(output.shape == [Self.batchSize, Self.decodeLength, Self.hiddenSize])
-        expectClose(floats(output), Self.decodeWithSink, "decode with sink")
+        expectClose(DeepSeekV4TestArrays.floats(output), Self.decodeWithSink, "decode with sink")
         #expect(cache.offset == Self.prefillLength + Self.decodeLength)
     }
 
@@ -358,8 +357,10 @@ struct DeepSeekV4AttentionTests {
         let plainCache = KVCacheSimple()
         let gainCache = GainKVCache(valueGain: gain)
 
-        let plainOutput = floats(block(Self.prefillInput(), mask: .causal, cache: plainCache))
-        let gainOutput = floats(block(Self.prefillInput(), mask: .causal, cache: gainCache))
+        let plainOutput = DeepSeekV4TestArrays.floats(
+            block(Self.prefillInput(), mask: .causal, cache: plainCache))
+        let gainOutput = DeepSeekV4TestArrays.floats(
+            block(Self.prefillInput(), mask: .causal, cache: gainCache))
 
         // Nothing after the softmax carries a bias, thus the whole block is
         // linear in the values the cache hands back. A block that dropped the
@@ -384,7 +385,9 @@ struct DeepSeekV4AttentionTests {
             projected.shape == [
                 Self.batchSize, Self.prefillLength, Self.outputGroups * Self.outputLoraRank,
             ])
-        expectClose(floats(projected), Self.groupedProjection, "grouped output projection")
+        expectClose(
+            DeepSeekV4TestArrays.floats(projected), Self.groupedProjection,
+            "grouped output projection")
     }
 
     @Test
@@ -401,8 +404,8 @@ struct DeepSeekV4AttentionTests {
 
         #expect(prefill.shape == [Self.batchSize, Self.widePrefillLength, Self.wideHiddenSize])
         #expect(decode.shape == [Self.batchSize, Self.decodeLength, Self.wideHiddenSize])
-        #expect(floats(prefill).allSatisfy { $0.isFinite })
-        #expect(floats(decode).allSatisfy { $0.isFinite })
+        #expect(DeepSeekV4TestArrays.floats(prefill).allSatisfy { $0.isFinite })
+        #expect(DeepSeekV4TestArrays.floats(decode).allSatisfy { $0.isFinite })
     }
 
     /// The width of the residual stream of the real DeepSeek-V4-Flash
@@ -448,16 +451,20 @@ struct DeepSeekV4AttentionTests {
         // At position 1 the angle of each pair is its own inverse frequency,
         // thus the cosine table is `cos(inv_freq)` term by term.
         expectClose(
-            floats(plainAngles.cos), Self.plainInverseFrequency.map { cos($0) },
+            DeepSeekV4TestArrays.floats(plainAngles.cos),
+            Self.plainInverseFrequency.map { cos($0) },
             "plain layer cosine")
         expectClose(
-            floats(compressedAngles.cos), Self.yarnInverseFrequency.map { cos($0) },
+            DeepSeekV4TestArrays.floats(compressedAngles.cos),
+            Self.yarnInverseFrequency.map { cos($0) },
             "compressed layer cosine")
         expectClose(
-            floats(plainAngles.sin), Self.plainInverseFrequency.map { sin($0) },
+            DeepSeekV4TestArrays.floats(plainAngles.sin),
+            Self.plainInverseFrequency.map { sin($0) },
             "plain layer sine")
         expectClose(
-            floats(compressedAngles.sin), Self.yarnInverseFrequency.map { sin($0) },
+            DeepSeekV4TestArrays.floats(compressedAngles.sin),
+            Self.yarnInverseFrequency.map { sin($0) },
             "compressed layer sine")
     }
 
@@ -503,8 +510,8 @@ struct DeepSeekV4AttentionTests {
             ropeDim: Self.realRopeDim)
 
         #expect(angles.cos.shape.last == Self.realRopeDim / Self.rotaryPairWidth)
-        let before = floats(head)
-        let after = floats(rotated)
+        let before = DeepSeekV4TestArrays.floats(head)
+        let after = DeepSeekV4TestArrays.floats(rotated)
         for dimension in 0 ..< Self.realNoPositionDim {
             #expect(after[dimension] == before[dimension], "dimension \(dimension) must not turn")
         }
