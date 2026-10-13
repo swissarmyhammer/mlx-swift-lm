@@ -141,15 +141,6 @@ struct DeepSeekV4CacheTests {
         return weights
     }
 
-    /// The values of an array, in row-major order.
-    ///
-    /// - Parameter array: The array to read.
-    /// - Returns: Every value of the array, in float32.
-    private static func floats(_ array: MLXArray) -> [Float] {
-        eval(array)
-        return array.asType(.float32).reshaped(-1).asArray(Float.self)
-    }
-
     /// Builds one compressor of the synthetic checkpoint and loads a
     /// repeatable random weight into every parameter it declares.
     ///
@@ -223,12 +214,13 @@ struct DeepSeekV4CacheTests {
         for layer in [Self.overlapLayer, Self.wideLayer] {
             let block = Self.fixture(
                 [Self.batchSize, Self.pooledTokenCount, Self.hiddenSize], seed: Self.weightSeed)
-            let whole = Self.floats(
+            let whole = DeepSeekV4TestArrays.floats(
                 try Self.pooledInCuts(block, cuts: [Self.pooledTokenCount], layer: layer))
             #expect(!whole.isEmpty, "layer \(layer) must pool at least one chunk")
 
             for cuts in Self.feedCuts {
-                let cut = Self.floats(try Self.pooledInCuts(block, cuts: cuts, layer: layer))
+                let cut = DeepSeekV4TestArrays.floats(
+                    try Self.pooledInCuts(block, cuts: cuts, layer: layer))
                 #expect(cut.count == whole.count, "layer \(layer), cuts \(cuts)")
                 for (index, pair) in zip(cut, whole).enumerated() {
                     let where_ = "layer \(layer), cuts \(cuts), value \(index)"
@@ -283,15 +275,15 @@ struct DeepSeekV4CacheTests {
         let cache = try Self.chunkCache(layer: layer)
         _ = cache.pooled(first, through: compressor, rope: rope, offset: 0)
         #expect(cache.rewind(to: rewindTo), "a fresh cache holds every raw row, thus it rewinds")
-        let afterRewind = Self.floats(
+        let afterRewind = DeepSeekV4TestArrays.floats(
             cache.pooled(
                 second[0..., rewindTo ..< window, 0...],
                 through: compressor, rope: rope, offset: rewindTo))
 
         let never = try Self.chunkCache(layer: layer)
-        let straight = Self.floats(
+        let straight = DeepSeekV4TestArrays.floats(
             never.pooled(joined, through: compressor, rope: rope, offset: 0))
-        let stale = Self.floats(
+        let stale = DeepSeekV4TestArrays.floats(
             try Self.chunkCache(layer: layer)
                 .pooled(first, through: compressor, rope: rope, offset: 0))
 
@@ -332,7 +324,7 @@ struct DeepSeekV4CacheTests {
         let keyValues = Self.fixture(
             [Self.batchSize, 1, Self.pooledTokenCount, Self.headDim], seed: Self.weightSeed + 1)
         _ = cache.update(keys: keyValues, values: keyValues)
-        let pooled = Self.floats(
+        let pooled = DeepSeekV4TestArrays.floats(
             cache.attentionChunks.pooled(
                 block, through: compressor, rope: rope, offset: 0))
         #expect(!pooled.isEmpty, "the premise: the cache holds pooled chunks to carry over")
@@ -347,7 +339,7 @@ struct DeepSeekV4CacheTests {
             "the carry position must survive the round trip")
         let restoredChunks = try #require(restored.attentionChunks.chunks)
         #expect(
-            Self.floats(restoredChunks) == pooled,
+            DeepSeekV4TestArrays.floats(restoredChunks) == pooled,
             "the pooled chunks must survive the round trip")
     }
 
@@ -360,13 +352,13 @@ struct DeepSeekV4CacheTests {
             [Self.batchSize, Self.pooledTokenCount, Self.hiddenSize], seed: Self.weightSeed)
 
         let cache = DeepSeekV4Cache(configuration: configuration, layer: layer)
-        let pooled = Self.floats(
+        let pooled = DeepSeekV4TestArrays.floats(
             cache.attentionChunks.pooled(block, through: compressor, rope: rope, offset: 0))
         #expect(!pooled.isEmpty, "the premise: the cache holds pooled chunks to copy")
 
         let duplicate = try #require(cache.copy() as? DeepSeekV4Cache)
         let duplicateChunks = try #require(duplicate.attentionChunks.chunks)
-        #expect(Self.floats(duplicateChunks) == pooled)
+        #expect(DeepSeekV4TestArrays.floats(duplicateChunks) == pooled)
     }
 
     // MARK: - The whole model
@@ -402,14 +394,15 @@ struct DeepSeekV4CacheTests {
             .reshaped([Self.batchSize, Self.longPromptLength])
 
         let whole = try model.newCache(parameters: nil)
-        let wholeLogits = Self.floats(model(tokens, cache: whole)[0..., -1, 0...])
+        let wholeLogits = DeepSeekV4TestArrays.floats(
+            model(tokens, cache: whole)[0..., -1, 0...])
 
         let cut = try model.newCache(parameters: nil)
         var cutLogits: [Float] = []
         var position = 0
         while position < Self.longPromptLength {
             let end = min(position + Self.prefillCut, Self.longPromptLength)
-            cutLogits = Self.floats(
+            cutLogits = DeepSeekV4TestArrays.floats(
                 model(tokens[0..., position ..< end], cache: cut)[0..., -1, 0...])
             position = end
         }
@@ -436,7 +429,8 @@ struct DeepSeekV4CacheTests {
             .reshaped([Self.batchSize, Self.longPromptLength])
 
         let whole = try model.newCache(parameters: nil)
-        let wholeLogits = Self.floats(model(tokens, cache: whole)[0..., -1, 0...])
+        let wholeLogits = DeepSeekV4TestArrays.floats(
+            model(tokens, cache: whole)[0..., -1, 0...])
 
         // The generation shape: one prefill call, then one call for each
         // token. `aLongPromptGivesOneAnswerWhateverThePrefillCutIs` cuts the
@@ -447,7 +441,7 @@ struct DeepSeekV4CacheTests {
         _ = model(tokens[0..., 0 ..< prefillEnd], cache: stepped)
         var steppedLogits: [Float] = []
         for position in prefillEnd ..< Self.longPromptLength {
-            steppedLogits = Self.floats(
+            steppedLogits = DeepSeekV4TestArrays.floats(
                 model(tokens[0..., position ..< (position + 1)], cache: stepped)[0..., -1, 0...])
         }
 
@@ -469,8 +463,8 @@ struct DeepSeekV4CacheTests {
 
         // A run that keeps no cache builds its own mask, thus it is where a
         // model that forgot to name its sliding window attends densely.
-        let stateless = Self.floats(model(tokens, cache: nil)[0..., -1, 0...])
-        let cached = Self.floats(
+        let stateless = DeepSeekV4TestArrays.floats(model(tokens, cache: nil)[0..., -1, 0...])
+        let cached = DeepSeekV4TestArrays.floats(
             model(tokens, cache: try model.newCache(parameters: nil))[0..., -1, 0...])
 
         #expect(stateless.count == cached.count)
@@ -499,7 +493,7 @@ struct DeepSeekV4CacheTests {
         let next = MLXArray([Int32(1)]).reshaped([Self.batchSize, 1])
         let logits = model(next, cache: cache)
         #expect(logits.shape == [Self.batchSize, 1, Self.vocabSize])
-        #expect(Self.floats(logits).allSatisfy { $0.isFinite })
+        #expect(DeepSeekV4TestArrays.floats(logits).allSatisfy { $0.isFinite })
         #expect(
             pooledLayer.attentionChunks.chunkCount == expectedChunks,
             "one decode step past a whole chunk must add no chunk")

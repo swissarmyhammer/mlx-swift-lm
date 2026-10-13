@@ -1,8 +1,18 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: 8c80
+comments:
+- actor: claude-code
+  id: 01m4vag43vghya7h37jhqf05c8
+  text: |-
+    ### Done in task ^rnnxh8d — no work left here
+    The review of ^rnnxh8d (findings of 2026-10-13 13:54) kept this work open on that task. The implement step of ^rnnxh8d did all of it, and the work goes into the next commit of ^rnnxh8d (not committed yet; the commit step of ^rnnxh8d makes it).
+    - Proof: `asArray(_:)` in mlx-swift `MLXArray+Bytes.swift` calls `eval()` and copies the values into a contiguous row-major buffer through the strides. Thus `eval` and `reshaped(-1)` change no value, and the three files now call `DeepSeekV4TestArrays.floats(_:)`. No second function was necessary.
+    - The private `floats` copies in ModelTests, CacheTests and CompressorTests are gone. The two inline int32 reads in MathHelpersTests call `DeepSeekV4TestArrays.integers(_:)`. The same bodies in GateCheckpointLoadTests, IndexerTests and QuantizationPlanTests also call the shared helper.
+    - Tests: `swift build --build-tests` exit 0; `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 716 XCTest, 0 failures; 1375 Swift Testing tests passed.
+  timestamp: 2026-10-13T19:05:46.363121+00:00
+position_column: done
+position_ordinal: ffbc80
 title: 'DeepSeek-V4 tests: use one shared reader for the static floats helper with eval'
 ---
 ## What
@@ -23,6 +33,6 @@ Also: `Tests/MLXLMTests/DeepSeekV4MathHelpersTests.swift` reads a bool mask two 
 
 ## Acceptance Criteria
 
-- [ ] No DeepSeek-V4 test file defines its own `floats` helper.
-- [ ] The DeepSeek-V4 unit tests pass (`swift build --build-tests`, then `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`).
+- [x] No DeepSeek-V4 test file defines its own `floats` helper.
+- [x] The DeepSeek-V4 unit tests pass (`swift build --build-tests`, then `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`).
 #deepseek-v4 #tests

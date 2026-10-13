@@ -239,7 +239,7 @@ struct DeepSeekV4GateCheckpointLoadTests {
                     Self.hashedExpert(token: token % Self.vocabSize, route: route))
             }
         }
-        #expect(indices.asType(.int32).asArray(Int32.self) == expected)
+        #expect(DeepSeekV4TestArrays.integers(indices) == expected)
     }
 
     @Test("The loaded top-k layer selects the highest biased scores")
@@ -259,8 +259,7 @@ struct DeepSeekV4GateCheckpointLoadTests {
         eval(first, second)
 
         #expect(
-            first.asType(.int32).asArray(Int32.self)
-                != second.asType(.int32).asArray(Int32.self),
+            DeepSeekV4TestArrays.integers(first) != DeepSeekV4TestArrays.integers(second),
             "the selection must follow the hidden state")
     }
 }

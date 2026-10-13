@@ -201,7 +201,7 @@ struct DeepSeekV4IndexerTests {
     private static func pickedChunks(
         _ mask: MLXArray, batch: Int, tokens: Int, chunks: Int
     ) -> [[[Int]]] {
-        let flags = mask.asType(.int32).reshaped(-1).asArray(Int32.self)
+        let flags = DeepSeekV4TestArrays.integers(mask)
         return (0 ..< batch).map { sequence in
             (0 ..< tokens).map { token in
                 (0 ..< chunks).filter { chunk in

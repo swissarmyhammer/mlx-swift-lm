@@ -130,8 +130,65 @@ comments:
     - evidence: swift build --build-tests complete, only the known warning (missing creator for mutated node, mlx-swift_Cmlx.bundle). xcrun xctest on all 5 bundles, all exit 0. MLXLMTests: 716 XCTest and 1375 Swift Testing pass, 0 failures. Same counts as the previous run, so no DeepSeek-V4 test was lost. CXGrammarTests 7, MLXFoundationModelsTests 367, MLXGuidedGenerationTests 70 pass. 0 skipped, 0 new warnings.
     - next: review.
   timestamp: 2026-10-13T18:53:59.277784+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m4v9ycc27en72bmqdjgm7r1x
+  text: |-
+    ### review — findings (iteration 2)
+    - evidence: `review sha HEAD~1..HEAD` (commit de68a23). Engine counts: 0 findings, 0 confirmed, 0 refuted, 7 attempted, 0 failed; 6 kanban files not reviewed (no validator). Verification of the prior item (2026-10-13 13:33, `reuse/reuse`): not fully fixed. The finding says to call the shared helper from the sibling test files. Open items: Tests/MLXLMTests/DeepSeekV4ModelTests.swift:202, Tests/MLXLMTests/DeepSeekV4CacheTests.swift:148, Tests/MLXLMTests/DeepSeekV4CompressorTests.swift:154 (private `floats` copies), Tests/MLXLMTests/DeepSeekV4MathHelpersTests.swift:536 and :556 (inline copies of the `integers` body in a file that this commit changed). No written rule lets the work move to follow-up ^9py7art.
+    - next: fix the 4 open items on this task (the work of ^9py7art), run the DeepSeek-V4 unit tests, commit, then run /review again. The task stays in review.
+  timestamp: 2026-10-13T18:56:04.994158+00:00
+- actor: claude-code
+  id: 01m4v9z0ant1c1yywwh18mn1z9
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — DeepSeekV4TestArrays.swift (new) and 5 DeepSeek-V4 test files use it
+    - test: green — MLXLMTests 716 XCTest + 1375 Swift Testing, 0 failures, same counts
+    - commit: de68a23
+    - review: findings — prior item not fully fixed: Tests/MLXLMTests/DeepSeekV4ModelTests.swift:202, Tests/MLXLMTests/DeepSeekV4CacheTests.swift:148, Tests/MLXLMTests/DeepSeekV4CompressorTests.swift:154, Tests/MLXLMTests/DeepSeekV4MathHelpersTests.swift:536
+  timestamp: 2026-10-13T18:56:25.429217+00:00
+- actor: claude-code
+  id: 01m4vafqn0eqtrym6nqp6yetcd
+  text: |-
+    ### Review findings of 2026-10-13 13:54 fixed: one shared array reader in every DeepSeek-V4 test file — 2026-10-13
+    - Proof that one function serves both forms (source `.build/checkouts/mlx-swift/Source/MLX/MLXArray+Bytes.swift`, `asArray(_:)`): it calls `self.eval()` first, and it copies `self.size` values into a contiguous buffer through `copy(from:toContiguous:)`, which walks the strides. Thus it evaluates the array and it gives the values in row-major order for every layout (transposed, sliced, broadcast). `eval(array)` before the read and `reshaped(-1)` before `asArray` change no value. Also, `asArray(T.self)` on an array of another dtype calls `asType(T)` itself. Thus `DeepSeekV4TestArrays.floats(_:)` gives the same list as each removed copy, and I added no second function. The type documentation of `DeepSeekV4TestArrays` now states this contract.
+    - Removed the private `floats` copies (`eval` + `reshaped(-1)` form) from ModelTests, CacheTests and CompressorTests. Every call names `DeepSeekV4TestArrays.floats`.
+    - MathHelpersTests: both inline `visible.asType(.int32).asArray(Int32.self)` reads now call `DeepSeekV4TestArrays.integers`.
+    - The search of all `Tests/MLXLMTests/DeepSeekV4*.swift` found more copies of the same bodies, and they now call the shared helper too: GateCheckpointLoadTests (3 inline `integers` reads), IndexerTests (`mask.asType(.int32).reshaped(-1).asArray(Int32.self)`), QuantizationPlanTests (2 `out.asArray(Float.self)` reads). Not changed: `input.text.tokens.asArray(Int.self)` in EncoderWiringTests and PromptFallbackTests. These give `[Int]` token identifiers for the tokenizer API, not the `[Float]`/`[Int32]` bodies.
+    - Tool note: `edit file` with `replace_all: true` again replaced only the first match (CompressorTests). I wrote ModelTests, CacheTests and CompressorTests in full, and I checked `git diff -U0`: the only changed lines are the removed helpers, the changed calls and line wraps. No fixture value moved.
+    - Checks: `swift-format lint` on the 8 files: no new warning (the one `where_` warning is on an unchanged line of CacheTests). `swift build --build-tests` exit 0, only the known "missing creator for mutated node" warning. `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 716 XCTest, 0 failures; 1375 Swift Testing tests in 110 suites passed. Same counts as before.
+  timestamp: 2026-10-13T19:05:33.600849+00:00
+- actor: claude-code
+  id: 01m4vag9zynrn40d1c2xyvab9c
+  text: |-
+    ### implement — changed
+    - evidence: 8 files — Tests/MLXLMTests/DeepSeekV4TestArrays.swift, Tests/MLXLMTests/DeepSeekV4ModelTests.swift, Tests/MLXLMTests/DeepSeekV4CacheTests.swift, Tests/MLXLMTests/DeepSeekV4CompressorTests.swift, Tests/MLXLMTests/DeepSeekV4MathHelpersTests.swift, Tests/MLXLMTests/DeepSeekV4GateCheckpointLoadTests.swift, Tests/MLXLMTests/DeepSeekV4IndexerTests.swift, Tests/MLXLMTests/DeepSeekV4QuantizationPlanTests.swift. `swift build --build-tests` exit 0 (only the known "missing creator for mutated node" warning); `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 716 XCTest, 0 failures; 1375 Swift Testing tests in 110 suites passed. The 4 findings of 2026-10-13 13:54 are checked. Follow-up ^9py7art completed (its work is done here).
+    - next: /review. Not committed. The task stays in doing.
+  timestamp: 2026-10-13T19:05:52.382033+00:00
+- actor: claude-code
+  id: 01m4vard66x9y10bevpa8jta1z
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests exit 0, only the known warning "missing creator for mutated node" (mlx-swift_Cmlx.bundle), no new warning. xcrun xctest on 5 bundles, all exit 0. MLXLMTests: 716 XCTest + 1375 Swift Testing, 0 failures. CXGrammarTests 7, MLXFoundationModelsTests 367, MLXGuidedGenerationTests 70, MLXHuggingFaceMacrosTests 5 XCTest. 0 skipped.
+    - next: review
+  timestamp: 2026-10-13T19:10:17.798909+00:00
+- actor: claude-code
+  id: 01m4vavffk6cc00qtmmk21p6cy
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (commit 4809494). The engine reviewed 8 files: 0 findings, 0 confirmed, 0 refuted, 14 attempted, 0 failed. All 5 prior items are checked. A search of Tests/MLXLMTests/DeepSeekV4*.swift found no private array-read helper and no inline copy of the `DeepSeekV4TestArrays.floats` or `integers` body. The only `asArray(Int.self)` reads are the token-id reads in DeepSeekV4PromptFallbackTests.swift and DeepSeekV4EncoderWiringTests.swift. These are not copies of the helper bodies.
+    - next: none. The task moved to done.
+  timestamp: 2026-10-13T19:11:58.451840+00:00
+- actor: claude-code
+  id: 01m4vavtmsqjh96wdkpfdf5mcy
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — DeepSeekV4TestArrays.swift and 7 DeepSeek-V4 test files use the shared helper; ^9py7art closed
+    - test: green — MLXLMTests 716 XCTest + 1375 Swift Testing, 0 failures, same counts
+    - commit: 4809494
+    - review: clean — review sha HEAD~1..HEAD, 0 findings, 5/5 prior items checked
+  timestamp: 2026-10-13T19:12:09.881213+00:00
+position_column: done
+position_ordinal: ffbd80
 title: 'DeepSeek-V4 speed: compile the small hot functions of the decode step'
 ---
 ## What
@@ -174,3 +231,22 @@ Give the position offset to a compiled function as an array, not as an `Int`. In
 > - `docs/deepseek-v4-support.md` — no validator matches this file
 
 - [x] `Tests/MLXLMTests/DeepSeekV4CompiledDecodeTests.swift:87` `reuse/reuse` — The new private helper `floats` copies a helper that already exists in the same test suite family. It reads an MLXArray as a flat [Float] by casting to float32 and calling asArray. Copies of this helper appear in several sibling test files, so the same reading logic now lives in many places and can diverge. Move `floats` into a shared internal test helper (for example beside `DeepSeekV4SyntheticCheckpoint`) and call it from this file and from the sibling test files. If a shared helper is not wanted, the same body as the existing private copies is acceptable, but then the duplication should be recorded as a deliberate convention, not left unstated.
+
+## Review Findings (2026-10-13 13:54)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 6 file(s) reviewed, 6 not reviewed.
+
+> 6 file(s) not reviewed — no validator matched:
+> - `.kanban/tags/01M4V9HVHVXYXC72JBY4M2ADJK.jsonl` — no validator matches this file
+> - `.kanban/tags/01M4V9HVHVXYXC72JBY4M2ADJK.yaml` — no validator matches this file
+> - `.kanban/tasks/01M4RH95TM0V4VXFF53RNNXH8D.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4RH95TM0V4VXFF53RNNXH8D.md` — no validator matches this file
+> - `.kanban/tasks/01M4V9HVHT49RX98FW39PY7ART.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4V9HVHT49RX98FW39PY7ART.md` — no validator matches this file
+
+> Verification of the prior item (2026-10-13 13:33, `reuse/reuse`): the code does not fully obey it. The engine found zero new findings in commit de68a23. But the prior finding says "call it from this file and from the sibling test files". These sibling files still hold the same cause. No written rule lets the work move to follow-up task ^9py7art. Thus the items below are open on this task.
+
+- [x] `Tests/MLXLMTests/DeepSeekV4ModelTests.swift:202` `reuse/reuse` — A private `floats` helper remains. It reads an MLXArray as a flat [Float] by casting to float32 and calling asArray (with `eval` and `reshaped(-1)`). This is the cause of the prior finding. Remove the private copy and call one shared helper in `DeepSeekV4TestArrays`. Either show that `asArray` already evaluates and gives a flat row-major buffer and call `DeepSeekV4TestArrays.floats(_:)`, or add the `eval` form to `DeepSeekV4TestArrays` with a name that states the difference.
+- [x] `Tests/MLXLMTests/DeepSeekV4CacheTests.swift:148` `reuse/reuse` — A private `floats` helper remains, with the same body as the copy in `DeepSeekV4ModelTests.swift`. This is the cause of the prior finding. Remove the private copy and call the shared helper in `DeepSeekV4TestArrays`.
+- [x] `Tests/MLXLMTests/DeepSeekV4CompressorTests.swift:154` `reuse/reuse` — A private `floats` helper remains, with the same body as the copy in `DeepSeekV4ModelTests.swift`. This is the cause of the prior finding. Remove the private copy and call the shared helper in `DeepSeekV4TestArrays`.
+- [x] `Tests/MLXLMTests/DeepSeekV4MathHelpersTests.swift:536` `reuse/reuse` — Commit de68a23 changed this file to use `DeepSeekV4TestArrays`, but the file still reads arrays inline with `visible.asType(.int32).asArray(Int32.self)` here and at line 556. That expression is the body of `DeepSeekV4TestArrays.integers(_:)`. Remove the cause from the whole file: replace both inline reads with `DeepSeekV4TestArrays.integers(_:)`.

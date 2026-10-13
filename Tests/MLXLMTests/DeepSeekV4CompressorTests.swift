@@ -147,15 +147,6 @@ struct DeepSeekV4CompressorTests {
         return weights
     }
 
-    /// The values of an array, in row-major order.
-    ///
-    /// - Parameter array: The array to read.
-    /// - Returns: Every value of the array, in float32.
-    private static func floats(_ array: MLXArray) -> [Float] {
-        eval(array)
-        return array.asType(.float32).reshaped(-1).asArray(Float.self)
-    }
-
     // MARK: - The plain-attention path
 
     /// The number of sequences every forward pass below carries.
@@ -204,7 +195,7 @@ struct DeepSeekV4CompressorTests {
             layer: Self.plainLayer, compressRatios: Self.noCompressRatios, weights: weights)
 
         #expect(
-            Self.floats(zeroRatio) == Self.floats(noCompressor),
+            DeepSeekV4TestArrays.floats(zeroRatio) == DeepSeekV4TestArrays.floats(noCompressor),
             "a layer whose compress ratio is 0 must read the plain-attention path")
 
         // The same comparison on a layer whose ratio is more than 0 fails,
@@ -216,7 +207,8 @@ struct DeepSeekV4CompressorTests {
         let compressedAsPlain = try Self.attentionOutput(
             layer: Self.overlapLayer, compressRatios: Self.noCompressRatios, weights: weights)
         #expect(
-            Self.floats(compressed) != Self.floats(compressedAsPlain),
+            DeepSeekV4TestArrays.floats(compressed)
+                != DeepSeekV4TestArrays.floats(compressedAsPlain),
             "a compressed layer must not answer what the plain-attention path answers")
     }
 
@@ -333,7 +325,8 @@ struct DeepSeekV4CompressorTests {
                 chunks.shape == [Self.batchSize, Self.pooledChunkCount, Self.headDim],
                 "compress ratio \(ratio)")
             #expect(
-                Self.floats(chunks).allSatisfy { $0.isFinite }, "compress ratio \(ratio)")
+                DeepSeekV4TestArrays.floats(chunks).allSatisfy { $0.isFinite },
+                "compress ratio \(ratio)")
         }
     }
 
@@ -383,9 +376,9 @@ struct DeepSeekV4CompressorTests {
                     Self.block(tokenCount: ratio, seed: Self.weightSeed + 1),
                 ], axis: 1)
 
-            let before = Self.floats(
+            let before = DeepSeekV4TestArrays.floats(
                 try Self.pooled(from: compressor, layer: layer, input: first, offset: 0))
-            let after = Self.floats(
+            let after = DeepSeekV4TestArrays.floats(
                 try Self.pooled(from: compressor, layer: layer, input: changed, offset: 0))
 
             let untouched = (Self.pooledChunkCount - 1) * Self.headDim
@@ -411,9 +404,9 @@ struct DeepSeekV4CompressorTests {
         let input = Self.block(
             tokenCount: Self.overlapRatio * Self.pooledChunkCount, seed: Self.weightSeed)
 
-        let atZero = Self.floats(
+        let atZero = DeepSeekV4TestArrays.floats(
             try Self.pooled(from: compressor, layer: Self.overlapLayer, input: input, offset: 0))
-        let atOffset = Self.floats(
+        let atOffset = DeepSeekV4TestArrays.floats(
             try Self.pooled(
                 from: compressor, layer: Self.overlapLayer, input: input,
                 offset: Self.rotaryOffset))
@@ -476,7 +469,7 @@ struct DeepSeekV4CompressorTests {
         let logits = model(tokens, cache: nil)
 
         #expect(logits.shape == [Self.batchSize, Self.longPromptLength, Self.vocabSize])
-        #expect(Self.floats(logits).allSatisfy { $0.isFinite })
+        #expect(DeepSeekV4TestArrays.floats(logits).allSatisfy { $0.isFinite })
     }
 
     // MARK: - The layers the compressor treats as compressed

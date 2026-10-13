@@ -8,6 +8,11 @@ import MLX
 /// More than one suite compares array values against Swift literals or
 /// against a second array. Each of these suites reads the values through
 /// these shared helpers, so the reading stays the same in every suite.
+///
+/// A caller needs no `eval` and no `reshaped(-1)` before a read.
+/// `MLXArray.asArray(_:)` evaluates the array itself, and it copies the
+/// values out in row-major order for every memory layout: a transposed, a
+/// sliced or a broadcast array gives the same list as its contiguous copy.
 enum DeepSeekV4TestArrays {
 
     /// Reads an array back as a flat list of `Float`, in row-major order.

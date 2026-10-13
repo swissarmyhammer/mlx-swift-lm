@@ -415,7 +415,7 @@ struct DeepSeekV4QuantizationPlanTests {
                 Self.forwardTokenCount, Self.forwardExpertsPerToken, 1,
                 Self.probeExpertHiddenSize,
             ])
-        #expect(out.asArray(Float.self).allSatisfy { $0.isFinite })
+        #expect(DeepSeekV4TestArrays.floats(out).allSatisfy { $0.isFinite })
     }
 
     @Test func mxfp4SwitchLinearMatchesItsOwnDequantizedWeights() throws {
@@ -456,7 +456,7 @@ struct DeepSeekV4QuantizationPlanTests {
                 Self.forwardTokenCount, Self.forwardExpertsPerToken, 1,
                 Self.probeExpertHiddenSize,
             ])
-        #expect(out.asArray(Float.self).allSatisfy { $0.isFinite })
+        #expect(DeepSeekV4TestArrays.floats(out).allSatisfy { $0.isFinite })
     }
 }
 

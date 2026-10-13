@@ -533,7 +533,7 @@ struct DeepSeekV4MathHelpersTests {
 
         // The rule again, in plain Swift: a query at absolute position `q`
         // reads chunk `c` only when the whole chunk stands behind it.
-        let read = visible.asType(.int32).asArray(Int32.self)
+        let read = DeepSeekV4TestArrays.integers(visible)
         for query in 0 ..< Self.visibilityQueryCount {
             let position = Self.visibilityOffset + query
             for chunk in 0 ..< Self.visibilityChunkCount {
@@ -553,7 +553,7 @@ struct DeepSeekV4MathHelpersTests {
         eval(visible)
 
         #expect(
-            visible.asType(.int32).asArray(Int32.self).allSatisfy { $0 == 0 },
+            DeepSeekV4TestArrays.integers(visible).allSatisfy { $0 == 0 },
             "no chunk has ended before position \(Self.visibilityChunkWidth - 1)")
     }
 }

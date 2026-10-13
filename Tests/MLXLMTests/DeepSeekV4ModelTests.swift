@@ -198,12 +198,6 @@ struct DeepSeekV4ModelTests {
             key: MLXRandom.key(seed))
     }
 
-    /// The values of an array, in row-major order.
-    private static func floats(_ array: MLXArray) -> [Float] {
-        eval(array)
-        return array.asType(.float32).reshaped(-1).asArray(Float.self)
-    }
-
     // MARK: - Module paths
 
     @Test func theModulePathsAreTheCheckpointKeyPaths() throws {
@@ -297,8 +291,8 @@ struct DeepSeekV4ModelTests {
             output.shape == [
                 Self.batchSize, Self.promptLength, configuration.hcMult, configuration.hiddenSize,
             ])
-        let got = Self.floats(output)
-        let want = Self.floats(expected)
+        let got = DeepSeekV4TestArrays.floats(output)
+        let want = DeepSeekV4TestArrays.floats(expected)
         #expect(got.count == want.count)
         for (index, value) in got.enumerated() {
             #expect(abs(value - want[index]) <= Self.tolerance, "value \(index)")
@@ -323,8 +317,8 @@ struct DeepSeekV4ModelTests {
             stream, mask: .causal, cache: nil,
             inputIds: Self.tokens(count: Self.promptLength, from: 1))
 
-        let firstValues = Self.floats(first)
-        let secondValues = Self.floats(second)
+        let firstValues = DeepSeekV4TestArrays.floats(first)
+        let secondValues = DeepSeekV4TestArrays.floats(second)
         #expect(firstValues.count == secondValues.count)
         #expect(
             zip(firstValues, secondValues).contains { abs($0 - $1) > Self.tolerance },
@@ -352,8 +346,8 @@ struct DeepSeekV4ModelTests {
         #expect(
             output.shape == [Self.batchSize, Self.promptLength, configuration.hiddenSize],
             "the head reduces the copy axis away before the final norm")
-        let got = Self.floats(output)
-        let want = Self.floats(expected)
+        let got = DeepSeekV4TestArrays.floats(output)
+        let want = DeepSeekV4TestArrays.floats(expected)
         #expect(got.count == want.count)
         for (index, value) in got.enumerated() {
             #expect(abs(value - want[index]) <= Self.tolerance, "value \(index)")
@@ -365,7 +359,7 @@ struct DeepSeekV4ModelTests {
         let logits = model(Self.tokens(count: Self.promptLength), cache: nil)
 
         #expect(logits.shape == [Self.batchSize, Self.promptLength, Self.vocabSize])
-        #expect(Self.floats(logits).allSatisfy { $0.isFinite })
+        #expect(DeepSeekV4TestArrays.floats(logits).allSatisfy { $0.isFinite })
     }
 
     @Test func decodeAdvancesTheCacheOneStepForEachToken() throws {
@@ -379,7 +373,7 @@ struct DeepSeekV4ModelTests {
         for step in 0 ..< Self.decodeStepCount {
             let logits = model(Self.tokens(count: 1, from: step), cache: cache)
             #expect(logits.shape == [Self.batchSize, 1, Self.vocabSize])
-            #expect(Self.floats(logits).allSatisfy { $0.isFinite })
+            #expect(DeepSeekV4TestArrays.floats(logits).allSatisfy { $0.isFinite })
             #expect(cache[0].offset == Self.promptLength + step + 1)
         }
 
@@ -475,7 +469,9 @@ struct DeepSeekV4ModelTests {
             post: mixtureCollapse.post, comb: mixtureCollapse.comb)
 
         #expect(compiled.shape == reference.shape)
-        #expect(Self.floats(compiled) == Self.floats(reference), "layer \(layerIndex)")
+        #expect(
+            DeepSeekV4TestArrays.floats(compiled) == DeepSeekV4TestArrays.floats(reference),
+            "layer \(layerIndex)")
         #expect(compiledCache.offset == opCache.offset)
     }
 
@@ -516,8 +512,8 @@ struct DeepSeekV4ModelTests {
         let logits = model(inputIds, cache: nil)
 
         #expect(logits.shape == [Self.batchSize, Self.promptLength, Self.vocabSize])
-        let got = Self.floats(logits)
-        let want = Self.floats(expected)
+        let got = DeepSeekV4TestArrays.floats(logits)
+        let want = DeepSeekV4TestArrays.floats(expected)
         #expect(got.count == want.count)
         for (index, value) in got.enumerated() {
             #expect(abs(value - want[index]) <= Self.tolerance, "value \(index)")
@@ -532,8 +528,8 @@ struct DeepSeekV4ModelTests {
         let expected = head(model.model(inputIds, cache: nil))
         let logits = model(inputIds, cache: nil)
 
-        let got = Self.floats(logits)
-        let want = Self.floats(expected)
+        let got = DeepSeekV4TestArrays.floats(logits)
+        let want = DeepSeekV4TestArrays.floats(expected)
         #expect(got.count == want.count)
         for (index, value) in got.enumerated() {
             #expect(abs(value - want[index]) <= Self.tolerance, "value \(index)")
@@ -628,7 +624,7 @@ struct DeepSeekV4ModelTests {
         #expect(Set(sanitized.keys) == Set(expected.keys))
         for (key, value) in expected {
             let tensor = try #require(sanitized[key], Comment(rawValue: key))
-            #expect(Self.floats(tensor) == [value], Comment(rawValue: key))
+            #expect(DeepSeekV4TestArrays.floats(tensor) == [value], Comment(rawValue: key))
         }
     }
 
@@ -664,7 +660,7 @@ struct DeepSeekV4ModelTests {
         #expect(Set(sanitized.keys) == Set(expected.keys))
         for (key, value) in expected {
             let tensor = try #require(sanitized[key], Comment(rawValue: key))
-            #expect(Self.floats(tensor) == [value], Comment(rawValue: key))
+            #expect(DeepSeekV4TestArrays.floats(tensor) == [value], Comment(rawValue: key))
         }
     }
 
@@ -688,9 +684,9 @@ struct DeepSeekV4ModelTests {
         let modulePath = "model.layers.\(Self.topKLayer).ffn.gate.bias"
         #expect(Set(checkpointSpelling.keys) == [modulePath])
         let mapped = try #require(checkpointSpelling[modulePath])
-        #expect(Self.floats(mapped) == [1])
+        #expect(DeepSeekV4TestArrays.floats(mapped) == [1])
         let unchanged = try #require(rawSpelling[modulePath])
-        #expect(Self.floats(unchanged) == [2])
+        #expect(DeepSeekV4TestArrays.floats(unchanged) == [2])
     }
 
     @Test func sanitizeStacksThePerExpertWeightsIntoTheSwitchLayer() throws {
@@ -719,7 +715,7 @@ struct DeepSeekV4ModelTests {
             // The stack keeps the expert order, thus expert `e` sits at row
             // `e`. A stack in another order would still carry this shape.
             #expect(
-                Self.floats(stacked)
+                DeepSeekV4TestArrays.floats(stacked)
                     == (0 ..< Self.routedExpertCount).map { first + Float($0) }, note)
         }
     }
