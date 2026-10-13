@@ -30,15 +30,17 @@
 //     numbers, which is 16384 on DeepSeek-V4-Flash, and bfloat16 loses that
 //     sum.
 //  3. The Sinkhorn split. The file above and this file both call one shared
-//     routine. This file calls `DeepSeekV4Math.hcSplitSinkhorn`, from
+//     routine. This file calls the two halves of
+//     `DeepSeekV4Math.hcSplitSinkhorn`, from
 //     Libraries/MLXLLM/Models/DeepSeekV4MathHelpers.swift, which is the
-//     transcription of the Python `hc_split_sinkhorn`, and it hands that
-//     routine the `hc_eps` of the checkpoint. The routine holds no epsilon
-//     of its own. On the GPU the collapse calls the split half of that
-//     routine, `DeepSeekV4Math.hcSplitFields`, and gives the Sinkhorn steps
-//     and the weighted sum to one fused Metal kernel,
-//     Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift. A parity test
-//     holds the kernel to the numbers of the op path.
+//     transcription of the Python `hc_split_sinkhorn`, and it hands them the
+//     `hc_eps` of the checkpoint. The routine holds no epsilon of its own.
+//     The collapse calls the split half, `DeepSeekV4Math.hcSplitFields`. On
+//     the GPU it gives the Sinkhorn steps and the weighted sum to one fused
+//     Metal kernel, Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift;
+//     on another device it calls the Sinkhorn half,
+//     `DeepSeekV4Math.sinkhorn`. A parity test holds the kernel to the
+//     numbers of the op path.
 //
 // The Python reference above does not decide how the expand reads the mixing
 // matrix `comb`. Its `hc_post` reads `comb` the wrong way round. The official
@@ -162,6 +164,75 @@ enum ManifoldStream {
     static func weightedSum(of stream: MLXArray, weights: MLXArray) -> MLXArray {
         (weights.expandedDimensions(axis: -1) * stream).sum(axis: StreamAxis.copy)
     }
+
+    /// Takes every step of the collapse of ``DeepSeekV4HyperConnection`` that
+    /// comes before the Sinkhorn steps: the float32 cast of the stream, the
+    /// mixes projection and the split of the mixes vector.
+    ///
+    /// ``DeepSeekV4CompiledDecode/collapseFields(hcMult:normEps:hcEps:)``
+    /// compiles this function for the decode step.
+    ///
+    /// - Parameters:
+    ///   - stream: The residual stream, shape `(batch, tokens, copies, width)`,
+    ///     already checked by ``checkShape(of:copyCount:width:)``.
+    ///   - projection: The mixes projection, shape `(mixes, copies * width)`.
+    ///   - normWeight: The weight of the reduction, every value 1, shape
+    ///     `(copies * width)`.
+    ///   - scale: The three learned scales, one for each field, shape `(3)`.
+    ///   - base: The learned bias of the mixes vector, shape `(mixes)`.
+    ///   - hcMult: The number of parallel copies of the residual stream.
+    ///   - normEps: The epsilon of the reduction, from `rms_norm_eps`.
+    ///   - hcEps: The epsilon of the split, from `hc_eps`.
+    /// - Returns: `stream`, the residual stream in float32; `pre` and `post`,
+    ///   each shape `(batch, tokens, copies)`; and `comb`, the row softmax of
+    ///   the mixing logits plus `hcEps`, shape `(batch, tokens, copies,
+    ///   copies)`. The Sinkhorn steps still have to run on `comb`.
+    static func collapseFields(
+        of stream: MLXArray, projection: MLXArray, normWeight: MLXArray, scale: MLXArray,
+        base: MLXArray, hcMult: Int, normEps: Float, hcEps: Float
+    ) -> (stream: MLXArray, pre: MLXArray, post: MLXArray, comb: MLXArray) {
+        let streamF32 = stream.asType(.float32)
+        let mixes = mixes(
+            of: streamF32, projection: projection, normWeight: normWeight, normEps: normEps)
+        let fields = DeepSeekV4Math.hcSplitFields(
+            mixes: mixes, scale: scale, base: base, hcMult: hcMult, eps: hcEps)
+        return (stream: streamF32, pre: fields.pre, post: fields.post, comb: fields.comb)
+    }
+
+    /// Writes a block output back into the parallel copies of the residual
+    /// stream, as the op path.
+    ///
+    /// ``DeepSeekV4HyperConnection/expand(blockOutput:residual:post:comb:)``
+    /// states the reading of `comb` this function makes and its source, and
+    /// ``DeepSeekV4CompiledDecode/expand`` compiles this function for the
+    /// decode step.
+    ///
+    /// - Parameters:
+    ///   - blockOutput: The output of the sub-layer, shape
+    ///     `(batch, tokens, width)`.
+    ///   - residual: The residual stream the matching collapse read, shape
+    ///     `(batch, tokens, copies, width)`.
+    ///   - post: The gain each copy gives the block output, shape
+    ///     `(batch, tokens, copies)`.
+    ///   - comb: The doubly stochastic mixing matrix, shape
+    ///     `(batch, tokens, copies, copies)`.
+    /// - Returns: The residual stream of the next sub-layer, shape
+    ///   `(batch, tokens, copies, width)`, in the dtype of `blockOutput`.
+    static func expand(
+        blockOutput: MLXArray, residual: MLXArray, post: MLXArray, comb: MLXArray
+    ) -> MLXArray {
+        let outputDType = blockOutput.dtype
+        // `post` holds one gain for each copy and carries no width axis, and
+        // `blockOutput` holds one width and carries no copy axis, thus each
+        // one takes the axis the other carries.
+        let newTerm =
+            post.asType(.float32).expandedDimensions(axis: -1)
+            * blockOutput.asType(.float32).expandedDimensions(axis: StreamAxis.copy)
+        let residualTerm = comb.asType(.float32)
+            .swappedAxes(MixingAxis.source, MixingAxis.target)
+            .matmul(residual.asType(.float32))
+        return (newTerm + residualTerm).asType(outputDType)
+    }
 }
 
 // MARK: - Hyper-connection
@@ -237,6 +308,16 @@ class DeepSeekV4HyperConnection: Module {
     /// would demand a tensor that no DeepSeek-V4 checkpoint holds.
     private let _normWeight: MLXArray
 
+    /// The compiled steps of the collapse before the Sinkhorn steps, which a
+    /// decode step reads.
+    ///
+    /// The function captures the constants of this layer alone, and takes
+    /// every weight as an argument on each call.
+    private let compiledCollapseFields:
+        @Sendable (MLXArray, MLXArray, MLXArray, MLXArray, MLXArray) -> (
+            MLXArray, MLXArray, MLXArray, MLXArray
+        )
+
     /// Builds the hyper-connection of one sub-layer.
     ///
     /// - Parameter configuration: The configuration of the checkpoint.
@@ -253,6 +334,9 @@ class DeepSeekV4HyperConnection: Module {
         self._mixBias.wrappedValue = MLXArray.zeros([mixWidth])
         self._mixScale.wrappedValue = MLXArray.zeros([Self.scaleFieldCount])
         self._normWeight = MLXArray.ones([hcDim])
+        self.compiledCollapseFields = DeepSeekV4CompiledDecode.collapseFields(
+            hcMult: configuration.hcMult, normEps: configuration.rmsNormEps,
+            hcEps: configuration.hcEps)
     }
 
     /// Reads the parallel copies of the residual stream down to one stream.
@@ -275,27 +359,42 @@ class DeepSeekV4HyperConnection: Module {
         _ stream: MLXArray
     ) -> (collapsed: MLXArray, post: MLXArray, comb: MLXArray) {
         ManifoldStream.checkShape(of: stream, copyCount: hcMult, width: hiddenSize)
-        let streamF32 = stream.asType(.float32)
-        let mixes = ManifoldStream.mixes(
-            of: streamF32, projection: mixProjection, normWeight: _normWeight,
-            normEps: normEps)
+        let fields = collapseFields(stream)
 
-        guard DeepSeekV4SinkhornKernel.canRun(on: streamF32, iters: sinkhornIterations) else {
-            let (pre, post, comb) = DeepSeekV4Math.hcSplitSinkhorn(
-                mixes: mixes, scale: mixScale, base: mixBias,
-                hcMult: hcMult, iters: sinkhornIterations, eps: hcEps)
-            let collapsed = ManifoldStream.weightedSum(of: streamF32, weights: pre)
-            return (collapsed: collapsed.asType(stream.dtype), post: post, comb: comb)
+        guard DeepSeekV4SinkhornKernel.canRun(on: fields.stream, iters: sinkhornIterations) else {
+            let comb = DeepSeekV4Math.sinkhorn(fields.comb, iters: sinkhornIterations, eps: hcEps)
+            let collapsed = ManifoldStream.weightedSum(of: fields.stream, weights: fields.pre)
+            return (collapsed: collapsed.asType(stream.dtype), post: fields.post, comb: comb)
         }
 
-        let fields = DeepSeekV4Math.hcSplitFields(
-            mixes: mixes, scale: mixScale, base: mixBias, hcMult: hcMult, eps: hcEps)
         let fused = DeepSeekV4SinkhornKernel.sinkhornCollapse(
-            comb: fields.comb, pre: fields.pre, stream: streamF32,
+            comb: fields.comb, pre: fields.pre, stream: fields.stream,
             iters: sinkhornIterations, eps: hcEps)
         return (
             collapsed: fused.collapsed.asType(stream.dtype), post: fields.post, comb: fused.comb
         )
+    }
+
+    /// Takes the steps of the collapse that come before the Sinkhorn steps.
+    ///
+    /// A decode step reads the compiled function, and a longer block reads
+    /// the op path. The two give the same bits.
+    ///
+    /// - Parameter stream: The residual stream, already checked.
+    /// - Returns: The fields
+    ///   ``ManifoldStream/collapseFields(of:projection:normWeight:scale:base:hcMult:normEps:hcEps:)``
+    ///   answers.
+    private func collapseFields(
+        _ stream: MLXArray
+    ) -> (stream: MLXArray, pre: MLXArray, post: MLXArray, comb: MLXArray) {
+        guard DeepSeekV4CompiledDecode.isDecodeStep(stream) else {
+            return ManifoldStream.collapseFields(
+                of: stream, projection: mixProjection, normWeight: _normWeight,
+                scale: mixScale, base: mixBias, hcMult: hcMult, normEps: normEps, hcEps: hcEps)
+        }
+        let (streamF32, pre, post, comb) = compiledCollapseFields(
+            stream, mixProjection, _normWeight, mixScale, mixBias)
+        return (stream: streamF32, pre: pre, post: post, comb: comb)
     }
 
     /// Writes the block output back into the parallel copies of the residual
@@ -336,17 +435,11 @@ class DeepSeekV4HyperConnection: Module {
     func expand(
         blockOutput: MLXArray, residual: MLXArray, post: MLXArray, comb: MLXArray
     ) -> MLXArray {
-        let outputDType = blockOutput.dtype
-        // `post` holds one gain for each copy and carries no width axis, and
-        // `blockOutput` holds one width and carries no copy axis, thus each
-        // one takes the axis the other carries.
-        let newTerm =
-            post.asType(.float32).expandedDimensions(axis: -1)
-            * blockOutput.asType(.float32).expandedDimensions(axis: StreamAxis.copy)
-        let residualTerm = comb.asType(.float32)
-            .swappedAxes(MixingAxis.source, MixingAxis.target)
-            .matmul(residual.asType(.float32))
-        return (newTerm + residualTerm).asType(outputDType)
+        guard DeepSeekV4CompiledDecode.isDecodeStep(blockOutput) else {
+            return ManifoldStream.expand(
+                blockOutput: blockOutput, residual: residual, post: post, comb: comb)
+        }
+        return DeepSeekV4CompiledDecode.expand(blockOutput, residual, post, comb)
     }
 }
 

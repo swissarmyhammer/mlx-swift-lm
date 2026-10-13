@@ -405,21 +405,92 @@ final class DeepSeekV4Attention: Module {
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
-        let batch = x.dim(0)
-        let length = x.dim(1)
-        let offset = cache?.offset ?? 0
+        let tables = rotaryTables(offset: cache?.offset ?? 0, length: x.dim(1))
+        let projected = project(x, cos: tables.cos, sin: tables.sin)
+        let attended = attend(
+            x, projected: projected, mask: mask, cache: cache, cos: tables.cos, sin: tables.sin)
+        return outputProjection(attended, cos: tables.cos, sin: tables.sin)
+    }
+
+    // MARK: - The three stages of a block
+
+    /// The queries and the keys of one block, before any cache reads them.
+    struct Projection {
+        /// The rotated queries, shape `(batch, heads, tokens, headDim)`.
+        let queries: MLXArray
+
+        /// The rotated keys of the one latent head, which are also its
+        /// values, shape `(batch, 1, tokens, headDim)`.
+        let keyValues: MLXArray
+
+        /// The low-rank query after its norm, shape
+        /// `(batch, tokens, qLoraRank)`. The indexer reads it.
+        let queryResidual: MLXArray
+    }
+
+    /// Gives the cosine and the sine tables one block reads, each with the
+    /// two leading axes a `(batch, heads, tokens, width)` tensor broadcasts
+    /// against.
+    ///
+    /// - Parameters:
+    ///   - offset: The absolute position of the first token of the block.
+    ///   - length: The number of tokens in the block.
+    /// - Returns: Two tables, each of shape `(1, 1, length, ropeDim / 2)`, in
+    ///   float32.
+    func rotaryTables(offset: Int, length: Int) -> (cos: MLXArray, sin: MLXArray) {
         let angles = rope.cosSin(offset: offset, length: length)
-        let cosTable = angles.cos.expandedDimensions(axes: [0, 1])
-        let sinTable = angles.sin.expandedDimensions(axes: [0, 1])
+        return (
+            cos: angles.cos.expandedDimensions(axes: Self.tableAxes),
+            sin: angles.sin.expandedDimensions(axes: Self.tableAxes)
+        )
+    }
 
+    /// The two leading axes a rotary table gains.
+    private static let tableAxes = [BatchMajorAxis.batch, BatchMajorAxis.token]
+
+    /// Projects one block onto its queries and its keys, and turns both.
+    ///
+    /// This stage reads no cache, thus a compiled decode step can trace it.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, tokens, hidden)`.
+    ///   - cos: The cosine table of ``rotaryTables(offset:length:)``.
+    ///   - sin: The sine table of ``rotaryTables(offset:length:)``.
+    /// - Returns: The projection of the block.
+    func project(_ x: MLXArray, cos: MLXArray, sin: MLXArray) -> Projection {
+        let batch = x.dim(BatchMajorAxis.batch)
+        let length = x.dim(BatchMajorAxis.token)
         let queryResidual = qNorm(wqA(x))
-        let queries = rotatedQueries(
-            queryResidual, batch: batch, length: length, cos: cosTable, sin: sinTable)
-        let keyValues = rotatedKeyValues(
-            x, batch: batch, length: length, cos: cosTable, sin: sinTable)
+        return Projection(
+            queries: rotatedQueries(
+                queryResidual, batch: batch, length: length, cos: cos, sin: sin),
+            keyValues: rotatedKeyValues(x, batch: batch, length: length, cos: cos, sin: sin),
+            queryResidual: queryResidual)
+    }
 
+    /// Writes the keys of one block into the cache and attends over every key
+    /// the block may read.
+    ///
+    /// This stage reads and writes the cache, thus it stays outside every
+    /// compiled function.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, tokens, hidden)`.
+    ///   - projected: The projection of the block.
+    ///   - mask: The attention mask of this block.
+    ///   - cache: The key/value cache of this layer, or `nil`.
+    ///   - cos: The cosine table of ``rotaryTables(offset:length:)``.
+    ///   - sin: The sine table of ``rotaryTables(offset:length:)``.
+    /// - Returns: The attention output, shape
+    ///   `(batch, heads, tokens, headDim)`.
+    func attend(
+        _ x: MLXArray, projected: Projection, mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?, cos: MLXArray, sin: MLXArray
+    ) -> MLXArray {
+        let length = x.dim(BatchMajorAxis.token)
         // The window mask must read the offset the cache stood at BEFORE the
         // keys of this block joined it.
+        let offset = cache?.offset ?? 0
         let windowMask =
             compressor == nil
             ? mask
@@ -427,15 +498,31 @@ final class DeepSeekV4Attention: Module {
                 ?? makeAttentionMask(
                     n: length, cache: nil, windowSize: slidingWindow, returnArray: true)
 
-        let attended = attentionOutput(
-            x, queries: queries, keyValues: keyValues, queryResidual: queryResidual,
-            windowMask: windowMask, cache: cache, cos: cosTable, sin: sinTable, offset: offset)
+        return attentionOutput(
+            x, queries: projected.queries, keyValues: projected.keyValues,
+            queryResidual: projected.queryResidual, windowMask: windowMask, cache: cache,
+            cos: cos, sin: sin, offset: offset)
+    }
 
+    /// Turns the attention output back and projects it onto the residual
+    /// width.
+    ///
+    /// This stage reads no cache, thus a compiled decode step can trace it.
+    ///
+    /// - Parameters:
+    ///   - attended: The attention output, shape
+    ///     `(batch, heads, tokens, headDim)`.
+    ///   - cos: The cosine table of ``rotaryTables(offset:length:)``.
+    ///   - sin: The sine table of ``rotaryTables(offset:length:)``.
+    /// - Returns: The block output, shape `(batch, tokens, hidden)`.
+    func outputProjection(_ attended: MLXArray, cos: MLXArray, sin: MLXArray) -> MLXArray {
+        let batch = attended.dim(BatchMajorAxis.batch)
+        let length = attended.dim(Self.keyAxis)
         // The keys carried the position into the scores. Turning the output
         // backward takes it out again, thus the residual stream reads a
         // result with no position in it.
         let straightened = DeepSeekV4Math.applyInversePartialRoPE(
-            attended, cos: cosTable, sin: sinTable, ropeDim: ropeDim)
+            attended, cos: cos, sin: sin, ropeDim: ropeDim)
         let flattened =
             straightened
             .transposed(axes: Self.headMajor)

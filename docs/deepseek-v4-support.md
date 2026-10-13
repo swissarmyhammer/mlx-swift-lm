@@ -214,6 +214,47 @@ seconds instead of after hours:
 `IntegrationTesting/`. Compile it with
 `xcodebuild build-for-testing -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS'`.
 
+### The compiled decode step
+
+With the weights resident, a decode step costs CPU time and not GPU time.
+Task `^rnnxh8d` profiled one step at a context of 128 tokens: the GPU was busy
+for about 9 ms of a step of about 53 ms. The CPU encodes each MLX primitive
+and the Swift code builds the graph, thus the cost of a step follows the
+number of primitives.
+
+A step of one token therefore runs through compiled functions, and a prefill
+block keeps the op path:
+
+- `Libraries/MLXLLM/Models/DeepSeekV4CompiledDecode.swift` compiles the
+  clamped SwiGLU, the top-k and the hash routing, the hyper-connection
+  expand, the steps of the collapse before the Sinkhorn kernel, and the
+  mixture-of-experts combine.
+- `DeepSeekV4DecoderLayer.decodeStep` runs each layer in two compiled traces,
+  one on each side of the stage that pools the chunks, writes the cache and
+  attends. That stage changes shape on each step, thus no trace holds it.
+
+Each compiled function and each trace gives the same bits as the op path, in
+float32 and in bfloat16. `DeepSeekV4CompiledDecodeTests` and
+`DeepSeekV4ModelTests` compare the bits.
+
+Measured on 2026-10-13 with the scratch bench of the task, release build, GPU
+otherwise idle, one direct model call for each step, synchronous, the mean of
+two rounds of 32 steps:
+
+| context | before | small functions | small functions and layer traces |
+|---|---|---|---|
+| 128 | 50.5 ms | 48.7 ms | 45.6 ms |
+| 4k | 52.6 ms | 50.4 ms | 48.2 ms |
+| 16k | 64.9 ms | 62.9 ms | 60.9 ms |
+
+A pipelined loop of direct calls, as `TokenIterator` runs them, moves the
+same way: 49.5, 52.1 and 63.3 ms before, and 44.0, 47.2 and 58.4 ms after.
+Prefill does not change.
+
+The traces add about 20 ms to the first decode step of a process, one time.
+The rest of the step is the stage outside the traces, above all the pooled
+chunks of the compressor, which task `^cm8fq2q` covers.
+
 ## Spelling note
 
 This repository spells the family `DeepSeek` (for example, `DeepSeekV4Model`).

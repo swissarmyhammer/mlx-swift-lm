@@ -44,10 +44,15 @@
 //  5. **The numeric tracer reads `MLX_DSV4_NUMERIC_TRACE`.** The file above
 //     reads `VMLX_DSV4_NUMERIC_TRACE`. Every environment variable of this
 //     repository starts with `MLX_`, thus the name follows that convention.
-//  6. **No compiled decode path and no stage profile.** The file above carries
-//     `compile(shapeless:)` around the collapse and around the layer tail, and
-//     a stage profiler behind `VMLX_DSV4_STAGE_PROFILE`. Both are performance
-//     work of their own and neither changes a number.
+//  6. **The compiled decode path, and no stage profile.** The file above
+//     carries `compile(shapeless:)` around the collapse and around the layer
+//     tail, and a stage profiler behind `VMLX_DSV4_STAGE_PROFILE`. This file
+//     compiles a decode step in two traces for each layer, around the stage
+//     that writes the cache (`DeepSeekV4DecoderLayer.decodeStep`), and
+//     Libraries/MLXLLM/Models/DeepSeekV4CompiledDecode.swift compiles the
+//     small hot functions inside them. Prefill keeps the op path. This file
+//     carries no stage profiler. Neither choice changes a number: the parity
+//     tests compare the bits of each compiled function with its op path.
 //
 // Two more points, which the card that ordered this file states differently
 // from the references it names:
@@ -214,6 +219,11 @@ final class DeepSeekV4DecoderLayer: Module {
         cache: KVCache?,
         inputIds: MLXArray
     ) -> MLXArray {
+        // The numeric trace evaluates each stage, and a compiled trace holds
+        // no array that can be evaluated, thus a traced run keeps the op path.
+        if DeepSeekV4CompiledDecode.isDecodeStep(stream), !DeepSeekV4NumericTrace.isEnabled {
+            return decodeStep(stream, mask: mask, cache: cache, inputIds: inputIds)
+        }
         let afterAttention = wrapped(
             stream, connection: attentionConnection, norm: attentionNorm, half: "attn"
         ) { [attention] normalized in
@@ -253,6 +263,144 @@ final class DeepSeekV4DecoderLayer: Module {
             blockOutput: output, residual: stream, post: post, comb: comb)
         DeepSeekV4NumericTrace.tensor("\(label).expand", expanded)
         return expanded
+    }
+
+    // MARK: - The compiled decode step
+
+    /// The place of each array in the argument list and in the answer list of
+    /// ``compiledAttentionInput``.
+    private enum AttentionInputSlot {
+        /// Argument: the residual stream the layer reads.
+        static let stream = 0
+        /// Argument: the cosine table of the block.
+        static let cos = 1
+        /// Argument: the sine table of the block.
+        static let sin = 2
+
+        /// Answer: the collapsed stream after the attention norm.
+        static let normalized = 0
+        /// Answer: the rotated queries.
+        static let queries = 1
+        /// Answer: the rotated keys, which are also the values.
+        static let keyValues = 2
+        /// Answer: the low-rank query after its norm.
+        static let queryResidual = 3
+        /// Answer: the `post` gain of the attention hyper-connection.
+        static let post = 4
+        /// Answer: the mixing matrix of the attention hyper-connection.
+        static let comb = 5
+    }
+
+    /// The place of each argument of ``compiledLayerTail``.
+    private enum LayerTailSlot {
+        /// The attention output, before its inverse rotation.
+        static let attended = 0
+        /// The cosine table of the block.
+        static let cos = 1
+        /// The sine table of the block.
+        static let sin = 2
+        /// The residual stream the layer read.
+        static let stream = 3
+        /// The `post` gain of the attention hyper-connection.
+        static let post = 4
+        /// The mixing matrix of the attention hyper-connection.
+        static let comb = 5
+        /// The token identifiers, which a hash layer routes by.
+        static let inputIds = 6
+    }
+
+    /// The compiled head of a decode step: the attention collapse, the
+    /// attention norm, and the query and key projections.
+    ///
+    /// The trace reads no cache. The rotary tables are arguments, thus the
+    /// position of the token never becomes a constant of the trace.
+    private let compiledAttentionInput = CompiledTrace<DeepSeekV4DecoderLayer> {
+        layer, arguments in
+        layer.attentionInput(
+            stream: arguments[AttentionInputSlot.stream],
+            cos: arguments[AttentionInputSlot.cos], sin: arguments[AttentionInputSlot.sin])
+    }
+
+    /// The compiled tail of a decode step: the attention output projection,
+    /// the attention expand, and the whole mixture-of-experts half.
+    private let compiledLayerTail = CompiledTrace<DeepSeekV4DecoderLayer> { layer, arguments in
+        [layer.layerTail(arguments)]
+    }
+
+    /// Reads one decode step: one token for each sequence.
+    ///
+    /// Two compiled traces take every stage that reads no cache. The stage
+    /// between them pools the chunks, writes the cache and attends, thus it
+    /// stays outside the traces. The answer is the answer of the op path.
+    ///
+    /// - Parameters:
+    ///   - stream: The residual stream, shape `(batch, 1, hcMult, hiddenSize)`.
+    ///   - mask: The attention mask of this block.
+    ///   - cache: The key/value cache of this layer, or `nil`.
+    ///   - inputIds: The token identifiers, shape `(batch, 1)`.
+    /// - Returns: The residual stream of the next layer.
+    private func decodeStep(
+        _ stream: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
+        inputIds: MLXArray
+    ) -> MLXArray {
+        let tables = attention.rotaryTables(
+            offset: cache?.offset ?? 0, length: stream.dim(DeepSeekV4CompiledDecode.tokenAxis))
+        let input = compiledAttentionInput(self, [stream, tables.cos, tables.sin])
+        let attended = attention.attend(
+            input[AttentionInputSlot.normalized],
+            projected: DeepSeekV4Attention.Projection(
+                queries: input[AttentionInputSlot.queries],
+                keyValues: input[AttentionInputSlot.keyValues],
+                queryResidual: input[AttentionInputSlot.queryResidual]),
+            mask: mask, cache: cache, cos: tables.cos, sin: tables.sin)
+        var tail = [MLXArray](repeating: attended, count: LayerTailSlot.inputIds + 1)
+        tail[LayerTailSlot.cos] = tables.cos
+        tail[LayerTailSlot.sin] = tables.sin
+        tail[LayerTailSlot.stream] = stream
+        tail[LayerTailSlot.post] = input[AttentionInputSlot.post]
+        tail[LayerTailSlot.comb] = input[AttentionInputSlot.comb]
+        tail[LayerTailSlot.inputIds] = inputIds
+        return compiledLayerTail(self, tail)[0]
+    }
+
+    /// The body of ``compiledAttentionInput``.
+    ///
+    /// - Parameters:
+    ///   - stream: The residual stream the layer reads.
+    ///   - cos: The cosine table of the block.
+    ///   - sin: The sine table of the block.
+    /// - Returns: The answer list ``AttentionInputSlot`` names.
+    private func attentionInput(stream: MLXArray, cos: MLXArray, sin: MLXArray) -> [MLXArray] {
+        let (collapsed, post, comb) = attentionConnection.collapse(stream)
+        let normalized = attentionNorm(collapsed)
+        let projected = attention.project(normalized, cos: cos, sin: sin)
+        var answer = [MLXArray](repeating: normalized, count: AttentionInputSlot.comb + 1)
+        answer[AttentionInputSlot.queries] = projected.queries
+        answer[AttentionInputSlot.keyValues] = projected.keyValues
+        answer[AttentionInputSlot.queryResidual] = projected.queryResidual
+        answer[AttentionInputSlot.post] = post
+        answer[AttentionInputSlot.comb] = comb
+        return answer
+    }
+
+    /// The body of ``compiledLayerTail``.
+    ///
+    /// - Parameter arguments: The argument list ``LayerTailSlot`` names.
+    /// - Returns: The residual stream of the next layer.
+    private func layerTail(_ arguments: [MLXArray]) -> MLXArray {
+        let output = attention.outputProjection(
+            arguments[LayerTailSlot.attended],
+            cos: arguments[LayerTailSlot.cos], sin: arguments[LayerTailSlot.sin])
+        let afterAttention = attentionConnection.expand(
+            blockOutput: output, residual: arguments[LayerTailSlot.stream],
+            post: arguments[LayerTailSlot.post], comb: arguments[LayerTailSlot.comb])
+        let inputIds = arguments[LayerTailSlot.inputIds]
+        return wrapped(
+            afterAttention, connection: mixtureOfExpertsConnection, norm: mixtureOfExpertsNorm,
+            half: "ffn"
+        ) { [mixtureOfExperts] normalized in
+            mixtureOfExperts(normalized, inputIds: inputIds)
+        }
     }
 }
 

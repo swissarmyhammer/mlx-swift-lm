@@ -75,6 +75,9 @@ final class DeepSeekV4MLP: Module, UnaryLayer {
     /// turns the clamp off.
     let swigluLimit: Float
 
+    /// The compiled activation, which a decode step reads.
+    private let compiledActivation: @Sendable (MLXArray, MLXArray) -> MLXArray
+
     /// Builds one dense feed-forward block.
     ///
     /// - Parameters:
@@ -86,15 +89,23 @@ final class DeepSeekV4MLP: Module, UnaryLayer {
         self._upProj.wrappedValue = Linear(hiddenSize, intermediateSize, bias: false)
         self._downProj.wrappedValue = Linear(intermediateSize, hiddenSize, bias: false)
         self.swigluLimit = swigluLimit
+        self.compiledActivation = DeepSeekV4CompiledDecode.clampedSwiGLU(limit: swigluLimit)
     }
 
     /// Reads one block of tokens.
     ///
-    /// - Parameter x: The block input, shape `(..., hiddenSize)`.
+    /// A block of one token reads the compiled activation, and a longer block
+    /// reads the op path. The two give the same bits.
+    ///
+    /// - Parameter x: The block input, shape `(batch, tokens, hiddenSize)`.
     /// - Returns: The block output, of the shape of `x`.
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(
-            DeepSeekV4Math.clampedSwiGLU(gate: gateProj(x), up: upProj(x), limit: swigluLimit))
+        let gate = gateProj(x)
+        let up = upProj(x)
+        guard DeepSeekV4CompiledDecode.isDecodeStep(x) else {
+            return downProj(DeepSeekV4Math.clampedSwiGLU(gate: gate, up: up, limit: swigluLimit))
+        }
+        return downProj(compiledActivation(gate, up))
     }
 }
 
@@ -163,23 +174,34 @@ final class DeepSeekV4SwitchGLU: Module {
         self._downProj.wrappedValue = SwitchLinear(
             inputDims: hiddenDims, outputDims: inputDims, numExperts: expertCount, bias: false)
         self.swigluLimit = swigluLimit
+        self.compiledActivation = DeepSeekV4CompiledDecode.clampedSwiGLU(limit: swigluLimit)
     }
+
+    /// The compiled activation, which a decode step reads.
+    private let compiledActivation: @Sendable (MLXArray, MLXArray) -> MLXArray
 
     /// Sends each token through the experts its gate selected.
     ///
+    /// A block of one token reads the compiled activation, and a longer block
+    /// reads the op path. The two give the same bits.
+    ///
     /// - Parameters:
-    ///   - x: The token values, shape `(..., inputDims)`.
-    ///   - indices: The selected experts, shape `(..., routes)`.
-    /// - Returns: One output for each route, shape `(..., routes, inputDims)`.
-    ///   The caller weighs them and adds them up.
+    ///   - x: The token values, shape `(batch, tokens, inputDims)`.
+    ///   - indices: The selected experts, shape `(batch, tokens, routes)`.
+    /// - Returns: One output for each route, shape
+    ///   `(batch, tokens, routes, inputDims)`. The caller weighs them and adds
+    ///   them up.
     func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
         let routed = MLX.expandedDimensions(x, axes: Self.routeAxes)
+        let compiled = DeepSeekV4CompiledDecode.isDecodeStep(x)
         guard indices.size >= Self.sortThreshold else {
-            let outputs = expertOutputs(routed, indices, sortedByExpert: false)
+            let outputs = expertOutputs(
+                routed, indices, sortedByExpert: false, compiled: compiled)
             return MLX.squeezed(outputs, axis: RoutedAxis.row)
         }
         let (sortedInput, sortedIndices, inverseOrder) = gatherSort(x: routed, indices: indices)
-        let sortedOutputs = expertOutputs(sortedInput, sortedIndices, sortedByExpert: true)
+        let sortedOutputs = expertOutputs(
+            sortedInput, sortedIndices, sortedByExpert: true, compiled: compiled)
         let outputs = scatterUnsort(
             x: sortedOutputs, invOrder: inverseOrder, shape: indices.shape)
         return MLX.squeezed(outputs, axis: RoutedAxis.row)
@@ -192,13 +214,18 @@ final class DeepSeekV4SwitchGLU: Module {
     ///   - indices: The selected experts, one for each row of `x`.
     ///   - sortedByExpert: True when `gatherSort` already grouped the rows by
     ///     expert, which lets the gathered matrix multiply take a faster path.
+    ///   - compiled: True when the block is a decode step, which reads the
+    ///     compiled activation.
     /// - Returns: The output of each route.
     private func expertOutputs(
-        _ x: MLXArray, _ indices: MLXArray, sortedByExpert: Bool
+        _ x: MLXArray, _ indices: MLXArray, sortedByExpert: Bool, compiled: Bool
     ) -> MLXArray {
         let gate = gateProj(x, indices, sortedIndices: sortedByExpert)
         let up = upProj(x, indices, sortedIndices: sortedByExpert)
-        let activated = DeepSeekV4Math.clampedSwiGLU(gate: gate, up: up, limit: swigluLimit)
+        let activated =
+            compiled
+            ? compiledActivation(gate, up)
+            : DeepSeekV4Math.clampedSwiGLU(gate: gate, up: up, limit: swigluLimit)
         return downProj(activated, indices, sortedIndices: sortedByExpert)
     }
 }
@@ -225,14 +252,9 @@ final class DeepSeekV4SwitchGLU: Module {
 /// weigh a lifted expert far too heavily.
 final class DeepSeekV4MoEGate: Module {
 
-    /// The number of routed experts one token reads.
-    let expertsPerToken: Int
-
-    /// The factor the selected weights take.
-    let routedScalingFactor: Float
-
-    /// True when the selected weights divide by their own sum.
-    let normalizesTopkProbabilities: Bool
+    /// The routing constants of the checkpoint, and the op path of the
+    /// routing.
+    let routing: DeepSeekV4ExpertRouting
 
     /// True when this layer routes through the hash table.
     ///
@@ -268,13 +290,13 @@ final class DeepSeekV4MoEGate: Module {
     /// fills.
     @ParameterInfo(key: "tid2eid") var tokenToExpert: MLXArray?
 
-    /// The epsilon the normalization adds, so that a row of scores that adds
-    /// up to zero cannot divide by zero.
-    private static let normalizeEpsilon: Float = 1e-20
+    /// The compiled top-k routing, which a decode step of a later layer
+    /// reads.
+    private let compiledTopK: @Sendable (MLXArray, MLXArray, MLXArray) -> (MLXArray, MLXArray)
 
-    /// The axis of a `(batch, tokens, experts)` score tensor that holds one
-    /// score for each routed expert. It is the last axis.
-    private static let expertScoreAxis = -1
+    /// The compiled hash routing, which a decode step of a hash layer reads.
+    private let compiledHash:
+        @Sendable (MLXArray, MLXArray, MLXArray, MLXArray) -> (MLXArray, MLXArray)
 
     /// Builds the gate of one layer.
     ///
@@ -283,9 +305,13 @@ final class DeepSeekV4MoEGate: Module {
     ///   - layer: The index of the decoder layer this gate belongs to.
     init(configuration: DeepSeekV4Configuration, layer: Int) {
         let hashLayer = configuration.isHashLayer(layer)
-        self.expertsPerToken = configuration.numExpertsPerTok
-        self.routedScalingFactor = configuration.routedScalingFactor
-        self.normalizesTopkProbabilities = configuration.normalizeTopkProb
+        let routing = DeepSeekV4ExpertRouting(
+            expertsPerToken: configuration.numExpertsPerTok,
+            routedScalingFactor: configuration.routedScalingFactor,
+            normalizesTopkProbabilities: configuration.normalizeTopkProb)
+        self.routing = routing
+        self.compiledTopK = DeepSeekV4CompiledDecode.topKRouting(routing)
+        self.compiledHash = DeepSeekV4CompiledDecode.hashRouting(routing)
         self._weight.wrappedValue = zeros([
             configuration.nRoutedExperts, configuration.hiddenSize,
         ])
@@ -300,6 +326,12 @@ final class DeepSeekV4MoEGate: Module {
 
     /// Routes one block of tokens.
     ///
+    /// Each layer holds one routing parameter alone, thus this function reads
+    /// the one the layer has: a hash layer reads its table, and every later
+    /// layer scores the experts and adds its bias. A block of one token reads
+    /// the compiled routing, and a longer block reads the op path. The two
+    /// give the same bits.
+    ///
     /// - Parameters:
     ///   - x: The token values, shape `(batch, tokens, hiddenSize)`.
     ///   - inputIds: The token identifiers, shape `(batch, tokens)`. A hash
@@ -309,29 +341,93 @@ final class DeepSeekV4MoEGate: Module {
     func callAsFunction(
         _ x: MLXArray, inputIds: MLXArray
     ) -> (indices: MLXArray, weights: MLXArray) {
-        let logits = x.asType(.float32).matmul(weight.asType(.float32).transposed())
-        let scores = DeepSeekV4Math.sqrtSoftplus(logits)
-        let indices = selectedExperts(scores: scores, inputIds: inputIds)
+        let compiled = DeepSeekV4CompiledDecode.isDecodeStep(x)
+        if let tokenToExpert {
+            guard compiled else {
+                return routing.hashed(x, weight: weight, table: tokenToExpert, inputIds: inputIds)
+            }
+            let (indices, weights) = compiledHash(x, weight, tokenToExpert, inputIds)
+            return (indices: indices, weights: weights)
+        }
+        guard compiled, let bias else {
+            return routing.topK(x, weight: weight, bias: bias)
+        }
+        let (indices, weights) = compiledTopK(x, weight, bias)
+        return (indices: indices, weights: weights)
+    }
+}
+
+/// The routing constants of a DeepSeek-V4 checkpoint, and the op path of the
+/// two routings a gate takes.
+///
+/// The routing lives in a value type rather than in ``DeepSeekV4MoEGate``,
+/// because ``DeepSeekV4CompiledDecode`` compiles it: a compiled body can
+/// capture a `Sendable` value, and it cannot capture a module.
+struct DeepSeekV4ExpertRouting: Sendable {
+
+    /// The number of routed experts one token reads.
+    let expertsPerToken: Int
+
+    /// The factor the selected weights take.
+    let routedScalingFactor: Float
+
+    /// True when the selected weights divide by their own sum.
+    let normalizesTopkProbabilities: Bool
+
+    /// The epsilon the normalization adds, so that a row of scores that adds
+    /// up to zero cannot divide by zero.
+    private static let normalizeEpsilon: Float = 1e-20
+
+    /// The axis of a `(batch, tokens, experts)` score tensor that holds one
+    /// score for each routed expert. It is the last axis.
+    private static let expertScoreAxis = -1
+
+    /// Routes one block of tokens by the highest scores of the gate.
+    ///
+    /// The routing bias joins the scores for the selection alone. This is the
+    /// only place the bias reaches, and the weights come from the scores it
+    /// left unchanged, thus the routing cannot gather a biased weight by
+    /// mistake.
+    ///
+    /// - Parameters:
+    ///   - x: The token values, shape `(batch, tokens, hiddenSize)`.
+    ///   - weight: The gate projection, shape `(routed experts, hiddenSize)`.
+    ///   - bias: The routing bias, one value for each routed expert, or `nil`
+    ///     for a gate that holds none.
+    /// - Returns: The selected experts as `uint32` and their weights, each of
+    ///   shape `(batch, tokens, expertsPerToken)`.
+    func topK(
+        _ x: MLXArray, weight: MLXArray, bias: MLXArray?
+    ) -> (indices: MLXArray, weights: MLXArray) {
+        let scores = Self.scores(x, weight: weight)
+        let biased = bias.map { scores + $0.asType(.float32) } ?? scores
+        let lastSelectedPosition = expertsPerToken - 1
+        let indices = argPartition(-biased, kth: lastSelectedPosition, axis: Self.expertScoreAxis)[
+            .ellipsis, ..<expertsPerToken]
         return (indices.asType(.uint32), routedWeights(gatheredFrom: scores, at: indices))
     }
 
-    /// Names the experts one block of tokens reads.
+    /// Routes one block of tokens by the hash table of the checkpoint.
     ///
-    /// Each layer holds one routing parameter alone, thus this function reads
-    /// the one the layer has: a hash layer reads its table, and every later
-    /// layer scores the experts and adds its bias.
-    ///
-    /// This is the only place the routing bias reaches. The scores this
-    /// function reads leave it unchanged, thus the caller cannot gather a
-    /// biased weight by mistake.
-    private func selectedExperts(scores: MLXArray, inputIds: MLXArray) -> MLXArray {
-        if let tokenToExpert {
-            return tokenToExpert[inputIds].asType(.int32)
-        }
-        let biased = bias.map { scores + $0.asType(.float32) } ?? scores
-        let lastSelectedPosition = expertsPerToken - 1
-        return argPartition(-biased, kth: lastSelectedPosition, axis: Self.expertScoreAxis)[
-            .ellipsis, ..<expertsPerToken]
+    /// - Parameters:
+    ///   - x: The token values, shape `(batch, tokens, hiddenSize)`.
+    ///   - weight: The gate projection, shape `(routed experts, hiddenSize)`.
+    ///   - table: The hash table, shape `(vocabSize, expertsPerToken)`.
+    ///   - inputIds: The token identifiers, shape `(batch, tokens)`.
+    /// - Returns: The selected experts as `uint32` and their weights, each of
+    ///   shape `(batch, tokens, expertsPerToken)`.
+    func hashed(
+        _ x: MLXArray, weight: MLXArray, table: MLXArray, inputIds: MLXArray
+    ) -> (indices: MLXArray, weights: MLXArray) {
+        let scores = Self.scores(x, weight: weight)
+        let indices = table[inputIds].asType(.int32)
+        return (indices.asType(.uint32), routedWeights(gatheredFrom: scores, at: indices))
+    }
+
+    /// Scores every routed expert as `sqrt(softplus(logits))`, in float32.
+    private static func scores(_ x: MLXArray, weight: MLXArray) -> MLXArray {
+        let logits = x.asType(.float32).matmul(weight.asType(.float32).transposed())
+        return DeepSeekV4Math.sqrtSoftplus(logits)
     }
 
     /// Reads the weight of each selected expert out of the UNBIASED scores.
@@ -386,6 +482,9 @@ final class DeepSeekV4MoE: Module {
 
     /// Reads one block of tokens.
     ///
+    /// A block of one token reads the compiled combine, and a longer block
+    /// reads the op path. The two give the same bits.
+    ///
     /// - Parameters:
     ///   - x: The block input, shape `(batch, tokens, hiddenSize)`.
     ///   - inputIds: The token identifiers, shape `(batch, tokens)`. A hash
@@ -393,12 +492,42 @@ final class DeepSeekV4MoE: Module {
     /// - Returns: The block output, of the shape and the dtype of `x`.
     func callAsFunction(_ x: MLXArray, inputIds: MLXArray) -> MLXArray {
         let (indices, weights) = gate(x, inputIds: inputIds)
+        let routed = switchMLP(x, indices)
+        let shared = sharedExperts.map { $0(x) }
+        guard DeepSeekV4CompiledDecode.isDecodeStep(x) else {
+            return Self.combine(x, routed: routed, weights: weights, shared: shared)
+        }
+        guard let shared else {
+            return DeepSeekV4CompiledDecode.combineRoutedExperts(x, routed, weights)
+        }
+        return DeepSeekV4CompiledDecode.combineWithSharedExpert(x, routed, weights, shared)
+    }
+
+    /// Weighs the routed expert outputs, adds them up in float32, and adds
+    /// the shared expert, as the op path.
+    ///
+    /// ``DeepSeekV4CompiledDecode/combineWithSharedExpert`` and
+    /// ``DeepSeekV4CompiledDecode/combineRoutedExperts`` compile this function
+    /// for the decode step.
+    ///
+    /// - Parameters:
+    ///   - x: The block input. The answer takes its dtype.
+    ///   - routed: One output for each route, shape
+    ///     `(batch, tokens, routes, hiddenSize)`.
+    ///   - weights: The weight of each route, shape `(batch, tokens, routes)`.
+    ///   - shared: The shared-expert output, shape
+    ///     `(batch, tokens, hiddenSize)`, or `nil` for a layer that holds no
+    ///     shared expert.
+    /// - Returns: The block output, shape `(batch, tokens, hiddenSize)`, in
+    ///   the dtype of `x`.
+    static func combine(
+        _ x: MLXArray, routed: MLXArray, weights: MLXArray, shared: MLXArray?
+    ) -> MLXArray {
         let weighted =
-            switchMLP(x, indices).asType(.float32)
-            * MLX.expandedDimensions(weights, axis: Self.widthAxis)
+            routed.asType(.float32) * MLX.expandedDimensions(weights, axis: widthAxis)
         var y = DeepSeekV4Math.reduceRoutedExpertsFP32(weighted)
-        if let sharedExperts {
-            y = y + sharedExperts(x).asType(.float32)
+        if let shared {
+            y = y + shared.asType(.float32)
         }
         return y.asType(x.dtype)
     }

@@ -388,6 +388,97 @@ struct DeepSeekV4ModelTests {
         }
     }
 
+    // MARK: - The compiled decode step
+
+    /// The compiled traces a decoder layer stores, found by reflection the
+    /// same way `Module.invalidateCompiledTraces()` finds them.
+    private static func compiledTraces(
+        of layer: DeepSeekV4DecoderLayer
+    ) -> [CompiledTrace<DeepSeekV4DecoderLayer>] {
+        layer.items().flattenedValues().compactMap { item in
+            guard case .other(let value) = item else { return nil }
+            return value as? CompiledTrace<DeepSeekV4DecoderLayer>
+        }
+    }
+
+    /// The number of compiled traces one decoder layer runs a decode step
+    /// through: one before the cache stage and one after it.
+    private static let decodeTraceCount = 2
+
+    @Test func onlyADecodeStepRunsThroughTheCompiledTracesOfEachLayer() throws {
+        let model = try Self.loadedModel()
+        let cache = try model.newCache(parameters: nil)
+
+        eval(model(Self.tokens(count: Self.promptLength), cache: cache))
+        for layer in model.model.layers {
+            let traces = Self.compiledTraces(of: layer)
+            let noTraceCompiled = traces.allSatisfy { !$0.isCompiled }
+            #expect(traces.count == Self.decodeTraceCount)
+            #expect(noTraceCompiled, "a prefill block keeps the op path")
+        }
+
+        eval(model(Self.tokens(count: 1), cache: cache))
+        for layer in model.model.layers {
+            let everyTraceCompiled = Self.compiledTraces(of: layer).allSatisfy { $0.isCompiled }
+            #expect(everyTraceCompiled, "a decode step runs through both compiled traces")
+        }
+    }
+
+    /// The seed of the residual stream the decode-step parity test reads.
+    private static let decodeStreamSeed: UInt64 = 303
+
+    /// The seed of the prompt stream the decode-step parity test prefills.
+    private static let promptStreamSeed: UInt64 = 304
+
+    /// The dtypes the decode-step parity test reads: the float32 of the other
+    /// tests, and the bfloat16 the published checkpoint computes in.
+    private static let decodeDTypes: [DType] = [.float32, .bfloat16]
+
+    @Test(arguments: [hashLayer, topKLayer], decodeDTypes)
+    func aDecodeStepThroughTheCompiledTracesGivesTheBitsOfTheOpPath(
+        layerIndex: Int, dtype: DType
+    ) throws {
+        // The op path below is the composition the decoder layer runs for a
+        // longer block, one stage at a time. Each stage of it reads the same
+        // functions the traces read, thus the only difference is the trace
+        // itself: the fusion of the elementwise chains across the stages.
+        let model = try Self.loadedModel()
+        let castWeights = model.parameters().flattened().map { key, value in
+            (key, value.dtype == .float32 ? value.asType(dtype) : value)
+        }
+        try model.update(parameters: ModuleParameters.unflattened(castWeights), verify: [.all])
+        let layer = model.model.layers[layerIndex]
+        let compiledCache = try model.newCache(parameters: nil)[layerIndex]
+        let opCache = try model.newCache(parameters: nil)[layerIndex]
+        let prompt = Self.residualStream(tokenCount: Self.promptLength, seed: Self.promptStreamSeed)
+            .asType(dtype)
+        let promptIds = Self.tokens(count: Self.promptLength)
+        for cache in [compiledCache, opCache] {
+            eval(layer(prompt, mask: .causal, cache: cache, inputIds: promptIds))
+        }
+        let stream = Self.residualStream(tokenCount: 1, seed: Self.decodeStreamSeed).asType(dtype)
+        let inputIds = Self.tokens(count: 1, from: Self.promptLength)
+
+        let compiled = layer(stream, mask: .none, cache: compiledCache, inputIds: inputIds)
+
+        let attentionCollapse = layer.attentionConnection.collapse(stream)
+        let attended = layer.attention(
+            layer.attentionNorm(attentionCollapse.collapsed), mask: .none, cache: opCache)
+        let afterAttention = layer.attentionConnection.expand(
+            blockOutput: attended, residual: stream,
+            post: attentionCollapse.post, comb: attentionCollapse.comb)
+        let mixtureCollapse = layer.mixtureOfExpertsConnection.collapse(afterAttention)
+        let mixed = layer.mixtureOfExperts(
+            layer.mixtureOfExpertsNorm(mixtureCollapse.collapsed), inputIds: inputIds)
+        let reference = layer.mixtureOfExpertsConnection.expand(
+            blockOutput: mixed, residual: afterAttention,
+            post: mixtureCollapse.post, comb: mixtureCollapse.comb)
+
+        #expect(compiled.shape == reference.shape)
+        #expect(Self.floats(compiled) == Self.floats(reference), "layer \(layerIndex)")
+        #expect(compiledCache.offset == opCache.offset)
+    }
+
     // MARK: - Tied word embeddings
 
     @Test func aTiedCheckpointDeclaresNoLanguageModelHead() throws {
