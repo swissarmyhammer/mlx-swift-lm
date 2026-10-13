@@ -71,8 +71,14 @@ final class DeepSeekV4RowBuffer {
     /// The number of rows the buffer grows by.
     static let allocationStep = 256
 
+    /// The axis a `(batch, rows, width)` tensor holds its batch on.
+    private static let batchAxis = 0
+
     /// The axis a `(batch, rows, width)` tensor holds its rows on.
     private static let rowAxis = 1
+
+    /// The axis a `(batch, rows, width)` tensor holds its width on.
+    private static let widthAxis = 2
 
     /// The buffer, shape `(batch, capacity, width)`, or `nil` when it holds no
     /// row. The rows past ``count`` hold no value.
@@ -174,7 +180,10 @@ final class DeepSeekV4RowBuffer {
         let missing = needed - count
         let stepCount = (missing + Self.allocationStep - 1) / Self.allocationStep
         let free = MLXArray.zeros(
-            [added.dim(0), stepCount * Self.allocationStep, added.dim(2)], dtype: added.dtype)
+            [
+                added.dim(Self.batchAxis), stepCount * Self.allocationStep,
+                added.dim(Self.widthAxis),
+            ], dtype: added.dtype)
         guard let held = rows else { return free }
         return concatenated([held, free], axis: Self.rowAxis)
     }

@@ -278,20 +278,15 @@ struct KVCacheByteCountTests {
             DeepSeekV4Configuration.self, from: Data(contentsOf: url))
     }
 
-    /// The number of projected row slots of one DeepSeek-V4 branch: the values
-    /// and the gate logits.
-    private static let deepSeekRowSlotCount = 2
-
-    /// Builds the four state slots of one DeepSeek-V4 branch.
+    /// Builds the four state slots of one DeepSeek-V4 branch from lazy arrays.
     ///
     /// - Returns: The chunks, the projected values, the projected gate logits
     ///   and the carry start.
     private static func deepSeekBranchSlots() -> [MLXArray] {
-        [lazyArray([batchSize, deepSeekChunkCount, deepSeekChunkWidth])]
-            + (0 ..< deepSeekRowSlotCount).map { _ in
-                lazyArray([batchSize, deepSeekCarryRowCount, deepSeekChunkWidth])
-            }
-            + [MLXArray([Int32(0)])]
+        DeepSeekV4BranchStateFixture.slots(
+            batchSize: batchSize, chunkCount: deepSeekChunkCount,
+            carryRowCount: deepSeekCarryRowCount, rowWidth: deepSeekChunkWidth
+        ) { shape, _ in lazyArray(shape) }
     }
 
     @Test("DeepSeekV4Cache counts the window and both chunk branches")
@@ -305,7 +300,8 @@ struct KVCacheByteCountTests {
 
         let windowBytes = window.totalByteCount
         let branchRows =
-            Self.deepSeekChunkCount + Self.deepSeekRowSlotCount * Self.deepSeekCarryRowCount
+            Self.deepSeekChunkCount
+            + DeepSeekV4BranchStateFixture.rowSlotCount * Self.deepSeekCarryRowCount
         let branchBytes =
             Self.batchSize * branchRows * Self.deepSeekChunkWidth * DType.float16.size
         #expect(cache.residentByteCount == windowBytes + Self.deepSeekBranchCount * branchBytes)

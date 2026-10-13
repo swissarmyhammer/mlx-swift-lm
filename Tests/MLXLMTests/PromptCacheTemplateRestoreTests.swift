@@ -257,12 +257,10 @@ struct PromptCacheTemplateRestoreTests {
     /// - Returns: The pooled chunks, the projected values, the projected gate logits and the
     ///   carry start.
     fileprivate static func deepSeekBranchSlots(seed: UInt64) -> [MLXArray] {
-        [
-            tensor([batchSize, deepSeekChunkCount, deepSeekRowWidth], seed: seed),
-            tensor([batchSize, deepSeekCarryRowCount, deepSeekRowWidth], seed: seed + 1),
-            tensor([batchSize, deepSeekCarryRowCount, deepSeekRowWidth], seed: seed + 2),
-            MLXArray([Int32(0)]),
-        ]
+        DeepSeekV4BranchStateFixture.slots(
+            batchSize: batchSize, chunkCount: deepSeekChunkCount,
+            carryRowCount: deepSeekCarryRowCount, rowWidth: deepSeekRowWidth
+        ) { shape, slot in tensor(shape, seed: seed + UInt64(slot)) }
     }
 
     /// Tells whether an array holds evaluated data.

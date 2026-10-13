@@ -98,8 +98,67 @@ comments:
     - evidence: swift build --build-tests (changed files touched): only the known warning "missing creator for mutated node" (mlx-swift_Cmlx.bundle), no new warning. xcrun xctest on 5 bundles, all exit 0: CXGrammarTests 7 swift-testing tests, MLXFoundationModelsTests 367, MLXGuidedGenerationTests 70, MLXHuggingFaceMacrosTests 5 XCTest, MLXLMTests 716 XCTest + 1378 swift-testing. 0 failures, 0 skipped. xcodebuild build-for-testing IntegrationTesting: TEST BUILD SUCCEEDED. Real-weights integration tests not run, as ordered.
     - next: review
   timestamp: 2026-10-13T20:26:13.528252+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m4vf9abkmspycsgbpyjf6xyh
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (68390b3). Counts: 2 findings, 2 confirmed, 2 refuted, 7 files attempted, 0 failed. Open: Libraries/MLXLLM/Models/DeepSeekV4Cache.swift:177 (code-hygiene/magic-numbers-swift), Tests/MLXLMTests/KVCacheByteCountTests.swift:290 (reuse/reuse).
+    - acceptance criteria: each of the 4 items has evidence in the comments. (1) No compressor work without a full window: "Implementation landed" comment, a call that ends no chunk gives back the same chunks array; test `aStepThatEndsNoChunkGivesBackTheChunksTheCacheHeld`. (2) Tests pass: "test — green" comment, MLXLMTests 716 XCTest + 1378 Swift Testing, 0 failures. (3) Old prompt cache fails closed: state format version 2, `earlierFormatMessage`, test `aPromptCacheOfTheRawRowFormatFailsClosed`. (4) Measurement: GPU idle, direct sync 4k 50.3 -> 45.6 ms, 32k 78.5 -> 73.6 ms. User decision: BF16 projection kept; tie-aware warm == cold check gives FAIL (tie) in chat (gap 0.0 <= margin 0.5) and thinking (gap 0.25 <= margin 0.5), both accepted; hard cache reuse PASS in both modes.
+    - next: fix the 2 findings in the whole file, then /review again. Task stays in review.
+  timestamp: 2026-10-13T20:29:26.259247+00:00
+- actor: claude-code
+  id: 01m4vf9vhce0kpjy3z60g1xwmt
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — DeepSeekV4Cache.swift, DeepSeekV4Compressor.swift, DeepSeekV4.swift, DeepSeekV4CacheTests.swift, KVCacheByteCountTests.swift, PromptCacheTemplateRestoreTests.swift, DeepSeekV4PromptCacheRewindTests.swift
+    - test: green — MLXLMTests 716 XCTest + 1378 Swift Testing, 0 failures; IntegrationTesting build-for-testing succeeded
+    - commit: 68390b3
+    - review: findings — Libraries/MLXLLM/Models/DeepSeekV4Cache.swift:177, Tests/MLXLMTests/KVCacheByteCountTests.swift:290
+  timestamp: 2026-10-13T20:29:43.852544+00:00
+- actor: claude-code
+  id: 01m4vfj9exkzd90x1p0nxxk74z
+  text: |-
+    ### Review findings worked 2026-10-13 (not committed)
+    - Finding 1 (magic-numbers-swift): swiftlint `no_magic_numbers` with the rule config (allowed 0, 1, -1, 100) found ONE number in the whole file: `added.dim(2)` in `DeepSeekV4RowBuffer.reserved`. New `batchAxis = 0` and `widthAxis = 2` with doc comments, beside `rowAxis`. Run again on the file: 0 findings.
+    - Finding 2 (reuse): new `Tests/MLXLMTests/DeepSeekV4BranchStateFixture.swift`, `slots(batchSize:chunkCount:carryRowCount:rowWidth:makeArray:)`. The array maker gets the shape and the slot place (0 chunks, 1 values, 2 gates). KVCacheByteCountTests gives `lazyArray`; PromptCacheTemplateRestoreTests gives `tensor(shape, seed: seed + slot)`, which keeps the seeds seed, seed+1, seed+2. `deepSeekRowSlotCount` in KVCacheByteCountTests moved to `DeepSeekV4BranchStateFixture.rowSlotCount`.
+    - Other copies checked: the 3-slot `rawRowBranch` in DeepSeekV4CacheTests is the version-1 RAW row format (different shape, hidden width), not a copy of this helper. No change there.
+    - No numeric or format change.
+  timestamp: 2026-10-13T20:34:20.253701+00:00
+- actor: claude-code
+  id: 01m4vfjcgrms35k9md5kkxb4j6
+  text: |-
+    ### implement — changed
+    - evidence: 4 files — Libraries/MLXLLM/Models/DeepSeekV4Cache.swift, Tests/MLXLMTests/DeepSeekV4BranchStateFixture.swift (new), Tests/MLXLMTests/KVCacheByteCountTests.swift, Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift. swiftlint no_magic_numbers on DeepSeekV4Cache.swift: 0 findings; swift-format lint: clean. swift build --build-tests: only the known "missing creator for mutated node" warning. xcrun xctest MLXLMTests.xctest: 716 XCTest 0 failures, 1378 Swift Testing passed. Both findings checked.
+    - next: /review. Nothing committed. Task stays in doing.
+  timestamp: 2026-10-13T20:34:23.384038+00:00
+- actor: claude-code
+  id: 01m4vftyx52zymzq8vg8yh94wa
+  text: |-
+    ### test — green (iteration 2)
+    - evidence: swift build --build-tests rebuilt after touch of the 4 changed files; only the known warning (missing creator for mutated node, mlx-swift_Cmlx.bundle). xcrun xctest on all 5 bundles, all exit 0. MLXLMTests: 716 XCTest, 0 failures; 1378 Swift Testing passed. CXGrammarTests 7, MLXFoundationModelsTests 367, MLXGuidedGenerationTests 70 Swift Testing passed. xcodebuild build-for-testing IntegrationTesting: TEST BUILD SUCCEEDED, no new warning. 0 skipped.
+    - next: review
+  timestamp: 2026-10-13T20:39:04.357196+00:00
+- actor: claude-code
+  id: 01m4vfxwb7rwdmcfqe10jt5dvr
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (5885ede). Counts: 0 findings, 0 confirmed, 0 refuted. 7 validator runs attempted, 0 failed. 4 files reviewed. 2 kanban files had no validator.
+    - prior items: the two items of `## Review Findings (2026-10-13 15:26)` are checked. Checked in the code:
+      - `DeepSeekV4Cache.swift`: swiftlint `no_magic_numbers` with `allowed_numbers: [0, 1, -1, 100]` (the configuration of `magic-numbers-swift`) gives 0 findings. Named axis constants replace `added.dim(0)` and `added.dim(2)`.
+      - `Tests/MLXLMTests`: one body of the branch-slot fixture is in `DeepSeekV4BranchStateFixture.slots`. `KVCacheByteCountTests` and `PromptCacheTemplateRestoreTests` call it and give only their own array maker. No copy of the body is left.
+    - next: none. The task is in done.
+  timestamp: 2026-10-13T20:40:40.039664+00:00
+- actor: claude-code
+  id: 01m4vfydzt0qp9n839amn5k7hk
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — DeepSeekV4Cache.swift (named axis constants), DeepSeekV4BranchStateFixture.swift (new), KVCacheByteCountTests.swift, PromptCacheTemplateRestoreTests.swift
+    - test: green — MLXLMTests 716 XCTest + 1378 Swift Testing, 0 failures; IntegrationTesting build-for-testing succeeded
+    - commit: 5885ede
+    - review: clean — review sha HEAD~1..HEAD, 0 findings, 2/2 prior items checked
+  timestamp: 2026-10-13T20:40:58.106576+00:00
+position_column: done
+position_ordinal: ffbe80
 title: 'DeepSeek-V4 speed: compressor decode state that does not pool the raw rows again on each step'
 ---
 ## What
@@ -123,3 +182,18 @@ mlx-lm PR 1195 keeps the projected rows and makes a chunk only when a window is 
 - [x] A prompt cache saved before the change restores, or fails closed with a clear error.
 - [x] A decode-step measurement on the real checkpoint, with the GPU otherwise idle, shows the speed before and after, at 4k and at 32k.
 #deepseek-v4 #performance
+
+## Review Findings (2026-10-13 15:26)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 7 file(s) reviewed, 6 not reviewed.
+
+> 6 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4RH9F6H90JR4WEN5CM8FQ2Q.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4RH9F6H90JR4WEN5CM8FQ2Q.md` — no validator matches this file
+> - `.kanban/tasks/01M4VE6CPD7A175ET7C9XMDS28.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4VE6CPD7A175ET7C9XMDS28.md` — no validator matches this file
+> - `.kanban/tasks/01M4VEV6B9NJ7M1D4G2SEBTWBA.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4VEV6B9NJ7M1D4G2SEBTWBA.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4Cache.swift:177` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/KVCacheByteCountTests.swift:290` `reuse/reuse` — The marked `deepSeekBranchSlots()` builds the four DeepSeek-V4 branch slots again. The same helper exists in PromptCacheTemplateRestoreTests.swift, where it is also changed in this review. Two copies of one fixture shape must now stay in step by hand. Move one shared fixture helper into a test support file, for example beside `DeepSeekV4SyntheticCheckpoint`. Let both test files call it. The two helpers differ in data source (`lazyArray` for byte counts, seeded `tensor` for restore), so the shared helper should take the array maker as a parameter, or the byte-count test should keep its own helper with a comment that says why. Confirm the near-match before you extract; `duplicates` scored it 0.93, not 1.0.
