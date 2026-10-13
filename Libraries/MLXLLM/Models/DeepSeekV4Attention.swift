@@ -43,13 +43,17 @@
 // chunks each query reads, and attends over the sliding window joined to those
 // chunks.
 //
-// A fourth detail does not come from the file above either. That file gathers
-// the top-k pooled rows of each query at decode time and builds a mask only
-// for prefill. This file answers ONE selection mask for a block of any length,
-// because ``DeepSeekV4Indexer`` already gives a Boolean mask that holds the
-// block-causal rule. A masked chunk takes no softmax weight, thus the numbers
-// are the numbers a gather gives, and the decode path and the prefill path
-// stay one path.
+// The file above gathers the top-k pooled rows of each query at decode time
+// and builds a mask only for prefill. This file does the same, with one
+// boundary of its own. A block of more than one token reads ONE selection
+// mask, because ``DeepSeekV4Indexer`` already gives a Boolean mask that holds
+// the block-causal rule. A decode step whose pool holds more than
+// `index_topk` chunks gathers the chunks the indexer picked and reads no mask
+// (task `^9xmds28`), as mlx-vlm `SparseCompressedAttention` and mlx-lm PR
+// 1195 do. A masked chunk takes no softmax weight, thus the two paths give
+// the same numbers. The gather keeps the cost of a decode step flat with the
+// context: the masked path copies every pooled chunk and builds a mask over
+// all of them on each step.
 
 import Foundation
 import MLX
@@ -304,8 +308,9 @@ final class DeepSeekV4Attention: Module {
     /// The selector holds the `attn.indexer.*` tensors of the checkpoint,
     /// which include the `attn.indexer.compressor.*` tensors of the pooled
     /// keys it scores. It answers which pooled chunks each query of a block
-    /// reads, and the attention mask of this layer then holds that answer
-    /// beside the sliding window.
+    /// reads. A decode step gathers those chunks when the pool holds more
+    /// than the budget; each other block holds the answer in the attention
+    /// mask beside the sliding window.
     @ModuleInfo(key: "indexer") var indexer: DeepSeekV4Indexer?
 
     /// The key/value compressor of this layer, or `nil` on a layer whose
@@ -585,6 +590,14 @@ final class DeepSeekV4Attention: Module {
                 queries: queries, keys: windowKeys, values: windowKeys,
                 scale: scale, mask: windowMask, sinks: sinks)
         }
+        if let picked = decodePicks(
+            x, queryResidual: queryResidual, pooled: pooled, cos: cos, sin: sin, offset: offset,
+            windowMask: windowMask)
+        {
+            return Self.attentionOverPickedChunks(
+                queries: queries, windowKeys: windowKeys, pooled: pooled.attention,
+                picked: picked, scale: scale, sinks: sinks)
+        }
 
         // The pooled chunks arrive as a second run of keys behind the window,
         // thus the mask reads `[window visibility | chunk visibility]`.
@@ -665,6 +678,89 @@ final class DeepSeekV4Attention: Module {
             attention: pooledCache.attentionChunks.pooled(
                 x, through: compressor, rope: rope, offset: offset),
             indexer: indexerChunks)
+    }
+
+    /// The number of tokens a decode step carries.
+    private static let decodeLength = 1
+
+    /// The chunks a decode step reads, or `nil` when the block takes the
+    /// masked path.
+    ///
+    /// A decode step on a layer that holds an indexer, whose pool holds more
+    /// than ``DeepSeekV4Indexer/topK`` chunks, reads only the chunks the
+    /// indexer picked. Every chunk of the pool stands wholly behind the one
+    /// token of the step, and the sliding window then answers no mask, thus
+    /// no part of that read needs a mask. Each other block -- a prefill
+    /// block, a layer with no indexer, a pool inside the budget -- takes the
+    /// masked path.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, tokens, hidden)`.
+    ///   - queryResidual: The low-rank query of this block, after its norm.
+    ///   - pooled: The chunks of each branch.
+    ///   - cos: The cosine of each rotary angle of this block.
+    ///   - sin: The sine of each rotary angle of this block.
+    ///   - offset: The absolute position of the first token of this block.
+    ///   - windowMask: The mask of the sliding window alone.
+    /// - Returns: The indices of the picked chunks, shape `(batch, 1, topK)`,
+    ///   or `nil`.
+    private func decodePicks(
+        _ x: MLXArray,
+        queryResidual: MLXArray,
+        pooled: PooledChunks,
+        cos: MLXArray,
+        sin: MLXArray,
+        offset: Int,
+        windowMask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray? {
+        guard x.dim(BatchMajorAxis.token) == Self.decodeLength,
+            case .none = windowMask,
+            let selector = indexer,
+            let pooledKeys = pooled.indexer,
+            pooledKeys.dim(Self.chunkAxis) > selector.topK
+        else {
+            return nil
+        }
+        return selector.rankedChunks(
+            x, queryResidual: queryResidual, pooledKeys: pooledKeys, cos: cos, sin: sin,
+            offset: offset)
+    }
+
+    /// Attends over the sliding window joined to the picked pooled chunks of
+    /// a decode step.
+    ///
+    /// The gather copies only the picked chunks, thus the attention reads
+    /// `window + topK` keys whatever the number of pooled chunks is, and it
+    /// needs no mask. The softmax over those keys is the softmax of the
+    /// masked path, because a masked chunk takes no weight there.
+    ///
+    /// - Parameters:
+    ///   - queries: The rotated queries, shape `(batch, heads, 1, headDim)`.
+    ///   - windowKeys: The keys of the sliding window, which are also its
+    ///     values, shape `(batch, 1, windowKeys, headDim)`.
+    ///   - pooled: The chunks the compressor of the attention pooled, shape
+    ///     `(batch, chunks, headDim)`.
+    ///   - picked: The indices of the chunks each sequence reads, shape
+    ///     `(batch, 1, picks)`.
+    ///   - scale: The factor the attention scores take before the softmax.
+    ///   - sinks: The learned sink of each head, or `nil`.
+    /// - Returns: The attention output, shape `(batch, heads, 1, headDim)`.
+    static func attentionOverPickedChunks(
+        queries: MLXArray,
+        windowKeys: MLXArray,
+        pooled: MLXArray,
+        picked: MLXArray,
+        scale: Float,
+        sinks: MLXArray?
+    ) -> MLXArray {
+        // One row index for each picked chunk. The last axis of 1 reaches
+        // every number of the chunk.
+        let rows = picked.reshaped(picked.dim(BatchMajorAxis.batch), -1, 1)
+        let gathered = takeAlong(pooled, rows, axis: chunkAxis)
+            .expandedDimensions(axis: latentHeadAxis)
+        let keys = concatenated([windowKeys, gathered], axis: keyAxis)
+        return MLXFast.scaledDotProductAttention(
+            queries: queries, keys: keys, values: keys, scale: scale, mask: .none, sinks: sinks)
     }
 
     /// The chunks each query of this block reads.

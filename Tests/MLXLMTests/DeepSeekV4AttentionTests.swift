@@ -25,6 +25,10 @@
 // larger. The smallest separation any fixture pair carries is 0.0031 -- the
 // gap between the plain-theta layer and the compressed-theta layer -- thus
 // the limit stays 30 times below the effect each test measures.
+//
+// One test holds no fixture. The picked-chunk parity test compares the
+// gather path of a decode step against the masked SDPA of MLX itself, over
+// random tensors, because the two paths must give the same numbers.
 
 import Foundation
 import MLX
@@ -368,6 +372,87 @@ struct DeepSeekV4AttentionTests {
         // plain output instead of the scaled one.
         expectClose(gainOutput, plainOutput.map { $0 * gain }, "values the cache returned")
         #expect(gainCache.offset == Self.prefillLength)
+    }
+
+    // MARK: - The picked chunks of a decode step
+
+    /// The shapes of the picked-chunk parity test. The pool holds more chunks
+    /// than the budget, which is the case where a decode step reads only the
+    /// chunks the indexer picked.
+    private enum PickedShape {
+        /// The number of sequences. Two sequences pick different chunks.
+        static let batch = 2
+        /// The number of keys the sliding window holds.
+        static let windowKeys = 5
+        /// The number of chunks the pool holds.
+        static let chunks = 9
+    }
+
+    /// The chunks each sequence of the parity test picked, in the order a
+    /// ranking gives them. The order is not sorted on purpose.
+    private static let pickedChunkIndices: [[Int32]] = [[7, 2, 4], [0, 8, 5]]
+
+    /// The axis a `(batch, heads, keys, width)` tensor holds its one latent
+    /// key/value head on.
+    private static let latentHeadAxis = 1
+
+    /// The axis a `(batch, heads, keys, width)` tensor holds its keys on.
+    private static let keyAxis = 2
+
+    /// The seeds of the random tensors of the picked-chunk parity test.
+    private enum PickedSeed {
+        static let queries: UInt64 = 41
+        static let windowKeys: UInt64 = 42
+        static let pooled: UInt64 = 43
+        static let sinks: UInt64 = 44
+    }
+
+    /// The mask that reads the window and the picked chunks of each sequence,
+    /// over the window joined to EVERY pooled chunk.
+    private static func pickedChunkMask() -> MLXArray {
+        let rows = pickedChunkIndices.map { picked in
+            [Bool](repeating: true, count: PickedShape.windowKeys)
+                + (0 ..< PickedShape.chunks).map { picked.contains(Int32($0)) }
+        }
+        return MLXArray(rows.flatMap { $0 })
+            .reshaped(PickedShape.batch, 1, Self.decodeLength, -1)
+    }
+
+    @Test
+    func thePickedChunksGiveTheAnswerOfTheMaskedChunks() throws {
+        let queries = MLXRandom.normal(
+            [PickedShape.batch, Self.headCount, Self.decodeLength, Self.headDim],
+            key: MLXRandom.key(PickedSeed.queries))
+        let windowKeys = MLXRandom.normal(
+            [PickedShape.batch, 1, PickedShape.windowKeys, Self.headDim],
+            key: MLXRandom.key(PickedSeed.windowKeys))
+        let pooled = MLXRandom.normal(
+            [PickedShape.batch, PickedShape.chunks, Self.headDim],
+            key: MLXRandom.key(PickedSeed.pooled))
+        let sinks = MLXRandom.normal([Self.headCount], key: MLXRandom.key(PickedSeed.sinks))
+        let picked = MLXArray(Self.pickedChunkIndices.flatMap { $0 })
+            .reshaped(PickedShape.batch, Self.decodeLength, -1)
+        let scale = 1 / Float(Self.headDim).squareRoot()
+
+        let allKeys = concatenated(
+            [windowKeys, pooled.expandedDimensions(axis: Self.latentHeadAxis)], axis: Self.keyAxis)
+        let masked = DeepSeekV4TestArrays.floats(
+            MLXFast.scaledDotProductAttention(
+                queries: queries, keys: allKeys, values: allKeys, scale: scale,
+                mask: .array(Self.pickedChunkMask()), sinks: sinks))
+        let unmasked = DeepSeekV4TestArrays.floats(
+            MLXFast.scaledDotProductAttention(
+                queries: queries, keys: allKeys, values: allKeys, scale: scale,
+                mask: .none, sinks: sinks))
+        let gathered = DeepSeekV4Attention.attentionOverPickedChunks(
+            queries: queries, windowKeys: windowKeys, pooled: pooled, picked: picked,
+            scale: scale, sinks: sinks)
+
+        #expect(
+            largestGap(masked, unmasked) > Self.tolerance,
+            "the premise: the chunks the mask hides change the answer")
+        #expect(gathered.shape == queries.shape)
+        expectClose(DeepSeekV4TestArrays.floats(gathered), masked, "picked chunks")
     }
 
     // MARK: - Grouped low-rank output projection

@@ -132,6 +132,50 @@ struct DeepSeekV4IndexerTests {
         return indexer
     }
 
+    /// The arguments one indexer call reads for one block of tokens.
+    private struct BlockInputs {
+        /// The block input, shape `(batch, tokens, hidden)`.
+        let x: MLXArray
+
+        /// The low-rank query, shape `(batch, tokens, qLoraRank)`.
+        let queryResidual: MLXArray
+
+        /// The pooled keys, shape `(batch, chunks, indexHeadDim)`.
+        let pooledKeys: MLXArray
+
+        /// The cosine table of the block.
+        let cos: MLXArray
+
+        /// The sine table of the block.
+        let sin: MLXArray
+
+        /// The absolute position of the first token of the block.
+        let offset: Int
+    }
+
+    /// Builds the repeatable arguments of one indexer call.
+    ///
+    /// - Parameters:
+    ///   - batch: The number of sequences in the block.
+    ///   - tokens: The number of tokens in the block.
+    ///   - chunks: The number of pooled chunks the compressor holds.
+    ///   - offset: The absolute position of the first token of the block.
+    ///   - seed: The seed the input filler starts at.
+    /// - Returns: The arguments.
+    private static func blockInputs(
+        batch: Int, tokens: Int, chunks: Int, offset: Int, seed: UInt64
+    ) throws -> BlockInputs {
+        let angles = DeepSeekV4RoPE(configuration: try configuration(), layer: indexerLayer)
+            .cosSin(offset: offset, length: tokens)
+        return BlockInputs(
+            x: fixture([batch, tokens, hiddenSize], seed: seed),
+            queryResidual: fixture([batch, tokens, queryLoraRank], seed: seed + 1),
+            pooledKeys: fixture([batch, chunks, indexHeadDim], seed: seed + 2),
+            cos: angles.cos.expandedDimensions(axes: [0, 1]),
+            sin: angles.sin.expandedDimensions(axes: [0, 1]),
+            offset: offset)
+    }
+
     /// The chunks one indexer picks for one block of tokens.
     ///
     /// - Parameters:
@@ -150,15 +194,11 @@ struct DeepSeekV4IndexerTests {
         offset: Int,
         seed: UInt64
     ) throws -> MLXArray {
-        let angles = DeepSeekV4RoPE(configuration: try configuration(), layer: indexerLayer)
-            .cosSin(offset: offset, length: tokens)
+        let inputs = try blockInputs(
+            batch: batch, tokens: tokens, chunks: chunks, offset: offset, seed: seed)
         let mask = indexer(
-            fixture([batch, tokens, hiddenSize], seed: seed),
-            queryResidual: fixture([batch, tokens, queryLoraRank], seed: seed + 1),
-            pooledKeys: fixture([batch, chunks, indexHeadDim], seed: seed + 2),
-            cos: angles.cos.expandedDimensions(axes: [0, 1]),
-            sin: angles.sin.expandedDimensions(axes: [0, 1]),
-            offset: offset)
+            inputs.x, queryResidual: inputs.queryResidual, pooledKeys: inputs.pooledKeys,
+            cos: inputs.cos, sin: inputs.sin, offset: inputs.offset)
         eval(mask)
         return mask
     }
@@ -268,6 +308,58 @@ struct DeepSeekV4IndexerTests {
                                     selected[sequence][token].count
                                         == min(Self.indexTopK, visible),
                                     "position \(offset + token) of \(chunks) chunks")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The pooled-chunk counts the ranked-chunk test walks. Each one is more
+    /// than ``indexTopK``, which is the only case where the indexer ranks.
+    private static let rankedChunkCounts = [5, 9]
+
+    /// The block offsets the ranked-chunk test walks. The last one puts every
+    /// chunk of ``rankedChunkCounts`` wholly behind the first query, which is
+    /// the shape of a decode step.
+    private static let rankedOffsets = [3, 10, 40]
+
+    @Test func theRankedChunksAreTheChunksTheSelectionMaskPicks() throws {
+        let indexer = try Self.loadedIndexer(seed: Self.weightSeed)
+
+        for batch in Self.batchSizes {
+            for tokens in Self.tokenCounts {
+                for offset in Self.rankedOffsets {
+                    for chunks in Self.rankedChunkCounts {
+                        let inputs = try Self.blockInputs(
+                            batch: batch, tokens: tokens, chunks: chunks, offset: offset,
+                            seed: Self.weightSeed + UInt64(offset + chunks + tokens))
+                        let ranked = indexer.rankedChunks(
+                            inputs.x, queryResidual: inputs.queryResidual,
+                            pooledKeys: inputs.pooledKeys, cos: inputs.cos, sin: inputs.sin,
+                            offset: inputs.offset)
+                        let mask = try Self.selection(
+                            from: indexer, batch: batch, tokens: tokens, chunks: chunks,
+                            offset: offset,
+                            seed: Self.weightSeed + UInt64(offset + chunks + tokens))
+
+                        #expect(ranked.shape == [batch, tokens, Self.indexTopK])
+                        let rankedIndices = DeepSeekV4TestArrays.integers(ranked)
+                        let selected = Self.pickedChunks(
+                            mask, batch: batch, tokens: tokens, chunks: chunks)
+                        for sequence in 0 ..< batch {
+                            for token in 0 ..< tokens {
+                                let row = (sequence * tokens + token) * Self.indexTopK
+                                let visible = Self.visibleChunkCount(
+                                    position: offset + token, chunks: chunks)
+                                let rankedVisible = rankedIndices[row ..< (row + Self.indexTopK)]
+                                    .map { Int($0) }
+                                    .filter { $0 < visible }
+                                    .sorted()
+                                #expect(
+                                    rankedVisible == selected[sequence][token],
+                                    "offset \(offset), token \(token) of \(chunks) chunks")
                             }
                         }
                     }

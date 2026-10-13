@@ -210,10 +210,10 @@ final class DeepSeekV4Indexer: Module {
                 to: [batch, 1, length, chunkCount])
         }
 
-        let scores = chunkScores(
-            x, queryResidual: queryResidual, pooledKeys: pooledKeys, cos: cos, sin: sin)
-        let masked = MLX.where(visible, scores, MLXArray(Self.maskedScore))
-        let ranked = argPartition(-masked, kth: topK - 1, axis: -1)[.ellipsis, 0 ..< topK]
+        let ranked = topChunks(
+            of: chunkScores(
+                x, queryResidual: queryResidual, pooledKeys: pooledKeys, cos: cos, sin: sin),
+            visible: visible)
         let chunkIndices = MLXArray(Int32(0) ..< Int32(chunkCount))
         let picked =
             (ranked.asType(.int32).expandedDimensions(axis: -1) .== chunkIndices)
@@ -222,6 +222,68 @@ final class DeepSeekV4Indexer: Module {
         // The ranking spends its whole budget even when fewer chunks stand
         // behind the query, thus the visibility decides again here.
         return (picked .&& visible).expandedDimensions(axis: Self.headAxis)
+    }
+
+    /// The indices of the ``topK`` chunks of the highest score for each query
+    /// of one block.
+    ///
+    /// The ranking reads the block-causal rule: a chunk that reaches past its
+    /// query ranks after every chunk the query may read. The answer is the
+    /// whole budget for each query, thus a query that has fewer than
+    /// ``topK`` chunks behind it also gets indices of chunks it may not read.
+    /// A caller that reads the indices of such a query must mask them.
+    ///
+    /// A decode step carries one token, and every chunk of its pool stands
+    /// wholly behind that token. This function then builds no visibility at
+    /// all, and a caller needs no mask.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, tokens, hidden)`.
+    ///   - queryResidual: The low-rank query of this layer, after its norm,
+    ///     shape `(batch, tokens, qLoraRank)`.
+    ///   - pooledKeys: The chunks the compressor pooled, shape
+    ///     `(batch, chunks, headDim)`. It must hold more than ``topK`` chunks.
+    ///   - cos: The cosine of each rotary angle of this block.
+    ///   - sin: The sine of each rotary angle of this block.
+    ///   - offset: The absolute position of the first token of this block.
+    /// - Returns: The chunk indices, shape `(batch, tokens, topK)`, in no
+    ///   particular order.
+    func rankedChunks(
+        _ x: MLXArray,
+        queryResidual: MLXArray,
+        pooledKeys: MLXArray,
+        cos: MLXArray,
+        sin: MLXArray,
+        offset: Int
+    ) -> MLXArray {
+        let chunkCount = pooledKeys.dim(Self.chunkAxis)
+        precondition(
+            chunkCount > topK,
+            "a ranking needs more than \(topK) chunks, and the pool holds \(chunkCount)")
+        let lastChunkEnd = chunkCount * chunkWidth - 1
+        let visible =
+            lastChunkEnd <= offset
+            ? nil
+            : chunkVisibility(queryCount: x.dim(1), offset: offset, chunkCount: chunkCount)
+        return topChunks(
+            of: chunkScores(
+                x, queryResidual: queryResidual, pooledKeys: pooledKeys, cos: cos, sin: sin),
+            visible: visible)
+    }
+
+    /// The axis a `(batch, chunks, headDim)` pool holds its chunks on.
+    private static let chunkAxis = 1
+
+    /// The indices of the ``topK`` chunks of the highest score.
+    ///
+    /// - Parameters:
+    ///   - scores: The chunk scores, shape `(batch, tokens, chunks)`.
+    ///   - visible: The block-causal visibility of each chunk, or `nil` when
+    ///     every query may read every chunk.
+    /// - Returns: The chunk indices, shape `(batch, tokens, topK)`.
+    private func topChunks(of scores: MLXArray, visible: MLXArray?) -> MLXArray {
+        let ranked = visible.map { MLX.where($0, scores, MLXArray(Self.maskedScore)) } ?? scores
+        return argPartition(-ranked, kth: topK - 1, axis: -1)[.ellipsis, 0 ..< topK]
     }
 
     /// The block-causal visibility of each pooled chunk.
