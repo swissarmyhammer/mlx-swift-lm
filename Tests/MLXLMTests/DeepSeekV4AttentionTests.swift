@@ -522,34 +522,46 @@ struct DeepSeekV4AttentionTests {
 
     // MARK: - Rotary position
 
+    /// A head whose rotary pairs each hold `(1, 0)` and whose other
+    /// dimensions hold 0. A turn by the angle `a` makes each pair
+    /// `(cos a, sin a)`, thus the turned head reads the angles back.
+    private static func unitPairHead() -> MLXArray {
+        let pairCount = ropeDim / rotaryPairWidth
+        let noPosition = [Float](repeating: 0, count: headDim - ropeDim)
+        let pairs = (0 ..< pairCount).flatMap { _ -> [Float] in [1, 0] }
+        return MLXArray(noPosition + pairs, [batchSize, singleHead, decodeLength, headDim])
+    }
+
+    /// The cosines and the sines a rotation wrote into ``unitPairHead()``.
+    private static func turnedPairs(_ head: MLXArray) -> (cos: [Float], sin: [Float]) {
+        let rotary = DeepSeekV4TestArrays.floats(head[.ellipsis, (headDim - ropeDim)...])
+        let cosines = stride(from: 0, to: rotary.count, by: rotaryPairWidth).map { rotary[$0] }
+        let sines = stride(from: 1, to: rotary.count, by: rotaryPairWidth).map { rotary[$0] }
+        return (cos: cosines, sin: sines)
+    }
+
     @Test
     func perLayerThetaSplitsThePlainLayerFromTheCompressedLayer() throws {
         let config = try Self.configuration(useAttnSink: true)
         let plain = DeepSeekV4RoPE(configuration: config, layer: Self.plainLayer)
         let compressed = DeepSeekV4RoPE(configuration: config, layer: Self.compressedLayer)
-        let position = 1
-        let length = 1
+        let position = DeepSeekV4RoPE.position(1)
 
-        let plainAngles = plain.cosSin(offset: position, length: length)
-        let compressedAngles = compressed.cosSin(offset: position, length: length)
+        let plainPairs = Self.turnedPairs(plain(Self.unitPairHead(), offset: position))
+        let compressedPairs = Self.turnedPairs(compressed(Self.unitPairHead(), offset: position))
 
         // At position 1 the angle of each pair is its own inverse frequency,
-        // thus the cosine table is `cos(inv_freq)` term by term.
+        // thus the turned pairs are `(cos(inv_freq), sin(inv_freq))` term by
+        // term.
         expectClose(
-            DeepSeekV4TestArrays.floats(plainAngles.cos),
-            Self.plainInverseFrequency.map { cos($0) },
-            "plain layer cosine")
+            plainPairs.cos, Self.plainInverseFrequency.map { cos($0) }, "plain layer cosine")
         expectClose(
-            DeepSeekV4TestArrays.floats(compressedAngles.cos),
-            Self.yarnInverseFrequency.map { cos($0) },
+            compressedPairs.cos, Self.yarnInverseFrequency.map { cos($0) },
             "compressed layer cosine")
         expectClose(
-            DeepSeekV4TestArrays.floats(plainAngles.sin),
-            Self.plainInverseFrequency.map { sin($0) },
-            "plain layer sine")
+            plainPairs.sin, Self.plainInverseFrequency.map { sin($0) }, "plain layer sine")
         expectClose(
-            DeepSeekV4TestArrays.floats(compressedAngles.sin),
-            Self.yarnInverseFrequency.map { sin($0) },
+            compressedPairs.sin, Self.yarnInverseFrequency.map { sin($0) },
             "compressed layer sine")
     }
 
@@ -587,14 +599,9 @@ struct DeepSeekV4AttentionTests {
             Self.batchSize, Self.singleHead, Self.decodeLength, Self.realHeadDim,
         ])
 
-        let angles = rope.cosSin(offset: Self.rotationPosition, length: Self.decodeLength)
-        let rotated = DeepSeekV4Math.applyPartialRoPE(
-            head,
-            cos: angles.cos.expandedDimensions(axes: [0, 1]),
-            sin: angles.sin.expandedDimensions(axes: [0, 1]),
-            ropeDim: Self.realRopeDim)
+        let rotated = rope(head, offset: DeepSeekV4RoPE.position(Self.rotationPosition))
 
-        #expect(angles.cos.shape.last == Self.realRopeDim / Self.rotaryPairWidth)
+        #expect(rotated.shape == head.shape)
         let before = DeepSeekV4TestArrays.floats(head)
         let after = DeepSeekV4TestArrays.floats(rotated)
         for dimension in 0 ..< Self.realNoPositionDim {

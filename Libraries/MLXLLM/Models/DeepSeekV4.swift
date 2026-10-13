@@ -271,10 +271,8 @@ final class DeepSeekV4DecoderLayer: Module {
     private enum AttentionInputSlot {
         /// Argument: the residual stream the layer reads.
         static let stream = 0
-        /// Argument: the cosine table of the block.
-        static let cos = 1
-        /// Argument: the sine table of the block.
-        static let sin = 2
+        /// Argument: the rotary position of the token, a scalar array.
+        static let position = 1
 
         /// Answer: the collapsed stream after the attention norm.
         static let normalized = 0
@@ -294,30 +292,28 @@ final class DeepSeekV4DecoderLayer: Module {
     private enum LayerTailSlot {
         /// The attention output, before its inverse rotation.
         static let attended = 0
-        /// The cosine table of the block.
-        static let cos = 1
-        /// The sine table of the block.
-        static let sin = 2
+        /// The rotary position of the token, a scalar array.
+        static let position = 1
         /// The residual stream the layer read.
-        static let stream = 3
+        static let stream = 2
         /// The `post` gain of the attention hyper-connection.
-        static let post = 4
+        static let post = 3
         /// The mixing matrix of the attention hyper-connection.
-        static let comb = 5
+        static let comb = 4
         /// The token identifiers, which a hash layer routes by.
-        static let inputIds = 6
+        static let inputIds = 5
     }
 
     /// The compiled head of a decode step: the attention collapse, the
     /// attention norm, and the query and key projections.
     ///
-    /// The trace reads no cache. The rotary tables are arguments, thus the
-    /// position of the token never becomes a constant of the trace.
+    /// The trace reads no cache. The rotary position is an array argument,
+    /// thus the position of the token never becomes a constant of the trace.
     private let compiledAttentionInput = CompiledTrace<DeepSeekV4DecoderLayer> {
         layer, arguments in
         layer.attentionInput(
             stream: arguments[AttentionInputSlot.stream],
-            cos: arguments[AttentionInputSlot.cos], sin: arguments[AttentionInputSlot.sin])
+            position: arguments[AttentionInputSlot.position])
     }
 
     /// The compiled tail of a decode step: the attention output projection,
@@ -342,19 +338,17 @@ final class DeepSeekV4DecoderLayer: Module {
         _ stream: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
         inputIds: MLXArray
     ) -> MLXArray {
-        let tables = attention.rotaryTables(
-            offset: cache?.offset ?? 0, length: stream.dim(DeepSeekV4CompiledDecode.tokenAxis))
-        let input = compiledAttentionInput(self, [stream, tables.cos, tables.sin])
+        let position = DeepSeekV4RoPE.position(cache?.offset ?? 0)
+        let input = compiledAttentionInput(self, [stream, position])
         let attended = attention.attend(
             input[AttentionInputSlot.normalized],
             projected: DeepSeekV4Attention.Projection(
                 queries: input[AttentionInputSlot.queries],
                 keyValues: input[AttentionInputSlot.keyValues],
                 queryResidual: input[AttentionInputSlot.queryResidual]),
-            mask: mask, cache: cache, cos: tables.cos, sin: tables.sin)
+            mask: mask, cache: cache)
         var tail = [MLXArray](repeating: attended, count: LayerTailSlot.inputIds + 1)
-        tail[LayerTailSlot.cos] = tables.cos
-        tail[LayerTailSlot.sin] = tables.sin
+        tail[LayerTailSlot.position] = position
         tail[LayerTailSlot.stream] = stream
         tail[LayerTailSlot.post] = input[AttentionInputSlot.post]
         tail[LayerTailSlot.comb] = input[AttentionInputSlot.comb]
@@ -366,13 +360,12 @@ final class DeepSeekV4DecoderLayer: Module {
     ///
     /// - Parameters:
     ///   - stream: The residual stream the layer reads.
-    ///   - cos: The cosine table of the block.
-    ///   - sin: The sine table of the block.
+    ///   - position: The rotary position of the token, a scalar array.
     /// - Returns: The answer list ``AttentionInputSlot`` names.
-    private func attentionInput(stream: MLXArray, cos: MLXArray, sin: MLXArray) -> [MLXArray] {
+    private func attentionInput(stream: MLXArray, position: MLXArray) -> [MLXArray] {
         let (collapsed, post, comb) = attentionConnection.collapse(stream)
         let normalized = attentionNorm(collapsed)
-        let projected = attention.project(normalized, cos: cos, sin: sin)
+        let projected = attention.project(normalized, position: position)
         var answer = [MLXArray](repeating: normalized, count: AttentionInputSlot.comb + 1)
         answer[AttentionInputSlot.queries] = projected.queries
         answer[AttentionInputSlot.keyValues] = projected.keyValues
@@ -388,8 +381,7 @@ final class DeepSeekV4DecoderLayer: Module {
     /// - Returns: The residual stream of the next layer.
     private func layerTail(_ arguments: [MLXArray]) -> MLXArray {
         let output = attention.outputProjection(
-            arguments[LayerTailSlot.attended],
-            cos: arguments[LayerTailSlot.cos], sin: arguments[LayerTailSlot.sin])
+            arguments[LayerTailSlot.attended], position: arguments[LayerTailSlot.position])
         let afterAttention = attentionConnection.expand(
             blockOutput: output, residual: arguments[LayerTailSlot.stream],
             post: arguments[LayerTailSlot.post], comb: arguments[LayerTailSlot.comb])

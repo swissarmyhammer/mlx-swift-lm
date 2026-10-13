@@ -190,22 +190,16 @@ struct DeepSeekV4MathHelpersTests {
         -1.0, 0.25, -3.5, 1.75, -0.75, 1.25, -2.0, 3.0,
     ]
 
-    /// `cos(position * invFreq)` for positions 0 and 1 against
-    /// `invFreq = [1, 0.01]`, shape `(2, 2)`.
-    private static let ropeCos: [Float] = [
-        1.0, 1.0,
-        0.5403023059, 0.9999500004,
-    ]
+    /// The inverse frequency of each rotary pair of the small fixture.
+    private static let ropeInverseFrequency: [Float] = [1, 0.01]
 
-    /// `sin(position * invFreq)` for the same positions and frequencies.
-    private static let ropeSin: [Float] = [
-        0.0, 0.0,
-        0.8414709848, 0.009999833334,
-    ]
+    /// The position stride of a row that is one token.
+    private static let tokenStride = 1
 
-    /// `DeepseekV4RoPE.__call__` lines 145-164 on the input above, reached
-    /// through the trailing-block split `DeepseekV4Attention.__call__` makes at
-    /// lines 602-605.
+    /// `DeepseekV4RoPE.__call__` lines 145-164 on the input above at positions
+    /// 0 and 1 against the inverse frequency above, reached through the
+    /// trailing-block split `DeepseekV4Attention.__call__` makes at lines
+    /// 602-605.
     ///
     /// Position 0 rotates by zero, thus its whole row is the input. Position 1
     /// keeps its first four dimensions and rotates the last four.
@@ -216,19 +210,19 @@ struct DeepSeekV4MathHelpersTests {
         -1.45706546, 0.04427464373, -2.029899501, 2.979850335,
     ]
 
-    private func ropeFixtureArrays() -> (x: MLXArray, cos: MLXArray, sin: MLXArray) {
-        (
-            MLXArray(Self.ropeInput, [1, 2, Self.fixtureHeadDim]),
-            MLXArray(Self.ropeCos, [2, Self.fixtureRopeDim / 2]),
-            MLXArray(Self.ropeSin, [2, Self.fixtureRopeDim / 2])
-        )
-    }
+    /// The position of the first row of the small fixture.
+    private static let fixtureOffset: Int32 = 0
 
-    @Test func applyPartialRoPEMatchesPythonReference() {
-        let (x, cos, sin) = ropeFixtureArrays()
-        let rotated = DeepSeekV4Math.applyPartialRoPE(
-            x, cos: cos, sin: sin, ropeDim: Self.fixtureRopeDim)
-        eval(rotated)
+    /// The number of token rows the small fixture holds.
+    private static let fixtureRowCount = 2
+
+    @Test func applyRoPEMatchesPythonReference() {
+        let x = MLXArray(Self.ropeInput, [1, Self.fixtureRowCount, Self.fixtureHeadDim])
+        let periods = DeepSeekV4Math.rotaryPeriods(
+            inverseFrequency: Self.ropeInverseFrequency, headDim: Self.fixtureHeadDim,
+            positionStride: Self.tokenStride, inverse: false)
+        let rotated = DeepSeekV4Math.applyRoPE(
+            x, periods: periods, offset: MLXArray(Self.fixtureOffset))
 
         #expect(rotated.shape == x.shape)
         expectCloseRelative(
@@ -236,6 +230,32 @@ struct DeepSeekV4MathHelpersTests {
             within: Self.relativeTolerance,
             "partial rope forward")
     }
+
+    /// The compress ratio the period-table test divides by.
+    private static let periodTableStride = 4
+
+    @Test func rotaryPeriodsGiveTheNoPositionPairsAnInfinitePeriod() {
+        let noPositionPairs = (Self.fixtureHeadDim - Self.fixtureRopeDim) / Self.pairWidth
+        for inverse in [false, true] {
+            let periods = DeepSeekV4TestArrays.floats(
+                DeepSeekV4Math.rotaryPeriods(
+                    inverseFrequency: Self.ropeInverseFrequency, headDim: Self.fixtureHeadDim,
+                    positionStride: Self.periodTableStride, inverse: inverse))
+            let direction: Float = inverse ? -1 : 1
+            let expectedRotary = Self.ropeInverseFrequency.map {
+                direction / ($0 * Float(Self.periodTableStride))
+            }
+
+            #expect(periods.count == Self.fixtureHeadDim / Self.pairWidth)
+            #expect(periods.prefix(noPositionPairs).allSatisfy { $0 == .infinity })
+            expectCloseRelative(
+                Array(periods.dropFirst(noPositionPairs)), expectedRotary,
+                within: Self.relativeTolerance, "rotary periods, inverse \(inverse)")
+        }
+    }
+
+    /// Two dimensions make one rotary pair.
+    private static let pairWidth = 2
 
     /// The real DeepSeek-V4 head width.
     private static let deepseekV4HeadDim = 512
@@ -246,24 +266,61 @@ struct DeepSeekV4MathHelpersTests {
     /// The number of positions the shape tests run.
     private static let deepseekV4SequenceLength = 3
 
-    /// Builds a deterministic rotation for the real DeepSeek-V4 rotary width.
-    private func deepseekV4Rotation() -> (x: MLXArray, cos: MLXArray, sin: MLXArray) {
-        MLXRandom.seed(20_260_810)
-        let sequenceLength = Self.deepseekV4SequenceLength
-        let pairCount = Self.deepseekV4RopeDim / 2
-        let x = MLXRandom.normal([1, sequenceLength, Self.deepseekV4HeadDim])
-        let theta = MLXRandom.uniform(
-            low: -Float.pi, high: Float.pi, [sequenceLength, pairCount])
-        return (x, cos(theta), sin(theta))
+    /// The position of the first row the shape tests turn. Position 0 turns
+    /// by zero, thus the tests need a later position.
+    private static let deepseekV4Offset: Int32 = 5
+
+    /// The DeepSeek-V4-Flash `compress_rope_theta`.
+    private static let compressRopeTheta: Float = 160_000
+
+    /// The DeepSeek-V4-Flash YaRN `original_max_position_embeddings`.
+    private static let yarnOriginalMaxPositionEmbeddings = 65_536
+
+    /// The DeepSeek-V4-Flash YaRN `factor`.
+    private static let yarnFactor: Float = 16
+
+    /// The DeepSeek-V4-Flash YaRN `beta_fast`.
+    private static let yarnBetaFast: Float = 32
+
+    /// The DeepSeek-V4-Flash YaRN `beta_slow`.
+    private static let yarnBetaSlow: Float = 1
+
+    /// The seed of the random block the shape tests turn.
+    private static let deepseekV4BlockSeed: UInt64 = 20_260_810
+
+    /// The inverse-frequency table of a DeepSeek-V4-Flash layer with a
+    /// compressor: `compress_rope_theta` with the YaRN scaling.
+    private static func deepseekV4InverseFrequency() -> [Float] {
+        DeepSeekV4Math.yarnInvFreq(
+            dim: deepseekV4RopeDim, base: compressRopeTheta,
+            originalMaxPositionEmbeddings: yarnOriginalMaxPositionEmbeddings,
+            factor: yarnFactor, betaFast: yarnBetaFast, betaSlow: yarnBetaSlow
+        ).asArray(Float.self)
     }
 
-    @Test func applyPartialRoPELeavesTheNoPositionDimensionsAlone() {
-        let (x, cosine, sine) = deepseekV4Rotation()
+    /// Turns a deterministic block of the real DeepSeek-V4 head width.
+    private func deepseekV4Rotation(_ x: MLXArray, inverse: Bool) -> MLXArray {
+        DeepSeekV4Math.applyRoPE(
+            x,
+            periods: DeepSeekV4Math.rotaryPeriods(
+                inverseFrequency: Self.deepseekV4InverseFrequency(),
+                headDim: Self.deepseekV4HeadDim, positionStride: Self.tokenStride,
+                inverse: inverse),
+            offset: MLXArray(Self.deepseekV4Offset))
+    }
+
+    /// A deterministic block of the real DeepSeek-V4 head width.
+    private func deepseekV4Block() -> MLXArray {
+        MLXRandom.normal(
+            [1, Self.deepseekV4SequenceLength, Self.deepseekV4HeadDim],
+            key: MLXRandom.key(Self.deepseekV4BlockSeed))
+    }
+
+    @Test func applyRoPELeavesTheNoPositionDimensionsAlone() {
+        let x = deepseekV4Block()
         let noPositionDim = Self.deepseekV4HeadDim - Self.deepseekV4RopeDim
 
-        let rotated = DeepSeekV4Math.applyPartialRoPE(
-            x, cos: cosine, sin: sine, ropeDim: Self.deepseekV4RopeDim)
-        eval(rotated)
+        let rotated = deepseekV4Rotation(x, inverse: false)
 
         #expect(rotated.shape == x.shape)
 
@@ -280,14 +337,11 @@ struct DeepSeekV4MathHelpersTests {
     /// are standard normal, thus this is a relative gap of about 1e-6.
     private static let roundTripTolerance: Float = 1e-5
 
-    @Test func inversePartialRoPEUndoesTheForwardRotation() {
-        let (x, cosine, sine) = deepseekV4Rotation()
+    @Test func theInverseTableUndoesTheForwardRotation() {
+        let x = deepseekV4Block()
 
-        let rotated = DeepSeekV4Math.applyPartialRoPE(
-            x, cos: cosine, sin: sine, ropeDim: Self.deepseekV4RopeDim)
-        let restored = DeepSeekV4Math.applyInversePartialRoPE(
-            rotated, cos: cosine, sin: sine, ropeDim: Self.deepseekV4RopeDim)
-        eval(rotated, restored)
+        let rotated = deepseekV4Rotation(x, inverse: false)
+        let restored = deepseekV4Rotation(rotated, inverse: true)
 
         #expect(
             DeepSeekV4TestArrays.floats(rotated) != DeepSeekV4TestArrays.floats(x),

@@ -22,9 +22,16 @@
 //     not a checkpoint parameter". The file above holds it as a plain
 //     `invFreq`, which puts `attn.rope.invFreq` into the module parameters
 //     and thus into every weight-load check, although no checkpoint gives
-//     that key. The leading underscore below keeps mlx-swift's
-//     `filterValidParameters` from collecting it, the same way
+//     that key. This file keeps the period tables it builds from that
+//     table under a leading underscore, which keeps mlx-swift's
+//     `filterValidParameters` from collecting them, the same way
 //     `YarnRoPE._freqs` does in Libraries/MLXLMCommon/RoPEUtils.swift.
+//
+// The rotary position itself follows the mlx-vlm reference
+// (Blaizzy/mlx-vlm, `mlx_vlm/models/deepseek_v4/language.py`,
+// `DeepseekV4RoPE`) rather than the file above: one `MLXFast.RoPE` call with a
+// period table turns the whole head, and the pairs that take no position
+// read an infinite period (task `^phf8pwt`).
 //  3. The quantization mode of the grouped output projection. The file
 //     above calls `quantizedMatmul` without a `mode:`, thus it reads the
 //     affine mode whatever mode the checkpoint gives. The Python passes
@@ -69,21 +76,54 @@ import MLXNN
 /// scaling. A layer with a compressor turns them with `compress_rope_theta`
 /// and takes the YaRN scaling of the checkpoint, which widens the context.
 ///
-/// The layer hands out a cosine table and a sine table rather than a rotated
-/// tensor, because DeepSeek-V4 reads the same tables three times in one
-/// block: forward on the queries, forward on the keys, and backward on the
-/// attention output.
+/// The layer turns each kind of row with one `MLXFast.RoPE` call: the queries
+/// and the keys of attention go forward, the attention output goes backward,
+/// the queries of the indexer go forward at the indexer head width, and the
+/// pooled chunks of each compressor go forward at the compress ratio. Each
+/// kind reads its own period table, and ``init(configuration:layer:)`` builds
+/// every table the layer reads one time. A block thus builds no table and no
+/// angle; it gives the position alone.
 final class DeepSeekV4RoPE: Module {
 
-    /// The inverse frequency of each rotary pair, in float32.
+    /// The period table of each kind of row this layer turns, keyed by
+    /// ``TableKind/key``.
     ///
     /// The name starts with an underscore on purpose. mlx-swift collects
     /// every stored `MLXArray` of a `Module` as a parameter unless its name
-    /// starts with an underscore, and this table comes from the
-    /// configuration rather than from the checkpoint. Without the
-    /// underscore a weight-load check would demand a `rope.invFreq` tensor
-    /// that no DeepSeek-V4 checkpoint holds.
-    private let _inverseFrequency: MLXArray
+    /// starts with an underscore, and these tables come from the
+    /// configuration rather than from the checkpoint. Without the underscore
+    /// a weight-load check would demand `rope.*` tensors that no DeepSeek-V4
+    /// checkpoint holds.
+    ///
+    /// The tables still belong to the state of the module, thus a compiled
+    /// decode trace reads them as inputs and captures no array.
+    private let _periodTables: [String: MLXArray]
+
+    /// The compress ratio of this layer, or `nil` on a layer that holds no
+    /// compressor and thus turns no pooled chunk.
+    private let chunkWidth: Int?
+
+    /// The position stride of a row that is one token: each row stands one
+    /// raw position after the row before it.
+    private static let tokenStride = 1
+
+    /// One kind of row the layer turns: a head width, a position stride and a
+    /// direction.
+    private struct TableKind {
+        /// The width of the head the table turns.
+        let headWidth: Int
+
+        /// The number of raw positions between two rows.
+        let positionStride: Int
+
+        /// True for the backward rotation.
+        let inverse: Bool
+
+        /// The key of this kind in ``DeepSeekV4RoPE/_periodTables``.
+        var key: String {
+            "width\(headWidth)-stride\(positionStride)-\(inverse ? "inverse" : "forward")"
+        }
+    }
 
     /// A YaRN scaling that leaves every frequency alone.
     private static let noScaling: Float = 1
@@ -99,34 +139,7 @@ final class DeepSeekV4RoPE: Module {
     /// The names the `rope_scaling` block gives a YaRN scaling.
     private static let yarnTypeNames: Set<String> = ["yarn", "deepseek_yarn"]
 
-    /// Builds the rotary table of one layer.
-    ///
-    /// - Parameters:
-    ///   - dim: The number of trailing head dimensions that take a position.
-    ///   - base: The rope theta of this layer.
-    ///   - factor: The YaRN scaling. A factor of 1 is no scaling.
-    ///   - originalMaxPositionEmbeddings: The context the checkpoint trained
-    ///     on, before YaRN widened it.
-    ///   - betaFast: The turn count that sets the low end of the YaRN ramp.
-    ///   - betaSlow: The turn count that sets the high end of the YaRN ramp.
-    init(
-        dim: Int,
-        base: Float,
-        factor: Float,
-        originalMaxPositionEmbeddings: Int,
-        betaFast: Float,
-        betaSlow: Float
-    ) {
-        self._inverseFrequency = DeepSeekV4Math.yarnInvFreq(
-            dim: dim,
-            base: base,
-            originalMaxPositionEmbeddings: originalMaxPositionEmbeddings,
-            factor: factor,
-            betaFast: betaFast,
-            betaSlow: betaSlow)
-    }
-
-    /// Builds the rotary table one layer of a checkpoint asks for.
+    /// Builds the rotary position one layer of a checkpoint asks for.
     ///
     /// A layer with a compressor takes `compress_rope_theta` and the YaRN
     /// scaling of the `rope_scaling` block. Every other layer takes
@@ -137,20 +150,69 @@ final class DeepSeekV4RoPE: Module {
     /// The Python reference demands both keys and stops without them; this
     /// port keeps the plain table instead of inventing a value.
     ///
+    /// The inverse-frequency table holds `qk_rope_head_dim / 2` values. The
+    /// period tables come from it here, one time, as plain arrays with no
+    /// graph behind them.
+    ///
     /// - Parameters:
     ///   - configuration: The configuration of the checkpoint.
     ///   - layer: The index of the decoder layer.
-    convenience init(configuration: DeepSeekV4Configuration, layer: Int) {
+    init(configuration: DeepSeekV4Configuration, layer: Int) {
         let scaling =
             configuration.hasCompressor(layer: layer)
             ? Self.yarnScaling(from: configuration.ropeScaling) : nil
-        self.init(
+        let inverseFrequency = DeepSeekV4Math.yarnInvFreq(
             dim: configuration.qkRopeHeadDim,
             base: configuration.ropeTheta(forLayer: layer),
-            factor: scaling?.factor ?? Self.noScaling,
             originalMaxPositionEmbeddings: scaling?.originalMaxPositionEmbeddings ?? 0,
+            factor: scaling?.factor ?? Self.noScaling,
             betaFast: scaling?.betaFast ?? Self.defaultBetaFast,
-            betaSlow: scaling?.betaSlow ?? Self.defaultBetaSlow)
+            betaSlow: scaling?.betaSlow ?? Self.defaultBetaSlow
+        ).asArray(Float.self)
+        self.chunkWidth =
+            configuration.hasCompressor(layer: layer)
+            ? configuration.compressRatio(ofLayer: layer) : nil
+        self._periodTables = Dictionary(
+            uniqueKeysWithValues: Self.tableKinds(configuration: configuration, layer: layer).map {
+                kind in
+                (
+                    kind.key,
+                    DeepSeekV4Math.rotaryPeriods(
+                        inverseFrequency: inverseFrequency, headDim: kind.headWidth,
+                        positionStride: kind.positionStride, inverse: kind.inverse)
+                )
+            })
+    }
+
+    /// The kinds of row one layer turns.
+    ///
+    /// Every layer turns its attention heads forward and backward. A layer
+    /// with an indexer also turns the indexer queries forward. A layer with a
+    /// compressor also turns the pooled chunks of each compressor it holds:
+    /// the chunks of the attention, and the chunks inside the indexer when it
+    /// holds one.
+    ///
+    /// - Parameters:
+    ///   - configuration: The configuration of the checkpoint.
+    ///   - layer: The index of the decoder layer.
+    /// - Returns: The kinds, each one time.
+    private static func tableKinds(
+        configuration: DeepSeekV4Configuration, layer: Int
+    ) -> [TableKind] {
+        let headWidths =
+            configuration.hasIndexer(layer: layer)
+            ? [configuration.headDim, configuration.indexHeadDim] : [configuration.headDim]
+        let forward = headWidths.map {
+            TableKind(headWidth: $0, positionStride: tokenStride, inverse: false)
+        }
+        let backward = TableKind(
+            headWidth: configuration.headDim, positionStride: tokenStride, inverse: true)
+        guard configuration.hasCompressor(layer: layer) else { return forward + [backward] }
+        let ratio = configuration.compressRatio(ofLayer: layer)
+        let pooled = headWidths.map {
+            TableKind(headWidth: $0, positionStride: ratio, inverse: false)
+        }
+        return forward + [backward] + pooled
     }
 
     /// The four numbers a YaRN scaling needs.
@@ -188,29 +250,76 @@ final class DeepSeekV4RoPE: Module {
             betaSlow: block["beta_slow"]?.asFloat() ?? defaultBetaSlow)
     }
 
-    /// Gives the cosine and the sine of each angle of a run of positions.
+    /// The position argument of a block whose first token stands at `offset`.
     ///
-    /// - Parameters:
-    ///   - offset: The position of the first token of the run.
-    ///   - length: The number of tokens in the run.
-    /// - Returns: Two tables, each of shape `(length, dim / 2)`, in float32.
-    func cosSin(offset: Int, length: Int) -> (cos: MLXArray, sin: MLXArray) {
-        cosSin(positions: MLXArray(Int32(offset) ..< Int32(offset + length)))
+    /// The position is an array, not an `Int`, thus a compiled decode trace
+    /// takes it as an argument and does not keep it as a constant.
+    ///
+    /// - Parameter offset: The absolute position of the first token.
+    /// - Returns: A scalar `int32` array.
+    static func position(_ offset: Int) -> MLXArray {
+        MLXArray(Int32(offset))
     }
 
-    /// Gives the cosine and the sine of each angle of the given positions.
+    /// Turns the rotary dimensions of each head of a block with one
+    /// `MLXFast.RoPE` call.
     ///
-    /// The positions need not stand in a run. ``DeepSeekV4Compressor`` reads
-    /// one position for each pooled chunk, and two neighbouring chunks stand a
-    /// whole compress ratio apart.
+    /// - Parameters:
+    ///   - x: The heads, shape `(batch, heads, tokens, headWidth)`. The head
+    ///     width is `head_dim` for attention and `index_head_dim` for the
+    ///     indexer queries.
+    ///   - offset: The ``position(_:)`` of the first token.
+    ///   - inverse: True to turn the heads backward, which takes the position
+    ///     back out of the attention output.
+    /// - Returns: An array of the shape and the dtype of `x`.
+    func callAsFunction(_ x: MLXArray, offset: MLXArray, inverse: Bool = false) -> MLXArray {
+        DeepSeekV4Math.applyRoPE(
+            x,
+            periods: periods(
+                of: TableKind(
+                    headWidth: x.dim(-1), positionStride: Self.tokenStride, inverse: inverse)),
+            offset: offset)
+    }
+
+    /// Turns each pooled chunk by the position it starts at, with one
+    /// `MLXFast.RoPE` call.
     ///
-    /// - Parameter positions: The positions, shape `(count)`.
-    /// - Returns: Two tables, each of shape `(count, dim / 2)`, in float32.
-    func cosSin(positions: MLXArray) -> (cos: MLXArray, sin: MLXArray) {
-        let angles =
-            positions.asType(.float32).expandedDimensions(axis: -1)
-            * _inverseFrequency.expandedDimensions(axis: 0)
-        return (cos: MLX.cos(angles), sin: MLX.sin(angles))
+    /// Two neighbouring chunks stand a whole compress ratio apart. The period
+    /// table of a chunk divides by the ratio and the offset divides by it
+    /// too, thus row `c` takes the angle of raw position
+    /// `firstPosition + c * ratio`, as the mlx-vlm `Compressor` does with
+    /// `freq_scale`.
+    ///
+    /// - Parameters:
+    ///   - chunks: The pooled chunks, shape `(batch, chunks, headWidth)`.
+    ///   - firstPosition: The raw position the first chunk starts at. It is a
+    ///     multiple of the compress ratio.
+    /// - Returns: An array of the shape and the dtype of `chunks`.
+    func rotatedChunks(_ chunks: MLXArray, firstPosition: Int) -> MLXArray {
+        guard let chunkWidth else {
+            preconditionFailure("a layer with no compressor pools no chunk")
+        }
+        precondition(
+            firstPosition.isMultiple(of: chunkWidth),
+            "a chunk starts at a multiple of \(chunkWidth), and \(firstPosition) is not one")
+        return DeepSeekV4Math.applyRoPE(
+            chunks,
+            periods: periods(
+                of: TableKind(
+                    headWidth: chunks.dim(-1), positionStride: chunkWidth, inverse: false)),
+            offset: Self.position(firstPosition / chunkWidth))
+    }
+
+    /// The period table of one kind of row.
+    ///
+    /// ``init(configuration:layer:)`` builds every table the layer reads, thus
+    /// a missing table is a programmer error: a head width or a stride that
+    /// the configuration does not give this layer.
+    private func periods(of kind: TableKind) -> MLXArray {
+        guard let table = _periodTables[kind.key] else {
+            preconditionFailure("this layer turns no rows of the kind \(kind.key)")
+        }
+        return table
     }
 }
 
@@ -242,9 +351,6 @@ final class DeepSeekV4Attention: Module {
 
     /// The width of one head.
     let headDim: Int
-
-    /// The number of trailing head dimensions that take a position.
-    let ropeDim: Int
 
     /// The number of head groups the output projection reads.
     let outputGroups: Int
@@ -361,7 +467,6 @@ final class DeepSeekV4Attention: Module {
     init(configuration: DeepSeekV4Configuration, layer: Int) {
         self.headCount = configuration.numAttentionHeads
         self.headDim = configuration.headDim
-        self.ropeDim = configuration.qkRopeHeadDim
         self.outputGroups = configuration.oGroups
         self.outputLoraRank = configuration.oLoraRank
         self.normEps = configuration.rmsNormEps
@@ -410,11 +515,10 @@ final class DeepSeekV4Attention: Module {
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
-        let tables = rotaryTables(offset: cache?.offset ?? 0, length: x.dim(1))
-        let projected = project(x, cos: tables.cos, sin: tables.sin)
-        let attended = attend(
-            x, projected: projected, mask: mask, cache: cache, cos: tables.cos, sin: tables.sin)
-        return outputProjection(attended, cos: tables.cos, sin: tables.sin)
+        let position = DeepSeekV4RoPE.position(cache?.offset ?? 0)
+        let projected = project(x, position: position)
+        let attended = attend(x, projected: projected, mask: mask, cache: cache)
+        return outputProjection(attended, position: position)
     }
 
     // MARK: - The three stages of a block
@@ -433,43 +537,23 @@ final class DeepSeekV4Attention: Module {
         let queryResidual: MLXArray
     }
 
-    /// Gives the cosine and the sine tables one block reads, each with the
-    /// two leading axes a `(batch, heads, tokens, width)` tensor broadcasts
-    /// against.
-    ///
-    /// - Parameters:
-    ///   - offset: The absolute position of the first token of the block.
-    ///   - length: The number of tokens in the block.
-    /// - Returns: Two tables, each of shape `(1, 1, length, ropeDim / 2)`, in
-    ///   float32.
-    func rotaryTables(offset: Int, length: Int) -> (cos: MLXArray, sin: MLXArray) {
-        let angles = rope.cosSin(offset: offset, length: length)
-        return (
-            cos: angles.cos.expandedDimensions(axes: Self.tableAxes),
-            sin: angles.sin.expandedDimensions(axes: Self.tableAxes)
-        )
-    }
-
-    /// The two leading axes a rotary table gains.
-    private static let tableAxes = [BatchMajorAxis.batch, BatchMajorAxis.token]
-
     /// Projects one block onto its queries and its keys, and turns both.
     ///
     /// This stage reads no cache, thus a compiled decode step can trace it.
     ///
     /// - Parameters:
     ///   - x: The block input, shape `(batch, tokens, hidden)`.
-    ///   - cos: The cosine table of ``rotaryTables(offset:length:)``.
-    ///   - sin: The sine table of ``rotaryTables(offset:length:)``.
+    ///   - position: The ``DeepSeekV4RoPE/position(_:)`` of the first token of
+    ///     the block.
     /// - Returns: The projection of the block.
-    func project(_ x: MLXArray, cos: MLXArray, sin: MLXArray) -> Projection {
+    func project(_ x: MLXArray, position: MLXArray) -> Projection {
         let batch = x.dim(BatchMajorAxis.batch)
         let length = x.dim(BatchMajorAxis.token)
         let queryResidual = qNorm(wqA(x))
         return Projection(
             queries: rotatedQueries(
-                queryResidual, batch: batch, length: length, cos: cos, sin: sin),
-            keyValues: rotatedKeyValues(x, batch: batch, length: length, cos: cos, sin: sin),
+                queryResidual, batch: batch, length: length, position: position),
+            keyValues: rotatedKeyValues(x, batch: batch, length: length, position: position),
             queryResidual: queryResidual)
     }
 
@@ -484,13 +568,11 @@ final class DeepSeekV4Attention: Module {
     ///   - projected: The projection of the block.
     ///   - mask: The attention mask of this block.
     ///   - cache: The key/value cache of this layer, or `nil`.
-    ///   - cos: The cosine table of ``rotaryTables(offset:length:)``.
-    ///   - sin: The sine table of ``rotaryTables(offset:length:)``.
     /// - Returns: The attention output, shape
     ///   `(batch, heads, tokens, headDim)`.
     func attend(
         _ x: MLXArray, projected: Projection, mask: MLXFast.ScaledDotProductAttentionMaskMode,
-        cache: KVCache?, cos: MLXArray, sin: MLXArray
+        cache: KVCache?
     ) -> MLXArray {
         let length = x.dim(BatchMajorAxis.token)
         // The window mask must read the offset the cache stood at BEFORE the
@@ -506,7 +588,7 @@ final class DeepSeekV4Attention: Module {
         return attentionOutput(
             x, queries: projected.queries, keyValues: projected.keyValues,
             queryResidual: projected.queryResidual, windowMask: windowMask, cache: cache,
-            cos: cos, sin: sin, offset: offset)
+            offset: offset)
     }
 
     /// Turns the attention output back and projects it onto the residual
@@ -517,17 +599,16 @@ final class DeepSeekV4Attention: Module {
     /// - Parameters:
     ///   - attended: The attention output, shape
     ///     `(batch, heads, tokens, headDim)`.
-    ///   - cos: The cosine table of ``rotaryTables(offset:length:)``.
-    ///   - sin: The sine table of ``rotaryTables(offset:length:)``.
+    ///   - position: The ``DeepSeekV4RoPE/position(_:)`` of the first token of
+    ///     the block.
     /// - Returns: The block output, shape `(batch, tokens, hidden)`.
-    func outputProjection(_ attended: MLXArray, cos: MLXArray, sin: MLXArray) -> MLXArray {
+    func outputProjection(_ attended: MLXArray, position: MLXArray) -> MLXArray {
         let batch = attended.dim(BatchMajorAxis.batch)
         let length = attended.dim(Self.keyAxis)
         // The keys carried the position into the scores. Turning the output
         // backward takes it out again, thus the residual stream reads a
         // result with no position in it.
-        let straightened = DeepSeekV4Math.applyInversePartialRoPE(
-            attended, cos: cos, sin: sin, ropeDim: ropeDim)
+        let straightened = rope(attended, offset: position, inverse: true)
         let flattened =
             straightened
             .transposed(axes: Self.headMajor)
@@ -551,8 +632,6 @@ final class DeepSeekV4Attention: Module {
     ///   - queryResidual: The low-rank query of this block, after its norm.
     ///   - windowMask: The mask of the sliding window alone.
     ///   - cache: The key/value cache of this layer, or `nil`.
-    ///   - cos: The cosine of each rotary angle of this block.
-    ///   - sin: The sine of each rotary angle of this block.
     ///   - offset: The absolute position of the first token of this block.
     /// - Returns: The attention output, shape
     ///   `(batch, heads, tokens, headDim)`.
@@ -563,8 +642,6 @@ final class DeepSeekV4Attention: Module {
         queryResidual: MLXArray,
         windowMask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache?,
-        cos: MLXArray,
-        sin: MLXArray,
         offset: Int
     ) -> MLXArray {
         let sinks = useAttnSink ? attnSink.asType(queries.dtype) : nil
@@ -591,7 +668,7 @@ final class DeepSeekV4Attention: Module {
                 scale: scale, mask: windowMask, sinks: sinks)
         }
         if let picked = decodePicks(
-            x, queryResidual: queryResidual, pooled: pooled, cos: cos, sin: sin, offset: offset,
+            x, queryResidual: queryResidual, pooled: pooled, offset: offset,
             windowMask: windowMask)
         {
             return Self.attentionOverPickedChunks(
@@ -604,7 +681,7 @@ final class DeepSeekV4Attention: Module {
         let batch = x.dim(0)
         let length = x.dim(1)
         let chunkMask = chunkVisibility(
-            x, queryResidual: queryResidual, pooled: pooled, cos: cos, sin: sin,
+            x, queryResidual: queryResidual, pooled: pooled,
             offset: offset, batch: batch, length: length)
         let joinedMask = concatenated(
             [
@@ -698,8 +775,6 @@ final class DeepSeekV4Attention: Module {
     ///   - x: The block input, shape `(batch, tokens, hidden)`.
     ///   - queryResidual: The low-rank query of this block, after its norm.
     ///   - pooled: The chunks of each branch.
-    ///   - cos: The cosine of each rotary angle of this block.
-    ///   - sin: The sine of each rotary angle of this block.
     ///   - offset: The absolute position of the first token of this block.
     ///   - windowMask: The mask of the sliding window alone.
     /// - Returns: The indices of the picked chunks, shape `(batch, 1, topK)`,
@@ -708,8 +783,6 @@ final class DeepSeekV4Attention: Module {
         _ x: MLXArray,
         queryResidual: MLXArray,
         pooled: PooledChunks,
-        cos: MLXArray,
-        sin: MLXArray,
         offset: Int,
         windowMask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray? {
@@ -722,8 +795,7 @@ final class DeepSeekV4Attention: Module {
             return nil
         }
         return selector.rankedChunks(
-            x, queryResidual: queryResidual, pooledKeys: pooledKeys, cos: cos, sin: sin,
-            offset: offset)
+            x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope, offset: offset)
     }
 
     /// Attends over the sliding window joined to the picked pooled chunks of
@@ -773,8 +845,6 @@ final class DeepSeekV4Attention: Module {
     ///   - x: The block input, shape `(batch, tokens, hidden)`.
     ///   - queryResidual: The low-rank query of this block, after its norm.
     ///   - pooled: The chunks of each branch.
-    ///   - cos: The cosine of each rotary angle of this block.
-    ///   - sin: The sine of each rotary angle of this block.
     ///   - offset: The absolute position of the first token of this block.
     ///   - batch: The number of sequences in this block.
     ///   - length: The number of tokens in this block.
@@ -783,8 +853,6 @@ final class DeepSeekV4Attention: Module {
         _ x: MLXArray,
         queryResidual: MLXArray,
         pooled: PooledChunks,
-        cos: MLXArray,
-        sin: MLXArray,
         offset: Int,
         batch: Int,
         length: Int
@@ -792,8 +860,8 @@ final class DeepSeekV4Attention: Module {
         let chunkCount = pooled.attention.dim(Self.chunkAxis)
         if let selector = indexer, let pooledKeys = pooled.indexer {
             return selector(
-                x, queryResidual: queryResidual, pooledKeys: pooledKeys,
-                cos: cos, sin: sin, offset: offset)
+                x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope,
+                offset: offset)
         }
         let visible = DeepSeekV4Math.pooledChunkVisibility(
             queryCount: length, offset: offset, chunkCount: chunkCount,
@@ -850,25 +918,24 @@ final class DeepSeekV4Attention: Module {
     /// divides by a mean of squares over 512 numbers, and float16 loses that
     /// sum.
     private func rotatedQueries(
-        _ queryResidual: MLXArray, batch: Int, length: Int, cos: MLXArray, sin: MLXArray
+        _ queryResidual: MLXArray, batch: Int, length: Int, position: MLXArray
     ) -> MLXArray {
         let projected = wqB(queryResidual).reshaped(batch, length, headCount, headDim)
         let wide = projected.asType(.float32)
         let normed = wide * rsqrt((wide * wide).mean(axis: -1, keepDims: true) + normEps)
-        return DeepSeekV4Math.applyPartialRoPE(
-            normed.asType(projected.dtype).transposed(axes: Self.headMajor),
-            cos: cos, sin: sin, ropeDim: ropeDim)
+        return rope(
+            normed.asType(projected.dtype).transposed(axes: Self.headMajor), offset: position)
     }
 
     /// Projects the one latent key/value head and turns its rotary
     /// dimensions forward.
     private func rotatedKeyValues(
-        _ x: MLXArray, batch: Int, length: Int, cos: MLXArray, sin: MLXArray
+        _ x: MLXArray, batch: Int, length: Int, position: MLXArray
     ) -> MLXArray {
         let projected = kvNorm(wkv(x))
             .reshaped(batch, length, Self.latentHeadCount, headDim)
             .transposed(axes: Self.headMajor)
-        return DeepSeekV4Math.applyPartialRoPE(projected, cos: cos, sin: sin, ropeDim: ropeDim)
+        return rope(projected, offset: position)
     }
 
     /// Reads the grouped low-rank half of the output projection.

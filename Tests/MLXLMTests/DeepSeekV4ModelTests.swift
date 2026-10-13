@@ -73,7 +73,8 @@ struct DeepSeekV4ModelTests {
     private static let promptLength = 8
 
     /// The number of decode steps ``decodeAdvancesTheCacheOneStepForEachToken``
-    /// takes.
+    /// and ``everyDecodeStepThroughTheCompiledTracesReadsItsOwnPosition(dtype:)``
+    /// take.
     private static let decodeStepCount = 3
 
     /// The batch of every forward pass below.
@@ -428,15 +429,23 @@ struct DeepSeekV4ModelTests {
     /// tests, and the bfloat16 the published checkpoint computes in.
     private static let decodeDTypes: [DType] = [.float32, .bfloat16]
 
-    @Test(arguments: [hashLayer, topKLayer], decodeDTypes)
-    func aDecodeStepThroughTheCompiledTracesGivesTheBitsOfTheOpPath(
-        layerIndex: Int, dtype: DType
-    ) throws {
-        // The op path below is the composition the decoder layer runs for a
-        // longer block, one stage at a time. Each stage of it reads the same
-        // functions the traces read, thus the only difference is the trace
-        // itself: the fusion of the elementwise chains across the stages.
-        let model = try Self.loadedModel()
+    /// One decoder layer of the loaded model in one dtype, with two caches
+    /// that each hold the same prefilled prompt.
+    private struct DecodeFixture {
+        /// The decoder layer under test.
+        let layer: DeepSeekV4DecoderLayer
+
+        /// The cache the compiled decode path writes.
+        let compiledCache: KVCache
+
+        /// The cache the op path writes.
+        let opCache: KVCache
+    }
+
+    /// Builds a ``DecodeFixture``: casts every float32 weight of the loaded
+    /// model to `dtype`, and prefills the prompt into two caches of one layer.
+    private static func decodeFixture(layerIndex: Int, dtype: DType) throws -> DecodeFixture {
+        let model = try loadedModel()
         let castWeights = model.parameters().flattened().map { key, value in
             (key, value.dtype == .float32 ? value.asType(dtype) : value)
         }
@@ -444,35 +453,82 @@ struct DeepSeekV4ModelTests {
         let layer = model.model.layers[layerIndex]
         let compiledCache = try model.newCache(parameters: nil)[layerIndex]
         let opCache = try model.newCache(parameters: nil)[layerIndex]
-        let prompt = Self.residualStream(tokenCount: Self.promptLength, seed: Self.promptStreamSeed)
+        let prompt = residualStream(tokenCount: promptLength, seed: promptStreamSeed)
             .asType(dtype)
-        let promptIds = Self.tokens(count: Self.promptLength)
+        let promptIds = tokens(count: promptLength)
         for cache in [compiledCache, opCache] {
             eval(layer(prompt, mask: .causal, cache: cache, inputIds: promptIds))
         }
-        let stream = Self.residualStream(tokenCount: 1, seed: Self.decodeStreamSeed).asType(dtype)
-        let inputIds = Self.tokens(count: 1, from: Self.promptLength)
+        return DecodeFixture(layer: layer, compiledCache: compiledCache, opCache: opCache)
+    }
 
-        let compiled = layer(stream, mask: .none, cache: compiledCache, inputIds: inputIds)
-
+    /// The op path of one decode step: the composition the decoder layer runs
+    /// for a longer block, one stage at a time.
+    ///
+    /// Each stage of it reads the same functions the traces read, thus the
+    /// only difference from the compiled path is the trace itself: the fusion
+    /// of the elementwise chains across the stages.
+    private static func opPathDecodeStep(
+        _ layer: DeepSeekV4DecoderLayer, stream: MLXArray, cache: KVCache, inputIds: MLXArray
+    ) -> MLXArray {
         let attentionCollapse = layer.attentionConnection.collapse(stream)
         let attended = layer.attention(
-            layer.attentionNorm(attentionCollapse.collapsed), mask: .none, cache: opCache)
+            layer.attentionNorm(attentionCollapse.collapsed), mask: .none, cache: cache)
         let afterAttention = layer.attentionConnection.expand(
             blockOutput: attended, residual: stream,
             post: attentionCollapse.post, comb: attentionCollapse.comb)
         let mixtureCollapse = layer.mixtureOfExpertsConnection.collapse(afterAttention)
         let mixed = layer.mixtureOfExperts(
             layer.mixtureOfExpertsNorm(mixtureCollapse.collapsed), inputIds: inputIds)
-        let reference = layer.mixtureOfExpertsConnection.expand(
+        return layer.mixtureOfExpertsConnection.expand(
             blockOutput: mixed, residual: afterAttention,
             post: mixtureCollapse.post, comb: mixtureCollapse.comb)
+    }
+
+    @Test(arguments: [hashLayer, topKLayer], decodeDTypes)
+    func aDecodeStepThroughTheCompiledTracesGivesTheBitsOfTheOpPath(
+        layerIndex: Int, dtype: DType
+    ) throws {
+        let fixture = try Self.decodeFixture(layerIndex: layerIndex, dtype: dtype)
+        let stream = Self.residualStream(tokenCount: 1, seed: Self.decodeStreamSeed).asType(dtype)
+        let inputIds = Self.tokens(count: 1, from: Self.promptLength)
+
+        let compiled = fixture.layer(
+            stream, mask: .none, cache: fixture.compiledCache, inputIds: inputIds)
+        let reference = Self.opPathDecodeStep(
+            fixture.layer, stream: stream, cache: fixture.opCache, inputIds: inputIds)
 
         #expect(compiled.shape == reference.shape)
         #expect(
             DeepSeekV4TestArrays.floats(compiled) == DeepSeekV4TestArrays.floats(reference),
             "layer \(layerIndex)")
-        #expect(compiledCache.offset == opCache.offset)
+        #expect(fixture.compiledCache.offset == fixture.opCache.offset)
+    }
+
+    @Test(arguments: decodeDTypes)
+    func everyDecodeStepThroughTheCompiledTracesReadsItsOwnPosition(dtype: DType) throws {
+        // The traces take the rotary position as an array argument. A trace
+        // that kept the position of its first call as a constant would turn
+        // every later step by the first angle, and the steps after the first
+        // would leave the op path.
+        let fixture = try Self.decodeFixture(layerIndex: Self.topKLayer, dtype: dtype)
+
+        for step in 0 ..< Self.decodeStepCount {
+            let stream = Self.residualStream(
+                tokenCount: 1, seed: Self.decodeStreamSeed + UInt64(step)
+            ).asType(dtype)
+            let inputIds = Self.tokens(count: 1, from: Self.promptLength + step)
+
+            let compiled = fixture.layer(
+                stream, mask: .none, cache: fixture.compiledCache, inputIds: inputIds)
+            let reference = Self.opPathDecodeStep(
+                fixture.layer, stream: stream, cache: fixture.opCache, inputIds: inputIds)
+
+            #expect(
+                DeepSeekV4TestArrays.floats(compiled) == DeepSeekV4TestArrays.floats(reference),
+                "decode step \(step)")
+        }
+        #expect(fixture.compiledCache.offset == Self.promptLength + Self.decodeStepCount)
     }
 
     // MARK: - Tied word embeddings

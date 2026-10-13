@@ -198,89 +198,85 @@ enum DeepSeekV4Math {
     /// `d / 2` pairs.
     private static let rotaryPairWidth = 2
 
-    /// Turns the trailing rotary dimensions of `x` by the given angle.
+    /// The period of a rotary pair that takes no position.
+    ///
+    /// `MLXFast.RoPE` turns a pair by `position / period` radians. An infinite
+    /// period gives an angle of zero at each position, thus a cosine of 1 and
+    /// a sine of 0, and the pair comes back with its own bits.
+    private static let noPositionPeriod: Float = .infinity
+
+    /// The factor `MLXFast.RoPE` multiplies each position by. The period
+    /// table holds every scaling already, thus the positions stay as they are.
+    private static let positionScale: Float = 1
+
+    /// Builds the period table that lets one `MLXFast.RoPE` call turn a whole
+    /// head.
     ///
     /// DeepSeek-V4 gives a position to the last `ropeDim` dimensions of a head
     /// and leaves the dimensions before them with no position at all. On the
     /// DeepSeek-V4-Flash head of width 512 with `qk_rope_head_dim` 64, the
     /// first 448 numbers of each head come back unchanged.
     ///
+    /// The table holds one period for each pair of the head. The leading
+    /// `(headDim - ropeDim) / 2` pairs take an infinite period, thus they do
+    /// not turn. The trailing pairs take `1 / inverseFrequency`. One call then
+    /// turns the whole head, with no slice and no concatenation. The mlx-vlm
+    /// reference does the same (`DeepseekV4RoPE._get_freqs` in
+    /// `mlx_vlm/models/deepseek_v4/language.py`).
+    ///
+    /// - Parameters:
+    ///   - inverseFrequency: The inverse frequency of each rotary pair, from
+    ///     ``yarnInvFreq(dim:base:originalMaxPositionEmbeddings:factor:betaFast:betaSlow:)``.
+    ///   - headDim: The width of the head the table turns.
+    ///   - positionStride: The number of raw positions between two rows. Each
+    ///     period divides by it, and the caller divides the offset by it, thus
+    ///     row `i` turns by the angle of raw position
+    ///     `(offset / positionStride + i) * positionStride`. A pooled chunk
+    ///     reads the compress ratio here (mlx-vlm `freq_scale`); every other
+    ///     row reads 1.
+    ///   - inverse: True for the backward rotation. The rotary periods then
+    ///     change sign, thus each angle and each sine change sign.
+    /// - Returns: The table, shape `(headDim / 2)`, in float32.
+    static func rotaryPeriods(
+        inverseFrequency: [Float], headDim: Int, positionStride: Int, inverse: Bool
+    ) -> MLXArray {
+        let ropeDim = inverseFrequency.count * rotaryPairWidth
+        precondition(
+            ropeDim <= headDim,
+            "ropeDim \(ropeDim) must not be wider than the head, which is \(headDim)")
+        precondition(positionStride > 0, "a position stride must be more than 0")
+        let direction: Float = inverse ? -1 : 1
+        let noPosition = [Float](
+            repeating: noPositionPeriod, count: (headDim - ropeDim) / rotaryPairWidth)
+        let rotary = inverseFrequency.map { direction * (1 / $0) / Float(positionStride) }
+        return MLXArray(noPosition + rotary)
+    }
+
+    /// Turns the rotary dimensions of `x` with one `MLXFast.RoPE` call.
+    ///
     /// The rotation is the traditional one: it turns adjacent pairs
     /// `(x[0], x[1])`, `(x[2], x[3])` and so on, not the two halves of the
     /// head. The other convention mixes position across the head and the model
     /// then repeats one token.
     ///
-    /// - Parameters:
-    ///   - x: The head values, shape `(..., headDim)`.
-    ///   - cos: The cosine of each angle, shape `(..., ropeDim / 2)`.
-    ///   - sin: The sine of each angle, shape `(..., ropeDim / 2)`.
-    ///   - ropeDim: The number of trailing dimensions that take a position.
-    /// - Returns: An array of the shape of `x`.
-    static func applyPartialRoPE(
-        _ x: MLXArray, cos: MLXArray, sin: MLXArray, ropeDim: Int
-    ) -> MLXArray {
-        partialRoPE(x, cos: cos, sin: sin, ropeDim: ropeDim, inverse: false)
-    }
-
-    /// Turns the trailing rotary dimensions of `x` back by the given angle.
-    ///
-    /// This is the conjugate of
-    /// ``applyPartialRoPE(_:cos:sin:ropeDim:)``: it flips the sign of the sine,
-    /// thus it undoes that rotation to the precision of the arithmetic.
-    ///
-    /// DeepSeek-V4 runs it on the output of attention, which strips the
-    /// position back out before the residual stream adds the block result.
+    /// The kernel turns each pair in float32 and rounds to the dtype of `x`
+    /// one time, thus no float32 value reaches the residual stream.
     ///
     /// - Parameters:
-    ///   - x: The head values, shape `(..., headDim)`.
-    ///   - cos: The cosine of each angle, shape `(..., ropeDim / 2)`.
-    ///   - sin: The sine of each angle, shape `(..., ropeDim / 2)`.
-    ///   - ropeDim: The number of trailing dimensions that take a position.
-    /// - Returns: An array of the shape of `x`.
-    static func applyInversePartialRoPE(
-        _ x: MLXArray, cos: MLXArray, sin: MLXArray, ropeDim: Int
-    ) -> MLXArray {
-        partialRoPE(x, cos: cos, sin: sin, ropeDim: ropeDim, inverse: true)
-    }
-
-    private static func partialRoPE(
-        _ x: MLXArray, cos: MLXArray, sin: MLXArray, ropeDim: Int, inverse: Bool
-    ) -> MLXArray {
-        guard let headDim = x.shape.last else {
-            preconditionFailure("x must have at least one axis")
-        }
-        precondition(
-            ropeDim <= headDim,
-            "ropeDim \(ropeDim) must not be wider than the head, which is \(headDim)")
-
-        let noPositionDim = headDim - ropeDim
-        guard noPositionDim > 0 else {
-            return rotatePairs(x, cos: cos, sin: sin, inverse: inverse)
-        }
-        let noPosition = x[.ellipsis, 0 ..< noPositionDim]
-        let rotated = rotatePairs(
-            x[.ellipsis, noPositionDim...], cos: cos, sin: sin, inverse: inverse)
-        return concatenated([noPosition, rotated], axis: -1)
-    }
-
-    /// Turns each adjacent pair of the last axis of `x`.
-    ///
-    /// The cosine and the sine move to the dtype of `x` first. The DeepSeek-V4
-    /// runtime builds the angle table in float32 and casts it down before it
-    /// rotates; without that cast float32 spreads from the table into the
-    /// whole residual stream and each later expert casts its weights too.
-    private static func rotatePairs(
-        _ x: MLXArray, cos: MLXArray, sin: MLXArray, inverse: Bool
-    ) -> MLXArray {
-        let cosine = cos.asType(x.dtype)
-        let sine = (inverse ? -sin : sin).asType(x.dtype)
-        let pairCount = (x.shape.last ?? 0) / rotaryPairWidth
-        let paired = x.reshaped(Array(x.shape.dropLast()) + [pairCount, rotaryPairWidth])
-        let real = paired[.ellipsis, 0]
-        let imaginary = paired[.ellipsis, 1]
-        let turnedReal = real * cosine - imaginary * sine
-        let turnedImaginary = real * sine + imaginary * cosine
-        return stacked([turnedReal, turnedImaginary], axis: -1).reshaped(x.shape)
+    ///   - x: The head values, shape `(..., rows, headDim)`, with at least
+    ///     three axes. Row `i` of the second-to-last axis takes position
+    ///     `offset + i`.
+    ///   - periods: The table of
+    ///     ``rotaryPeriods(inverseFrequency:headDim:positionStride:inverse:)``,
+    ///     shape `(headDim / 2)`.
+    ///   - offset: The position of the first row, a scalar `int32` array. An
+    ///     array rather than an `Int` keeps the position out of a compiled
+    ///     trace.
+    /// - Returns: An array of the shape and the dtype of `x`.
+    static func applyRoPE(_ x: MLXArray, periods: MLXArray, offset: MLXArray) -> MLXArray {
+        MLXFast.RoPE(
+            x, dimensions: x.dim(-1), traditional: true, base: nil, scale: positionScale,
+            offset: offset, freqs: periods)
     }
 
     // MARK: - YaRN inverse frequency

@@ -30,12 +30,14 @@
 //     `activationQATEnabled` flag of its own configuration. The published
 //     DeepSeek-V4-Flash `config.json` names no such key, thus this port leaves
 //     the round trip out. ``DeepSeekV4Indexer`` states the same.
-//  5. **The rotary tables come from the layer rope.** The file above reads
+//  5. **The layer rope turns the chunks.** The file above reads
 //     `rope.invFreq` and builds the tables itself. That property would put
 //     `attn.rope.invFreq` into the module parameters and thus into the
 //     weight-load check, which is the very trap
 //     Libraries/MLXLLM/Models/DeepSeekV4Attention.swift records. This file
-//     asks ``DeepSeekV4RoPE/cosSin(positions:)`` for the tables instead.
+//     hands the chunks to ``DeepSeekV4RoPE/rotatedChunks(_:firstPosition:)``
+//     instead, which turns them with one `MLXFast.RoPE` call at the compress
+//     ratio, as the mlx-vlm `Compressor` does with `freq_scale`.
 //
 // ``DeepSeekV4Attention`` and ``DeepSeekV4Indexer`` each hold a compressor,
 // thus the `attn.compressor.*` and `attn.indexer.compressor.*` tensors of the
@@ -81,9 +83,6 @@ final class DeepSeekV4Compressor: Module {
 
     /// True when each pooled chunk also reads the chunk before it.
     let poolsWithOverlap: Bool
-
-    /// The number of trailing head dimensions that take a position.
-    let ropeDim: Int
 
     /// The projection that makes the values one chunk pools, from `wkv`.
     @ModuleInfo(key: "wkv") var wkv: Linear
@@ -157,7 +156,6 @@ final class DeepSeekV4Compressor: Module {
         self.headDim = headDim
         self.projectionWidth = width
         self.poolsWithOverlap = overlaps
-        self.ropeDim = configuration.qkRopeHeadDim
 
         self._wkv.wrappedValue = Linear(configuration.hiddenSize, width, bias: false)
         self._wgate.wrappedValue = Linear(configuration.hiddenSize, width, bias: false)
@@ -254,14 +252,7 @@ final class DeepSeekV4Compressor: Module {
         let weights = softmax(windows.gates, axis: WindowAxis.position, precise: true)
         let pooled = norm((windows.values * weights).sum(axis: WindowAxis.position).asType(dtype))
 
-        let positions =
-            MLXArray(Int32(0) ..< Int32(chunkCount)) * Int32(chunkWidth) + Int32(offset)
-        let angles = rope.cosSin(positions: positions)
-        return DeepSeekV4Math.applyPartialRoPE(
-            pooled,
-            cos: angles.cos.expandedDimensions(axis: WindowAxis.batch),
-            sin: angles.sin.expandedDimensions(axis: WindowAxis.batch),
-            ropeDim: ropeDim)
+        return rope.rotatedChunks(pooled, firstPosition: offset)
     }
 
     /// The values and the gate logits of each chunk, ready for the softmax.

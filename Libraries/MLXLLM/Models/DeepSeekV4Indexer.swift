@@ -66,9 +66,6 @@ final class DeepSeekV4Indexer: Module {
     /// The number of pooled chunks one query keeps, from `index_topk`.
     let topK: Int
 
-    /// The number of trailing head dimensions that take a position.
-    let ropeDim: Int
-
     /// The number of raw positions one pooled chunk covers, which is the
     /// compress ratio of this layer.
     let chunkWidth: Int
@@ -108,7 +105,7 @@ final class DeepSeekV4Indexer: Module {
     /// chunk this selector picks names a chunk of the attention pool.
     ///
     /// The caller pools with this module and hands the answer to
-    /// ``callAsFunction(_:queryResidual:pooledKeys:cos:sin:offset:)``.
+    /// ``callAsFunction(_:queryResidual:pooledKeys:rope:offset:)``.
     @ModuleInfo(key: "compressor") var compressor: DeepSeekV4Compressor
 
     /// The axis a `(batch, heads, tokens, width)` tensor holds its heads on.
@@ -154,7 +151,6 @@ final class DeepSeekV4Indexer: Module {
         self.headCount = configuration.indexNHeads
         self.headDim = configuration.indexHeadDim
         self.topK = configuration.indexTopK
-        self.ropeDim = configuration.qkRopeHeadDim
         self.chunkWidth = configuration.compressRatio(ofLayer: layer)
         self.scale = 1 / sqrt(Float(configuration.indexHeadDim))
         self.headWeightScale = 1 / sqrt(Float(configuration.indexNHeads))
@@ -182,8 +178,7 @@ final class DeepSeekV4Indexer: Module {
     ///     shape `(batch, tokens, qLoraRank)`.
     ///   - pooledKeys: The chunks the compressor pooled, shape
     ///     `(batch, chunks, headDim)`.
-    ///   - cos: The cosine of each rotary angle of this block.
-    ///   - sin: The sine of each rotary angle of this block.
+    ///   - rope: The rotary position of this layer, which turns the queries.
     ///   - offset: The absolute position of the first token of this block.
     /// - Returns: The selection, shape `(batch, 1, tokens, chunks)`, where a
     ///   true entry names a chunk its query reads.
@@ -191,8 +186,7 @@ final class DeepSeekV4Indexer: Module {
         _ x: MLXArray,
         queryResidual: MLXArray,
         pooledKeys: MLXArray,
-        cos: MLXArray,
-        sin: MLXArray,
+        rope: DeepSeekV4RoPE,
         offset: Int
     ) -> MLXArray {
         let batch = x.dim(0)
@@ -212,7 +206,8 @@ final class DeepSeekV4Indexer: Module {
 
         let ranked = topChunks(
             of: chunkScores(
-                x, queryResidual: queryResidual, pooledKeys: pooledKeys, cos: cos, sin: sin),
+                x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope,
+                offset: offset),
             visible: visible)
         let chunkIndices = MLXArray(Int32(0) ..< Int32(chunkCount))
         let picked =
@@ -243,8 +238,7 @@ final class DeepSeekV4Indexer: Module {
     ///     shape `(batch, tokens, qLoraRank)`.
     ///   - pooledKeys: The chunks the compressor pooled, shape
     ///     `(batch, chunks, headDim)`. It must hold more than ``topK`` chunks.
-    ///   - cos: The cosine of each rotary angle of this block.
-    ///   - sin: The sine of each rotary angle of this block.
+    ///   - rope: The rotary position of this layer, which turns the queries.
     ///   - offset: The absolute position of the first token of this block.
     /// - Returns: The chunk indices, shape `(batch, tokens, topK)`, in no
     ///   particular order.
@@ -252,8 +246,7 @@ final class DeepSeekV4Indexer: Module {
         _ x: MLXArray,
         queryResidual: MLXArray,
         pooledKeys: MLXArray,
-        cos: MLXArray,
-        sin: MLXArray,
+        rope: DeepSeekV4RoPE,
         offset: Int
     ) -> MLXArray {
         let chunkCount = pooledKeys.dim(Self.chunkAxis)
@@ -267,7 +260,8 @@ final class DeepSeekV4Indexer: Module {
             : chunkVisibility(queryCount: x.dim(1), offset: offset, chunkCount: chunkCount)
         return topChunks(
             of: chunkScores(
-                x, queryResidual: queryResidual, pooledKeys: pooledKeys, cos: cos, sin: sin),
+                x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope,
+                offset: offset),
             visible: visible)
     }
 
@@ -313,22 +307,21 @@ final class DeepSeekV4Indexer: Module {
     ///   - x: The block input, shape `(batch, tokens, hidden)`.
     ///   - queryResidual: The low-rank query of this layer, after its norm.
     ///   - pooledKeys: The chunks the compressor pooled.
-    ///   - cos: The cosine of each rotary angle of this block.
-    ///   - sin: The sine of each rotary angle of this block.
+    ///   - rope: The rotary position of this layer, which turns the queries.
+    ///   - offset: The absolute position of the first token of this block.
     /// - Returns: The scores, shape `(batch, tokens, chunks)`, in float32.
     private func chunkScores(
         _ x: MLXArray,
         queryResidual: MLXArray,
         pooledKeys: MLXArray,
-        cos: MLXArray,
-        sin: MLXArray
+        rope: DeepSeekV4RoPE,
+        offset: Int
     ) -> MLXArray {
         let projected = wqB(queryResidual)
             .reshaped(x.dim(0), x.dim(1), headCount, headDim)
             .swappedAxes(Self.headAxis, Self.batchMajorHeadAxis)
-        let queries = DeepSeekV4Math.applyPartialRoPE(
-            projected, cos: cos, sin: sin, ropeDim: ropeDim
-        ).asType(.float32)
+        let queries = rope(projected, offset: DeepSeekV4RoPE.position(offset))
+            .asType(.float32)
         let keys = pooledKeys.asType(.float32)
             .expandedDimensions(axis: Self.headAxis)
             .swappedAxes(-1, Self.matrixRowAxis)

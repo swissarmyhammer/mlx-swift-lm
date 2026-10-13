@@ -143,11 +143,8 @@ struct DeepSeekV4IndexerTests {
         /// The pooled keys, shape `(batch, chunks, indexHeadDim)`.
         let pooledKeys: MLXArray
 
-        /// The cosine table of the block.
-        let cos: MLXArray
-
-        /// The sine table of the block.
-        let sin: MLXArray
+        /// The rotary position of the indexer layer.
+        let rope: DeepSeekV4RoPE
 
         /// The absolute position of the first token of the block.
         let offset: Int
@@ -165,14 +162,11 @@ struct DeepSeekV4IndexerTests {
     private static func blockInputs(
         batch: Int, tokens: Int, chunks: Int, offset: Int, seed: UInt64
     ) throws -> BlockInputs {
-        let angles = DeepSeekV4RoPE(configuration: try configuration(), layer: indexerLayer)
-            .cosSin(offset: offset, length: tokens)
-        return BlockInputs(
+        BlockInputs(
             x: fixture([batch, tokens, hiddenSize], seed: seed),
             queryResidual: fixture([batch, tokens, queryLoraRank], seed: seed + 1),
             pooledKeys: fixture([batch, chunks, indexHeadDim], seed: seed + 2),
-            cos: angles.cos.expandedDimensions(axes: [0, 1]),
-            sin: angles.sin.expandedDimensions(axes: [0, 1]),
+            rope: DeepSeekV4RoPE(configuration: try configuration(), layer: indexerLayer),
             offset: offset)
     }
 
@@ -198,7 +192,7 @@ struct DeepSeekV4IndexerTests {
             batch: batch, tokens: tokens, chunks: chunks, offset: offset, seed: seed)
         let mask = indexer(
             inputs.x, queryResidual: inputs.queryResidual, pooledKeys: inputs.pooledKeys,
-            cos: inputs.cos, sin: inputs.sin, offset: inputs.offset)
+            rope: inputs.rope, offset: inputs.offset)
         eval(mask)
         return mask
     }
@@ -337,7 +331,7 @@ struct DeepSeekV4IndexerTests {
                             seed: Self.weightSeed + UInt64(offset + chunks + tokens))
                         let ranked = indexer.rankedChunks(
                             inputs.x, queryResidual: inputs.queryResidual,
-                            pooledKeys: inputs.pooledKeys, cos: inputs.cos, sin: inputs.sin,
+                            pooledKeys: inputs.pooledKeys, rope: inputs.rope,
                             offset: inputs.offset)
                         let mask = try Self.selection(
                             from: indexer, batch: batch, tokens: tokens, chunks: chunks,
