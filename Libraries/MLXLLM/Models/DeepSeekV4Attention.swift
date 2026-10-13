@@ -109,7 +109,12 @@ final class DeepSeekV4RoPE: Module {
 
     /// One kind of row the layer turns: a head width, a position stride and a
     /// direction.
-    private struct TableKind {
+    ///
+    /// Two kinds with the same three values read the same table, thus the
+    /// kind is `Hashable` and ``tableKinds(configuration:layer:)`` gives each
+    /// kind one time. ``key`` names all three values, thus two different kinds
+    /// never share a key.
+    private struct TableKind: Hashable {
         /// The width of the head the table turns.
         let headWidth: Int
 
@@ -192,14 +197,18 @@ final class DeepSeekV4RoPE: Module {
     /// the chunks of the attention, and the chunks inside the indexer when it
     /// holds one.
     ///
+    /// A checkpoint may give the indexer heads the width of the attention
+    /// heads. The two widths then ask for the same kinds, and the set keeps
+    /// one of each: the attention and the indexer read the same table.
+    ///
     /// - Parameters:
     ///   - configuration: The configuration of the checkpoint.
     ///   - layer: The index of the decoder layer.
     /// - Returns: The kinds, each one time.
     private static func tableKinds(
         configuration: DeepSeekV4Configuration, layer: Int
-    ) -> [TableKind] {
-        let headWidths =
+    ) -> Set<TableKind> {
+        let headWidths: Set<Int> =
             configuration.hasIndexer(layer: layer)
             ? [configuration.headDim, configuration.indexHeadDim] : [configuration.headDim]
         let forward = headWidths.map {
@@ -207,12 +216,12 @@ final class DeepSeekV4RoPE: Module {
         }
         let backward = TableKind(
             headWidth: configuration.headDim, positionStride: tokenStride, inverse: true)
-        guard configuration.hasCompressor(layer: layer) else { return forward + [backward] }
+        guard configuration.hasCompressor(layer: layer) else { return Set(forward + [backward]) }
         let ratio = configuration.compressRatio(ofLayer: layer)
         let pooled = headWidths.map {
             TableKind(headWidth: $0, positionStride: ratio, inverse: false)
         }
-        return forward + [backward] + pooled
+        return Set(forward + [backward] + pooled)
     }
 
     /// The four numbers a YaRN scaling needs.

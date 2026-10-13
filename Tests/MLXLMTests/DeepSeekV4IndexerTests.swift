@@ -61,16 +61,22 @@ struct DeepSeekV4IndexerTests {
     /// neither a compressor nor an indexer.
     private static let plainLayer = 0
 
+    /// The width of one attention head of the synthetic checkpoint.
+    private static let attentionHeadDim = 8
+
     /// The `config.json` of the synthetic checkpoint.
     ///
+    /// - Parameter indexHeadWidth: The `index_head_dim` of the checkpoint.
     /// - Returns: The decoded configuration.
-    private static func configuration() throws -> DeepSeekV4Configuration {
+    private static func configuration(
+        indexHeadWidth: Int = indexHeadDim
+    ) throws -> DeepSeekV4Configuration {
         let json = """
             {
               "hidden_size": \(hiddenSize),
               "num_attention_heads": 2,
               "num_key_value_heads": 1,
-              "head_dim": 8,
+              "head_dim": \(attentionHeadDim),
               "qk_rope_head_dim": \(ropeDim),
               "q_lora_rank": \(queryLoraRank),
               "o_groups": 2,
@@ -81,7 +87,7 @@ struct DeepSeekV4IndexerTests {
               "compress_rope_theta": 160000.0,
               "compress_ratios": [0, 0, \(indexerRatio), 128],
               "index_n_heads": \(indexHeadCount),
-              "index_head_dim": \(indexHeadDim),
+              "index_head_dim": \(indexHeadWidth),
               "index_topk": \(indexTopK)
             }
             """
@@ -121,15 +127,25 @@ struct DeepSeekV4IndexerTests {
     /// - Returns: The loaded indexer.
     private static func loadedIndexer(seed: UInt64) throws -> DeepSeekV4Indexer {
         let indexer = DeepSeekV4Indexer(configuration: try configuration(), layer: indexerLayer)
+        try loadRepeatableWeights(into: indexer, seed: seed)
+        return indexer
+    }
+
+    /// Loads a repeatable random weight into every parameter a module
+    /// declares, through `update(parameters:verify:[.all])`.
+    ///
+    /// - Parameters:
+    ///   - module: The module to fill.
+    ///   - seed: The seed the weight filler starts at.
+    private static func loadRepeatableWeights(into module: Module, seed: UInt64) throws {
         var checkpoint: [String: MLXArray] = [:]
         var next = seed
-        for (key, value) in indexer.parameters().flattened() {
+        for (key, value) in module.parameters().flattened() {
             next += 1
             checkpoint[key] = fixture(value.shape, seed: next)
         }
-        try indexer.update(parameters: ModuleParameters.unflattened(checkpoint), verify: [.all])
-        eval(indexer)
-        return indexer
+        try module.update(parameters: ModuleParameters.unflattened(checkpoint), verify: [.all])
+        eval(module)
     }
 
     /// The arguments one indexer call reads for one block of tokens.
@@ -452,6 +468,36 @@ struct DeepSeekV4IndexerTests {
         #expect(
             DeepSeekV4Attention(configuration: configuration, layer: Self.plainLayer)
                 .indexer == nil)
+    }
+
+    /// The number of tokens the equal-width forward test reads: one whole
+    /// chunk more than the indexer keeps, thus the indexer ranks the chunks.
+    private static let equalWidthTokenCount = indexerRatio * (indexTopK + 1)
+
+    /// The seed of the input the equal-width forward test reads.
+    private static let equalWidthInputSeed: UInt64 = 20_261_013
+
+    /// A layer whose indexer heads are as wide as its attention heads.
+    ///
+    /// The attention compressor and the indexer compressor then pool chunks
+    /// of the same width at the same stride, thus the layer turns the two
+    /// kinds of pooled rows with one period table. The test fails when the
+    /// layer cannot build, or when the forward gives a value that is not
+    /// finite.
+    @Test func anIndexerAsWideAsTheAttentionHeadsBuildsAndRunsAForward() throws {
+        let configuration = try Self.configuration(indexHeadWidth: Self.attentionHeadDim)
+        let attention = DeepSeekV4Attention(
+            configuration: configuration, layer: Self.indexerLayer)
+        try Self.loadRepeatableWeights(into: attention, seed: Self.weightSeed)
+        let input = Self.fixture(
+            [1, Self.equalWidthTokenCount, Self.hiddenSize], seed: Self.equalWidthInputSeed)
+
+        let output = attention(input, mask: .causal, cache: nil)
+        let everyValueIsFinite = DeepSeekV4TestArrays.floats(output).allSatisfy(\.isFinite)
+
+        #expect(attention.indexer != nil)
+        #expect(output.shape == [1, Self.equalWidthTokenCount, Self.hiddenSize])
+        #expect(everyValueIsFinite)
     }
 
     // MARK: - The load filter

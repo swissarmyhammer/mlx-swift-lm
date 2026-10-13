@@ -61,6 +61,47 @@ comments:
     - evidence: swift build --build-tests exit 0 (changed files touched; only known warning "missing creator for mutated node"). xcrun xctest on all 5 bundles, exit 0 each: MLXLMTests 1389 tests passed (716 XCTest, 0 failures), MLXFoundationModelsTests 367 passed, MLXGuidedGenerationTests 70 passed, CXGrammarTests 7 passed, MLXHuggingFaceMacrosTests 5 passed (0 failures). 0 skipped. DeepSeekV4RoPEParityTests suite passed. xcodebuild build-for-testing IntegrationTesting: TEST BUILD SUCCEEDED, 0 warnings. Real-weights integration tests not run, as ordered.
     - next: review
   timestamp: 2026-10-13T23:21:03.534879+00:00
+- actor: claude-code
+  id: 01m4vscrpw9jv0zw7xp8sd9rhg
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (16a80b0): 2 findings (2 confirmed, 2 refuted, 14 attempted, 0 failed). Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:176 (completeness/invariant-propagation), Tests/MLXLMTests/DeepSeekV4MathHelpersTests.swift:293 (duplication/duplication).
+    - acceptance criteria: each one has its evidence in a comment. One MLXFast.RoPE call for each site: "Implementation landed". Parity: the tolerances (3.2e-4 float32, 0.03125 bfloat16) and the measured gaps they come from are in "Implementation landed"; the rotary dimensions are not bit-exact because the fused kernel rounds one time. Unit tests: "test — green". Decode measurement before and after, GPU idle: "Measurements 2026-10-13".
+    - next: implement the two findings in the 2026-10-13 18:21 Review Findings section. The task stays in review.
+  timestamp: 2026-10-13T23:26:05.020544+00:00
+- actor: claude-code
+  id: 01m4vsdc6frejt7gkf7f2n4nz5
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — DeepSeekV4MathHelpers.swift, DeepSeekV4Attention.swift, DeepSeekV4Indexer.swift, DeepSeekV4Compressor.swift, DeepSeekV4.swift, DeepSeekV4RoPEParityTests.swift (new), and 4 test files
+    - test: green — all 5 bundles exit 0, 0 failures; IntegrationTesting build-for-testing succeeded
+    - commit: 16a80b0
+    - review: findings — Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:176, Tests/MLXLMTests/DeepSeekV4MathHelpersTests.swift:293
+  timestamp: 2026-10-13T23:26:24.975288+00:00
+- actor: claude-code
+  id: 01m4vstq7sw70kj66fnpd41805
+  text: |-
+    ### Review findings 2026-10-13 18:21 — work done (not committed)
+    - Finding 1 (invariant-propagation): `TableKind` is now `Hashable`, and `tableKinds(configuration:layer:)` returns `Set<TableKind>` (the head widths are also a `Set<Int>`). Thus each kind is in the list one time by construction, and `key` names all three values, thus `Dictionary(uniqueKeysWithValues:)` cannot trap. When `index_head_dim == head_dim`, the attention and the indexer read the same table. The search of the DeepSeek-V4 files found no other dictionary or table built from these kinds.
+    - RED before the fix: the new test `DeepSeekV4IndexerTests.anIndexerAsWideAsTheAttentionHeadsBuildsAndRunsAForward()` (layer 2, `index_head_dim` 8 == `head_dim` 8, 16 tokens, cache nil) stopped the process: `Fatal error: Duplicate values for key: 'width8-stride1-forward'`. Note: the forward kinds also had the duplicate key, not only the pooled kinds. GREEN after the fix: passed in 0.047 s.
+    - The test file has a new shared helper `loadRepeatableWeights(into:seed:)`; `loadedIndexer(seed:)` calls it. `configuration(indexHeadWidth:)` takes the indexer width (default `indexHeadDim`), and `head_dim` is the named constant `attentionHeadDim`.
+    - Finding 2 (duplication): new test support file `Tests/MLXLMTests/DeepSeekV4FlashYarn.swift` (`enum DeepSeekV4FlashYarn`) holds the Flash constants (`ropeDim`, `compressRopeTheta`, `factor`, `originalMaxPositionEmbeddings`, `betaFast`, `betaSlow`) and `inverseFrequency() -> MLXArray`. `DeepSeekV4RoPEParityTests.yarnInverseFrequency()` and `DeepSeekV4MathHelpersTests.deepseekV4InverseFrequency()` are deleted, with their copies of the constants. The third copy of the call, `yarnInvFreqMatchesPythonReference()` (literal 160_000, 65536, 16, 32, 1), now calls the shared helper too. `.asArray(Float.self)` stays at the MathHelpers call site.
+    - Production behaviour on Flash does not change: widths 512 and 128 are different, thus the layer builds the same tables as before. No real-weights run.
+  timestamp: 2026-10-13T23:33:42.265325+00:00
+- actor: claude-code
+  id: 01m4vsttbb1vr07m8995brtgxr
+  text: |-
+    ### implement — changed
+    - evidence: 5 files — Libraries/MLXLLM/Models/DeepSeekV4Attention.swift; Tests/MLXLMTests/DeepSeekV4FlashYarn.swift (new), DeepSeekV4IndexerTests.swift, DeepSeekV4MathHelpersTests.swift, DeepSeekV4RoPEParityTests.swift. `swift build --build-tests` exit 0 (only the known toolchain warning "missing creator for mutated node"); `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` exit 0: 716 XCTest 0 failures, 1390 Swift Testing passed in 111 suites (one new test). Both 2026-10-13 18:21 findings checked.
+    - next: /test, then /review (task left in doing, not committed)
+  timestamp: 2026-10-13T23:33:45.451987+00:00
+- actor: claude-code
+  id: 01m4vt3dpe0ecedng3rb2hrq5a
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests (changed files touched) — no new warning; only the known "missing creator for mutated node" (mlx-swift_Cmlx.bundle). xcrun xctest on all 5 bundles, exit 0. MLXLMTests: 716 XCTest, 0 failures; 1390 Swift Testing in 111 suites, passed. CXGrammarTests 7 ST. MLXFoundationModelsTests 367 ST. MLXGuidedGenerationTests 70 ST. MLXHuggingFaceMacrosTests 5 XCTest. xcodebuild build-for-testing IntegrationTesting: TEST BUILD SUCCEEDED, no new warning. 0 skipped.
+    - next: review
+  timestamp: 2026-10-13T23:38:27.406871+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'DeepSeek-V4 speed: one MLXFast.rope call with a freqs table'
@@ -88,3 +129,14 @@ In mlx-lm PR 1192, the Apple (angeloskath) RoPE changes took decode on an M3 Ult
 - [x] The existing DeepSeek-V4 unit tests pass.
 - [x] A decode-step measurement on the real checkpoint, with the GPU otherwise idle, shows the speed before and after.
 #deepseek-v4 #performance
+
+## Review Findings (2026-10-13 18:21)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 10 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4RH9AEVJP0MDG34XPHF8PWT.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4RH9AEVJP0MDG34XPHF8PWT.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:176` `completeness/invariant-propagation` — The period-table key is built from head width, stride and direction only. When a layer holds both an attention compressor and an indexer, and the two head widths are equal, `tableKinds` returns two kinds with the same key. `Dictionary(uniqueKeysWithValues:)` then traps at layer init. The fix that added the indexer width did not carry the uniqueness rule to the keys it builds. Deduplicate the kinds before building the dictionary, for example with `Dictionary(_:uniquingKeysWith:)` or by collecting the kinds into a `Set` first. Add a test with `indexHeadDim == headDim` on a compressor-and-indexer layer so the case is locked in.
+- [x] `Tests/MLXLMTests/DeepSeekV4MathHelpersTests.swift:293` `duplication/duplication` — deepseekV4InverseFrequency() repeats the same yarnInvFreq call that DeepSeekV4RoPEParityTests.yarnInverseFrequency() makes. Both pass dim 64, base 160000, original max positions 65536, factor 16, beta_fast 32 and beta_slow 1. If one copy changes and the other does not, the two test suites check different tables. Keep one shared helper for the DeepSeek-V4-Flash YaRN inverse-frequency table, in one test support file. Have both suites call it and delete the second copy. Keep the return-type conversion at the call site.

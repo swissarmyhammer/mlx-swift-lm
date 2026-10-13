@@ -41,26 +41,10 @@ struct DeepSeekV4RoPEParityTests {
     private static let indexHeadDim = 128
 
     /// The number of trailing head dimensions that take a position.
-    private static let ropeDim = 64
+    private static let ropeDim = DeepSeekV4FlashYarn.ropeDim
 
     /// The `rope_theta` of the DeepSeek-V4-Flash checkpoint.
     private static let ropeTheta: Float = 10_000
-
-    /// The `compress_rope_theta` of the DeepSeek-V4-Flash checkpoint.
-    private static let compressRopeTheta: Float = 160_000
-
-    /// The YaRN `factor` of the DeepSeek-V4-Flash checkpoint.
-    private static let yarnFactor: Float = 16
-
-    /// The YaRN `original_max_position_embeddings` of the DeepSeek-V4-Flash
-    /// checkpoint.
-    private static let yarnOriginalMaxPositionEmbeddings = 65_536
-
-    /// The YaRN `beta_fast` of the DeepSeek-V4-Flash checkpoint.
-    private static let yarnBetaFast: Float = 32
-
-    /// The YaRN `beta_slow` of the DeepSeek-V4-Flash checkpoint.
-    private static let yarnBetaSlow: Float = 1
 
     /// A YaRN factor that leaves every frequency alone.
     private static let noScaling: Float = 1
@@ -80,6 +64,7 @@ struct DeepSeekV4RoPEParityTests {
     /// A checkpoint of four layers with the real head widths, the real rope
     /// thetas and the real YaRN block.
     private static func configuration() throws -> DeepSeekV4Configuration {
+        let yarn = DeepSeekV4FlashYarn.self
         let json = """
             {
               "num_hidden_layers": 4,
@@ -87,13 +72,13 @@ struct DeepSeekV4RoPEParityTests {
               "qk_rope_head_dim": \(ropeDim),
               "index_head_dim": \(indexHeadDim),
               "rope_theta": \(ropeTheta),
-              "compress_rope_theta": \(compressRopeTheta),
+              "compress_rope_theta": \(yarn.compressRopeTheta),
               "rope_scaling": {
                 "type": "yarn",
-                "factor": \(yarnFactor),
-                "original_max_position_embeddings": \(yarnOriginalMaxPositionEmbeddings),
-                "beta_fast": \(yarnBetaFast),
-                "beta_slow": \(yarnBetaSlow)
+                "factor": \(yarn.factor),
+                "original_max_position_embeddings": \(yarn.originalMaxPositionEmbeddings),
+                "beta_fast": \(yarn.betaFast),
+                "beta_slow": \(yarn.betaSlow)
               },
               "compress_ratios": [0, 0, 4, 128]
             }
@@ -105,17 +90,9 @@ struct DeepSeekV4RoPEParityTests {
     private static func plainInverseFrequency() -> MLXArray {
         DeepSeekV4Math.yarnInvFreq(
             dim: ropeDim, base: ropeTheta,
-            originalMaxPositionEmbeddings: yarnOriginalMaxPositionEmbeddings,
-            factor: noScaling, betaFast: yarnBetaFast, betaSlow: yarnBetaSlow)
-    }
-
-    /// The inverse-frequency table of a layer that reads
-    /// `compress_rope_theta` with the YaRN scaling.
-    private static func yarnInverseFrequency() -> MLXArray {
-        DeepSeekV4Math.yarnInvFreq(
-            dim: ropeDim, base: compressRopeTheta,
-            originalMaxPositionEmbeddings: yarnOriginalMaxPositionEmbeddings,
-            factor: yarnFactor, betaFast: yarnBetaFast, betaSlow: yarnBetaSlow)
+            originalMaxPositionEmbeddings: DeepSeekV4FlashYarn.originalMaxPositionEmbeddings,
+            factor: noScaling, betaFast: DeepSeekV4FlashYarn.betaFast,
+            betaSlow: DeepSeekV4FlashYarn.betaSlow)
     }
 
     // MARK: - The inputs
@@ -247,14 +224,14 @@ struct DeepSeekV4RoPEParityTests {
     func theCompressRopeThetaLayerTurnsTheHeadWithYaRNAsTheOpPath(dtype: DType) throws {
         try checkHeads(
             layer: Self.overlapLayer, width: Self.headDim, inverse: false,
-            inverseFrequency: Self.yarnInverseFrequency(), dtype: dtype)
+            inverseFrequency: DeepSeekV4FlashYarn.inverseFrequency(), dtype: dtype)
     }
 
     @Test(arguments: dtypes)
     func theIndexerHeadTurnsAsTheOpPath(dtype: DType) throws {
         try checkHeads(
             layer: Self.overlapLayer, width: Self.indexHeadDim, inverse: false,
-            inverseFrequency: Self.yarnInverseFrequency(), dtype: dtype)
+            inverseFrequency: DeepSeekV4FlashYarn.inverseFrequency(), dtype: dtype)
     }
 
     @Test(arguments: dtypes)
@@ -268,7 +245,7 @@ struct DeepSeekV4RoPEParityTests {
     func theInverseRotationOfTheCompressRopeThetaLayerTurnsAsTheOpPath(dtype: DType) throws {
         try checkHeads(
             layer: Self.overlapLayer, width: Self.headDim, inverse: true,
-            inverseFrequency: Self.yarnInverseFrequency(), dtype: dtype)
+            inverseFrequency: DeepSeekV4FlashYarn.inverseFrequency(), dtype: dtype)
     }
 
     // MARK: - Pooled rows
@@ -283,7 +260,7 @@ struct DeepSeekV4RoPEParityTests {
         for first in Self.firstChunkPositions {
             let turned = rope.rotatedChunks(input, firstPosition: first)
             let reference = OpPathRoPE.turned(
-                input, inverseFrequency: Self.yarnInverseFrequency(),
+                input, inverseFrequency: DeepSeekV4FlashYarn.inverseFrequency(),
                 positions: Self.positions(from: first, count: Self.chunkCount, stride: ratio),
                 ropeDim: Self.ropeDim, inverse: false)
             expectParity(

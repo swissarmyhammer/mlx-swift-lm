@@ -260,9 +260,6 @@ struct DeepSeekV4MathHelpersTests {
     /// The real DeepSeek-V4 head width.
     private static let deepseekV4HeadDim = 512
 
-    /// The real DeepSeek-V4 rotary width.
-    private static let deepseekV4RopeDim = 64
-
     /// The number of positions the shape tests run.
     private static let deepseekV4SequenceLength = 3
 
@@ -270,40 +267,15 @@ struct DeepSeekV4MathHelpersTests {
     /// by zero, thus the tests need a later position.
     private static let deepseekV4Offset: Int32 = 5
 
-    /// The DeepSeek-V4-Flash `compress_rope_theta`.
-    private static let compressRopeTheta: Float = 160_000
-
-    /// The DeepSeek-V4-Flash YaRN `original_max_position_embeddings`.
-    private static let yarnOriginalMaxPositionEmbeddings = 65_536
-
-    /// The DeepSeek-V4-Flash YaRN `factor`.
-    private static let yarnFactor: Float = 16
-
-    /// The DeepSeek-V4-Flash YaRN `beta_fast`.
-    private static let yarnBetaFast: Float = 32
-
-    /// The DeepSeek-V4-Flash YaRN `beta_slow`.
-    private static let yarnBetaSlow: Float = 1
-
     /// The seed of the random block the shape tests turn.
     private static let deepseekV4BlockSeed: UInt64 = 20_260_810
-
-    /// The inverse-frequency table of a DeepSeek-V4-Flash layer with a
-    /// compressor: `compress_rope_theta` with the YaRN scaling.
-    private static func deepseekV4InverseFrequency() -> [Float] {
-        DeepSeekV4Math.yarnInvFreq(
-            dim: deepseekV4RopeDim, base: compressRopeTheta,
-            originalMaxPositionEmbeddings: yarnOriginalMaxPositionEmbeddings,
-            factor: yarnFactor, betaFast: yarnBetaFast, betaSlow: yarnBetaSlow
-        ).asArray(Float.self)
-    }
 
     /// Turns a deterministic block of the real DeepSeek-V4 head width.
     private func deepseekV4Rotation(_ x: MLXArray, inverse: Bool) -> MLXArray {
         DeepSeekV4Math.applyRoPE(
             x,
             periods: DeepSeekV4Math.rotaryPeriods(
-                inverseFrequency: Self.deepseekV4InverseFrequency(),
+                inverseFrequency: DeepSeekV4FlashYarn.inverseFrequency().asArray(Float.self),
                 headDim: Self.deepseekV4HeadDim, positionStride: Self.tokenStride,
                 inverse: inverse),
             offset: MLXArray(Self.deepseekV4Offset))
@@ -318,7 +290,7 @@ struct DeepSeekV4MathHelpersTests {
 
     @Test func applyRoPELeavesTheNoPositionDimensionsAlone() {
         let x = deepseekV4Block()
-        let noPositionDim = Self.deepseekV4HeadDim - Self.deepseekV4RopeDim
+        let noPositionDim = Self.deepseekV4HeadDim - DeepSeekV4FlashYarn.ropeDim
 
         let rotated = deepseekV4Rotation(x, inverse: false)
 
@@ -370,16 +342,10 @@ struct DeepSeekV4MathHelpersTests {
     ]
 
     @Test func yarnInvFreqMatchesPythonReference() {
-        let invFreq = DeepSeekV4Math.yarnInvFreq(
-            dim: Self.deepseekV4RopeDim,
-            base: 160_000,
-            originalMaxPositionEmbeddings: 65536,
-            factor: 16,
-            betaFast: 32,
-            betaSlow: 1)
+        let invFreq = DeepSeekV4FlashYarn.inverseFrequency()
         eval(invFreq)
 
-        #expect(invFreq.shape == [Self.deepseekV4RopeDim / 2])
+        #expect(invFreq.shape == [DeepSeekV4FlashYarn.ropeDim / Self.pairWidth])
         expectCloseRelative(
             DeepSeekV4TestArrays.floats(invFreq), Self.expectedYarnInvFreq,
             within: Self.relativeTolerance,
