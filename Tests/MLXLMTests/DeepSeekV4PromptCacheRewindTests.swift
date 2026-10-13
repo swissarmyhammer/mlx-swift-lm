@@ -25,7 +25,7 @@
 //     wrapped, thus the keys a rewind would need are overwritten and gone.
 //   * `DeepSeekV4Cache.isTrimmable(after:)` adds
 //     `DeepSeekV4ChunkCache.holdsEveryRewindableRow`, and
-//     `DeepSeekV4ChunkCache` drops its raw rows at the same window to keep its
+//     `DeepSeekV4ChunkCache` drops its projected rows at the same window to keep its
 //     memory bounded.
 //
 // Thus a DeepSeek-V4 conversation of more than `slidingWindow` tokens has NO

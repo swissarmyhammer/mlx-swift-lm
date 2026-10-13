@@ -223,10 +223,10 @@ struct DeepSeekV4CacheTests {
                     try Self.pooledInCuts(block, cuts: cuts, layer: layer))
                 #expect(cut.count == whole.count, "layer \(layer), cuts \(cuts)")
                 for (index, pair) in zip(cut, whole).enumerated() {
-                    let where_ = "layer \(layer), cuts \(cuts), value \(index)"
+                    let place = "layer \(layer), cuts \(cuts), value \(index)"
                     #expect(
                         abs(pair.0 - pair.1) <= Self.tolerance,
-                        Comment(rawValue: "\(where_): got \(pair.0), expected \(pair.1)"))
+                        Comment(rawValue: "\(place): got \(pair.0), expected \(pair.1)"))
                 }
             }
         }
@@ -248,6 +248,90 @@ struct DeepSeekV4CacheTests {
                 pooled.dim(1) == (position + 1) / Self.wideRatio,
                 "at position \(position) the pool must hold the chunks that have ended")
         }
+    }
+
+    /// The number of whole chunks the no-work test feeds before its
+    /// single-token steps. Their tokens stand past the sliding window, thus
+    /// the cache keeps only the rows it needs for the next chunk.
+    private static let leadingChunkCount = 3
+
+    @Test(arguments: [overlapLayer, wideLayer])
+    func aStepThatEndsNoChunkGivesBackTheChunksTheCacheHeld(layer: Int) throws {
+        let ratio = try Self.configuration().compressRatio(ofLayer: layer)
+        let compressor = try Self.loadedCompressor(layer: layer)
+        let rope = DeepSeekV4RoPE(configuration: try Self.configuration(), layer: layer)
+        let cache = try Self.chunkCache(layer: layer)
+        let prefix = Self.leadingChunkCount * ratio
+        let block = Self.fixture(
+            [Self.batchSize, prefix + ratio, Self.hiddenSize], seed: Self.weightSeed)
+
+        var held = cache.pooled(
+            block[0..., 0 ..< prefix, 0...], through: compressor, rope: rope, offset: 0)
+        for position in prefix ..< (prefix + ratio) {
+            let pooled = cache.pooled(
+                block[0..., position ..< (position + 1), 0...],
+                through: compressor, rope: rope, offset: position)
+            let endsChunk = (position + 1).isMultiple(of: ratio)
+            #expect(
+                (pooled === held) == !endsChunk,
+                "layer \(layer), position \(position): only a step that ends a chunk pools")
+            held = pooled
+        }
+        #expect(held.dim(1) == Self.leadingChunkCount + 1)
+    }
+
+    @Test func theCacheKeepsTheProjectedRowsOfTheRunInProgress() throws {
+        let layer = Self.overlapLayer
+        let compressor = try Self.loadedCompressor(layer: layer)
+        let rope = DeepSeekV4RoPE(configuration: try Self.configuration(), layer: layer)
+        let cache = try Self.chunkCache(layer: layer)
+        let block = Self.fixture(
+            [Self.batchSize, Self.pooledTokenCount, Self.hiddenSize], seed: Self.weightSeed)
+        _ = cache.pooled(block, through: compressor, rope: rope, offset: 0)
+
+        let kept = block[0..., cache.carryStart..., 0...]
+        let rows = try #require(cache.projectedRows, "the run in progress leaves rows behind")
+        let pairs = [
+            (rows.values, compressor.wkv(kept)),
+            (rows.gates, compressor.wgate(kept)),
+        ].map { (DeepSeekV4TestArrays.floats($0.0), DeepSeekV4TestArrays.floats($0.1)) }
+        for (got, expected) in pairs {
+            #expect(got.count == expected.count, "the cache keeps one projected row per token")
+            for (index, pair) in zip(got, expected).enumerated() {
+                #expect(
+                    abs(pair.0 - pair.1) <= Self.tolerance,
+                    Comment(rawValue: "value \(index): got \(pair.0), expected \(pair.1)"))
+            }
+        }
+    }
+
+    /// The number of raw rows each branch of the earlier state format carries.
+    private static let rawRowCount = 3
+
+    @Test func aPromptCacheOfTheRawRowFormatFailsClosed() throws {
+        let configuration = try Self.configuration()
+        let layer = Self.overlapLayer
+        let source = DeepSeekV4Cache(configuration: configuration, layer: layer)
+        let keyValues = Self.fixture(
+            [Self.batchSize, 1, Self.slidingWindow, Self.headDim], seed: Self.weightSeed)
+        _ = source.update(keys: keyValues, values: keyValues)
+
+        // The earlier format: each branch held the pooled chunks, the RAW block
+        // rows and the carry position, and the meta state was the meta state of
+        // the window alone.
+        let rawRowBranch = [
+            Self.fixture([Self.batchSize, 1, Self.headDim], seed: Self.weightSeed + 1),
+            Self.fixture(
+                [Self.batchSize, Self.rawRowCount, Self.hiddenSize], seed: Self.weightSeed + 2),
+            MLXArray([Int32(0)]),
+        ]
+        let template = DeepSeekV4Cache(configuration: configuration, layer: layer)
+        let error = #expect(throws: KVCacheError.self) {
+            try template.validatePromptCacheRestore(
+                state: source.local.state + rawRowBranch + rawRowBranch,
+                metaState: source.local.metaState)
+        }
+        #expect(error?.message == DeepSeekV4Cache.earlierFormatMessage)
     }
 
     /// The position the rewind test goes back to. It stands INSIDE the second
@@ -274,7 +358,8 @@ struct DeepSeekV4CacheTests {
 
         let cache = try Self.chunkCache(layer: layer)
         _ = cache.pooled(first, through: compressor, rope: rope, offset: 0)
-        #expect(cache.rewind(to: rewindTo), "a fresh cache holds every raw row, thus it rewinds")
+        #expect(
+            cache.rewind(to: rewindTo), "a fresh cache holds every projected row, thus it rewinds")
         let afterRewind = DeepSeekV4TestArrays.floats(
             cache.pooled(
                 second[0..., rewindTo ..< window, 0...],

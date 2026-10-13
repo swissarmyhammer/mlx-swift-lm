@@ -165,14 +165,47 @@ final class DeepSeekV4Compressor: Module {
         self._norm.wrappedValue = RMSNorm(dimensions: headDim, eps: configuration.rmsNormEps)
     }
 
+    /// The two projections of a run of tokens: the values a chunk pools and
+    /// the gate logits it pools them by.
+    ///
+    /// ``DeepSeekV4ChunkCache`` keeps these rows across calls, thus a decode
+    /// step projects its one new token and pools nothing until a chunk ends.
+    struct ProjectedRows {
+        /// The `wkv` projection, shape `(batch, tokens, projectionWidth)`.
+        let values: MLXArray
+
+        /// The `wgate` projection, shape `(batch, tokens, projectionWidth)`.
+        /// It holds no `ape` bias yet: the bias belongs to the place of a token
+        /// inside its chunk, which the pooling knows.
+        let gates: MLXArray
+    }
+
+    /// The axis a `(batch, tokens, width)` tensor holds its tokens on.
+    private static let tokenAxis = 1
+
+    /// Projects a run of tokens onto the values and the gate logits a chunk
+    /// pools.
+    ///
+    /// The projections run in the dtype of `x`, as in the Python reference
+    /// (mlx-vlm `Compressor.__call__`). The pooling reads the rows in float32.
+    ///
+    /// Earlier, `x` went to float32 before the two projections. Task
+    /// `^cm8fq2q` removed that cast: on the published checkpoint the 64-token
+    /// greedy parity with the mlx-vlm fixture still holds, and a decode step
+    /// takes about 5 ms less, because the cast and the float32 matrix product
+    /// ran on each step for each compressor.
+    ///
+    /// - Parameter x: The tokens, shape `(batch, tokens, hidden)`.
+    /// - Returns: The projected rows, in the dtype of `x`.
+    func project(_ x: MLXArray) -> ProjectedRows {
+        ProjectedRows(values: wkv(x), gates: wgate(x))
+    }
+
     /// The chunks this layer pools out of one block of tokens.
     ///
     /// The block gives one chunk for each whole run of ``chunkWidth`` tokens in
     /// it. The tokens of an incomplete run at the end give no chunk, because a
     /// chunk stands for a run that has ended.
-    ///
-    /// The arithmetic runs in float32 up to the norm. The gate is a softmax
-    /// over as many as `2 * chunkWidth` logits, and bfloat16 loses that sum.
     ///
     /// - Parameters:
     ///   - x: The block input, shape `(batch, tokens, hidden)`.
@@ -184,15 +217,42 @@ final class DeepSeekV4Compressor: Module {
     /// - Returns: The pooled chunks, shape `(batch, chunks, headDim)`, in the
     ///   dtype of `x`.
     func callAsFunction(_ x: MLXArray, rope: DeepSeekV4RoPE, offset: Int) -> MLXArray {
-        let batch = x.dim(0)
-        let chunkCount = x.dim(1) / chunkWidth
-        guard chunkCount > 0 else {
-            return zeros([batch, 0, headDim], dtype: x.dtype)
+        let wholeTokenCount = (x.dim(Self.tokenAxis) / chunkWidth) * chunkWidth
+        guard wholeTokenCount > 0 else {
+            return zeros([x.dim(WindowAxis.batch), 0, headDim], dtype: x.dtype)
         }
+        let whole = x[0..., 0 ..< wholeTokenCount, 0...]
+        return pooled(project(whole), rope: rope, offset: offset, dtype: x.dtype)
+    }
 
-        let windows = pooledWindows(x, batch: batch, chunkCount: chunkCount)
+    /// Pools whole chunks of projected rows.
+    ///
+    /// The arithmetic runs in float32 up to the norm. The gate is a softmax
+    /// over as many as `2 * chunkWidth` logits, and bfloat16 loses that sum.
+    ///
+    /// - Parameters:
+    ///   - rows: The projected rows. Their count is a multiple of
+    ///     ``chunkWidth``, and the first row starts a chunk.
+    ///   - rope: The rotary position of this layer, which turns each chunk by
+    ///     the position that chunk starts at.
+    ///   - offset: The absolute position of the first row.
+    ///   - dtype: The dtype of the pooled chunks, which is the dtype of the
+    ///     block input.
+    /// - Returns: The pooled chunks, shape `(batch, chunks, headDim)`. On a
+    ///   layer that pools with overlap the first chunk takes a padded left
+    ///   half, because no rows stand before it here.
+    func pooled(
+        _ rows: ProjectedRows, rope: DeepSeekV4RoPE, offset: Int, dtype: DType
+    ) -> MLXArray {
+        let rowCount = rows.values.dim(Self.tokenAxis)
+        precondition(
+            rowCount.isMultiple(of: chunkWidth),
+            "the pooling reads whole chunks, and \(rowCount) rows are not a multiple of "
+                + "\(chunkWidth)")
+        let chunkCount = rowCount / chunkWidth
+        let windows = pooledWindows(rows, chunkCount: chunkCount)
         let weights = softmax(windows.gates, axis: WindowAxis.position, precise: true)
-        let pooled = norm((windows.values * weights).sum(axis: WindowAxis.position).asType(x.dtype))
+        let pooled = norm((windows.values * weights).sum(axis: WindowAxis.position).asType(dtype))
 
         let positions =
             MLXArray(Int32(0) ..< Int32(chunkCount)) * Int32(chunkWidth) + Int32(offset)
@@ -207,23 +267,18 @@ final class DeepSeekV4Compressor: Module {
     /// The values and the gate logits of each chunk, ready for the softmax.
     ///
     /// - Parameters:
-    ///   - x: The block input, shape `(batch, tokens, hidden)`.
-    ///   - batch: The number of sequences in the block.
-    ///   - chunkCount: The number of whole chunks the block holds.
+    ///   - rows: The projected rows of whole chunks.
+    ///   - chunkCount: The number of whole chunks the rows hold.
     /// - Returns: Two tensors of shape
     ///   `(batch, chunkCount, positions, headDim)`, in float32, where
     ///   `positions` is `chunkWidth` on a layer that does not overlap and
     ///   twice that on a layer that does.
     private func pooledWindows(
-        _ x: MLXArray, batch: Int, chunkCount: Int
+        _ rows: ProjectedRows, chunkCount: Int
     ) -> (values: MLXArray, gates: MLXArray) {
-        // The DeepSeek-V4 runtime stages the compressor in float32 from the
-        // projections onward, thus the cast stands ahead of them rather than
-        // after them.
-        let whole = x[0..., 0 ..< (chunkCount * chunkWidth), 0...].asType(.float32)
-        let shape = [batch, chunkCount, chunkWidth, projectionWidth]
-        let values = wkv(whole).reshaped(shape)
-        let gates = wgate(whole).reshaped(shape) + ape.asType(.float32)
+        let shape = [rows.values.dim(WindowAxis.batch), chunkCount, chunkWidth, projectionWidth]
+        let values = rows.values.asType(.float32).reshaped(shape)
+        let gates = rows.gates.asType(.float32).reshaped(shape) + ape.asType(.float32)
 
         guard poolsWithOverlap else { return (values: values, gates: gates) }
         return (

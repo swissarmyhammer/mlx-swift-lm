@@ -59,7 +59,7 @@ struct KVCacheByteCountTests {
     /// The number of pooled chunks in each DeepSeek-V4 branch fixture.
     private static let deepSeekChunkCount = 5
 
-    /// The number of raw carry rows in each DeepSeek-V4 branch fixture.
+    /// The number of projected carry rows in each DeepSeek-V4 branch fixture.
     private static let deepSeekCarryRowCount = 3
 
     /// The hidden width of the DeepSeek-V4 branch fixtures.
@@ -278,15 +278,20 @@ struct KVCacheByteCountTests {
             DeepSeekV4Configuration.self, from: Data(contentsOf: url))
     }
 
-    /// Builds the three state slots of one DeepSeek-V4 branch.
+    /// The number of projected row slots of one DeepSeek-V4 branch: the values
+    /// and the gate logits.
+    private static let deepSeekRowSlotCount = 2
+
+    /// Builds the four state slots of one DeepSeek-V4 branch.
     ///
-    /// - Returns: The chunks, the carry rows and the carry start.
+    /// - Returns: The chunks, the projected values, the projected gate logits
+    ///   and the carry start.
     private static func deepSeekBranchSlots() -> [MLXArray] {
-        [
-            lazyArray([batchSize, deepSeekChunkCount, deepSeekChunkWidth]),
-            lazyArray([batchSize, deepSeekCarryRowCount, deepSeekChunkWidth]),
-            MLXArray([Int32(0)]),
-        ]
+        [lazyArray([batchSize, deepSeekChunkCount, deepSeekChunkWidth])]
+            + (0 ..< deepSeekRowSlotCount).map { _ in
+                lazyArray([batchSize, deepSeekCarryRowCount, deepSeekChunkWidth])
+            }
+            + [MLXArray([Int32(0)])]
     }
 
     @Test("DeepSeekV4Cache counts the window and both chunk branches")
@@ -299,7 +304,8 @@ struct KVCacheByteCountTests {
         cache.state = window + Self.deepSeekBranchSlots() + Self.deepSeekBranchSlots()
 
         let windowBytes = window.totalByteCount
-        let branchRows = Self.deepSeekChunkCount + Self.deepSeekCarryRowCount
+        let branchRows =
+            Self.deepSeekChunkCount + Self.deepSeekRowSlotCount * Self.deepSeekCarryRowCount
         let branchBytes =
             Self.batchSize * branchRows * Self.deepSeekChunkWidth * DType.float16.size
         #expect(cache.residentByteCount == windowBytes + Self.deepSeekBranchCount * branchBytes)

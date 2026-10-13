@@ -82,7 +82,7 @@ struct PromptCacheTemplateRestoreTests {
     /// The number of pooled chunks in each DeepSeek-V4 branch fixture.
     fileprivate static let deepSeekChunkCount = 5
 
-    /// The number of raw carry rows in each DeepSeek-V4 branch fixture.
+    /// The number of projected carry rows in each DeepSeek-V4 branch fixture.
     fileprivate static let deepSeekCarryRowCount = 3
 
     /// The width of the rows of the DeepSeek-V4 branch fixtures.
@@ -251,14 +251,16 @@ struct PromptCacheTemplateRestoreTests {
             DeepSeekV4Configuration.self, from: Data(contentsOf: url))
     }
 
-    /// Makes the three state slots of one DeepSeek-V4 branch.
+    /// Makes the four state slots of one DeepSeek-V4 branch.
     ///
     /// - Parameter seed: The seed of the random key.
-    /// - Returns: The pooled chunks, the carry rows and the carry start.
+    /// - Returns: The pooled chunks, the projected values, the projected gate logits and the
+    ///   carry start.
     fileprivate static func deepSeekBranchSlots(seed: UInt64) -> [MLXArray] {
         [
             tensor([batchSize, deepSeekChunkCount, deepSeekRowWidth], seed: seed),
             tensor([batchSize, deepSeekCarryRowCount, deepSeekRowWidth], seed: seed + 1),
+            tensor([batchSize, deepSeekCarryRowCount, deepSeekRowWidth], seed: seed + 2),
             MLXArray([Int32(0)]),
         ]
     }

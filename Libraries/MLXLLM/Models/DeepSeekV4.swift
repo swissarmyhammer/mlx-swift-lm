@@ -26,12 +26,11 @@
 //     `mtp.*` and builds a DSpark drafter from it. The Python reference drops
 //     every `mtp.` key, and this repository carries no DSpark type, thus the
 //     load filter drops them here.
-//  3. **The pooled cache keeps RAW rows, not projected rows.** The file above
-//     keeps the incomplete tail of a chunk as `wkv` and `wgate` output and
-//     holds a second pooling path for it. This port keeps the raw block rows
-//     and re-pools them through the one pooling path
-//     ``DeepSeekV4Compressor`` has --
-//     Libraries/MLXLLM/Models/DeepSeekV4Cache.swift records the whole
+//  3. **The pooled cache has one pooling path.** The file above keeps the
+//     incomplete tail of a chunk as `wkv` and `wgate` output, as this port
+//     does, but it holds a second pooling path for that tail. This port gives
+//     the projected rows to the one pooling path ``DeepSeekV4Compressor`` has
+//     -- Libraries/MLXLLM/Models/DeepSeekV4Cache.swift records the whole
 //     difference. No sparse-attention key is dropped either way.
 //  4. **The language-model head is optional.** The file above declares a
 //     non-optional `lm_head`. `MLXLMCommon.loadWeights` verifies with

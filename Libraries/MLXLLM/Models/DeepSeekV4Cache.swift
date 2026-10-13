@@ -9,34 +9,35 @@
 // The pooled cache DeepSeek-V4 sparse attention needs. A decode step carries
 // one token, thus a stateless compressor pools nothing and the global context
 // would go away at the first decode step. This file keeps the pooled chunks,
-// and the raw rows of an incomplete chunk, across calls and across turns.
+// and the projected rows of an incomplete chunk, across calls and across turns.
 //
 // Five details do not come from that file.
 //
-//  1. **The incomplete tail is kept as RAW rows, not as projected rows.** The
-//     file above keeps the `wkv` and `wgate` output of the tokens that have
-//     not filled a chunk yet, and it holds a second pooling path
-//     (`accumulateOverlapWindows`) that joins them. This file keeps the block
-//     input itself and re-pools it through
-//     ``DeepSeekV4Compressor/callAsFunction(_:rope:offset:)``, which is the
-//     one pooling path this port has and the one 12 tests already hold. The
-//     cost is that at most `2 * compress_ratio` rows go through the two
-//     projections again for each call.
+//  1. **One pooling path.** The file above keeps the `wkv` and `wgate` output
+//     of the tokens that have not filled a chunk yet, as this file does, but
+//     it joins them through a second pooling path of its own
+//     (`accumulateOverlapWindows`). This file gives the rows to
+//     ``DeepSeekV4Compressor/pooled(_:rope:offset:dtype:)``, which is the one
+//     pooling path this port has and the one the compressor tests hold. A call
+//     pools only the chunks that it ends, thus a decode step that ends no
+//     chunk does no pooling at all (task `^cm8fq2q`).
 //  2. **An overlapping layer keeps one WHOLE chunk of rows as well.** Chunk
 //     `c` of a ratio-4 layer reads the tokens of chunk `c - 1` as well as its
-//     own. The stateless pooling gives its FIRST chunk a padded left half,
-//     thus this cache starts each call one whole chunk early and drops that
-//     first pooled row. Chunk `c` then reads real tokens on both halves
-//     whatever the call boundary is.
+//     own. The pooling gives its FIRST chunk a padded left half, thus this
+//     cache pools from one whole chunk early and drops that first pooled row.
+//     Chunk `c` then reads real tokens on both halves whatever the call
+//     boundary is. mlx-lm PR 1195 keeps the same chunk (`state_kv[:, :ratio]`).
+//     mlx-vlm (`PoolingCache.accumulate_windows`) does not, thus there a
+//     ratio-4 chunk takes a padded left half at each decode window.
 //  3. **The pooled rows are recomputed, never trimmed proportionally.** The
 //     `trim(_:)` of the file above drops `max(1, n / compress_ratio)` trailing
 //     pooled rows and clears its buffers, which leaves the pool one row short
-//     or one row long of the rewound position. This file keeps every raw row
-//     while a rewind is still legal -- which is while `RotatingKVCache` still
-//     answers `isTrimmable`, thus over the first `sliding_window` positions --
-//     and rebuilds the pool from those rows. Past that point it holds the
-//     minimal carry and answers `isTrimmable` false, thus
-//     `RewindToCommonPrefixRule` never asks for a rewind this cache cannot
+//     or one row long of the rewound position. This file keeps every projected
+//     row while a rewind is still legal -- which is while `RotatingKVCache`
+//     still answers `isTrimmable`, thus over the first `sliding_window`
+//     positions -- and pools the rewound chunks again from those rows. Past
+//     that point it holds the minimal carry and answers `isTrimmable` false,
+//     thus `RewindToCommonPrefixRule` never asks for a rewind this cache cannot
 //     make exactly.
 //  4. **No pool quantization.** The file above encodes each pooled row to
 //     UInt8 behind a `DSV4_POOL_QUANT` environment switch. This port keeps the
@@ -52,47 +53,182 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+// MARK: - A buffer of rows that grows in steps
+
+/// A buffer of `(batch, rows, width)` rows that grows in steps, as
+/// `KVCacheSimple` grows its keys.
+///
+/// A write goes into free rows of the buffer that is already there, thus MLX
+/// can write in place when nothing else holds the buffer. A concatenation runs
+/// only when the buffer is full, which is once for each ``allocationStep``
+/// rows.
+///
+/// The buffer is a class because a write changes the one `MLXArray` it holds
+/// in place. No view this buffer gives out is that array: each view is a new
+/// slice, thus a write never changes an array a caller holds.
+final class DeepSeekV4RowBuffer {
+
+    /// The number of rows the buffer grows by.
+    static let allocationStep = 256
+
+    /// The axis a `(batch, rows, width)` tensor holds its rows on.
+    private static let rowAxis = 1
+
+    /// The buffer, shape `(batch, capacity, width)`, or `nil` when it holds no
+    /// row. The rows past ``count`` hold no value.
+    private(set) var storage: MLXArray?
+
+    /// The number of rows the buffer holds.
+    private(set) var count = 0
+
+    /// Builds an empty buffer.
+    init() {}
+
+    /// Builds a buffer that holds the given rows and no free row.
+    ///
+    /// - Parameter rows: The rows, shape `(batch, rows, width)`, or `nil` for
+    ///   an empty buffer.
+    init(rows: MLXArray?) {
+        guard let rows, rows.dim(Self.rowAxis) > 0 else { return }
+        self.storage = rows[.ellipsis]
+        self.count = rows.dim(Self.rowAxis)
+    }
+
+    /// A new view of the rows the buffer holds, or `nil` when it holds none.
+    var rows: MLXArray? {
+        guard let storage, count > 0 else { return nil }
+        return storage[0..., 0 ..< count, 0...]
+    }
+
+    /// Writes rows after the rows the buffer holds.
+    ///
+    /// - Parameter added: The rows, shape `(batch, rows, width)`.
+    func append(_ added: MLXArray) {
+        let newCount = count + added.dim(Self.rowAxis)
+        let buffer = reserved(toHold: newCount, like: added)
+        buffer[0..., count ..< newCount, 0...] = added
+        storage = buffer
+        count = newCount
+    }
+
+    /// Keeps the leading rows and forgets the others.
+    ///
+    /// - Parameter newCount: The number of leading rows to keep.
+    func truncate(to newCount: Int) {
+        precondition(
+            newCount >= 0 && newCount <= count,
+            "a buffer of \(count) rows cannot keep \(newCount) rows")
+        count = newCount
+        if count == 0 {
+            storage = nil
+        }
+    }
+
+    /// Forgets the leading rows and moves the others to the front.
+    ///
+    /// A buffer that grew past one step during a long prefill block shrinks
+    /// back to one step here, thus a long prompt leaves no large buffer behind.
+    ///
+    /// - Parameter dropCount: The number of leading rows to forget.
+    func dropLeading(_ dropCount: Int) {
+        precondition(
+            dropCount >= 0 && dropCount <= count,
+            "a buffer of \(count) rows cannot forget \(dropCount) rows")
+        let keptCount = count - dropCount
+        guard dropCount > 0 else { return }
+        guard let storage, keptCount > 0 else {
+            truncate(to: 0)
+            return
+        }
+        let kept = storage[0..., dropCount ..< count, 0...]
+        if storage.dim(Self.rowAxis) > Self.allocationStep {
+            truncate(to: 0)
+            append(kept)
+            return
+        }
+        storage[0..., 0 ..< keptCount, 0...] = kept
+        count = keptCount
+    }
+
+    /// Builds an independent copy of this buffer.
+    ///
+    /// - Returns: The copy.
+    func copy() -> DeepSeekV4RowBuffer {
+        let duplicate = DeepSeekV4RowBuffer()
+        duplicate.storage = storage?[.ellipsis]
+        duplicate.count = count
+        return duplicate
+    }
+
+    /// The buffer that has room for `needed` rows.
+    ///
+    /// - Parameters:
+    ///   - needed: The number of rows the buffer must hold.
+    ///   - added: The rows that will be written, which give the batch, the
+    ///     width and the dtype of a new buffer.
+    /// - Returns: The buffer, which is ``storage`` when it has room.
+    private func reserved(toHold needed: Int, like added: MLXArray) -> MLXArray {
+        if let storage, needed <= storage.dim(Self.rowAxis) {
+            return storage
+        }
+        let missing = needed - count
+        let stepCount = (missing + Self.allocationStep - 1) / Self.allocationStep
+        let free = MLXArray.zeros(
+            [added.dim(0), stepCount * Self.allocationStep, added.dim(2)], dtype: added.dtype)
+        guard let held = rows else { return free }
+        return concatenated([held, free], axis: Self.rowAxis)
+    }
+}
+
 // MARK: - The pooled chunks of one compressor
 
-/// The chunks one DeepSeek-V4 compressor pooled, and the raw rows it has not
-/// pooled into a whole chunk yet.
+/// The chunks one DeepSeek-V4 compressor pooled, and the projected rows it has
+/// not pooled into a whole chunk yet.
 ///
 /// The pooled chunks are keyed to ABSOLUTE positions: chunk `c` covers the raw
 /// positions `c * chunkWidth` through `(c + 1) * chunkWidth - 1`, whatever
 /// call gave those tokens. A prompt arrives in prefill chunks whose boundaries
 /// are not multiples of the compress ratio, and a decode step then adds one
-/// token at a time, thus the cache holds the rows of the run in progress and
-/// pools them when the run ends.
+/// token at a time, thus the cache holds the projected rows of the run in
+/// progress and pools them when the run ends.
 final class DeepSeekV4ChunkCache {
 
     /// The number of raw positions one pooled chunk covers, which is the
     /// compress ratio of this layer.
     let chunkWidth: Int
 
-    /// The number of whole chunks of raw rows the next call must read again.
+    /// The number of whole chunks of rows the next pooling must read again.
     ///
     /// An overlapping layer pools chunk `c` from the tokens of chunk `c - 1`
     /// as well as its own, thus it keeps one whole chunk and drops the first
-    /// pooled row of each call. A layer that does not overlap keeps none.
+    /// pooled row of each pooling. A layer that does not overlap keeps none.
     let retainedChunkCount: Int
 
-    /// The number of leading positions whose raw rows stay whole.
+    /// The number of leading positions whose projected rows stay whole.
     ///
     /// It is the sliding window, which is also the range in which the
     /// `RotatingKVCache` beside this cache still rewinds. Inside that range a
-    /// rewind rebuilds the pool exactly; past it this cache holds the minimal
-    /// carry and ``holdsEveryRewindableRow`` answers false.
+    /// rewind pools the chunks again exactly; past it this cache holds the
+    /// minimal carry and ``holdsEveryRewindableRow`` answers false.
     let rewindableTokenCount: Int
 
-    /// The chunks this cache holds, shape `(batch, chunks, headDim)`, or `nil`
-    /// before the first call.
-    private(set) var chunks: MLXArray?
+    /// The pooled chunks, in a buffer that grows in steps.
+    private var pool = DeepSeekV4RowBuffer()
 
-    /// The raw rows the next call must read again, shape
-    /// `(batch, rows, hidden)`, or `nil` when there are none.
-    private(set) var carry: MLXArray?
+    /// The view of every pooled chunk that ``pooled(_:through:rope:offset:)``
+    /// gives back, or `nil` while the cache holds no chunk.
+    ///
+    /// The view changes only when the chunk count changes, thus a call that
+    /// ends no chunk gives back this same array and adds no operation.
+    private var heldChunks: MLXArray?
 
-    /// The absolute position of the first row of ``carry``. It is always a
+    /// The `wkv` rows of the positions from ``carryStart`` onward.
+    private var projectedValues = DeepSeekV4RowBuffer()
+
+    /// The `wgate` rows of the positions from ``carryStart`` onward.
+    private var projectedGates = DeepSeekV4RowBuffer()
+
+    /// The absolute position of the first projected row. It is always a
     /// multiple of ``chunkWidth``.
     private(set) var carryStart = 0
 
@@ -103,26 +239,30 @@ final class DeepSeekV4ChunkCache {
     private static let plainRetainedChunkCount = 0
 
     /// The axis a `(batch, tokens, width)` tensor holds its tokens on. A pool
-    /// tensor and a carry tensor share that layout.
+    /// tensor and a row tensor share that layout.
     private static let tokenAxis = 1
 
     /// The number of arrays this cache writes into a serialized state: the
-    /// pooled chunks, the raw rows, and the position those rows start at.
-    static let stateSlotCount = 3
+    /// pooled chunks, the projected values, the projected gate logits, and the
+    /// position those rows start at.
+    static let stateSlotCount = 4
 
     /// The place of the pooled chunks inside a serialized state.
     private static let chunksSlot = 0
 
-    /// The place of the raw rows inside a serialized state.
-    private static let carrySlot = 1
+    /// The place of the projected values inside a serialized state.
+    private static let valuesSlot = 1
+
+    /// The place of the projected gate logits inside a serialized state.
+    private static let gatesSlot = 2
 
     /// The place of the carry position inside a serialized state.
-    private static let carryStartSlot = 2
+    private static let carryStartSlot = 3
 
     /// The state slots a branch that is not there writes, so that the slot
     /// count of a serialized state never changes.
     static var absentState: [MLXArray] {
-        [noValuePlaceholder, noValuePlaceholder, MLXArray([Int32(0)])]
+        [noValuePlaceholder, noValuePlaceholder, noValuePlaceholder, MLXArray([Int32(0)])]
     }
 
     /// The array that stands for "no value" in a chunks or rows slot of a serialized state.
@@ -142,10 +282,10 @@ final class DeepSeekV4ChunkCache {
     ///
     /// - Parameters:
     ///   - chunkWidth: The number of raw positions one pooled chunk covers.
-    ///   - retainedChunkCount: The number of whole chunks of raw rows the next
-    ///     call must read again.
-    ///   - rewindableTokenCount: The number of leading positions whose raw
-    ///     rows stay whole.
+    ///   - retainedChunkCount: The number of whole chunks of rows the next
+    ///     pooling must read again.
+    ///   - rewindableTokenCount: The number of leading positions whose
+    ///     projected rows stay whole.
     init(chunkWidth: Int, retainedChunkCount: Int, rewindableTokenCount: Int) {
         precondition(chunkWidth > 0, "a pooled cache needs a compress ratio of more than 0")
         self.chunkWidth = chunkWidth
@@ -172,25 +312,41 @@ final class DeepSeekV4ChunkCache {
 
     /// The number of chunks this cache holds.
     var chunkCount: Int {
-        chunks?.dim(Self.tokenAxis) ?? 0
+        pool.count
     }
 
-    /// True while every raw row of the history is still here, thus while a
-    /// rewind to any earlier position rebuilds the pool exactly.
+    /// Every chunk this cache holds, shape `(batch, chunks, headDim)`, or
+    /// `nil` when it holds none.
+    var chunks: MLXArray? {
+        heldChunks
+    }
+
+    /// The projected rows of the positions from ``carryStart`` onward, or
+    /// `nil` when the cache holds none.
+    var projectedRows: DeepSeekV4Compressor.ProjectedRows? {
+        guard let values = projectedValues.rows, let gates = projectedGates.rows else {
+            return nil
+        }
+        return DeepSeekV4Compressor.ProjectedRows(values: values, gates: gates)
+    }
+
+    /// True while every projected row of the history is still here, thus while
+    /// a rewind to any earlier position pools the chunks again exactly.
     var holdsEveryRewindableRow: Bool {
         carryStart == 0
     }
 
-    /// The number of rows ``carry`` holds.
-    private var carryRowCount: Int {
-        carry?.dim(Self.tokenAxis) ?? 0
+    /// The number of projected rows this cache holds.
+    private var rowCount: Int {
+        projectedValues.count
     }
 
     /// Pools one block of tokens and answers every chunk this cache holds.
     ///
-    /// The block joins the rows the last call kept, the join goes through the
-    /// compressor, and the chunks that stand before those rows stay as they
-    /// were. The answer is thus the same whatever the block was cut into.
+    /// The block is projected and joins the rows the last call kept. Only the
+    /// chunks that this block ends are pooled, and the chunks that stand
+    /// before them stay as they were. The answer is thus the same whatever the
+    /// block was cut into, and a block that ends no chunk does no pooling.
     ///
     /// - Parameters:
     ///   - block: The block input, shape `(batch, tokens, hidden)`.
@@ -203,35 +359,44 @@ final class DeepSeekV4ChunkCache {
         rope: DeepSeekV4RoPE, offset: Int
     ) -> MLXArray {
         precondition(
-            carryStart + carryRowCount == offset,
-            "the cache stands at position \(carryStart + carryRowCount) and the block "
+            carryStart + rowCount == offset,
+            "the cache stands at position \(carryStart + rowCount) and the block "
                 + "starts at position \(offset)")
 
-        let rows = carry.map { concatenated([$0, block], axis: Self.tokenAxis) } ?? block
-        let fresh = compressor(rows, rope: rope, offset: carryStart)
-        let joined = joined(fresh: fresh, droppingLeading: chunkCount - carryStart / chunkWidth)
-        chunks = joined
+        let projected = compressor.project(block)
+        projectedValues.append(projected.values)
+        projectedGates.append(projected.gates)
 
-        let nextStart = nextCarryStart(
-            chunkCount: joined.dim(Self.tokenAxis),
-            endPosition: offset + block.dim(Self.tokenAxis))
-        carry = trailingRows(of: rows, from: nextStart - carryStart)
-        carryStart = nextStart
-        return joined
+        let endPosition = offset + block.dim(Self.tokenAxis)
+        let endedChunkCount = endPosition / chunkWidth
+        if endedChunkCount > chunkCount {
+            poolChunks(
+                endingBefore: endedChunkCount, through: compressor, rope: rope,
+                dtype: block.dtype)
+        }
+        dropRows(before: nextCarryStart(chunkCount: chunkCount, endPosition: endPosition))
+        return heldChunks
+            ?? zeros([block.dim(0), 0, compressor.headDim], dtype: block.dtype)
     }
 
     /// Takes this cache back to an earlier absolute position.
     ///
     /// - Parameter position: The number of positions the cache must hold after
     ///   the rewind.
-    /// - Returns: True when the rewind happened. It answers false when the raw
-    ///   rows of the rewound region are gone, and it then changes nothing.
+    /// - Returns: True when the rewind happened. It answers false when the
+    ///   projected rows of the rewound region are gone, and it then changes
+    ///   nothing.
     @discardableResult
     func rewind(to position: Int) -> Bool {
         guard carryStart <= position else { return false }
         let keptCount = min(chunkCount, position / chunkWidth)
-        chunks = chunks.map { $0[0..., 0 ..< keptCount, 0...] }
-        carry = leadingCarry(rowCount: position - carryStart)
+        if keptCount < chunkCount {
+            heldChunks = nil
+            pool.truncate(to: keptCount)
+            heldChunks = pool.rows
+        }
+        projectedValues.truncate(to: position - carryStart)
+        projectedGates.truncate(to: position - carryStart)
         return true
     }
 
@@ -240,7 +405,12 @@ final class DeepSeekV4ChunkCache {
     /// The carry position rides in an array rather than in the meta state, so
     /// that a reader may set the state and the meta state in either order.
     var state: [MLXArray] {
-        [Self.serializable(chunks), Self.serializable(carry), MLXArray([Int32(carryStart)])]
+        [
+            heldChunks ?? Self.noValuePlaceholder,
+            projectedValues.rows ?? Self.noValuePlaceholder,
+            projectedGates.rows ?? Self.noValuePlaceholder,
+            MLXArray([Int32(carryStart)]),
+        ]
     }
 
     /// Checks a serialized state before ``restore(state:)`` reads it.
@@ -253,7 +423,7 @@ final class DeepSeekV4ChunkCache {
     func validateRestore(state: [MLXArray]) throws {
         guard state.count == Self.stateSlotCount,
             Self.isRowTensor(state[Self.chunksSlot]) || Self.isNoValue(state[Self.chunksSlot]),
-            Self.isRowTensor(state[Self.carrySlot]) || Self.isNoValue(state[Self.carrySlot])
+            Self.areProjectedRows(values: state[Self.valuesSlot], gates: state[Self.gatesSlot])
         else {
             throw KVCacheError(
                 message: "Corrupt prompt cache: invalid DeepSeek-V4 pooled-cache arrays.")
@@ -282,15 +452,30 @@ final class DeepSeekV4ChunkCache {
     ///   is 0.
     static func isAbsentState(_ state: [MLXArray]) -> Bool {
         state.count == stateSlotCount && isNoValue(state[chunksSlot])
-            && isNoValue(state[carrySlot]) && state[carryStartSlot].size == 1
+            && isNoValue(state[valuesSlot]) && isNoValue(state[gatesSlot])
+            && state[carryStartSlot].size == 1
             && state[carryStartSlot].dtype == .int32
             && state[carryStartSlot].asArray(Int32.self)[0] == 0
+    }
+
+    /// True when the two row slots of a serialized state belong together: both
+    /// stand for no value, or both are row tensors of one shape.
+    ///
+    /// - Parameters:
+    ///   - values: The array of the projected values slot.
+    ///   - gates: The array of the projected gate logits slot.
+    /// - Returns: True when the two slots are a valid pair.
+    private static func areProjectedRows(values: MLXArray, gates: MLXArray) -> Bool {
+        if isNoValue(values) && isNoValue(gates) {
+            return true
+        }
+        return isRowTensor(values) && isRowTensor(gates) && values.shape == gates.shape
     }
 
     /// True when a chunks or rows slot holds a `(batch, rows, width)` tensor.
     ///
     /// - Parameter array: The array of the slot.
-    /// - Returns: True when the array has the rank of a pool tensor or a carry tensor.
+    /// - Returns: True when the array has the rank of a pool tensor or a row tensor.
     private static func isRowTensor(_ array: MLXArray) -> Bool {
         array.ndim == rowTensorRank
     }
@@ -298,12 +483,12 @@ final class DeepSeekV4ChunkCache {
     /// True when a chunks or rows slot holds the one-axis array that stands for no value.
     ///
     /// - Parameter array: The array of the slot.
-    /// - Returns: True for ``noValuePlaceholder`` and for the empty array of earlier states.
+    /// - Returns: True for ``noValuePlaceholder`` and for an empty one-axis array.
     private static func isNoValue(_ array: MLXArray) -> Bool {
         array.ndim == 1 && array.size <= noValueMaximumSize
     }
 
-    /// The rank of a pool tensor and of a carry tensor: `(batch, rows, width)`.
+    /// The rank of a pool tensor and of a row tensor: `(batch, rows, width)`.
     private static let rowTensorRank = 3
 
     /// Reads a serialized state back.
@@ -314,63 +499,93 @@ final class DeepSeekV4ChunkCache {
             state.count == Self.stateSlotCount,
             "a pooled cache state holds \(Self.stateSlotCount) arrays, and this one holds "
                 + "\(state.count)")
-        self.chunks = Self.nullable(state[Self.chunksSlot])
-        self.carry = Self.nullable(state[Self.carrySlot])
-        self.carryStart = Int(state[Self.carryStartSlot].asArray(Int32.self)[0])
+        pool = DeepSeekV4RowBuffer(rows: Self.nullable(state[Self.chunksSlot]))
+        heldChunks = pool.rows
+        projectedValues = DeepSeekV4RowBuffer(rows: Self.nullable(state[Self.valuesSlot]))
+        projectedGates = DeepSeekV4RowBuffer(rows: Self.nullable(state[Self.gatesSlot]))
+        carryStart = Int(state[Self.carryStartSlot].asArray(Int32.self)[0])
     }
 
     /// The arrays a forward pass must evaluate to keep the lazy graph bounded.
     ///
-    /// - Returns: The pooled chunks and the raw rows this cache holds.
+    /// - Returns: The buffers of the pooled chunks and of the projected rows,
+    ///   at their full allocated size.
     func innerState() -> [MLXArray] {
-        [chunks, carry].compactMap { $0 }
+        [pool.storage, projectedValues.storage, projectedGates.storage].compactMap { $0 }
     }
 
     /// Builds an independent copy of this cache.
-    ///
-    /// A pooled tensor is replaced rather than written in place, thus a view
-    /// of it is a copy for every purpose this cache has.
     ///
     /// - Returns: The copy.
     func copy() -> DeepSeekV4ChunkCache {
         let duplicate = DeepSeekV4ChunkCache(
             chunkWidth: chunkWidth, retainedChunkCount: retainedChunkCount,
             rewindableTokenCount: rewindableTokenCount)
-        duplicate.chunks = chunks?[.ellipsis]
-        duplicate.carry = carry?[.ellipsis]
+        duplicate.pool = pool.copy()
+        duplicate.heldChunks = duplicate.pool.rows
+        duplicate.projectedValues = projectedValues.copy()
+        duplicate.projectedGates = projectedGates.copy()
         duplicate.carryStart = carryStart
         return duplicate
     }
 
-    /// Joins the chunks this cache already holds to the chunks this call
-    /// pooled.
+    /// Pools the chunks that the last block ended and writes them after the
+    /// chunks this cache already holds.
     ///
-    /// The pooling starts at ``carryStart``, thus its leading rows re-pool
-    /// chunks the cache already holds. Those rows are DROPPED rather than
-    /// kept: on an overlapping layer the first row of any pooling takes a
-    /// padded left half, which is right only for chunk 0. The stored row of
-    /// the same chunk read the real tokens of the chunk before it.
+    /// The pooling starts one whole chunk early on an overlapping layer, thus
+    /// its leading row pools a chunk the cache already holds. That row is
+    /// DROPPED rather than kept: the first row of any pooling takes a padded
+    /// left half, which is right only for chunk 0. The stored row of the same
+    /// chunk read the real tokens of the chunk before it.
     ///
     /// - Parameters:
-    ///   - fresh: The chunks the compressor pooled from ``carryStart`` onward.
-    ///   - dropCount: The number of leading fresh chunks the cache already
-    ///     holds.
-    /// - Returns: Every chunk, in absolute chunk order.
-    private func joined(fresh: MLXArray, droppingLeading dropCount: Int) -> MLXArray {
-        precondition(
-            dropCount >= 0 && dropCount <= fresh.dim(Self.tokenAxis),
-            "a pooling from position \(carryStart) answered \(fresh.dim(Self.tokenAxis)) "
-                + "chunks, and \(dropCount) of them are already here")
+    ///   - endedChunkCount: The number of chunks that have ended after the
+    ///     last block.
+    ///   - compressor: The compressor of this branch.
+    ///   - rope: The rotary position of this layer.
+    ///   - dtype: The dtype of the pooled chunks.
+    private func poolChunks(
+        endingBefore endedChunkCount: Int, through compressor: DeepSeekV4Compressor,
+        rope: DeepSeekV4RoPE, dtype: DType
+    ) {
+        guard let rows = projectedRows else {
+            preconditionFailure("a block that ends a chunk leaves projected rows behind")
+        }
+        let firstChunk = max(carryStart / chunkWidth, chunkCount - retainedChunkCount)
+        let firstRow = firstChunk * chunkWidth - carryStart
+        let endRow = endedChunkCount * chunkWidth - carryStart
+        let window = DeepSeekV4Compressor.ProjectedRows(
+            values: rows.values[0..., firstRow ..< endRow, 0...],
+            gates: rows.gates[0..., firstRow ..< endRow, 0...])
+        let fresh = compressor.pooled(
+            window, rope: rope, offset: firstChunk * chunkWidth, dtype: dtype)
+
+        let dropCount = chunkCount - firstChunk
         let added = dropCount > 0 ? fresh[0..., dropCount..., 0...] : fresh
-        guard let chunks, chunkCount > 0 else { return added }
-        return concatenated([chunks, added], axis: Self.tokenAxis)
+        // The view must go before the write, so that MLX can write the pool in
+        // place rather than copy it.
+        heldChunks = nil
+        pool.append(added)
+        heldChunks = pool.rows
     }
 
-    /// The absolute position the raw rows of the next call must start at.
+    /// Forgets the projected rows before an absolute position.
+    ///
+    /// - Parameter newStart: The absolute position the kept rows start at.
+    private func dropRows(before newStart: Int) {
+        guard newStart > carryStart else { return }
+        let dropCount = newStart - carryStart
+        projectedValues.dropLeading(dropCount)
+        projectedGates.dropLeading(dropCount)
+        carryStart = newStart
+    }
+
+    /// The absolute position the projected rows of the next call must start
+    /// at.
     ///
     /// While the history is short enough for a rewind, that position is 0 and
-    /// every raw row stays. Past that the cache keeps ``retainedChunkCount``
-    /// whole chunks and the run in progress.
+    /// every projected row stays. Past that the cache keeps
+    /// ``retainedChunkCount`` whole chunks and the run in progress.
     ///
     /// - Parameters:
     ///   - chunkCount: The number of chunks the cache holds after this call.
@@ -380,34 +595,6 @@ final class DeepSeekV4ChunkCache {
     private func nextCarryStart(chunkCount: Int, endPosition: Int) -> Int {
         guard endPosition > rewindableTokenCount else { return 0 }
         return max(0, chunkCount - retainedChunkCount) * chunkWidth
-    }
-
-    /// The trailing rows of a joined block, from one index onward.
-    ///
-    /// - Parameters:
-    ///   - rows: The joined block, shape `(batch, rows, hidden)`.
-    ///   - index: The first row to keep.
-    /// - Returns: The rows, or `nil` when none are left.
-    private func trailingRows(of block: MLXArray, from index: Int) -> MLXArray? {
-        guard index < block.dim(Self.tokenAxis) else { return nil }
-        return block[0..., index..., 0...]
-    }
-
-    /// The leading rows of ``carry``.
-    ///
-    /// - Parameter rowCount: The number of rows to keep.
-    /// - Returns: The rows, or `nil` when none are left.
-    private func leadingCarry(rowCount: Int) -> MLXArray? {
-        guard rowCount > 0, let carry else { return nil }
-        return carry[0..., 0 ..< rowCount, 0...]
-    }
-
-    /// The array a serialized state carries for one slot.
-    ///
-    /// - Parameter array: The array, or `nil`.
-    /// - Returns: The array, or ``noValuePlaceholder`` standing for `nil`.
-    private static func serializable(_ array: MLXArray?) -> MLXArray {
-        array ?? noValuePlaceholder
     }
 
     /// The array one slot of a serialized state stood for.
@@ -504,7 +691,7 @@ public final class DeepSeekV4Cache: KVCache {
 
     /// The arrays a forward pass must evaluate to keep the lazy graph bounded.
     ///
-    /// - Returns: The window, the pooled chunks and the raw rows of each
+    /// - Returns: The window, the pooled chunks and the projected rows of each
     ///   branch.
     public func innerState() -> [MLXArray] {
         local.innerState() + attentionChunks.innerState()
@@ -536,19 +723,39 @@ public final class DeepSeekV4Cache: KVCache {
         }
     }
 
-    /// The serialized meta state, which is the meta state of the window.
+    /// The serialized meta state: the meta state of the window, then
+    /// ``stateFormat``.
     ///
     /// The branches keep their own numbers in ``state`` rather than here, thus
     /// a reader may set the two in either order.
     public var metaState: [String] {
-        get { local.metaState }
-        set { local.metaState = newValue }
+        get { local.metaState + [Self.stateFormat] }
+        set {
+            precondition(
+                newValue.last == Self.stateFormat,
+                "a DeepSeek-V4 meta state ends in the format \(Self.stateFormat)")
+            local.metaState = Array(newValue.dropLast())
+        }
     }
+
+    /// The name of the format of ``state``, which ``metaState`` writes last.
+    ///
+    /// The first format kept the RAW block rows of an incomplete chunk and
+    /// wrote no format name. This format keeps the projected rows (task
+    /// `^cm8fq2q`). A raw row cannot become a projected row without the
+    /// compressor, thus a prompt cache of the first format does not restore.
+    static let stateFormat = "DeepSeekV4Cache.projectedRows.v2"
+
+    /// The error message of a prompt cache whose meta state does not end in
+    /// ``stateFormat``.
+    static let earlierFormatMessage =
+        "The prompt cache does not hold the DeepSeek-V4 cache format \(stateFormat). A prompt "
+        + "cache of an earlier format cannot be restored: build the prompt cache again."
 
     /// True when this cache can go back to an earlier position.
     ///
     /// The window rewinds only before it has wrapped, and the branches rewind
-    /// only while they still hold every raw row. The two ranges are the same
+    /// only while they still hold every projected row. The two ranges are the same
     /// range, thus a caller that reads this property never asks for a rewind
     /// the pool cannot make exactly.
     public var isTrimmable: Bool {
@@ -616,14 +823,18 @@ extension DeepSeekV4Cache: PromptCacheRestorable {
 
     /// Checks a saved state and meta state before any setter reads them.
     ///
-    /// The window part must fit a `RotatingKVCache`, each branch part must be a pooled-cache
-    /// state, and a layer with no indexer accepts only the absent branch state.
+    /// The meta state must end in ``stateFormat``, the window part must fit a
+    /// `RotatingKVCache`, each branch part must be a pooled-cache state, and a layer with no
+    /// indexer accepts only the absent branch state.
     ///
     /// - Parameters:
     ///   - state: The saved arrays: the window arrays, then the slots of each branch.
-    ///   - metaState: The saved meta state of the window.
+    ///   - metaState: The saved meta state: the meta state of the window, then the format.
     /// - Throws: `KVCacheError` when the values are not a state of this cache.
     public func validatePromptCacheRestore(state: [MLXArray], metaState: [String]) throws {
+        guard metaState.last == Self.stateFormat else {
+            throw KVCacheError(message: Self.earlierFormatMessage)
+        }
         guard state.count >= Self.stateSlotCount else {
             throw KVCacheError(
                 message:
@@ -632,7 +843,7 @@ extension DeepSeekV4Cache: PromptCacheRestorable {
         }
         let parts = Self.stateParts(state)
         try KVCacheSerializationRegistry.validate(
-            state: parts.window, metaState: metaState, for: local)
+            state: parts.window, metaState: Array(metaState.dropLast()), for: local)
         try attentionChunks.validateRestore(state: parts.attention)
         if let indexerChunks {
             try indexerChunks.validateRestore(state: parts.indexer)
@@ -648,7 +859,7 @@ extension DeepSeekV4Cache: PromptCacheRestorable {
     ///
     /// - Parameters:
     ///   - state: The saved arrays: the window arrays, then the slots of each branch.
-    ///   - metaState: The saved meta state of the window.
+    ///   - metaState: The saved meta state: the meta state of the window, then the format.
     public func restorePromptCache(state: [MLXArray], metaState: [String]) {
         self.state = state
         self.metaState = metaState
