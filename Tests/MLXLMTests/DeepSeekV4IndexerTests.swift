@@ -127,25 +127,9 @@ struct DeepSeekV4IndexerTests {
     /// - Returns: The loaded indexer.
     private static func loadedIndexer(seed: UInt64) throws -> DeepSeekV4Indexer {
         let indexer = DeepSeekV4Indexer(configuration: try configuration(), layer: indexerLayer)
-        try loadRepeatableWeights(into: indexer, seed: seed)
+        try DeepSeekV4RepeatableWeights.load(
+            into: indexer, seed: seed, low: fixtureLow, high: fixtureHigh, order: .flattened)
         return indexer
-    }
-
-    /// Loads a repeatable random weight into every parameter a module
-    /// declares, through `update(parameters:verify:[.all])`.
-    ///
-    /// - Parameters:
-    ///   - module: The module to fill.
-    ///   - seed: The seed the weight filler starts at.
-    private static func loadRepeatableWeights(into module: Module, seed: UInt64) throws {
-        var checkpoint: [String: MLXArray] = [:]
-        var next = seed
-        for (key, value) in module.parameters().flattened() {
-            next += 1
-            checkpoint[key] = fixture(value.shape, seed: next)
-        }
-        try module.update(parameters: ModuleParameters.unflattened(checkpoint), verify: [.all])
-        eval(module)
     }
 
     /// The arguments one indexer call reads for one block of tokens.
@@ -488,7 +472,9 @@ struct DeepSeekV4IndexerTests {
         let configuration = try Self.configuration(indexHeadWidth: Self.attentionHeadDim)
         let attention = DeepSeekV4Attention(
             configuration: configuration, layer: Self.indexerLayer)
-        try Self.loadRepeatableWeights(into: attention, seed: Self.weightSeed)
+        try DeepSeekV4RepeatableWeights.load(
+            into: attention, seed: Self.weightSeed, low: Self.fixtureLow, high: Self.fixtureHigh,
+            order: .flattened)
         let input = Self.fixture(
             [1, Self.equalWidthTokenCount, Self.hiddenSize], seed: Self.equalWidthInputSeed)
 

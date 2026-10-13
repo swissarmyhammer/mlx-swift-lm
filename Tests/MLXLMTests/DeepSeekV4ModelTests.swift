@@ -162,18 +162,11 @@ struct DeepSeekV4ModelTests {
         tieWordEmbeddings: Bool = false
     ) throws -> DeepSeekV4Model {
         let model = DeepSeekV4Model(try configuration(tieWordEmbeddings: tieWordEmbeddings))
-        var checkpoint: [String: MLXArray] = [:]
-        var seed = weightSeed
-        for (key, value) in model.parameters().flattened().sorted(by: { $0.0 < $1.0 }) {
-            seed += 1
-            checkpoint[key] =
-                key.hasSuffix(hashTableSuffix)
-                ? hashTable(shape: value.shape)
-                : MLXRandom.uniform(
-                    low: weightLow, high: weightHigh, value.shape, key: MLXRandom.key(seed))
-        }
-        try model.update(parameters: ModuleParameters.unflattened(checkpoint), verify: [.all])
-        eval(model)
+        try DeepSeekV4RepeatableWeights.load(
+            into: model, seed: weightSeed, low: weightLow, high: weightHigh,
+            replacing: { path, shape in
+                path.hasSuffix(hashTableSuffix) ? hashTable(shape: shape) : nil
+            })
         return model
     }
 

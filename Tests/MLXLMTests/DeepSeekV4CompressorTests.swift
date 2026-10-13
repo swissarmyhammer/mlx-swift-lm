@@ -131,22 +131,6 @@ struct DeepSeekV4CompressorTests {
         MLXRandom.uniform(low: fixtureLow, high: fixtureHigh, shape, key: MLXRandom.key(seed))
     }
 
-    /// Builds one repeatable random weight for each parameter of a module.
-    ///
-    /// - Parameters:
-    ///   - module: The module whose parameters the checkpoint must fill.
-    ///   - seed: The seed the filler starts at.
-    /// - Returns: The weights, by parameter path.
-    private static func checkpoint(for module: Module, seed: UInt64) -> [String: MLXArray] {
-        var weights: [String: MLXArray] = [:]
-        var next = seed
-        for (key, value) in module.parameters().flattened().sorted(by: { $0.0 < $1.0 }) {
-            next += 1
-            weights[key] = fixture(value.shape, seed: next)
-        }
-        return weights
-    }
-
     // MARK: - The plain-attention path
 
     /// The number of sequences every forward pass below carries.
@@ -187,7 +171,8 @@ struct DeepSeekV4CompressorTests {
         let plain = DeepSeekV4Attention(
             configuration: try Self.configuration(compressRatios: Self.noCompressRatios),
             layer: Self.plainLayer)
-        let weights = Self.checkpoint(for: plain, seed: Self.weightSeed)
+        let weights = DeepSeekV4RepeatableWeights.checkpoint(
+            for: plain, seed: Self.weightSeed, low: Self.fixtureLow, high: Self.fixtureHigh)
 
         let zeroRatio = try Self.attentionOutput(
             layer: Self.plainLayer, compressRatios: Self.compressRatios, weights: weights)
@@ -240,10 +225,8 @@ struct DeepSeekV4CompressorTests {
     private static func loadedCompressor(layer: Int, seed: UInt64) throws -> DeepSeekV4Compressor {
         let compressor = DeepSeekV4Compressor(
             configuration: try configuration(), layer: layer, headDim: headDim)
-        try compressor.update(
-            parameters: ModuleParameters.unflattened(checkpoint(for: compressor, seed: seed)),
-            verify: [.all])
-        eval(compressor)
+        try DeepSeekV4RepeatableWeights.load(
+            into: compressor, seed: seed, low: fixtureLow, high: fixtureHigh)
         return compressor
     }
 
@@ -458,11 +441,8 @@ struct DeepSeekV4CompressorTests {
 
     @Test func aPromptPastTheSlidingWindowGivesFiniteLogits() throws {
         let model = DeepSeekV4Model(try Self.configuration())
-        try model.update(
-            parameters: ModuleParameters.unflattened(
-                Self.checkpoint(for: model, seed: Self.weightSeed)),
-            verify: [.all])
-        eval(model)
+        try DeepSeekV4RepeatableWeights.load(
+            into: model, seed: Self.weightSeed, low: Self.fixtureLow, high: Self.fixtureHigh)
 
         let tokens = MLXArray((0 ..< Self.longPromptLength).map { Int32($0 % Self.vocabSize) })
             .reshaped([Self.batchSize, Self.longPromptLength])

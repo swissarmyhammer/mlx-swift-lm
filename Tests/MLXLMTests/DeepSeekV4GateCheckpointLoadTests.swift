@@ -153,14 +153,9 @@ struct DeepSeekV4GateCheckpointLoadTests {
     /// - Returns: The tensors, by module path.
     private static func publishedCheckpoint() throws -> [String: MLXArray] {
         let donor = DeepSeekV4Model(try configuration())
-        var checkpoint = [String: MLXArray]()
-        var seed = weightSeed
-        for (path, value) in donor.parameters().flattened().sorted(by: { $0.0 < $1.0 })
-        where !isRoutingTensor(path) {
-            seed += 1
-            checkpoint[path] = MLXRandom.uniform(
-                low: weightLow, high: weightHigh, value.shape, key: MLXRandom.key(seed))
-        }
+        var checkpoint = DeepSeekV4RepeatableWeights.checkpoint(
+            for: donor, seed: weightSeed, low: weightLow, high: weightHigh,
+            including: { !isRoutingTensor($0) })
         for layer in 0 ..< layerCount {
             let prefix = "model.layers.\(layer)."
             if layer < hashLayerCount {

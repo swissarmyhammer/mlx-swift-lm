@@ -102,8 +102,75 @@ comments:
     - evidence: swift build --build-tests (changed files touched) — no new warning; only the known "missing creator for mutated node" (mlx-swift_Cmlx.bundle). xcrun xctest on all 5 bundles, exit 0. MLXLMTests: 716 XCTest, 0 failures; 1390 Swift Testing in 111 suites, passed. CXGrammarTests 7 ST. MLXFoundationModelsTests 367 ST. MLXGuidedGenerationTests 70 ST. MLXHuggingFaceMacrosTests 5 XCTest. xcodebuild build-for-testing IntegrationTesting: TEST BUILD SUCCEEDED, no new warning. 0 skipped.
     - next: review
   timestamp: 2026-10-13T23:38:27.406871+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m4vt6tcy4q43acdxsjpekny9
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (7536f55): 1 finding, 1 confirmed, 0 refuted — Tests/MLXLMTests/DeepSeekV4IndexerTests.swift:140 (reuse/reuse).
+    - prior items: both are fixed in the code. `tableKinds` gives a `Set<TableKind>`, and `key` holds width, stride and direction, thus `Dictionary(uniqueKeysWithValues:)` cannot get a duplicate key. `DeepSeekV4FlashYarn.inverseFrequency()` is the only `yarnInvFreq` call with the Flash YaRN constants in Tests/MLXLMTests.
+    - next: move `loadRepeatableWeights(into:seed:)` to a shared test file and make the Cache and Compressor suites call it. The task stays in review.
+  timestamp: 2026-10-13T23:40:18.718259+00:00
+- actor: claude-code
+  id: 01m4vt7c528a1tzn1t76zvw21d
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — DeepSeekV4Attention.swift (unique table kinds), DeepSeekV4FlashYarn.swift (new), DeepSeekV4IndexerTests.swift, DeepSeekV4MathHelpersTests.swift, DeepSeekV4RoPEParityTests.swift
+    - test: green — MLXLMTests 716 XCTest + 1390 Swift Testing, 0 failures; IntegrationTesting build-for-testing succeeded
+    - commit: 7536f55
+    - review: findings — Tests/MLXLMTests/DeepSeekV4IndexerTests.swift:140 (prior 2 items verified fixed)
+  timestamp: 2026-10-13T23:40:36.898227+00:00
+- actor: claude-code
+  id: 01m4vtf9ny5pwsz4k4b3h8bvvv
+  text: |-
+    ### Research 2026-10-13 (finding 18:38, reuse)
+    - Five DeepSeek-V4 suites hold a copy of the weight filler: Indexer (`loadRepeatableWeights`), Cache (`checkpoint(for:seed:)`), Compressor (`checkpoint(for:seed:)`), Model (`loadedModel`), GateCheckpointLoad (`publishedCheckpoint`). AttentionTests, MoETests, HyperConnectionTests, CompiledDecodeTests and EncoderWiringTests fill by hand or save weights; they have no filler copy.
+    - Common: seed of parameter n = start seed + n (n from 1), `MLXRandom.uniform(low:high:shape,key: MLXRandom.key(seed))`, float32, range -0.5 ... 0.5 from the constants of each suite.
+    - Differences that change values: (1) key order. Indexer reads `flattened()` order; the others sort the full paths. `NestedDictionary.flattened()` sorts each level on its own and gives array items by index, thus `layers.10` comes after `layers.2`, and `a.b` / `a_c` can change places. The two orders are different. (2) Model puts a hash table (not random) in each `tid2eid` key, but the seed still moves on for that key. (3) Gate skips the routing tensors, and the seed does not move on for a skipped key. (4) Gate and one Compressor test use the weights without a load into the same module.
+    - The file `DeepSeekV4SyntheticCheckpoint.swift` already exists and holds a `config.json` (no forward pass). Thus the filler goes into a new file `DeepSeekV4RepeatableWeights.swift`, with a `KeyOrder` enum, an `including` filter and a `replacing` closure.
+  timestamp: 2026-10-13T23:44:56.510620+00:00
+- actor: claude-code
+  id: 01m4vtqkxnwc907t7cbtrpxa77
+  text: |-
+    ### Finding 18:38 (reuse) — work done (not committed)
+    - New test support file `Tests/MLXLMTests/DeepSeekV4RepeatableWeights.swift` (`enum DeepSeekV4RepeatableWeights`). `checkpoint(for:seed:low:high:order:including:replacing:)` builds the weights; `load(into:seed:low:high:order:replacing:)` fills the module and loads it through `update(parameters:verify:[.all])`, then `eval`. The seed of parameter n is the start seed + n (n from 1), the value is `MLXRandom.uniform(low:high:shape,key:)` in float32, as in every copy before.
+    - Parameters for the differences that change values: `order` (`KeyOrder.flattened` for the Indexer, `.sorted` for the others), `low` / `high` (each suite passes its own range constants, thus the weight range stays tied to the fixture range of the suite), `including` (Gate: skip the routing tensors, and a skipped key takes no seed), `replacing` (Model: a hash table in each `tid2eid` key, and the key still takes its seed).
+    - Removed copies: `DeepSeekV4IndexerTests.loadRepeatableWeights`, `DeepSeekV4CacheTests.checkpoint(for:seed:)`, `DeepSeekV4CompressorTests.checkpoint(for:seed:)`, the loop in `DeepSeekV4ModelTests.loadedModel`, the loop in `DeepSeekV4GateCheckpointLoadTests.publishedCheckpoint`. All 9 call sites call the shared helper.
+    - Not put into `DeepSeekV4SyntheticCheckpoint.swift`: that file already exists and holds only a `config.json` for suites that run no forward pass.
+    - `git diff -U0 -- Tests` shows no change to a seed, a range, a tolerance or an expected value.
+    - Tests: `swift build --build-tests` exit 0 (only the known warning "missing creator for mutated node"). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` exit 0: 716 XCTest, 0 failures; 1390 Swift Testing in 111 suites passed. The counts did not change.
+  timestamp: 2026-10-13T23:49:29.141273+00:00
+- actor: claude-code
+  id: 01m4vtqpgkkn777ts0vcgfxg80
+  text: |-
+    ### implement — changed
+    - evidence: 6 files — Tests/MLXLMTests/DeepSeekV4RepeatableWeights.swift (new), DeepSeekV4IndexerTests.swift, DeepSeekV4CacheTests.swift, DeepSeekV4CompressorTests.swift, DeepSeekV4ModelTests.swift, DeepSeekV4GateCheckpointLoadTests.swift. `swift build --build-tests` exit 0; `xcrun xctest MLXLMTests.xctest` exit 0: 716 XCTest 0 failures, 1390 Swift Testing passed (111 suites). The 2026-10-13 18:38 finding is checked.
+    - next: /test, then /review (task left in doing, not committed)
+  timestamp: 2026-10-13T23:49:31.795627+00:00
+- actor: claude-code
+  id: 01m4vv04kn7e4cc93d64yh7fz6
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests (changed files touched, rebuilt; only the known warning "missing creator for mutated node" for mlx-swift_Cmlx.bundle). xcrun xctest on all 5 bundles, all exit 0. MLXLMTests: 716 XCTest passed, 0 failures; 1390 Swift Testing tests in 111 suites passed. CXGrammarTests 7 passed. MLXFoundationModelsTests 367 passed. MLXGuidedGenerationTests 70 passed. MLXHuggingFaceMacrosTests 5 XCTest passed. 0 skipped, 0 new warnings.
+    - next: review.
+  timestamp: 2026-10-13T23:54:08.373376+00:00
+- actor: claude-code
+  id: 01m4vv2wgk9z781p6x1pkej3rt
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (3c6162a). 0 findings, 0 confirmed, 0 refuted. 6 files reviewed. 2 files not reviewed (.kanban task files; no validator matches them). All 3 prior findings are checked. A check of Tests/MLXLMTests/DeepSeekV4*Tests.swift found no other seeded fill-and-load copy. The Cache, Compressor, Indexer, Model and GateCheckpointLoad suites call DeepSeekV4RepeatableWeights.load or DeepSeekV4RepeatableWeights.checkpoint.
+    - next: none. The task is in done.
+  timestamp: 2026-10-13T23:55:38.387099+00:00
+- actor: claude-code
+  id: 01m4vv3c9mad9vagd7mgyhpw73
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — DeepSeekV4RepeatableWeights.swift (new) and 5 DeepSeek-V4 test suites use it
+    - test: green — MLXLMTests 716 XCTest + 1390 Swift Testing, 0 failures, same counts
+    - commit: 3c6162a
+    - review: clean — review sha HEAD~1..HEAD, 0 findings, 3/3 prior items checked
+  timestamp: 2026-10-13T23:55:54.548918+00:00
+position_column: done
+position_ordinal: ffc180
 title: 'DeepSeek-V4 speed: one MLXFast.rope call with a freqs table'
 ---
 ## What
@@ -140,3 +207,13 @@ In mlx-lm PR 1192, the Apple (angeloskath) RoPE changes took decode on an M3 Ult
 
 - [x] `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:176` `completeness/invariant-propagation` — The period-table key is built from head width, stride and direction only. When a layer holds both an attention compressor and an indexer, and the two head widths are equal, `tableKinds` returns two kinds with the same key. `Dictionary(uniqueKeysWithValues:)` then traps at layer init. The fix that added the indexer width did not carry the uniqueness rule to the keys it builds. Deduplicate the kinds before building the dictionary, for example with `Dictionary(_:uniquingKeysWith:)` or by collecting the kinds into a `Set` first. Add a test with `indexHeadDim == headDim` on a compressor-and-indexer layer so the case is locked in.
 - [x] `Tests/MLXLMTests/DeepSeekV4MathHelpersTests.swift:293` `duplication/duplication` — deepseekV4InverseFrequency() repeats the same yarnInvFreq call that DeepSeekV4RoPEParityTests.yarnInverseFrequency() makes. Both pass dim 64, base 160000, original max positions 65536, factor 16, beta_fast 32 and beta_slow 1. If one copy changes and the other does not, the two test suites check different tables. Keep one shared helper for the DeepSeek-V4-Flash YaRN inverse-frequency table, in one test support file. Have both suites call it and delete the second copy. Keep the return-type conversion at the call site.
+
+## Review Findings (2026-10-13 18:38)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 5 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4RH9AEVJP0MDG34XPHF8PWT.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4RH9AEVJP0MDG34XPHF8PWT.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/DeepSeekV4IndexerTests.swift:140` `reuse/reuse` — The new private `loadRepeatableWeights(into:seed:)` repeats the fill-and-load logic of the `checkpoint` helpers in other DeepSeek-V4 test suites. Each suite keeps its own copy, so one fix to the weight filler must be made in several places. Move `loadRepeatableWeights` to a shared test file, such as `DeepSeekV4SyntheticCheckpoint.swift`, and have the Cache and Compressor suites call it. If their `checkpoint` helpers differ in a way that matters, parameterize the shared helper for that difference instead of keeping a parallel copy.

@@ -125,22 +125,6 @@ struct DeepSeekV4CacheTests {
         MLXRandom.uniform(low: fixtureLow, high: fixtureHigh, shape, key: MLXRandom.key(seed))
     }
 
-    /// Builds one repeatable random weight for each parameter of a module.
-    ///
-    /// - Parameters:
-    ///   - module: The module whose parameters the checkpoint must fill.
-    ///   - seed: The seed the filler starts at.
-    /// - Returns: The weights, by parameter path.
-    private static func checkpoint(for module: Module, seed: UInt64) -> [String: MLXArray] {
-        var weights: [String: MLXArray] = [:]
-        var next = seed
-        for (key, value) in module.parameters().flattened().sorted(by: { $0.0 < $1.0 }) {
-            next += 1
-            weights[key] = fixture(value.shape, seed: next)
-        }
-        return weights
-    }
-
     /// Builds one compressor of the synthetic checkpoint and loads a
     /// repeatable random weight into every parameter it declares.
     ///
@@ -149,11 +133,8 @@ struct DeepSeekV4CacheTests {
     private static func loadedCompressor(layer: Int) throws -> DeepSeekV4Compressor {
         let compressor = DeepSeekV4Compressor(
             configuration: try configuration(), layer: layer, headDim: headDim)
-        try compressor.update(
-            parameters: ModuleParameters.unflattened(
-                checkpoint(for: compressor, seed: weightSeed)),
-            verify: [.all])
-        eval(compressor)
+        try DeepSeekV4RepeatableWeights.load(
+            into: compressor, seed: weightSeed, low: fixtureLow, high: fixtureHigh)
         return compressor
     }
 
@@ -466,10 +447,8 @@ struct DeepSeekV4CacheTests {
     /// - Returns: The loaded model.
     private static func loadedModel() throws -> DeepSeekV4Model {
         let model = DeepSeekV4Model(try configuration())
-        try model.update(
-            parameters: ModuleParameters.unflattened(checkpoint(for: model, seed: weightSeed)),
-            verify: [.all])
-        eval(model)
+        try DeepSeekV4RepeatableWeights.load(
+            into: model, seed: weightSeed, low: fixtureLow, high: fixtureHigh)
         return model
     }
 
