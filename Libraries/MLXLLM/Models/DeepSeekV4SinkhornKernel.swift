@@ -88,6 +88,37 @@ enum DeepSeekV4SinkhornKernel {
         DeepSeekV4Math.preScaleIndex, DeepSeekV4Math.postScaleIndex,
         DeepSeekV4Math.combScaleIndex)
 
+    /// The outputs of the kernel, in the order of the kernel output list. The
+    /// name of each case is the name of its output in the Metal source, and
+    /// the raw value of each case is its place in the output list.
+    private enum Output: Int, CaseIterable {
+        /// The gain of each copy, shape `(..., copies)`.
+        case post
+        /// The doubly stochastic matrix, shape `(..., copies, copies)`.
+        case comb
+        /// The single stream, shape `(..., width)`.
+        case collapsed
+
+        /// The name of the output in the Metal source.
+        var name: String { String(describing: self) }
+
+        /// The shape of the output.
+        ///
+        /// - Parameters:
+        ///   - leading: The leading axes of the residual stream, one for each
+        ///     token axis.
+        ///   - copies: The number of copies of the residual stream.
+        ///   - width: The width of one copy.
+        /// - Returns: The shape of the output for these axes.
+        func shape(leading: [Int], copies: Int, width: Int) -> [Int] {
+            switch self {
+            case .post: leading + [copies]
+            case .comb: leading + [copies, copies]
+            case .collapsed: leading + [width]
+            }
+        }
+    }
+
     /// The Metal source. The template arguments are `HC`, the number of
     /// copies; `ITERS`, the number of Sinkhorn steps; `D`, the width of one
     /// copy; `THREADS`, the threadgroup width; `SIMD_WIDTH`, the number of
@@ -110,6 +141,13 @@ enum DeepSeekV4SinkhornKernel {
     /// of a row normalization and a column normalization. Each normalization
     /// adds the values in index order and divides by the sum plus epsilon,
     /// which is the order of `DeepSeekV4Math.sinkhorn(_:iters:eps:)`.
+    /// `stepsPerPair` is the number of normalizations in one pair; an odd
+    /// step is a row normalization and an even step is a column
+    /// normalization.
+    ///
+    /// The weighted sum reads the width in groups of `vectorWidth`, the
+    /// number of floats in one `float4`, when the width is a multiple of
+    /// that number.
     ///
     /// Lane `r` of the first SIMD group keeps row `r` in registers. A row
     /// normalization adds the row of the lane. A column normalization reads
@@ -156,8 +194,9 @@ enum DeepSeekV4SinkhornKernel {
             for (int b = 0; b < HC; b++) {
                 v[b] = v[b] * inverse + eps;
             }
-            for (int step = 0; step < 2 * ITERS - 1; step++) {
-                if (step % 2 == 1) {
+            constexpr int stepsPerPair = 2;
+            for (int step = 0; step < stepsPerPair * ITERS - 1; step++) {
+                if (step % stepsPerPair == 1) {
                     float total = 0.0f;
                     #pragma unroll
                     for (int b = 0; b < HC; b++) {
@@ -198,8 +237,9 @@ enum DeepSeekV4SinkhornKernel {
         }
         const device float* copies = stream + token * HC * D;
         device float* single = collapsed + token * D;
-        if (D % 4 == 0) {
-            constexpr uint groups = D / 4;
+        constexpr uint vectorWidth = sizeof(float4) / sizeof(float);
+        if (D % vectorWidth == 0) {
+            constexpr uint groups = D / vectorWidth;
             const device float4* copies4 = (const device float4*)copies;
             device float4* single4 = (device float4*)single;
             for (uint i = lane; i < groups; i += THREADS) {
@@ -250,7 +290,7 @@ enum DeepSeekV4SinkhornKernel {
     private static let kernel = MLXFast.metalKernel(
         name: "deepseek_v4_split_sinkhorn_collapse",
         inputNames: ["mixes", "scale", "base", "stream"],
-        outputNames: ["post", "comb", "collapsed"],
+        outputNames: Output.allCases.map(\.name),
         source: source,
         header: header)
 
@@ -325,9 +365,14 @@ enum DeepSeekV4SinkhornKernel {
             template: templateArguments(copies: copies, iters: iters, width: width, eps: eps),
             grid: (leading.reduce(1, *) * threadsPerToken, 1, 1),
             threadGroup: (threadsPerToken, 1, 1),
-            outputShapes: [leading + [copies], leading + [copies, copies], leading + [width]],
-            outputDTypes: [.float32, .float32, .float32])
-        return (post: outputs[0], comb: outputs[1], collapsed: outputs[2])
+            outputShapes: Output.allCases.map {
+                $0.shape(leading: leading, copies: copies, width: width)
+            },
+            outputDTypes: Output.allCases.map { _ in .float32 })
+        return (
+            post: outputs[Output.post.rawValue], comb: outputs[Output.comb.rawValue],
+            collapsed: outputs[Output.collapsed.rawValue]
+        )
     }
 
     /// The template arguments of one specialization of the kernel. The

@@ -1,0 +1,20 @@
+---
+assignees:
+- claude-code
+position_column: todo
+position_ordinal: 8c80
+title: 'DeepSeek-V4 decode speed: project the compressor rows only at a chunk boundary'
+---
+## What
+
+Found on 2026-10-14 in a study of osaurus (scratchpad `osaurus/REPORT.md`, idea 2).
+
+Our cache projects each new token through `wkv` and `wgate` on every decode step (`DeepSeekV4Cache.swift` about line 375). Osaurus keeps the raw rows and projects the whole chunk once at the chunk boundary (vmlx-swift commit fd93476a, `DeepseekV4Compressor.swift:1125-1172` and 1324-1379). They measured +8.3 % decode at 2k context.
+
+Estimate at 32k: about 136 MB less weight read and about 120 fewer dispatches on most steps, decode -0.3 to -0.6 ms/token. A block projection can use a different matmul kernel than the one-token path, thus the bits can change. Rewind and the cache state (format version) must change. Risk: low to medium.
+
+## Acceptance Criteria
+
+- [ ] A unit test compares the pooled rows with the current path (tolerance if not bit-exact).
+- [ ] Decode ms/token at 32k, before and after, GPU idle.
+- [ ] Cache save, load and rewind tests pass. The greedy parity test passes. #deepseek-v4 #performance

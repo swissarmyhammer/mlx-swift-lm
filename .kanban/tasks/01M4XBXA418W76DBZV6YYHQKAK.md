@@ -39,10 +39,57 @@ comments:
     - evidence: Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift, Libraries/MLXLLM/Models/DeepSeekV4HyperConnection.swift, Libraries/MLXLLM/Models/DeepSeekV4MathHelpers.swift, Libraries/MLXLLM/Models/DeepSeekV4CompiledDecode.swift, Tests/MLXLMTests/DeepSeekV4HyperConnectionTests.swift, Tests/MLXLMTests/DeepSeekV4TestArrays.swift. Decode graph Softmax 129 -> 43 and 344 compiled split kernels -> 0 (430 dispatches less per step). 32k decode 33.0/32.9 -> 31.7/31.7 ms/token; profile window 34.6/35.4 -> 33.2/33.3 ms/step; prefill unchanged. xctest 716 XCTest 0 failures, 1426 Swift Testing passed, 0 compiler warnings. Bit-exact float32 and bfloat16 parity tests pass. Greedy parity passed.
     - next: review
   timestamp: 2026-10-14T18:05:46.404825+00:00
+- actor: claude-code
+  id: 01m4xsmpn8m4npdpakqj5ds17p
+  text: |-
+    ### review — findings
+    - evidence: `review sha HEAD~1..HEAD` (dfa3b28): 1 finding (7 attempted, 1 confirmed, 6 refuted). Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift:330 `code-hygiene/magic-numbers-swift`.
+    - acceptance: all 3 items checked against the comments. (1) Parity test `theFusedSinkhornKernelAgreesWithTheOpPath` compares post, comb and collapsed with `==` on the floats, cases include (4,20,64,float32) and (4,20,64,bfloat16); suite passes. (2) 32k decode, GPU idle: 33.0/32.9 -> 31.7/31.7 ms/token. (3) `greedyFirstTokensMatchThePythonFixture()`: TEST SUCCEEDED.
+    - note: the card text asks for a precise `exp`. The kernel uses `fast::exp` (softmax) and `metal::exp` (sigmoid), the same as the MLX ops. The implement step recorded that `metal::precise::exp` broke bit-exactness. Bit-exactness is the acceptance criterion, thus this change agrees with the criterion.
+    - next: implement the finding (replace the output indices 0, 1, 2 with named constants, and remove the same cause from the whole file), then review again.
+  timestamp: 2026-10-14T18:08:53.928643+00:00
+- actor: claude-code
+  id: 01m4xsn3ywmapdjzw2ky3x939t
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 6 files; 32k decode 33.0 -> 31.7 ms/token, prefill unchanged; same bits; greedy parity pass
+    - test: green — 716 XCTest + 1426 Swift Testing pass, 0 warnings (run by the implement step on the same tree)
+    - commit: dfa3b28
+    - review: findings — DeepSeekV4SinkhornKernel.swift:330
+  timestamp: 2026-10-14T18:09:07.548892+00:00
+- actor: claude-code
+  id: 01m4xsx2f69jc8dfh3ktbr08w2
+  text: |-
+    Finding `code-hygiene/magic-numbers-swift` (DeepSeekV4SinkhornKernel.swift:330, "Magic numbers should be replaced by named constants.") is done for the whole file.
+    - RED: `swiftlint lint` with `only_rules: [no_magic_numbers]` and `allowed_numbers: [0, 1, -1, 100]` gave 1 violation at the `outputs[2]` line. GREEN: 0 violations.
+    - Swift: new `private enum Output: Int, CaseIterable { post, comb, collapsed }`. The raw value is the place in the output list, the case name is the Metal output name, and `shape(leading:copies:width:)` gives the output shape. `outputNames`, `outputShapes`, `outputDTypes` and the return tuple all come from this enum. Thus the order is in one place.
+    - Metal source: `constexpr int stepsPerPair = 2` replaces the two `2` literals of the Sinkhorn step loop. `constexpr uint vectorWidth = sizeof(float4) / sizeof(float)` replaces the two `4` literals of the weighted sum. The doc comment tells both names. The values are compile-time constants with the same value, thus the bits do not change.
+    - Tests: GPU idle (0 %). `swift build --build-tests`: 0 compiler warnings (only the known `missing creator for mutated node` line). `xcrun xctest`: 716 XCTest 0 failures; 1426 Swift Testing tests in 112 suites passed. `theFusedSinkhornKernelAgreesWithTheOpPath` (5 cases, float32 and bfloat16) and `theCollapseTakesTheRowSoftmaxOfTheMixingMatrixInTheFusedKernel` pass.
+
+    ### implement — changed
+    - evidence: Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift; swiftlint no_magic_numbers 1 -> 0; xctest 716 XCTest 0 failures, 1426 Swift Testing passed, 0 compiler warnings.
+    - next: review
+  timestamp: 2026-10-14T18:13:28.166414+00:00
+- actor: claude-code
+  id: 01m4xsyz2rqvhf9ep295wcqar8
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (639b959): 0 findings, 0 confirmed, 0 refuted, 7 attempted, 0 failed. 1 file reviewed. The prior finding at Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift (code-hygiene/magic-numbers-swift) is checked.
+    - next: none. The task moved to done.
+  timestamp: 2026-10-14T18:14:30.232390+00:00
+- actor: claude-code
+  id: 01m4xszqzfkz3t5xs21a196bt5
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 1 file, 1 finding fixed (named kernel outputs and loop widths)
+    - test: green — 716 XCTest + 1426 Swift Testing pass, 0 warnings (run by the implement step on the same tree)
+    - commit: 639b959
+    - review: clean — 0 findings
+  timestamp: 2026-10-14T18:14:55.727314+00:00
 depends_on:
 - 01M4XBWWKVGF366NQ6EX5NV4X8
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffcb80
 title: 'DeepSeek-V4 decode speed: put the comb softmax and the sigmoids into the Sinkhorn kernel'
 ---
 ## What
@@ -57,6 +104,24 @@ Expected gain: about 0.3-0.5 ms/token.
 
 ## Acceptance Criteria
 
-- [ ] The kernel output is bit-exact with the op path (float32 and bfloat16 tests).
-- [ ] Decode ms/token at 32k, before and after, GPU idle.
-- [ ] The greedy parity test on the real checkpoint passes. #deepseek-v4 #performance
+- [x] The kernel output is bit-exact with the op path (float32 and bfloat16 tests).
+- [x] Decode ms/token at 32k, before and after, GPU idle.
+- [x] The greedy parity test on the real checkpoint passes. #deepseek-v4 #performance
+
+## Review Findings (2026-10-14 13:06)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 6 file(s) reviewed, 10 not reviewed.
+
+> 10 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4XBXA418W76DBZV6YYHQKAK.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4XBXA418W76DBZV6YYHQKAK.md` — no validator matches this file
+> - `.kanban/tasks/01M4XRH91GZ301C38MNF4ZTXGJ.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4XRH91GZ301C38MNF4ZTXGJ.md` — no validator matches this file
+> - `.kanban/tasks/01M4XRHDG8R5QF02SYQ5EFYZ6W.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4XRHDG8R5QF02SYQ5EFYZ6W.md` — no validator matches this file
+> - `.kanban/tasks/01M4XRHHA9FY9TSJHZWYCM4P15.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4XRHHA9FY9TSJHZWYCM4P15.md` — no validator matches this file
+> - `.kanban/tasks/01M4XRHN411A4RM83YWATJ552P.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4XRHN411A4RM83YWATJ552P.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift:330` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.

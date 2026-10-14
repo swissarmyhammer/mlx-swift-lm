@@ -1,6 +1,14 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m4xszn3ptjxc94jpefkk0ca6
+  text: |-
+    Note from the osaurus study (scratchpad `osaurus/REPORT.md`) on 2026-10-14:
+    - The kernel must read only the visible window range of each query (see the new window-slab task), or it keeps the waste of scoring all window keys of the block.
+    - Reference kernels in vmlx-swift (scratchpad `osaurus/vmlx/`): `vmlx_dsv4_heads16_prefill` at `DeepseekV4MathHelpers.swift:1604-1805` loads one row at a time and is slow. The 32-key-tile sparse kernel at `NaiveN05FlashPrefillAttention.swift:79-140` is a better start.
+  timestamp: 2026-10-14T18:14:52.790069+00:00
 position_column: todo
 position_ordinal: '8780'
 title: 'DeepSeek-V4 speed: one fused Metal sparse attention kernel for head dim 512 (window + picked pool rows + sink, online softmax)'
