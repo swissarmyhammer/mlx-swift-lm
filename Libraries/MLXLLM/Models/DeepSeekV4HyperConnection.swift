@@ -503,9 +503,6 @@ class DeepSeekV4HyperHead: Module {
     /// hyper-connection holds one for each of its three fields.
     private static let scaleFieldCount = 1
 
-    /// The place of the learned scale inside the scale vector.
-    private static let scaleIndex = 0
-
     /// The number of parallel copies of the residual stream.
     let hcMult: Int
 
@@ -563,7 +560,9 @@ class DeepSeekV4HyperHead: Module {
             of: streamF32, projection: mixProjection, normWeight: _normWeight,
             normEps: normEps)
 
-        let scale = mixScale.asType(.float32)[Self.scaleIndex]
+        // The scale vector holds one value, thus it broadcasts across the
+        // mixes as it is. An `Int` subscript would add a `Gather` node.
+        let scale = mixScale.asType(.float32)
         let weights = sigmoid(mixes * scale + mixBias.asType(.float32)) + hcEps
         return ManifoldStream.weightedSum(of: streamF32, weights: weights).asType(stream.dtype)
     }

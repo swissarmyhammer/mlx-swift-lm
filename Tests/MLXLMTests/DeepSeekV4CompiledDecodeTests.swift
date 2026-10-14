@@ -28,7 +28,10 @@ struct DeepSeekV4CompiledDecodeTests {
     // MARK: - The shapes of one decode step
 
     /// The leading shape of one decode step: one sequence of one token.
-    private static let decodeShape = [1, 1]
+    private static let decodeShape = [1, decodeTokens]
+
+    /// The token count of one decode step.
+    private static let decodeTokens = 1
 
     /// The token counts of the blocks that one shapeless function reads in
     /// turn: two prefill blocks of different lengths, and one decode step.
@@ -201,27 +204,68 @@ struct DeepSeekV4CompiledDecodeTests {
 
     // MARK: - The collapse fields
 
+    /// The token count of the prefill block the gather test reads.
+    private static let prefillTokens = blockLengths[0]
+
+    /// The weights and the stream one collapse reads, for a block of
+    /// `tokens` tokens.
+    private static func collapseInputs(tokens: Int) -> (
+        stream: MLXArray, projection: MLXArray, normWeight: MLXArray, scale: MLXArray,
+        base: MLXArray
+    ) {
+        (
+            stream: randomArray(
+                blockShape(tokens) + [hcMult, hiddenSize], seed: 121, dtype: .bfloat16),
+            projection: randomArray([mixWidth, hcMult * hiddenSize], seed: 122),
+            normWeight: MLXArray.ones([hcMult * hiddenSize]),
+            scale: randomArray([scaleCount], seed: 123),
+            base: randomArray([mixWidth], seed: 124)
+        )
+    }
+
+    /// The compiled collapse fields of one decode step.
+    private static func compiledDecodeCollapseFields() -> (
+        MLXArray, MLXArray, MLXArray, MLXArray
+    ) {
+        let inputs = collapseInputs(tokens: decodeTokens)
+        return DeepSeekV4CompiledDecode.collapseFields(
+            hcMult: hcMult, normEps: normEps, hcEps: hcEps)(
+                inputs.stream, inputs.projection, inputs.normWeight, inputs.scale, inputs.base)
+    }
+
     @Test
     func theCompiledCollapseFieldsGiveTheBitsOfTheOpPath() {
-        let stream = Self.randomArray(
-            Self.decodeShape + [Self.hcMult, Self.hiddenSize], seed: 121, dtype: .bfloat16)
-        let projection = Self.randomArray(
-            [Self.mixWidth, Self.hcMult * Self.hiddenSize], seed: 122)
-        let normWeight = MLXArray.ones([Self.hcMult * Self.hiddenSize])
-        let scale = Self.randomArray([Self.scaleCount], seed: 123)
-        let base = Self.randomArray([Self.mixWidth], seed: 124)
+        let inputs = Self.collapseInputs(tokens: Self.decodeTokens)
 
-        let compiled = DeepSeekV4CompiledDecode.collapseFields(
-            hcMult: Self.hcMult, normEps: Self.normEps, hcEps: Self.hcEps)(
-                stream, projection, normWeight, scale, base)
+        let compiled = Self.compiledDecodeCollapseFields()
         let reference = ManifoldStream.collapseFields(
-            of: stream, projection: projection, normWeight: normWeight, scale: scale, base: base,
-            hcMult: Self.hcMult, normEps: Self.normEps, hcEps: Self.hcEps)
+            of: inputs.stream, projection: inputs.projection, normWeight: inputs.normWeight,
+            scale: inputs.scale, base: inputs.base, hcMult: Self.hcMult, normEps: Self.normEps,
+            hcEps: Self.hcEps)
 
         expectSameBits(compiled.0, reference.stream, "the float32 stream")
         expectSameBits(compiled.1, reference.pre, "the pre weights")
         expectSameBits(compiled.2, reference.post, "the post gains")
         expectSameBits(compiled.3, reference.comb, "the row softmax of the mixing matrix")
+    }
+
+    @Test
+    func theCompiledCollapseFieldsReadTheScalesWithNoGather() {
+        let fields = Self.compiledDecodeCollapseFields()
+
+        #expect(DeepSeekV4TestArrays.gatherNodeCount([fields.1, fields.2, fields.3]) == 0)
+    }
+
+    @Test
+    func theCollapseFieldsOfAPrefillBlockReadTheScalesWithNoGather() {
+        let inputs = Self.collapseInputs(tokens: Self.prefillTokens)
+
+        let fields = ManifoldStream.collapseFields(
+            of: inputs.stream, projection: inputs.projection, normWeight: inputs.normWeight,
+            scale: inputs.scale, base: inputs.base, hcMult: Self.hcMult, normEps: Self.normEps,
+            activations: DeepSeekV4CompiledDecode.splitActivations(hcEps: Self.hcEps))
+
+        #expect(DeepSeekV4TestArrays.gatherNodeCount([fields.pre, fields.post, fields.comb]) == 0)
     }
 
     // MARK: - The routing gate

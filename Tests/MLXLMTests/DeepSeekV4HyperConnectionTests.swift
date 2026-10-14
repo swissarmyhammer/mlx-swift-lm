@@ -657,6 +657,15 @@ struct DeepSeekV4HyperConnectionTests {
     }
 
     @Test
+    func theHeadReduceReadsItsScaleWithNoGather() throws {
+        let head = try Self.fixtureHyperHead(configuration: Self.configuration())
+
+        let reduced = head(Self.hiddenStateFixture())
+
+        #expect(DeepSeekV4TestArrays.gatherNodeCount([reduced]) == 0)
+    }
+
+    @Test
     func theHeadReduceAnswersOneFiniteStreamOfTheWideCheckpoint() throws {
         let configuration = try Self.configuration(hiddenSize: Self.wideHiddenSize)
         let head = DeepSeekV4HyperHead(configuration: configuration)

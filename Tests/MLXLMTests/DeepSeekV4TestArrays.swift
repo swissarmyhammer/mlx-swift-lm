@@ -1,5 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
+import Foundation
 import MLX
 
 /// Helpers that read MLX arrays back into Swift values for the DeepSeek-V4
@@ -13,6 +14,9 @@ import MLX
 /// `MLXArray.asArray(_:)` evaluates the array itself, and it copies the
 /// values out in row-major order for every memory layout: a transposed, a
 /// sliced or a broadcast array gives the same list as its contiguous copy.
+///
+/// One more helper reads the graph of an array, not its values, and counts
+/// the gather nodes in it.
 enum DeepSeekV4TestArrays {
 
     /// Reads an array back as a flat list of `Float`, in row-major order.
@@ -31,5 +35,22 @@ enum DeepSeekV4TestArrays {
     /// - Returns: Every value of the array, in int32.
     static func integers(_ array: MLXArray) -> [Int32] {
         array.asType(.int32).asArray(Int32.self)
+    }
+
+    /// The label `exportToDot(_:)` writes for a node of the general MLX
+    /// gather. The quotation marks keep `GatherAxis` and `GatherQMM` out of
+    /// the count, because those are different primitives.
+    private static let gatherNodeLabel = "\"Gather\""
+
+    /// Counts the general gather nodes in the graph that makes `arrays`.
+    ///
+    /// Each gather node is one more kernel dispatch on each evaluation, thus
+    /// a test can hold a path to the gathers it needs.
+    ///
+    /// - Parameter arrays: The outputs whose graph to read. The function does
+    ///   not evaluate them.
+    /// - Returns: The number of `Gather` nodes in the graph.
+    static func gatherNodeCount(_ arrays: [MLXArray]) -> Int {
+        exportToDot(arrays).components(separatedBy: gatherNodeLabel).count - 1
     }
 }

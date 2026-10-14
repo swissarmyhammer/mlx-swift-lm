@@ -141,7 +141,7 @@ enum DeepSeekV4Math {
         /// The part of the mixes vector this field reads.
         let mixes: MLXArray
 
-        /// The learned scale of this field, a scalar.
+        /// The learned scale of this field, shape `(1)`.
         let scale: MLXArray
 
         /// The learned bias of this field, of the trailing shape of `mixes`.
@@ -203,14 +203,32 @@ enum DeepSeekV4Math {
         let combShape = Array(combFlat.shape.dropLast()) + [hcMult, hcMult]
         return HCSplitOperands(
             pre: HCSplitField(
-                mixes: mixesF32[.ellipsis, 0 ..< hcMult], scale: scaleF32[preScaleIndex],
-                base: baseF32[0 ..< hcMult]),
+                mixes: mixesF32[.ellipsis, 0 ..< hcMult],
+                scale: fieldScale(scaleF32, at: preScaleIndex), base: baseF32[0 ..< hcMult]),
             post: HCSplitField(
                 mixes: mixesF32[.ellipsis, hcMult ..< splitWidth],
-                scale: scaleF32[postScaleIndex], base: baseF32[hcMult ..< splitWidth]),
+                scale: fieldScale(scaleF32, at: postScaleIndex),
+                base: baseF32[hcMult ..< splitWidth]),
             comb: HCSplitField(
-                mixes: combFlat.reshaped(combShape), scale: scaleF32[combScaleIndex],
+                mixes: combFlat.reshaped(combShape),
+                scale: fieldScale(scaleF32, at: combScaleIndex),
                 base: baseF32[splitWidth...].reshaped([hcMult, hcMult])))
+    }
+
+    /// The learned scale of one field of the split, as a slice of one value.
+    ///
+    /// An `Int` subscript calls `take`, and `take` adds a `Gather` node to
+    /// the graph: one more kernel dispatch for each field of each
+    /// hyper-connection on each step. A range slice is a view of the scale
+    /// vector and dispatches no kernel. The slice has shape `(1)`, and it
+    /// broadcasts across the field to the values a scalar gives.
+    ///
+    /// - Parameters:
+    ///   - scale: The three learned scales, shape `(3)`.
+    ///   - index: The place of the field scale inside `scale`.
+    /// - Returns: The scale of the field, shape `(1)`.
+    private static func fieldScale(_ scale: MLXArray, at index: Int) -> MLXArray {
+        scale[index ... index]
     }
 
     /// Takes the activations of the three fields of the mHC split.
