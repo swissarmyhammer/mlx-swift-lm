@@ -191,11 +191,46 @@ enum ManifoldStream {
         of stream: MLXArray, projection: MLXArray, normWeight: MLXArray, scale: MLXArray,
         base: MLXArray, hcMult: Int, normEps: Float, hcEps: Float
     ) -> (stream: MLXArray, pre: MLXArray, post: MLXArray, comb: MLXArray) {
+        collapseFields(
+            of: stream, projection: projection, normWeight: normWeight, scale: scale, base: base,
+            hcMult: hcMult, normEps: normEps
+        ) { DeepSeekV4Math.hcSplitActivations($0, eps: hcEps) }
+    }
+
+    /// Takes the steps of
+    /// ``collapseFields(of:projection:normWeight:scale:base:hcMult:normEps:hcEps:)``
+    /// with the split activations the caller gives.
+    ///
+    /// A prefill block gives the shapeless compiled activations of
+    /// ``DeepSeekV4CompiledDecode/splitActivations(hcEps:)``, which give the
+    /// bits of the op path.
+    ///
+    /// - Parameters:
+    ///   - stream: The residual stream, shape `(batch, tokens, copies, width)`,
+    ///     already checked by ``checkShape(of:copyCount:width:)``.
+    ///   - projection: The mixes projection, shape `(mixes, copies * width)`.
+    ///   - normWeight: The weight of the reduction, every value 1, shape
+    ///     `(copies * width)`.
+    ///   - scale: The three learned scales, one for each field, shape `(3)`.
+    ///   - base: The learned bias of the mixes vector, shape `(mixes)`.
+    ///   - hcMult: The number of parallel copies of the residual stream.
+    ///   - normEps: The epsilon of the reduction, from `rms_norm_eps`.
+    ///   - activations: The activations of the three split fields.
+    /// - Returns: The fields
+    ///   ``collapseFields(of:projection:normWeight:scale:base:hcMult:normEps:hcEps:)``
+    ///   gives.
+    static func collapseFields(
+        of stream: MLXArray, projection: MLXArray, normWeight: MLXArray, scale: MLXArray,
+        base: MLXArray, hcMult: Int, normEps: Float,
+        activations: (DeepSeekV4Math.HCSplitOperands) -> (
+            pre: MLXArray, post: MLXArray, comb: MLXArray
+        )
+    ) -> (stream: MLXArray, pre: MLXArray, post: MLXArray, comb: MLXArray) {
         let streamF32 = stream.asType(.float32)
         let mixes = mixes(
             of: streamF32, projection: projection, normWeight: normWeight, normEps: normEps)
-        let fields = DeepSeekV4Math.hcSplitFields(
-            mixes: mixes, scale: scale, base: base, hcMult: hcMult, eps: hcEps)
+        let fields = activations(
+            DeepSeekV4Math.hcSplitOperands(mixes: mixes, scale: scale, base: base, hcMult: hcMult))
         return (stream: streamF32, pre: fields.pre, post: fields.post, comb: fields.comb)
     }
 
@@ -204,8 +239,8 @@ enum ManifoldStream {
     ///
     /// ``DeepSeekV4HyperConnection/expand(blockOutput:residual:post:comb:)``
     /// states the reading of `comb` this function makes and its source, and
-    /// ``DeepSeekV4CompiledDecode/expand`` compiles this function for the
-    /// decode step.
+    /// ``DeepSeekV4CompiledDecode/expand`` compiles this function for each
+    /// block.
     ///
     /// - Parameters:
     ///   - blockOutput: The output of the sub-layer, shape
@@ -318,6 +353,13 @@ class DeepSeekV4HyperConnection: Module {
             MLXArray, MLXArray, MLXArray, MLXArray
         )
 
+    /// The shapeless compiled activations of the split, which a block of
+    /// more than one token reads.
+    private let compiledSplitActivations:
+        @Sendable (DeepSeekV4Math.HCSplitOperands) -> (
+            pre: MLXArray, post: MLXArray, comb: MLXArray
+        )
+
     /// Builds the hyper-connection of one sub-layer.
     ///
     /// - Parameter configuration: The configuration of the checkpoint.
@@ -336,6 +378,8 @@ class DeepSeekV4HyperConnection: Module {
         self._normWeight = MLXArray.ones([hcDim])
         self.compiledCollapseFields = DeepSeekV4CompiledDecode.collapseFields(
             hcMult: configuration.hcMult, normEps: configuration.rmsNormEps,
+            hcEps: configuration.hcEps)
+        self.compiledSplitActivations = DeepSeekV4CompiledDecode.splitActivations(
             hcEps: configuration.hcEps)
     }
 
@@ -377,8 +421,9 @@ class DeepSeekV4HyperConnection: Module {
 
     /// Takes the steps of the collapse that come before the Sinkhorn steps.
     ///
-    /// A decode step reads the compiled function, and a longer block reads
-    /// the op path. The two give the same bits.
+    /// A decode step reads the whole compiled function. A longer block reads
+    /// the op path for the projection and the slices, and the shapeless
+    /// compiled split activations. Each path gives the bits of the op path.
     ///
     /// - Parameter stream: The residual stream, already checked.
     /// - Returns: The fields
@@ -390,7 +435,8 @@ class DeepSeekV4HyperConnection: Module {
         guard DeepSeekV4CompiledDecode.isDecodeStep(stream) else {
             return ManifoldStream.collapseFields(
                 of: stream, projection: mixProjection, normWeight: _normWeight,
-                scale: mixScale, base: mixBias, hcMult: hcMult, normEps: normEps, hcEps: hcEps)
+                scale: mixScale, base: mixBias, hcMult: hcMult, normEps: normEps,
+                activations: compiledSplitActivations)
         }
         let (streamF32, pre, post, comb) = compiledCollapseFields(
             stream, mixProjection, _normWeight, mixScale, mixBias)
@@ -435,11 +481,7 @@ class DeepSeekV4HyperConnection: Module {
     func expand(
         blockOutput: MLXArray, residual: MLXArray, post: MLXArray, comb: MLXArray
     ) -> MLXArray {
-        guard DeepSeekV4CompiledDecode.isDecodeStep(blockOutput) else {
-            return ManifoldStream.expand(
-                blockOutput: blockOutput, residual: residual, post: post, comb: comb)
-        }
-        return DeepSeekV4CompiledDecode.expand(blockOutput, residual, post, comb)
+        DeepSeekV4CompiledDecode.expand(blockOutput, residual, post, comb)
     }
 }
 

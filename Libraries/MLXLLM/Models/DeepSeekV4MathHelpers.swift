@@ -128,6 +128,66 @@ enum DeepSeekV4Math {
         hcMult: Int,
         eps: Float
     ) -> (pre: MLXArray, post: MLXArray, comb: MLXArray) {
+        hcSplitActivations(
+            hcSplitOperands(mixes: mixes, scale: scale, base: base, hcMult: hcMult), eps: eps)
+    }
+
+    /// One field of the mHC split before its activation.
+    ///
+    /// The field holds the part of the mixes vector it reads, and the learned
+    /// scale and bias it takes. Its logits are `mixes * scale + base`. All
+    /// three arrays are float32.
+    struct HCSplitField {
+        /// The part of the mixes vector this field reads.
+        let mixes: MLXArray
+
+        /// The learned scale of this field, a scalar.
+        let scale: MLXArray
+
+        /// The learned bias of this field, of the trailing shape of `mixes`.
+        let base: MLXArray
+
+        /// The logits of this field, `mixes * scale + base`.
+        var logits: MLXArray {
+            mixes * scale + base
+        }
+    }
+
+    /// The three fields of the mHC split before their activations.
+    ///
+    /// ``hcSplitOperands(mixes:scale:base:hcMult:)`` makes them with slices
+    /// and one reshape, and no arithmetic. The activations that follow are
+    /// elementwise, thus a compiled function without a shape can take them:
+    /// MLX gives no output shape to a slice, and a function without a shape
+    /// can hold no slice.
+    struct HCSplitOperands {
+        /// The field of the `pre` weights, shape `(..., hcMult)`.
+        let pre: HCSplitField
+
+        /// The field of the `post` gains, shape `(..., hcMult)`.
+        let post: HCSplitField
+
+        /// The field of the mixing matrix, shape `(..., hcMult, hcMult)`.
+        let comb: HCSplitField
+    }
+
+    /// Cuts the mHC mixes vector and the learned parameters into the three
+    /// fields of the split.
+    ///
+    /// The last axis of `mixes` holds `(2 + hcMult) * hcMult` numbers: the
+    /// first `hcMult` make `pre`, the next `hcMult` make `post`, and the
+    /// remaining `hcMult * hcMult` reshape into the mixing matrix `comb`.
+    /// Every value moves to float32 first.
+    ///
+    /// - Parameters:
+    ///   - mixes: The projected mixes, shape `(..., (2 + hcMult) * hcMult)`.
+    ///   - scale: The three learned scales, one for each field, shape `(3)`.
+    ///   - base: The learned bias, shape `((2 + hcMult) * hcMult)`.
+    ///   - hcMult: The number of parallel copies of the residual stream.
+    /// - Returns: The three fields, in float32.
+    static func hcSplitOperands(
+        mixes: MLXArray, scale: MLXArray, base: MLXArray, hcMult: Int
+    ) -> HCSplitOperands {
         let mixWidth = (splitFieldCount + hcMult) * hcMult
         precondition(
             mixes.shape.last == mixWidth,
@@ -139,25 +199,70 @@ enum DeepSeekV4Math {
         let baseF32 = base.asType(.float32)
 
         let splitWidth = splitFieldCount * hcMult
-        let pre =
-            sigmoid(
-                mixesF32[.ellipsis, 0 ..< hcMult] * scaleF32[preScaleIndex]
-                    + baseF32[0 ..< hcMult]) + eps
-        let post =
-            postGain
-            * sigmoid(
-                mixesF32[.ellipsis, hcMult ..< splitWidth] * scaleF32[postScaleIndex]
-                    + baseF32[hcMult ..< splitWidth])
-
         let combFlat = mixesF32[.ellipsis, splitWidth...]
         let combShape = Array(combFlat.shape.dropLast()) + [hcMult, hcMult]
-        let combLogits =
-            (combFlat * scaleF32[combScaleIndex]).reshaped(combShape)
-            + baseF32[splitWidth...].reshaped([hcMult, hcMult])
+        return HCSplitOperands(
+            pre: HCSplitField(
+                mixes: mixesF32[.ellipsis, 0 ..< hcMult], scale: scaleF32[preScaleIndex],
+                base: baseF32[0 ..< hcMult]),
+            post: HCSplitField(
+                mixes: mixesF32[.ellipsis, hcMult ..< splitWidth],
+                scale: scaleF32[postScaleIndex], base: baseF32[hcMult ..< splitWidth]),
+            comb: HCSplitField(
+                mixes: combFlat.reshaped(combShape), scale: scaleF32[combScaleIndex],
+                base: baseF32[splitWidth...].reshaped([hcMult, hcMult])))
+    }
 
-        let comb = softmax(combLogits, axis: rowSumAxis, precise: true) + eps
+    /// Takes the activations of the three fields of the mHC split.
+    ///
+    /// Each activation is elementwise but the row softmax of `comb`, thus
+    /// the reshape of `comb` ahead of its scale gives the same bits as a
+    /// reshape after it.
+    ///
+    /// - Parameters:
+    ///   - operands: The fields of
+    ///     ``hcSplitOperands(mixes:scale:base:hcMult:)``.
+    ///   - eps: The epsilon the split adds, from `hc_eps`.
+    /// - Returns: `pre`, `post` and `comb`, as
+    ///   ``hcSplitFields(mixes:scale:base:hcMult:eps:)`` gives them.
+    static func hcSplitActivations(
+        _ operands: HCSplitOperands, eps: Float
+    ) -> (pre: MLXArray, post: MLXArray, comb: MLXArray) {
+        (
+            pre: hcPreWeights(operands.pre, eps: eps),
+            post: hcPostGains(operands.post),
+            comb: hcCombRows(operands.comb, eps: eps)
+        )
+    }
 
-        return (pre: pre, post: post, comb: comb)
+    /// The `pre` weights: the sigmoid of the field logits plus `eps`.
+    ///
+    /// - Parameters:
+    ///   - field: The `pre` field of the split.
+    ///   - eps: The epsilon the split adds, from `hc_eps`.
+    /// - Returns: The weights, of the shape of the field.
+    static func hcPreWeights(_ field: HCSplitField, eps: Float) -> MLXArray {
+        sigmoid(field.logits) + eps
+    }
+
+    /// The `post` gains: the sigmoid of the field logits, opened to the range
+    /// 0 through 2.
+    ///
+    /// - Parameter field: The `post` field of the split.
+    /// - Returns: The gains, of the shape of the field.
+    static func hcPostGains(_ field: HCSplitField) -> MLXArray {
+        postGain * sigmoid(field.logits)
+    }
+
+    /// The rows of the mixing matrix: the row softmax of the field logits
+    /// plus `eps`. The Sinkhorn steps still have to run on them.
+    ///
+    /// - Parameters:
+    ///   - field: The `comb` field of the split.
+    ///   - eps: The epsilon the split adds, from `hc_eps`.
+    /// - Returns: The rows, of the shape of the field.
+    static func hcCombRows(_ field: HCSplitField, eps: Float) -> MLXArray {
+        softmax(field.logits, axis: rowSumAxis, precise: true) + eps
     }
 
     /// Takes the Sinkhorn steps of ``hcSplitSinkhorn(mixes:scale:base:hcMult:iters:eps:)``

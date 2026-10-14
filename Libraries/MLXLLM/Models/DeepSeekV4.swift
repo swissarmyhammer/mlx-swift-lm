@@ -49,7 +49,9 @@
 //     compiles a decode step in two traces for each layer, around the stage
 //     that writes the cache (`DeepSeekV4DecoderLayer.decodeStep`), and
 //     Libraries/MLXLLM/Models/DeepSeekV4CompiledDecode.swift compiles the
-//     small hot functions inside them. Prefill keeps the op path. This file
+//     small hot functions inside them. A prefill block reads the shapeless
+//     ones of those functions (the SwiGLU, the expand, the combine and the
+//     split activations) and the op path for the rest. This file
 //     carries no stage profiler. Neither choice changes a number: the parity
 //     tests compare the bits of each compiled function with its op path.
 //

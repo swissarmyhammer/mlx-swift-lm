@@ -71,11 +71,7 @@ final class DeepSeekV4MLP: Module, UnaryLayer {
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
 
-    /// The `swiglu_limit` the activation clamps with. A limit of zero or less
-    /// turns the clamp off.
-    let swigluLimit: Float
-
-    /// The compiled activation, which a decode step reads.
+    /// The compiled activation, which each block reads.
     private let compiledActivation: @Sendable (MLXArray, MLXArray) -> MLXArray
 
     /// Builds one dense feed-forward block.
@@ -88,24 +84,18 @@ final class DeepSeekV4MLP: Module, UnaryLayer {
         self._gateProj.wrappedValue = Linear(hiddenSize, intermediateSize, bias: false)
         self._upProj.wrappedValue = Linear(hiddenSize, intermediateSize, bias: false)
         self._downProj.wrappedValue = Linear(intermediateSize, hiddenSize, bias: false)
-        self.swigluLimit = swigluLimit
         self.compiledActivation = DeepSeekV4CompiledDecode.clampedSwiGLU(limit: swigluLimit)
     }
 
     /// Reads one block of tokens.
     ///
-    /// A block of one token reads the compiled activation, and a longer block
-    /// reads the op path. The two give the same bits.
+    /// Each block reads the shapeless compiled activation, which gives the
+    /// bits of the op path.
     ///
     /// - Parameter x: The block input, shape `(batch, tokens, hiddenSize)`.
     /// - Returns: The block output, of the shape of `x`.
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let gate = gateProj(x)
-        let up = upProj(x)
-        guard DeepSeekV4CompiledDecode.isDecodeStep(x) else {
-            return downProj(DeepSeekV4Math.clampedSwiGLU(gate: gate, up: up, limit: swigluLimit))
-        }
-        return downProj(compiledActivation(gate, up))
+        downProj(compiledActivation(gateProj(x), upProj(x)))
     }
 }
 
@@ -131,9 +121,6 @@ final class DeepSeekV4SwitchGLU: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: SwitchLinear
     @ModuleInfo(key: "up_proj") var upProj: SwitchLinear
     @ModuleInfo(key: "down_proj") var downProj: SwitchLinear
-
-    /// The `swiglu_limit` each expert clamps its activation with.
-    let swigluLimit: Float
 
     /// The number of routes a block must hold before a sort by expert pays
     /// for itself. `SwitchGLU` reads the same number, thus the two routed
@@ -173,17 +160,16 @@ final class DeepSeekV4SwitchGLU: Module {
             inputDims: inputDims, outputDims: hiddenDims, numExperts: expertCount, bias: false)
         self._downProj.wrappedValue = SwitchLinear(
             inputDims: hiddenDims, outputDims: inputDims, numExperts: expertCount, bias: false)
-        self.swigluLimit = swigluLimit
         self.compiledActivation = DeepSeekV4CompiledDecode.clampedSwiGLU(limit: swigluLimit)
     }
 
-    /// The compiled activation, which a decode step reads.
+    /// The compiled activation, which each block reads.
     private let compiledActivation: @Sendable (MLXArray, MLXArray) -> MLXArray
 
     /// Sends each token through the experts its gate selected.
     ///
-    /// A block of one token reads the compiled activation, and a longer block
-    /// reads the op path. The two give the same bits.
+    /// Each block reads the shapeless compiled activation, which gives the
+    /// bits of the op path.
     ///
     /// - Parameters:
     ///   - x: The token values, shape `(batch, tokens, inputDims)`.
@@ -193,15 +179,12 @@ final class DeepSeekV4SwitchGLU: Module {
     ///   them up.
     func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
         let routed = MLX.expandedDimensions(x, axes: Self.routeAxes)
-        let compiled = DeepSeekV4CompiledDecode.isDecodeStep(x)
         guard indices.size >= Self.sortThreshold else {
-            let outputs = expertOutputs(
-                routed, indices, sortedByExpert: false, compiled: compiled)
+            let outputs = expertOutputs(routed, indices, sortedByExpert: false)
             return MLX.squeezed(outputs, axis: RoutedAxis.row)
         }
         let (sortedInput, sortedIndices, inverseOrder) = gatherSort(x: routed, indices: indices)
-        let sortedOutputs = expertOutputs(
-            sortedInput, sortedIndices, sortedByExpert: true, compiled: compiled)
+        let sortedOutputs = expertOutputs(sortedInput, sortedIndices, sortedByExpert: true)
         let outputs = scatterUnsort(
             x: sortedOutputs, invOrder: inverseOrder, shape: indices.shape)
         return MLX.squeezed(outputs, axis: RoutedAxis.row)
@@ -214,19 +197,14 @@ final class DeepSeekV4SwitchGLU: Module {
     ///   - indices: The selected experts, one for each row of `x`.
     ///   - sortedByExpert: True when `gatherSort` already grouped the rows by
     ///     expert, which lets the gathered matrix multiply take a faster path.
-    ///   - compiled: True when the block is a decode step, which reads the
-    ///     compiled activation.
     /// - Returns: The output of each route.
     private func expertOutputs(
-        _ x: MLXArray, _ indices: MLXArray, sortedByExpert: Bool, compiled: Bool
+        _ x: MLXArray, _ indices: MLXArray, sortedByExpert: Bool
     ) -> MLXArray {
         let gate = gateProj(x, indices, sortedIndices: sortedByExpert)
         let up = upProj(x, indices, sortedIndices: sortedByExpert)
-        let activated =
-            compiled
-            ? compiledActivation(gate, up)
-            : DeepSeekV4Math.clampedSwiGLU(gate: gate, up: up, limit: swigluLimit)
-        return downProj(activated, indices, sortedIndices: sortedByExpert)
+        return downProj(
+            compiledActivation(gate, up), indices, sortedIndices: sortedByExpert)
     }
 }
 
@@ -486,8 +464,8 @@ final class DeepSeekV4MoE: Module {
 
     /// Reads one block of tokens.
     ///
-    /// A block of one token reads the compiled combine, and a longer block
-    /// reads the op path. The two give the same bits.
+    /// Each block reads the shapeless compiled combine, which gives the bits
+    /// of the op path.
     ///
     /// - Parameters:
     ///   - x: The block input, shape `(batch, tokens, hiddenSize)`.
@@ -498,9 +476,6 @@ final class DeepSeekV4MoE: Module {
         let (indices, weights) = gate(x, inputIds: inputIds)
         let routed = switchMLP(x, indices)
         let shared = sharedExperts.map { $0(x) }
-        guard DeepSeekV4CompiledDecode.isDecodeStep(x) else {
-            return Self.combine(x, routed: routed, weights: weights, shared: shared)
-        }
         guard let shared else {
             return DeepSeekV4CompiledDecode.combineRoutedExperts(x, routed, weights)
         }
@@ -512,7 +487,7 @@ final class DeepSeekV4MoE: Module {
     ///
     /// ``DeepSeekV4CompiledDecode/combineWithSharedExpert`` and
     /// ``DeepSeekV4CompiledDecode/combineRoutedExperts`` compile this function
-    /// for the decode step.
+    /// for each block.
     ///
     /// - Parameters:
     ///   - x: The block input. The answer takes its dtype.

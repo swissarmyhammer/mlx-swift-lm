@@ -13,7 +13,7 @@
 // compiles the same functions: `_expert_select`, `_hash_expert_select`,
 // `_limited_swiglu`, `_hc_split_sinkhorn_ops` and `_hc_expand_op`.
 //
-// Three rules hold for every function in this file:
+// Four rules hold for every function in this file:
 //
 //  1. Each array the body reads is an argument. A compiled function keeps an
 //     array it captures as a constant of its trace, thus a captured weight
@@ -25,11 +25,21 @@
 //     step, such as the position offset, must be an `MLXArray` argument. A
 //     captured `Int` offset adds one trace for each token (mlx-lm PR 1189:
 //     decode fell from 29 to 17.7 tok/s after 6K tokens).
-//  3. Only a block of one token reads a compiled function. A compiled function
-//     keeps one trace for each input shape, and each new prefill length would
-//     add one more trace for each layer. Prefill is bound by its matrix
-//     multiplies, thus it keeps the op path. `Qwen35.swift` makes the same
-//     choice.
+//  3. A function compiled with a shape serves only a block of one token. Such
+//     a function keeps one trace for each input shape, and MLX never drops a
+//     trace, thus each new prefill length would add one more trace for each
+//     layer. `Qwen35.swift` makes the same choice.
+//  4. A function compiled without a shape (`compile(shapeless: true)`) serves
+//     each block, prefill and decode, with one trace. MLX replays such a
+//     trace on a new shape through the `output_shapes` of each primitive.
+//     Elementwise operations, an expanded axis, a transpose, a matrix
+//     multiply and a reduction give an output shape; a slice and a reshape to
+//     a fixed shape do not. Thus only a body free of slices and fixed
+//     reshapes may be shapeless. The clamped SwiGLU, the expand, the combine
+//     and the activations of the mHC split are shapeless. At prefill each one
+//     fuses its elementwise chain over a whole block into one kernel, which
+//     reads and writes each large float32 tensor one time instead of one time
+//     for each operation.
 //
 // Each compiled function gives the same bits as its op path. The parity tests
 // in Tests/MLXLMTests/DeepSeekV4CompiledDecodeTests.swift compare the bits.
@@ -44,7 +54,8 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-/// The compiled functions of the DeepSeek-V4 decode step.
+/// The compiled functions of the DeepSeek-V4 decode step. The shapeless ones
+/// also serve each prefill block.
 ///
 /// Each function here wraps one op-path function of the DeepSeek-V4 port in
 /// `compile`. A factory takes the constants of the checkpoint and returns the
@@ -56,7 +67,7 @@ enum DeepSeekV4CompiledDecode {
     static let tokenAxis = 1
 
     /// Tells whether a block is one decode step, thus whether it reads the
-    /// compiled functions.
+    /// functions compiled with a shape.
     ///
     /// - Parameter block: A block of shape `(batch, tokens, ...)`.
     /// - Returns: True when the block holds one token.
@@ -66,12 +77,13 @@ enum DeepSeekV4CompiledDecode {
 
     // MARK: - The clamped SwiGLU
 
-    /// Compiles ``DeepSeekV4Math/clampedSwiGLU(gate:up:limit:)``.
+    /// Compiles ``DeepSeekV4Math/clampedSwiGLU(gate:up:limit:)`` without a
+    /// shape, thus one trace serves each block.
     ///
     /// - Parameter limit: The `swiglu_limit` of the checkpoint.
     /// - Returns: A function of `(gate, up)` that gives the activation.
     static func clampedSwiGLU(limit: Float) -> @Sendable (MLXArray, MLXArray) -> MLXArray {
-        compile { gate, up in
+        compile(shapeless: true) { gate, up in
             DeepSeekV4Math.clampedSwiGLU(gate: gate, up: up, limit: limit)
         }
     }
@@ -81,12 +93,53 @@ enum DeepSeekV4CompiledDecode {
     /// The compiled ``ManifoldStream/expand(blockOutput:residual:post:comb:)``.
     ///
     /// The expand reads no constant of the checkpoint, thus every layer shares
-    /// this one function and its one trace.
+    /// this one function. It is shapeless, thus one trace serves each block.
     ///
     /// The arguments are `(blockOutput, residual, post, comb)`.
-    static let expand: @Sendable (MLXArray, MLXArray, MLXArray, MLXArray) -> MLXArray = compile {
-        blockOutput, residual, post, comb in
+    static let expand: @Sendable (MLXArray, MLXArray, MLXArray, MLXArray) -> MLXArray = compile(
+        shapeless: true
+    ) { blockOutput, residual, post, comb in
         ManifoldStream.expand(blockOutput: blockOutput, residual: residual, post: post, comb: comb)
+    }
+
+    /// Compiles ``DeepSeekV4Math/hcSplitActivations(_:eps:)`` without a shape,
+    /// thus one trace of each field serves each block.
+    ///
+    /// The slices of the split stay outside, in
+    /// ``DeepSeekV4Math/hcSplitOperands(mixes:scale:base:hcMult:)``, because
+    /// a shapeless function can hold no slice. Each field takes its own
+    /// compiled function, because each field reads its own three arrays.
+    ///
+    /// - Parameter hcEps: The epsilon of the split, from `hc_eps`.
+    /// - Returns: A function of the split operands that gives `pre`, `post`
+    ///   and `comb`.
+    static func splitActivations(
+        hcEps: Float
+    ) -> @Sendable (DeepSeekV4Math.HCSplitOperands) -> (
+        pre: MLXArray, post: MLXArray, comb: MLXArray
+    ) {
+        let preWeights = shapelessField { DeepSeekV4Math.hcPreWeights($0, eps: hcEps) }
+        let postGains = shapelessField { DeepSeekV4Math.hcPostGains($0) }
+        let combRows = shapelessField { DeepSeekV4Math.hcCombRows($0, eps: hcEps) }
+        return { operands in
+            (
+                pre: preWeights(operands.pre), post: postGains(operands.post),
+                comb: combRows(operands.comb)
+            )
+        }
+    }
+
+    /// Compiles the activation of one field of the mHC split without a shape.
+    ///
+    /// - Parameter activation: The op path of the field.
+    /// - Returns: A function of the field that gives its activation.
+    private static func shapelessField(
+        _ activation: @escaping @Sendable (DeepSeekV4Math.HCSplitField) -> MLXArray
+    ) -> @Sendable (DeepSeekV4Math.HCSplitField) -> MLXArray {
+        let compiled = compile(shapeless: true) { mixes, scale, base in
+            activation(DeepSeekV4Math.HCSplitField(mixes: mixes, scale: scale, base: base))
+        }
+        return { field in compiled(field.mixes, field.scale, field.base) }
     }
 
     /// Compiles
@@ -146,21 +199,23 @@ enum DeepSeekV4CompiledDecode {
     // MARK: - The mixture-of-experts combine
 
     /// The compiled ``DeepSeekV4MoE/combine(_:routed:weights:shared:)`` of a
-    /// layer that holds a shared expert.
+    /// layer that holds a shared expert. It is shapeless, thus one trace
+    /// serves each block.
     ///
     /// The arguments are `(x, routed, weights, shared)`.
     static let combineWithSharedExpert:
-        @Sendable (MLXArray, MLXArray, MLXArray, MLXArray) -> MLXArray = compile {
+        @Sendable (MLXArray, MLXArray, MLXArray, MLXArray) -> MLXArray = compile(shapeless: true) {
             x, routed, weights, shared in
             DeepSeekV4MoE.combine(x, routed: routed, weights: weights, shared: shared)
         }
 
     /// The compiled ``DeepSeekV4MoE/combine(_:routed:weights:shared:)`` of a
-    /// layer that holds no shared expert.
+    /// layer that holds no shared expert. It is shapeless, thus one trace
+    /// serves each block.
     ///
     /// The arguments are `(x, routed, weights)`.
     static let combineRoutedExperts: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray =
-        compile { x, routed, weights in
+        compile(shapeless: true) { x, routed, weights in
             DeepSeekV4MoE.combine(x, routed: routed, weights: weights, shared: nil)
         }
 }

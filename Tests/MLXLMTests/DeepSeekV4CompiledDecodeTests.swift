@@ -9,8 +9,10 @@
 // place, and 43 layers carry such a gap into the greedy token. A tolerance
 // would hide it, thus every test below compares the bits.
 //
-// The inputs have the shapes of one decode step: one sequence of one token.
-// The decode path is the only path that reads the compiled functions.
+// The functions compiled with a shape serve the decode step alone, thus their
+// inputs have the shapes of one decode step: one sequence of one token. The
+// shapeless functions serve each block, thus one instance of each reads
+// blocks of several lengths in turn.
 
 import Foundation
 import MLX
@@ -27,6 +29,17 @@ struct DeepSeekV4CompiledDecodeTests {
 
     /// The leading shape of one decode step: one sequence of one token.
     private static let decodeShape = [1, 1]
+
+    /// The token counts of the blocks that one shapeless function reads in
+    /// turn: two prefill blocks of different lengths, and one decode step.
+    /// One function instance reads all of them, thus a trace of one length
+    /// must give the bits of the op path at each other length.
+    private static let blockLengths = [5, 3, 1]
+
+    /// The leading shape of one block of `tokens` tokens in one sequence.
+    private static func blockShape(_ tokens: Int) -> [Int] {
+        [1, tokens]
+    }
 
     /// The number of parallel copies of the residual stream.
     private static let hcMult = 4
@@ -112,46 +125,78 @@ struct DeepSeekV4CompiledDecodeTests {
     private static let activationDTypes: [DType] = [.float32, .bfloat16]
 
     @Test(arguments: activationDTypes)
-    func theCompiledClampedSwiGLUGivesTheBitsOfTheOpPath(dtype: DType) {
-        let shape = Self.decodeShape + [Self.expertsPerToken, 1, Self.expertWidth]
-        let gate = Self.randomArray(shape, seed: 101, range: Self.activationRange, dtype: dtype)
-        let up = Self.randomArray(shape, seed: 102, range: Self.activationRange, dtype: dtype)
+    func theCompiledClampedSwiGLUGivesTheBitsOfTheOpPathAtEachBlockLength(dtype: DType) {
+        let activation = DeepSeekV4CompiledDecode.clampedSwiGLU(limit: Self.swigluLimit)
+        for tokens in Self.blockLengths {
+            let shape = Self.blockShape(tokens) + [Self.expertsPerToken, 1, Self.expertWidth]
+            let gate = Self.randomArray(shape, seed: 101, range: Self.activationRange, dtype: dtype)
+            let up = Self.randomArray(shape, seed: 102, range: Self.activationRange, dtype: dtype)
 
-        let compiled = DeepSeekV4CompiledDecode.clampedSwiGLU(limit: Self.swigluLimit)(gate, up)
-        let reference = DeepSeekV4Math.clampedSwiGLU(gate: gate, up: up, limit: Self.swigluLimit)
+            let reference = DeepSeekV4Math.clampedSwiGLU(
+                gate: gate, up: up, limit: Self.swigluLimit)
 
-        expectSameBits(compiled, reference, "the clamped SwiGLU")
+            expectSameBits(activation(gate, up), reference, "the clamped SwiGLU, \(tokens) tokens")
+        }
     }
 
     @Test
-    func theCompiledSwiGLUWithNoLimitGivesTheBitsOfTheOpPath() {
-        let shape = Self.decodeShape + [Self.expertWidth]
-        let gate = Self.randomArray(shape, seed: 103, range: Self.activationRange)
-        let up = Self.randomArray(shape, seed: 104, range: Self.activationRange)
+    func theCompiledSwiGLUWithNoLimitGivesTheBitsOfTheOpPathAtEachBlockLength() {
+        let activation = DeepSeekV4CompiledDecode.clampedSwiGLU(limit: 0)
+        for tokens in Self.blockLengths {
+            let shape = Self.blockShape(tokens) + [Self.expertWidth]
+            let gate = Self.randomArray(shape, seed: 103, range: Self.activationRange)
+            let up = Self.randomArray(shape, seed: 104, range: Self.activationRange)
 
-        let compiled = DeepSeekV4CompiledDecode.clampedSwiGLU(limit: 0)(gate, up)
-        let reference = DeepSeekV4Math.clampedSwiGLU(gate: gate, up: up, limit: 0)
+            let reference = DeepSeekV4Math.clampedSwiGLU(gate: gate, up: up, limit: 0)
 
-        expectSameBits(compiled, reference, "the SwiGLU with no limit")
+            expectSameBits(
+                activation(gate, up), reference, "the SwiGLU with no limit, \(tokens) tokens")
+        }
     }
 
     // MARK: - The hyper-connection expand
 
     @Test
-    func theCompiledExpandGivesTheBitsOfTheOpPath() {
-        let blockOutput = Self.randomArray(
-            Self.decodeShape + [Self.hiddenSize], seed: 111, dtype: .bfloat16)
-        let residual = Self.randomArray(
-            Self.decodeShape + [Self.hcMult, Self.hiddenSize], seed: 112, dtype: .bfloat16)
-        let post = Self.randomArray(Self.decodeShape + [Self.hcMult], seed: 113)
-        let comb = softmax(
-            Self.randomArray(Self.decodeShape + [Self.hcMult, Self.hcMult], seed: 114), axis: -1)
+    func theCompiledExpandGivesTheBitsOfTheOpPathAtEachBlockLength() {
+        for tokens in Self.blockLengths {
+            let block = Self.blockShape(tokens)
+            let blockOutput = Self.randomArray(
+                block + [Self.hiddenSize], seed: 111, dtype: .bfloat16)
+            let residual = Self.randomArray(
+                block + [Self.hcMult, Self.hiddenSize], seed: 112, dtype: .bfloat16)
+            let post = Self.randomArray(block + [Self.hcMult], seed: 113)
+            let comb = softmax(
+                Self.randomArray(block + [Self.hcMult, Self.hcMult], seed: 114), axis: -1)
 
-        let compiled = DeepSeekV4CompiledDecode.expand(blockOutput, residual, post, comb)
-        let reference = ManifoldStream.expand(
-            blockOutput: blockOutput, residual: residual, post: post, comb: comb)
+            let compiled = DeepSeekV4CompiledDecode.expand(blockOutput, residual, post, comb)
+            let reference = ManifoldStream.expand(
+                blockOutput: blockOutput, residual: residual, post: post, comb: comb)
 
-        expectSameBits(compiled, reference, "the expanded residual stream")
+            expectSameBits(compiled, reference, "the expanded residual stream, \(tokens) tokens")
+        }
+    }
+
+    // MARK: - The split activations
+
+    @Test
+    func theCompiledSplitActivationsGiveTheBitsOfTheSplitFieldsAtEachBlockLength() {
+        let activations = DeepSeekV4CompiledDecode.splitActivations(hcEps: Self.hcEps)
+        let scale = Self.randomArray([Self.scaleCount], seed: 125)
+        let base = Self.randomArray([Self.mixWidth], seed: 126)
+        for tokens in Self.blockLengths {
+            let mixes = Self.randomArray(Self.blockShape(tokens) + [Self.mixWidth], seed: 127)
+
+            let compiled = activations(
+                DeepSeekV4Math.hcSplitOperands(
+                    mixes: mixes, scale: scale, base: base, hcMult: Self.hcMult))
+            let reference = DeepSeekV4Math.hcSplitFields(
+                mixes: mixes, scale: scale, base: base, hcMult: Self.hcMult, eps: Self.hcEps)
+
+            expectSameBits(compiled.pre, reference.pre, "the pre weights, \(tokens) tokens")
+            expectSameBits(compiled.post, reference.post, "the post gains, \(tokens) tokens")
+            expectSameBits(
+                compiled.comb, reference.comb, "the row softmax of comb, \(tokens) tokens")
+        }
     }
 
     // MARK: - The collapse fields
@@ -228,37 +273,45 @@ struct DeepSeekV4CompiledDecodeTests {
     // MARK: - The mixture-of-experts combine
 
     @Test
-    func theCompiledCombineGivesTheBitsOfTheOpPath() {
-        let x = Self.randomArray(Self.decodeShape + [Self.hiddenSize], seed: 151, dtype: .bfloat16)
-        let routed = Self.randomArray(
-            Self.decodeShape + [Self.expertsPerToken, Self.hiddenSize], seed: 152, dtype: .bfloat16)
-        let weights = Self.randomArray(Self.decodeShape + [Self.expertsPerToken], seed: 153)
-        let shared = Self.randomArray(
-            Self.decodeShape + [Self.hiddenSize], seed: 154, dtype: .bfloat16)
+    func theCompiledCombineGivesTheBitsOfTheOpPathAtEachBlockLength() {
+        for tokens in Self.blockLengths {
+            let block = Self.blockShape(tokens)
+            let x = Self.randomArray(block + [Self.hiddenSize], seed: 151, dtype: .bfloat16)
+            let routed = Self.randomArray(
+                block + [Self.expertsPerToken, Self.hiddenSize], seed: 152, dtype: .bfloat16)
+            let weights = Self.randomArray(block + [Self.expertsPerToken], seed: 153)
+            let shared = Self.randomArray(block + [Self.hiddenSize], seed: 154, dtype: .bfloat16)
 
-        let compiled = DeepSeekV4CompiledDecode.combineWithSharedExpert(x, routed, weights, shared)
-        let reference = DeepSeekV4MoE.combine(x, routed: routed, weights: weights, shared: shared)
+            let compiled = DeepSeekV4CompiledDecode.combineWithSharedExpert(
+                x, routed, weights, shared)
+            let reference = DeepSeekV4MoE.combine(
+                x, routed: routed, weights: weights, shared: shared)
 
-        expectSameBits(compiled, reference, "the mixture-of-experts output")
+            expectSameBits(compiled, reference, "the mixture-of-experts output, \(tokens) tokens")
+        }
     }
 
     @Test
-    func theCompiledCombineWithNoSharedExpertGivesTheBitsOfTheOpPath() {
-        let x = Self.randomArray(Self.decodeShape + [Self.hiddenSize], seed: 161, dtype: .bfloat16)
-        let routed = Self.randomArray(
-            Self.decodeShape + [Self.expertsPerToken, Self.hiddenSize], seed: 162, dtype: .bfloat16)
-        let weights = Self.randomArray(Self.decodeShape + [Self.expertsPerToken], seed: 163)
+    func theCompiledCombineWithNoSharedExpertGivesTheBitsOfTheOpPathAtEachBlockLength() {
+        for tokens in Self.blockLengths {
+            let block = Self.blockShape(tokens)
+            let x = Self.randomArray(block + [Self.hiddenSize], seed: 161, dtype: .bfloat16)
+            let routed = Self.randomArray(
+                block + [Self.expertsPerToken, Self.hiddenSize], seed: 162, dtype: .bfloat16)
+            let weights = Self.randomArray(block + [Self.expertsPerToken], seed: 163)
 
-        let compiled = DeepSeekV4CompiledDecode.combineRoutedExperts(x, routed, weights)
-        let reference = DeepSeekV4MoE.combine(x, routed: routed, weights: weights, shared: nil)
+            let compiled = DeepSeekV4CompiledDecode.combineRoutedExperts(x, routed, weights)
+            let reference = DeepSeekV4MoE.combine(
+                x, routed: routed, weights: weights, shared: nil)
 
-        expectSameBits(compiled, reference, "the routed-only output")
+            expectSameBits(compiled, reference, "the routed-only output, \(tokens) tokens")
+        }
     }
 
     // MARK: - Which path a block reads
 
     @Test
-    func onlyABlockOfOneTokenReadsTheCompiledPath() {
+    func onlyABlockOfOneTokenReadsTheFunctionsCompiledWithAShape() {
         let oneToken = MLXArray.zeros(Self.decodeShape + [Self.hiddenSize])
         let twoTokens = MLXArray.zeros([1, 2, Self.hiddenSize])
 
