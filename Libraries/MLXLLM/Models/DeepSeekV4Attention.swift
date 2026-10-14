@@ -724,24 +724,15 @@ final class DeepSeekV4Attention: Module {
     ) -> MLXArray {
         let sinks = attentionSinks(dtype: queries.dtype)
         guard let compressor else {
-            // `attentionWithCacheUpdate` feeds SDPA the very arrays the cache
-            // returned. A block that dropped that return and fed its own tensor
-            // instead leaks one Metal buffer for each layer and each token --
-            // `ml-explore/mlx-lm` issue 1662.
-            return attentionWithCacheUpdate(
-                queries: queries,
-                keys: keyValues,
-                values: keyValues,
-                cache: cache,
-                scale: scale,
-                mask: windowMask,
+            return windowAttention(
+                queries: queries, keyValues: keyValues, windowMask: windowMask, cache: cache,
                 sinks: sinks)
         }
 
         let pooled = pooledChunks(x, compressor: compressor, cache: cache, offset: offset)
         let windowKeys = cache.map { $0.update(keys: keyValues, values: keyValues).0 } ?? keyValues
         guard pooled.attention.dim(Self.chunkAxis) > 0 else {
-            return MLXFast.scaledDotProductAttention(
+            return Self.attentionInQuerySlices(
                 queries: queries, keys: windowKeys, values: windowKeys,
                 scale: scale, mask: windowMask, sinks: sinks)
         }
@@ -864,9 +855,229 @@ final class DeepSeekV4Attention: Module {
     ) -> MLXArray {
         let keys = concatenated(
             [windowKeys, chunks.expandedDimensions(axis: latentHeadAxis)], axis: keyAxis)
-        return MLXFast.scaledDotProductAttention(
+        return attentionInQuerySlices(
             queries: queries, keys: keys, values: keys, scale: scale, mask: mask, sinks: sinks)
     }
+
+    /// Attends over the sliding window alone, which is the path of a layer
+    /// whose compress ratio is 0.
+    ///
+    /// Both routes feed SDPA the very arrays the cache returned. A block that
+    /// dropped that return and fed its own tensor instead leaks one Metal
+    /// buffer for each layer and each token -- `ml-explore/mlx-lm` issue
+    /// 1662. A decode step, and a cache that owns its attention, read
+    /// `attentionWithCacheUpdate`. A longer block over a cache that returns
+    /// plain arrays, or over no cache, reads those arrays in slices of query
+    /// rows.
+    ///
+    /// - Parameters:
+    ///   - queries: The rotated queries, shape `(batch, heads, tokens, headDim)`.
+    ///   - keyValues: The rotated keys of this block, which are also its
+    ///     values.
+    ///   - windowMask: The mask of the sliding window.
+    ///   - cache: The key/value cache of this layer, or `nil`.
+    ///   - sinks: The learned sink of each head, or `nil`.
+    /// - Returns: The attention output, shape
+    ///   `(batch, heads, tokens, headDim)`.
+    private func windowAttention(
+        queries: MLXArray,
+        keyValues: MLXArray,
+        windowMask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?,
+        sinks: MLXArray?
+    ) -> MLXArray {
+        guard queries.dim(Self.queryAxis) > Self.decodeLength,
+            cache.map(Self.returnsPlainArrays) ?? true
+        else {
+            return attentionWithCacheUpdate(
+                queries: queries,
+                keys: keyValues,
+                values: keyValues,
+                cache: cache,
+                scale: scale,
+                mask: windowMask,
+                sinks: sinks)
+        }
+        let (keys, values) =
+            cache?.update(keys: keyValues, values: keyValues) ?? (keyValues, keyValues)
+        return Self.attentionInQuerySlices(
+            queries: queries, keys: keys, values: values, scale: scale, mask: windowMask,
+            sinks: sinks)
+    }
+
+    /// Tells whether `update` of a cache hands back the plain keys and
+    /// values that SDPA reads, thus whether the layer may attend over them
+    /// itself.
+    ///
+    /// A quantized cache, a TurboQuant cache and a cache that owns its
+    /// attention each attend in their own way, thus they keep the route of
+    /// `attentionWithCacheUpdate`.
+    ///
+    /// - Parameter cache: The key/value cache of this layer.
+    /// - Returns: True for a cache that returns plain arrays.
+    private static func returnsPlainArrays(_ cache: KVCache) -> Bool {
+        usesPlainAttentionCacheRoute(cache) && !(cache is KVCacheAttentionProtocol)
+    }
+
+    // MARK: - The score limit of one attention call
+
+    /// The first number of scores that one SDPA call reads wrong.
+    ///
+    /// MLX SDPA has no fused kernel for a head of 512 numbers, thus a block of
+    /// more than one token reads the op path. With a sink, that path holds a
+    /// 32-bit index over the `(batch, heads, queries, keys + 1)` scores, and
+    /// it gives wrong values from `2^31` scores on (MLX 0.32.3, found on
+    /// 2026-10-13). A block of 64 heads reads 5792 tokens correctly in one
+    /// call, and one block of 8018 tokens moved the layer-0 output of its
+    /// last token by 3.3 %.
+    static let oneCallScoreLimit = Int(Int32.max) + 1
+
+    /// The one sink column the op path of SDPA joins to the keys of each
+    /// query row. The rule counts it on every call, with a sink or without.
+    private static let sinkColumn = 1
+
+    /// The fewest query rows a call reads, so that each call makes progress.
+    private static let fewestRowsPerCall = 1
+
+    /// The most query rows one SDPA call can read with fewer scores than the
+    /// limit.
+    ///
+    /// When one row alone holds the limit or more, no split of the queries
+    /// can help. The answer is then one row, thus each call still reads a
+    /// row.
+    ///
+    /// - Parameters:
+    ///   - batch: The number of sequences.
+    ///   - heads: The number of query heads.
+    ///   - keys: The number of keys each query row reads.
+    ///   - scoreLimit: The first score count a call must not reach.
+    /// - Returns: The number of query rows for each call, 1 or more.
+    static func queryRowsPerCall(
+        batch: Int, heads: Int, keys: Int, scoreLimit: Int = oneCallScoreLimit
+    ) -> Int {
+        let scoresPerRow = batch * heads * (keys + sinkColumn)
+        return max(fewestRowsPerCall, (scoreLimit - 1) / scoresPerRow)
+    }
+
+    /// Attends in slices of query rows, so that no SDPA call holds the score
+    /// limit or more.
+    ///
+    /// Each query row reads its keys on its own, thus the slices give the
+    /// answer of one call. A block whose rows fit in one call, which includes
+    /// every decode step, makes that one call with the arguments it got.
+    ///
+    /// - Parameters:
+    ///   - queries: The queries, shape `(batch, heads, tokens, headDim)`.
+    ///   - keys: The keys, shape `(batch, keyHeads, keys, headDim)`.
+    ///   - values: The values, of the shape of `keys`.
+    ///   - scale: The factor the attention scores take before the softmax.
+    ///   - mask: The visibility of each key for each query row.
+    ///   - sinks: The learned sink of each head, or `nil`.
+    ///   - scoreLimit: The first score count a call must not reach.
+    /// - Returns: The attention output, shape
+    ///   `(batch, heads, tokens, headDim)`.
+    static func attentionInQuerySlices(
+        queries: MLXArray,
+        keys: MLXArray,
+        values: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        sinks: MLXArray?,
+        scoreLimit: Int = oneCallScoreLimit
+    ) -> MLXArray {
+        let queryCount = queries.dim(queryAxis)
+        let keyCount = keys.dim(keyAxis)
+        let rowsPerCall = queryRowsPerCall(
+            batch: queries.dim(BatchMajorAxis.batch), heads: queries.dim(headAxis),
+            keys: keyCount, scoreLimit: scoreLimit)
+        guard rowsPerCall < queryCount else {
+            return MLXFast.scaledDotProductAttention(
+                queries: queries, keys: keys, values: values, scale: scale, mask: mask,
+                sinks: sinks)
+        }
+        let slices = stride(from: 0, to: queryCount, by: rowsPerCall).map { first in
+            let rows = first ..< min(first + rowsPerCall, queryCount)
+            return MLXFast.scaledDotProductAttention(
+                queries: queries[0..., 0..., rows], keys: keys, values: values, scale: scale,
+                mask: maskRows(mask, rows: rows, queryCount: queryCount, keyCount: keyCount),
+                sinks: sinks)
+        }
+        return concatenated(slices, axis: queryAxis)
+    }
+
+    /// The part of a mask that one slice of query rows reads.
+    ///
+    /// `mask` gives the one array of an array mask, of either spelling, and
+    /// gives `nil` for `.none` and for `.causal`.
+    ///
+    /// - Parameters:
+    ///   - mask: The mask of every query row.
+    ///   - rows: The query rows of the slice.
+    ///   - queryCount: The number of query rows of the whole block.
+    ///   - keyCount: The number of keys.
+    /// - Returns: The mask of the slice.
+    private static func maskRows(
+        _ mask: MLXFast.ScaledDotProductAttentionMaskMode, rows: Range<Int>, queryCount: Int,
+        keyCount: Int
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        if case .causal = mask {
+            return .array(causalRows(rows, queryCount: queryCount, keyCount: keyCount))
+        }
+        guard let visibility = mask.mask else {
+            return mask
+        }
+        return .array(visibilityRows(visibility, rows: rows))
+    }
+
+    /// The rows of one mask array that a slice of query rows reads.
+    ///
+    /// A mask with no row axis, or with one row, reads the same row for each
+    /// query, thus it stays whole.
+    ///
+    /// - Parameters:
+    ///   - visibility: The mask array, whose last two axes hold the query rows
+    ///     and the keys.
+    ///   - rows: The query rows of the slice.
+    /// - Returns: The rows of the slice.
+    private static func visibilityRows(_ visibility: MLXArray, rows: Range<Int>) -> MLXArray {
+        guard visibility.ndim >= maskRankWithRows, visibility.dim(maskRowAxis) > 1 else {
+            return visibility
+        }
+        return visibility[.ellipsis, rows, 0...]
+    }
+
+    /// The causal visibility of a slice of query rows, as an array.
+    ///
+    /// MLX aligns `.causal` to the last key: of `queryCount` rows over
+    /// `keyCount` keys, row `i` sees key `j` when
+    /// `j <= i + max(0, keyCount - queryCount)`. A shorter call would move
+    /// that alignment, thus the slice reads the rows of the whole block as an
+    /// array.
+    ///
+    /// - Parameters:
+    ///   - rows: The query rows of the slice.
+    ///   - queryCount: The number of query rows of the whole block.
+    ///   - keyCount: The number of keys.
+    /// - Returns: The visibility, shape `(rows, keyCount)`.
+    private static func causalRows(_ rows: Range<Int>, queryCount: Int, keyCount: Int) -> MLXArray {
+        let shift = max(0, keyCount - queryCount)
+        let rowPositions = MLXArray(Int32(rows.lowerBound + shift) ..< Int32(rows.upperBound + shift))
+        let keyPositions = MLXArray(Int32(0) ..< Int32(keyCount))
+        return rowPositions.expandedDimensions(axis: -1) .>= keyPositions
+    }
+
+    /// The axis a mask array holds its query rows on, counted from the end.
+    private static let maskRowAxis = -2
+
+    /// The fewest axes a mask array holds when it has a query row axis.
+    private static let maskRankWithRows = 2
+
+    /// The axis a `(batch, heads, tokens, width)` tensor holds its heads on.
+    private static let headAxis = 1
+
+    /// The axis a `(batch, heads, tokens, width)` tensor holds its query rows
+    /// on.
+    private static let queryAxis = 2
 
     /// The axis a `(batch, chunks, headDim)` pool holds its chunks on.
     private static let chunkAxis = 1

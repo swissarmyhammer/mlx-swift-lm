@@ -595,6 +595,182 @@ struct DeepSeekV4AttentionTests {
         expectClose(DeepSeekV4TestArrays.floats(gathered), masked, "picked chunks")
     }
 
+    // MARK: - The score limit of one attention call
+
+    /// The first score count the op path of MLX SDPA reads wrong when it
+    /// holds a sink: a 32-bit index reaches no further than `2^31 - 1`.
+    private static let int32IndexLimit = Int(Int32.max) + 1
+
+    /// The one sink column the op path of MLX SDPA joins to the keys of each
+    /// query row.
+    private static let sinkColumn = 1
+
+    /// The longest block of 64 heads that one call read correctly on
+    /// 2026-10-13. One more token gave wrong values.
+    private static let longestCorrectBlock = 5792
+
+    /// The block of the real checkpoint that changed the layer-0 output of
+    /// its last token by 3.3 % in one call.
+    private static let evidenceBlock = 8018
+
+    /// The keys of a ratio-4 layer late in a long context that 512-token
+    /// prefill steps read: the window and about 262k pooled rows.
+    private static let longContextKeys = 262_144
+
+    /// The key counts the split rule test reads.
+    private static let longBlockKeyCounts = [
+        longestCorrectBlock, longestCorrectBlock + 1, evidenceBlock, longContextKeys,
+    ]
+
+    @Test
+    func theRowsOfOneCallAreTheMostThatStayUnderTheScoreLimit() throws {
+        for keys in Self.longBlockKeyCounts {
+            let scoresPerRow = Self.realHeadCount * (keys + Self.sinkColumn)
+
+            let rows = DeepSeekV4Attention.queryRowsPerCall(
+                batch: Self.batchSize, heads: Self.realHeadCount, keys: keys)
+
+            #expect(rows * scoresPerRow < Self.int32IndexLimit, "\(keys) keys: \(rows) rows")
+            #expect(
+                (rows + 1) * scoresPerRow >= Self.int32IndexLimit,
+                "\(keys) keys: \(rows + 1) rows must not fit")
+        }
+    }
+
+    @Test
+    func theLongestCorrectBlockIsTheLongestBlockOfOneCall() throws {
+        let fits = DeepSeekV4Attention.queryRowsPerCall(
+            batch: Self.batchSize, heads: Self.realHeadCount, keys: Self.longestCorrectBlock)
+        let oneMore = DeepSeekV4Attention.queryRowsPerCall(
+            batch: Self.batchSize, heads: Self.realHeadCount, keys: Self.longestCorrectBlock + 1)
+
+        #expect(fits == Self.longestCorrectBlock)
+        #expect(oneMore < Self.longestCorrectBlock + 1)
+    }
+
+    @Test
+    func theSequencesOfABatchShareTheScoreLimit() throws {
+        let sequences = SliceShape.batch
+        let scoresPerRow = sequences * Self.realHeadCount * (Self.evidenceBlock + Self.sinkColumn)
+
+        let rows = DeepSeekV4Attention.queryRowsPerCall(
+            batch: sequences, heads: Self.realHeadCount, keys: Self.evidenceBlock)
+
+        #expect(rows * scoresPerRow < Self.int32IndexLimit)
+        #expect((rows + 1) * scoresPerRow >= Self.int32IndexLimit)
+    }
+
+    @Test
+    func aRowOverTheScoreLimitStillGivesOneRowForEachCall() throws {
+        // One row holds exactly the limit, thus no row stays under it.
+        let rows = DeepSeekV4Attention.queryRowsPerCall(
+            batch: SliceShape.batch, heads: SliceShape.heads, keys: SliceShape.keys,
+            scoreLimit: SliceShape.scoresPerRow)
+
+        #expect(rows == 1, "a call must read at least one row")
+    }
+
+    /// The shapes of the sliced attention test. The block is short, and the
+    /// test forces a small score limit so that the queries split.
+    private enum SliceShape {
+        /// The number of sequences.
+        static let batch = 2
+        /// The number of query heads.
+        static let heads = 4
+        /// The number of query rows of the block.
+        static let queries = 10
+        /// The number of keys each query row can read.
+        static let keys = 14
+        /// The width of one head.
+        static let headDim = 16
+        /// The number of query rows each call reads. It does not divide
+        /// ``queries``, thus the last slice is shorter than the others.
+        static let rowsPerCall = 3
+        /// The number of scores one query row of the block holds, the sink
+        /// column included.
+        static let scoresPerRow = batch * heads * (keys + 1)
+        /// The score limit that gives ``rowsPerCall`` rows for each call.
+        static let scoreLimit = rowsPerCall * scoresPerRow + 1
+    }
+
+    /// The seeds of the random tensors of the sliced attention test.
+    private enum SliceSeed {
+        static let queries: UInt64 = 61
+        static let keys: UInt64 = 62
+        static let values: UInt64 = 63
+        static let sinks: UInt64 = 64
+    }
+
+    /// The masks the sliced attention test reads.
+    enum SliceMask: CaseIterable, Sendable {
+        /// No mask: each row reads every key.
+        case none
+        /// The symbolic causal mask, which MLX aligns to the last key.
+        case causal
+        /// One visibility array for each sequence.
+        case array
+    }
+
+    /// The period of the pattern that hides keys in the array mask.
+    private static let hiddenKeyPeriod = 5
+
+    /// The step of the row in the hidden-key pattern. It shares no factor
+    /// with the period, thus each row hides a different set of keys.
+    private static let hiddenKeyRowStep = 3
+
+    /// Builds the mask mode of one case of the sliced attention test.
+    private static func sliceMaskMode(
+        _ mask: SliceMask
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        switch mask {
+        case .none:
+            return .none
+        case .causal:
+            return .causal
+        case .array:
+            let rowCount = SliceShape.batch * SliceShape.queries
+            let visible = (0 ..< rowCount).flatMap { row in
+                (0 ..< SliceShape.keys).map { key in
+                    (row * hiddenKeyRowStep + key) % hiddenKeyPeriod != 0
+                }
+            }
+            return .array(
+                MLXArray(visible, [SliceShape.batch, 1, SliceShape.queries, SliceShape.keys]))
+        }
+    }
+
+    @Test(arguments: SliceMask.allCases)
+    func theSlicedCallsGiveTheAnswerOfOneCall(mask: SliceMask) throws {
+        let queries = MLXRandom.normal(
+            [SliceShape.batch, SliceShape.heads, SliceShape.queries, SliceShape.headDim],
+            key: MLXRandom.key(SliceSeed.queries))
+        let keys = MLXRandom.normal(
+            [SliceShape.batch, 1, SliceShape.keys, SliceShape.headDim],
+            key: MLXRandom.key(SliceSeed.keys))
+        let values = MLXRandom.normal(
+            [SliceShape.batch, 1, SliceShape.keys, SliceShape.headDim],
+            key: MLXRandom.key(SliceSeed.values))
+        let sinks = MLXRandom.normal([SliceShape.heads], key: MLXRandom.key(SliceSeed.sinks))
+        let scale = 1 / Float(SliceShape.headDim).squareRoot()
+        let mode = Self.sliceMaskMode(mask)
+
+        let oneCall = MLXFast.scaledDotProductAttention(
+            queries: queries, keys: keys, values: values, scale: scale, mask: mode, sinks: sinks)
+        let sliced = DeepSeekV4Attention.attentionInQuerySlices(
+            queries: queries, keys: keys, values: values, scale: scale, mask: mode, sinks: sinks,
+            scoreLimit: SliceShape.scoreLimit)
+
+        #expect(
+            DeepSeekV4Attention.queryRowsPerCall(
+                batch: SliceShape.batch, heads: SliceShape.heads, keys: SliceShape.keys,
+                scoreLimit: SliceShape.scoreLimit) == SliceShape.rowsPerCall,
+            "the premise: the block splits into slices of \(SliceShape.rowsPerCall) rows")
+        #expect(sliced.shape == oneCall.shape)
+        expectClose(
+            DeepSeekV4TestArrays.floats(sliced), DeepSeekV4TestArrays.floats(oneCall),
+            "sliced attention, mask \(mask)")
+    }
+
     // MARK: - Grouped low-rank output projection
 
     @Test
