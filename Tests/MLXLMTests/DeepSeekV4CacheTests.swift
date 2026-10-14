@@ -304,6 +304,210 @@ struct DeepSeekV4CacheTests {
         }
     }
 
+    /// The axis a `(batch, tokens, width)` tensor holds its tokens on.
+    private static let tokenAxis = 1
+
+    /// The number of tokens one decode step carries.
+    private static let decodeStepLength = 1
+
+    /// The tokens of one decode step.
+    ///
+    /// - Parameters:
+    ///   - block: The block, shape `(batch, tokens, hidden)`.
+    ///   - position: The position of the token inside the block.
+    /// - Returns: The token, shape `(batch, 1, hidden)`.
+    private static func decodeStep(of block: MLXArray, at position: Int) -> MLXArray {
+        block[0..., position ..< (position + decodeStepLength), 0...]
+    }
+
+    /// The position after the last projected row of a cache.
+    ///
+    /// - Parameter cache: The cache to read.
+    /// - Returns: ``DeepSeekV4ChunkCache/carryStart`` plus the number of projected rows.
+    private static func projectedEnd(of cache: DeepSeekV4ChunkCache) -> Int {
+        cache.carryStart + (cache.projectedRows?.values.dim(tokenAxis) ?? 0)
+    }
+
+    @Test(arguments: [overlapLayer, wideLayer])
+    func aStepProjectsTheRowsOfARunOnlyWhenItEndsTheRun(layer: Int) throws {
+        let ratio = try Self.configuration().compressRatio(ofLayer: layer)
+        let compressor = try Self.loadedCompressor(layer: layer)
+        let rope = DeepSeekV4RoPE(configuration: try Self.configuration(), layer: layer)
+        let cache = try Self.chunkCache(layer: layer)
+        let prefix = Self.leadingChunkCount * ratio
+        let block = Self.fixture(
+            [Self.batchSize, prefix + ratio, Self.hiddenSize], seed: Self.weightSeed)
+
+        _ = cache.pooled(
+            block[0..., 0 ..< prefix, 0...], through: compressor, rope: rope, offset: 0)
+        for position in prefix ..< (prefix + ratio) {
+            _ = cache.pooled(
+                Self.decodeStep(of: block, at: position),
+                through: compressor, rope: rope, offset: position)
+            // The last step ends the run, thus there the projected rows must
+            // reach the new token. Before it they must stop at the last chunk end.
+            let lastChunkEnd = ((position + Self.decodeStepLength) / ratio) * ratio
+            #expect(
+                Self.projectedEnd(of: cache) == lastChunkEnd,
+                "layer \(layer), position \(position): only a step that ends a run projects")
+        }
+    }
+
+    /// Pools a block from rows that were projected one token at a time, which
+    /// is what each decode step did before the cache kept the rows of a run
+    /// unprojected.
+    ///
+    /// - Parameters:
+    ///   - block: The block, shape `(batch, tokens, hidden)`.
+    ///   - compressor: The compressor of the layer.
+    ///   - layer: The index of the decoder layer.
+    /// - Returns: The chunks of every whole run of the block.
+    private static func pooledFromOneTokenProjections(
+        _ block: MLXArray, compressor: DeepSeekV4Compressor, layer: Int
+    ) throws -> MLXArray {
+        let rope = DeepSeekV4RoPE(configuration: try configuration(), layer: layer)
+        let wholeCount = (block.dim(tokenAxis) / compressor.chunkWidth) * compressor.chunkWidth
+        let rows = (0 ..< wholeCount).map { position in
+            compressor.project(decodeStep(of: block, at: position))
+        }
+        let joined = DeepSeekV4Compressor.ProjectedRows(
+            values: concatenated(rows.map(\.values), axis: tokenAxis),
+            gates: concatenated(rows.map(\.gates), axis: tokenAxis))
+        return compressor.pooled(joined, rope: rope, offset: 0, dtype: block.dtype)
+    }
+
+    @Test(arguments: [overlapLayer, wideLayer])
+    func aRunOfOneTokenStepsPoolsTheChunksOfRowsProjectedOneTokenAtATime(layer: Int) throws {
+        let compressor = try Self.loadedCompressor(layer: layer)
+        let block = Self.fixture(
+            [Self.batchSize, Self.pooledTokenCount, Self.hiddenSize], seed: Self.weightSeed)
+        let stepped = DeepSeekV4TestArrays.floats(
+            try Self.pooled(
+                block,
+                cuts: Array(repeating: Self.decodeStepLength, count: Self.pooledTokenCount),
+                through: Self.chunkCache(layer: layer), compressor: compressor, layer: layer))
+        let reference = DeepSeekV4TestArrays.floats(
+            try Self.pooledFromOneTokenProjections(block, compressor: compressor, layer: layer))
+
+        #expect(!reference.isEmpty, "the premise: layer \(layer) pools at least one chunk")
+        #expect(stepped.count == reference.count, "layer \(layer)")
+        for (index, pair) in zip(stepped, reference).enumerated() {
+            let place = "layer \(layer), value \(index)"
+            #expect(
+                abs(pair.0 - pair.1) <= Self.tolerance,
+                Comment(rawValue: "\(place): got \(pair.0), expected \(pair.1)"))
+        }
+    }
+
+    /// The number of tokens the round trip test inside a run reads.
+    private static let roundTripTokenCount = 72
+
+    /// The position at which the round trip test inside a run saves its state.
+    /// It is not a multiple of ``overlapRatio``, thus the cache then holds the
+    /// rows of a run that has not ended.
+    private static let roundTripSavePosition = 66
+
+    @Test func aStateSavedInsideARunPoolsTheChunksOfAnUnbrokenRun() throws {
+        let configuration = try Self.configuration()
+        let layer = Self.overlapLayer
+        let compressor = try Self.loadedCompressor(layer: layer)
+        let rope = DeepSeekV4RoPE(configuration: configuration, layer: layer)
+        let block = Self.fixture(
+            [Self.batchSize, Self.roundTripTokenCount, Self.hiddenSize], seed: Self.weightSeed)
+        let leading = (Self.roundTripSavePosition / Self.overlapRatio) * Self.overlapRatio
+        #expect(
+            leading < Self.roundTripSavePosition,
+            "the premise: the state is saved inside a run that has not ended")
+
+        let cache = DeepSeekV4Cache(configuration: configuration, layer: layer)
+        let keyValues = Self.fixture(
+            [Self.batchSize, 1, Self.roundTripSavePosition, Self.headDim],
+            seed: Self.weightSeed + 1)
+        _ = cache.update(keys: keyValues, values: keyValues)
+        _ = cache.attentionChunks.pooled(
+            block[0..., 0 ..< leading, 0...], through: compressor, rope: rope, offset: 0)
+        for position in leading ..< Self.roundTripSavePosition {
+            _ = cache.attentionChunks.pooled(
+                Self.decodeStep(of: block, at: position),
+                through: compressor, rope: rope, offset: position)
+        }
+
+        let restored = DeepSeekV4Cache(configuration: configuration, layer: layer)
+        try restored.validatePromptCacheRestore(
+            state: cache.state.map { $0[.ellipsis] }, metaState: cache.metaState)
+        restored.restorePromptCache(
+            state: cache.state.map { $0[.ellipsis] }, metaState: cache.metaState)
+
+        let rest = block[0..., Self.roundTripSavePosition..., 0...]
+        let unbroken = DeepSeekV4TestArrays.floats(
+            cache.attentionChunks.pooled(
+                rest, through: compressor, rope: rope, offset: Self.roundTripSavePosition))
+        let afterRestore = DeepSeekV4TestArrays.floats(
+            restored.attentionChunks.pooled(
+                rest, through: compressor, rope: rope, offset: Self.roundTripSavePosition))
+        #expect(
+            unbroken.count == (Self.roundTripTokenCount / Self.overlapRatio) * Self.headDim,
+            "the premise: the rest of the block ends the run the state was saved inside")
+        #expect(afterRestore == unbroken, "the rows of the run must survive the round trip")
+    }
+
+    /// The number of tokens each block of the rewind test inside a run holds.
+    /// The block ends one run past the sliding window.
+    private static let runRewindTokenCount = slidingWindow + overlapRatio
+
+    /// The position the rewind test inside a run goes back to. It stands
+    /// inside the run that the single-token steps have not ended.
+    private static let runRewindPosition = slidingWindow + decodeStepLength
+
+    @Test func theCacheRewindsInsideTheRunItHasNotProjected() throws {
+        let layer = Self.overlapLayer
+        let compressor = try Self.loadedCompressor(layer: layer)
+        let rope = DeepSeekV4RoPE(configuration: try Self.configuration(), layer: layer)
+        let length = Self.runRewindTokenCount
+        let rewindTo = Self.runRewindPosition
+        let first = Self.fixture([Self.batchSize, length, Self.hiddenSize], seed: Self.weightSeed)
+        let second = Self.fixture(
+            [Self.batchSize, length, Self.hiddenSize], seed: Self.weightSeed + 1)
+        let joined = concatenated(
+            [first[0..., 0 ..< rewindTo, 0...], second[0..., rewindTo ..< length, 0...]],
+            axis: Self.tokenAxis)
+
+        // The first run stops one step before the run ends, thus its last
+        // tokens are not projected yet when the rewind comes.
+        let cache = try Self.chunkCache(layer: layer)
+        let stoppedAt = length - Self.decodeStepLength
+        let steps = Array(
+            repeating: Self.decodeStepLength,
+            count: (stoppedAt - Self.slidingWindow) / Self.decodeStepLength)
+        _ = try Self.pooled(
+            first[0..., 0 ..< stoppedAt, 0...], cuts: [Self.slidingWindow] + steps,
+            through: cache, compressor: compressor, layer: layer)
+        #expect(
+            Self.projectedEnd(of: cache) < rewindTo,
+            "the premise: the rewind position stands past the projected rows")
+        #expect(cache.rewind(to: rewindTo), "the rows from the carry position onward are held")
+        let afterRewind = DeepSeekV4TestArrays.floats(
+            cache.pooled(
+                second[0..., rewindTo ..< length, 0...],
+                through: compressor, rope: rope, offset: rewindTo))
+
+        let straight = DeepSeekV4TestArrays.floats(
+            try Self.chunkCache(layer: layer)
+                .pooled(joined, through: compressor, rope: rope, offset: 0))
+        let stale = DeepSeekV4TestArrays.floats(
+            try Self.chunkCache(layer: layer)
+                .pooled(first, through: compressor, rope: rope, offset: 0))
+        #expect(
+            straight != stale,
+            "the premise: the two blocks pool different chunks, thus a stale row shows")
+        #expect(afterRewind.count == straight.count)
+        for (index, pair) in zip(afterRewind, straight).enumerated() {
+            #expect(
+                abs(pair.0 - pair.1) <= Self.tolerance,
+                Comment(rawValue: "value \(index): got \(pair.0), expected \(pair.1)"))
+        }
+    }
+
     /// The number of raw rows each branch of the earlier state format carries.
     private static let rawRowCount = 3
 
@@ -536,11 +740,15 @@ struct DeepSeekV4CacheTests {
         #expect(kept.dtype == DeepSeekV4Indexer.scoreDType)
     }
 
-    /// The format name of the prompt caches whose indexer pool held the
-    /// activation dtype.
-    private static let activationIndexerPoolFormat = "DeepSeekV4Cache.projectedRows.v2"
+    /// The format names of the earlier prompt caches that kept the rows of a
+    /// run in a projected form: the format whose indexer pool held the
+    /// activation dtype, and the format whose indexer pool held the score dtype.
+    private static let projectedRunFormats = [
+        "DeepSeekV4Cache.projectedRows.v2", "DeepSeekV4Cache.scoreDTypeIndexerPool.v3",
+    ]
 
-    @Test func aPromptCacheOfTheActivationIndexerPoolFormatFailsClosed() throws {
+    @Test(arguments: projectedRunFormats)
+    func aPromptCacheOfAProjectedRunFormatFailsClosed(format: String) throws {
         let configuration = try Self.configuration()
         let layer = Self.overlapLayer
         let source = DeepSeekV4Cache(configuration: configuration, layer: layer)
@@ -552,7 +760,7 @@ struct DeepSeekV4CacheTests {
         let error = #expect(throws: KVCacheError.self) {
             try template.validatePromptCacheRestore(
                 state: source.state,
-                metaState: source.local.metaState + [Self.activationIndexerPoolFormat])
+                metaState: source.local.metaState + [format])
         }
         #expect(error?.message == DeepSeekV4Cache.earlierFormatMessage)
     }

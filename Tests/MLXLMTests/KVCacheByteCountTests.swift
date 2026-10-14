@@ -59,7 +59,7 @@ struct KVCacheByteCountTests {
     /// The number of pooled chunks in each DeepSeek-V4 branch fixture.
     private static let deepSeekChunkCount = 5
 
-    /// The number of projected carry rows in each DeepSeek-V4 branch fixture.
+    /// The number of rows of each row slot in each DeepSeek-V4 branch fixture.
     private static let deepSeekCarryRowCount = 3
 
     /// The hidden width of the DeepSeek-V4 branch fixtures.
@@ -278,10 +278,10 @@ struct KVCacheByteCountTests {
             DeepSeekV4Configuration.self, from: Data(contentsOf: url))
     }
 
-    /// Builds the four state slots of one DeepSeek-V4 branch from lazy arrays.
+    /// Builds the five state slots of one DeepSeek-V4 branch from lazy arrays.
     ///
-    /// - Returns: The chunks, the projected values, the projected gate logits
-    ///   and the carry start.
+    /// - Returns: The chunks, the projected values, the projected gate logits,
+    ///   the unprojected rows and the carry start.
     private static func deepSeekBranchSlots() -> [MLXArray] {
         DeepSeekV4BranchStateFixture.slots(
             batchSize: batchSize, chunkCount: deepSeekChunkCount,

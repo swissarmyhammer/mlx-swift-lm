@@ -1,8 +1,34 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: 8b80
+comments:
+- actor: claude-code
+  id: 01m4y6y38b7g7ntezpnrteghhb
+  text: |-
+    Research after ^f4ztxgj (HEAD 155eec4). The window slab cannot give speed at 32k now.
+
+    1. Prefill. `DeepSeekV4SparseAttentionKernel.canRun` sends each block with 256 threadgroups or more to the fused kernel. With 64 heads and a head block of 16, that is each block of 64 tokens or more. The fused kernel already reads only the visible window rows of each query (one range of at most 128 rows). This is the goal of the slab, with no slab and no mask. The op paths that the card names (`windowAttention` slices, `maskedAttention`, `attentionOverRankedTile`) run only for blocks of 2 to 63 tokens.
+    2. The 32k bench prompt is 32118 tokens with prefill step 2048 and `.balanced` chunking (`PrefillParameters.forEachChunk`, which reserves 1 token). The blocks are 15 x 2008 tokens, 1 x 1997 tokens and 1 token. All the multi-token blocks go to the fused kernel. Thus the op path runs for 0 blocks of 2 to 63 tokens at 32k. The time that the slab could remove is 0 ms.
+    3. Decode and the reserved last token. The window cache is `RotatingKVCache(maxSize: slidingWindow = 128)`. Thus a 1-token block reads 128 window rows or fewer, and `readsWithNoMask` gives no mask. A slab of 256 keys cannot read fewer rows. There is no decode effect (the card also says this).
+    4. The cache concat and the window buffer do not change with a slab: the fused kernel reads the rows that `RotatingKVCache.update` gives back.
+
+    Thus I did not change the code. The unit-test and greedy-parity criteria do not apply because no code changed.
+
+    Osaurus idea 4 (prefill step 4096). Its premise is that the attention cost per row does not grow with the block size. The fused kernel already makes that true, so I measured it. I changed only the scratchpad bench (`DSV4_PREFILL_STEP` env var; the default stays 2048). M3 Ultra, GPU idle before each run, args `<snap> 32768 128 8192 1024`:
+    - step 2048 (f4z-after-full-1/2 + new control ngj-step2048-full-1): 559.9 / 559.5 / 559.5 tok/s, peak 143 GiB, decode 30.4 / 30.3 / 30.4 ms/token.
+    - step 4096 (ngj-step4096-full-1/2): 579.6 / 579.0 tok/s, peak 145 GiB, decode 30.4 / 30.3 ms/token.
+    - Result: prefill +3.5 % (inside the 0 to +5 % estimate), peak memory +2 GiB, no decode change. HARD reuse check PASS in all runs.
+    The prefill step is a caller parameter (`GenerateParameters.prefillStepSize`; the library default is 512 for all models). The repository has no DeepSeek-V4 step to change. I added a new task for a model-preferred prefill step.
+  timestamp: 2026-10-14T22:01:13.227048+00:00
+- actor: claude-code
+  id: 01m4y6ymdeaty5xr2tbpkcy756
+  text: |-
+    ### implement — no-change
+    - evidence: The window slab can remove 0 ms at 32k. Every prefill block of the 32k run (15 x 2008, 1 x 1997 tokens) goes to the fused kernel of ^f4ztxgj, which already reads only the visible window rows (128 or fewer). The op path runs for 0 blocks of 2 to 63 tokens. Decode and the last token read the 128-row RotatingKVCache window, so a slab cannot read fewer rows. Repository files changed: 0. Prefill step 4096 measured: 579.6 / 579.0 tok/s, peak 145 GiB, decode 30.4 / 30.3 ms/token. Step 2048: 559.9 / 559.5 / 559.5 tok/s, peak 143 GiB, decode 30.4 ms/token. Logs: scratchpad ngj-step4096-full-1.log, ngj-step4096-full-2.log, ngj-step2048-full-1.log.
+    - next: a person decides to close this card as overtaken by ^f4ztxgj. The step-size finding is in the new task ^jyfka2h.
+  timestamp: 2026-10-14T22:01:30.798881+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'DeepSeek-V4 prefill speed: each query block reads only its own window rows, not all window keys of the block'
 ---
 ## What

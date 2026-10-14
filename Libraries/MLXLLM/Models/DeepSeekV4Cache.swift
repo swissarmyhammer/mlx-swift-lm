@@ -9,18 +9,21 @@
 // The pooled cache DeepSeek-V4 sparse attention needs. A decode step carries
 // one token, thus a stateless compressor pools nothing and the global context
 // would go away at the first decode step. This file keeps the pooled chunks,
-// and the projected rows of an incomplete chunk, across calls and across turns.
+// and the rows of an incomplete chunk, across calls and across turns.
 //
 // Five details do not come from that file.
 //
 //  1. **One pooling path.** The file above keeps the `wkv` and `wgate` output
-//     of the tokens that have not filled a chunk yet, as this file does, but
-//     it joins them through a second pooling path of its own
-//     (`accumulateOverlapWindows`). This file gives the rows to
+//     of the tokens that have not filled a chunk yet, and it joins them
+//     through a second pooling path of its own (`accumulateOverlapWindows`).
+//     This file gives the rows to
 //     ``DeepSeekV4Compressor/pooled(_:rope:offset:dtype:)``, which is the one
 //     pooling path this port has and the one the compressor tests hold. A call
 //     pools only the chunks that it ends, thus a decode step that ends no
-//     chunk does no pooling at all (task `^cm8fq2q`).
+//     chunk does no pooling at all (task `^cm8fq2q`). A call that ends no
+//     chunk does no projection either: it keeps the raw rows of its block,
+//     and the call that ends the chunk projects the whole run one time
+//     (task `^4n7mtxa`, after the osaurus vmlx-swift commit fd93476a).
 //  2. **An overlapping layer keeps one WHOLE chunk of rows as well.** Chunk
 //     `c` of a ratio-4 layer reads the tokens of chunk `c - 1` as well as its
 //     own. The pooling gives its FIRST chunk a padded left half, thus this
@@ -69,8 +72,11 @@ import MLXNN
 /// slice, thus a write never changes an array a caller holds.
 final class DeepSeekV4RowBuffer {
 
+    /// The number of rows a buffer grows by when its caller names no step.
+    static let defaultAllocationStep = 256
+
     /// The number of rows the buffer grows by.
-    static let allocationStep = 256
+    let allocationStep: Int
 
     /// The axis a `(batch, rows, width)` tensor holds its batch on.
     private static let batchAxis = 0
@@ -89,13 +95,21 @@ final class DeepSeekV4RowBuffer {
     private(set) var count = 0
 
     /// Builds an empty buffer.
-    init() {}
+    ///
+    /// - Parameter allocationStep: The number of rows the buffer grows by.
+    init(allocationStep: Int = defaultAllocationStep) {
+        precondition(allocationStep > 0, "a row buffer must grow by at least one row")
+        self.allocationStep = allocationStep
+    }
 
     /// Builds a buffer that holds the given rows and no free row.
     ///
-    /// - Parameter rows: The rows, shape `(batch, rows, width)`, or `nil` for
-    ///   an empty buffer.
-    init(rows: MLXArray?) {
+    /// - Parameters:
+    ///   - rows: The rows, shape `(batch, rows, width)`, or `nil` for an empty
+    ///     buffer.
+    ///   - allocationStep: The number of rows the buffer grows by.
+    convenience init(rows: MLXArray?, allocationStep: Int = defaultAllocationStep) {
+        self.init(allocationStep: allocationStep)
         guard let rows, rows.dim(Self.rowAxis) > 0 else { return }
         self.storage = rows[.ellipsis]
         self.count = rows.dim(Self.rowAxis)
@@ -131,6 +145,18 @@ final class DeepSeekV4RowBuffer {
         }
     }
 
+    /// Forgets every row and keeps the storage, thus the next write fills the
+    /// free rows with no new allocation.
+    ///
+    /// A storage that grew past one ``allocationStep`` goes, thus a long block
+    /// leaves no large buffer behind.
+    func removeAll() {
+        count = 0
+        if let storage, storage.dim(Self.rowAxis) > allocationStep {
+            self.storage = nil
+        }
+    }
+
     /// Forgets the leading rows and moves the others to the front.
     ///
     /// A buffer that grew past one step during a long prefill block shrinks
@@ -148,7 +174,7 @@ final class DeepSeekV4RowBuffer {
             return
         }
         let kept = storage[0..., dropCount ..< count, 0...]
-        if storage.dim(Self.rowAxis) > Self.allocationStep {
+        if storage.dim(Self.rowAxis) > allocationStep {
             truncate(to: 0)
             append(kept)
             return
@@ -161,7 +187,7 @@ final class DeepSeekV4RowBuffer {
     ///
     /// - Returns: The copy.
     func copy() -> DeepSeekV4RowBuffer {
-        let duplicate = DeepSeekV4RowBuffer()
+        let duplicate = DeepSeekV4RowBuffer(allocationStep: allocationStep)
         duplicate.storage = storage?[.ellipsis]
         duplicate.count = count
         return duplicate
@@ -179,10 +205,10 @@ final class DeepSeekV4RowBuffer {
             return storage
         }
         let missing = needed - count
-        let stepCount = (missing + Self.allocationStep - 1) / Self.allocationStep
+        let stepCount = (missing + allocationStep - 1) / allocationStep
         let free = MLXArray.zeros(
             [
-                added.dim(Self.batchAxis), stepCount * Self.allocationStep,
+                added.dim(Self.batchAxis), stepCount * allocationStep,
                 added.dim(Self.widthAxis),
             ], dtype: added.dtype)
         guard let held = rows else { return free }
@@ -192,15 +218,19 @@ final class DeepSeekV4RowBuffer {
 
 // MARK: - The pooled chunks of one compressor
 
-/// The chunks one DeepSeek-V4 compressor pooled, and the projected rows it has
-/// not pooled into a whole chunk yet.
+/// The chunks one DeepSeek-V4 compressor pooled, and the rows it has not
+/// pooled into a whole chunk yet.
 ///
 /// The pooled chunks are keyed to ABSOLUTE positions: chunk `c` covers the raw
 /// positions `c * chunkWidth` through `(c + 1) * chunkWidth - 1`, whatever
 /// call gave those tokens. A prompt arrives in prefill chunks whose boundaries
 /// are not multiples of the compress ratio, and a decode step then adds one
-/// token at a time, thus the cache holds the projected rows of the run in
-/// progress and pools them when the run ends.
+/// token at a time, thus the cache holds the rows of the run in progress and
+/// pools them when the run ends.
+///
+/// A block that ends no run is NOT projected: the cache keeps its raw input
+/// rows, and the block that ends the run projects them together with its own
+/// tokens. Most decode steps thus read no `wkv` or `wgate` weight at all.
 final class DeepSeekV4ChunkCache {
 
     /// The number of raw positions one pooled chunk covers, which is the
@@ -248,6 +278,13 @@ final class DeepSeekV4ChunkCache {
     /// The `wgate` rows of the positions from ``carryStart`` onward.
     private var projectedGates = DeepSeekV4RowBuffer()
 
+    /// The raw block rows of the positions from ``projectedEnd`` onward,
+    /// which no block has projected yet because no block has ended their run.
+    ///
+    /// The buffer grows by ``chunkWidth`` rows, because it never holds a whole
+    /// run: the block that ends a run projects these rows and empties it.
+    private var unprojectedRows: DeepSeekV4RowBuffer
+
     /// The absolute position of the first projected row. It is always a
     /// multiple of ``chunkWidth``.
     private(set) var carryStart = 0
@@ -263,9 +300,9 @@ final class DeepSeekV4ChunkCache {
     private static let tokenAxis = 1
 
     /// The number of arrays this cache writes into a serialized state: the
-    /// pooled chunks, the projected values, the projected gate logits, and the
-    /// position those rows start at.
-    static let stateSlotCount = 4
+    /// pooled chunks, the projected values, the projected gate logits, the
+    /// unprojected rows, and the position the projected rows start at.
+    static let stateSlotCount = 5
 
     /// The place of the pooled chunks inside a serialized state.
     private static let chunksSlot = 0
@@ -276,13 +313,19 @@ final class DeepSeekV4ChunkCache {
     /// The place of the projected gate logits inside a serialized state.
     private static let gatesSlot = 2
 
+    /// The place of the unprojected rows inside a serialized state.
+    private static let unprojectedSlot = 3
+
     /// The place of the carry position inside a serialized state.
-    private static let carryStartSlot = 3
+    private static let carryStartSlot = 4
 
     /// The state slots a branch that is not there writes, so that the slot
     /// count of a serialized state never changes.
     static var absentState: [MLXArray] {
-        [noValuePlaceholder, noValuePlaceholder, noValuePlaceholder, MLXArray([Int32(0)])]
+        [
+            noValuePlaceholder, noValuePlaceholder, noValuePlaceholder, noValuePlaceholder,
+            MLXArray([Int32(0)]),
+        ]
     }
 
     /// The array that stands for "no value" in a chunks or rows slot of a serialized state.
@@ -316,6 +359,7 @@ final class DeepSeekV4ChunkCache {
         self.retainedChunkCount = retainedChunkCount
         self.rewindableTokenCount = rewindableTokenCount
         self.poolDType = poolDType
+        self.unprojectedRows = DeepSeekV4RowBuffer(allocationStep: chunkWidth)
     }
 
     /// Builds the empty pooled cache of one layer of a checkpoint.
@@ -350,8 +394,9 @@ final class DeepSeekV4ChunkCache {
         heldChunks
     }
 
-    /// The projected rows of the positions from ``carryStart`` onward, or
-    /// `nil` when the cache holds none.
+    /// The projected rows of the positions from ``carryStart`` up to the end
+    /// of the last block that ended a chunk, or `nil` when the cache holds
+    /// none. The rows of a run that no block has ended are not projected yet.
     var projectedRows: DeepSeekV4Compressor.ProjectedRows? {
         guard let values = projectedValues.rows, let gates = projectedGates.rows else {
             return nil
@@ -365,17 +410,20 @@ final class DeepSeekV4ChunkCache {
         carryStart == 0
     }
 
-    /// The number of projected rows this cache holds.
-    private var rowCount: Int {
-        projectedValues.count
+    /// The absolute position after the last projected row, which is where the
+    /// unprojected rows start.
+    private var projectedEnd: Int {
+        carryStart + projectedValues.count
     }
 
     /// Pools one block of tokens and answers every chunk this cache holds.
     ///
-    /// The block is projected and joins the rows the last call kept. Only the
-    /// chunks that this block ends are pooled, and the chunks that stand
-    /// before them stay as they were. The answer is thus the same whatever the
-    /// block was cut into, and a block that ends no chunk does no pooling.
+    /// A block that ends a run is projected together with the unprojected
+    /// rows the last calls kept, and joins the projected rows. Only the chunks
+    /// that this block ends are pooled, and the chunks that stand before them
+    /// stay as they were. The answer is thus the same whatever the block was
+    /// cut into. A block that ends no run does no projection and no pooling:
+    /// the cache keeps its raw rows.
     ///
     /// - Parameters:
     ///   - block: The block input, shape `(batch, tokens, hidden)`.
@@ -387,21 +435,20 @@ final class DeepSeekV4ChunkCache {
         _ block: MLXArray, through compressor: DeepSeekV4Compressor,
         rope: DeepSeekV4RoPE, offset: Int
     ) -> MLXArray {
+        let position = projectedEnd + unprojectedRows.count
         precondition(
-            carryStart + rowCount == offset,
-            "the cache stands at position \(carryStart + rowCount) and the block "
-                + "starts at position \(offset)")
-
-        let projected = compressor.project(block)
-        projectedValues.append(projected.values)
-        projectedGates.append(projected.gates)
+            position == offset,
+            "the cache stands at position \(position) and the block starts at position \(offset)")
 
         let endPosition = offset + block.dim(Self.tokenAxis)
         let endedChunkCount = endPosition / chunkWidth
         if endedChunkCount > chunkCount {
+            projectRun(endingWith: block, through: compressor)
             poolChunks(
                 endingBefore: endedChunkCount, through: compressor, rope: rope,
                 dtype: block.dtype)
+        } else {
+            unprojectedRows.append(block)
         }
         dropRows(before: nextCarryStart(chunkCount: chunkCount, endPosition: endPosition))
         return heldChunks
@@ -413,8 +460,7 @@ final class DeepSeekV4ChunkCache {
     /// - Parameter position: The number of positions the cache must hold after
     ///   the rewind.
     /// - Returns: True when the rewind happened. It answers false when the
-    ///   projected rows of the rewound region are gone, and it then changes
-    ///   nothing.
+    ///   rows of the rewound region are gone, and it then changes nothing.
     @discardableResult
     func rewind(to position: Int) -> Bool {
         guard carryStart <= position else { return false }
@@ -424,8 +470,14 @@ final class DeepSeekV4ChunkCache {
             pool.truncate(to: keptCount)
             heldChunks = pool.rows
         }
-        projectedValues.truncate(to: position - carryStart)
-        projectedGates.truncate(to: position - carryStart)
+        let projectedEnd = self.projectedEnd
+        if position >= projectedEnd {
+            unprojectedRows.truncate(to: position - projectedEnd)
+        } else {
+            projectedValues.truncate(to: position - carryStart)
+            projectedGates.truncate(to: position - carryStart)
+            unprojectedRows.removeAll()
+        }
         return true
     }
 
@@ -438,6 +490,7 @@ final class DeepSeekV4ChunkCache {
             heldChunks ?? Self.noValuePlaceholder,
             projectedValues.rows ?? Self.noValuePlaceholder,
             projectedGates.rows ?? Self.noValuePlaceholder,
+            unprojectedRows.rows ?? Self.noValuePlaceholder,
             MLXArray([Int32(carryStart)]),
         ]
     }
@@ -452,7 +505,8 @@ final class DeepSeekV4ChunkCache {
     func validateRestore(state: [MLXArray]) throws {
         guard state.count == Self.stateSlotCount,
             Self.isRowTensor(state[Self.chunksSlot]) || Self.isNoValue(state[Self.chunksSlot]),
-            Self.areProjectedRows(values: state[Self.valuesSlot], gates: state[Self.gatesSlot])
+            Self.areProjectedRows(values: state[Self.valuesSlot], gates: state[Self.gatesSlot]),
+            isUnprojectedRun(state[Self.unprojectedSlot])
         else {
             throw KVCacheError(
                 message: "Corrupt prompt cache: invalid DeepSeek-V4 pooled-cache arrays.")
@@ -482,6 +536,7 @@ final class DeepSeekV4ChunkCache {
     static func isAbsentState(_ state: [MLXArray]) -> Bool {
         state.count == stateSlotCount && isNoValue(state[chunksSlot])
             && isNoValue(state[valuesSlot]) && isNoValue(state[gatesSlot])
+            && isNoValue(state[unprojectedSlot])
             && state[carryStartSlot].size == 1
             && state[carryStartSlot].dtype == .int32
             && state[carryStartSlot].asArray(Int32.self)[0] == 0
@@ -499,6 +554,16 @@ final class DeepSeekV4ChunkCache {
             return true
         }
         return isRowTensor(values) && isRowTensor(gates) && values.shape == gates.shape
+    }
+
+    /// True when the unprojected rows slot of a serialized state stands for no
+    /// value, or holds the rows of a run that has not ended: fewer rows than
+    /// one chunk covers.
+    ///
+    /// - Parameter rows: The array of the unprojected rows slot.
+    /// - Returns: True when the slot is valid for this cache.
+    private func isUnprojectedRun(_ rows: MLXArray) -> Bool {
+        Self.isNoValue(rows) || (Self.isRowTensor(rows) && rows.dim(Self.tokenAxis) < chunkWidth)
     }
 
     /// True when a chunks or rows slot holds a `(batch, rows, width)` tensor.
@@ -532,15 +597,18 @@ final class DeepSeekV4ChunkCache {
         heldChunks = pool.rows
         projectedValues = DeepSeekV4RowBuffer(rows: Self.nullable(state[Self.valuesSlot]))
         projectedGates = DeepSeekV4RowBuffer(rows: Self.nullable(state[Self.gatesSlot]))
+        unprojectedRows = DeepSeekV4RowBuffer(
+            rows: Self.nullable(state[Self.unprojectedSlot]), allocationStep: chunkWidth)
         carryStart = Int(state[Self.carryStartSlot].asArray(Int32.self)[0])
     }
 
     /// The arrays a forward pass must evaluate to keep the lazy graph bounded.
     ///
-    /// - Returns: The buffers of the pooled chunks and of the projected rows,
-    ///   at their full allocated size.
+    /// - Returns: The buffers of the pooled chunks, of the projected rows and
+    ///   of the unprojected rows, at their full allocated size.
     func innerState() -> [MLXArray] {
-        [pool.storage, projectedValues.storage, projectedGates.storage].compactMap { $0 }
+        [pool.storage, projectedValues.storage, projectedGates.storage, unprojectedRows.storage]
+            .compactMap { $0 }
     }
 
     /// The arrays the generation loop evaluates with each token.
@@ -565,8 +633,29 @@ final class DeepSeekV4ChunkCache {
         duplicate.heldChunks = duplicate.pool.rows
         duplicate.projectedValues = projectedValues.copy()
         duplicate.projectedGates = projectedGates.copy()
+        duplicate.unprojectedRows = unprojectedRows.copy()
         duplicate.carryStart = carryStart
         return duplicate
+    }
+
+    /// Projects the run that a block ends: the unprojected rows the last
+    /// calls kept, then the block. The projected rows join the rows this
+    /// cache holds, and no unprojected row stays.
+    ///
+    /// The tokens of the block past the last run it ends are projected too,
+    /// thus the projected rows always reach the end of the block.
+    ///
+    /// - Parameters:
+    ///   - block: The block input that ends the run, shape
+    ///     `(batch, tokens, hidden)`.
+    ///   - compressor: The compressor of this branch.
+    private func projectRun(endingWith block: MLXArray, through compressor: DeepSeekV4Compressor) {
+        let run =
+            unprojectedRows.rows.map { concatenated([$0, block], axis: Self.tokenAxis) } ?? block
+        let projected = compressor.project(run)
+        projectedValues.append(projected.values)
+        projectedGates.append(projected.gates)
+        unprojectedRows.removeAll()
     }
 
     /// Pools the chunks that the last block ended and writes them after the
@@ -798,15 +887,17 @@ public final class DeepSeekV4Cache: KVCache {
 
     /// The name of the format of ``state``, which ``metaState`` writes last.
     ///
-    /// The first format kept the RAW block rows of an incomplete chunk and
-    /// wrote no format name. A raw row cannot become a projected row without
-    /// the compressor, thus a prompt cache of the first format does not
-    /// restore. The second format, `DeepSeekV4Cache.projectedRows.v2`, kept
-    /// the projected rows (task `^cm8fq2q`) and an indexer pool in the
-    /// activation dtype. This format keeps the indexer pool in
-    /// ``DeepSeekV4Indexer/scoreDType`` (task `^atj552p`), thus the pool of a
-    /// prompt cache has the dtype that the cache appends to it.
-    static let stateFormat = "DeepSeekV4Cache.scoreDTypeIndexerPool.v3"
+    /// The first format kept the RAW block rows of an incomplete chunk in
+    /// place of the projected rows, and wrote no format name, thus it does
+    /// not restore. The second format,
+    /// `DeepSeekV4Cache.projectedRows.v2`, kept the projected rows of each
+    /// token (task `^cm8fq2q`) and an indexer pool in the activation dtype.
+    /// The third format, `DeepSeekV4Cache.scoreDTypeIndexerPool.v3`, kept the
+    /// indexer pool in ``DeepSeekV4Indexer/scoreDType`` (task `^atj552p`).
+    /// This format keeps the projected rows up to the last ended chunk and
+    /// the raw rows of the run in progress, in a slot of their own (task
+    /// `^4n7mtxa`), thus a branch has five slots.
+    static let stateFormat = "DeepSeekV4Cache.unprojectedRun.v4"
 
     /// The error message of a prompt cache whose meta state does not end in
     /// ``stateFormat``.
