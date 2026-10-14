@@ -374,6 +374,67 @@ struct DeepSeekV4AttentionTests {
         #expect(gainCache.offset == Self.prefillLength)
     }
 
+    // MARK: - The fused sparse attention kernel
+
+    /// The name `exportToDot(_:)` writes for the node of a custom Metal
+    /// kernel.
+    private static let customKernelPrimitive = "CustomKernel"
+
+    /// The tokens of the block the routing test reads. The two heads of the
+    /// synthetic checkpoint give one threadgroup for each token, thus the
+    /// block gives the 256 threadgroups the kernel needs. Its 64 whole
+    /// chunks of the compressed layer stand behind the last token, thus that
+    /// layer reads pooled rows beside the window, and they are fewer than
+    /// `index_topk`, thus the indexer ranks nothing.
+    private static let routingBlockLength = 256
+
+    /// The custom kernels the prefill block of the routing test dispatches
+    /// on the GPU: the fused attention kernel, and nothing else. The decode
+    /// step after it keeps the op path and dispatches none.
+    private static let prefillKernelCounts = [1, 0]
+
+    /// The cache `DeepSeekV4Model.newCache(parameters:)` builds for one layer.
+    private static func layerCache(layer: Int) throws -> KVCache {
+        let configuration = try configuration(useAttnSink: true)
+        guard configuration.hasCompressor(layer: layer) else {
+            return RotatingKVCache(maxSize: configuration.slidingWindow, keep: 0)
+        }
+        return DeepSeekV4Cache(configuration: configuration, layer: layer)
+    }
+
+    /// The custom kernel nodes in the graph of a prefill block and in the
+    /// graph of the decode step after it, built on the default device.
+    private static func customKernelCounts(layer: Int) throws -> [Int] {
+        let block = try attention(layer: layer, useAttnSink: true)
+        let cache = try layerCache(layer: layer)
+        let prefill = block(
+            fixtureArray([batchSize, routingBlockLength, hiddenSize], seed: Seed.prefillInput),
+            mask: .causal, cache: cache)
+        let prefillCount = DeepSeekV4TestArrays.nodeCount(
+            [prefill], primitive: customKernelPrimitive)
+        eval([prefill] + cache.innerState())
+        let decode = block(decodeInput(), mask: .none, cache: cache)
+        return [
+            prefillCount,
+            DeepSeekV4TestArrays.nodeCount([decode], primitive: customKernelPrimitive),
+        ]
+    }
+
+    /// On the GPU a prefill block reads the fused kernel, on the plain layer
+    /// and on the compressed layer alike, and a decode step keeps the op
+    /// path. The count of the prefill block shows the counter sees a kernel;
+    /// the op path of the CPU dispatches none at all.
+    @Test(arguments: [plainLayer, compressedLayer])
+    func aPrefillBlockReadsTheFusedKernelOnTheGPU(layer: Int) throws {
+        let gpuCounts = try Self.customKernelCounts(layer: layer)
+        let cpuCounts = try Device.withDefaultDevice(.cpu) {
+            try Self.customKernelCounts(layer: layer)
+        }
+
+        #expect(gpuCounts == Self.prefillKernelCounts)
+        #expect(cpuCounts == [0, 0])
+    }
+
     // MARK: - The kept attention sinks
 
     /// The sink value of each head that the update test writes. It is a

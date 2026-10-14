@@ -65,6 +65,13 @@
 // chunk with no mask either (task `^3q35p00`), because every pooled chunk
 // stands wholly behind the one token of the step. mlx-lm PR 1195 passes
 // `mask=None` at one token for the same reason.
+//
+// On the GPU a prefill block reads none of these paths. One fused Metal kernel,
+// Libraries/MLXLLM/Models/DeepSeekV4SparseAttentionKernel.swift, reads the
+// window rows of each query, the pooled chunks the indexer picked or every
+// pooled chunk behind the query, and the sink, as llama.cpp does (PR 28098 and
+// PR 29377). The op paths stay for a decode step, whose one query gives the
+// kernel too few threadgroups, and for a run on the CPU.
 
 import Foundation
 import MLX
@@ -702,13 +709,21 @@ final class DeepSeekV4Attention: Module {
     /// is the plain path this file always had. A layer that holds a compressor
     /// reads that window AND the pooled chunks of everything before it.
     ///
+    /// On the GPU a block whose queries fill the GPU, such as a prefill step,
+    /// reads one fused kernel, ``DeepSeekV4SparseAttentionKernel``: each query
+    /// reads only its own window rows, its pooled rows and its sink, and no
+    /// mask. A decode step, a short block and a run on the CPU read the op
+    /// paths below, which give the same numbers up to the order of the sums.
+    ///
     /// - Parameters:
     ///   - x: The block input, shape `(batch, tokens, hidden)`.
     ///   - queries: The rotated queries of this block.
     ///   - keyValues: The rotated keys of this block, which are also its
     ///     values.
     ///   - queryResidual: The low-rank query of this block, after its norm.
-    ///   - windowMask: The mask of the sliding window alone.
+    ///   - windowMask: The mask of the sliding window alone. The fused kernel
+    ///     reads no mask: it takes the window rows of each query from the
+    ///     layout the cache gives back.
     ///   - cache: The key/value cache of this layer, or `nil`.
     ///   - offset: The absolute position of the first token of this block.
     /// - Returns: The attention output, shape
@@ -731,6 +746,13 @@ final class DeepSeekV4Attention: Module {
 
         let pooled = pooledChunks(x, compressor: compressor, cache: cache, offset: offset)
         let windowKeys = cache.map { $0.update(keys: keyValues, values: keyValues).0 } ?? keyValues
+        if DeepSeekV4SparseAttentionKernel.canRun(queries: queries) {
+            return DeepSeekV4SparseAttentionKernel.attention(
+                queries: queries,
+                window: .init(keys: windowKeys, values: windowKeys, window: slidingWindow),
+                pooled: pooledRows(x, queryResidual: queryResidual, pooled: pooled, offset: offset),
+                scale: scale, sinks: sinks)
+        }
         guard pooled.attention.dim(Self.chunkAxis) > 0 else {
             return Self.attentionInQuerySlices(
                 queries: queries, keys: windowKeys, values: windowKeys,
@@ -907,13 +929,14 @@ final class DeepSeekV4Attention: Module {
     /// Attends over the sliding window alone, which is the path of a layer
     /// whose compress ratio is 0.
     ///
-    /// Both routes feed SDPA the very arrays the cache returned. A block that
-    /// dropped that return and fed its own tensor instead leaks one Metal
-    /// buffer for each layer and each token -- `ml-explore/mlx-lm` issue
+    /// Each route feeds the attention the very arrays the cache returned. A
+    /// block that dropped that return and fed its own tensor instead leaks one
+    /// Metal buffer for each layer and each token -- `ml-explore/mlx-lm` issue
     /// 1662. A decode step, and a cache that owns its attention, read
     /// `attentionWithCacheUpdate`. A longer block over a cache that returns
-    /// plain arrays, or over no cache, reads those arrays in slices of query
-    /// rows.
+    /// plain arrays, or over no cache, reads those arrays through the fused
+    /// kernel when ``DeepSeekV4SparseAttentionKernel/canRun(queries:)`` allows
+    /// it, and in slices of query rows when it does not.
     ///
     /// - Parameters:
     ///   - queries: The rotated queries, shape `(batch, heads, tokens, headDim)`.
@@ -931,7 +954,8 @@ final class DeepSeekV4Attention: Module {
         cache: KVCache?,
         sinks: MLXArray?
     ) -> MLXArray {
-        guard queries.dim(Self.queryAxis) > Self.decodeLength,
+        let fuses = DeepSeekV4SparseAttentionKernel.canRun(queries: queries)
+        guard fuses || queries.dim(Self.queryAxis) > Self.decodeLength,
             cache.map(Self.returnsPlainArrays) ?? true
         else {
             return attentionWithCacheUpdate(
@@ -945,9 +969,14 @@ final class DeepSeekV4Attention: Module {
         }
         let (keys, values) =
             cache?.update(keys: keyValues, values: keyValues) ?? (keyValues, keyValues)
-        return Self.attentionInQuerySlices(
-            queries: queries, keys: keys, values: values, scale: scale, mask: windowMask,
-            sinks: sinks)
+        guard fuses else {
+            return Self.attentionInQuerySlices(
+                queries: queries, keys: keys, values: values, scale: scale, mask: windowMask,
+                sinks: sinks)
+        }
+        return DeepSeekV4SparseAttentionKernel.attention(
+            queries: queries, window: .init(keys: keys, values: values, window: slidingWindow),
+            pooled: nil, scale: scale, sinks: sinks)
     }
 
     /// Tells whether `update` of a cache hands back the plain keys and
@@ -1215,6 +1244,32 @@ final class DeepSeekV4Attention: Module {
         }
         return selector.rankedChunks(
             x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope, offset: offset)
+    }
+
+    /// The pooled chunks the fused kernel reads beside the window, or `nil`
+    /// while the pool holds no chunk.
+    ///
+    /// A pool of more than ``DeepSeekV4Indexer/topK`` chunks gives the chunks
+    /// the indexer picked for each query. A smaller pool, and a layer with no
+    /// indexer, give every chunk, and the kernel reads each one that stands
+    /// wholly behind its query.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, tokens, hidden)`.
+    ///   - queryResidual: The low-rank query of this block, after its norm.
+    ///   - pooled: The chunks of each branch.
+    ///   - offset: The absolute position of the first token of this block.
+    /// - Returns: The pooled rows of the kernel, or `nil`.
+    private func pooledRows(
+        _ x: MLXArray, queryResidual: MLXArray, pooled: PooledChunks, offset: Int
+    ) -> DeepSeekV4SparseAttentionKernel.PooledRows? {
+        guard pooled.attention.dim(Self.chunkAxis) > 0 else {
+            return nil
+        }
+        return DeepSeekV4SparseAttentionKernel.PooledRows(
+            pool: pooled.attention,
+            picked: indexerPicks(x, queryResidual: queryResidual, pooled: pooled, offset: offset),
+            offset: offset, chunkWidth: compressorChunkWidth)
     }
 
     /// Attends over the sliding window joined to every given pooled chunk,
