@@ -39,20 +39,34 @@ enum DeepSeekV4Math {
     /// The number of one-value-for-each-copy fields the mixes vector holds
     /// ahead of the flattened mixing matrix: one `pre` weight and one `post`
     /// weight for each parallel copy of the residual stream.
-    private static let splitFieldCount = 2
+    ///
+    /// ``DeepSeekV4SinkhornKernel`` reads the same layout of the mixes
+    /// vector, thus this constant and the four below are internal.
+    static let splitFieldCount = 2
 
     /// The place of the `pre` scale inside the learned scale vector.
-    private static let preScaleIndex = 0
+    static let preScaleIndex = 0
 
     /// The place of the `post` scale inside the learned scale vector.
-    private static let postScaleIndex = 1
+    static let postScaleIndex = 1
 
     /// The place of the `comb` scale inside the learned scale vector.
-    private static let combScaleIndex = 2
+    static let combScaleIndex = 2
 
     /// The `post` field is a sigmoid opened to the range 0 through 2, thus one
     /// block output can double before the residual stream takes it back.
-    private static let postGain: Float = 2
+    static let postGain: Float = 2
+
+    /// The width of the mHC mixes vector, `(2 + hcMult) * hcMult`: one
+    /// `pre` weight and one `post` weight for each copy, and the flattened
+    /// mixing matrix.
+    ///
+    /// - Parameter hcMult: The number of parallel copies of the residual
+    ///   stream.
+    /// - Returns: The number of values the last axis of the mixes holds.
+    static func mixWidth(hcMult: Int) -> Int {
+        (splitFieldCount + hcMult) * hcMult
+    }
 
     /// A sum over this axis gives one number for each row, thus a division by
     /// that sum makes each row of the mixing matrix add up to 1.
@@ -76,8 +90,8 @@ enum DeepSeekV4Math {
     ///
     /// This function is the op path: ``hcSplitFields(mixes:scale:base:hcMult:eps:)``
     /// and then ``sinkhorn(_:iters:eps:)``. On the GPU the hyper-connection
-    /// collapse takes the same split and gives the Sinkhorn steps to one fused
-    /// kernel, ``DeepSeekV4SinkhornKernel``.
+    /// collapse gives the split and the Sinkhorn steps to one fused kernel,
+    /// ``DeepSeekV4SinkhornKernel``, which gives the same bits.
     ///
     /// Every value moves to float32 first. The Sinkhorn steps divide by sums
     /// of small numbers, and float16 loses those sums.
@@ -188,7 +202,7 @@ enum DeepSeekV4Math {
     static func hcSplitOperands(
         mixes: MLXArray, scale: MLXArray, base: MLXArray, hcMult: Int
     ) -> HCSplitOperands {
-        let mixWidth = (splitFieldCount + hcMult) * hcMult
+        let mixWidth = mixWidth(hcMult: hcMult)
         precondition(
             mixes.shape.last == mixWidth,
             "the last axis of mixes must be (2 + hcMult) * hcMult = \(mixWidth), "

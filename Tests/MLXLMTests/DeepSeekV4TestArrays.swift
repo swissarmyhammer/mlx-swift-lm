@@ -17,8 +17,8 @@ import Testing
 /// sliced or a broadcast array gives the same list as its contiguous copy.
 ///
 /// More helpers read the graph of an array, not its values. They count the
-/// gather nodes in it, and they check the counter against a control graph
-/// that holds one known gather.
+/// nodes of one primitive in it, and they check the gather count against a
+/// control graph that holds one known gather.
 enum DeepSeekV4TestArrays {
 
     /// Reads an array back as a flat list of `Float`, in row-major order.
@@ -39,10 +39,25 @@ enum DeepSeekV4TestArrays {
         array.asType(.int32).asArray(Int32.self)
     }
 
-    /// The label `exportToDot(_:)` writes for a node of the general MLX
-    /// gather. The quotation marks keep `GatherAxis` and `GatherQMM` out of
-    /// the count, because those are different primitives.
-    private static let gatherNodeLabel = "\"Gather\""
+    /// The name `exportToDot(_:)` writes for a node of the general MLX
+    /// gather.
+    private static let gatherPrimitive = "Gather"
+
+    /// Counts the nodes of one primitive in the graph that makes `arrays`.
+    ///
+    /// The count reads the label `exportToDot(_:)` writes for each node,
+    /// with its quotation marks. Thus the name `Gather` does not count a
+    /// `GatherAxis` or a `GatherQMM` node, because those are different
+    /// primitives.
+    ///
+    /// - Parameters:
+    ///   - arrays: The outputs whose graph to read. The function does not
+    ///     evaluate them.
+    ///   - primitive: The name of the primitive, such as `Softmax`.
+    /// - Returns: The number of nodes of that primitive in the graph.
+    static func nodeCount(_ arrays: [MLXArray], primitive: String) -> Int {
+        exportToDot(arrays).components(separatedBy: "\"\(primitive)\"").count - 1
+    }
 
     /// Counts the general gather nodes in the graph that makes `arrays`.
     ///
@@ -53,7 +68,7 @@ enum DeepSeekV4TestArrays {
     ///   not evaluate them.
     /// - Returns: The number of `Gather` nodes in the graph.
     static func gatherNodeCount(_ arrays: [MLXArray]) -> Int {
-        exportToDot(arrays).components(separatedBy: gatherNodeLabel).count - 1
+        nodeCount(arrays, primitive: gatherPrimitive)
     }
 
     /// The length of the vector that the control graph reads.

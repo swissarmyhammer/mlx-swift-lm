@@ -105,6 +105,9 @@ enum DeepSeekV4CompiledDecode {
     /// Compiles ``DeepSeekV4Math/hcSplitActivations(_:eps:)`` without a shape,
     /// thus one trace of each field serves each block.
     ///
+    /// Only the collapse off the GPU reads this function. On the GPU the
+    /// fused kernel ``DeepSeekV4SinkhornKernel`` takes the activations.
+    ///
     /// The slices of the split stay outside, in
     /// ``DeepSeekV4Math/hcSplitOperands(mixes:scale:base:hcMult:)``, because
     /// a shapeless function can hold no slice. Each field takes its own
@@ -144,6 +147,9 @@ enum DeepSeekV4CompiledDecode {
 
     /// Compiles
     /// ``ManifoldStream/collapseFields(of:projection:normWeight:scale:base:hcMult:normEps:hcEps:)``.
+    ///
+    /// Only the decode step off the GPU reads this function. On the GPU the
+    /// fused kernel ``DeepSeekV4SinkhornKernel`` takes the split.
     ///
     /// - Parameters:
     ///   - hcMult: The number of parallel copies of the residual stream.

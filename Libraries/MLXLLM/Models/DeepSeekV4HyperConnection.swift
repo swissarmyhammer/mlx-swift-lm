@@ -35,12 +35,12 @@
 //     Libraries/MLXLLM/Models/DeepSeekV4MathHelpers.swift, which is the
 //     transcription of the Python `hc_split_sinkhorn`, and it hands them the
 //     `hc_eps` of the checkpoint. The routine holds no epsilon of its own.
-//     The collapse calls the split half, `DeepSeekV4Math.hcSplitFields`. On
-//     the GPU it gives the Sinkhorn steps and the weighted sum to one fused
-//     Metal kernel, Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift;
-//     on another device it calls the Sinkhorn half,
-//     `DeepSeekV4Math.sinkhorn`. A parity test holds the kernel to the
-//     numbers of the op path.
+//     On the GPU the collapse gives the split activations, the Sinkhorn
+//     steps and the weighted sum to one fused Metal kernel,
+//     Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift. On another
+//     device it calls the split half, `DeepSeekV4Math.hcSplitFields`, and
+//     then the Sinkhorn half, `DeepSeekV4Math.sinkhorn`. A parity test holds
+//     the kernel to the numbers of the op path.
 //
 // The Python reference above does not decide how the expand reads the mixing
 // matrix `comb`. Its `hc_post` reads `comb` the wrong way round. The official
@@ -295,11 +295,6 @@ enum ManifoldStream {
 /// and the tests hold it to values rather than to shapes.
 class DeepSeekV4HyperConnection: Module {
 
-    /// The number of one-value-for-each-copy fields the mixes vector holds
-    /// ahead of the flattened mixing matrix: one `pre` weight and one `post`
-    /// weight for each copy.
-    private static let splitFieldCount = 2
-
     /// The number of learned scales, one for each of the three fields the
     /// mixes vector splits into.
     private static let scaleFieldCount = 3
@@ -344,7 +339,7 @@ class DeepSeekV4HyperConnection: Module {
     private let _normWeight: MLXArray
 
     /// The compiled steps of the collapse before the Sinkhorn steps, which a
-    /// decode step reads.
+    /// decode step off the GPU reads.
     ///
     /// The function captures the constants of this layer alone, and takes
     /// every weight as an argument on each call.
@@ -354,7 +349,7 @@ class DeepSeekV4HyperConnection: Module {
         )
 
     /// The shapeless compiled activations of the split, which a block of
-    /// more than one token reads.
+    /// more than one token off the GPU reads.
     private let compiledSplitActivations:
         @Sendable (DeepSeekV4Math.HCSplitOperands) -> (
             pre: MLXArray, post: MLXArray, comb: MLXArray
@@ -370,7 +365,7 @@ class DeepSeekV4HyperConnection: Module {
         self.hcEps = configuration.hcEps
         self.normEps = configuration.rmsNormEps
 
-        let mixWidth = (Self.splitFieldCount + configuration.hcMult) * configuration.hcMult
+        let mixWidth = DeepSeekV4Math.mixWidth(hcMult: configuration.hcMult)
         let hcDim = configuration.hcMult * configuration.hiddenSize
         self._mixProjection.wrappedValue = MLXArray.zeros([mixWidth, hcDim])
         self._mixBias.wrappedValue = MLXArray.zeros([mixWidth])
@@ -389,9 +384,11 @@ class DeepSeekV4HyperConnection: Module {
     /// that the mixes projection runs one time for each sub-layer rather than
     /// two times.
     ///
-    /// On the GPU one fused kernel, ``DeepSeekV4SinkhornKernel``, takes the
-    /// Sinkhorn steps and the weighted sum. On another device, or with no
-    /// Sinkhorn step, the collapse takes them as separate MLX operations.
+    /// On the GPU the collapse takes the mixes projection as MLX operations,
+    /// and one fused kernel, ``DeepSeekV4SinkhornKernel``, takes the split
+    /// activations, the Sinkhorn steps and the weighted sum. On another
+    /// device, or with no Sinkhorn step, the collapse takes every step as
+    /// MLX operations. The two paths give the same bits.
     ///
     /// - Parameter stream: The residual stream, shape
     ///   `(batch, tokens, hcMult, hiddenSize)`.
@@ -403,23 +400,26 @@ class DeepSeekV4HyperConnection: Module {
         _ stream: MLXArray
     ) -> (collapsed: MLXArray, post: MLXArray, comb: MLXArray) {
         ManifoldStream.checkShape(of: stream, copyCount: hcMult, width: hiddenSize)
-        let fields = collapseFields(stream)
-
-        guard DeepSeekV4SinkhornKernel.canRun(on: fields.stream, iters: sinkhornIterations) else {
+        guard DeepSeekV4SinkhornKernel.canRun(on: stream, iters: sinkhornIterations) else {
+            let fields = collapseFields(stream)
             let comb = DeepSeekV4Math.sinkhorn(fields.comb, iters: sinkhornIterations, eps: hcEps)
             let collapsed = ManifoldStream.weightedSum(of: fields.stream, weights: fields.pre)
             return (collapsed: collapsed.asType(stream.dtype), post: fields.post, comb: comb)
         }
 
-        let fused = DeepSeekV4SinkhornKernel.sinkhornCollapse(
-            comb: fields.comb, pre: fields.pre, stream: fields.stream,
+        let streamF32 = stream.asType(.float32)
+        let mixes = ManifoldStream.mixes(
+            of: streamF32, projection: mixProjection, normWeight: _normWeight, normEps: normEps)
+        let fused = DeepSeekV4SinkhornKernel.splitSinkhornCollapse(
+            mixes: mixes, scale: mixScale, base: mixBias, stream: streamF32,
             iters: sinkhornIterations, eps: hcEps)
         return (
-            collapsed: fused.collapsed.asType(stream.dtype), post: fields.post, comb: fused.comb
+            collapsed: fused.collapsed.asType(stream.dtype), post: fused.post, comb: fused.comb
         )
     }
 
-    /// Takes the steps of the collapse that come before the Sinkhorn steps.
+    /// Takes the steps of the collapse that come before the Sinkhorn steps,
+    /// on the path off the GPU.
     ///
     /// A decode step reads the whole compiled function. A longer block reads
     /// the op path for the projection and the slices, and the shapeless

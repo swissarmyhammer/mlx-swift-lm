@@ -556,74 +556,102 @@ struct DeepSeekV4HyperConnectionTests {
     /// one SIMD group of 32 lanes, one row of the mixing matrix in each lane.
     private static let fullSimdGroupCopies = 32
 
+    /// The range of the random mixes of the parity input. A range wider than
+    /// 1 gives the softmax rows a large spread, thus the largest value of a
+    /// row decides most of its sum.
+    private static let parityMixRange: Float = 4
+
     /// The cases the parity test reads: the number of copies, the number of
-    /// Sinkhorn steps and the width of one copy. The first case is the
-    /// DeepSeek-V4-Flash `hc_mult` and step count. One step is only the first
-    /// column normalization. An odd copy count catches an index that takes
-    /// the count as 4, and a width that is not a multiple of 4 takes the
-    /// scalar path of the weighted sum. The last case gives a row to more
-    /// lanes than the DeepSeek-V4-Flash count does.
+    /// Sinkhorn steps, the width of one copy and the dtype of the mixes and
+    /// of the stream. The first two cases are the DeepSeek-V4-Flash `hc_mult`
+    /// and step count, in float32 and in the bfloat16 of the checkpoint. One
+    /// step is only the first column normalization. An odd copy count catches
+    /// an index that takes the count as 4, and it leaves the last group of 4
+    /// values of a softmax row partly empty. A width that is not a multiple
+    /// of 4 takes the scalar path of the weighted sum. The last case gives a
+    /// row to more lanes than the DeepSeek-V4-Flash count does, and its rows
+    /// fill two groups of 4 values.
     ///
     /// No case holds 16 or more copies. At 16 and at 32 copies the MLX sum of
     /// the op path does not add in index order, thus its weighted sum, which
     /// the kernel did not change, also moves by one unit in the last place.
-    private static let parityCases: [(copies: Int, iters: Int, width: Int)] = [
-        (4, 20, 64), (3, 1, 6), (3, 7, 8), (8, 3, 4),
+    private static let parityCases: [(copies: Int, iters: Int, width: Int, dtype: DType)] = [
+        (4, 20, 64, .float32), (4, 20, 64, .bfloat16), (3, 1, 6, .float32),
+        (3, 7, 8, .float32), (8, 3, 4, .float32),
     ]
 
     @Test(arguments: parityCases)
-    func theFusedSinkhornKernelAgreesWithTheOpPath(copies: Int, iters: Int, width: Int) {
+    func theFusedSinkhornKernelAgreesWithTheOpPath(
+        copies: Int, iters: Int, width: Int, dtype: DType
+    ) {
         // The kernel runs the float32 operations of the op path in the same
         // order and rounds each product before it adds it, thus the two give
         // the same bits. A kernel that fused a multiply and an add into one
         // `fma` moved the weighted sum by one unit in the last place.
         expectFusedParity(
-            leading: Self.parityLeadingShape, copies: copies, iters: iters, width: width)
+            leading: Self.parityLeadingShape, copies: copies, iters: iters, width: width,
+            dtype: dtype)
     }
 
     /// The leading shape of one token alone.
     private static let singleTokenLeadingShape = [1, 1]
 
-    /// A copy count whose mixing matrix of one token holds fewer than the 8
+    /// A copy count whose mixes vector of one token holds fewer than the 8
     /// values that MLX gives to a kernel in the `device` address space.
-    private static let constantSpaceCopies = 2
+    private static let constantSpaceCopies = 1
 
     @Test
-    func theFusedSinkhornKernelTakesAMixingMatrixInTheConstantAddressSpace() {
+    func theFusedSinkhornKernelTakesMixesInTheConstantAddressSpace() {
         // MLX gives an input of fewer than 8 values to a custom kernel in the
         // `constant` address space, not in the `device` address space. With
-        // one token of 2 copies the mixing matrix holds 4 values. A kernel
-        // that reads that input through a `device` pointer does not compile.
+        // one token of 1 copy the mixes vector and the bias each hold 3
+        // values, and the scale vector always holds 3. A kernel that reads
+        // such an input through a `device` pointer does not compile. The
+        // stream holds one wide copy, thus it stays in the `device` address
+        // space, as every residual stream of a checkpoint does.
         expectFusedParity(
             leading: Self.singleTokenLeadingShape, copies: Self.constantSpaceCopies,
-            iters: Self.sinkhornIterations, width: Self.hcMult)
+            iters: Self.sinkhornIterations, width: Self.wideHiddenSize, dtype: .float32)
     }
 
-    /// Checks that the fused kernel gives the bits of the op path.
+    /// Checks that the fused kernel gives the bits of the op path: the split
+    /// of ``DeepSeekV4Math/hcSplitSinkhorn(mixes:scale:base:hcMult:iters:eps:)``
+    /// and the weighted sum of ``ManifoldStream/weightedSum(of:weights:)``.
     ///
     /// - Parameters:
     ///   - leading: The leading shape of the input.
     ///   - copies: The number of copies.
     ///   - iters: The number of Sinkhorn steps.
     ///   - width: The width of one copy.
-    private func expectFusedParity(leading: [Int], copies: Int, iters: Int, width: Int) {
+    ///   - dtype: The dtype of the mixes and of the stream.
+    private func expectFusedParity(
+        leading: [Int], copies: Int, iters: Int, width: Int, dtype: DType
+    ) {
         let seed = UInt64(copies * iters * width)
-        let stream = Self.randomArray(leading + [copies, width], seed: seed)
-        let pre = sigmoid(Self.randomArray(leading + [copies], seed: seed + 1)) + Self.hcEps
-        let logits = Self.randomArray(leading + [copies, copies], seed: seed + 2)
-        let comb = softmax(logits, axis: -1, precise: true) + Self.hcEps
+        let mixWidth = DeepSeekV4Math.mixWidth(hcMult: copies)
+        let stream = Self.randomArray(leading + [copies, width], seed: seed).asType(dtype)
+        let mixes = (Self.randomArray(leading + [mixWidth], seed: seed + 1) * Self.parityMixRange)
+            .asType(dtype)
+        let scale = Self.randomArray([Self.scales.count], seed: seed + 2)
+        let base = Self.randomArray([mixWidth], seed: seed + 3)
 
-        let opComb = DeepSeekV4Math.sinkhorn(comb, iters: iters, eps: Self.hcEps)
-        let opCollapsed = ManifoldStream.weightedSum(of: stream, weights: pre)
-        let fused = DeepSeekV4SinkhornKernel.sinkhornCollapse(
-            comb: comb, pre: pre, stream: stream, iters: iters, eps: Self.hcEps)
+        let op = DeepSeekV4Math.hcSplitSinkhorn(
+            mixes: mixes, scale: scale, base: base, hcMult: copies, iters: iters, eps: Self.hcEps)
+        let opCollapsed = ManifoldStream.weightedSum(of: stream.asType(.float32), weights: op.pre)
+        let fused = DeepSeekV4SinkhornKernel.splitSinkhornCollapse(
+            mixes: mixes, scale: scale, base: base, stream: stream, iters: iters, eps: Self.hcEps)
 
-        #expect(fused.comb.shape == comb.shape)
+        #expect(fused.post.shape == op.post.shape)
+        #expect(fused.comb.shape == op.comb.shape)
         #expect(fused.collapsed.shape == leading + [width])
+        #expect(fused.post.dtype == .float32)
         #expect(fused.comb.dtype == .float32)
         #expect(fused.collapsed.dtype == .float32)
         #expect(
-            DeepSeekV4TestArrays.floats(fused.comb) == DeepSeekV4TestArrays.floats(opComb),
+            DeepSeekV4TestArrays.floats(fused.post) == DeepSeekV4TestArrays.floats(op.post),
+            "the post gains")
+        #expect(
+            DeepSeekV4TestArrays.floats(fused.comb) == DeepSeekV4TestArrays.floats(op.comb),
             "the Sinkhorn mixing matrix")
         #expect(
             DeepSeekV4TestArrays.floats(fused.collapsed)
@@ -639,6 +667,38 @@ struct DeepSeekV4HyperConnectionTests {
         let stream = MLXArray.zeros(Self.parityLeadingShape + [copies, Self.hcMult])
 
         #expect(!DeepSeekV4SinkhornKernel.canRun(on: stream, iters: Self.sinkhornIterations))
+    }
+
+    /// The name `exportToDot(_:)` writes for a node of the MLX softmax.
+    private static let softmaxPrimitive = "Softmax"
+
+    /// The token counts of the collapse graph test: one decode step, and one
+    /// block of the wide checkpoint.
+    private static let collapseGraphTokenCounts = [1, wideTokenCount]
+
+    @Test(arguments: collapseGraphTokenCounts)
+    func theCollapseTakesTheRowSoftmaxOfTheMixingMatrixInTheFusedKernel(tokens: Int) throws {
+        // On the GPU the fused kernel takes the row softmax of `comb`, thus
+        // the graph of the collapse holds no `Softmax` node. The op path of
+        // the same split holds one, and it is the positive control of the
+        // count.
+        let hyperConnection = try Self.wideHyperConnection()
+        let stream = Self.randomArray(
+            [1, tokens, Self.hcMult, Self.wideHiddenSize], seed: 91)
+        let opFields = DeepSeekV4Math.hcSplitFields(
+            mixes: Self.randomArray([1, tokens, Self.mixWidth], seed: 92),
+            scale: hyperConnection.mixScale, base: hyperConnection.mixBias,
+            hcMult: Self.hcMult, eps: Self.hcEps)
+
+        let (collapsed, post, comb) = hyperConnection.collapse(stream)
+
+        #expect(
+            DeepSeekV4TestArrays.nodeCount([opFields.comb], primitive: Self.softmaxPrimitive) == 1,
+            "the op path holds one softmax node")
+        #expect(
+            DeepSeekV4TestArrays.nodeCount(
+                [collapsed, post, comb], primitive: Self.softmaxPrimitive) == 0,
+            "the collapse holds no softmax node")
     }
 
     // MARK: - The head reduce
