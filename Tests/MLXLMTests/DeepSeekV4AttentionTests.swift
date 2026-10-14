@@ -374,6 +374,129 @@ struct DeepSeekV4AttentionTests {
         #expect(gainCache.offset == Self.prefillLength)
     }
 
+    // MARK: - The kept attention sinks
+
+    /// The sink value of each head that the update test writes. It is a
+    /// multiple of an eighth, thus exact in every float dtype, and no fixture
+    /// head holds it.
+    private static let updatedSinkValue: Float = 0.75
+
+    @Test
+    func theKeptSinksAreOneArrayForEveryStep() throws {
+        let block = try Self.attention(layer: Self.plainLayer, useAttnSink: true)
+        block.keepAttentionSinks(dtype: .bfloat16)
+
+        let first = try #require(block.attentionSinks(dtype: .bfloat16))
+        let second = try #require(block.attentionSinks(dtype: .bfloat16))
+
+        #expect(first === second, "a kept cast makes no new array on a step")
+        #expect(first.dtype == .bfloat16)
+        #expect(
+            DeepSeekV4TestArrays.floats(first)
+                == DeepSeekV4TestArrays.floats(block.attnSink.asType(.bfloat16)))
+    }
+
+    @Test
+    func aStepInAnotherDtypeCastsTheSinksAgain() throws {
+        let block = try Self.attention(layer: Self.plainLayer, useAttnSink: true)
+        block.keepAttentionSinks(dtype: .bfloat16)
+
+        let sinks = try #require(block.attentionSinks(dtype: .float32))
+
+        #expect(sinks.dtype == .float32)
+        #expect(DeepSeekV4TestArrays.floats(sinks) == DeepSeekV4TestArrays.floats(block.attnSink))
+    }
+
+    @Test
+    func theKeptSinksGiveTheOutputOfTheCastOnEachStep() throws {
+        let kept = try Self.attention(layer: Self.plainLayer, useAttnSink: true)
+        kept.keepAttentionSinks(dtype: .float32)
+        let plain = try Self.attention(layer: Self.plainLayer, useAttnSink: true)
+        let keptCache = KVCacheSimple()
+        let plainCache = KVCacheSimple()
+
+        _ = kept(Self.prefillInput(), mask: .causal, cache: keptCache)
+        _ = plain(Self.prefillInput(), mask: .causal, cache: plainCache)
+        let keptOutput = kept(Self.decodeInput(), mask: .causal, cache: keptCache)
+        let plainOutput = plain(Self.decodeInput(), mask: .causal, cache: plainCache)
+
+        #expect(
+            DeepSeekV4TestArrays.floats(keptOutput) == DeepSeekV4TestArrays.floats(plainOutput))
+    }
+
+    @Test
+    func anUpdateOfTheParametersDropsTheKeptSinks() throws {
+        let block = try Self.attention(layer: Self.plainLayer, useAttnSink: true)
+        block.keepAttentionSinks(dtype: .float32)
+        let updated = MLXArray(
+            [Float](repeating: Self.updatedSinkValue, count: Self.headCount))
+
+        try block.update(
+            parameters: ModuleParameters.unflattened(["attn_sink": updated]), verify: [])
+        let sinks = try #require(block.attentionSinks(dtype: .float32))
+
+        #expect(DeepSeekV4TestArrays.floats(sinks) == DeepSeekV4TestArrays.floats(updated))
+    }
+
+    @Test
+    func aLayerWithNoSinkKeepsNone() throws {
+        let block = try Self.attention(layer: Self.plainLayer, useAttnSink: false)
+        block.keepAttentionSinks(dtype: .float32)
+
+        #expect(block.attentionSinks(dtype: .float32) == nil)
+    }
+
+    // MARK: - The query head norm
+
+    /// The seed of the random heads the head-norm parity test reads.
+    private static let headNormSeed: UInt64 = 51
+
+    /// The epsilon of every norm of the real checkpoint, `rms_norm_eps`.
+    private static let realNormEps: Float = 1e-6
+
+    /// The number of query heads of the real checkpoint.
+    private static let realHeadCount = 64
+
+    /// The largest relative gap allowed between two float32 head norms that
+    /// sum the squares in a different order.
+    private static let float32NormTolerance: Float = 1e-6
+
+    /// The relative spacing of two neighbouring BF16 numbers: BF16 keeps 7
+    /// bits of mantissa after the leading bit. Two BF16 head norms that
+    /// round one float32 result apart may differ by this much.
+    private static let bfloat16Spacing: Float = 1.0 / 128
+
+    /// The head norm of the op path before the fast kernel: cast to float32,
+    /// divide by the root mean square, cast back.
+    private static func opPathHeadNorm(_ heads: MLXArray, eps: Float) -> MLXArray {
+        let wide = heads.asType(.float32)
+        return (wide * rsqrt((wide * wide).mean(axis: -1, keepDims: true) + eps))
+            .asType(heads.dtype)
+    }
+
+    /// The largest gap between two lists, relative to the larger of 1 and
+    /// the reference value.
+    private func largestRelativeGap(_ got: [Float], _ reference: [Float]) -> Float {
+        zip(got, reference).map { abs($0 - $1) / max(1, abs($1)) }.max() ?? 0
+    }
+
+    @Test(arguments: [(DType.float32, float32NormTolerance), (DType.bfloat16, bfloat16Spacing)])
+    func theHeadNormGivesTheNumbersOfTheOpPath(dtype: DType, tolerance: Float) throws {
+        let heads = MLXRandom.normal(
+            [Self.batchSize, Self.decodeLength, Self.realHeadCount, Self.realHeadDim],
+            key: MLXRandom.key(Self.headNormSeed)
+        ).asType(dtype)
+
+        let normed = DeepSeekV4Attention.normalizedHeads(heads, eps: Self.realNormEps)
+        let reference = Self.opPathHeadNorm(heads, eps: Self.realNormEps)
+
+        #expect(normed.dtype == dtype)
+        #expect(normed.shape == heads.shape)
+        let gap = largestRelativeGap(
+            DeepSeekV4TestArrays.floats(normed), DeepSeekV4TestArrays.floats(reference))
+        #expect(gap <= tolerance, "\(dtype): the largest gap was \(gap)")
+    }
+
     // MARK: - The picked chunks of a decode step
 
     /// The shapes of the picked-chunk parity test. The pool holds more chunks
@@ -416,6 +539,23 @@ struct DeepSeekV4AttentionTests {
         }
         return MLXArray(rows.flatMap { $0 })
             .reshaped(PickedShape.batch, 1, Self.decodeLength, -1)
+    }
+
+    @Test
+    func onlyADecodeStepWhoseWindowAnswersNoMaskReadsWithNoMask() throws {
+        let window = MLXArray([true, true, false, true], [Self.prefillLength, Self.prefillLength])
+
+        #expect(
+            DeepSeekV4Attention.readsWithNoMask(
+                blockLength: Self.decodeLength, windowMask: .none))
+        #expect(
+            !DeepSeekV4Attention.readsWithNoMask(
+                blockLength: Self.prefillLength, windowMask: .none),
+            "each query of a longer block reads a different set of chunks")
+        #expect(
+            !DeepSeekV4Attention.readsWithNoMask(
+                blockLength: Self.decodeLength, windowMask: .array(window)),
+            "a window that answered a mask hides some of its keys")
     }
 
     @Test

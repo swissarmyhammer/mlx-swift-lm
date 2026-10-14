@@ -87,6 +87,22 @@ public protocol KVCache: Evaluatable, Updatable {
     /// The default implementation is the sum of `nbytes` over ``innerState()``.
     var residentByteCount: Int { get }
 
+    /// The arrays the generation loop evaluates with each token.
+    ///
+    /// ``TokenIterator`` evaluates these arrays at the end of prefill and
+    /// after each decode step. The list must hold every lazy array the cache
+    /// keeps for a later call, or an array that a later call reads. Decode
+    /// runs on another thread than prefill, and MLX cannot evaluate there a
+    /// graph that names the stream of the prefill thread.
+    ///
+    /// This is a requirement and not only an extension member, so that a call
+    /// through `any KVCache` goes to the implementation of the dynamic type.
+    /// The default implementation is ``state``. A cache whose ``state`` makes
+    /// new arrays on each call (slices or placeholders for serialization) can
+    /// give the arrays it already holds instead, which adds no operation to
+    /// each step.
+    var evaluationState: [MLXArray] { get }
+
     /// whether this cache can be trimmed
     var isTrimmable: Bool { get }
 
@@ -151,6 +167,11 @@ extension KVCache {
     /// buffer the cache holds, at its full allocated size.
     public var residentByteCount: Int {
         innerState().totalByteCount
+    }
+
+    /// The serialized ``state``, which holds every array a plain cache keeps.
+    public var evaluationState: [MLXArray] {
+        state
     }
 }
 

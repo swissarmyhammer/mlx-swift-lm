@@ -60,7 +60,11 @@
 // 1195 do. A masked chunk takes no softmax weight, thus the two paths give
 // the same numbers. The gather keeps the cost of a decode step flat with the
 // context: the masked path copies every pooled chunk and builds a mask over
-// all of them on each step.
+// all of them on each step. Each other decode step -- a layer with no
+// indexer, or a pool of `index_topk` chunks or fewer -- reads every pooled
+// chunk with no mask either (task `^3q35p00`), because every pooled chunk
+// stands wholly behind the one token of the step. mlx-lm PR 1195 passes
+// `mask=None` at one token for the same reason.
 
 import Foundation
 import MLX
@@ -424,8 +428,9 @@ final class DeepSeekV4Attention: Module {
     /// which include the `attn.indexer.compressor.*` tensors of the pooled
     /// keys it scores. It answers which pooled chunks each query of a block
     /// reads. A decode step gathers those chunks when the pool holds more
-    /// than the budget; each other block holds the answer in the attention
-    /// mask beside the sliding window.
+    /// than the budget, and it reads every chunk with no mask when the pool
+    /// holds no more. A block of more than one token holds the answer in the
+    /// attention mask beside the sliding window.
     @ModuleInfo(key: "indexer") var indexer: DeepSeekV4Indexer?
 
     /// The key/value compressor of this layer, or `nil` on a layer whose
@@ -511,6 +516,70 @@ final class DeepSeekV4Attention: Module {
             self._compressor.wrappedValue = DeepSeekV4Compressor(
                 configuration: configuration, layer: layer, headDim: configuration.headDim)
         }
+    }
+
+    // MARK: - The kept attention sinks
+
+    /// The learned sinks cast to the dtype of the residual stream, or `nil`
+    /// before ``keepAttentionSinks(dtype:)`` runs and after each parameter
+    /// update.
+    ///
+    /// The checkpoint holds `attn_sink` in float32, and SDPA refuses sinks
+    /// that do not promote to the dtype of its output. Without this array each
+    /// decode step casts the sinks of each layer again. The name starts with
+    /// an underscore, thus the array is no parameter of the module.
+    private var _keptSinks: MLXArray?
+
+    /// Casts the learned sinks to the dtype of the queries one time, so that
+    /// each step reads the same array.
+    ///
+    /// ``DeepSeekV4Model/prepare()`` calls this after the weights load, while
+    /// it holds the model alone. The cast is evaluated here, thus no step
+    /// reads a lazy array that names the stream of the thread that loaded the
+    /// model.
+    ///
+    /// - Parameter dtype: The dtype of the queries, which is the dtype of the
+    ///   residual stream.
+    func keepAttentionSinks(dtype: DType) {
+        guard useAttnSink else {
+            _keptSinks = nil
+            return
+        }
+        let kept = attnSink.asType(dtype)
+        eval(kept)
+        _keptSinks = kept
+    }
+
+    /// The learned sink of each head in the dtype of the queries, or `nil` on
+    /// a layer that reads no sink.
+    ///
+    /// The kept cast answers when its dtype is the dtype asked for. Any other
+    /// dtype takes a new cast, which gives the same values.
+    ///
+    /// - Parameter dtype: The dtype of the queries.
+    /// - Returns: The sinks, shape `(headCount)`, or `nil`.
+    func attentionSinks(dtype: DType) -> MLXArray? {
+        guard useAttnSink else { return nil }
+        if let kept = _keptSinks, kept.dtype == dtype {
+            return kept
+        }
+        return attnSink.asType(dtype)
+    }
+
+    /// Loads new parameters and drops the kept sinks.
+    ///
+    /// An update writes new values into the `attn_sink` array, thus a kept
+    /// cast of the old values would be wrong. The next
+    /// ``keepAttentionSinks(dtype:)`` keeps a new one; until then each step
+    /// casts the sinks again.
+    @discardableResult
+    override func update(
+        parameters: ModuleParameters, verify: VerifyUpdate,
+        path: [String] = [], modulePath: [String] = []
+    ) throws -> Self {
+        _keptSinks = nil
+        return try super.update(
+            parameters: parameters, verify: verify, path: path, modulePath: modulePath)
     }
 
     /// Reads one block of tokens.
@@ -653,7 +722,7 @@ final class DeepSeekV4Attention: Module {
         cache: KVCache?,
         offset: Int
     ) -> MLXArray {
-        let sinks = useAttnSink ? attnSink.asType(queries.dtype) : nil
+        let sinks = attentionSinks(dtype: queries.dtype)
         guard let compressor else {
             // `attentionWithCacheUpdate` feeds SDPA the very arrays the cache
             // returned. A block that dropped that return and fed its own tensor
@@ -676,27 +745,91 @@ final class DeepSeekV4Attention: Module {
                 queries: queries, keys: windowKeys, values: windowKeys,
                 scale: scale, mask: windowMask, sinks: sinks)
         }
-        if let picked = decodePicks(
-            x, queryResidual: queryResidual, pooled: pooled, offset: offset,
-            windowMask: windowMask)
-        {
-            return Self.attentionOverPickedChunks(
-                queries: queries, windowKeys: windowKeys, pooled: pooled.attention,
-                picked: picked, scale: scale, sinks: sinks)
+        guard
+            Self.readsWithNoMask(
+                blockLength: x.dim(BatchMajorAxis.token), windowMask: windowMask)
+        else {
+            return maskedAttention(
+                x, queries: queries, windowKeys: windowKeys, queryResidual: queryResidual,
+                pooled: pooled, windowMask: windowMask, offset: offset, sinks: sinks)
         }
+        guard
+            let picked = decodePicks(
+                x, queryResidual: queryResidual, pooled: pooled, offset: offset)
+        else {
+            return Self.attentionOverEveryChunk(
+                queries: queries, windowKeys: windowKeys, chunks: pooled.attention,
+                scale: scale, sinks: sinks)
+        }
+        return Self.attentionOverPickedChunks(
+            queries: queries, windowKeys: windowKeys, pooled: pooled.attention,
+            picked: picked, scale: scale, sinks: sinks)
+    }
 
+    /// Tells whether a block reads every key it is given, thus whether its
+    /// attention needs no mask.
+    ///
+    /// The pool holds only the chunks that end at or before the last token of
+    /// the block. A block of one token thus stands wholly behind every pooled
+    /// chunk, and the indexer of a pool inside its budget reads them all. When
+    /// the sliding window answered no mask as well, no key of the block is
+    /// hidden. mlx-lm PR 1195 (`deepseek_v4.py`) passes `mask=None` in the same
+    /// case.
+    ///
+    /// - Parameters:
+    ///   - blockLength: The number of tokens in the block.
+    ///   - windowMask: The mask the sliding window answered.
+    /// - Returns: True for a block of one token whose window answered no mask.
+    static func readsWithNoMask(
+        blockLength: Int, windowMask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> Bool {
+        guard blockLength == decodeLength, case .none = windowMask else {
+            return false
+        }
+        return true
+    }
+
+    /// Attends over the sliding window joined to the pooled chunks, through
+    /// one mask that holds the visibility of each key.
+    ///
+    /// A block of more than one token reads this path: each of its queries
+    /// sees a different set of window keys and of chunks.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, tokens, hidden)`.
+    ///   - queries: The rotated queries of this block.
+    ///   - windowKeys: The keys of the sliding window, which are also its
+    ///     values.
+    ///   - queryResidual: The low-rank query of this block, after its norm.
+    ///   - pooled: The chunks of each branch.
+    ///   - windowMask: The mask of the sliding window alone.
+    ///   - offset: The absolute position of the first token of this block.
+    ///   - sinks: The learned sink of each head, or `nil`.
+    /// - Returns: The attention output, shape
+    ///   `(batch, heads, tokens, headDim)`.
+    private func maskedAttention(
+        _ x: MLXArray,
+        queries: MLXArray,
+        windowKeys: MLXArray,
+        queryResidual: MLXArray,
+        pooled: PooledChunks,
+        windowMask: MLXFast.ScaledDotProductAttentionMaskMode,
+        offset: Int,
+        sinks: MLXArray?
+    ) -> MLXArray {
         // The pooled chunks arrive as a second run of keys behind the window,
         // thus the mask reads `[window visibility | chunk visibility]`.
-        let batch = x.dim(0)
-        let length = x.dim(1)
+        let batch = x.dim(BatchMajorAxis.batch)
+        let length = x.dim(BatchMajorAxis.token)
+        let windowKeyCount = windowKeys.dim(Self.keyAxis)
         let chunkMask = chunkVisibility(
             x, queryResidual: queryResidual, pooled: pooled,
             offset: offset, batch: batch, length: length)
         let joinedMask = concatenated(
             [
                 broadcast(
-                    windowVisibility(windowMask, length: length, keyCount: windowKeys.dim(2)),
-                    to: [batch, 1, length, windowKeys.dim(2)]),
+                    windowVisibility(windowMask),
+                    to: [batch, 1, length, windowKeyCount]),
                 chunkMask,
             ], axis: -1)
         let keys = concatenated(
@@ -769,35 +902,26 @@ final class DeepSeekV4Attention: Module {
     /// The number of tokens a decode step carries.
     private static let decodeLength = 1
 
-    /// The chunks a decode step reads, or `nil` when the block takes the
-    /// masked path.
+    /// The chunks a block that needs no mask reads, or `nil` when it reads
+    /// every pooled chunk.
     ///
-    /// A decode step on a layer that holds an indexer, whose pool holds more
-    /// than ``DeepSeekV4Indexer/topK`` chunks, reads only the chunks the
-    /// indexer picked. Every chunk of the pool stands wholly behind the one
-    /// token of the step, and the sliding window then answers no mask, thus
-    /// no part of that read needs a mask. Each other block -- a prefill
-    /// block, a layer with no indexer, a pool inside the budget -- takes the
-    /// masked path.
+    /// The caller asks only for a block that ``readsWithNoMask(blockLength:windowMask:)``
+    /// accepts. On a layer that holds an indexer, whose pool holds more than
+    /// ``DeepSeekV4Indexer/topK`` chunks, the block reads only the chunks the
+    /// indexer picked. A layer with no indexer, and a pool inside the budget,
+    /// read every chunk.
     ///
     /// - Parameters:
-    ///   - x: The block input, shape `(batch, tokens, hidden)`.
+    ///   - x: The block input, shape `(batch, 1, hidden)`.
     ///   - queryResidual: The low-rank query of this block, after its norm.
     ///   - pooled: The chunks of each branch.
-    ///   - offset: The absolute position of the first token of this block.
-    ///   - windowMask: The mask of the sliding window alone.
+    ///   - offset: The absolute position of the token of this block.
     /// - Returns: The indices of the picked chunks, shape `(batch, 1, topK)`,
     ///   or `nil`.
     private func decodePicks(
-        _ x: MLXArray,
-        queryResidual: MLXArray,
-        pooled: PooledChunks,
-        offset: Int,
-        windowMask: MLXFast.ScaledDotProductAttentionMaskMode
+        _ x: MLXArray, queryResidual: MLXArray, pooled: PooledChunks, offset: Int
     ) -> MLXArray? {
-        guard x.dim(BatchMajorAxis.token) == Self.decodeLength,
-            case .none = windowMask,
-            let selector = indexer,
+        guard let selector = indexer,
             let pooledKeys = pooled.indexer,
             pooledKeys.dim(Self.chunkAxis) > selector.topK
         else {
@@ -805,6 +929,31 @@ final class DeepSeekV4Attention: Module {
         }
         return selector.rankedChunks(
             x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope, offset: offset)
+    }
+
+    /// Attends over the sliding window joined to every given pooled chunk,
+    /// with no mask.
+    ///
+    /// - Parameters:
+    ///   - queries: The rotated queries, shape `(batch, heads, 1, headDim)`.
+    ///   - windowKeys: The keys of the sliding window, which are also its
+    ///     values, shape `(batch, 1, windowKeys, headDim)`.
+    ///   - chunks: The pooled chunks the block reads, shape
+    ///     `(batch, chunks, headDim)`.
+    ///   - scale: The factor the attention scores take before the softmax.
+    ///   - sinks: The learned sink of each head, or `nil`.
+    /// - Returns: The attention output, shape `(batch, heads, 1, headDim)`.
+    static func attentionOverEveryChunk(
+        queries: MLXArray,
+        windowKeys: MLXArray,
+        chunks: MLXArray,
+        scale: Float,
+        sinks: MLXArray?
+    ) -> MLXArray {
+        let keys = concatenated(
+            [windowKeys, chunks.expandedDimensions(axis: latentHeadAxis)], axis: keyAxis)
+        return MLXFast.scaledDotProductAttention(
+            queries: queries, keys: keys, values: keys, scale: scale, mask: .none, sinks: sinks)
     }
 
     /// Attends over the sliding window joined to the picked pooled chunks of
@@ -837,11 +986,9 @@ final class DeepSeekV4Attention: Module {
         // One row index for each picked chunk. The last axis of 1 reaches
         // every number of the chunk.
         let rows = picked.reshaped(picked.dim(BatchMajorAxis.batch), -1, 1)
-        let gathered = takeAlong(pooled, rows, axis: chunkAxis)
-            .expandedDimensions(axis: latentHeadAxis)
-        let keys = concatenated([windowKeys, gathered], axis: keyAxis)
-        return MLXFast.scaledDotProductAttention(
-            queries: queries, keys: keys, values: keys, scale: scale, mask: .none, sinks: sinks)
+        return attentionOverEveryChunk(
+            queries: queries, windowKeys: windowKeys,
+            chunks: takeAlong(pooled, rows, axis: chunkAxis), scale: scale, sinks: sinks)
     }
 
     /// The chunks each query of this block reads.
@@ -890,30 +1037,25 @@ final class DeepSeekV4Attention: Module {
 
     /// The window mask, as a Boolean array of the shape the joined mask needs.
     ///
-    /// - Parameters:
-    ///   - mask: The mask the sliding window answered.
-    ///   - length: The number of tokens in this block.
-    ///   - keyCount: The number of keys the window holds.
-    /// - Returns: The visibility, shape `(1, 1, length, keyCount)`.
+    /// Only the masked path reads this function. A block of one token whose
+    /// window answered no mask reads no mask at all, and a window mask taken
+    /// with `returnArray` true for a longer block is always an array.
+    ///
+    /// - Parameter mask: The mask the sliding window answered.
+    /// - Returns: The visibility, shape `(1, 1, tokens, windowKeys)`.
     private func windowVisibility(
-        _ mask: MLXFast.ScaledDotProductAttentionMaskMode, length: Int, keyCount: Int
+        _ mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
-        switch mask {
-        case .array(let visible):
-            precondition(
-                visible.ndim == Self.windowMaskAxisCount,
-                "a window mask must hold one axis for the queries and one for the keys, and "
-                    + "this one holds \(visible.ndim)")
-            return visible.expandedDimensions(axes: [0, 1])
-        case .none:
-            // A block of one token reads every key the window holds, thus the
-            // window answers no mask at all.
-            return MLXArray.ones([1, 1, length, keyCount], dtype: .bool)
-        default:
+        guard case .array(let visible) = mask else {
             preconditionFailure(
-                "a window mask taken with returnArray true must be an array or none, and this "
-                    + "one is \(mask)")
+                "the masked path reads a window mask taken with returnArray true, which is "
+                    + "an array, and this one is \(mask)")
         }
+        precondition(
+            visible.ndim == Self.windowMaskAxisCount,
+            "a window mask must hold one axis for the queries and one for the keys, and "
+                + "this one holds \(visible.ndim)")
+        return visible.expandedDimensions(axes: [0, 1])
     }
 
     /// The number of axes a window mask array holds: one for the queries and
@@ -922,18 +1064,27 @@ final class DeepSeekV4Attention: Module {
 
     /// Projects the queries, norms each head, and turns the rotary
     /// dimensions forward.
-    ///
-    /// The head norm runs in float32 whatever the activation dtype is. It
-    /// divides by a mean of squares over 512 numbers, and float16 loses that
-    /// sum.
     private func rotatedQueries(
         _ queryResidual: MLXArray, batch: Int, length: Int, position: MLXArray
     ) -> MLXArray {
         let projected = wqB(queryResidual).reshaped(batch, length, headCount, headDim)
-        let wide = projected.asType(.float32)
-        let normed = wide * rsqrt((wide * wide).mean(axis: -1, keepDims: true) + normEps)
-        return rope(
-            normed.asType(projected.dtype).transposed(axes: Self.headMajor), offset: position)
+        let normed = Self.normalizedHeads(projected, eps: normEps)
+        return rope(normed.transposed(axes: Self.headMajor), offset: position)
+    }
+
+    /// Divides each head by its root mean square, with no learned weight.
+    ///
+    /// One `MLXFast.rmsNorm` kernel does the work, which is the call mlx-vlm
+    /// makes (`mx.fast.rms_norm(q, None, eps)`). The kernel sums the squares
+    /// in float32 whatever the dtype of the heads is, thus a BF16 head of 512
+    /// numbers keeps its sum. The answer takes the dtype of the heads.
+    ///
+    /// - Parameters:
+    ///   - heads: The heads, of any shape whose last axis holds one head.
+    ///   - eps: The epsilon the mean of squares takes before the root.
+    /// - Returns: The normed heads, of the shape and the dtype of `heads`.
+    static func normalizedHeads(_ heads: MLXArray, eps: Float) -> MLXArray {
+        MLXFast.rmsNorm(heads, weight: .mlxNone, eps: eps)
     }
 
     /// Projects the one latent key/value head and turns its rotary

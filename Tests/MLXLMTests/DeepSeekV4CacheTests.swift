@@ -94,7 +94,7 @@ struct DeepSeekV4CacheTests {
               "compress_ratios": [0, 0, \(overlapRatio), \(wideRatio)],
               "index_n_heads": 2,
               "index_head_dim": 4,
-              "index_topk": 3,
+              "index_topk": \(indexTopK),
               "use_attn_sink": true
             }
             """
@@ -520,6 +520,53 @@ struct DeepSeekV4CacheTests {
         }
     }
 
+    /// The number of tokens the small-pool decode test reads. The prompt
+    /// stands past the sliding window, and its last step pools exactly
+    /// `index_topk` chunks of ``overlapLayer``, thus every decode step of
+    /// that layer reads its whole pool with no mask.
+    private static let smallPoolLength = 12
+
+    /// The number of tokens the small-pool decode test takes one at a time.
+    private static let smallPoolStepCount = 3
+
+    /// The `index_topk` of the synthetic checkpoint.
+    private static let indexTopK = 3
+
+    @Test func aDecodeStepOverAPoolInsideTheBudgetGivesTheAnswerOfOneCall() throws {
+        // A decode step reads every pooled chunk with no mask when the pool
+        // holds `index_topk` chunks or fewer. A prefill block of more than
+        // one token reads the same chunks through the mask, thus the two
+        // must agree.
+        let model = try Self.loadedModel()
+        let tokens = MLXArray((0 ..< Self.smallPoolLength).map { Int32($0 % Self.vocabSize) })
+            .reshaped([Self.batchSize, Self.smallPoolLength])
+        let wholeLogits = DeepSeekV4TestArrays.floats(
+            model(tokens, cache: try model.newCache(parameters: nil))[0..., -1, 0...])
+
+        let stepped = try model.newCache(parameters: nil)
+        let prefillEnd = Self.smallPoolLength - Self.smallPoolStepCount
+        _ = model(tokens[0..., 0 ..< prefillEnd], cache: stepped)
+        var steppedLogits: [Float] = []
+        for position in prefillEnd ..< Self.smallPoolLength {
+            steppedLogits = DeepSeekV4TestArrays.floats(
+                model(tokens[0..., position ..< (position + 1)], cache: stepped)[0..., -1, 0...])
+        }
+
+        let pooledLayer = try #require(stepped[Self.overlapLayer] as? DeepSeekV4Cache)
+        let chunkCount = pooledLayer.attentionChunks.chunkCount
+        #expect(
+            chunkCount > 0 && chunkCount <= Self.indexTopK,
+            "the premise: the pool holds chunks, and no more than the budget")
+        #expect(steppedLogits.count == wholeLogits.count)
+        for (index, pair) in zip(steppedLogits, wholeLogits).enumerated() {
+            #expect(
+                abs(pair.0 - pair.1) <= Self.logitTolerance,
+                Comment(
+                    rawValue: "logit \(index): decode steps gave \(pair.0), "
+                        + "one call gave \(pair.1)"))
+        }
+    }
+
     @Test func aPromptWithNoCacheReadsTheSameSlidingWindowAsACachedRun() throws {
         let model = try Self.loadedModel()
         let tokens = MLXArray((0 ..< Self.longPromptLength).map { Int32($0 % Self.vocabSize) })
@@ -562,5 +609,51 @@ struct DeepSeekV4CacheTests {
             pooledLayer.attentionChunks.chunkCount == expectedChunks,
             "one decode step past a whole chunk must add no chunk")
         #expect(pooledLayer.offset == Self.longPromptLength + 1)
+    }
+
+    // MARK: - The arrays the generation loop evaluates
+
+    /// The pooled layer caches a prompt of ``longPromptLength`` tokens leaves
+    /// behind: one layer with an indexer, and one layer without.
+    ///
+    /// - Returns: The cache of ``overlapLayer`` and the cache of ``wideLayer``.
+    private static func promptedLayerCaches() throws -> [DeepSeekV4Cache] {
+        let model = try loadedModel()
+        let tokens = MLXArray((0 ..< longPromptLength).map { Int32($0 % vocabSize) })
+            .reshaped([batchSize, longPromptLength])
+        let cache = try model.newCache(parameters: nil)
+        eval(model(tokens, cache: cache))
+        return try [overlapLayer, wideLayer].map { layer in
+            try #require(cache[layer] as? DeepSeekV4Cache)
+        }
+    }
+
+    @Test func theEvaluationStateMakesNoNewArray() throws {
+        for layerCache in try Self.promptedLayerCaches() {
+            let first = layerCache.evaluationState
+            let second = layerCache.evaluationState
+
+            #expect(!first.isEmpty, "the premise: the prompt left arrays to evaluate")
+            #expect(first.count == second.count)
+            #expect(
+                zip(first, second).allSatisfy { $0 === $1 },
+                "each read must give the arrays the cache holds, not new ones")
+        }
+    }
+
+    @Test func theEvaluationStateHoldsEveryArrayTheNextStepReads() throws {
+        for layerCache in try Self.promptedLayerCaches() {
+            let evaluated = layerCache.evaluationState
+            let chunkViews = [layerCache.attentionChunks.chunks, layerCache.indexerChunks?.chunks]
+                .compactMap { $0 }
+            let kept = layerCache.innerState() + chunkViews
+
+            #expect(!chunkViews.isEmpty, "the premise: the prompt pooled chunks")
+            for array in kept {
+                #expect(
+                    evaluated.contains { $0 === array },
+                    "a kept array that stays lazy fails on the decode thread")
+            }
+        }
     }
 }

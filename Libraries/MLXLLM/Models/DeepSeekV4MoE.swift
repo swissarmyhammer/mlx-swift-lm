@@ -266,6 +266,10 @@ final class DeepSeekV4MoEGate: Module {
     /// The gate projection, shape `(routed experts, hiddenSize)`. It is a
     /// raw parameter and not a `Linear`, because the projection runs in
     /// float32 whatever the activation dtype is.
+    ///
+    /// The load filter of ``DeepSeekV4Model`` casts the BF16 weight of the
+    /// checkpoint to float32 one time, thus the cast in the scores adds no
+    /// operation to a step.
     @ParameterInfo(key: "weight") var weight: MLXArray
 
     /// The routing bias, one value for each routed expert. It joins the

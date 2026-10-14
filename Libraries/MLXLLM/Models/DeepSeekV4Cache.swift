@@ -523,6 +523,17 @@ final class DeepSeekV4ChunkCache {
         [pool.storage, projectedValues.storage, projectedGates.storage].compactMap { $0 }
     }
 
+    /// The arrays the generation loop evaluates with each token.
+    ///
+    /// The list is ``innerState()`` and the view of every pooled chunk that
+    /// the next call reads. The view is a lazy slice of the pool, thus it
+    /// must be evaluated on its own: an evaluation of the pool does not
+    /// evaluate a slice of it. Each array is one this cache already holds,
+    /// thus a read adds no operation.
+    var evaluationState: [MLXArray] {
+        innerState() + [heldChunks].compactMap { $0 }
+    }
+
     /// Builds an independent copy of this cache.
     ///
     /// - Returns: The copy.
@@ -705,6 +716,20 @@ public final class DeepSeekV4Cache: KVCache {
     public func innerState() -> [MLXArray] {
         local.innerState() + attentionChunks.innerState()
             + (indexerChunks?.innerState() ?? [])
+    }
+
+    /// The arrays the generation loop evaluates with each token: the buffers
+    /// of the window, and the evaluation state of each branch.
+    ///
+    /// ``state`` writes a serialized form. It slices the window and the
+    /// projected rows, and it makes a placeholder array for each slot that
+    /// holds no value, thus it adds new operations on each call. This list
+    /// holds only arrays the cache already holds. It still holds every lazy
+    /// array the cache keeps, thus an evaluation at the end of prefill leaves
+    /// no array that names the stream of the prefill thread.
+    public var evaluationState: [MLXArray] {
+        local.innerState() + attentionChunks.evaluationState
+            + (indexerChunks?.evaluationState ?? [])
     }
 
     /// The serialized state: the state of the window, then the slots of each

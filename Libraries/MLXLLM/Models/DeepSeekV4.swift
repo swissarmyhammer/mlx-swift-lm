@@ -436,6 +436,14 @@ public final class DeepSeekV4ModelInner: Module {
             dimensions: configuration.hiddenSize, eps: configuration.rmsNormEps)
     }
 
+    /// The dtype of the residual stream, which is the dtype of the rows the
+    /// embedding table gives.
+    ///
+    /// A quantized table gives its rows in the dtype of its scales.
+    var residualDType: DType {
+        (embedTokens as? QuantizedEmbedding)?.scales.dtype ?? embedTokens.weight.dtype
+    }
+
     /// Reads one block of tokens.
     ///
     /// The embedding gains a copy axis on the way in, because every block reads
@@ -545,6 +553,19 @@ public final class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, 
         }
     }
 
+    /// Builds the derived inference state after the weights load: each
+    /// attention layer keeps its learned sinks in the dtype of the residual
+    /// stream, so that no decode step casts them again.
+    ///
+    /// The loader calls this while it holds the model alone, and again after
+    /// each adapter change.
+    public func prepare() throws {
+        let dtype = model.residualDType
+        for layer in model.layers {
+            layer.attention.keepAttentionSinks(dtype: dtype)
+        }
+    }
+
     /// The layers a LoRA adapter attaches to.
     public var loraLayers: [Module] {
         model.layers
@@ -598,6 +619,7 @@ public final class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, 
             sanitized[Self.modulePath(of: key)] = value
         }
         stackRoutedExperts(in: &sanitized)
+        Self.castGateWeightsToFloat32(in: &sanitized)
         if configuration.tieWordEmbeddings {
             sanitized[Self.languageModelHeadWeight] = nil
         }
@@ -649,6 +671,27 @@ public final class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, 
 
     /// The path ``DeepSeekV4MoEGate`` gives the same tensor.
     private static let gateBiasPath = ".ffn.gate.bias"
+
+    /// The end of the module path of each gate weight.
+    private static let gateWeightPath = ".ffn.gate.weight"
+
+    /// Keeps each gate weight in float32.
+    ///
+    /// ``DeepSeekV4ExpertRouting`` scores the experts in float32. The
+    /// checkpoint holds each gate weight in BF16, thus without this cast each
+    /// decode step of each layer would cast the whole weight again. A BF16
+    /// value is exact in float32, thus the scores do not change. A gate
+    /// weight that is not a float, such as a quantized one, stays as it is.
+    ///
+    /// - Parameter weights: The tensors, by module path.
+    private static func castGateWeightsToFloat32(in weights: inout [String: MLXArray]) {
+        for (key, value) in weights
+        where key.hasSuffix(gateWeightPath) && value.dtype.isFloatingPoint
+            && value.dtype != .float32
+        {
+            weights[key] = value.asType(.float32)
+        }
+    }
 
     /// The path of each top-level checkpoint tensor, by checkpoint key.
     private static let topLevelPaths = [

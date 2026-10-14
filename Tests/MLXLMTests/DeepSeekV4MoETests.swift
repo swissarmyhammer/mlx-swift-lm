@@ -282,6 +282,74 @@ struct DeepSeekV4MoETests {
         }
     }
 
+    // MARK: - The dtype of the gate weight
+
+    /// The seed of the random gate weight the dtype parity test reads.
+    private static let gateWeightSeed: UInt64 = 31
+
+    /// The seed of the random bias the dtype parity test reads.
+    private static let gateBiasSeed: UInt64 = 32
+
+    /// The seed of the random tokens the dtype parity test routes.
+    private static let gateInputSeed: UInt64 = 33
+
+    /// The block lengths the dtype parity test routes: one decode step, which
+    /// reads the compiled routing, and one longer block, which reads the op
+    /// path.
+    private static let gateBlockLengths = [1, 3]
+
+    /// Builds a top-k gate whose weight is the given BF16 weight in the given
+    /// dtype.
+    ///
+    /// - Parameters:
+    ///   - weight: The gate weight as the checkpoint holds it, in BF16.
+    ///   - bias: The routing bias.
+    ///   - dtype: The dtype the gate holds its weight in.
+    /// - Returns: The gate.
+    private static func topKGate(
+        weight: MLXArray, bias: MLXArray, dtype: DType
+    ) throws -> DeepSeekV4MoEGate {
+        let gate = DeepSeekV4MoEGate(configuration: try configuration(), layer: topKLayer)
+        try gate.update(
+            parameters: ModuleParameters.unflattened([
+                ("weight", weight.asType(dtype)), ("bias", bias),
+            ]),
+            verify: [.all])
+        return gate
+    }
+
+    @Test
+    func aFloat32GateWeightRoutesAsTheBFloat16CheckpointWeight() throws {
+        // The load filter keeps the gate weight in float32, because the gate
+        // scores in float32. The BF16 weight of the checkpoint is exact in
+        // float32, thus the cast the old path ran on each call gave the same
+        // bits.
+        let weight = Self.randomArray(
+            [Self.routedExpertCount, Self.hiddenSize], seed: Self.gateWeightSeed
+        ).asType(.bfloat16)
+        let bias = Self.randomArray([Self.routedExpertCount], seed: Self.gateBiasSeed)
+        let checkpointGate = try Self.topKGate(weight: weight, bias: bias, dtype: .bfloat16)
+        let loadedGate = try Self.topKGate(weight: weight, bias: bias, dtype: .float32)
+
+        for length in Self.gateBlockLengths {
+            let input = Self.randomArray(
+                [1, length, Self.hiddenSize], seed: Self.gateInputSeed
+            ).asType(.bfloat16)
+            let tokens = MLXArray((0 ..< length).map { Int32($0) }, [1, length])
+            let checkpoint = checkpointGate(input, inputIds: tokens)
+            let loaded = loadedGate(input, inputIds: tokens)
+
+            #expect(
+                DeepSeekV4TestArrays.integers(loaded.indices)
+                    == DeepSeekV4TestArrays.integers(checkpoint.indices),
+                "block of \(length)")
+            #expect(
+                DeepSeekV4TestArrays.floats(loaded.weights)
+                    == DeepSeekV4TestArrays.floats(checkpoint.weights),
+                "block of \(length)")
+        }
+    }
+
     // MARK: - Hash routing
 
     @Test

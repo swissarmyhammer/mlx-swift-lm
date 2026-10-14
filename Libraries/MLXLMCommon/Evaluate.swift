@@ -1151,15 +1151,17 @@ public struct TokenIterator: TokenIteratorProtocol {
         return y
     }
 
-    /// Schedules the first token and the cache state at the end of prefill.
+    /// Schedules a token and the cache state: the first token at the end of
+    /// prefill, and each next token in ``next()``.
     ///
-    /// The cache state goes with the token, as in ``next()``. Some caches hold
+    /// The cache state goes with the token. Some caches hold
     /// state that the token does not read (the DeepSeek-V4 compressor rows, for
     /// example). That state must not stay lazy: decode runs on the
     /// `GenerationWorker` thread, and MLX cannot evaluate a graph that names the
-    /// stream of the prefill thread.
+    /// stream of the prefill thread. ``KVCache/evaluationState`` holds every
+    /// lazy array a cache keeps.
     private func evaluateTokenAndLogProbabilities(_ token: MLXArray) {
-        let cacheState = cache.flatMap { $0.state }
+        let cacheState = cache.flatMap { $0.evaluationState }
         if let deferredLogProbabilities {
             asyncEval([token] + cacheState + deferredLogProbabilities.arrays)
         } else {
@@ -1206,12 +1208,9 @@ public struct TokenIterator: TokenIteratorProtocol {
             // through functional ops (concatenation, slice assignment), and an
             // unevaluated chain of those updates keeps every prior step's
             // intermediates alive. Python mlx-lm settles cache state the same
-            // way in its generation loop.
-            if let deferredLogProbabilities {
-                asyncEval([token] + cache.flatMap { $0.state } + deferredLogProbabilities.arrays)
-            } else {
-                asyncEval([token] + cache.flatMap { $0.state })
-            }
+            // way in its generation loop. `evaluationState` gives the arrays a
+            // cache already holds, thus this adds no operation to the step.
+            evaluateTokenAndLogProbabilities(token)
 
             // Periodically return freed buffers that cannot be reused (odd or
             // monotonically growing sizes accumulate in the pool otherwise).

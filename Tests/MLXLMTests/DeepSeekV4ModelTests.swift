@@ -600,6 +600,32 @@ struct DeepSeekV4ModelTests {
         eval(tied)
     }
 
+    // MARK: - The derived inference state
+
+    /// The suffix of the learned sinks of each attention layer.
+    private static let attentionSinkSuffix = "attn_sink"
+
+    @Test func prepareKeepsTheSinksOfEveryLayerInTheDtypeOfTheResidualStream() throws {
+        // The published checkpoint holds the sinks in float32 and every other
+        // tensor in BF16, thus the sinks take a real cast to the dtype of the
+        // residual stream.
+        let model = try Self.loadedModel()
+        let checkpointWeights = model.parameters().flattened().map { key, value in
+            let keepsItsDType = key.hasSuffix(Self.attentionSinkSuffix) || value.dtype != .float32
+            return (key, keepsItsDType ? value : value.asType(.bfloat16))
+        }
+        try model.update(
+            parameters: ModuleParameters.unflattened(checkpointWeights), verify: [.all])
+
+        try model.prepare()
+
+        for layer in model.model.layers {
+            let first = try #require(layer.attention.attentionSinks(dtype: .bfloat16))
+            let second = try #require(layer.attention.attentionSinks(dtype: .bfloat16))
+            #expect(first === second, "each step must read the sinks prepare kept")
+        }
+    }
+
     // MARK: - The load filter
 
     /// A one-value array, which stands in for a checkpoint tensor whose values
@@ -736,6 +762,30 @@ struct DeepSeekV4ModelTests {
         #expect(DeepSeekV4TestArrays.floats(mapped) == [1])
         let unchanged = try #require(rawSpelling[modulePath])
         #expect(DeepSeekV4TestArrays.floats(unchanged) == [2])
+    }
+
+    /// The seed of the random gate weight the gate dtype test loads.
+    private static let gateWeightSeed: UInt64 = 404
+
+    @Test func sanitizeKeepsTheGateWeightInFloat32() throws {
+        // The gate scores the experts in float32. A gate weight that stayed in
+        // BF16 would take a cast of 256 x 4096 numbers on each decode step of
+        // each layer.
+        let model = DeepSeekV4Model(try Self.configuration())
+        let checkpointWeight = MLXRandom.uniform(
+            low: Self.weightLow, high: Self.weightHigh,
+            [Self.routedExpertCount, Self.hiddenSize], key: MLXRandom.key(Self.gateWeightSeed)
+        ).asType(.bfloat16)
+
+        let sanitized = model.sanitize(weights: [
+            "layers.\(Self.topKLayer).ffn.gate.weight": checkpointWeight
+        ])
+
+        let loaded = try #require(sanitized["model.layers.\(Self.topKLayer).ffn.gate.weight"])
+        #expect(loaded.dtype == .float32)
+        #expect(
+            DeepSeekV4TestArrays.floats(loaded) == DeepSeekV4TestArrays.floats(checkpointWeight),
+            "the BF16 weight is exact in float32, thus the cast changes no number")
     }
 
     @Test func sanitizeStacksThePerExpertWeightsIntoTheSwitchLayer() throws {
