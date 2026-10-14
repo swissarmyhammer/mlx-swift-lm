@@ -488,4 +488,22 @@ enum DeepSeekV4Math {
     /// The axis a `(batch, queryCount, picks)` set of chunk indices holds its
     /// queries on.
     private static let pickedQueryAxis = 1
+
+    // MARK: - Row tiles
+
+    /// The tiles of rows that cover a block, in order.
+    ///
+    /// Each tile holds `rowsPerTile` rows, and the last tile holds the rows
+    /// that remain. The paths that read a block of query rows in tiles read
+    /// these ranges, so that each tile stays inside its own memory limit.
+    ///
+    /// - Parameters:
+    ///   - count: The number of rows in the block.
+    ///   - rowsPerTile: The most rows one tile holds, 1 or more.
+    /// - Returns: The row range of each tile, from the first row on.
+    static func rowTiles(count: Int, rowsPerTile: Int) -> [Range<Int>] {
+        stride(from: 0, to: count, by: rowsPerTile).map { first in
+            first ..< min(first + rowsPerTile, count)
+        }
+    }
 }

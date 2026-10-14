@@ -1040,9 +1040,9 @@ final class DeepSeekV4Attention: Module {
                 queries: queries, keys: keys, values: values, scale: scale, mask: mask,
                 sinks: sinks)
         }
-        let slices = stride(from: 0, to: queryCount, by: rowsPerCall).map { first in
-            let rows = first ..< min(first + rowsPerCall, queryCount)
-            return MLXFast.scaledDotProductAttention(
+        let slices = DeepSeekV4Math.rowTiles(count: queryCount, rowsPerTile: rowsPerCall).map {
+            rows in
+            MLXFast.scaledDotProductAttention(
                 queries: queries[0..., 0..., rows], keys: keys, values: values, scale: scale,
                 mask: maskRows(mask, rows: rows, queryCount: queryCount, keyCount: keyCount),
                 sinks: sinks)
@@ -1106,7 +1106,8 @@ final class DeepSeekV4Attention: Module {
     /// - Returns: The visibility, shape `(rows, keyCount)`.
     private static func causalRows(_ rows: Range<Int>, queryCount: Int, keyCount: Int) -> MLXArray {
         let shift = max(0, keyCount - queryCount)
-        let rowPositions = MLXArray(Int32(rows.lowerBound + shift) ..< Int32(rows.upperBound + shift))
+        let rowPositions = MLXArray(
+            Int32(rows.lowerBound + shift) ..< Int32(rows.upperBound + shift))
         let keyPositions = MLXArray(Int32(0) ..< Int32(keyCount))
         return rowPositions.expandedDimensions(axis: -1) .>= keyPositions
     }
@@ -1438,9 +1439,9 @@ final class DeepSeekV4Attention: Module {
             return attentionOverRankedTile(
                 queries: queries, window: window, ranked: ranked, scale: scale, sinks: sinks)
         }
-        let tiles = stride(from: 0, to: queryCount, by: rowsPerTile).map { first in
-            let rows = first ..< min(first + rowsPerTile, queryCount)
-            return attentionOverRankedTile(
+        let tiles = DeepSeekV4Math.rowTiles(count: queryCount, rowsPerTile: rowsPerTile).map {
+            rows in
+            attentionOverRankedTile(
                 queries: queries[0..., 0..., rows], window: window.tile(rows),
                 ranked: ranked.tile(rows), scale: scale, sinks: sinks)
         }

@@ -621,4 +621,26 @@ struct DeepSeekV4MathHelpersTests {
             }
         }
     }
+
+    // MARK: - Row tiles
+
+    /// The row count of the row-tile tests. It is not a multiple of
+    /// ``tileRows``, thus the last tile is shorter.
+    private static let tiledRowCount = 5
+
+    /// The rows of each full tile in the row-tile tests.
+    private static let tileRows = 2
+
+    @Test func rowTilesCoverEveryRowInOrderAndEndOnAShortTile() {
+        let tiles = DeepSeekV4Math.rowTiles(count: Self.tiledRowCount, rowsPerTile: Self.tileRows)
+
+        #expect(tiles == [0 ..< 2, 2 ..< 4, 4 ..< 5])
+    }
+
+    @Test func rowTilesGiveOneTileWhenEveryRowFits() {
+        let tiles = DeepSeekV4Math.rowTiles(
+            count: Self.tiledRowCount, rowsPerTile: Self.tiledRowCount + 1)
+
+        #expect(tiles == [0 ..< Self.tiledRowCount])
+    }
 }

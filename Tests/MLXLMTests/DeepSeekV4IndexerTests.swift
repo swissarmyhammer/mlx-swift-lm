@@ -327,6 +327,176 @@ struct DeepSeekV4IndexerTests {
         #expect(selected[4] == [0])
     }
 
+    // MARK: - The query tiles of the ranking
+
+    /// The block length the tiled-ranking test reads. It holds more than one
+    /// tile of ``tiledRankingRowsPerTile`` rows and ends on a partial tile.
+    private static let tiledRankingTokens = 9
+
+    /// The pooled-chunk count the tiled-ranking test reads.
+    private static let tiledRankingChunks = 9
+
+    /// The offset of the tiled-ranking block. Some of its queries have fewer
+    /// than ``indexTopK`` chunks behind them, and some have more.
+    private static let tiledRankingOffset = 10
+
+    /// The number of sequences the tiled-ranking test reads.
+    private static let tiledRankingBatch = 2
+
+    /// The number of query rows each tile of the tiled-ranking test holds.
+    private static let tiledRankingRowsPerTile = 2
+
+    /// The bytes of one float32 score.
+    private static let scoreBytes = MemoryLayout<Float>.size
+
+    /// The axis a `(batch, tokens, ...)` tensor holds its tokens on.
+    private static let tokenAxis = 1
+
+    /// The axis a `(batch, heads, tokens, width)` tensor holds its heads on.
+    private static let headAxis = 1
+
+    /// The axis a `(batch, tokens, heads, width)` tensor holds its heads on.
+    private static let batchMajorHeadAxis = 2
+
+    /// The axis a stack of matrices holds its rows on.
+    private static let matrixRowAxis = -2
+
+    /// The last axis of a tensor.
+    private static let lastAxis = -1
+
+    /// The scores of each pooled chunk against each query of one block, by
+    /// the arithmetic the indexer read before it went in query tiles.
+    ///
+    /// The test states that arithmetic again, step by step, so that a change
+    /// of the module cannot make the test agree with it.
+    ///
+    /// - Parameters:
+    ///   - indexer: The indexer under test.
+    ///   - inputs: The arguments of the call.
+    /// - Returns: The scores, shape `(batch, tokens, chunks)`, as one flat
+    ///   list in row-major order.
+    private static func referenceScores(
+        of indexer: DeepSeekV4Indexer, inputs: BlockInputs
+    ) -> [Float] {
+        let batch = inputs.x.dim(0)
+        let tokens = inputs.x.dim(tokenAxis)
+        let projected = indexer.wqB(inputs.queryResidual)
+            .reshaped(batch, tokens, indexHeadCount, indexHeadDim)
+            .swappedAxes(headAxis, batchMajorHeadAxis)
+        let queries = inputs.rope(projected, offset: DeepSeekV4RoPE.position(inputs.offset))
+            .asType(.float32)
+        let keys = inputs.pooledKeys.asType(.float32)
+            .expandedDimensions(axis: headAxis)
+            .swappedAxes(lastAxis, matrixRowAxis)
+        let perHead = maximum(queries.matmul(keys), 0) * indexer.scale
+        let headWeights =
+            (indexer.weightsProj(inputs.x).asType(.float32)
+            * indexer.headWeightScale)
+            .swappedAxes(lastAxis, matrixRowAxis)
+            .expandedDimensions(axis: lastAxis)
+        return DeepSeekV4TestArrays.floats((perHead * headWeights).sum(axis: headAxis))
+    }
+
+    /// The chunks one query reads by the reference rule: the visible chunks
+    /// of the highest reference score, at most ``indexTopK`` of them.
+    ///
+    /// - Parameters:
+    ///   - scores: The reference scores of the query, one for each chunk.
+    ///   - position: The absolute position of the query.
+    /// - Returns: The sorted chunk indices.
+    private static func referenceChunks(scores: ArraySlice<Float>, position: Int) -> [Int] {
+        let visible = visibleChunkCount(position: position, chunks: scores.count)
+        let first = scores.startIndex
+        return (0 ..< visible)
+            .sorted { scores[first + $0] > scores[first + $1] }
+            .prefix(indexTopK)
+            .sorted()
+    }
+
+    @Test func aTiledRankingReadsTheChunksOfTheHighestReferenceScore() throws {
+        let indexer = try Self.loadedIndexer(seed: Self.weightSeed)
+        let tokens = Self.tiledRankingTokens
+        let chunks = Self.tiledRankingChunks
+        let inputs = try Self.blockInputs(
+            batch: Self.tiledRankingBatch, tokens: tokens, chunks: chunks,
+            offset: Self.tiledRankingOffset, seed: Self.weightSeed)
+        let rowBytes = Self.indexHeadCount * chunks * Self.scoreBytes
+        let byteLimit = Self.tiledRankingBatch * Self.tiledRankingRowsPerTile * rowBytes
+
+        let ranked = indexer.rankedChunks(
+            inputs.x, queryResidual: inputs.queryResidual, pooledKeys: inputs.pooledKeys,
+            rope: inputs.rope, offset: inputs.offset, scoreByteLimit: byteLimit)
+        let picks = DeepSeekV4TestArrays.integers(ranked)
+        let scores = Self.referenceScores(of: indexer, inputs: inputs)
+
+        #expect(ranked.shape == [Self.tiledRankingBatch, tokens, Self.indexTopK])
+        for row in 0 ..< Self.tiledRankingBatch * tokens {
+            let position = Self.tiledRankingOffset + row % tokens
+            let read = picks[(row * Self.indexTopK) ..< ((row + 1) * Self.indexTopK)]
+                .map(Int.init)
+                .filter { ($0 + 1) * Self.indexerRatio <= position + 1 }
+                .sorted()
+            let expected = Self.referenceChunks(
+                scores: scores[(row * chunks) ..< ((row + 1) * chunks)], position: position)
+            #expect(read == expected, "row \(row) at position \(position)")
+        }
+    }
+
+    /// The query heads of the real checkpoint.
+    private static let publishedIndexHeads = 64
+
+    /// The width of one indexer head of the real checkpoint.
+    private static let publishedIndexHeadDim = 128
+
+    /// The token count of the compiled-sum parity test.
+    private static let paritySumTokens = 7
+
+    /// The chunk count of the compiled-sum parity test.
+    private static let paritySumChunks = 33
+
+    /// The seed of the per-head scores of the compiled-sum parity test.
+    private static let paritySumSeed: UInt64 = 20_261_014
+
+    @Test func theCompiledHeadSumGivesTheBitsOfTheOpPath() {
+        let scale = MLXArray(1 / Float(Self.publishedIndexHeadDim).squareRoot())
+        let scores = MLXRandom.normal(
+            [1, Self.publishedIndexHeads, Self.paritySumTokens, Self.paritySumChunks],
+            key: MLXRandom.key(Self.paritySumSeed))
+        let headWeights = MLXRandom.normal(
+            [1, Self.publishedIndexHeads, Self.paritySumTokens, 1],
+            key: MLXRandom.key(Self.paritySumSeed + 1))
+
+        let compiled = DeepSeekV4Indexer.compiledHeadWeightedSum(scores, headWeights, scale)
+        let opPath = DeepSeekV4Indexer.headWeightedSum(
+            scores, headWeights: headWeights, scale: scale)
+
+        #expect(compiled.shape == [1, Self.paritySumTokens, Self.paritySumChunks])
+        #expect(DeepSeekV4TestArrays.floats(compiled) == DeepSeekV4TestArrays.floats(opPath))
+    }
+
+    /// The pooled-chunk count of a 32k context at a compress ratio of 4.
+    private static let longContextChunks = 8192
+
+    /// The score bytes one tile may hold in the tile-size test: 1 GiB.
+    private static let oneGibibyte = 1 << 30
+
+    /// The rows of one 1 GiB tile of 64 heads over 8192 float32 scores.
+    private static let longContextRowsPerTile = 512
+
+    @Test func aScoreTileHoldsTheRowsThatFitTheByteLimit() {
+        #expect(
+            DeepSeekV4Indexer.queryRowsPerScoreTile(
+                batch: 1, heads: Self.publishedIndexHeads, chunks: Self.longContextChunks,
+                scoreByteLimit: Self.oneGibibyte) == Self.longContextRowsPerTile)
+    }
+
+    @Test func aScoreTileHoldsOneRowWhenOneRowBreaksTheByteLimit() {
+        #expect(
+            DeepSeekV4Indexer.queryRowsPerScoreTile(
+                batch: 1, heads: Self.publishedIndexHeads, chunks: Self.longContextChunks,
+                scoreByteLimit: Self.scoreBytes) == 1)
+    }
+
     // MARK: - The projections the checkpoint fills
 
     @Test func theProjectionsTakeTheirWidthFromTheIndexKeys() throws {
