@@ -43,8 +43,54 @@ comments:
     - evidence: GPU idle (Device Utilization 0 percent). Deleted the DeepSeekV4 object files, then swift build --build-tests: Build complete, 0 compiler warnings, 0 errors. The only warning is a build-system message about the mlx-swift_Cmlx.bundle, not from the source. xcrun xctest MLXLMTests.xctest: XCTest 716 tests, 0 failures. Swift Testing 1412 tests in 111 suites passed. 0 skipped.
     - next: review
   timestamp: 2026-10-14T15:32:49.860275+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m4xgwkhw9jpm8e0442h60w9z
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (cf3232e); 3 findings, 3 confirmed, 0 refuted — Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:1452 (duplication/duplication), :1457 (code-hygiene/magic-numbers-swift), :1459 (code-hygiene/magic-numbers-swift)
+    - next: implement all 3 findings. Every finding is mandatory. Extract the shared gather helper for attentionOverRankedTile and attentionOverPickedChunks, and replace the magic numbers in the whole file with named constants. Then test, commit, and review again.
+  timestamp: 2026-10-14T15:35:55.708884+00:00
+- actor: claude-code
+  id: 01m4xgx4qcx7yq4437b0hehq8m
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 6 files; 32k prefill 327.2 -> 382.5 tok/s, peak 151 -> 148 GiB, decode 34.3 -> 34.0 ms/token; greedy parity pass
+    - test: green — 716 XCTest + 1412 Swift Testing pass, 0 warnings
+    - commit: cf3232e
+    - review: findings — DeepSeekV4Attention.swift:1452, DeepSeekV4Attention.swift:1457, DeepSeekV4Attention.swift:1459
+  timestamp: 2026-10-14T15:36:13.292724+00:00
+- actor: claude-code
+  id: 01m4xh518d9ez2qcsx65hj58ep
+  text: |-
+    Review findings fixed (not committed). Same ops, same order.
+    - duplication: the new private static helper `gatherChunks(_:picked:)` holds the reshape of the indices to `(batch, -1, 1)` and the `takeAlong` on `chunkAxis`. `attentionOverPickedChunks` and `attentionOverRankedTile` both call it. The ranked tile keeps its last reshape to `(batch, rows, picks, headDim)` at the call site. The helper reads the batch from `picked`, which has the same batch as the queries.
+    - magic numbers: the new constant `trailingKeyAxis = -2` and the existing `widthAxis = -1` replace the two `swappedAxes(-1, -2)` calls. swiftlint `no_magic_numbers` with the rule config (`allowed_numbers: [0, 1, -1, 100]`) over the whole file now reports 0 findings (before: 2, the two finding lines only).
+  timestamp: 2026-10-14T15:40:31.885456+00:00
+- actor: claude-code
+  id: 01m4xh53bra7naj7khmvn065a3
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Libraries/MLXLLM/Models/DeepSeekV4Attention.swift. GPU idle (0 percent). swift build --build-tests: Build complete, 0 compiler warnings (only the build-system message about mlx-swift_Cmlx.bundle). xcrun xctest MLXLMTests.xctest: XCTest 716 tests, 0 failures; Swift Testing 1412 tests in 111 suites passed. All 3 findings checked.
+    - next: /test, then /commit and /review
+  timestamp: 2026-10-14T15:40:34.040607+00:00
+- actor: claude-code
+  id: 01m4xh74fm3789p08cggtk0t8y
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (commit 864da6e). 0 findings, 0 confirmed, 0 refuted. 7 checks attempted, 0 failed. 1 file reviewed. The 2 .kanban files have no validator. All 3 prior findings are checked.
+    - next: Task moved to done.
+  timestamp: 2026-10-14T15:41:40.724393+00:00
+- actor: claude-code
+  id: 01m4xh7gdks0yjp4v614yvpx01
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 1 file (DeepSeekV4Attention.swift), 3 findings fixed
+    - test: green — 716 XCTest + 1412 Swift Testing pass, 0 warnings (run by the implement step on the same tree)
+    - commit: 864da6e
+    - review: clean — 0 findings
+  timestamp: 2026-10-14T15:41:52.947181+00:00
+position_column: done
+position_ordinal: ffc780
 title: 'DeepSeek-V4 prefill speed: attend over the top-k pooled chunks by gather, not masked SDPA over all chunks'
 ---
 ## What
@@ -62,3 +108,15 @@ Expected gain: about 12-15 s on a 32k prefill (323 to about 380 tok/s).
 - [x] Prefill at 32k uses the gather path. A unit test compares it with the masked path (tolerance, because the order of additions changes).
 - [x] Prefill tok/s and peak memory at 32k, before and after, GPU idle.
 - [x] The greedy parity test on the real checkpoint passes. #deepseek-v4 #performance
+
+## Review Findings (2026-10-14 10:33)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 6 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4XBWS196F30WSR5F74WVJZ8.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4XBWS196F30WSR5F74WVJZ8.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:1452` `duplication/duplication` — The new per-row gather in attentionOverRankedTile repeats the gather idiom of attentionOverPickedChunks: reshape the picked indices to one trailing axis of 1, then takeAlong the pooled chunks on chunkAxis. The two copies can drift apart, for example in the axis or in the reshape, and a fix to one would not reach the other. Extract a small static helper, for example `gatherChunks(_ pooled: MLXArray, picked: MLXArray) -> MLXArray`, that holds the reshape and the takeAlong. Call it from attentionOverRankedTile and from attentionOverPickedChunks. Keep the final reshape at the call site, since the two paths shape the result differently. This is a minor duplication of about two lines, so the change is optional if the team prefers the local form.
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:1457` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLLM/Models/DeepSeekV4Attention.swift:1459` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.

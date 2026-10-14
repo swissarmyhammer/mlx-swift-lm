@@ -1267,12 +1267,29 @@ final class DeepSeekV4Attention: Module {
         scale: Float,
         sinks: MLXArray?
     ) -> MLXArray {
+        attentionOverEveryChunk(
+            queries: queries, windowKeys: windowKeys,
+            chunks: gatherChunks(pooled, picked: picked), scale: scale, sinks: sinks)
+    }
+
+    /// Copies the pooled chunks at the picked indices of each sequence.
+    ///
+    /// The decode path and the ranked-chunk path gather the same way, and
+    /// each caller gives the answer its own shape.
+    ///
+    /// - Parameters:
+    ///   - pooled: The chunks the compressor of the attention pooled, shape
+    ///     `(batch, chunks, headDim)`.
+    ///   - picked: The indices of the chunks to copy, shape
+    ///     `(batch, ..., picks)`.
+    /// - Returns: The picked chunks in the order of `picked`, shape
+    ///   `(batch, allPicks, headDim)`, where `allPicks` is the number of
+    ///   indices of one sequence.
+    private static func gatherChunks(_ pooled: MLXArray, picked: MLXArray) -> MLXArray {
         // One row index for each picked chunk. The last axis of 1 reaches
         // every number of the chunk.
         let rows = picked.reshaped(picked.dim(BatchMajorAxis.batch), -1, 1)
-        return attentionOverEveryChunk(
-            queries: queries, windowKeys: windowKeys,
-            chunks: takeAlong(pooled, rows, axis: chunkAxis), scale: scale, sinks: sinks)
+        return takeAlong(pooled, rows, axis: chunkAxis)
     }
 
     // MARK: - The ranked chunks of a block of more than one token
@@ -1338,6 +1355,10 @@ final class DeepSeekV4Attention: Module {
     /// The axis every tensor of this path holds the numbers of one head or
     /// one chunk on.
     private static let widthAxis = -1
+
+    /// The axis every key tensor of this path holds its keys on, counted from
+    /// the end: the axis just ahead of ``widthAxis``.
+    private static let trailingKeyAxis = -2
 
     /// The most bytes the gather of one tile of query rows copies.
     ///
@@ -1445,18 +1466,15 @@ final class DeepSeekV4Attention: Module {
         scale: Float,
         sinks: MLXArray?
     ) -> MLXArray {
-        let batch = queries.dim(BatchMajorAxis.batch)
-        let rowCount = queries.dim(queryAxis)
-        // One pool row for each ranked chunk. The last axis of 1 reaches
-        // every number of the chunk.
-        let gathered = takeAlong(
-            ranked.pooled, ranked.picked.reshaped(batch, -1, 1), axis: chunkAxis
-        ).reshaped(batch, rowCount, ranked.pickCount, ranked.pooled.dim(widthAxis))
+        let gathered = gatherChunks(ranked.pooled, picked: ranked.picked).reshaped(
+            queries.dim(BatchMajorAxis.batch), queries.dim(queryAxis), ranked.pickCount,
+            ranked.pooled.dim(widthAxis))
         let scaled = queries * scale
         let windowScores = visibleScores(
-            scaled.matmul(window.keys.swappedAxes(-1, -2)), visible: window.visible)
+            scaled.matmul(window.keys.swappedAxes(widthAxis, trailingKeyAxis)),
+            visible: window.visible)
         let chunkScores = visibleScores(
-            rowMajor(rowMajor(scaled).matmul(gathered.swappedAxes(-1, -2))),
+            rowMajor(rowMajor(scaled).matmul(gathered.swappedAxes(widthAxis, trailingKeyAxis))),
             visible: ranked.visible.expandedDimensions(axis: headAxis))
 
         let weights = softmaxWithSink(
