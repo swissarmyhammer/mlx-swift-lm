@@ -832,12 +832,40 @@ final class DeepSeekV4Attention: Module {
                     to: [batch, 1, length, windowKeyCount]),
                 chunkMask,
             ], axis: -1)
-        let keys = concatenated(
-            [windowKeys, pooled.attention.expandedDimensions(axis: Self.latentHeadAxis)],
-            axis: Self.keyAxis)
-        return MLXFast.scaledDotProductAttention(
-            queries: queries, keys: keys, values: keys,
+        return Self.attentionOverJoinedKeys(
+            queries: queries, windowKeys: windowKeys, chunks: pooled.attention,
             scale: scale, mask: .array(joinedMask), sinks: sinks)
+    }
+
+    /// Attends over the sliding window joined to the given pooled chunks.
+    ///
+    /// The chunks arrive as a second run of keys behind the window, thus a
+    /// mask reads `[window visibility | chunk visibility]`. The keys are also
+    /// the values.
+    ///
+    /// - Parameters:
+    ///   - queries: The rotated queries, shape `(batch, heads, tokens, headDim)`.
+    ///   - windowKeys: The keys of the sliding window, which are also its
+    ///     values, shape `(batch, 1, windowKeys, headDim)`.
+    ///   - chunks: The pooled chunks the block reads, shape
+    ///     `(batch, chunks, headDim)`.
+    ///   - scale: The factor the attention scores take before the softmax.
+    ///   - mask: The visibility of each joined key.
+    ///   - sinks: The learned sink of each head, or `nil`.
+    /// - Returns: The attention output, shape
+    ///   `(batch, heads, tokens, headDim)`.
+    private static func attentionOverJoinedKeys(
+        queries: MLXArray,
+        windowKeys: MLXArray,
+        chunks: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        sinks: MLXArray?
+    ) -> MLXArray {
+        let keys = concatenated(
+            [windowKeys, chunks.expandedDimensions(axis: latentHeadAxis)], axis: keyAxis)
+        return MLXFast.scaledDotProductAttention(
+            queries: queries, keys: keys, values: keys, scale: scale, mask: mask, sinks: sinks)
     }
 
     /// The axis a `(batch, chunks, headDim)` pool holds its chunks on.
@@ -950,10 +978,9 @@ final class DeepSeekV4Attention: Module {
         scale: Float,
         sinks: MLXArray?
     ) -> MLXArray {
-        let keys = concatenated(
-            [windowKeys, chunks.expandedDimensions(axis: latentHeadAxis)], axis: keyAxis)
-        return MLXFast.scaledDotProductAttention(
-            queries: queries, keys: keys, values: keys, scale: scale, mask: .none, sinks: sinks)
+        attentionOverJoinedKeys(
+            queries: queries, windowKeys: windowKeys, chunks: chunks, scale: scale, mask: .none,
+            sinks: sinks)
     }
 
     /// Attends over the sliding window joined to the picked pooled chunks of

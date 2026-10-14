@@ -452,6 +452,73 @@ struct DeepSeekV4CacheTests {
         return model
     }
 
+    /// Records one failure for each logit of a run that is farther than
+    /// ``logitTolerance`` from the logit of the reference run.
+    ///
+    /// - Parameters:
+    ///   - actual: The logits of the run under test.
+    ///   - expected: The logits of the reference run.
+    ///   - actualSource: The name of the run under test, for the message.
+    ///   - expectedSource: The name of the reference run, for the message.
+    ///   - sourceLocation: The location the failures point at.
+    private static func expectSameLogits(
+        _ actual: [Float],
+        _ expected: [Float],
+        actualSource: String,
+        expectedSource: String,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        #expect(actual.count == expected.count, sourceLocation: sourceLocation)
+        for (index, pair) in zip(actual, expected).enumerated() {
+            #expect(
+                abs(pair.0 - pair.1) <= logitTolerance,
+                Comment(
+                    rawValue: "logit \(index): \(actualSource) gave \(pair.0), "
+                        + "\(expectedSource) gave \(pair.1)"),
+                sourceLocation: sourceLocation)
+        }
+    }
+
+    /// The logits of a prompt read in the generation shape, beside the
+    /// logits of one call over the same prompt.
+    private struct SteppedRun {
+        /// The last logits of the run that prefills and then steps.
+        let steppedLogits: [Float]
+
+        /// The last logits of one call over the whole prompt.
+        let wholeLogits: [Float]
+
+        /// The cache of the run that prefills and then steps.
+        let steppedCache: [KVCache]
+    }
+
+    /// Reads a prompt in the generation shape, one prefill call and then one
+    /// call for each of its last tokens, and reads it again in one call.
+    ///
+    /// - Parameters:
+    ///   - model: The model that reads the prompt.
+    ///   - tokens: The prompt, shape `(batch, promptLength)`.
+    ///   - promptLength: The number of tokens in the prompt.
+    ///   - stepCount: The number of last tokens the run takes one at a time.
+    /// - Returns: The logits of both runs and the cache of the stepped run.
+    private static func steppedRun(
+        model: DeepSeekV4Model, tokens: MLXArray, promptLength: Int, stepCount: Int
+    ) throws -> SteppedRun {
+        let wholeLogits = DeepSeekV4TestArrays.floats(
+            model(tokens, cache: try model.newCache(parameters: nil))[0..., -1, 0...])
+
+        let stepped = try model.newCache(parameters: nil)
+        let prefillEnd = promptLength - stepCount
+        _ = model(tokens[0..., 0 ..< prefillEnd], cache: stepped)
+        var steppedLogits: [Float] = []
+        for position in prefillEnd ..< promptLength {
+            steppedLogits = DeepSeekV4TestArrays.floats(
+                model(tokens[0..., position ..< (position + 1)], cache: stepped)[0..., -1, 0...])
+        }
+        return SteppedRun(
+            steppedLogits: steppedLogits, wholeLogits: wholeLogits, steppedCache: stepped)
+    }
+
     @Test func aLongPromptGivesOneAnswerWhateverThePrefillCutIs() throws {
         let model = try Self.loadedModel()
         let tokens = MLXArray((0 ..< Self.longPromptLength).map { Int32($0 % Self.vocabSize) })
@@ -471,13 +538,9 @@ struct DeepSeekV4CacheTests {
             position = end
         }
 
-        #expect(cutLogits.count == wholeLogits.count)
         #expect(cutLogits.allSatisfy { $0.isFinite })
-        for (index, pair) in zip(cutLogits, wholeLogits).enumerated() {
-            #expect(
-                abs(pair.0 - pair.1) <= Self.logitTolerance,
-                "logit \(index): cut gave \(pair.0), one call gave \(pair.1)")
-        }
+        Self.expectSameLogits(
+            cutLogits, wholeLogits, actualSource: "cut", expectedSource: "one call")
     }
 
     /// The number of tokens the decode-step test takes ONE at a time, after a
@@ -492,32 +555,18 @@ struct DeepSeekV4CacheTests {
         let tokens = MLXArray((0 ..< Self.longPromptLength).map { Int32($0 % Self.vocabSize) })
             .reshaped([Self.batchSize, Self.longPromptLength])
 
-        let whole = try model.newCache(parameters: nil)
-        let wholeLogits = DeepSeekV4TestArrays.floats(
-            model(tokens, cache: whole)[0..., -1, 0...])
-
         // The generation shape: one prefill call, then one call for each
         // token. `aLongPromptGivesOneAnswerWhateverThePrefillCutIs` cuts the
         // prompt into blocks of 13 and never reads a block of one, which is
         // the block every decode step carries.
-        let stepped = try model.newCache(parameters: nil)
-        let prefillEnd = Self.longPromptLength - Self.decodeStepCount
-        _ = model(tokens[0..., 0 ..< prefillEnd], cache: stepped)
-        var steppedLogits: [Float] = []
-        for position in prefillEnd ..< Self.longPromptLength {
-            steppedLogits = DeepSeekV4TestArrays.floats(
-                model(tokens[0..., position ..< (position + 1)], cache: stepped)[0..., -1, 0...])
-        }
+        let run = try Self.steppedRun(
+            model: model, tokens: tokens, promptLength: Self.longPromptLength,
+            stepCount: Self.decodeStepCount)
 
-        #expect(steppedLogits.count == wholeLogits.count)
-        #expect(steppedLogits.allSatisfy { $0.isFinite })
-        for (index, pair) in zip(steppedLogits, wholeLogits).enumerated() {
-            #expect(
-                abs(pair.0 - pair.1) <= Self.logitTolerance,
-                Comment(
-                    rawValue: "logit \(index): decode steps gave \(pair.0), "
-                        + "one call gave \(pair.1)"))
-        }
+        #expect(run.steppedLogits.allSatisfy { $0.isFinite })
+        Self.expectSameLogits(
+            run.steppedLogits, run.wholeLogits, actualSource: "decode steps",
+            expectedSource: "one call")
     }
 
     /// The number of tokens the small-pool decode test reads. The prompt
@@ -540,31 +589,18 @@ struct DeepSeekV4CacheTests {
         let model = try Self.loadedModel()
         let tokens = MLXArray((0 ..< Self.smallPoolLength).map { Int32($0 % Self.vocabSize) })
             .reshaped([Self.batchSize, Self.smallPoolLength])
-        let wholeLogits = DeepSeekV4TestArrays.floats(
-            model(tokens, cache: try model.newCache(parameters: nil))[0..., -1, 0...])
+        let run = try Self.steppedRun(
+            model: model, tokens: tokens, promptLength: Self.smallPoolLength,
+            stepCount: Self.smallPoolStepCount)
 
-        let stepped = try model.newCache(parameters: nil)
-        let prefillEnd = Self.smallPoolLength - Self.smallPoolStepCount
-        _ = model(tokens[0..., 0 ..< prefillEnd], cache: stepped)
-        var steppedLogits: [Float] = []
-        for position in prefillEnd ..< Self.smallPoolLength {
-            steppedLogits = DeepSeekV4TestArrays.floats(
-                model(tokens[0..., position ..< (position + 1)], cache: stepped)[0..., -1, 0...])
-        }
-
-        let pooledLayer = try #require(stepped[Self.overlapLayer] as? DeepSeekV4Cache)
+        let pooledLayer = try #require(run.steppedCache[Self.overlapLayer] as? DeepSeekV4Cache)
         let chunkCount = pooledLayer.attentionChunks.chunkCount
         #expect(
             chunkCount > 0 && chunkCount <= Self.indexTopK,
             "the premise: the pool holds chunks, and no more than the budget")
-        #expect(steppedLogits.count == wholeLogits.count)
-        for (index, pair) in zip(steppedLogits, wholeLogits).enumerated() {
-            #expect(
-                abs(pair.0 - pair.1) <= Self.logitTolerance,
-                Comment(
-                    rawValue: "logit \(index): decode steps gave \(pair.0), "
-                        + "one call gave \(pair.1)"))
-        }
+        Self.expectSameLogits(
+            run.steppedLogits, run.wholeLogits, actualSource: "decode steps",
+            expectedSource: "one call")
     }
 
     @Test func aPromptWithNoCacheReadsTheSameSlidingWindowAsACachedRun() throws {
@@ -578,14 +614,9 @@ struct DeepSeekV4CacheTests {
         let cached = DeepSeekV4TestArrays.floats(
             model(tokens, cache: try model.newCache(parameters: nil))[0..., -1, 0...])
 
-        #expect(stateless.count == cached.count)
         #expect(stateless.allSatisfy { $0.isFinite })
-        for (index, pair) in zip(stateless, cached).enumerated() {
-            #expect(
-                abs(pair.0 - pair.1) <= Self.logitTolerance,
-                Comment(rawValue: "logit \(index): no cache gave \(pair.0), a cache gave \(pair.1)")
-            )
-        }
+        Self.expectSameLogits(
+            stateless, cached, actualSource: "no cache", expectedSource: "a cache")
     }
 
     @Test func aDecodeStepReadsTheChunksThePromptPooled() throws {

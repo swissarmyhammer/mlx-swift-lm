@@ -164,30 +164,53 @@ struct DeepSeekV4MoETests {
         MLXArray(hashTable).reshaped([vocabSize, expertsPerToken])
     }
 
-    /// Builds a gate and loads the routing fixture into it.
+    /// The parameters of one gate, named as the gate declares them.
     ///
     /// A hash layer declares the hash table alone and every later layer
-    /// declares the routing bias alone, thus the fixture carries the one
-    /// parameter the layer holds. The load verifies with `[.all]`, which is
-    /// the verification `MLXLMCommon.loadWeights` applies, thus a fixture that
-    /// filled the other parameter would fail here.
+    /// declares the routing bias alone, thus the list carries the one of the
+    /// two that the layer holds.
     ///
     /// - Parameters:
     ///   - layer: The index of the decoder layer.
+    ///   - weight: The gate weight, shape `(routedExperts, hidden)`.
+    ///   - bias: The routing bias, shape `(routedExperts)`. A hash layer holds
+    ///     no bias and passes over this value.
+    ///   - configuration: The configuration the gate is built from.
+    /// - Returns: The name and the value of each parameter.
+    private static func gateParameters(
+        layer: Int, weight: MLXArray, bias: MLXArray, configuration: DeepSeekV4Configuration
+    ) -> [(String, MLXArray)] {
+        guard configuration.isHashLayer(layer) else {
+            return [("weight", weight), ("bias", bias)]
+        }
+        return [("weight", weight), ("tid2eid", hashTableArray())]
+    }
+
+    /// Builds a gate and loads the routing fixture into it.
+    ///
+    /// The fixture is ``gateParameters(layer:weight:bias:configuration:)``.
+    /// The load verifies with `[.all]`, which is the verification
+    /// `MLXLMCommon.loadWeights` applies, thus a fixture that filled the
+    /// parameter the layer does not hold would fail here.
+    ///
+    /// - Parameters:
+    ///   - layer: The index of the decoder layer.
+    ///   - weight: The gate weight, shape `(routedExperts, hidden)`. The
+    ///     default is ``routingGateWeight()``.
     ///   - bias: The routing bias, one value for each routed expert. A hash
     ///     layer holds no bias and passes over this value.
     ///   - configuration: The configuration to build the gate from.
     /// - Returns: The gate.
     private static func routingGate(
-        layer: Int, bias: [Float], configuration: DeepSeekV4Configuration
+        layer: Int,
+        weight: MLXArray = routingGateWeight(),
+        bias: [Float],
+        configuration: DeepSeekV4Configuration
     ) throws -> DeepSeekV4MoEGate {
         let gate = DeepSeekV4MoEGate(configuration: configuration, layer: layer)
-        var fixture: [(String, MLXArray)] = [("weight", routingGateWeight())]
-        if configuration.isHashLayer(layer) {
-            fixture.append(("tid2eid", hashTableArray()))
-        } else {
-            fixture.append(("bias", array(bias, [routedExpertCount])))
-        }
+        let fixture = gateParameters(
+            layer: layer, weight: weight, bias: array(bias, [routedExpertCount]),
+            configuration: configuration)
         try gate.update(parameters: ModuleParameters.unflattened(fixture), verify: [.all])
         return gate
     }
@@ -298,26 +321,6 @@ struct DeepSeekV4MoETests {
     /// path.
     private static let gateBlockLengths = [1, 3]
 
-    /// Builds a top-k gate whose weight is the given BF16 weight in the given
-    /// dtype.
-    ///
-    /// - Parameters:
-    ///   - weight: The gate weight as the checkpoint holds it, in BF16.
-    ///   - bias: The routing bias.
-    ///   - dtype: The dtype the gate holds its weight in.
-    /// - Returns: The gate.
-    private static func topKGate(
-        weight: MLXArray, bias: MLXArray, dtype: DType
-    ) throws -> DeepSeekV4MoEGate {
-        let gate = DeepSeekV4MoEGate(configuration: try configuration(), layer: topKLayer)
-        try gate.update(
-            parameters: ModuleParameters.unflattened([
-                ("weight", weight.asType(dtype)), ("bias", bias),
-            ]),
-            verify: [.all])
-        return gate
-    }
-
     @Test
     func aFloat32GateWeightRoutesAsTheBFloat16CheckpointWeight() throws {
         // The load filter keeps the gate weight in float32, because the gate
@@ -327,9 +330,14 @@ struct DeepSeekV4MoETests {
         let weight = Self.randomArray(
             [Self.routedExpertCount, Self.hiddenSize], seed: Self.gateWeightSeed
         ).asType(.bfloat16)
-        let bias = Self.randomArray([Self.routedExpertCount], seed: Self.gateBiasSeed)
-        let checkpointGate = try Self.topKGate(weight: weight, bias: bias, dtype: .bfloat16)
-        let loadedGate = try Self.topKGate(weight: weight, bias: bias, dtype: .float32)
+        let bias = DeepSeekV4TestArrays.floats(
+            Self.randomArray([Self.routedExpertCount], seed: Self.gateBiasSeed))
+        let configuration = try Self.configuration()
+        let checkpointGate = try Self.routingGate(
+            layer: Self.topKLayer, weight: weight, bias: bias, configuration: configuration)
+        let loadedGate = try Self.routingGate(
+            layer: Self.topKLayer, weight: weight.asType(.float32), bias: bias,
+            configuration: configuration)
 
         for length in Self.gateBlockLengths {
             let input = Self.randomArray(
@@ -606,14 +614,12 @@ struct DeepSeekV4MoETests {
     private static func randomLayer(layer: Int, sharedScale: Float = 1) throws -> DeepSeekV4MoE {
         let checkpointConfiguration = try configuration()
         let moe = DeepSeekV4MoE(configuration: checkpointConfiguration, layer: layer)
-        var fixture: [(String, MLXArray)] = [
-            ("gate.weight", randomArray([routedExpertCount, hiddenSize], seed: 31))
-        ]
-        if checkpointConfiguration.isHashLayer(layer) {
-            fixture.append(("gate.tid2eid", hashTableArray()))
-        } else {
-            fixture.append(("gate.bias", randomArray([routedExpertCount], seed: 32)))
-        }
+        var fixture = gateParameters(
+            layer: layer,
+            weight: randomArray([routedExpertCount, hiddenSize], seed: 31),
+            bias: randomArray([routedExpertCount], seed: 32),
+            configuration: checkpointConfiguration
+        ).map { ("gate." + $0.0, $0.1) }
         fixture.append(
             contentsOf: [
                 (
