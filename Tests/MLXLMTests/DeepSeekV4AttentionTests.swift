@@ -595,6 +595,158 @@ struct DeepSeekV4AttentionTests {
         expectClose(DeepSeekV4TestArrays.floats(gathered), masked, "picked chunks")
     }
 
+    // MARK: - The ranked chunks of a block of more than one token
+
+    /// The shapes of the ranked-chunk parity test. The pool holds more chunks
+    /// than one query keeps, and each query of the block sees a different
+    /// set of window keys and of chunks.
+    private enum RankedShape {
+        /// The number of sequences. Two sequences rank different chunks.
+        static let batch = 2
+        /// The number of query rows of the block.
+        static let queries = 5
+        /// The number of keys the sliding window holds.
+        static let windowKeys = 6
+        /// The number of chunks the pool holds.
+        static let chunks = 9
+        /// The number of chunks the ranking keeps for each query.
+        static let picks = 3
+        /// The number of query rows one tile reads when the test forces the
+        /// tiles. It does not divide ``queries``, thus the last tile is
+        /// shorter than the others.
+        static let rowsPerTile = 2
+    }
+
+    /// The chunks each query of the parity test ranked, by sequence and by
+    /// query, in the order a ranking gives them.
+    private static let rankedChunkIndices: [[[Int32]]] = [
+        [[5, 1, 3], [1, 7, 0], [3, 0, 6], [6, 2, 4], [8, 0, 5]],
+        [[2, 4, 0], [0, 1, 8], [2, 5, 1], [0, 6, 3], [7, 4, 1]],
+    ]
+
+    /// The number of chunks that stand wholly behind each query of the
+    /// parity test. The first query sees no chunk at all, and the middle
+    /// queries see fewer chunks than the ranking keeps, thus some ranked
+    /// chunks are hidden from their query.
+    private static let visibleChunkCounts = [0, 2, 4, 7, 9]
+
+    /// The period of the pattern that hides window keys in the ranked-chunk
+    /// parity test.
+    private static let hiddenWindowKeyPeriod = 4
+
+    /// The seeds of the random tensors of the ranked-chunk parity test.
+    private enum RankedSeed {
+        static let queries: UInt64 = 71
+        static let windowKeys: UInt64 = 72
+        static let pooled: UInt64 = 73
+        static let sinks: UInt64 = 74
+    }
+
+    /// Tells whether one window key of the parity test is visible to one
+    /// query row. Each row hides a different set of keys, and each row sees
+    /// at least one key.
+    private static func windowKeyIsVisible(query: Int, key: Int) -> Bool {
+        (query * hiddenKeyRowStep + key) % hiddenWindowKeyPeriod != 0
+    }
+
+    /// The visibility of each window key, shape `(1, 1, queries, windowKeys)`.
+    private static func rankedWindowVisibility() -> MLXArray {
+        let flags = (0 ..< RankedShape.queries).flatMap { query in
+            (0 ..< RankedShape.windowKeys).map { windowKeyIsVisible(query: query, key: $0) }
+        }
+        return MLXArray(flags, [1, 1, RankedShape.queries, RankedShape.windowKeys])
+    }
+
+    /// The visibility of each ranked chunk, shape `(batch, queries, picks)`.
+    private static func rankedChunkVisibility() -> MLXArray {
+        let flags = rankedChunkIndices.flatMap { sequence in
+            sequence.enumerated().flatMap { query, ranked in
+                ranked.map { Int($0) < visibleChunkCounts[query] }
+            }
+        }
+        return MLXArray(flags, [RankedShape.batch, RankedShape.queries, RankedShape.picks])
+    }
+
+    /// The mask that reads the window and the visible ranked chunks of each
+    /// query, over the window joined to EVERY pooled chunk.
+    private static func rankedChunkMask() -> MLXArray {
+        let flags = rankedChunkIndices.flatMap { sequence in
+            sequence.enumerated().flatMap { query, ranked in
+                (0 ..< RankedShape.windowKeys).map { windowKeyIsVisible(query: query, key: $0) }
+                    + (0 ..< RankedShape.chunks).map { chunk in
+                        ranked.contains(Int32(chunk)) && chunk < visibleChunkCounts[query]
+                    }
+            }
+        }
+        return MLXArray(
+            flags,
+            [
+                RankedShape.batch, 1, RankedShape.queries,
+                RankedShape.windowKeys + RankedShape.chunks,
+            ])
+    }
+
+    /// The bytes the gather copies for one query row of one sequence of the
+    /// parity test, in float32.
+    private static let rankedRowBytes =
+        RankedShape.picks * headDim * MemoryLayout<Float>.size
+
+    /// The gather budget that gives ``RankedShape/rowsPerTile`` rows for each
+    /// tile.
+    private static let tiledGatherByteLimit =
+        RankedShape.rowsPerTile * RankedShape.batch * rankedRowBytes
+
+    /// The gather budgets the ranked-chunk parity test reads: one that holds
+    /// the whole block in one tile, and one that forces several tiles.
+    private static let rankedGatherByteLimits = [
+        DeepSeekV4Attention.oneTileGatherBytes, tiledGatherByteLimit,
+    ]
+
+    @Test
+    func aTileHoldsTheMostRowsThatStayUnderTheGatherBudget() throws {
+        let rows = DeepSeekV4Attention.queryRowsPerTile(
+            batch: RankedShape.batch, heads: Self.headCount,
+            keys: RankedShape.windowKeys + RankedShape.picks,
+            gatheredRowBytes: Self.rankedRowBytes, gatherByteLimit: Self.tiledGatherByteLimit)
+
+        #expect(rows == RankedShape.rowsPerTile)
+    }
+
+    @Test(arguments: rankedGatherByteLimits)
+    func theRankedChunksGiveTheAnswerOfTheMaskedChunks(gatherByteLimit: Int) throws {
+        let queries = MLXRandom.normal(
+            [RankedShape.batch, Self.headCount, RankedShape.queries, Self.headDim],
+            key: MLXRandom.key(RankedSeed.queries))
+        let windowKeys = MLXRandom.normal(
+            [RankedShape.batch, 1, RankedShape.windowKeys, Self.headDim],
+            key: MLXRandom.key(RankedSeed.windowKeys))
+        let pooled = MLXRandom.normal(
+            [RankedShape.batch, RankedShape.chunks, Self.headDim],
+            key: MLXRandom.key(RankedSeed.pooled))
+        let sinks = MLXRandom.normal([Self.headCount], key: MLXRandom.key(RankedSeed.sinks))
+        let picked = MLXArray(Self.rankedChunkIndices.flatMap { $0.flatMap { $0 } })
+            .reshaped(RankedShape.batch, RankedShape.queries, RankedShape.picks)
+        let scale = 1 / Float(Self.headDim).squareRoot()
+
+        let allKeys = concatenated(
+            [windowKeys, pooled.expandedDimensions(axis: Self.latentHeadAxis)], axis: Self.keyAxis)
+        let masked = DeepSeekV4TestArrays.floats(
+            MLXFast.scaledDotProductAttention(
+                queries: queries, keys: allKeys, values: allKeys, scale: scale,
+                mask: .array(Self.rankedChunkMask()), sinks: sinks))
+        let gathered = DeepSeekV4Attention.attentionOverRankedChunks(
+            queries: queries,
+            window: .init(keys: windowKeys, visible: Self.rankedWindowVisibility()),
+            ranked: .init(
+                pooled: pooled, picked: picked, visible: Self.rankedChunkVisibility()),
+            scale: scale, sinks: sinks, gatherByteLimit: gatherByteLimit)
+
+        #expect(gathered.shape == queries.shape)
+        expectClose(
+            DeepSeekV4TestArrays.floats(gathered), masked,
+            "ranked chunks, gather budget \(gatherByteLimit)")
+    }
+
     // MARK: - The score limit of one attention call
 
     /// The first score count the op path of MLX SDPA reads wrong when it

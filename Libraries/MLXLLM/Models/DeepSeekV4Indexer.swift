@@ -19,13 +19,13 @@
 //     pooled chunks, chunk 1 and chunk 2 hold positions 4 through 11, which
 //     the query has not read yet, and the ranking may pick them. This file
 //     masks each block, of any length.
-//  2. **The answer is a selection mask, not a list of chunk indices.** The
-//     file above answers `argPartition` output directly. When fewer chunks
-//     stand behind a query than the budget holds, that output fills the rest
-//     of the row with chunks the query may not read, and a later step must
-//     take them back. This file answers a Boolean mask that already holds the
-//     causal rule, thus a row carries exactly the chunks its query may read
-//     and never more.
+//  2. **A chunk the query may not read ranks last.** The file above answers
+//     `argPartition` output of the raw scores. This file gives each chunk
+//     that reaches past its query the lowest score first, thus the ranking
+//     spends its budget on visible chunks before any other. When fewer chunks
+//     stand behind a query than the budget holds, the rest of the row still
+//     names chunks the query may not read, and the attention hides them with
+//     `DeepSeekV4Math.pickedChunkVisibility`.
 //  3. **The pooled keys arrive as an argument.** The file above calls its own
 //     compressor inside the score path, which ties the score path to the
 //     pooled cache that compressor reads. This file holds the compressor, so
@@ -105,13 +105,10 @@ final class DeepSeekV4Indexer: Module {
     /// chunk this selector picks names a chunk of the attention pool.
     ///
     /// The caller pools with this module and hands the answer to
-    /// ``callAsFunction(_:queryResidual:pooledKeys:rope:offset:)``.
+    /// ``rankedChunks(_:queryResidual:pooledKeys:rope:offset:)``.
     @ModuleInfo(key: "compressor") var compressor: DeepSeekV4Compressor
 
     /// The axis a `(batch, heads, tokens, width)` tensor holds its heads on.
-    ///
-    /// The selection mask keeps the same axis with one entry, because every
-    /// attention head of the layer reads the one selection.
     private static let headAxis = 1
 
     /// The axis a `(batch, tokens, heads, width)` tensor holds its heads on.
@@ -123,10 +120,6 @@ final class DeepSeekV4Indexer: Module {
     /// The axis a stack of matrices holds its rows on. A swap of it with the
     /// last axis turns each matrix of the stack around.
     private static let matrixRowAxis = -2
-
-    /// The axis a `(batch, tokens, chunks)` mask holds its chunks on, which is
-    /// also the axis the ranked chunk indices of one query sit on.
-    private static let maskChunkAxis = -1
 
     /// The score a chunk that its query may not read takes.
     ///
@@ -164,56 +157,6 @@ final class DeepSeekV4Indexer: Module {
         self._compressor.wrappedValue = DeepSeekV4Compressor(
             configuration: configuration, layer: layer,
             headDim: configuration.indexHeadDim)
-    }
-
-    /// The pooled chunks each query of one block reads.
-    ///
-    /// The answer holds exactly the smaller of ``topK`` and the number of
-    /// chunks that stand wholly behind the query, and it never holds a chunk
-    /// that reaches past the query.
-    ///
-    /// - Parameters:
-    ///   - x: The block input, shape `(batch, tokens, hidden)`.
-    ///   - queryResidual: The low-rank query of this layer, after its norm,
-    ///     shape `(batch, tokens, qLoraRank)`.
-    ///   - pooledKeys: The chunks the compressor pooled, shape
-    ///     `(batch, chunks, headDim)`.
-    ///   - rope: The rotary position of this layer, which turns the queries.
-    ///   - offset: The absolute position of the first token of this block.
-    /// - Returns: The selection, shape `(batch, 1, tokens, chunks)`, where a
-    ///   true entry names a chunk its query reads.
-    func callAsFunction(
-        _ x: MLXArray,
-        queryResidual: MLXArray,
-        pooledKeys: MLXArray,
-        rope: DeepSeekV4RoPE,
-        offset: Int
-    ) -> MLXArray {
-        let batch = x.dim(0)
-        let length = x.dim(1)
-        let chunkCount = pooledKeys.dim(1)
-        let visible = chunkVisibility(
-            queryCount: length, offset: offset, chunkCount: chunkCount)
-
-        // Every chunk fits inside the budget, thus a ranking would keep them
-        // all. The score path answers this very mask and costs one matmul for
-        // each head.
-        guard chunkCount > topK else {
-            return broadcast(
-                visible.expandedDimensions(axis: Self.headAxis),
-                to: [batch, 1, length, chunkCount])
-        }
-
-        let ranked = topChunks(
-            of: chunkScores(
-                x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope,
-                offset: offset),
-            visible: visible)
-        let picked = Self.membershipMask(of: ranked, chunkCount: chunkCount)
-
-        // The ranking spends its whole budget even when fewer chunks stand
-        // behind the query, thus the visibility decides again here.
-        return (picked .&& visible).expandedDimensions(axis: Self.headAxis)
     }
 
     /// The indices of the ``topK`` chunks of the highest score for each query
@@ -275,32 +218,6 @@ final class DeepSeekV4Indexer: Module {
     private func topChunks(of scores: MLXArray, visible: MLXArray?) -> MLXArray {
         let ranked = visible.map { MLX.where($0, scores, MLXArray(Self.maskedScore)) } ?? scores
         return argPartition(-ranked, kth: topK - 1, axis: -1)[.ellipsis, 0 ..< topK]
-    }
-
-    /// The membership mask of a set of ranked chunks: a true entry names a
-    /// chunk that the ranking of its query holds.
-    ///
-    /// The mask comes from a scatter of `true` into a mask of `false`, thus
-    /// it writes `batch * tokens * rank` entries and holds no array larger
-    /// than the mask. A broadcast compare of each ranked index against every
-    /// chunk index gives the same mask, but it holds a
-    /// `(batch, tokens, rank, chunkCount)` array. At a 2048-token prefill
-    /// step of a 32k context that array is 8 GiB for each indexer layer.
-    ///
-    /// A repeated index writes the same entry two times, which gives the
-    /// same mask as one write.
-    ///
-    /// - Parameters:
-    ///   - ranked: The ranked chunk indices, shape `(batch, tokens, rank)`.
-    ///     Each index must be in `0 ..< chunkCount`.
-    ///   - chunkCount: The number of pooled chunks.
-    /// - Returns: The mask, shape `(batch, tokens, chunkCount)`, in Booleans.
-    static func membershipMask(of ranked: MLXArray, chunkCount: Int) -> MLXArray {
-        var shape = ranked.shape
-        shape[shape.count + Self.maskChunkAxis] = chunkCount
-        return putAlong(
-            MLXArray.zeros(shape, type: Bool.self), ranked, values: MLXArray(true),
-            axis: Self.maskChunkAxis)
     }
 
     /// The block-causal visibility of each pooled chunk.

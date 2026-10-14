@@ -736,18 +736,22 @@ final class DeepSeekV4Attention: Module {
                 queries: queries, keys: windowKeys, values: windowKeys,
                 scale: scale, mask: windowMask, sinks: sinks)
         }
+        let picked = indexerPicks(
+            x, queryResidual: queryResidual, pooled: pooled, offset: offset)
         guard
             Self.readsWithNoMask(
                 blockLength: x.dim(BatchMajorAxis.token), windowMask: windowMask)
         else {
-            return maskedAttention(
-                x, queries: queries, windowKeys: windowKeys, queryResidual: queryResidual,
-                pooled: pooled, windowMask: windowMask, offset: offset, sinks: sinks)
+            guard let picked else {
+                return maskedAttention(
+                    x, queries: queries, windowKeys: windowKeys, pooled: pooled.attention,
+                    windowMask: windowMask, offset: offset, sinks: sinks)
+            }
+            return rankedAttention(
+                queries: queries, windowKeys: windowKeys, windowMask: windowMask,
+                pooled: pooled.attention, picked: picked, offset: offset, sinks: sinks)
         }
-        guard
-            let picked = decodePicks(
-                x, queryResidual: queryResidual, pooled: pooled, offset: offset)
-        else {
+        guard let picked else {
             return Self.attentionOverEveryChunk(
                 queries: queries, windowKeys: windowKeys, chunks: pooled.attention,
                 scale: scale, sinks: sinks)
@@ -780,19 +784,21 @@ final class DeepSeekV4Attention: Module {
         return true
     }
 
-    /// Attends over the sliding window joined to the pooled chunks, through
+    /// Attends over the sliding window joined to every pooled chunk, through
     /// one mask that holds the visibility of each key.
     ///
-    /// A block of more than one token reads this path: each of its queries
-    /// sees a different set of window keys and of chunks.
+    /// A block that needs a mask and that reads every chunk behind each of
+    /// its queries takes this path: a layer with no indexer, and a layer
+    /// whose pool holds no more chunks than one query keeps. Each query of
+    /// the block sees a different set of window keys and of chunks.
     ///
     /// - Parameters:
     ///   - x: The block input, shape `(batch, tokens, hidden)`.
     ///   - queries: The rotated queries of this block.
     ///   - windowKeys: The keys of the sliding window, which are also its
     ///     values.
-    ///   - queryResidual: The low-rank query of this block, after its norm.
-    ///   - pooled: The chunks of each branch.
+    ///   - pooled: The chunks the compressor of the attention pooled, shape
+    ///     `(batch, chunks, headDim)`.
     ///   - windowMask: The mask of the sliding window alone.
     ///   - offset: The absolute position of the first token of this block.
     ///   - sinks: The learned sink of each head, or `nil`.
@@ -802,8 +808,7 @@ final class DeepSeekV4Attention: Module {
         _ x: MLXArray,
         queries: MLXArray,
         windowKeys: MLXArray,
-        queryResidual: MLXArray,
-        pooled: PooledChunks,
+        pooled: MLXArray,
         windowMask: MLXFast.ScaledDotProductAttentionMaskMode,
         offset: Int,
         sinks: MLXArray?
@@ -812,20 +817,60 @@ final class DeepSeekV4Attention: Module {
         // thus the mask reads `[window visibility | chunk visibility]`.
         let batch = x.dim(BatchMajorAxis.batch)
         let length = x.dim(BatchMajorAxis.token)
-        let windowKeyCount = windowKeys.dim(Self.keyAxis)
-        let chunkMask = chunkVisibility(
-            x, queryResidual: queryResidual, pooled: pooled,
-            offset: offset, batch: batch, length: length)
+        let chunkCount = pooled.dim(Self.chunkAxis)
+        let chunkMask = DeepSeekV4Math.pooledChunkVisibility(
+            queryCount: length, offset: offset, chunkCount: chunkCount,
+            chunkWidth: compressorChunkWidth
+        ).expandedDimensions(axis: Self.latentHeadAxis)
         let joinedMask = concatenated(
             [
                 broadcast(
                     windowVisibility(windowMask),
-                    to: [batch, 1, length, windowKeyCount]),
-                chunkMask,
+                    to: [batch, 1, length, windowKeys.dim(Self.keyAxis)]),
+                broadcast(chunkMask, to: [batch, 1, length, chunkCount]),
             ], axis: -1)
         return Self.attentionOverJoinedKeys(
-            queries: queries, windowKeys: windowKeys, chunks: pooled.attention,
+            queries: queries, windowKeys: windowKeys, chunks: pooled,
             scale: scale, mask: .array(joinedMask), sinks: sinks)
+    }
+
+    /// Attends over the sliding window joined to the chunks the indexer
+    /// ranked for each query of a block that needs a mask.
+    ///
+    /// The cost of this path does not grow with the pool, because each query
+    /// reads only its ranked chunks; ``maskedAttention(_:queries:windowKeys:pooled:windowMask:offset:sinks:)``
+    /// reads every pooled chunk. A ranked chunk that does not stand wholly
+    /// behind its query takes no weight.
+    ///
+    /// - Parameters:
+    ///   - queries: The rotated queries of this block.
+    ///   - windowKeys: The keys of the sliding window, which are also its
+    ///     values.
+    ///   - windowMask: The mask of the sliding window alone.
+    ///   - pooled: The chunks the compressor of the attention pooled, shape
+    ///     `(batch, chunks, headDim)`.
+    ///   - picked: The chunks the indexer ranked for each query, shape
+    ///     `(batch, tokens, topK)`.
+    ///   - offset: The absolute position of the first token of this block.
+    ///   - sinks: The learned sink of each head, or `nil`.
+    /// - Returns: The attention output, shape
+    ///   `(batch, heads, tokens, headDim)`.
+    private func rankedAttention(
+        queries: MLXArray,
+        windowKeys: MLXArray,
+        windowMask: MLXFast.ScaledDotProductAttentionMaskMode,
+        pooled: MLXArray,
+        picked: MLXArray,
+        offset: Int,
+        sinks: MLXArray?
+    ) -> MLXArray {
+        let visible = DeepSeekV4Math.pickedChunkVisibility(
+            picked, offset: offset, chunkWidth: compressorChunkWidth)
+        return Self.attentionOverRankedChunks(
+            queries: queries,
+            window: WindowKeys(keys: windowKeys, visible: windowVisibility(windowMask)),
+            ranked: RankedChunks(pooled: pooled, picked: picked, visible: visible),
+            scale: scale, sinks: sinks)
     }
 
     /// Attends over the sliding window joined to the given pooled chunks.
@@ -1141,23 +1186,24 @@ final class DeepSeekV4Attention: Module {
     /// The number of tokens a decode step carries.
     private static let decodeLength = 1
 
-    /// The chunks a block that needs no mask reads, or `nil` when it reads
-    /// every pooled chunk.
+    /// The chunks the indexer ranked for each query of a block, or `nil` when
+    /// each query reads every pooled chunk that stands behind it.
     ///
-    /// The caller asks only for a block that ``readsWithNoMask(blockLength:windowMask:)``
-    /// accepts. On a layer that holds an indexer, whose pool holds more than
-    /// ``DeepSeekV4Indexer/topK`` chunks, the block reads only the chunks the
-    /// indexer picked. A layer with no indexer, and a pool inside the budget,
-    /// read every chunk.
+    /// On a layer that holds an indexer, whose pool holds more than
+    /// ``DeepSeekV4Indexer/topK`` chunks, each query reads only the chunks the
+    /// indexer ranked. A layer with no indexer, and a pool inside the budget,
+    /// read every chunk. The ranking puts a chunk that reaches past its query
+    /// after every chunk the query may read, thus a query with fewer than
+    /// `topK` chunks behind it also gets chunks the caller must hide.
     ///
     /// - Parameters:
-    ///   - x: The block input, shape `(batch, 1, hidden)`.
+    ///   - x: The block input, shape `(batch, tokens, hidden)`.
     ///   - queryResidual: The low-rank query of this block, after its norm.
     ///   - pooled: The chunks of each branch.
-    ///   - offset: The absolute position of the token of this block.
-    /// - Returns: The indices of the picked chunks, shape `(batch, 1, topK)`,
-    ///   or `nil`.
-    private func decodePicks(
+    ///   - offset: The absolute position of the first token of this block.
+    /// - Returns: The indices of the ranked chunks, shape
+    ///   `(batch, tokens, topK)`, or `nil`.
+    private func indexerPicks(
         _ x: MLXArray, queryResidual: MLXArray, pooled: PooledChunks, offset: Int
     ) -> MLXArray? {
         guard let selector = indexer,
@@ -1229,40 +1275,245 @@ final class DeepSeekV4Attention: Module {
             chunks: takeAlong(pooled, rows, axis: chunkAxis), scale: scale, sinks: sinks)
     }
 
-    /// The chunks each query of this block reads.
+    // MARK: - The ranked chunks of a block of more than one token
+
+    /// The keys of the sliding window of a block, and the keys each query row
+    /// of the block sees.
+    struct WindowKeys {
+        /// The keys of the sliding window, which are also its values, shape
+        /// `(batch, 1, windowKeys, headDim)`.
+        let keys: MLXArray
+
+        /// The visibility of each window key for each query row, shape
+        /// `(1, 1, tokens, windowKeys)`.
+        let visible: MLXArray
+
+        /// The window as one tile of query rows reads it.
+        ///
+        /// - Parameter rows: The query rows of the tile.
+        /// - Returns: The same keys, with the visibility of those rows alone.
+        func tile(_ rows: Range<Int>) -> WindowKeys {
+            WindowKeys(keys: keys, visible: DeepSeekV4Attention.visibilityRows(visible, rows: rows))
+        }
+    }
+
+    /// The pooled chunks the indexer ranked for each query row of a block.
+    struct RankedChunks {
+        /// The chunks the compressor of the attention pooled, shape
+        /// `(batch, chunks, headDim)`.
+        let pooled: MLXArray
+
+        /// The indices of the chunks each query row reads, shape
+        /// `(batch, tokens, picks)`.
+        let picked: MLXArray
+
+        /// True for a ranked chunk that stands wholly behind its query row,
+        /// shape `(batch, tokens, picks)` or `(1, tokens, picks)`.
+        ///
+        /// A query row with fewer chunks behind it than the ranking keeps
+        /// also gets chunks it may not read, and this mask hides them.
+        let visible: MLXArray
+
+        /// The number of chunks the ranking keeps for each query row.
+        var pickCount: Int { picked.dim(DeepSeekV4Attention.rankAxis) }
+
+        /// The bytes the gather copies for one query row of one sequence.
+        var gatheredRowBytes: Int {
+            pickCount * pooled.dim(DeepSeekV4Attention.widthAxis) * pooled.dtype.size
+        }
+
+        /// The chunks as one tile of query rows reads them.
+        ///
+        /// - Parameter rows: The query rows of the tile.
+        /// - Returns: The same pool, with the ranking of those rows alone.
+        func tile(_ rows: Range<Int>) -> RankedChunks {
+            RankedChunks(
+                pooled: pooled, picked: picked[0..., rows], visible: visible[0..., rows])
+        }
+    }
+
+    /// The axis a `(batch, tokens, picks)` ranking holds its picks on.
+    private static let rankAxis = -1
+
+    /// The axis every tensor of this path holds the numbers of one head or
+    /// one chunk on.
+    private static let widthAxis = -1
+
+    /// The most bytes the gather of one tile of query rows copies.
     ///
-    /// A layer that holds an indexer asks it, and the answer already holds the
-    /// block-causal rule. A layer that holds no indexer reads every chunk that
-    /// stands wholly behind its query.
+    /// At the real checkpoint a query row of one sequence gathers 512 chunks
+    /// of 512 BF16 numbers, which is 512 KiB, thus 1 GiB holds a tile of 2048
+    /// rows: one whole prefill step.
+    static let oneTileGatherBytes = 1 << 30
+
+    /// The most query rows one tile of the ranked-chunk path reads.
+    ///
+    /// The tile copies `gatheredRowBytes` for each row of each sequence, and
+    /// the copy stays inside `gatherByteLimit`. The scores of the tile also
+    /// stay under ``oneCallScoreLimit``, the rule of one SDPA call, although
+    /// this path makes no SDPA call. When one row alone breaks a limit, the
+    /// answer is one row, thus each tile still reads a row.
     ///
     /// - Parameters:
-    ///   - x: The block input, shape `(batch, tokens, hidden)`.
-    ///   - queryResidual: The low-rank query of this block, after its norm.
-    ///   - pooled: The chunks of each branch.
-    ///   - offset: The absolute position of the first token of this block.
-    ///   - batch: The number of sequences in this block.
-    ///   - length: The number of tokens in this block.
-    /// - Returns: The visibility, shape `(batch, 1, length, chunks)`.
-    private func chunkVisibility(
-        _ x: MLXArray,
-        queryResidual: MLXArray,
-        pooled: PooledChunks,
-        offset: Int,
-        batch: Int,
-        length: Int
+    ///   - batch: The number of sequences.
+    ///   - heads: The number of query heads.
+    ///   - keys: The number of keys each query row reads: the window keys and
+    ///     the ranked chunks.
+    ///   - gatheredRowBytes: The bytes the gather copies for one query row of
+    ///     one sequence.
+    ///   - gatherByteLimit: The most bytes the gather of one tile copies.
+    /// - Returns: The number of query rows for each tile, 1 or more.
+    static func queryRowsPerTile(
+        batch: Int, heads: Int, keys: Int, gatheredRowBytes: Int, gatherByteLimit: Int
+    ) -> Int {
+        let rowsInBudget = max(fewestRowsPerCall, gatherByteLimit / (batch * gatheredRowBytes))
+        return min(rowsInBudget, queryRowsPerCall(batch: batch, heads: heads, keys: keys))
+    }
+
+    /// Attends over the sliding window joined to the chunks the indexer
+    /// ranked for each query row of a block.
+    ///
+    /// Each query row reads its own chunks, thus the gather copies
+    /// `(batch, tokens, picks, headDim)` and the attention reads
+    /// `window + picks` keys for each row, whatever the number of pooled
+    /// chunks is. The masked path reads every pooled chunk instead, and its
+    /// cost grows with the context.
+    ///
+    /// The arithmetic is the op path of MLX SDPA, the path a head of 512
+    /// reads: the scaled queries score the keys, a hidden key takes the
+    /// lowest finite score, the sink column joins in front, and one precise
+    /// softmax reads the joined row. Only the sum of the output adds the
+    /// window half and the chunk half apart, thus the answer is that of the
+    /// masked path up to the order of the additions. mlx-vlm
+    /// (`deepseek_v4/language.py`, `_sparse_pooled_attention`) gathers the
+    /// same rows.
+    ///
+    /// The queries go in tiles of ``queryRowsPerTile(batch:heads:keys:gatheredRowBytes:gatherByteLimit:)``
+    /// rows, so that one gather stays inside `gatherByteLimit`.
+    ///
+    /// - Parameters:
+    ///   - queries: The rotated queries, shape `(batch, heads, tokens, headDim)`.
+    ///   - window: The window keys and their visibility.
+    ///   - ranked: The pool and the chunks each query row reads.
+    ///   - scale: The factor the attention scores take before the softmax.
+    ///   - sinks: The learned sink of each head, or `nil`.
+    ///   - gatherByteLimit: The most bytes the gather of one tile copies.
+    /// - Returns: The attention output, shape
+    ///   `(batch, heads, tokens, headDim)`.
+    static func attentionOverRankedChunks(
+        queries: MLXArray,
+        window: WindowKeys,
+        ranked: RankedChunks,
+        scale: Float,
+        sinks: MLXArray?,
+        gatherByteLimit: Int = oneTileGatherBytes
     ) -> MLXArray {
-        let chunkCount = pooled.attention.dim(Self.chunkAxis)
-        if let selector = indexer, let pooledKeys = pooled.indexer {
-            return selector(
-                x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope,
-                offset: offset)
+        let queryCount = queries.dim(queryAxis)
+        let rowsPerTile = queryRowsPerTile(
+            batch: queries.dim(BatchMajorAxis.batch), heads: queries.dim(headAxis),
+            keys: window.keys.dim(keyAxis) + ranked.pickCount,
+            gatheredRowBytes: ranked.gatheredRowBytes, gatherByteLimit: gatherByteLimit)
+        guard rowsPerTile < queryCount else {
+            return attentionOverRankedTile(
+                queries: queries, window: window, ranked: ranked, scale: scale, sinks: sinks)
         }
-        let visible = DeepSeekV4Math.pooledChunkVisibility(
-            queryCount: length, offset: offset, chunkCount: chunkCount,
-            chunkWidth: compressorChunkWidth)
-        return broadcast(
-            visible.expandedDimensions(axis: Self.latentHeadAxis),
-            to: [batch, 1, length, chunkCount])
+        let tiles = stride(from: 0, to: queryCount, by: rowsPerTile).map { first in
+            let rows = first ..< min(first + rowsPerTile, queryCount)
+            return attentionOverRankedTile(
+                queries: queries[0..., 0..., rows], window: window.tile(rows),
+                ranked: ranked.tile(rows), scale: scale, sinks: sinks)
+        }
+        return concatenated(tiles, axis: queryAxis)
+    }
+
+    /// Attends over the window and the ranked chunks of one tile of query
+    /// rows.
+    ///
+    /// - Parameters:
+    ///   - queries: The rotated queries of the tile, shape
+    ///     `(batch, heads, rows, headDim)`.
+    ///   - window: The window keys, with the visibility of the tile rows.
+    ///   - ranked: The pool, with the ranking of the tile rows.
+    ///   - scale: The factor the attention scores take before the softmax.
+    ///   - sinks: The learned sink of each head, or `nil`.
+    /// - Returns: The attention output of the tile, shape
+    ///   `(batch, heads, rows, headDim)`.
+    private static func attentionOverRankedTile(
+        queries: MLXArray,
+        window: WindowKeys,
+        ranked: RankedChunks,
+        scale: Float,
+        sinks: MLXArray?
+    ) -> MLXArray {
+        let batch = queries.dim(BatchMajorAxis.batch)
+        let rowCount = queries.dim(queryAxis)
+        // One pool row for each ranked chunk. The last axis of 1 reaches
+        // every number of the chunk.
+        let gathered = takeAlong(
+            ranked.pooled, ranked.picked.reshaped(batch, -1, 1), axis: chunkAxis
+        ).reshaped(batch, rowCount, ranked.pickCount, ranked.pooled.dim(widthAxis))
+        let scaled = queries * scale
+        let windowScores = visibleScores(
+            scaled.matmul(window.keys.swappedAxes(-1, -2)), visible: window.visible)
+        let chunkScores = visibleScores(
+            rowMajor(rowMajor(scaled).matmul(gathered.swappedAxes(-1, -2))),
+            visible: ranked.visible.expandedDimensions(axis: headAxis))
+
+        let weights = softmaxWithSink(
+            joining: [windowScores, chunkScores], sinks: sinks, dtype: queries.dtype)
+        let windowWeights = weights[.ellipsis, 0 ..< window.keys.dim(keyAxis)]
+        let chunkWeights = weights[.ellipsis, window.keys.dim(keyAxis)...]
+        return windowWeights.matmul(window.keys)
+            + rowMajor(rowMajor(chunkWeights).matmul(gathered))
+    }
+
+    /// Swaps the head axis and the query row axis of a 4-axis tensor.
+    ///
+    /// The scores of the ranked chunks read one key set for each query row,
+    /// thus their matmul runs with the query rows ahead of the heads. A
+    /// second swap puts the heads back in front.
+    private static func rowMajor(_ tensor: MLXArray) -> MLXArray {
+        tensor.swappedAxes(headAxis, queryAxis)
+    }
+
+    /// The scores with each hidden key at the lowest finite score.
+    ///
+    /// The op path of MLX SDPA fills a hidden key the same way, thus a hidden
+    /// key takes no weight in the softmax and a row that hides every key of
+    /// one half still reads the other half.
+    ///
+    /// - Parameters:
+    ///   - scores: The scores, shape `(batch, heads, rows, keys)`.
+    ///   - visible: The visibility of each key, broadcastable to `scores`.
+    /// - Returns: The masked scores.
+    private static func visibleScores(_ scores: MLXArray, visible: MLXArray) -> MLXArray {
+        MLX.where(visible, scores, MLXArray.maskFill(for: scores.dtype))
+    }
+
+    /// The precise softmax over several runs of scores joined along the key
+    /// axis, with the sink column of each head in front when there is one.
+    ///
+    /// The answer drops the sink column again, thus its keys are the joined
+    /// keys in the order of `runs`.
+    ///
+    /// - Parameters:
+    ///   - runs: The scores of each run of keys, shape
+    ///     `(batch, heads, rows, keys)` each.
+    ///   - sinks: The learned sink of each head, or `nil`.
+    ///   - dtype: The dtype of the queries, which the sinks take.
+    /// - Returns: The weights, shape `(batch, heads, rows, joinedKeys)`.
+    private static func softmaxWithSink(
+        joining runs: [MLXArray], sinks: MLXArray?, dtype: DType
+    ) -> MLXArray {
+        guard let sinks, let first = runs.first else {
+            return softmax(concatenated(runs, axis: -1), axis: -1, precise: true)
+        }
+        var columnShape = first.shape
+        columnShape[columnShape.count - 1] = sinkColumn
+        let column = broadcast(
+            sinks.asType(dtype).reshaped(1, -1, 1, 1), to: columnShape)
+        let weights = softmax(concatenated([column] + runs, axis: -1), axis: -1, precise: true)
+        return weights[.ellipsis, sinkColumn...]
     }
 
     /// The number of raw positions one pooled chunk of this layer covers.
@@ -1273,11 +1524,13 @@ final class DeepSeekV4Attention: Module {
         compressor?.chunkWidth ?? 1
     }
 
-    /// The window mask, as a Boolean array of the shape the joined mask needs.
+    /// The window mask, as a Boolean array of the shape the joined mask and
+    /// the ranked-chunk path need.
     ///
-    /// Only the masked path reads this function. A block of one token whose
-    /// window answered no mask reads no mask at all, and a window mask taken
-    /// with `returnArray` true for a longer block is always an array.
+    /// Only a block that needs a mask reads this function: the masked path
+    /// and the ranked-chunk path. A block of one token whose window answered
+    /// no mask reads no mask at all, and a window mask taken with
+    /// `returnArray` true for a longer block is always an array.
     ///
     /// - Parameter mask: The mask the sliding window answered.
     /// - Returns: The visibility, shape `(1, 1, tokens, windowKeys)`.
@@ -1286,7 +1539,8 @@ final class DeepSeekV4Attention: Module {
     ) -> MLXArray {
         guard case .array(let visible) = mask else {
             preconditionFailure(
-                "the masked path reads a window mask taken with returnArray true, which is "
+                "a block that needs a mask reads a window mask taken with returnArray true, "
+                    + "which is "
                     + "an array, and this one is \(mask)")
         }
         precondition(

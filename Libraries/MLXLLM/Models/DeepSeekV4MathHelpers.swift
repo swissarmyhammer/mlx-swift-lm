@@ -441,9 +441,51 @@ enum DeepSeekV4Math {
     static func pooledChunkVisibility(
         queryCount: Int, offset: Int, chunkCount: Int, chunkWidth: Int
     ) -> MLXArray {
+        chunkVisibility(
+            MLXArray(Int32(0) ..< Int32(chunkCount)).reshaped(1, 1, chunkCount),
+            queryCount: queryCount, offset: offset, chunkWidth: chunkWidth)
+    }
+
+    /// The block-causal visibility of each chunk a query of one block picked.
+    ///
+    /// The rule is the rule of
+    /// ``pooledChunkVisibility(queryCount:offset:chunkCount:chunkWidth:)``,
+    /// read for the chunk index each entry of `picked` holds. A ranking keeps
+    /// its whole budget even for a query that has fewer chunks behind it, and
+    /// this mask hides the chunks such a query may not read.
+    ///
+    /// - Parameters:
+    ///   - picked: The chunk indices, shape `(batch, queryCount, picks)`.
+    ///   - offset: The absolute position of the first token of this block.
+    ///   - chunkWidth: The number of raw positions one chunk covers.
+    /// - Returns: The visibility of each pick, shape `(batch, queryCount, picks)`.
+    static func pickedChunkVisibility(
+        _ picked: MLXArray, offset: Int, chunkWidth: Int
+    ) -> MLXArray {
+        chunkVisibility(
+            picked, queryCount: picked.dim(pickedQueryAxis), offset: offset,
+            chunkWidth: chunkWidth)
+    }
+
+    /// The block-causal rule for a set of chunk indices.
+    ///
+    /// - Parameters:
+    ///   - chunks: The chunk indices, of a shape whose second-to-last axis
+    ///     broadcasts to `queryCount`.
+    ///   - queryCount: The number of tokens in this block.
+    ///   - offset: The absolute position of the first token of this block.
+    ///   - chunkWidth: The number of raw positions one chunk covers.
+    /// - Returns: True for each chunk that stands wholly behind its query.
+    private static func chunkVisibility(
+        _ chunks: MLXArray, queryCount: Int, offset: Int, chunkWidth: Int
+    ) -> MLXArray {
         let positions = MLXArray(Int32(offset) ..< Int32(offset + queryCount))
             .reshaped(1, queryCount, 1)
-        let chunkEnds = (MLXArray(Int32(0) ..< Int32(chunkCount)) + 1) * Int32(chunkWidth)
-        return chunkEnds.reshaped(1, 1, chunkCount) .<= (positions + 1)
+        let chunkEnds = (chunks.asType(.int32) + 1) * Int32(chunkWidth)
+        return chunkEnds .<= (positions + 1)
     }
+
+    /// The axis a `(batch, queryCount, picks)` set of chunk indices holds its
+    /// queries on.
+    private static let pickedQueryAxis = 1
 }

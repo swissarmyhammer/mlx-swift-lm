@@ -576,4 +576,49 @@ struct DeepSeekV4MathHelpersTests {
             DeepSeekV4TestArrays.integers(visible).allSatisfy { $0 == 0 },
             "no chunk has ended before position \(Self.visibilityChunkWidth - 1)")
     }
+
+    /// The chunks each query of the picked-visibility test picked, by sequence
+    /// and by query. Each row of ``visibilityQueryCount`` queries holds every
+    /// chunk index in some order, thus each chunk meets each query once.
+    private static let pickedChunks: [[[Int32]]] = [
+        (0 ..< visibilityQueryCount).map { query in
+            (0 ..< Int32(visibilityChunkCount)).map {
+                ($0 + Int32(query)) % Int32(visibilityChunkCount)
+            }
+        },
+        (0 ..< visibilityQueryCount).map { query in
+            (0 ..< Int32(visibilityChunkCount)).reversed().map {
+                ($0 + Int32(query)) % Int32(visibilityChunkCount)
+            }
+        },
+    ]
+
+    @Test func pickedChunkVisibilityHidesEveryPickThatReachesPastItsQuery() {
+        let sequences = Self.pickedChunks.count
+        let picked = MLXArray(Self.pickedChunks.flatMap { $0.flatMap { $0 } })
+            .reshaped(sequences, Self.visibilityQueryCount, Self.visibilityChunkCount)
+
+        let visible = DeepSeekV4Math.pickedChunkVisibility(
+            picked, offset: Self.visibilityOffset, chunkWidth: Self.visibilityChunkWidth)
+
+        #expect(
+            visible.shape == [sequences, Self.visibilityQueryCount, Self.visibilityChunkCount])
+        #expect(visible.dtype == .bool)
+        // The rule again, in plain Swift, for each pick.
+        let read = DeepSeekV4TestArrays.integers(visible)
+        for (sequence, queries) in Self.pickedChunks.enumerated() {
+            for (query, picks) in queries.enumerated() {
+                let position = Self.visibilityOffset + query
+                for (slot, chunk) in picks.enumerated() {
+                    let expected = (Int(chunk) + 1) * Self.visibilityChunkWidth <= position + 1
+                    let index =
+                        (sequence * Self.visibilityQueryCount + query)
+                        * Self.visibilityChunkCount + slot
+                    #expect(
+                        (read[index] != 0) == expected,
+                        "sequence \(sequence), query \(position), chunk \(chunk)")
+                }
+            }
+        }
+    }
 }

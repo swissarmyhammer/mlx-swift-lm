@@ -170,31 +170,51 @@ struct DeepSeekV4IndexerTests {
             offset: offset)
     }
 
-    /// The chunks one indexer picks for one block of tokens.
+    /// The chunks each query of one block reads: the chunks one indexer
+    /// ranks, less the ranked chunks the query may not read.
+    ///
+    /// The ranking keeps its whole budget, and the attention reads only the
+    /// ranked chunks that ``DeepSeekV4Math/pickedChunkVisibility(_:offset:chunkWidth:)``
+    /// accepts. This helper reads the two together, as the attention does.
     ///
     /// - Parameters:
     ///   - indexer: The indexer under test.
     ///   - batch: The number of sequences in the block.
     ///   - tokens: The number of tokens in the block.
-    ///   - chunks: The number of pooled chunks the compressor holds.
+    ///   - chunks: The number of pooled chunks the compressor holds. It must
+    ///     be more than ``indexTopK``.
     ///   - offset: The absolute position of the first token of the block.
     ///   - seed: The seed the input filler starts at.
-    /// - Returns: The selection mask, shape `(batch, 1, tokens, chunks)`.
-    private static func selection(
+    /// - Returns: One sorted list of chunk indices for each sequence and
+    ///   token.
+    private static func readChunks(
         from indexer: DeepSeekV4Indexer,
         batch: Int,
         tokens: Int,
         chunks: Int,
         offset: Int,
         seed: UInt64
-    ) throws -> MLXArray {
+    ) throws -> [[[Int]]] {
         let inputs = try blockInputs(
             batch: batch, tokens: tokens, chunks: chunks, offset: offset, seed: seed)
-        let mask = indexer(
+        let ranked = indexer.rankedChunks(
             inputs.x, queryResidual: inputs.queryResidual, pooledKeys: inputs.pooledKeys,
             rope: inputs.rope, offset: inputs.offset)
-        eval(mask)
-        return mask
+        let visible = DeepSeekV4Math.pickedChunkVisibility(
+            ranked, offset: offset, chunkWidth: indexer.chunkWidth)
+        #expect(ranked.shape == [batch, tokens, indexTopK])
+        #expect(visible.shape == ranked.shape)
+        let indices = DeepSeekV4TestArrays.integers(ranked)
+        let flags = DeepSeekV4TestArrays.integers(visible)
+        return (0 ..< batch).map { sequence in
+            (0 ..< tokens).map { token in
+                let row = (sequence * tokens + token) * indexTopK
+                return (row ..< (row + indexTopK))
+                    .filter { flags[$0] != 0 }
+                    .map { Int(indices[$0]) }
+                    .sorted()
+            }
+        }
     }
 
     /// The number of chunks a query at one absolute position may read.
@@ -216,38 +236,20 @@ struct DeepSeekV4IndexerTests {
     /// The block lengths the property tests walk.
     private static let tokenCounts = [1, 4, 9]
 
-    /// The block offsets the property tests walk.
-    private static let offsets = [0, 3, 10]
+    /// The block offsets the property tests walk. The last one puts every
+    /// chunk of ``chunkCounts`` wholly behind the first query, which is the
+    /// shape of a decode step.
+    private static let offsets = [0, 3, 10, 40]
 
-    /// The pooled-chunk counts the property tests walk. The list crosses
-    /// ``indexTopK`` in both directions, thus it reads both the ranked path
-    /// and the every-chunk-fits path.
-    private static let chunkCounts = [1, 3, 5, 9]
-
-    /// The chunks one selection mask picked, by sequence and by token.
-    ///
-    /// - Parameters:
-    ///   - mask: The selection mask, shape `(batch, 1, tokens, chunks)`.
-    ///   - batch: The number of sequences in the block.
-    ///   - tokens: The number of tokens in the block.
-    ///   - chunks: The number of pooled chunks the compressor holds.
-    /// - Returns: One list of chunk indices for each sequence and token.
-    private static func pickedChunks(
-        _ mask: MLXArray, batch: Int, tokens: Int, chunks: Int
-    ) -> [[[Int]]] {
-        let flags = DeepSeekV4TestArrays.integers(mask)
-        return (0 ..< batch).map { sequence in
-            (0 ..< tokens).map { token in
-                (0 ..< chunks).filter { chunk in
-                    flags[(sequence * tokens + token) * chunks + chunk] != 0
-                }
-            }
-        }
-    }
+    /// The pooled-chunk counts the property tests walk. Each one is more
+    /// than ``indexTopK``, which is the only case where the indexer ranks. A
+    /// pool inside the budget reads every visible chunk, and
+    /// `DeepSeekV4MathHelpersTests` holds that rule.
+    private static let chunkCounts = [5, 9]
 
     // MARK: - The causal contract
 
-    @Test func everyPickedChunkStandsWhollyBehindItsQuery() throws {
+    @Test func everyReadChunkStandsWhollyBehindItsQuery() throws {
         let indexer = try Self.loadedIndexer(seed: Self.weightSeed)
         var picked = 0
 
@@ -255,13 +257,9 @@ struct DeepSeekV4IndexerTests {
             for tokens in Self.tokenCounts {
                 for offset in Self.offsets {
                     for chunks in Self.chunkCounts {
-                        let mask = try Self.selection(
+                        let selected = try Self.readChunks(
                             from: indexer, batch: batch, tokens: tokens, chunks: chunks,
                             offset: offset, seed: Self.weightSeed + UInt64(chunks + tokens))
-                        #expect(mask.shape == [batch, 1, tokens, chunks])
-
-                        let selected = Self.pickedChunks(
-                            mask, batch: batch, tokens: tokens, chunks: chunks)
                         for sequence in 0 ..< batch {
                             for token in 0 ..< tokens {
                                 let position = offset + token
@@ -288,11 +286,9 @@ struct DeepSeekV4IndexerTests {
             for tokens in Self.tokenCounts {
                 for offset in Self.offsets {
                     for chunks in Self.chunkCounts {
-                        let mask = try Self.selection(
+                        let selected = try Self.readChunks(
                             from: indexer, batch: batch, tokens: tokens, chunks: chunks,
                             offset: offset, seed: Self.weightSeed + UInt64(offset + chunks))
-                        let selected = Self.pickedChunks(
-                            mask, batch: batch, tokens: tokens, chunks: chunks)
 
                         for sequence in 0 ..< batch {
                             for token in 0 ..< tokens {
@@ -310,129 +306,19 @@ struct DeepSeekV4IndexerTests {
         }
     }
 
-    /// The pooled-chunk counts the ranked-chunk test walks. Each one is more
-    /// than ``indexTopK``, which is the only case where the indexer ranks.
-    private static let rankedChunkCounts = [5, 9]
-
-    /// The block offsets the ranked-chunk test walks. The last one puts every
-    /// chunk of ``rankedChunkCounts`` wholly behind the first query, which is
-    /// the shape of a decode step.
-    private static let rankedOffsets = [3, 10, 40]
-
-    @Test func theRankedChunksAreTheChunksTheSelectionMaskPicks() throws {
-        let indexer = try Self.loadedIndexer(seed: Self.weightSeed)
-
-        for batch in Self.batchSizes {
-            for tokens in Self.tokenCounts {
-                for offset in Self.rankedOffsets {
-                    for chunks in Self.rankedChunkCounts {
-                        let inputs = try Self.blockInputs(
-                            batch: batch, tokens: tokens, chunks: chunks, offset: offset,
-                            seed: Self.weightSeed + UInt64(offset + chunks + tokens))
-                        let ranked = indexer.rankedChunks(
-                            inputs.x, queryResidual: inputs.queryResidual,
-                            pooledKeys: inputs.pooledKeys, rope: inputs.rope,
-                            offset: inputs.offset)
-                        let mask = try Self.selection(
-                            from: indexer, batch: batch, tokens: tokens, chunks: chunks,
-                            offset: offset,
-                            seed: Self.weightSeed + UInt64(offset + chunks + tokens))
-
-                        #expect(ranked.shape == [batch, tokens, Self.indexTopK])
-                        let rankedIndices = DeepSeekV4TestArrays.integers(ranked)
-                        let selected = Self.pickedChunks(
-                            mask, batch: batch, tokens: tokens, chunks: chunks)
-                        for sequence in 0 ..< batch {
-                            for token in 0 ..< tokens {
-                                let row = (sequence * tokens + token) * Self.indexTopK
-                                let visible = Self.visibleChunkCount(
-                                    position: offset + token, chunks: chunks)
-                                let rankedVisible = rankedIndices[row ..< (row + Self.indexTopK)]
-                                    .map { Int($0) }
-                                    .filter { $0 < visible }
-                                    .sorted()
-                                #expect(
-                                    rankedVisible == selected[sequence][token],
-                                    "offset \(offset), token \(token) of \(chunks) chunks")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: - The membership mask
-
-    /// The number of sequences of the random ranked indices.
-    private static let membershipBatch = 2
-
-    /// The number of tokens of the random ranked indices.
-    private static let membershipTokens = 7
-
-    /// The number of indices each token of the random ranked indices holds.
-    private static let membershipRankWidth = 5
-
-    /// The chunk counts the membership test walks. The first is less than
-    /// ``membershipRankWidth``, thus each random row holds a repeated index.
-    private static let membershipChunkCounts = [3, 5, 16, 64]
-
-    /// The seed of the random ranked indices.
-    private static let membershipSeed: UInt64 = 20_261_014
-
-    /// The axis the ranked indices of one token sit on, after the compare
-    /// adds the chunk axis at the end.
-    private static let comparedRankAxis = -2
-
-    /// The membership mask by the broadcast compare: each ranked index is
-    /// compared against every chunk index, and a chunk is a member when one
-    /// comparison is true.
-    ///
-    /// This is the method the scatter replaces, stated again here so that
-    /// the test measures the scatter against an independent method.
-    ///
-    /// - Parameters:
-    ///   - ranked: The ranked chunk indices, shape `(batch, tokens, rank)`.
-    ///   - chunkCount: The number of pooled chunks.
-    /// - Returns: The mask, shape `(batch, tokens, chunkCount)`.
-    private static func comparedMembership(of ranked: MLXArray, chunkCount: Int) -> MLXArray {
-        let chunkIndices = MLXArray(Int32(0) ..< Int32(chunkCount))
-        return (ranked.asType(.int32).expandedDimensions(axis: -1) .== chunkIndices)
-            .any(axis: comparedRankAxis)
-    }
-
-    @Test func theScatteredMembershipMaskIsTheBroadcastCompare() throws {
-        for chunks in Self.membershipChunkCounts {
-            let ranked = MLXRandom.randInt(
-                low: 0, high: chunks,
-                [Self.membershipBatch, Self.membershipTokens, Self.membershipRankWidth],
-                type: UInt32.self, key: MLXRandom.key(Self.membershipSeed + UInt64(chunks)))
-
-            let scattered = DeepSeekV4Indexer.membershipMask(of: ranked, chunkCount: chunks)
-            let compared = Self.comparedMembership(of: ranked, chunkCount: chunks)
-
-            #expect(scattered.shape == compared.shape, "\(chunks) chunks")
-            #expect(scattered.dtype == .bool, "\(chunks) chunks")
-            #expect(
-                DeepSeekV4TestArrays.integers(scattered) == DeepSeekV4TestArrays.integers(compared),
-                "\(chunks) chunks")
-        }
-    }
-
     /// The number of tokens the first-positions test reads. It reaches one
     /// position past the end of the first chunk.
     private static let firstBlockTokens = 5
 
-    /// The number of pooled chunks the first-positions test reads.
+    /// The number of pooled chunks the first-positions test reads. It is more
+    /// than ``indexTopK``, thus the indexer ranks.
     private static let firstBlockChunks = 4
 
     @Test func theFirstPositionsPickNothingUntilAWholeChunkStandsBehindThem() throws {
         let indexer = try Self.loadedIndexer(seed: Self.weightSeed)
-        let mask = try Self.selection(
+        let selected = try Self.readChunks(
             from: indexer, batch: 1, tokens: Self.firstBlockTokens,
-            chunks: Self.firstBlockChunks, offset: 0, seed: Self.weightSeed)
-        let selected = Self.pickedChunks(
-            mask, batch: 1, tokens: Self.firstBlockTokens, chunks: Self.firstBlockChunks)[0]
+            chunks: Self.firstBlockChunks, offset: 0, seed: Self.weightSeed)[0]
 
         #expect(selected[0].isEmpty)
         #expect(selected[1].isEmpty)
