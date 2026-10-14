@@ -28,7 +28,7 @@ struct DeepSeekV4CompiledDecodeTests {
     // MARK: - The shapes of one decode step
 
     /// The leading shape of one decode step: one sequence of one token.
-    private static let decodeShape = [1, decodeTokens]
+    private static let decodeShape = blockShape(decodeTokens)
 
     /// The token count of one decode step.
     private static let decodeTokens = 1
@@ -253,7 +253,7 @@ struct DeepSeekV4CompiledDecodeTests {
     func theCompiledCollapseFieldsReadTheScalesWithNoGather() {
         let fields = Self.compiledDecodeCollapseFields()
 
-        #expect(DeepSeekV4TestArrays.gatherNodeCount([fields.1, fields.2, fields.3]) == 0)
+        DeepSeekV4TestArrays.expectNoGather([fields.1, fields.2, fields.3])
     }
 
     @Test
@@ -265,7 +265,7 @@ struct DeepSeekV4CompiledDecodeTests {
             scale: inputs.scale, base: inputs.base, hcMult: Self.hcMult, normEps: Self.normEps,
             activations: DeepSeekV4CompiledDecode.splitActivations(hcEps: Self.hcEps))
 
-        #expect(DeepSeekV4TestArrays.gatherNodeCount([fields.pre, fields.post, fields.comb]) == 0)
+        DeepSeekV4TestArrays.expectNoGather([fields.pre, fields.post, fields.comb])
     }
 
     // MARK: - The routing gate
@@ -357,7 +357,7 @@ struct DeepSeekV4CompiledDecodeTests {
     @Test
     func onlyABlockOfOneTokenReadsTheFunctionsCompiledWithAShape() {
         let oneToken = MLXArray.zeros(Self.decodeShape + [Self.hiddenSize])
-        let twoTokens = MLXArray.zeros([1, 2, Self.hiddenSize])
+        let twoTokens = MLXArray.zeros(Self.blockShape(Self.decodeTokens + 1) + [Self.hiddenSize])
 
         #expect(DeepSeekV4CompiledDecode.isDecodeStep(oneToken))
         #expect(!DeepSeekV4CompiledDecode.isDecodeStep(twoTokens))

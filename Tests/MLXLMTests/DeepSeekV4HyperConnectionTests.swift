@@ -662,7 +662,7 @@ struct DeepSeekV4HyperConnectionTests {
 
         let reduced = head(Self.hiddenStateFixture())
 
-        #expect(DeepSeekV4TestArrays.gatherNodeCount([reduced]) == 0)
+        DeepSeekV4TestArrays.expectNoGather([reduced])
     }
 
     @Test
