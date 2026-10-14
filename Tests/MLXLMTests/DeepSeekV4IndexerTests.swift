@@ -123,10 +123,15 @@ struct DeepSeekV4IndexerTests {
     /// states that the indexer declares exactly the parameters a checkpoint
     /// fills.
     ///
-    /// - Parameter seed: The seed the weight filler starts at.
+    /// - Parameters:
+    ///   - seed: The seed the weight filler starts at.
+    ///   - headWidth: The `index_head_dim` of the checkpoint.
     /// - Returns: The loaded indexer.
-    private static func loadedIndexer(seed: UInt64) throws -> DeepSeekV4Indexer {
-        let indexer = DeepSeekV4Indexer(configuration: try configuration(), layer: indexerLayer)
+    private static func loadedIndexer(
+        seed: UInt64, headWidth: Int = indexHeadDim
+    ) throws -> DeepSeekV4Indexer {
+        let indexer = DeepSeekV4Indexer(
+            configuration: try configuration(indexHeadWidth: headWidth), layer: indexerLayer)
         try DeepSeekV4RepeatableWeights.load(
             into: indexer, seed: seed, low: fixtureLow, high: fixtureHigh, order: .flattened)
         return indexer
@@ -158,15 +163,18 @@ struct DeepSeekV4IndexerTests {
     ///   - chunks: The number of pooled chunks the compressor holds.
     ///   - offset: The absolute position of the first token of the block.
     ///   - seed: The seed the input filler starts at.
+    ///   - headWidth: The width of one indexer head, thus of one pooled key.
     /// - Returns: The arguments.
     private static func blockInputs(
-        batch: Int, tokens: Int, chunks: Int, offset: Int, seed: UInt64
+        batch: Int, tokens: Int, chunks: Int, offset: Int, seed: UInt64,
+        headWidth: Int = indexHeadDim
     ) throws -> BlockInputs {
         BlockInputs(
             x: fixture([batch, tokens, hiddenSize], seed: seed),
             queryResidual: fixture([batch, tokens, queryLoraRank], seed: seed + 1),
-            pooledKeys: fixture([batch, chunks, indexHeadDim], seed: seed + 2),
-            rope: DeepSeekV4RoPE(configuration: try configuration(), layer: indexerLayer),
+            pooledKeys: fixture([batch, chunks, headWidth], seed: seed + 2),
+            rope: DeepSeekV4RoPE(
+                configuration: try configuration(indexHeadWidth: headWidth), layer: indexerLayer),
             offset: offset)
     }
 
@@ -381,7 +389,7 @@ struct DeepSeekV4IndexerTests {
         let batch = inputs.x.dim(0)
         let tokens = inputs.x.dim(tokenAxis)
         let projected = indexer.wqB(inputs.queryResidual)
-            .reshaped(batch, tokens, indexHeadCount, indexHeadDim)
+            .reshaped(batch, tokens, indexHeadCount, indexer.headDim)
             .swappedAxes(headAxis, batchMajorHeadAxis)
         let queries = inputs.rope(projected, offset: DeepSeekV4RoPE.position(inputs.offset))
             .asType(.float32)
@@ -413,33 +421,110 @@ struct DeepSeekV4IndexerTests {
             .sorted()
     }
 
-    @Test func aTiledRankingReadsTheChunksOfTheHighestReferenceScore() throws {
-        let indexer = try Self.loadedIndexer(seed: Self.weightSeed)
-        let tokens = Self.tiledRankingTokens
-        let chunks = Self.tiledRankingChunks
-        let inputs = try Self.blockInputs(
-            batch: Self.tiledRankingBatch, tokens: tokens, chunks: chunks,
-            offset: Self.tiledRankingOffset, seed: Self.weightSeed)
-        let rowBytes = Self.indexHeadCount * chunks * Self.scoreBytes
-        let byteLimit = Self.tiledRankingBatch * Self.tiledRankingRowsPerTile * rowBytes
+    /// A head width that is not a whole number of float4 vectors. The fused
+    /// score kernel does not take it, thus an indexer of this width keeps the
+    /// tiled op path, also on the GPU.
+    private static let opPathHeadWidth = 6
 
+    /// Builds the block of the ranking tests for an indexer of one head
+    /// width.
+    ///
+    /// - Parameter headWidth: The width of one indexer head.
+    /// - Returns: The indexer and the arguments of its call.
+    private static func rankingFixture(
+        headWidth: Int
+    ) throws -> (indexer: DeepSeekV4Indexer, inputs: BlockInputs) {
+        let indexer = try loadedIndexer(seed: weightSeed, headWidth: headWidth)
+        let inputs = try blockInputs(
+            batch: tiledRankingBatch, tokens: tiledRankingTokens, chunks: tiledRankingChunks,
+            offset: tiledRankingOffset, seed: weightSeed, headWidth: headWidth)
+        return (indexer, inputs)
+    }
+
+    /// Checks that each query of the ranking fixture reads the chunks of the
+    /// highest reference score.
+    ///
+    /// - Parameters:
+    ///   - indexer: The indexer under test.
+    ///   - inputs: The arguments of the call.
+    ///   - scoreByteLimit: The most bytes the per-head scores of one tile of
+    ///     the op path hold.
+    private static func expectTheReferenceRanking(
+        of indexer: DeepSeekV4Indexer, inputs: BlockInputs,
+        scoreByteLimit: Int = DeepSeekV4Indexer.oneTileScoreBytes
+    ) {
+        let tokens = tiledRankingTokens
+        let chunks = tiledRankingChunks
         let ranked = indexer.rankedChunks(
             inputs.x, queryResidual: inputs.queryResidual, pooledKeys: inputs.pooledKeys,
-            rope: inputs.rope, offset: inputs.offset, scoreByteLimit: byteLimit)
+            rope: inputs.rope, offset: inputs.offset, scoreByteLimit: scoreByteLimit)
         let picks = DeepSeekV4TestArrays.integers(ranked)
-        let scores = Self.referenceScores(of: indexer, inputs: inputs)
+        let scores = referenceScores(of: indexer, inputs: inputs)
 
-        #expect(ranked.shape == [Self.tiledRankingBatch, tokens, Self.indexTopK])
-        for row in 0 ..< Self.tiledRankingBatch * tokens {
-            let position = Self.tiledRankingOffset + row % tokens
-            let read = picks[(row * Self.indexTopK) ..< ((row + 1) * Self.indexTopK)]
+        #expect(ranked.shape == [tiledRankingBatch, tokens, indexTopK])
+        for row in 0 ..< tiledRankingBatch * tokens {
+            let position = tiledRankingOffset + row % tokens
+            let read = picks[(row * indexTopK) ..< ((row + 1) * indexTopK)]
                 .map(Int.init)
-                .filter { ($0 + 1) * Self.indexerRatio <= position + 1 }
+                .filter { ($0 + 1) * indexerRatio <= position + 1 }
                 .sorted()
-            let expected = Self.referenceChunks(
+            let expected = referenceChunks(
                 scores: scores[(row * chunks) ..< ((row + 1) * chunks)], position: position)
             #expect(read == expected, "row \(row) at position \(position)")
         }
+    }
+
+    @Test func aTiledRankingReadsTheChunksOfTheHighestReferenceScore() throws {
+        let (indexer, inputs) = try Self.rankingFixture(headWidth: Self.opPathHeadWidth)
+        let rowBytes = Self.indexHeadCount * Self.tiledRankingChunks * Self.scoreBytes
+        let byteLimit = Self.tiledRankingBatch * Self.tiledRankingRowsPerTile * rowBytes
+
+        #expect(!DeepSeekV4IndexerScoreKernel.canRun(headDim: indexer.headDim))
+        Self.expectTheReferenceRanking(of: indexer, inputs: inputs, scoreByteLimit: byteLimit)
+    }
+
+    @Test func theKernelRankingReadsTheChunksOfTheHighestReferenceScore() throws {
+        let (indexer, inputs) = try Self.rankingFixture(headWidth: Self.indexHeadDim)
+
+        #expect(DeepSeekV4IndexerScoreKernel.canRun(headDim: indexer.headDim))
+        Self.expectTheReferenceRanking(of: indexer, inputs: inputs)
+    }
+
+    /// The number of matmul nodes the two projections of the indexer give:
+    /// `wq_b` and `weights_proj`.
+    private static let projectionMatmulCount = 2
+
+    /// The number of matmul nodes the per-head scores of the op path give:
+    /// one matmul for all heads of the queries against the pooled keys.
+    private static let scoreMatmulCount = 1
+
+    /// The name `exportToDot(_:)` writes for a matmul node.
+    private static let matmulPrimitive = "Matmul"
+
+    /// The number of matmul nodes in the graph of one ranking.
+    ///
+    /// - Parameter headWidth: The width of one indexer head.
+    /// - Returns: The count of `Matmul` nodes in the graph of the ranked
+    ///   chunks.
+    private static func rankingMatmulCount(headWidth: Int) throws -> Int {
+        let (indexer, inputs) = try rankingFixture(headWidth: headWidth)
+        let ranked = indexer.rankedChunks(
+            inputs.x, queryResidual: inputs.queryResidual, pooledKeys: inputs.pooledKeys,
+            rope: inputs.rope, offset: inputs.offset)
+        return DeepSeekV4TestArrays.nodeCount([ranked], primitive: matmulPrimitive)
+    }
+
+    /// The fused kernel scores the chunks, thus the ranking holds no matmul
+    /// of the queries and the pooled keys, and writes no per-head score
+    /// tensor. The op path of the unaligned head width is the positive
+    /// control: the counter must see its score matmul.
+    @Test func theKernelRankingHoldsNoPerHeadScoreMatmul() throws {
+        #expect(
+            try Self.rankingMatmulCount(headWidth: Self.opPathHeadWidth)
+                == Self.projectionMatmulCount + Self.scoreMatmulCount)
+        #expect(
+            try Self.rankingMatmulCount(headWidth: Self.indexHeadDim)
+                == Self.projectionMatmulCount)
     }
 
     @Test func theRankedChunksOfEachQueryComeInAscendingIndexOrder() throws {

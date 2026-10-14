@@ -9,7 +9,7 @@
 // `Compressor` half, which pools the keys this file scores against, is
 // Libraries/MLXLLM/Models/DeepSeekV4Compressor.swift.
 //
-// Four details do not come from that file.
+// Five details do not come from that file.
 //
 //  1. **A block of one token takes the causal mask too.** The mask of the
 //     file above sits in `DeepseekV4Math.causalMaskedIndexerScores`, and that
@@ -36,6 +36,11 @@
 //     an `activationQATEnabled` flag of its own configuration. The published
 //     DeepSeek-V4-Flash `config.json` names no such key, thus this port
 //     leaves the round trip out.
+//  5. **The GPU scores the chunks in one fused kernel.** The file above
+//     writes the per-head scores of a matmul and adds the heads after it.
+//     On the GPU this file calls ``DeepSeekV4IndexerScoreKernel``, which adds
+//     the heads inside the kernel and writes no per-head scores. Its sums run
+//     in another order, thus a score can differ in the last bits.
 
 import Foundation
 import MLX
@@ -223,7 +228,11 @@ final class DeepSeekV4Indexer: Module {
     /// wholly behind that token. This function then builds no visibility at
     /// all, and a caller needs no mask.
     ///
-    /// The queries go in tiles of
+    /// On the GPU, ``DeepSeekV4IndexerScoreKernel`` scores the whole block in
+    /// one dispatch. It adds the heads inside the kernel and writes only the
+    /// `(batch, tokens, chunks)` scores, with the masked score already in
+    /// place. Off the GPU, or for a head width the kernel does not take, the
+    /// op path scores the block in tiles of
     /// ``queryRowsPerScoreTile(batch:heads:chunks:scoreByteLimit:)`` rows, so
     /// that the per-head scores of one tile stay inside `scoreByteLimit`.
     /// Each query row ranks on its own, thus the tiles give the answer of one
@@ -237,8 +246,8 @@ final class DeepSeekV4Indexer: Module {
     ///     `(batch, chunks, headDim)`. It must hold more than ``topK`` chunks.
     ///   - rope: The rotary position of this layer, which turns the queries.
     ///   - offset: The absolute position of the first token of this block.
-    ///   - scoreByteLimit: The most bytes the per-head scores of one tile
-    ///     hold.
+    ///   - scoreByteLimit: The most bytes the per-head scores of one tile of
+    ///     the op path hold.
     /// - Returns: The chunk indices, shape `(batch, tokens, topK)`, in
     ///   ascending index order for each query.
     func rankedChunks(
@@ -253,16 +262,43 @@ final class DeepSeekV4Indexer: Module {
         precondition(
             chunkCount > topK,
             "a ranking needs more than \(topK) chunks, and the pool holds \(chunkCount)")
-        let queryCount = x.dim(Self.tokenAxis)
+        let operands = scoreOperands(
+            x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope, offset: offset)
+        guard DeepSeekV4IndexerScoreKernel.canRun(headDim: headDim) else {
+            return tiledRankedChunks(
+                operands, queryCount: x.dim(Self.tokenAxis), offset: offset,
+                scoreByteLimit: scoreByteLimit)
+        }
+        let scores = DeepSeekV4IndexerScoreKernel.scores(
+            queries: operands.queries, keys: operands.keys, headWeights: operands.headWeights,
+            scale: scale,
+            visibility: .init(
+                offset: offset, chunkWidth: chunkWidth, maskedScore: Self.maskedScore))
+        return topChunks(of: scores, visible: nil)
+    }
+
+    /// The ranked chunks of one block by the op path, in tiles of query rows.
+    ///
+    /// - Parameters:
+    ///   - operands: The operands of the whole block.
+    ///   - queryCount: The number of tokens in this block.
+    ///   - offset: The absolute position of the first token of this block.
+    ///   - scoreByteLimit: The most bytes the per-head scores of one tile
+    ///     hold.
+    /// - Returns: The chunk indices, shape `(batch, tokens, topK)`, in
+    ///   ascending index order for each query.
+    private func tiledRankedChunks(
+        _ operands: ScoreOperands, queryCount: Int, offset: Int, scoreByteLimit: Int
+    ) -> MLXArray {
+        let chunkCount = operands.keys.dim(Self.chunkAxis)
         let lastChunkEnd = chunkCount * chunkWidth - 1
         let visible =
             lastChunkEnd <= offset
             ? nil
             : chunkVisibility(queryCount: queryCount, offset: offset, chunkCount: chunkCount)
-        let operands = scoreOperands(
-            x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope, offset: offset)
         let rowsPerTile = Self.queryRowsPerScoreTile(
-            batch: x.dim(0), heads: headCount, chunks: chunkCount, scoreByteLimit: scoreByteLimit)
+            batch: operands.keys.dim(0), heads: headCount, chunks: chunkCount,
+            scoreByteLimit: scoreByteLimit)
         return DeepSeekV4Math.tiledRows(
             count: queryCount, rowsPerTile: rowsPerTile, axis: Self.tokenAxis,
             whole: { topChunks(of: chunkScores(operands), visible: visible) },
@@ -281,7 +317,8 @@ final class DeepSeekV4Indexer: Module {
     /// - Parameters:
     ///   - scores: The chunk scores, shape `(batch, tokens, chunks)`.
     ///   - visible: The block-causal visibility of each chunk, or `nil` when
-    ///     every query may read every chunk.
+    ///     every query may read every chunk or the scores already hold the
+    ///     masked score.
     /// - Returns: The chunk indices, shape `(batch, tokens, topK)`, in
     ///   ascending index order for each query.
     private func topChunks(of scores: MLXArray, visible: MLXArray?) -> MLXArray {
@@ -317,8 +354,7 @@ final class DeepSeekV4Indexer: Module {
         /// The rotated queries, shape `(batch, heads, tokens, headDim)`.
         let queries: MLXArray
 
-        /// The pooled keys, turned for the score matmul, shape
-        /// `(batch, 1, headDim, chunks)`.
+        /// The pooled keys, shape `(batch, chunks, headDim)`.
         ///
         /// Every tile of a block reads this one array, thus a cast of a pool
         /// in another dtype runs one time for each block and not one time
@@ -326,7 +362,7 @@ final class DeepSeekV4Indexer: Module {
         let keys: MLXArray
 
         /// The weight of each head for each query, shape
-        /// `(batch, heads, tokens, 1)`.
+        /// `(batch, tokens, heads)`.
         let headWeights: MLXArray
 
         /// The factor each per-head score takes, a float32 scalar.
@@ -340,7 +376,7 @@ final class DeepSeekV4Indexer: Module {
         func tile(_ rows: Range<Int>) -> ScoreOperands {
             ScoreOperands(
                 queries: queries[0..., 0..., rows], keys: keys,
-                headWeights: headWeights[0..., 0..., rows], scale: scale)
+                headWeights: headWeights[0..., rows], scale: scale)
         }
     }
 
@@ -372,26 +408,31 @@ final class DeepSeekV4Indexer: Module {
         let queries = rope(projected, offset: DeepSeekV4RoPE.position(offset))
             .asType(Self.scoreDType)
         let keys = pooledKeys.asType(Self.scoreDType)
-            .expandedDimensions(axis: Self.headAxis)
-            .swappedAxes(-1, Self.matrixRowAxis)
-        let headWeights = (weightsProj(x).asType(Self.scoreDType) * headWeightScale)
-            .swappedAxes(-1, Self.matrixRowAxis)
-            .expandedDimensions(axis: -1)
+        let headWeights = weightsProj(x).asType(Self.scoreDType) * headWeightScale
         return ScoreOperands(
             queries: queries, keys: keys, headWeights: headWeights, scale: MLXArray(scale))
     }
 
-    /// The score of each pooled chunk against each query the operands hold.
+    /// The score of each pooled chunk against each query the operands hold,
+    /// by the op path.
     ///
     /// Each head scores the chunks on its own matmul, and
     /// ``headWeightedSum(_:headWeights:scale:)`` adds the heads into the one
-    /// score the ranking reads, in one compiled kernel.
+    /// score the ranking reads, in one compiled kernel. The keys turn into
+    /// `(batch, 1, headDim, chunks)` and the head weights into
+    /// `(batch, heads, tokens, 1)`; both turns are views, which copy nothing.
     ///
     /// - Parameter operands: The operands of one block or of one tile.
     /// - Returns: The scores, shape `(batch, tokens, chunks)`, in float32.
     private func chunkScores(_ operands: ScoreOperands) -> MLXArray {
-        Self.compiledHeadWeightedSum(
-            operands.queries.matmul(operands.keys), operands.headWeights, operands.scale)
+        let keys = operands.keys
+            .expandedDimensions(axis: Self.headAxis)
+            .swappedAxes(-1, Self.matrixRowAxis)
+        let headWeights = operands.headWeights
+            .swappedAxes(-1, Self.matrixRowAxis)
+            .expandedDimensions(axis: -1)
+        return Self.compiledHeadWeightedSum(
+            operands.queries.matmul(keys), headWeights, operands.scale)
     }
 
     /// Adds the per-head chunk scores into one score for each query and
