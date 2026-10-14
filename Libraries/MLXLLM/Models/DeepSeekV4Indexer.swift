@@ -253,14 +253,12 @@ final class DeepSeekV4Indexer: Module {
             x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope, offset: offset)
         let rowsPerTile = Self.queryRowsPerScoreTile(
             batch: x.dim(0), heads: headCount, chunks: chunkCount, scoreByteLimit: scoreByteLimit)
-        guard rowsPerTile < queryCount else {
-            return topChunks(of: chunkScores(operands), visible: visible)
-        }
-        let tiles = DeepSeekV4Math.rowTiles(count: queryCount, rowsPerTile: rowsPerTile).map {
-            rows in
-            topChunks(of: chunkScores(operands.tile(rows)), visible: visible?[0..., rows])
-        }
-        return concatenated(tiles, axis: Self.tokenAxis)
+        return DeepSeekV4Math.tiledRows(
+            count: queryCount, rowsPerTile: rowsPerTile, axis: Self.tokenAxis,
+            whole: { topChunks(of: chunkScores(operands), visible: visible) },
+            tile: { rows in
+                topChunks(of: chunkScores(operands.tile(rows)), visible: visible?[0..., rows])
+            })
     }
 
     /// The indices of the ``topK`` chunks of the highest score.

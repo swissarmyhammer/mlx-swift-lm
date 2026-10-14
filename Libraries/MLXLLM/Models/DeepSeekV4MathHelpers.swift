@@ -506,4 +506,34 @@ enum DeepSeekV4Math {
             first ..< min(first + rowsPerTile, count)
         }
     }
+
+    /// Runs one path over a block of rows in tiles, and joins the tile
+    /// outputs.
+    ///
+    /// A block whose rows fit in one tile runs `whole` one time, with the
+    /// arguments of the caller and no slice. A larger block runs `tile` on
+    /// each range of ``rowTiles(count:rowsPerTile:)`` in order and joins the
+    /// outputs on `axis`. The paths that read a block of query rows in tiles
+    /// go through this function, so that each tile stays inside its own
+    /// memory limit.
+    ///
+    /// - Parameters:
+    ///   - count: The number of rows in the block.
+    ///   - rowsPerTile: The most rows one tile holds, 1 or more.
+    ///   - axis: The axis the tile outputs hold their rows on.
+    ///   - whole: The path over the whole block.
+    ///   - tile: The path over the rows of one tile.
+    /// - Returns: The output of `whole`, or the tile outputs joined on `axis`.
+    static func tiledRows(
+        count: Int,
+        rowsPerTile: Int,
+        axis: Int,
+        whole: () -> MLXArray,
+        tile: (Range<Int>) -> MLXArray
+    ) -> MLXArray {
+        guard rowsPerTile < count else {
+            return whole()
+        }
+        return concatenated(rowTiles(count: count, rowsPerTile: rowsPerTile).map(tile), axis: axis)
+    }
 }

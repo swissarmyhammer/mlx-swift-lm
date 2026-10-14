@@ -1035,19 +1035,19 @@ final class DeepSeekV4Attention: Module {
         let rowsPerCall = queryRowsPerCall(
             batch: queries.dim(BatchMajorAxis.batch), heads: queries.dim(headAxis),
             keys: keyCount, scoreLimit: scoreLimit)
-        guard rowsPerCall < queryCount else {
-            return MLXFast.scaledDotProductAttention(
-                queries: queries, keys: keys, values: values, scale: scale, mask: mask,
-                sinks: sinks)
-        }
-        let slices = DeepSeekV4Math.rowTiles(count: queryCount, rowsPerTile: rowsPerCall).map {
-            rows in
-            MLXFast.scaledDotProductAttention(
-                queries: queries[0..., 0..., rows], keys: keys, values: values, scale: scale,
-                mask: maskRows(mask, rows: rows, queryCount: queryCount, keyCount: keyCount),
-                sinks: sinks)
-        }
-        return concatenated(slices, axis: queryAxis)
+        return DeepSeekV4Math.tiledRows(
+            count: queryCount, rowsPerTile: rowsPerCall, axis: queryAxis,
+            whole: {
+                MLXFast.scaledDotProductAttention(
+                    queries: queries, keys: keys, values: values, scale: scale, mask: mask,
+                    sinks: sinks)
+            },
+            tile: { rows in
+                MLXFast.scaledDotProductAttention(
+                    queries: queries[0..., 0..., rows], keys: keys, values: values, scale: scale,
+                    mask: maskRows(mask, rows: rows, queryCount: queryCount, keyCount: keyCount),
+                    sinks: sinks)
+            })
     }
 
     /// The part of a mask that one slice of query rows reads.
@@ -1435,17 +1435,17 @@ final class DeepSeekV4Attention: Module {
             batch: queries.dim(BatchMajorAxis.batch), heads: queries.dim(headAxis),
             keys: window.keys.dim(keyAxis) + ranked.pickCount,
             gatheredRowBytes: ranked.gatheredRowBytes, gatherByteLimit: gatherByteLimit)
-        guard rowsPerTile < queryCount else {
-            return attentionOverRankedTile(
-                queries: queries, window: window, ranked: ranked, scale: scale, sinks: sinks)
-        }
-        let tiles = DeepSeekV4Math.rowTiles(count: queryCount, rowsPerTile: rowsPerTile).map {
-            rows in
-            attentionOverRankedTile(
-                queries: queries[0..., 0..., rows], window: window.tile(rows),
-                ranked: ranked.tile(rows), scale: scale, sinks: sinks)
-        }
-        return concatenated(tiles, axis: queryAxis)
+        return DeepSeekV4Math.tiledRows(
+            count: queryCount, rowsPerTile: rowsPerTile, axis: queryAxis,
+            whole: {
+                attentionOverRankedTile(
+                    queries: queries, window: window, ranked: ranked, scale: scale, sinks: sinks)
+            },
+            tile: { rows in
+                attentionOverRankedTile(
+                    queries: queries[0..., 0..., rows], window: window.tile(rows),
+                    ranked: ranked.tile(rows), scale: scale, sinks: sinks)
+            })
     }
 
     /// Attends over the window and the ranked chunks of one tile of query

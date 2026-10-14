@@ -643,4 +643,49 @@ struct DeepSeekV4MathHelpersTests {
 
         #expect(tiles == [0 ..< Self.tiledRowCount])
     }
+
+    /// The axis the tiled-row tests join their tiles on. It is not the first
+    /// axis, thus a join on the wrong axis gives a different shape.
+    private static let tiledAxis = 1
+
+    /// The rows of the block in the tiled-row tests: one value for each row,
+    /// on ``tiledAxis``.
+    private static func tiledBlock() -> MLXArray {
+        MLXArray(Int32(0) ..< Int32(tiledRowCount)).reshaped(1, tiledRowCount)
+    }
+
+    @Test func tiledRowsJoinTheTilesInOrderOnTheAxis() {
+        let block = Self.tiledBlock()
+        var readTiles: [Range<Int>] = []
+
+        let joined = DeepSeekV4Math.tiledRows(
+            count: Self.tiledRowCount, rowsPerTile: Self.tileRows, axis: Self.tiledAxis,
+            whole: {
+                Issue.record("a block of several tiles must not take the whole path")
+                return block
+            },
+            tile: { rows in
+                readTiles.append(rows)
+                return block[0..., rows]
+            })
+
+        #expect(readTiles == [0 ..< 2, 2 ..< 4, 4 ..< 5])
+        #expect(joined.shape == block.shape)
+        #expect(DeepSeekV4TestArrays.integers(joined) == DeepSeekV4TestArrays.integers(block))
+    }
+
+    @Test func tiledRowsTakeTheWholePathWhenEveryRowFits() {
+        let block = Self.tiledBlock()
+
+        let result = DeepSeekV4Math.tiledRows(
+            count: Self.tiledRowCount, rowsPerTile: Self.tiledRowCount, axis: Self.tiledAxis,
+            whole: { block },
+            tile: { rows in
+                Issue.record("a block of one tile must not read tile \(rows)")
+                return block[0..., rows]
+            })
+
+        #expect(result.shape == block.shape)
+        #expect(DeepSeekV4TestArrays.integers(result) == DeepSeekV4TestArrays.integers(block))
+    }
 }
