@@ -442,6 +442,24 @@ struct DeepSeekV4IndexerTests {
         }
     }
 
+    @Test func theRankedChunksOfEachQueryComeInAscendingIndexOrder() throws {
+        let indexer = try Self.loadedIndexer(seed: Self.weightSeed)
+        let inputs = try Self.blockInputs(
+            batch: Self.tiledRankingBatch, tokens: Self.tiledRankingTokens,
+            chunks: Self.tiledRankingChunks, offset: Self.tiledRankingOffset,
+            seed: Self.weightSeed)
+
+        let ranked = indexer.rankedChunks(
+            inputs.x, queryResidual: inputs.queryResidual, pooledKeys: inputs.pooledKeys,
+            rope: inputs.rope, offset: inputs.offset)
+        let picks = DeepSeekV4TestArrays.integers(ranked)
+
+        for row in 0 ..< Self.tiledRankingBatch * Self.tiledRankingTokens {
+            let rowPicks = Array(picks[(row * Self.indexTopK) ..< ((row + 1) * Self.indexTopK)])
+            #expect(rowPicks == rowPicks.sorted(), "row \(row)")
+        }
+    }
+
     /// The query heads of the real checkpoint.
     private static let publishedIndexHeads = 64
 

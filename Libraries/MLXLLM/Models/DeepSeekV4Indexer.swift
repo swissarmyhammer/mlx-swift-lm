@@ -181,6 +181,9 @@ final class DeepSeekV4Indexer: Module {
     /// The axis a `(batch, chunks, headDim)` pool holds its chunks on.
     private static let chunkAxis = 1
 
+    /// The axis a `(batch, tokens, chunks)` score tensor holds its chunks on.
+    private static let scoreChunkAxis = -1
+
     /// The most query rows one tile of the ranking scores.
     ///
     /// The per-head scores of a tile stay inside `scoreByteLimit`. When one
@@ -229,8 +232,8 @@ final class DeepSeekV4Indexer: Module {
     ///   - offset: The absolute position of the first token of this block.
     ///   - scoreByteLimit: The most bytes the per-head scores of one tile
     ///     hold.
-    /// - Returns: The chunk indices, shape `(batch, tokens, topK)`, in no
-    ///   particular order.
+    /// - Returns: The chunk indices, shape `(batch, tokens, topK)`, in
+    ///   ascending index order for each query.
     func rankedChunks(
         _ x: MLXArray,
         queryResidual: MLXArray,
@@ -263,14 +266,24 @@ final class DeepSeekV4Indexer: Module {
 
     /// The indices of the ``topK`` chunks of the highest score.
     ///
+    /// On the GPU, ``DeepSeekV4TopKKernel`` picks the chunks. MLX
+    /// `argPartition` is a full sort of each row, and the kernel takes a few
+    /// passes over the row instead. On another device, `argPartition` picks
+    /// the chunks, and a sort gives them the order of the kernel.
+    ///
     /// - Parameters:
     ///   - scores: The chunk scores, shape `(batch, tokens, chunks)`.
     ///   - visible: The block-causal visibility of each chunk, or `nil` when
     ///     every query may read every chunk.
-    /// - Returns: The chunk indices, shape `(batch, tokens, topK)`.
+    /// - Returns: The chunk indices, shape `(batch, tokens, topK)`, in
+    ///   ascending index order for each query.
     private func topChunks(of scores: MLXArray, visible: MLXArray?) -> MLXArray {
         let ranked = visible.map { MLX.where($0, scores, MLXArray(Self.maskedScore)) } ?? scores
-        return argPartition(-ranked, kth: topK - 1, axis: -1)[.ellipsis, 0 ..< topK]
+        guard DeepSeekV4TopKKernel.canRun else {
+            let picks = argPartition(-ranked, kth: topK - 1, axis: Self.scoreChunkAxis)
+            return sorted(picks[.ellipsis, 0 ..< topK], axis: Self.scoreChunkAxis)
+        }
+        return DeepSeekV4TopKKernel.topIndices(ranked, count: topK)
     }
 
     /// The block-causal visibility of each pooled chunk.
