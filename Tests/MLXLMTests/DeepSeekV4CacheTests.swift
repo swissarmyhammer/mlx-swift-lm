@@ -172,18 +172,36 @@ struct DeepSeekV4CacheTests {
     private static func pooledInCuts(
         _ block: MLXArray, cuts: [Int], layer: Int
     ) throws -> MLXArray {
-        let compressor = try loadedCompressor(layer: layer)
+        let chunks = try pooled(
+            block, cuts: cuts, through: chunkCache(layer: layer),
+            compressor: loadedCompressor(layer: layer), layer: layer)
+        eval(chunks)
+        return chunks
+    }
+
+    /// Pools one block of tokens through a given branch, cut into the given
+    /// lengths.
+    ///
+    /// - Parameters:
+    ///   - block: The whole block, shape `(batch, tokens, hidden)`.
+    ///   - cuts: The length of each call. They must add up to the token count.
+    ///   - branch: The branch that pools the block.
+    ///   - compressor: The compressor of the branch.
+    ///   - layer: The index of the decoder layer.
+    /// - Returns: The chunks the branch holds after the last call.
+    private static func pooled(
+        _ block: MLXArray, cuts: [Int], through branch: DeepSeekV4ChunkCache,
+        compressor: DeepSeekV4Compressor, layer: Int
+    ) throws -> MLXArray {
         let rope = DeepSeekV4RoPE(configuration: try configuration(), layer: layer)
-        let cache = try chunkCache(layer: layer)
         var offset = 0
         var pooled = zeros([batchSize, 0, headDim])
         for cut in cuts {
-            pooled = cache.pooled(
+            pooled = branch.pooled(
                 block[0..., offset ..< (offset + cut), 0...],
                 through: compressor, rope: rope, offset: offset)
             offset += cut
         }
-        eval(pooled)
         return pooled
     }
 
@@ -425,6 +443,118 @@ struct DeepSeekV4CacheTests {
         let duplicate = try #require(cache.copy() as? DeepSeekV4Cache)
         let duplicateChunks = try #require(duplicate.attentionChunks.chunks)
         #expect(DeepSeekV4TestArrays.floats(duplicateChunks) == pooled)
+    }
+
+    // MARK: - The dtype of the indexer pool
+
+    /// The activation dtype of the real checkpoint, which the indexer pool
+    /// tests feed.
+    private static let activationDType = DType.bfloat16
+
+    /// Builds the compressor of ``overlapLayer`` with every weight in
+    /// ``activationDType``, as the real checkpoint holds it.
+    ///
+    /// A compressor with float32 weights pools float32 chunks from any block,
+    /// because its norm and its rotation promote the chunks to float32.
+    ///
+    /// - Returns: The loaded compressor.
+    private static func activationCompressor() throws -> DeepSeekV4Compressor {
+        let compressor = try loadedCompressor(layer: overlapLayer)
+        let weights = compressor.parameters().flattened().map { key, value in
+            (key, value.asType(activationDType))
+        }
+        try compressor.update(parameters: ModuleParameters.unflattened(weights), verify: [.all])
+        return compressor
+    }
+
+    /// Pools a block of ``pooledTokenCount`` tokens in the activation dtype
+    /// through one branch of ``overlapLayer``, cut into the given lengths.
+    ///
+    /// - Parameters:
+    ///   - branch: The branch that pools the block.
+    ///   - cuts: The length of each call. They must add up to
+    ///     ``pooledTokenCount``.
+    /// - Returns: The chunks the branch holds after the last call.
+    private static func activationPooled(
+        through branch: DeepSeekV4ChunkCache, cuts: [Int]
+    ) throws -> MLXArray {
+        let block = fixture([batchSize, pooledTokenCount, hiddenSize], seed: weightSeed)
+            .asType(activationDType)
+        return try pooled(
+            block, cuts: cuts, through: branch, compressor: activationCompressor(),
+            layer: overlapLayer)
+    }
+
+    @Test(arguments: feedCuts)
+    func theIndexerBranchKeepsItsPoolInTheScoreDTypeWithTheBitsOfACast(cuts: [Int]) throws {
+        let cache = DeepSeekV4Cache(configuration: try Self.configuration(), layer: Self.overlapLayer)
+        let indexerBranch = try #require(cache.indexerChunks, "the overlap layer holds an indexer")
+        let kept = try Self.activationPooled(through: indexerBranch, cuts: cuts)
+        let activation = try Self.activationPooled(through: cache.attentionChunks, cuts: cuts)
+
+        #expect(
+            activation.dtype == Self.activationDType,
+            "the premise: the attention branch keeps the activation dtype")
+        #expect(kept.dtype == DeepSeekV4Indexer.scoreDType, "cuts \(cuts)")
+        #expect(
+            DeepSeekV4TestArrays.floats(kept) == DeepSeekV4TestArrays.floats(activation),
+            "cuts \(cuts): the indexer pool holds the bits of a cast of the activation pool")
+    }
+
+    @Test func theIndexerBranchKeepsItsScoreDTypePoolAcrossAStateRoundTrip() throws {
+        let configuration = try Self.configuration()
+        let layer = Self.overlapLayer
+        let cache = DeepSeekV4Cache(configuration: configuration, layer: layer)
+        let keyValues = Self.fixture(
+            [Self.batchSize, 1, Self.pooledTokenCount, Self.headDim], seed: Self.weightSeed + 1)
+        _ = cache.update(keys: keyValues, values: keyValues)
+        let indexerBranch = try #require(cache.indexerChunks, "the overlap layer holds an indexer")
+        let pooled = DeepSeekV4TestArrays.floats(
+            try Self.activationPooled(through: indexerBranch, cuts: [Self.pooledTokenCount]))
+        #expect(!pooled.isEmpty, "the premise: the cache holds pooled chunks to carry over")
+
+        let restored = DeepSeekV4Cache(configuration: configuration, layer: layer)
+        try restored.validatePromptCacheRestore(
+            state: cache.state.map { $0[.ellipsis] }, metaState: cache.metaState)
+        restored.restorePromptCache(
+            state: cache.state.map { $0[.ellipsis] }, metaState: cache.metaState)
+
+        let restoredChunks = try #require(restored.indexerChunks?.chunks)
+        #expect(restoredChunks.dtype == DeepSeekV4Indexer.scoreDType)
+        #expect(
+            DeepSeekV4TestArrays.floats(restoredChunks) == pooled,
+            "the indexer pool must survive the round trip")
+    }
+
+    @Test func aCopyOfTheCachePoolsItsIndexerBranchInTheScoreDType() throws {
+        let cache = DeepSeekV4Cache(configuration: try Self.configuration(), layer: Self.overlapLayer)
+        let duplicate = try #require(cache.copy() as? DeepSeekV4Cache)
+        let indexerBranch = try #require(
+            duplicate.indexerChunks, "the copy of the overlap layer holds an indexer")
+
+        let kept = try Self.activationPooled(through: indexerBranch, cuts: [Self.pooledTokenCount])
+        #expect(kept.dtype == DeepSeekV4Indexer.scoreDType)
+    }
+
+    /// The format name of the prompt caches whose indexer pool held the
+    /// activation dtype.
+    private static let activationIndexerPoolFormat = "DeepSeekV4Cache.projectedRows.v2"
+
+    @Test func aPromptCacheOfTheActivationIndexerPoolFormatFailsClosed() throws {
+        let configuration = try Self.configuration()
+        let layer = Self.overlapLayer
+        let source = DeepSeekV4Cache(configuration: configuration, layer: layer)
+        let keyValues = Self.fixture(
+            [Self.batchSize, 1, Self.slidingWindow, Self.headDim], seed: Self.weightSeed)
+        _ = source.update(keys: keyValues, values: keyValues)
+
+        let template = DeepSeekV4Cache(configuration: configuration, layer: layer)
+        let error = #expect(throws: KVCacheError.self) {
+            try template.validatePromptCacheRestore(
+                state: source.state,
+                metaState: source.local.metaState + [Self.activationIndexerPoolFormat])
+        }
+        #expect(error?.message == DeepSeekV4Cache.earlierFormatMessage)
     }
 
     // MARK: - The whole model

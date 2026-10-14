@@ -41,8 +41,9 @@
 //     make exactly.
 //  4. **No pool quantization.** The file above encodes each pooled row to
 //     UInt8 behind a `DSV4_POOL_QUANT` environment switch. This port keeps the
-//     pool in the activation dtype. The switch is a memory trade of its own
-//     and it changes the numbers.
+//     pool of the attention in the activation dtype, and the pool of the
+//     indexer in the float32 dtype its scores use (task `^atj552p`). The
+//     switch is a memory trade of its own and it changes the numbers.
 //  5. **Any batch size.** The file above opens its pooling path with
 //     `precondition(projectedKV.dim(0) == 1)`, because its pool windows belong
 //     to one request. Nothing here belongs to a request, thus this file reads
@@ -221,6 +222,16 @@ final class DeepSeekV4ChunkCache {
     /// minimal carry and ``holdsEveryRewindableRow`` answers false.
     let rewindableTokenCount: Int
 
+    /// The dtype the pool keeps its chunks in, or `nil` to keep each chunk in
+    /// the dtype of the block that pooled it.
+    ///
+    /// The branch of the indexer keeps ``DeepSeekV4Indexer/scoreDType``. The
+    /// cast of a new chunk runs one time, when the chunk arrives, and a decode
+    /// step then reads the whole pool with no cast. A cast from bfloat16 to
+    /// float32 is exact, thus the chunks keep the bits of the cast that each
+    /// step ran before.
+    let poolDType: DType?
+
     /// The pooled chunks, in a buffer that grows in steps.
     private var pool = DeepSeekV4RowBuffer()
 
@@ -295,11 +306,16 @@ final class DeepSeekV4ChunkCache {
     ///     pooling must read again.
     ///   - rewindableTokenCount: The number of leading positions whose
     ///     projected rows stay whole.
-    init(chunkWidth: Int, retainedChunkCount: Int, rewindableTokenCount: Int) {
+    ///   - poolDType: The dtype the pool keeps its chunks in, or `nil` to
+    ///     keep the dtype of each block.
+    init(
+        chunkWidth: Int, retainedChunkCount: Int, rewindableTokenCount: Int, poolDType: DType?
+    ) {
         precondition(chunkWidth > 0, "a pooled cache needs a compress ratio of more than 0")
         self.chunkWidth = chunkWidth
         self.retainedChunkCount = retainedChunkCount
         self.rewindableTokenCount = rewindableTokenCount
+        self.poolDType = poolDType
     }
 
     /// Builds the empty pooled cache of one layer of a checkpoint.
@@ -307,7 +323,11 @@ final class DeepSeekV4ChunkCache {
     /// - Parameters:
     ///   - configuration: The configuration of the checkpoint.
     ///   - layer: The index of the decoder layer.
-    convenience init(configuration: DeepSeekV4Configuration, layer: Int) {
+    ///   - poolDType: The dtype the pool keeps its chunks in, or `nil` to
+    ///     keep the dtype of each block.
+    convenience init(
+        configuration: DeepSeekV4Configuration, layer: Int, poolDType: DType? = nil
+    ) {
         let ratio = configuration.compressRatio(ofLayer: layer)
         precondition(
             configuration.hasCompressor(layer: layer),
@@ -316,7 +336,7 @@ final class DeepSeekV4ChunkCache {
             chunkWidth: ratio,
             retainedChunkCount: ratio == DeepSeekV4Configuration.indexerCompressRatio
                 ? Self.overlapRetainedChunkCount : Self.plainRetainedChunkCount,
-            rewindableTokenCount: configuration.slidingWindow)
+            rewindableTokenCount: configuration.slidingWindow, poolDType: poolDType)
     }
 
     /// The number of chunks this cache holds.
@@ -385,7 +405,7 @@ final class DeepSeekV4ChunkCache {
         }
         dropRows(before: nextCarryStart(chunkCount: chunkCount, endPosition: endPosition))
         return heldChunks
-            ?? zeros([block.dim(0), 0, compressor.headDim], dtype: block.dtype)
+            ?? zeros([block.dim(0), 0, compressor.headDim], dtype: poolDType ?? block.dtype)
     }
 
     /// Takes this cache back to an earlier absolute position.
@@ -540,7 +560,7 @@ final class DeepSeekV4ChunkCache {
     func copy() -> DeepSeekV4ChunkCache {
         let duplicate = DeepSeekV4ChunkCache(
             chunkWidth: chunkWidth, retainedChunkCount: retainedChunkCount,
-            rewindableTokenCount: rewindableTokenCount)
+            rewindableTokenCount: rewindableTokenCount, poolDType: poolDType)
         duplicate.pool = pool.copy()
         duplicate.heldChunks = duplicate.pool.rows
         duplicate.projectedValues = projectedValues.copy()
@@ -563,7 +583,8 @@ final class DeepSeekV4ChunkCache {
     ///     last block.
     ///   - compressor: The compressor of this branch.
     ///   - rope: The rotary position of this layer.
-    ///   - dtype: The dtype of the pooled chunks.
+    ///   - dtype: The dtype the compressor pools the chunks in. The pool then
+    ///     keeps them in ``poolDType`` when it is set.
     private func poolChunks(
         endingBefore endedChunkCount: Int, through compressor: DeepSeekV4Compressor,
         rope: DeepSeekV4RoPE, dtype: DType
@@ -585,7 +606,7 @@ final class DeepSeekV4ChunkCache {
         // The view must go before the write, so that MLX can write the pool in
         // place rather than copy it.
         heldChunks = nil
-        pool.append(added)
+        pool.append(poolDType.map { added.asType($0) } ?? added)
         heldChunks = pool.rows
     }
 
@@ -673,7 +694,10 @@ public final class DeepSeekV4Cache: KVCache {
         self.attentionChunks = DeepSeekV4ChunkCache(configuration: configuration, layer: layer)
         self.indexerChunks =
             configuration.hasIndexer(layer: layer)
-            ? DeepSeekV4ChunkCache(configuration: configuration, layer: layer) : nil
+            ? DeepSeekV4ChunkCache(
+                configuration: configuration, layer: layer,
+                poolDType: DeepSeekV4Indexer.scoreDType)
+            : nil
     }
 
     /// Builds a cache that holds the given window and branches.
@@ -775,10 +799,14 @@ public final class DeepSeekV4Cache: KVCache {
     /// The name of the format of ``state``, which ``metaState`` writes last.
     ///
     /// The first format kept the RAW block rows of an incomplete chunk and
-    /// wrote no format name. This format keeps the projected rows (task
-    /// `^cm8fq2q`). A raw row cannot become a projected row without the
-    /// compressor, thus a prompt cache of the first format does not restore.
-    static let stateFormat = "DeepSeekV4Cache.projectedRows.v2"
+    /// wrote no format name. A raw row cannot become a projected row without
+    /// the compressor, thus a prompt cache of the first format does not
+    /// restore. The second format, `DeepSeekV4Cache.projectedRows.v2`, kept
+    /// the projected rows (task `^cm8fq2q`) and an indexer pool in the
+    /// activation dtype. This format keeps the indexer pool in
+    /// ``DeepSeekV4Indexer/scoreDType`` (task `^atj552p`), thus the pool of a
+    /// prompt cache has the dtype that the cache appends to it.
+    static let stateFormat = "DeepSeekV4Cache.scoreDTypeIndexerPool.v3"
 
     /// The error message of a prompt cache whose meta state does not end in
     /// ``stateFormat``.

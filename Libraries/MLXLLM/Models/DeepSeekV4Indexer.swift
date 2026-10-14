@@ -121,6 +121,13 @@ final class DeepSeekV4Indexer: Module {
     /// last axis turns each matrix of the stack around.
     private static let matrixRowAxis = -2
 
+    /// The dtype the chunk scores use.
+    ///
+    /// The arithmetic runs in float32, because a sum over 64 heads loses too
+    /// much in bfloat16. The indexer branch of ``DeepSeekV4Cache`` keeps its
+    /// pool in this dtype, thus a decode step reads the pool with no cast.
+    static let scoreDType = DType.float32
+
     /// The score a chunk that its query may not read takes.
     ///
     /// Every real score stands above it, thus the ranking picks a masked chunk
@@ -304,8 +311,8 @@ final class DeepSeekV4Indexer: Module {
 
     // MARK: - The chunk scores
 
-    /// The float32 operands of the chunk scores of one block, or of one tile
-    /// of its query rows.
+    /// The ``scoreDType`` operands of the chunk scores of one block, or of
+    /// one tile of its query rows.
     private struct ScoreOperands {
         /// The rotated queries, shape `(batch, heads, tokens, headDim)`.
         let queries: MLXArray
@@ -313,8 +320,9 @@ final class DeepSeekV4Indexer: Module {
         /// The pooled keys, turned for the score matmul, shape
         /// `(batch, 1, headDim, chunks)`.
         ///
-        /// Every tile of a block reads this one float32 copy, thus the cast
-        /// runs one time for each block and not one time for each tile.
+        /// Every tile of a block reads this one array, thus a cast of a pool
+        /// in another dtype runs one time for each block and not one time
+        /// for each tile.
         let keys: MLXArray
 
         /// The weight of each head for each query, shape
@@ -336,10 +344,12 @@ final class DeepSeekV4Indexer: Module {
         }
     }
 
-    /// The float32 operands of the chunk scores of one block.
+    /// The operands of the chunk scores of one block, in ``scoreDType``.
     ///
-    /// The arithmetic runs in float32, because a sum over 64 heads loses too
-    /// much in bfloat16.
+    /// A pool that is already in ``scoreDType``, as the pool of the cache is,
+    /// takes no cast: MLX gives back the same array for a cast to its own
+    /// dtype. A pool in another dtype, as the pool of a call with no cache
+    /// is, takes one cast for the block.
     ///
     /// - Parameters:
     ///   - x: The block input, shape `(batch, tokens, hidden)`.
@@ -348,7 +358,7 @@ final class DeepSeekV4Indexer: Module {
     ///   - rope: The rotary position of this layer, which turns the queries.
     ///   - offset: The absolute position of the first token of this block.
     /// - Returns: The queries, the keys, the head weights and the scale, in
-    ///   float32.
+    ///   ``scoreDType``.
     private func scoreOperands(
         _ x: MLXArray,
         queryResidual: MLXArray,
@@ -360,11 +370,11 @@ final class DeepSeekV4Indexer: Module {
             .reshaped(x.dim(0), x.dim(Self.tokenAxis), headCount, headDim)
             .swappedAxes(Self.headAxis, Self.batchMajorHeadAxis)
         let queries = rope(projected, offset: DeepSeekV4RoPE.position(offset))
-            .asType(.float32)
-        let keys = pooledKeys.asType(.float32)
+            .asType(Self.scoreDType)
+        let keys = pooledKeys.asType(Self.scoreDType)
             .expandedDimensions(axis: Self.headAxis)
             .swappedAxes(-1, Self.matrixRowAxis)
-        let headWeights = (weightsProj(x).asType(.float32) * headWeightScale)
+        let headWeights = (weightsProj(x).asType(Self.scoreDType) * headWeightScale)
             .swappedAxes(-1, Self.matrixRowAxis)
             .expandedDimensions(axis: -1)
         return ScoreOperands(
