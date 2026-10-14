@@ -33,8 +33,51 @@ comments:
     - evidence: 5 files — Libraries/MLXLLM/Models/DeepSeekV4Cache.swift, Tests/MLXLMTests/DeepSeekV4CacheTests.swift, Tests/MLXLMTests/DeepSeekV4BranchStateFixture.swift, Tests/MLXLMTests/KVCacheByteCountTests.swift, Tests/MLXLMTests/PromptCacheTemplateRestoreTests.swift. `swift build --build-tests` clean (only the SwiftPM "missing creator for mutated node" note that HEAD also gives). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 716 XCTest 0 failures, 1453 Swift Testing tests in 115 suites passed. Greedy parity `greedyFirstTokensMatchThePythonFixture()` passed. 32k decode 30.35 -> about 30.0 ms/tok (profile 31.7 -> 31.35 ms/step), prefill and peak unchanged.
     - next: review
   timestamp: 2026-10-14T22:50:05.864702+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m4y9wh0gtcseyncatk4mdfp9
+  text: |-
+    ### review — findings
+    - evidence: `review sha HEAD~1..HEAD` (commit c97d071): 1 finding, 1 confirmed, 0 refuted — Tests/MLXLMTests/DeepSeekV4CacheTests.swift:328 (`reuse/reuse`).
+    - next: implement the open item in the "Review Findings (2026-10-14 17:50)" section. The task stays in review.
+  timestamp: 2026-10-14T22:52:47.504428+00:00
+- actor: claude-code
+  id: 01m4y9ww78zwdak8e0z44rsbmx
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 5 files; 32k profile window 31.7 → 31.2-31.5 ms/step, prefill and peak no change
+    - test: green — xcrun xctest MLXLMTests, 716 XCTest and 1453 Swift Testing passed, 0 failures; greedy parity passed
+    - commit: c97d071
+    - review: findings — Tests/MLXLMTests/DeepSeekV4CacheTests.swift:328
+  timestamp: 2026-10-14T22:52:58.984960+00:00
+- actor: claude-code
+  id: 01m4ya484nnxd506f4jar3j3ke
+  text: 'Review finding fixed (not committed). `DeepSeekV4ChunkCache.projectedEnd` is internal now (it was `private`), thus `@testable import` reads it. The test helper `projectedEnd(of:)` is deleted. The two tests `aStepProjectsTheRowsOfARunOnlyWhenItEndsTheRun` and `theCacheRewindsInsideTheRunItHasNotProjected` read `cache.projectedEnd`. I examined all the other test helpers and computations in the file: `lastChunkEnd`, `wholeCount` and `leading` are independent expected values or fixture premises, not copies of a cache value, thus they stay. RED: the build failed with "''projectedEnd'' is inaccessible due to ''private'' protection level". GREEN: after the access change, the build passed.'
+  timestamp: 2026-10-14T22:57:00.565880+00:00
+- actor: claude-code
+  id: 01m4ya49ttph1eth840s70jhhh
+  text: |-
+    ### implement — changed
+    - evidence: 2 files — Libraries/MLXLLM/Models/DeepSeekV4Cache.swift, Tests/MLXLMTests/DeepSeekV4CacheTests.swift. `swift build --build-tests`: 0 warnings (only the known "missing creator" note). `xcrun xctest`: XCTest 716 tests, 0 failures; Swift Testing 1453 tests in 115 suites passed.
+    - next: /review. The task stays in doing.
+  timestamp: 2026-10-14T22:57:02.298012+00:00
+- actor: claude-code
+  id: 01m4ya61j7534g4q0z4tkj5801
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (f205a3d). Counts: 0 findings, 0 confirmed, 0 refuted. 7 validator runs, 0 failed. The prior finding at DeepSeekV4CacheTests.swift:328 is checked.
+    - next: none. The task is in done.
+  timestamp: 2026-10-14T22:57:59.367205+00:00
+- actor: claude-code
+  id: 01m4ya6fcc82c38ffzk9w0nfwm
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 2 files; projectedEnd is internal, the test helper is removed
+    - test: green — xcrun xctest MLXLMTests, 716 XCTest and 1453 Swift Testing passed, 0 failures
+    - commit: f205a3d
+    - review: clean — 0 findings; prior finding checked
+  timestamp: 2026-10-14T22:58:13.516612+00:00
+position_column: done
+position_ordinal: ffd080
 title: 'DeepSeek-V4 decode speed: project the compressor rows only at a chunk boundary'
 ---
 ## What
@@ -50,3 +93,17 @@ Estimate at 32k: about 136 MB less weight read and about 120 fewer dispatches on
 - [x] A unit test compares the pooled rows with the current path (tolerance if not bit-exact).
 - [x] Decode ms/token at 32k, before and after, GPU idle.
 - [x] Cache save, load and rewind tests pass. The greedy parity test passes. #deepseek-v4 #performance
+
+## Review Findings (2026-10-14 17:50)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 5 file(s) reviewed, 6 not reviewed.
+
+> 6 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4XSZAC5BBG53QG7XNGJPZMQ.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4XSZAC5BBG53QG7XNGJPZMQ.md` — no validator matches this file
+> - `.kanban/tasks/01M4XSZE6QXG6H3SK9V4N7MTXA.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4XSZE6QXG6H3SK9V4N7MTXA.md` — no validator matches this file
+> - `.kanban/tasks/01M4Y6YAFH5N7R8P3XAJYFKA2H.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4Y6YAFH5N7R8P3XAJYFKA2H.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/DeepSeekV4CacheTests.swift:328` `reuse/reuse` — The test helper `projectedEnd(of:)` recomputes the position after the last projected row from `carryStart` and the projected values count. The cache already computes this in its private `projectedEnd` property. The test copy can drift from the cache rule if the cache rule changes. Expose the cache's `projectedEnd` to the test module, for example as `private(set) var` or an internal getter, and delete the test helper. Then the test reads the same value the cache uses.

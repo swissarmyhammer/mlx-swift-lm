@@ -320,14 +320,6 @@ struct DeepSeekV4CacheTests {
         block[0..., position ..< (position + decodeStepLength), 0...]
     }
 
-    /// The position after the last projected row of a cache.
-    ///
-    /// - Parameter cache: The cache to read.
-    /// - Returns: ``DeepSeekV4ChunkCache/carryStart`` plus the number of projected rows.
-    private static func projectedEnd(of cache: DeepSeekV4ChunkCache) -> Int {
-        cache.carryStart + (cache.projectedRows?.values.dim(tokenAxis) ?? 0)
-    }
-
     @Test(arguments: [overlapLayer, wideLayer])
     func aStepProjectsTheRowsOfARunOnlyWhenItEndsTheRun(layer: Int) throws {
         let ratio = try Self.configuration().compressRatio(ofLayer: layer)
@@ -348,7 +340,7 @@ struct DeepSeekV4CacheTests {
             // reach the new token. Before it they must stop at the last chunk end.
             let lastChunkEnd = ((position + Self.decodeStepLength) / ratio) * ratio
             #expect(
-                Self.projectedEnd(of: cache) == lastChunkEnd,
+                cache.projectedEnd == lastChunkEnd,
                 "layer \(layer), position \(position): only a step that ends a run projects")
         }
     }
@@ -483,7 +475,7 @@ struct DeepSeekV4CacheTests {
             first[0..., 0 ..< stoppedAt, 0...], cuts: [Self.slidingWindow] + steps,
             through: cache, compressor: compressor, layer: layer)
         #expect(
-            Self.projectedEnd(of: cache) < rewindTo,
+            cache.projectedEnd < rewindTo,
             "the premise: the rewind position stands past the projected rows")
         #expect(cache.rewind(to: rewindTo), "the rows from the carry position onward are held")
         let afterRewind = DeepSeekV4TestArrays.floats(

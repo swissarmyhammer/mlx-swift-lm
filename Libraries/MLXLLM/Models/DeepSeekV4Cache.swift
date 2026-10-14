@@ -412,7 +412,7 @@ final class DeepSeekV4ChunkCache {
 
     /// The absolute position after the last projected row, which is where the
     /// unprojected rows start.
-    private var projectedEnd: Int {
+    var projectedEnd: Int {
         carryStart + projectedValues.count
     }
 
