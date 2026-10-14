@@ -124,9 +124,9 @@ final class DeepSeekV4Indexer: Module {
     /// last axis turns each matrix of the stack around.
     private static let matrixRowAxis = -2
 
-    /// The axis the ranked chunk indices of one query sit on, after the
-    /// comparison against every chunk index adds an axis at the end.
-    private static let rankedChunkAxis = -2
+    /// The axis a `(batch, tokens, chunks)` mask holds its chunks on, which is
+    /// also the axis the ranked chunk indices of one query sit on.
+    private static let maskChunkAxis = -1
 
     /// The score a chunk that its query may not read takes.
     ///
@@ -209,10 +209,7 @@ final class DeepSeekV4Indexer: Module {
                 x, queryResidual: queryResidual, pooledKeys: pooledKeys, rope: rope,
                 offset: offset),
             visible: visible)
-        let chunkIndices = MLXArray(Int32(0) ..< Int32(chunkCount))
-        let picked =
-            (ranked.asType(.int32).expandedDimensions(axis: -1) .== chunkIndices)
-            .any(axis: Self.rankedChunkAxis)
+        let picked = Self.membershipMask(of: ranked, chunkCount: chunkCount)
 
         // The ranking spends its whole budget even when fewer chunks stand
         // behind the query, thus the visibility decides again here.
@@ -278,6 +275,32 @@ final class DeepSeekV4Indexer: Module {
     private func topChunks(of scores: MLXArray, visible: MLXArray?) -> MLXArray {
         let ranked = visible.map { MLX.where($0, scores, MLXArray(Self.maskedScore)) } ?? scores
         return argPartition(-ranked, kth: topK - 1, axis: -1)[.ellipsis, 0 ..< topK]
+    }
+
+    /// The membership mask of a set of ranked chunks: a true entry names a
+    /// chunk that the ranking of its query holds.
+    ///
+    /// The mask comes from a scatter of `true` into a mask of `false`, thus
+    /// it writes `batch * tokens * rank` entries and holds no array larger
+    /// than the mask. A broadcast compare of each ranked index against every
+    /// chunk index gives the same mask, but it holds a
+    /// `(batch, tokens, rank, chunkCount)` array. At a 2048-token prefill
+    /// step of a 32k context that array is 8 GiB for each indexer layer.
+    ///
+    /// A repeated index writes the same entry two times, which gives the
+    /// same mask as one write.
+    ///
+    /// - Parameters:
+    ///   - ranked: The ranked chunk indices, shape `(batch, tokens, rank)`.
+    ///     Each index must be in `0 ..< chunkCount`.
+    ///   - chunkCount: The number of pooled chunks.
+    /// - Returns: The mask, shape `(batch, tokens, chunkCount)`, in Booleans.
+    static func membershipMask(of ranked: MLXArray, chunkCount: Int) -> MLXArray {
+        var shape = ranked.shape
+        shape[shape.count + Self.maskChunkAxis] = chunkCount
+        return putAlong(
+            MLXArray.zeros(shape, type: Bool.self), ranked, values: MLXArray(true),
+            axis: Self.maskChunkAxis)
     }
 
     /// The block-causal visibility of each pooled chunk.

@@ -362,6 +362,63 @@ struct DeepSeekV4IndexerTests {
         }
     }
 
+    // MARK: - The membership mask
+
+    /// The number of sequences of the random ranked indices.
+    private static let membershipBatch = 2
+
+    /// The number of tokens of the random ranked indices.
+    private static let membershipTokens = 7
+
+    /// The number of indices each token of the random ranked indices holds.
+    private static let membershipRankWidth = 5
+
+    /// The chunk counts the membership test walks. The first is less than
+    /// ``membershipRankWidth``, thus each random row holds a repeated index.
+    private static let membershipChunkCounts = [3, 5, 16, 64]
+
+    /// The seed of the random ranked indices.
+    private static let membershipSeed: UInt64 = 20_261_014
+
+    /// The axis the ranked indices of one token sit on, after the compare
+    /// adds the chunk axis at the end.
+    private static let comparedRankAxis = -2
+
+    /// The membership mask by the broadcast compare: each ranked index is
+    /// compared against every chunk index, and a chunk is a member when one
+    /// comparison is true.
+    ///
+    /// This is the method the scatter replaces, stated again here so that
+    /// the test measures the scatter against an independent method.
+    ///
+    /// - Parameters:
+    ///   - ranked: The ranked chunk indices, shape `(batch, tokens, rank)`.
+    ///   - chunkCount: The number of pooled chunks.
+    /// - Returns: The mask, shape `(batch, tokens, chunkCount)`.
+    private static func comparedMembership(of ranked: MLXArray, chunkCount: Int) -> MLXArray {
+        let chunkIndices = MLXArray(Int32(0) ..< Int32(chunkCount))
+        return (ranked.asType(.int32).expandedDimensions(axis: -1) .== chunkIndices)
+            .any(axis: comparedRankAxis)
+    }
+
+    @Test func theScatteredMembershipMaskIsTheBroadcastCompare() throws {
+        for chunks in Self.membershipChunkCounts {
+            let ranked = MLXRandom.randInt(
+                low: 0, high: chunks,
+                [Self.membershipBatch, Self.membershipTokens, Self.membershipRankWidth],
+                type: UInt32.self, key: MLXRandom.key(Self.membershipSeed + UInt64(chunks)))
+
+            let scattered = DeepSeekV4Indexer.membershipMask(of: ranked, chunkCount: chunks)
+            let compared = Self.comparedMembership(of: ranked, chunkCount: chunks)
+
+            #expect(scattered.shape == compared.shape, "\(chunks) chunks")
+            #expect(scattered.dtype == .bool, "\(chunks) chunks")
+            #expect(
+                DeepSeekV4TestArrays.integers(scattered) == DeepSeekV4TestArrays.integers(compared),
+                "\(chunks) chunks")
+        }
+    }
+
     /// The number of tokens the first-positions test reads. It reaches one
     /// position past the end of the first chunk.
     private static let firstBlockTokens = 5
