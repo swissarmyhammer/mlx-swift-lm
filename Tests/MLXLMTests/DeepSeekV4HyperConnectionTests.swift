@@ -552,14 +552,23 @@ struct DeepSeekV4HyperConnectionTests {
     /// The leading shape of the parity input: two sequences of five tokens.
     private static let parityLeadingShape = [2, 5]
 
+    /// The largest copy count the fused kernel takes: the copies that fill
+    /// one SIMD group of 32 lanes, one row of the mixing matrix in each lane.
+    private static let fullSimdGroupCopies = 32
+
     /// The cases the parity test reads: the number of copies, the number of
     /// Sinkhorn steps and the width of one copy. The first case is the
     /// DeepSeek-V4-Flash `hc_mult` and step count. One step is only the first
     /// column normalization. An odd copy count catches an index that takes
     /// the count as 4, and a width that is not a multiple of 4 takes the
-    /// scalar path of the weighted sum.
+    /// scalar path of the weighted sum. The last case gives a row to more
+    /// lanes than the DeepSeek-V4-Flash count does.
+    ///
+    /// No case holds 16 or more copies. At 16 and at 32 copies the MLX sum of
+    /// the op path does not add in index order, thus its weighted sum, which
+    /// the kernel did not change, also moves by one unit in the last place.
     private static let parityCases: [(copies: Int, iters: Int, width: Int)] = [
-        (4, 20, 64), (3, 1, 6), (3, 7, 8),
+        (4, 20, 64), (3, 1, 6), (3, 7, 8), (8, 3, 4),
     ]
 
     @Test(arguments: parityCases)
@@ -568,7 +577,36 @@ struct DeepSeekV4HyperConnectionTests {
         // order and rounds each product before it adds it, thus the two give
         // the same bits. A kernel that fused a multiply and an add into one
         // `fma` moved the weighted sum by one unit in the last place.
-        let leading = Self.parityLeadingShape
+        expectFusedParity(
+            leading: Self.parityLeadingShape, copies: copies, iters: iters, width: width)
+    }
+
+    /// The leading shape of one token alone.
+    private static let singleTokenLeadingShape = [1, 1]
+
+    /// A copy count whose mixing matrix of one token holds fewer than the 8
+    /// values that MLX gives to a kernel in the `device` address space.
+    private static let constantSpaceCopies = 2
+
+    @Test
+    func theFusedSinkhornKernelTakesAMixingMatrixInTheConstantAddressSpace() {
+        // MLX gives an input of fewer than 8 values to a custom kernel in the
+        // `constant` address space, not in the `device` address space. With
+        // one token of 2 copies the mixing matrix holds 4 values. A kernel
+        // that reads that input through a `device` pointer does not compile.
+        expectFusedParity(
+            leading: Self.singleTokenLeadingShape, copies: Self.constantSpaceCopies,
+            iters: Self.sinkhornIterations, width: Self.hcMult)
+    }
+
+    /// Checks that the fused kernel gives the bits of the op path.
+    ///
+    /// - Parameters:
+    ///   - leading: The leading shape of the input.
+    ///   - copies: The number of copies.
+    ///   - iters: The number of Sinkhorn steps.
+    ///   - width: The width of one copy.
+    private func expectFusedParity(leading: [Int], copies: Int, iters: Int, width: Int) {
         let seed = UInt64(copies * iters * width)
         let stream = Self.randomArray(leading + [copies, width], seed: seed)
         let pre = sigmoid(Self.randomArray(leading + [copies], seed: seed + 1)) + Self.hcEps
@@ -590,6 +628,17 @@ struct DeepSeekV4HyperConnectionTests {
         #expect(
             DeepSeekV4TestArrays.floats(fused.collapsed)
                 == DeepSeekV4TestArrays.floats(opCollapsed), "the collapsed residual stream")
+    }
+
+    @Test
+    func theFusedSinkhornKernelDoesNotTakeMoreCopiesThanOneSimdGroup() {
+        // The kernel keeps one row of the mixing matrix in each lane of one
+        // SIMD group, thus a copy count of more than one SIMD group must go
+        // to the op path.
+        let copies = Self.fullSimdGroupCopies + 1
+        let stream = MLXArray.zeros(Self.parityLeadingShape + [copies, Self.hcMult])
+
+        #expect(!DeepSeekV4SinkhornKernel.canRun(on: stream, iters: Self.sinkhornIterations))
     }
 
     // MARK: - The head reduce
