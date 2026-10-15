@@ -159,6 +159,17 @@ struct Qwen35ThinkingOffRenderTests {
         }
     }
 
+    @Test(
+        "a turn with thinking off renders a prompt other than a turn with thinking on",
+        arguments: [false, true])
+    func aThinkingOffTurnRendersAnotherPromptThanAThinkingOnTurn(withTools: Bool) async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectThinkingOffAndOnRenderDifferentPrompts(withTools: withTools)
+        } else {
+            Issue.record(Self.unsupportedSystem)
+        }
+    }
+
     // MARK: - The checks
 
     /// One pass with thinking off renders the system block of thinking on, and
@@ -167,16 +178,7 @@ struct Qwen35ThinkingOffRenderTests {
     private func expectAThinkingOffTurnRendersTheSystemBlockOfThinkingOn(withTools: Bool)
         async throws
     {
-        let weights = try makeScriptedWeightsDirectory()
-        defer { try? FileManager.default.removeItem(at: weights) }
-        let model = makeModel(weights: weights, scripts: [Self.answerScript])
-        let store = makeStore()
-
-        _ = try await respond(
-            turns: 1, thinking: false, withTools: withTools, model: model, inside: store)
-
-        let entry = try #require(await store.peek(key(of: model)))
-        let render = ScriptedByteTokenizer().decode(tokenIds: entry.renderTokens)
+        let render = try await renderOfOnePass(thinking: false, withTools: withTools)
         let systemBlock = Self.systemBlock(withTools: withTools)
         #expect(
             render.hasPrefix(systemBlock),
@@ -198,9 +200,7 @@ struct Qwen35ThinkingOffRenderTests {
     ) async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let scripts = [firstThinking, !firstThinking].map {
-            $0 ? Self.thinkingScript : Self.answerScript
-        }
+        let scripts = [firstThinking, !firstThinking].map(Self.script(thinking:))
         let model = makeModel(weights: weights, scripts: scripts)
         let store = makeStore()
 
@@ -216,7 +216,62 @@ struct Qwen35ThinkingOffRenderTests {
         )
     }
 
+    /// A pass with thinking off renders a prompt other than a pass with
+    /// thinking on: the thinking switch of the request gets to the render.
+    ///
+    /// Two passes with thinking on render the same prompt. This control shows
+    /// that the difference comes from the switch, and not from a render that
+    /// changes from pass to pass.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectThinkingOffAndOnRenderDifferentPrompts(withTools: Bool) async throws {
+        let thinkingOn = try await renderOfOnePass(thinking: true, withTools: withTools)
+        let thinkingOnAgain = try await renderOfOnePass(thinking: true, withTools: withTools)
+        let thinkingOff = try await renderOfOnePass(thinking: false, withTools: withTools)
+
+        #expect(
+            thinkingOnAgain == thinkingOn,
+            "Two passes with thinking on must render the same prompt. <<<\(thinkingOn)>>>")
+        #expect(
+            thinkingOff != thinkingOn,
+            "A pass with thinking off must not render the prompt of thinking on. <<<\(thinkingOff)>>>"
+        )
+        #expect(
+            thinkingOn.hasSuffix(
+                Qwen35TemplateContractProcessor.assistantHeader
+                    + Qwen35TemplateContractProcessor.openThinkBlock),
+            "A pass with thinking on must end with the open block. <<<\(thinkingOn)>>>")
+    }
+
     // MARK: - Fixtures
+
+    /// The prompt that one pass of a new session renders.
+    ///
+    /// - Parameters:
+    ///   - thinking: whether the request leaves thinking on.
+    ///   - withTools: whether the request enables ``tool``.
+    /// - Returns: the text of the render that the store holds after the pass.
+    /// - Throws: the error of the executor, or an issue when the store holds no entry.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func renderOfOnePass(thinking: Bool, withTools: Bool) async throws -> String {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let model = makeModel(weights: weights, scripts: [Self.script(thinking: thinking)])
+        let store = makeStore()
+
+        _ = try await respond(
+            turns: 1, thinking: thinking, withTools: withTools, model: model, inside: store)
+
+        let entry = try #require(await store.peek(key(of: model)))
+        return ScriptedByteTokenizer().decode(tokenIds: entry.renderTokens)
+    }
+
+    /// The text that a pass writes.
+    ///
+    /// - Parameter thinking: whether the request of the pass leaves thinking on.
+    /// - Returns: ``thinkingScript`` when thinking is on, else ``answerScript``.
+    private static func script(thinking: Bool) -> String {
+        thinking ? thinkingScript : answerScript
+    }
 
     /// The system block of a render with thinking on.
     private static func systemBlock(withTools: Bool) -> String {
