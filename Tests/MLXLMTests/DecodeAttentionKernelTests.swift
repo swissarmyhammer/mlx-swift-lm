@@ -62,16 +62,6 @@ struct DecodeAttentionKernelTests {
     /// and the bfloat16 of the published checkpoints.
     static let dtypes: [DType] = [.float32, .bfloat16]
 
-    /// The largest gap allowed between the kernel and the SDPA of MLX, as a
-    /// part of the largest reference value, for float32 inputs. Both paths
-    /// add in float32, each in its own order.
-    private static let float32Tolerance: Float = 1e-4
-
-    /// The largest gap for bfloat16 inputs. The reference reads the same
-    /// bfloat16 inputs in float32. The kernel adds in float32 and rounds its
-    /// output to bfloat16, whose step is 2^-8 of the value.
-    private static let bfloat16Tolerance: Float = 8e-3
-
     /// The seed of each random operand.
     private enum Seed {
         static let queries: UInt64 = 20_261_015
@@ -128,18 +118,6 @@ struct DecodeAttentionKernelTests {
             scale: operands.scale, mask: .none)
     }
 
-    /// The largest gap between two outputs, as a part of the largest
-    /// absolute value of the expected output.
-    static func worstGap(_ got: MLXArray, _ expected: MLXArray) -> Float {
-        let gap = abs(got.asType(.float32) - expected).max().item(Float.self)
-        return gap / abs(expected).max().item(Float.self)
-    }
-
-    /// The tolerance of one dtype.
-    static func tolerance(_ dtype: DType) -> Float {
-        dtype == .float32 ? float32Tolerance : bfloat16Tolerance
-    }
-
     @Test(arguments: attentionCases, dtypes)
     func theKernelStaysInsideTheToleranceOfTheSDPA(attentionCase: AttentionCase, dtype: DType) {
         let operands = Self.operands(attentionCase, dtype: dtype)
@@ -155,8 +133,8 @@ struct DecodeAttentionKernelTests {
         #expect(kernel.shape == operands.queries.shape)
         #expect(kernel.dtype == dtype)
         #expect(abs(reference).max().item(Float.self) > 0, "every reference value was zero")
-        let gap = Self.worstGap(kernel, reference)
-        #expect(gap <= Self.tolerance(dtype), "worst gap \(gap)")
+        let gap = AttentionKernelTolerance.worstGap(kernel, reference)
+        #expect(gap <= AttentionKernelTolerance.of(dtype), "worst gap \(gap)")
     }
 
     /// Keys and values whose head numbers do not stand side by side, from a
@@ -177,8 +155,8 @@ struct DecodeAttentionKernelTests {
         let reference = Self.reference(operands, keys: attentionCase.keys)
 
         #expect(spacedKeys.asData(access: .noCopy).strides[Self.widthAxis] != 1)
-        let gap = Self.worstGap(kernel, reference)
-        #expect(gap <= Self.float32Tolerance, "worst gap \(gap)")
+        let gap = AttentionKernelTolerance.worstGap(kernel, reference)
+        #expect(gap <= AttentionKernelTolerance.float32, "worst gap \(gap)")
     }
 
     /// The positive control of the tolerance test: a kernel that did not read
@@ -192,7 +170,7 @@ struct DecodeAttentionKernelTests {
         let full = Self.reference(operands, keys: attentionCase.keys)
         let short = Self.reference(operands, keys: attentionCase.keys - lastBlock)
 
-        #expect(Self.worstGap(short, full) > Self.bfloat16Tolerance)
+        #expect(AttentionKernelTolerance.worstGap(short, full) > AttentionKernelTolerance.bfloat16)
     }
 
     /// The Qwen3.8 attention shape over `keys` cached keys, in bfloat16.

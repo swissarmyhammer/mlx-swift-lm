@@ -21,21 +21,8 @@ struct Qwen35DecodeAttentionTests {
     /// reads, and some more.
     private static let cachedKeys = DecodeAttentionKernel.fewestKeys + 76
 
-    /// The width of one attention head.
-    private static let headDim = 64
-
-    /// The number of query heads; six for each KV head, as in Qwen3.8.
-    private static let queryHeads = 6
-
-    /// The number of KV heads.
-    private static let kvHeads = 1
-
-    /// The width of the residual stream.
-    private static let hiddenSize = 32
-
-    /// The index of the full-attention layer: with a full-attention interval
-    /// of 2, layer 1 is the first full-attention layer.
-    private static let attentionLayer = 1
+    /// The layer: a head of 64 numbers.
+    private static let fixture = Qwen35AttentionLayerFixture(headDim: 64)
 
     /// The seed of each random operand.
     private enum Seed {
@@ -43,37 +30,9 @@ struct Qwen35DecodeAttentionTests {
         static let step: UInt64 = 20_261_021
     }
 
-    /// A small dense Qwen3.5 text configuration with one full-attention layer.
-    private static func configuration() throws -> Qwen35TextConfiguration {
-        let json = """
-            {
-                "model_type": "qwen3_5",
-                "hidden_size": \(hiddenSize),
-                "num_hidden_layers": 2,
-                "intermediate_size": 64,
-                "num_attention_heads": \(queryHeads),
-                "num_key_value_heads": \(kvHeads),
-                "head_dim": \(headDim),
-                "linear_num_value_heads": 2,
-                "linear_num_key_heads": 1,
-                "linear_key_head_dim": 8,
-                "linear_value_head_dim": 8,
-                "linear_conv_kernel_dim": 4,
-                "vocab_size": 32,
-                "full_attention_interval": 2
-            }
-            """
-        return try JSONDecoder().decode(Qwen35TextConfiguration.self, from: Data(json.utf8))
-    }
-
     /// A key cache that holds ``cachedKeys`` random keys and values.
     private static func filledCache() -> KVCacheSimple {
-        let cache = KVCacheSimple()
-        let rows = MLXRandom.normal(
-            [2, 1, kvHeads, cachedKeys, headDim], key: MLXRandom.key(Seed.cache))
-        _ = cache.update(keys: rows[0], values: rows[1])
-        eval(cache.state)
-        return cache
+        fixture.filledCache(keys: cachedKeys, seed: Seed.cache)
     }
 
     /// The kernel output over the cache after the step wrote its key.
@@ -86,14 +45,15 @@ struct Qwen35DecodeAttentionTests {
     }
 
     @Test func theTracedDecodeStepGivesTheKernelOutput() throws {
-        let layer = Qwen35DecoderLayer(try Self.configuration(), layerIdx: Self.attentionLayer)
+        let layer = try Self.fixture.layer()
         let attention = try #require(layer.selfAttn)
         let cache = Self.filledCache()
         let step = MLXRandom.normal(
-            [3, 1, Self.queryHeads, 1, Self.headDim], key: MLXRandom.key(Seed.step))
+            [3, 1, Qwen35AttentionLayerFixture.queryHeads, 1, Self.fixture.headDim],
+            key: MLXRandom.key(Seed.step))
         let queries = step[0]
-        let keys = step[1][0..., ..<Self.kvHeads]
-        let values = step[2][0..., ..<Self.kvHeads]
+        let keys = step[1][0..., ..<Qwen35AttentionLayerFixture.kvHeads]
+        let values = step[2][0..., ..<Qwen35AttentionLayerFixture.kvHeads]
         let rotatedQueries = applyRotaryPosition(
             attention.rope, to: queries, offset: cache.ropeOffset)
 
@@ -107,10 +67,10 @@ struct Qwen35DecodeAttentionTests {
     }
 
     @Test func theGeneralAttentionBodyGivesTheKernelOutput() throws {
-        let layer = Qwen35DecoderLayer(try Self.configuration(), layerIdx: Self.attentionLayer)
-        let attention = try #require(layer.selfAttn)
+        let attention = try #require(try Self.fixture.layer().selfAttn)
         let cache = Self.filledCache()
-        let x = MLXRandom.normal([1, 1, Self.hiddenSize], key: MLXRandom.key(Seed.step))
+        let x = MLXRandom.normal(
+            [1, 1, Qwen35AttentionLayerFixture.hiddenSize], key: MLXRandom.key(Seed.step))
         let (queries, gate, _, _) = attention.projectPreRope(x)
         let rotatedQueries = applyRotaryPosition(
             attention.rope, to: queries, offset: cache.ropeOffset)

@@ -639,8 +639,10 @@ final class Qwen35Attention: Module {
 
     /// The attention of the rotated queries over the cache, after the cache
     /// takes the new keys and values. A plain key cache gives its keys to
-    /// ``DecodeAttentionKernel``, which reads one query over a long cache
-    /// faster than the SDPA of MLX and keeps that SDPA for every other call.
+    /// ``PrefillAttentionKernel``, which reads a prefill block without the
+    /// full score tensor, and to ``DecodeAttentionKernel``, which reads one
+    /// query over a long cache faster than the SDPA of MLX. Every other call
+    /// keeps that SDPA.
     /// A quantized, TurboQuant or cache-native cache keeps its own route.
     ///
     /// - Parameters:
@@ -662,7 +664,7 @@ final class Qwen35Attention: Module {
                 mask: mask)
         }
         let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
-        return DecodeAttentionKernel.scaledDotProductAttention(
+        return PrefillAttentionKernel.scaledDotProductAttention(
             queries: queries, keys: cachedKeys, values: cachedValues, scale: scale, mask: mask)
     }
 

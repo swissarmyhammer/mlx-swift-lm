@@ -25,6 +25,7 @@
 
 import Foundation
 import MLX
+import MLXLMCommon
 
 /// One Metal kernel that gives the DeepSeek-V4 attention output of each query
 /// of a prefill block over its window rows and its pooled rows.
@@ -125,9 +126,9 @@ enum DeepSeekV4SparseAttentionKernel {
 
     /// The Metal header.
     ///
-    /// `lane_coordinate` gives the row and the first column of the two
-    /// elements one lane holds in an 8x8 SIMD-group matrix, the layout MLX
-    /// reads in `BaseMMAFrag::get_coord`. The kernel fills the matrices of
+    /// `lane_coordinate` of ``metalMatrixLaneDeclaration`` gives the row and
+    /// the first column of the two elements one lane holds in an 8x8
+    /// SIMD-group matrix. The kernel fills the matrices of
     /// the queries and of the keys one lane at a time with it, because the
     /// keys of a tile stand at rows that an index gives.
     ///
@@ -147,21 +148,10 @@ enum DeepSeekV4SparseAttentionKernel {
     ///
     /// MLX writes the kernel signature directly after the header, thus the
     /// header ends in a line break.
-    private static let header = """
-        constexpr constant short matrixSide = 8;
-        constexpr constant short elementsPerLane = 2;
-        constexpr constant short lanesPerQuad = 4;
-        constexpr constant short quadRowBit = 4;
-        constexpr constant short quadColumnBit = 2;
+    private static let header =
+        metalMatrixLaneDeclaration + """
         constexpr constant uint bfloat16Bits = 16;
         constexpr constant uint highHalfMask = 0xFFFF0000u;
-
-        inline short2 lane_coordinate(ushort lane) {
-            short quad = lane / lanesPerQuad;
-            short row = (quad & quadRowBit) + (lane / elementsPerLane) % lanesPerQuad;
-            short column = (quad & quadColumnBit) * elementsPerLane + (lane % elementsPerLane) * elementsPerLane;
-            return short2(column, row);
-        }
 
         inline float2 load_pair(const device float* source, size_t index) {
             return *(const device float2*)(source + index);
