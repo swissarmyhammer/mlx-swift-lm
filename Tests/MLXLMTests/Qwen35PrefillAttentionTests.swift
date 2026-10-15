@@ -27,30 +27,15 @@ struct Qwen35PrefillAttentionTests {
     private static let fixture = Qwen35AttentionLayerFixture(headDim: 256)
 
     /// The seed of each random operand.
-    private enum Seed {
-        static let cache: UInt64 = 20_261_120
-        static let block: UInt64 = 20_261_121
-    }
+    private static let seeds = Qwen35AttentionLayerFixture.Seeds(
+        cache: 20_261_120, tokens: 20_261_121)
 
     @Test func thePrefillBlockGivesTheKernelOutput() throws {
-        let attention = try #require(try Self.fixture.layer().selfAttn)
-        let cache = Self.fixture.filledCache(keys: Self.cachedKeys, seed: Seed.cache)
-        let x = MLXRandom.normal(
-            [1, Self.blockTokens, Qwen35AttentionLayerFixture.hiddenSize],
-            key: MLXRandom.key(Seed.block))
-        let (queries, gate, _, _) = attention.projectPreRope(x)
-        let rotatedQueries = applyRotaryPosition(
-            attention.rope, to: queries, offset: cache.ropeOffset)
-
-        let output = attention(x, mask: .causal, cache: cache)
-        let state = cache.state
-        let expected = attention.mergeHeadsAndProject(
-            attention: PrefillAttentionKernel.attention(
-                queries: rotatedQueries, keys: state[0], values: state[1],
-                scale: attention.scale, causal: true),
-            gate: gate)
-
-        #expect(cache.offset == Self.cachedKeys + Self.blockTokens)
-        #expect(arrayEqual(output, expected).item(Bool.self))
+        try Self.fixture.expectTheAttentionBodyGivesTheKernelOutput(
+            cachedKeys: Self.cachedKeys, tokens: Self.blockTokens, mask: .causal, seeds: Self.seeds
+        ) {
+            PrefillAttentionKernel.attention(
+                queries: $0, keys: $1, values: $2, scale: $3, causal: true)
+        }
     }
 }

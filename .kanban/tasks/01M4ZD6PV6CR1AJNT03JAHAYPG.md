@@ -56,6 +56,41 @@ comments:
 
     step: implement / outcome: changed / evidence: peak 20.7 to 17.9 GiB; prefill blocks 8-15 0.16 s faster in 2 of 2 runs, total gain about 0.2-0.4 s (target 3 s not met); all tests pass / task: ^jahaypg
   timestamp: 2026-10-15T17:18:15.109616+00:00
+- actor: claude-code
+  id: 01m509tkm1s3wn6vnywn49zeh9
+  text: |-
+    ### review — findings
+    - scope: review sha HEAD~1..HEAD (commit 78245c8 only)
+    - evidence: 4 findings (4 confirmed, 4 refuted) — Tests/MLXLMTests/PrefillAttentionKernelTests.swift:62, :173, :223, :224
+    - decision: the user keeps this change for the peak memory gain (20.7 GiB to 17.9 GiB). The prefill speed gain at 32k is in the noise, thus the item "Prefill at 32k is faster, measured" stays not ticked.
+    - next: do the 4 items in "Review Findings (2026-10-15 12:26)". The task stays in review.
+  timestamp: 2026-10-15T17:30:13.505047+00:00
+- actor: claude-code
+  id: 01m509v30qj84xfaam08mnscfg
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 10 files; 32k peak 20.7 → 17.9 GiB, prefill 0.2-0.4 s faster (in the noise); kept by decision of the user
+    - test: green — MLXLMTests 716 XCTest and 1497 Swift Testing, 0 failures, 0 warnings; Qwen35 integration 7/7
+    - commit: 78245c8
+    - review: findings — Tests/MLXLMTests/PrefillAttentionKernelTests.swift:62, :173, :223, :224
+  timestamp: 2026-10-15T17:30:29.271518+00:00
+- actor: claude-code
+  id: 01m509yymv2wmanzynxt2wf9qs
+  text: 'Picked up the 4 findings of 2026-10-15 12:26. Research: PrefillAttentionKernel and DecodeAttentionKernel both read float32, float16 and bfloat16 (private `floatTypes`), but both tolerance tests ran only float32 and bfloat16. The decode spaced-keys test also ran only float32. The two kernel suites had near-equal copies of AttentionCase, Operands, operands(), reference(), qwen38Operands() and the spaced-keys body. Qwen35PrefillAttentionTests and Qwen35DecodeAttentionTests had near-equal attention-body test bodies (project, rotate, run the body, merge the kernel output, compare bit for bit). Plan: move all of these into AttentionKernelTolerance.swift and Qwen35AttentionLayerFixture.swift, add a float16 bound, and run every tolerance and spaced-keys test over all three dtypes for both kernels.'
+  timestamp: 2026-10-15T17:32:35.867798+00:00
+- actor: claude-code
+  id: 01m50arpracc3ar2z5arn3v35r
+  text: |-
+    ### implement — changed
+    - What changed (test files only, no library change):
+      - AttentionKernelTolerance.swift: new `dtypes` [float32, float16, bfloat16] (every dtype both kernels read), new `float16` bound 1e-3 and `of(_:)` as a switch. Shared types moved here: `AttentionKernelCase` (with `qwen38(queries:keys:capacity:)`), `AttentionKernelRandomOperands` (per-suite seeds; `operands(_:dtype:)`, `qwen38(queries:keys:dtype:)`), `AttentionKernelOperands` (axes, `maskMode`, `firstKeys`, `withSpacedHeadNumbers`, `reference(causal:)`, `expectInsideTheTolerance`, `expectSpacedHeadNumbersStayInsideTheTolerance`).
+      - DecodeAttentionKernelTests and PrefillAttentionKernelTests: their copies of the case, operands, reference, qwen38 builder and spaced-keys body are gone. The tolerance tests and the spaced-keys tests of both kernels run over all three dtypes (prefill spaced-keys also over both masks). The decode single-query call is `qwen38(queries: 1, ...)`.
+      - Qwen35AttentionLayerFixture.swift: shared `Kernel`, `Seeds`, `rotated`, `kernelOutput` and `expectTheAttentionBodyGivesTheKernelOutput`. Qwen35PrefillAttentionTests and Qwen35DecodeAttentionTests call the one body.
+    - RED probe: with the float16 bound set to 1e-6 for one run, 13 float16 checks failed (decode 4 tolerance + 1 spaced, prefill 6 tolerance + 2 spaced). Measured float16 worst gaps: 2.4e-4 to 4.4e-4, inside 1e-3.
+    - Note: the `replace_all` flag of the files tool replaced only one match each time; I wrote whole files again.
+    - evidence: swift build --build-tests 0 compiler warnings (only the SwiftPM note "missing creator for mutated node"); xcrun xctest MLXLMTests 716 XCTest 0 failures, 1497 Swift Testing passed (positive controls pass); swiftlint no_magic_numbers 0 and swift format lint clean on the 6 files. Findings 12:26 all ticked.
+    - next: review
+  timestamp: 2026-10-15T17:46:39.754261+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Qwen3.8 prefill speed: fused attention kernel for head dim 256 (no full score tensor)'
@@ -79,3 +114,20 @@ scratchpad/qwen38bench at 32k: a micro-benchmark of one call at the last block, 
 - [ ] Prefill at 32k is faster, measured.
 - [ ] A tolerance test compares the kernel with MLX SDPA in float32 and bfloat16, with a positive control.
 - [ ] All MLXLMTests pass, with 0 compiler warnings. #qwen3-8 #performance
+
+## Decision (2026-10-15)
+
+The user decided to keep this change because peak memory decreases from 20.7 GiB to 17.9 GiB. The prefill speed gain at 32k is in the noise. Thus the item "Prefill at 32k is faster, measured" stays not ticked, and this is not a blocker for the change.
+
+## Review Findings (2026-10-15 12:26)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 10 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4ZD6PV6CR1AJNT03JAHAYPG.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4ZD6PV6CR1AJNT03JAHAYPG.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:62` `completeness/invariant-propagation` — The kernel accepts float16 as a query dtype, but the tolerance test never runs float16 inputs. `dtypes` is [.float32, .bfloat16], so the float16 path (half tile size, float16 loads in `load_pair` and `copy_tiles`) has no numeric check against the SDPA of MLX. The only float16 coverage is `runsCausal` in `theKernelReadsOnlyTheDtypesAndMasksItHolds`, which checks dispatch, not output values. A float16 precision or tile bug would pass the suite. Add `.float16` to `dtypes`, so the tolerance test checks float16 output against the float32 reference. Use the `AttentionKernelTolerance.bfloat16` bound for float16 or add a float16 bound, since the 2-byte tile and rounding of the weights match bfloat16. Also add one narrow-load case (`keysWithSpacedHeadNumbersStayInsideTheTolerance`) for bfloat16 as well as float32, because the narrow path is only checked in float32.
+- [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:173` `reuse/reuse` — `qwen38Operands(queries:keys:dtype:)` is a near-match of the private `qwen38Operands(keys:)` in `DecodeAttentionKernelTests`. The prefill helper adds a query count and a dtype parameter. The author wrote a parallel fixture, but it was possible to make the existing fixture more general. Lift the Qwen3.8 shape fixture to a shared helper with `queries`, `keys` and `dtype` parameters, and have both `DecodeAttentionKernelTests` and `PrefillAttentionKernelTests` call it. Keep the single-query decode call as a parameter value, not a separate function.
+- [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:223` `reuse/reuse` — `keysWithSpacedHeadNumbersStayInsideTheTolerance` repeats the body of the same-named test in `DecodeAttentionKernelTests`. Both transpose the keys and values, call a kernel, and check the worst gap against the tolerance. The prefill copy is a parallel test instead of an extension of the existing one. Move the spaced-layout operand builder and the stride assertion into a shared helper, such as the one used for `operands`. Parameterize the kernel call and the causal flag so both suites call one test body.
+- [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:224` `completeness/invariant-propagation` — The narrow-load branch of the kernel (`wide == false`, used when key and value head numbers do not stand side by side) is checked only for float32 inputs. Its bfloat16 and float16 forms are not checked against the SDPA of MLX, although the kernel accepts both dtypes and the wide and narrow branches use different load types (`Unit` is `T` instead of `uint4`). Parameterize `keysWithSpacedHeadNumbersStayInsideTheTolerance` over `dtypes` (after `dtypes` includes `.float16`), and pick the tolerance with `AttentionKernelTolerance.of(dtype)`, so the narrow load is checked for every dtype the kernel accepts.

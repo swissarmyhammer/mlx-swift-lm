@@ -5,6 +5,7 @@
 
 import Foundation
 import MLX
+import Testing
 
 @testable import MLXLLM
 @testable import MLXLMCommon
@@ -12,6 +13,20 @@ import MLX
 /// One small dense Qwen3.5 layer with full attention: six query heads for
 /// one KV head, as in Qwen3.8, and a head width that each test picks.
 struct Qwen35AttentionLayerFixture {
+
+    /// An attention kernel over rotated queries and the cached keys and
+    /// values, with the score factor of the layer.
+    typealias Kernel = (
+        _ queries: MLXArray, _ keys: MLXArray, _ values: MLXArray, _ scale: Float
+    ) -> MLXArray
+
+    /// The seed of each random operand of one test.
+    struct Seeds: Sendable {
+        /// The seed of the filled cache.
+        let cache: UInt64
+        /// The seed of the new tokens of the step.
+        let tokens: UInt64
+    }
 
     /// The number of query heads; six for each KV head, as in Qwen3.8.
     static let queryHeads = 6
@@ -75,5 +90,67 @@ struct Qwen35AttentionLayerFixture {
         _ = cache.update(keys: rows[0], values: rows[1])
         eval(cache.state)
         return cache
+    }
+
+    /// The queries of a step at the rotary position of the cache. Call it
+    /// before the step writes its keys, while the cache offset is the
+    /// position of the first new token.
+    ///
+    /// - Parameters:
+    ///   - queries: The queries before the rotary position.
+    ///   - attention: The attention of the layer.
+    ///   - cache: The cache before the step.
+    /// - Returns: The rotated queries.
+    static func rotated(
+        _ queries: MLXArray, attention: Qwen35Attention, cache: KVCacheSimple
+    ) -> MLXArray {
+        applyRotaryPosition(attention.rope, to: queries, offset: cache.ropeOffset)
+    }
+
+    /// The kernel output over the cache after the step wrote its keys.
+    ///
+    /// - Parameters:
+    ///   - kernel: The attention kernel.
+    ///   - rotatedQueries: The queries of the step, from ``rotated(_:attention:cache:)``.
+    ///   - attention: The attention of the layer.
+    ///   - cache: The cache after the step.
+    /// - Returns: The kernel output.
+    static func kernelOutput(
+        _ kernel: Kernel, rotatedQueries: MLXArray, attention: Qwen35Attention,
+        cache: KVCacheSimple
+    ) -> MLXArray {
+        let state = cache.state
+        return kernel(rotatedQueries, state[0], state[1], attention.scale)
+    }
+
+    /// Checks that the general attention body of the layer gives the kernel
+    /// output bit for bit, for `tokens` random tokens after `cachedKeys`
+    /// cached keys.
+    ///
+    /// - Parameters:
+    ///   - cachedKeys: The number of cached keys ahead of the step.
+    ///   - tokens: The number of new tokens of the step.
+    ///   - mask: The mask the step gives the body.
+    ///   - seeds: The seed of each random operand.
+    ///   - sourceLocation: The location that a failure reports.
+    ///   - kernel: The attention kernel that the body must call.
+    func expectTheAttentionBodyGivesTheKernelOutput(
+        cachedKeys: Int, tokens: Int, mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        seeds: Seeds, sourceLocation: SourceLocation = #_sourceLocation, kernel: Kernel
+    ) throws {
+        let attention = try #require(try layer().selfAttn, sourceLocation: sourceLocation)
+        let cache = filledCache(keys: cachedKeys, seed: seeds.cache)
+        let x = MLXRandom.normal([1, tokens, Self.hiddenSize], key: MLXRandom.key(seeds.tokens))
+        let (queries, gate, _, _) = attention.projectPreRope(x)
+        let rotatedQueries = Self.rotated(queries, attention: attention, cache: cache)
+
+        let output = attention(x, mask: mask, cache: cache)
+        let expected = attention.mergeHeadsAndProject(
+            attention: Self.kernelOutput(
+                kernel, rotatedQueries: rotatedQueries, attention: attention, cache: cache),
+            gate: gate)
+
+        #expect(cache.offset == cachedKeys + tokens, sourceLocation: sourceLocation)
+        #expect(arrayEqual(output, expected).item(Bool.self), sourceLocation: sourceLocation)
     }
 }
