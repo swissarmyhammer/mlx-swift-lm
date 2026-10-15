@@ -14,15 +14,12 @@ import MLXNN
 /// prefill of a turn writes the first token of the turn, and each decode step
 /// writes the next one.
 ///
-/// The conformance is `@unchecked` because ``passes`` and `step` are mutable
-/// and carry no lock. The invariant that makes it safe: one ``ChatSession``
-/// owns this model, and a session runs its forward passes ONE AT A TIME, thus
-/// every mutation happens inside ``callAsFunction(_:cache:)`` and no two calls
-/// overlap. A test reads ``passes`` only after its `respond(to:)` calls return,
-/// thus the read never races a write.
-final class ScriptedTokenModel: Module, LLMModel, KVCacheDimensionProvider,
-    @unchecked Sendable
-{
+/// The model is not `Sendable`, because ``passes`` and `step` are mutable and
+/// carry no lock. One ``ChatSession`` owns this model, and a session runs its
+/// forward passes ONE AT A TIME, thus every mutation happens inside
+/// ``callAsFunction(_:cache:)`` and no two calls overlap. A test reads
+/// ``passes`` only after its `respond(to:)` calls return.
+final class ScriptedTokenModel: Module, LLMModel, KVCacheDimensionProvider {
     /// What one forward pass received.
     struct Pass {
         /// The position the cache held when the pass began.
