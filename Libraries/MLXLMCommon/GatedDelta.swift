@@ -21,19 +21,54 @@ private let computeGatedDeltaG: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXA
     exp(-exp(aLog.asType(.float32)) * softplus(a + dtBias))
 }
 
+// MARK: - Axes
+
+/// The axes of the `(batch, steps, heads, width)` q, k, v and y tensors.
+private enum GatedDeltaAxis {
+    /// The axis that holds the sequences.
+    static let batch = 0
+    /// The axis that holds the steps.
+    static let step = 1
+    /// The axis that holds the heads.
+    static let head = 2
+    /// The axis that holds the numbers of one head.
+    static let width = 3
+}
+
+/// The axes of the `(batch, heads, valueRows, keyNumbers)` recurrent state.
+private enum GatedDeltaStateAxis {
+    /// The axis that holds the heads.
+    static let head = 1
+    /// The axis that holds the value rows.
+    static let valueRow = 2
+    /// The axis that holds the key numbers of one row.
+    static let keyNumber = 3
+}
+
+/// The ranks of the gate and of the mask of one step of the ops path.
+private enum GatedDeltaStepRank {
+    /// One number for each sequence: `(batch)`.
+    static let perSequence = 1
+    /// One number for each head: `(batch, heads)`.
+    static let perHead = 2
+    /// One number for each number of a head: `(batch, heads, width)`.
+    static let perHeadNumber = 3
+}
+
 // MARK: - Metal Kernel
 
-/// The number of lanes of one SIMD group. One SIMD group holds one row of the
-/// recurrent state, and each lane holds `Dk / gatedDeltaSimdWidth` of its
-/// numbers.
-let gatedDeltaSimdWidth = 32
+/// The number of SIMD groups of one threadgroup of `gated_delta_step`. Each
+/// SIMD group holds one value row of the recurrent state.
+private let gatedDeltaStepSimdGroups = 4
 
 /// The Metal helpers that the gated delta kernels share.
 ///
 /// `gated_delta_row` runs one token of the gated delta rule on one row of the
 /// recurrent state: the decay, the delta update, and the output of the row.
 /// One lane holds `N` numbers of the row and the same `N` numbers of the key
-/// and the query. The lanes of the SIMD group hold the whole row.
+/// and the query. The lanes of the SIMD group hold the whole row. A row has
+/// `SIMD_WIDTH` lanes, which is ``metalSimdWidth``, thus each lane holds
+/// `Dk / SIMD_WIDTH` numbers.
 ///
 /// The first sum keeps Kahan compensation under the default fast math of
 /// Metal, for parity with mlx-lm.
@@ -41,7 +76,7 @@ let gatedDeltaSimdWidth = 32
 /// MLX writes the kernel signature directly after the header, thus the
 /// header ends in a line break.
 let gatedDeltaMetalHeader = """
-    constexpr constant int SIMD_WIDTH = \(gatedDeltaSimdWidth);
+    constexpr constant int SIMD_WIDTH = \(metalSimdWidth);
 
     template <int N>
     inline float gated_delta_row(
@@ -180,12 +215,12 @@ func gatedDeltaKernel(
     state: MLXArray,
     mask: MLXArray? = nil
 ) -> (MLXArray, MLXArray) {
-    let B = k.dim(0)
-    let T = k.dim(1)
-    let Hk = k.dim(2)
-    let Dk = k.dim(3)
-    let Hv = v.dim(2)
-    let Dv = v.dim(3)
+    let B = k.dim(GatedDeltaAxis.batch)
+    let T = k.dim(GatedDeltaAxis.step)
+    let Hk = k.dim(GatedDeltaAxis.head)
+    let Dk = k.dim(GatedDeltaAxis.width)
+    let Hv = v.dim(GatedDeltaAxis.head)
+    let Dv = v.dim(GatedDeltaAxis.width)
     let inputType = q.dtype
     let stateType = state.dtype
 
@@ -212,8 +247,8 @@ func gatedDeltaKernel(
             ("Hk", Hk),
             ("Hv", Hv),
         ],
-        grid: (32, Dv, B * Hv),
-        threadGroup: (32, 4, 1),
+        grid: (metalSimdWidth, Dv, B * Hv),
+        threadGroup: (metalSimdWidth, gatedDeltaStepSimdGroups, 1),
         outputShapes: [[B, T, Hv, Dv], state.shape],
         outputDTypes: [inputType, stateType]
     )
@@ -234,27 +269,36 @@ private func gatedDeltaStepOps(
 ) -> (MLXArray, MLXArray) {
     let oldState = state
     let decay: MLXArray
-    if g.ndim == 2 {
-        decay = expandedDimensions(g, axes: [2, 3])
-    } else if g.ndim == 3 {
-        decay = expandedDimensions(g, axis: -2)
+    if g.ndim == GatedDeltaStepRank.perHead {
+        decay = expandedDimensions(
+            g, axes: [GatedDeltaStateAxis.valueRow, GatedDeltaStateAxis.keyNumber])
+    } else if g.ndim == GatedDeltaStepRank.perHeadNumber {
+        decay = expandedDimensions(g, axis: GatedDeltaStateAxis.valueRow)
     } else {
         fatalError("Unsupported gating shape \(g.shape)")
     }
 
     var state = state * decay
-    let kvMem = (state * expandedDimensions(k, axis: -2)).sum(axis: -1)
+    let kvMem = (state * expandedDimensions(k, axis: GatedDeltaStateAxis.valueRow)).sum(axis: -1)
     let delta = (v - kvMem) * expandedDimensions(beta, axis: -1)
-    state = state + expandedDimensions(k, axis: -2) * expandedDimensions(delta, axis: -1)
-    let y = (state * expandedDimensions(q, axis: -2)).sum(axis: -1)
+    state =
+        state + expandedDimensions(k, axis: GatedDeltaStateAxis.valueRow)
+        * expandedDimensions(delta, axis: -1)
+    let y = (state * expandedDimensions(q, axis: GatedDeltaStateAxis.valueRow)).sum(axis: -1)
 
     if let mask {
         let expandedMask: MLXArray
-        if mask.ndim == 1 {
-            expandedMask = expandedDimensions(mask, axes: [1, 2, 3])
-        } else if mask.ndim == 2 {
-            expandedMask = expandedDimensions(mask, axes: [2, 3])
-        } else if mask.ndim == 3 {
+        if mask.ndim == GatedDeltaStepRank.perSequence {
+            expandedMask = expandedDimensions(
+                mask,
+                axes: [
+                    GatedDeltaStateAxis.head, GatedDeltaStateAxis.valueRow,
+                    GatedDeltaStateAxis.keyNumber,
+                ])
+        } else if mask.ndim == GatedDeltaStepRank.perHead {
+            expandedMask = expandedDimensions(
+                mask, axes: [GatedDeltaStateAxis.valueRow, GatedDeltaStateAxis.keyNumber])
+        } else if mask.ndim == GatedDeltaStepRank.perHeadNumber {
             expandedMask = expandedDimensions(mask, axis: -1)
         } else {
             fatalError("Unsupported mask shape \(mask.shape)")
@@ -278,15 +322,35 @@ private func gatedDeltaStepOps(
 let gatedDeltaRecomputeChunk = 16
 
 private enum GatedDeltaRecompute {
+    /// The places of the operands in the `inputs` of ``steps(_:masked:)``.
+    private enum Input {
+        /// The queries.
+        static let q = 0
+        /// The keys.
+        static let k = 1
+        /// The values.
+        static let v = 2
+        /// The decay gates.
+        static let g = 3
+        /// The beta gates.
+        static let beta = 4
+        /// The recurrent state.
+        static let state = 5
+        /// The mask, when there is one.
+        static let mask = 6
+    }
+
     /// `inputs` = [q, k, v, g, beta, state] plus the mask when there is one,
     /// each sliced to the chunk; returns [y, state].
     static func steps(_ inputs: [MLXArray], masked: Bool) -> [MLXArray] {
-        let (q, k, v, g, beta) = (inputs[0], inputs[1], inputs[2], inputs[3], inputs[4])
-        var state = inputs[5]
-        let mask = masked ? inputs[6] : nil
+        let (q, k, v, g, beta) = (
+            inputs[Input.q], inputs[Input.k], inputs[Input.v], inputs[Input.g], inputs[Input.beta]
+        )
+        var state = inputs[Input.state]
+        let mask = masked ? inputs[Input.mask] : nil
         var ys = [MLXArray]()
-        ys.reserveCapacity(q.dim(1))
-        for t in 0 ..< q.dim(1) {
+        ys.reserveCapacity(q.dim(GatedDeltaAxis.step))
+        for t in 0 ..< q.dim(GatedDeltaAxis.step) {
             let (y, newState) = gatedDeltaStepOps(
                 q: q[0..., t],
                 k: k[0..., t],
@@ -299,7 +363,7 @@ private enum GatedDeltaRecompute {
             ys.append(y)
             state = newState
         }
-        return [MLX.stacked(ys, axis: 1), state]
+        return [MLX.stacked(ys, axis: GatedDeltaAxis.step), state]
     }
 
     // The closure holds a locked state object; two callers serialise on it.
@@ -327,20 +391,20 @@ func gatedDeltaOps(
     state: MLXArray? = nil,
     mask: MLXArray? = nil
 ) -> (MLXArray, MLXArray) {
-    let B = q.dim(0)
-    let T = q.dim(1)
-    let Hk = q.dim(2)
-    let Dk = q.dim(3)
-    let Hv = v.dim(2)
-    let Dv = v.dim(3)
+    let B = q.dim(GatedDeltaAxis.batch)
+    let T = q.dim(GatedDeltaAxis.step)
+    let Hk = q.dim(GatedDeltaAxis.head)
+    let Dk = q.dim(GatedDeltaAxis.width)
+    let Hv = v.dim(GatedDeltaAxis.head)
+    let Dv = v.dim(GatedDeltaAxis.width)
 
     var q = q
     var k = k
 
     let repeatFactor = Hv / Hk
     if repeatFactor > 1 {
-        q = repeated(q, count: repeatFactor, axis: -2)
-        k = repeated(k, count: repeatFactor, axis: -2)
+        q = repeated(q, count: repeatFactor, axis: GatedDeltaAxis.head)
+        k = repeated(k, count: repeatFactor, axis: GatedDeltaAxis.head)
     }
 
     var state = state ?? MLXArray.zeros([B, Hv, Dv, Dk], dtype: .float32)
@@ -366,7 +430,7 @@ func gatedDeltaOps(
         state = out[1]
     }
 
-    let y = ys.count == 1 ? ys[0] : MLX.concatenated(ys, axis: 1)
+    let y = ys.count == 1 ? ys[0] : MLX.concatenated(ys, axis: GatedDeltaAxis.step)
     return (y, state)
 }
 
@@ -387,10 +451,10 @@ public func gatedDeltaUpdate(
     let beta = sigmoid(b).asType(.float32)
     let g = computeGatedDeltaG(aLog, a, dtBias)
 
-    let B = q.dim(0)
-    let Dk = q.dim(3)
-    let Hv = v.dim(2)
-    let Dv = v.dim(3)
+    let B = q.dim(GatedDeltaAxis.batch)
+    let Dk = q.dim(GatedDeltaAxis.width)
+    let Hv = v.dim(GatedDeltaAxis.head)
+    let Dv = v.dim(GatedDeltaAxis.width)
 
     // State kept in fp32 to match Python mlx-lm. Using q.dtype (bf16) loses
     // precision across T-step recurrence, compounding rounding error.
@@ -399,18 +463,19 @@ public func gatedDeltaUpdate(
         state = state.asType(.float32)
     }
 
-    // The fused kernel distributes Dk over exactly 32 simd lanes
-    // (`n_per_t = Dk / 32`, integer-truncating). A key head dim that is not a
-    // multiple of 32 would silently drop its trailing `Dk % 32` state
-    // dimensions and produce wrong output with no error. Stock Qwen3.5 uses
-    // Dk = 192 (a multiple of 32), but the value is config-driven, so route any
-    // non-multiple-of-32 Dk to the ops fallback, which handles an arbitrary key
-    // dimension correctly (slower, but never truncating).
+    // The fused kernel distributes Dk over exactly `metalSimdWidth` simd lanes
+    // (`n_per_t = Dk / SIMD_WIDTH`, integer-truncating). A key head dim that is
+    // not a multiple of `metalSimdWidth` would silently drop its trailing
+    // `Dk % metalSimdWidth` state dimensions and produce wrong output with no
+    // error. Stock Qwen3.5 uses Dk = 192 (a multiple of `metalSimdWidth`), but
+    // the value is config-driven, so route any other Dk to the ops fallback,
+    // which handles an arbitrary key dimension correctly (slower, but never
+    // truncating).
     //
     // `useKernel: false` is for training: the kernel is a custom Metal
     // kernel and has no gradient, so a model in training mode passes
     // `!training` here, as the Python model does with `use_kernel`.
-    if useKernel, GatedDeltaKernelManager.shared.kernel != nil, Dk % 32 == 0 {
+    if useKernel, GatedDeltaKernelManager.shared.kernel != nil, Dk % metalSimdWidth == 0 {
         return gatedDeltaKernel(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
     }
 

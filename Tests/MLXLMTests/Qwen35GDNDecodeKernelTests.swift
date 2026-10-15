@@ -58,6 +58,21 @@ struct Qwen35GDNDecodeKernelTests {
     /// The conv taps of the Qwen 3.5 checkpoints.
     private static let convTaps = 4
 
+    /// The query heads of the full-attention layers of the test
+    /// configuration. The test never runs these layers.
+    private static let attentionHeads = 2
+
+    /// The head width of the full-attention layers of the test
+    /// configuration.
+    private static let attentionHeadDim = 32
+
+    /// The vocabulary size of the test configuration.
+    private static let vocabularySize = 32
+
+    /// The layer interval of the full-attention layers of the test
+    /// configuration.
+    private static let fullAttentionInterval = 2
+
     /// The largest gap allowed between the kernel and the op path, as a part
     /// of the largest reference value, for bfloat16: two steps of 2^-8.
     private static let bfloat16Tolerance: Float = 8e-3
@@ -100,16 +115,16 @@ struct Qwen35GDNDecodeKernelTests {
                 "hidden_size": \(hiddenSize),
                 "num_hidden_layers": 1,
                 "intermediate_size": \(hiddenSize),
-                "num_attention_heads": 2,
+                "num_attention_heads": \(attentionHeads),
                 "num_key_value_heads": 1,
-                "head_dim": 32,
+                "head_dim": \(attentionHeadDim),
                 "linear_num_value_heads": \(headCase.valueHeads),
                 "linear_num_key_heads": \(headCase.keyHeads),
                 "linear_key_head_dim": \(headCase.keyHeadDim),
                 "linear_value_head_dim": \(headCase.valueHeadDim),
                 "linear_conv_kernel_dim": \(convTaps),
-                "vocab_size": 32,
-                "full_attention_interval": 2
+                "vocab_size": \(vocabularySize),
+                "full_attention_interval": \(fullAttentionInterval)
             }
             """
         let configuration = try JSONDecoder().decode(

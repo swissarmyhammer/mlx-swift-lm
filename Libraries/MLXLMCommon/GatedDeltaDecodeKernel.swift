@@ -144,13 +144,29 @@ package enum GatedDeltaDecodeKernel {
         package let recurrentState: MLXArray
     }
 
-    /// The most SIMD groups of one threadgroup: 1024 threads, the limit of
-    /// Metal.
-    private static let mostSimdGroups = 32
+    /// The most threads of one threadgroup: the limit of Metal.
+    private static let mostThreadgroupThreads = 1024
 
-    /// The most float32 numbers the threadgroup memory of the kernel holds:
-    /// 32 KB, the limit of Metal.
-    private static let mostThreadgroupNumbers = 8192
+    /// The most SIMD groups of one threadgroup.
+    private static let mostSimdGroups = mostThreadgroupThreads / metalSimdWidth
+
+    /// The places of the outputs of the kernel, in the order of its
+    /// `outputNames`.
+    private enum Output {
+        /// The gated, normalized output of the heads.
+        static let output = 0
+        /// The recurrent state after the token.
+        static let recurrentState = 1
+        /// The conv state after the token.
+        static let convState = 2
+    }
+
+    /// The most bytes of threadgroup memory of one threadgroup: 32 KB, the
+    /// limit of Metal.
+    private static let mostThreadgroupBytes = 32_768
+
+    /// The most float32 numbers the threadgroup memory of the kernel holds.
+    private static let mostThreadgroupNumbers = mostThreadgroupBytes / MemoryLayout<Float>.size
 
     /// The dtypes of the token inputs the kernel reads.
     private static let inputTypes: [DType] = [.float16, .bfloat16]
@@ -192,37 +208,38 @@ package enum GatedDeltaDecodeKernel {
     /// compiled MLX kernels round. `conv_silu` computes the conv taps of one
     /// channel in float32, as `decodeConv` of the model does, then the SiLU in
     /// the input type.
-    private static let header = gatedDeltaMetalHeader + """
-        template <typename T>
-        inline T sigmoid_of(T x) {
-          auto y = 1 / (1 + metal::exp(metal::abs(x)));
-          return (x < 0) ? y : 1 - y;
-        }
+    private static let header =
+        gatedDeltaMetalHeader + """
+            template <typename T>
+            inline T sigmoid_of(T x) {
+              auto y = 1 / (1 + metal::exp(metal::abs(x)));
+              return (x < 0) ? y : 1 - y;
+            }
 
-        template <typename T>
-        inline T softplus_of(T x) {
-          T zero = T(0);
-          T largest = metal::max(x, zero);
-          T smallest = metal::min(x, zero);
-          return (largest == metal::numeric_limits<T>::infinity())
-              ? largest
-              : (largest + log1p(metal::exp(smallest - largest)));
-        }
+            template <typename T>
+            inline T softplus_of(T x) {
+              T zero = T(0);
+              T largest = metal::max(x, zero);
+              T smallest = metal::min(x, zero);
+              return (largest == metal::numeric_limits<T>::infinity())
+                  ? largest
+                  : (largest + log1p(metal::exp(smallest - largest)));
+            }
 
-        template <typename T, typename W>
-        inline float conv_silu(
-            const device T* state, const device T* token, const device W* weight,
-            uint channel, int taps, int channels) {
-          float sum = float(state[channel]) * float(weight[channel * taps]);
-          for (int tap = 1; tap < taps; ++tap) {
-            float x = tap < taps - 1 ? float(state[tap * channels + channel]) : float(token[channel]);
-            sum = sum + x * float(weight[channel * taps + tap]);
-          }
-          T pre = static_cast<T>(sum);
-          return float(pre * sigmoid_of(pre));
-        }
+            template <typename T, typename W>
+            inline float conv_silu(
+                const device T* state, const device T* token, const device W* weight,
+                uint channel, int taps, int channels) {
+              float sum = float(state[channel]) * float(weight[channel * taps]);
+              for (int tap = 1; tap < taps; ++tap) {
+                float x = tap < taps - 1 ? float(state[tap * channels + channel]) : float(token[channel]);
+                sum = sum + x * float(weight[channel * taps + tap]);
+              }
+              T pre = static_cast<T>(sum);
+              return float(pre * sigmoid_of(pre));
+            }
 
-        """
+            """
 
     /// The kernel body.
     ///
@@ -242,6 +259,7 @@ package enum GatedDeltaDecodeKernel {
         constexpr int THREADS = SIMD_GROUPS * SIMD_WIDTH;
         constexpr int ROWS = Dv / SIMD_GROUPS;
         constexpr int V_AT = QK_BLOCKS * Dk;
+        constexpr int STATE_ROWS = TAPS - 1;
         threadgroup float head_inputs[V_AT + Dv];
         threadgroup float head_output[Dv];
 
@@ -254,11 +272,11 @@ package enum GatedDeltaDecodeKernel {
         uint key_head = value_head / (Hv / Hk);
 
         const device InT* token = qkv + sequence * CHANNELS;
-        const device InT* state = conv_state + sequence * (TAPS - 1) * CHANNELS;
+        const device InT* state = conv_state + sequence * STATE_ROWS * CHANNELS;
 
         // The conv state after the token: every thread of the grid writes at
         // most a few numbers.
-        uint state_numbers = (TAPS - 1) * CHANNELS;
+        uint state_numbers = STATE_ROWS * CHANNELS;
         uint grid_threads = threads_per_grid.x * threads_per_grid.y * threads_per_grid.z;
         uint grid_thread = (thread_position_in_grid.z * threads_per_grid.y + thread_position_in_grid.y)
             * threads_per_grid.x + thread_position_in_grid.x;
@@ -266,8 +284,8 @@ package enum GatedDeltaDecodeKernel {
           uint from = i / state_numbers;
           uint row = (i % state_numbers) / CHANNELS;
           uint channel = i % CHANNELS;
-          conv_out[i] = row + 1 < TAPS - 1
-              ? conv_state[(from * (TAPS - 1) + row + 1) * CHANNELS + channel]
+          conv_out[i] = row + 1 < STATE_ROWS
+              ? conv_state[(from * STATE_ROWS + row + 1) * CHANNELS + channel]
               : qkv[from * CHANNELS + channel];
         }
 
@@ -390,7 +408,7 @@ package enum GatedDeltaDecodeKernel {
     private static func fits(_ shape: HeadShape) -> Bool {
         let threadgroupNumbers =
             queryKeyBlocks * shape.keyHeadDim + shape.valueHeadDim + shape.valueHeadDim
-        return shape.keyHeadDim % gatedDeltaSimdWidth == 0
+        return shape.keyHeadDim % metalSimdWidth == 0
             && shape.valueHeadDim % shape.simdGroups == 0
             && shape.valueHeads % shape.keyHeads == 0
             && shape.taps >= fewestTaps
@@ -473,7 +491,8 @@ package enum GatedDeltaDecodeKernel {
                 weights: weights),
             "the gated delta decode kernel cannot run a step of conv input \(inputs.qkv.shape) "
                 + "and recurrent state \(recurrentState.shape)")
-        guard let shape = headShape(inputs: inputs, recurrentState: recurrentState, weights: weights)
+        guard
+            let shape = headShape(inputs: inputs, recurrentState: recurrentState, weights: weights)
         else { preconditionFailure("canRun checks the head shape") }
         let batch = inputs.qkv.dim(Axis.batch)
         let outputs = kernel(
@@ -486,13 +505,15 @@ package enum GatedDeltaDecodeKernel {
                 ("Dk", shape.keyHeadDim), ("Dv", shape.valueHeadDim), ("Hk", shape.keyHeads),
                 ("Hv", shape.valueHeads), ("TAPS", shape.taps), ("SIMD_GROUPS", shape.simdGroups),
             ],
-            grid: (gatedDeltaSimdWidth, shape.simdGroups, batch * shape.valueHeads),
-            threadGroup: (gatedDeltaSimdWidth, shape.simdGroups, 1),
+            grid: (metalSimdWidth, shape.simdGroups, batch * shape.valueHeads),
+            threadGroup: (metalSimdWidth, shape.simdGroups, 1),
             outputShapes: [
                 [batch, 1, shape.valueHeads * shape.valueHeadDim], recurrentState.shape,
                 convState.shape,
             ],
             outputDTypes: [inputs.qkv.dtype, recurrentState.dtype, convState.dtype])
-        return Step(output: outputs[0], convState: outputs[2], recurrentState: outputs[1])
+        return Step(
+            output: outputs[Output.output], convState: outputs[Output.convState],
+            recurrentState: outputs[Output.recurrentState])
     }
 }

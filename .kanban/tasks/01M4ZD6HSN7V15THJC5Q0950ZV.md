@@ -52,6 +52,41 @@ comments:
     - evidence: 4 files — Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift (new), Libraries/MLXLMCommon/GatedDelta.swift, Libraries/MLXLLM/Models/Qwen35.swift, Tests/MLXLMTests/Qwen35GDNDecodeKernelTests.swift (new). Decode at 32k, same-session A/B profile: 29.89 -> 29.03 ms/token (-0.86 ms); dispatches 1446 -> 870 per token; prefill and peak memory unchanged; reuse check PASS. MLXLMTests: 716 XCTest + 1488 Swift Testing, 0 failures, 0 skipped; Qwen35 real-weights integration 7/7 passed.
     - next: /review. Card target 2-3 ms not reached (about 1 ms was the most to gain, see the comment above). Follow-up ^znzpvzb.
   timestamp: 2026-10-15T14:39:31.488236+00:00
+- actor: claude-code
+  id: 01m5007sws2etyfr3bm3qcmk8y
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (a6c0dac). 1 finding, 1 confirmed, 0 refuted. Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift:496 code-hygiene/magic-numbers-swift.
+    - next: Replace the magic numbers with named constants in all of GatedDeltaDecodeKernel.swift. Then run the review again. The task stays in review.
+  timestamp: 2026-10-15T14:42:40.153489+00:00
+- actor: claude-code
+  id: 01m500869ev99tz7pc4gmt4qxx
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 4 files; 32k decode 29.89 → 29.03 ms/token, kernels per token 1446 → 870
+    - test: green — MLXLMTests 716 XCTest and 1488 Swift Testing, 0 failures, 0 warnings; Qwen35 integration 7/7
+    - commit: a6c0dac
+    - review: findings — Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift:496
+  timestamp: 2026-10-15T14:42:52.846543+00:00
+- actor: claude-code
+  id: 01m500t417jh3rnw3rj5e9qgyg
+  text: |-
+    Fix of the finding `code-hygiene/magic-numbers-swift` (pure refactor, same values):
+
+    - The rule runs `swiftlint no_magic_numbers` (allowed: 0, 1, -1, 100). Before the fix it found 37 violations in GatedDeltaDecodeKernel.swift (1) and GatedDelta.swift (36). After the fix: 0 in the 5 changed files.
+    - New Libraries/MLXLMCommon/MetalSimdWidth.swift: `metalSimdWidth = 32`, the one shared SIMD width. It replaces `gatedDeltaSimdWidth` (GatedDelta.swift) and the private `DecodeAttentionKernel.simdWidth`. Both kernels write it into their Metal source as `SIMD_WIDTH`. New file in MLXLMCommon; no ARCHITECTURE.md exists.
+    - GatedDeltaDecodeKernel.swift: `Output` enum names the output places (the finding line). `mostSimdGroups = mostThreadgroupThreads (1024) / metalSimdWidth`, `mostThreadgroupNumbers = mostThreadgroupBytes (32_768) / MemoryLayout<Float>.size`. Metal: `constexpr int STATE_ROWS = TAPS - 1` replaces the four `TAPS - 1`.
+    - GatedDelta.swift: `GatedDeltaAxis` (batch, step, head, width), `GatedDeltaStateAxis` (head, valueRow, keyNumber), `GatedDeltaStepRank` (perSequence, perHead, perHeadNumber), `GatedDeltaRecompute.Input` (input places), `gatedDeltaStepSimdGroups = 4` (threadgroup of `gated_delta_step`); grid width and the `Dk % 32` check use `metalSimdWidth`. The `axis: -2` operands are now the positive axes of the same rank (`repeated(..., axis: 2)` on 4-D q/k; `expandedDimensions(..., axis: 2)` on 3-D k/q/g), which give the same shapes.
+    - Qwen35GDNDecodeKernelTests.swift: the numbers of the JSON configuration have names (attentionHeads, attentionHeadDim, vocabularySize, fullAttentionInterval). swiftlint found no violation in this file before.
+    - swift-format reformatted the `header` string of GatedDeltaDecodeKernel.swift (indentation of the multi-line literal only; the string content does not change) and one `guard` line.
+  timestamp: 2026-10-15T14:52:40.359607+00:00
+- actor: claude-code
+  id: 01m500t9aqeeg6vbsyxc8pnzqm
+  text: |-
+    ### implement — changed
+    - evidence: 5 files — Libraries/MLXLMCommon/MetalSimdWidth.swift (new), Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift, Libraries/MLXLMCommon/GatedDelta.swift, Libraries/MLXLMCommon/DecodeAttentionKernel.swift, Tests/MLXLMTests/Qwen35GDNDecodeKernelTests.swift. swiftlint no_magic_numbers: 37 -> 0. `swift build --build-tests`: 0 compiler warnings (only the SwiftPM notice "missing creator for mutated node"). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: XCTest 716 tests 0 failures; Swift Testing 1488 tests in 120 suites passed. Real weights (xcodebuild -only-testing Qwen35SessionPromptCacheTests + Qwen35CheckpointIntegrationTests): 7 tests in 2 suites passed. Finding flipped to [x]. Not committed.
+    - next: /review
+  timestamp: 2026-10-15T14:52:45.783443+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Qwen3.8 decode speed: fuse the small GDN kernels of each linear-attention layer'
@@ -75,3 +110,15 @@ scratchpad/qwen38bench at 32k: profile and step modes for decode (two runs each,
 - [x] Decode at 32k is faster, measured.
 - [x] A tolerance test compares the fused kernel with the op path, with a positive control.
 - [x] All MLXLMTests pass, with 0 compiler warnings. #qwen3-8 #performance
+
+## Review Findings (2026-10-15 09:40)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 4 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4ZD6HSN7V15THJC5Q0950ZV.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4ZD6HSN7V15THJC5Q0950ZV.md` — no validator matches this file
+> - `.kanban/tasks/01M5000W20Q4CW37GXFZNZPVZB.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5000W20Q4CW37GXFZNZPVZB.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift:496` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.

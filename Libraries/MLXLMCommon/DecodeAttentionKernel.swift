@@ -30,9 +30,6 @@ package enum DecodeAttentionKernel {
     /// MLX is faster, because it reads the keys in one pass.
     static let fewestKeys = 1024
 
-    /// The number of lanes of one SIMD group.
-    private static let simdWidth = 32
-
     /// The number of groups the query heads of one KV head make. Each SIMD
     /// group holds one group of heads, and the SIMD groups of the other
     /// groups read the same key rows.
@@ -100,7 +97,7 @@ package enum DecodeAttentionKernel {
     /// MLX writes the kernel signature directly after the header, thus the
     /// header ends in a line break.
     private static let header = """
-        constexpr constant int SIMD_WIDTH = \(simdWidth);
+        constexpr constant int SIMD_WIDTH = \(metalSimdWidth);
         constexpr constant int HEAD_GROUPS = \(headGroups);
         constexpr constant int BLOCK_SIMD_GROUPS = \(blockSimdGroups);
         constexpr constant int COMBINE_SIMD_GROUPS = \(combineSimdGroups);
@@ -394,12 +391,12 @@ package enum DecodeAttentionKernel {
     /// registers: the query heads make an even number for each KV head, and
     /// the lanes share the head width evenly.
     private static func headShapeFits(queryHeads: Int, kvHeads: Int, headDim: Int) -> Bool {
-        guard kvHeads > 0, queryHeads % kvHeads == 0, headDim % simdWidth == 0 else {
+        guard kvHeads > 0, queryHeads % kvHeads == 0, headDim % metalSimdWidth == 0 else {
             return false
         }
         let group = queryHeads / kvHeads
         guard group % headGroups == 0 else { return false }
-        return (group / headGroups) * (headDim / simdWidth) <= mostQueryNumbersPerLane
+        return (group / headGroups) * (headDim / metalSimdWidth) <= mostQueryNumbersPerLane
     }
 
     /// The attention output of one query token over every cached key, with
@@ -424,7 +421,7 @@ package enum DecodeAttentionKernel {
         let headDim = queries.dim(Axis.width)
         let keyCount = keys.dim(Axis.row)
         let blocks = blockCount(keys: keyCount)
-        let blockThreads = blockSimdGroups * simdWidth
+        let blockThreads = blockSimdGroups * metalSimdWidth
         let results = blockKernel(
             [
                 queries, keys, values, MLXArray([scale]),
@@ -441,8 +438,8 @@ package enum DecodeAttentionKernel {
         return combineKernel(
             results,
             template: [("T", queries.dtype), ("DIM", headDim)],
-            grid: (simdWidth, rows * combineSimdGroups, 1),
-            threadGroup: (simdWidth, combineSimdGroups, 1),
+            grid: (metalSimdWidth, rows * combineSimdGroups, 1),
+            threadGroup: (metalSimdWidth, combineSimdGroups, 1),
             outputShapes: [queries.shape],
             outputDTypes: [queries.dtype])[0]
     }
