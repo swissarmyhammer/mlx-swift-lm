@@ -32,13 +32,6 @@ struct Qwen35DecodeAttentionTests {
     /// and the values.
     private static let stepTensors = 3
 
-    /// The decode kernel over rotated queries and the cache.
-    private static func kernel(
-        queries: MLXArray, keys: MLXArray, values: MLXArray, scale: Float
-    ) -> MLXArray {
-        DecodeAttentionKernel.attention(queries: queries, keys: keys, values: values, scale: scale)
-    }
-
     @Test func theTracedDecodeStepGivesTheKernelOutput() throws {
         let layer = try Self.fixture.layer()
         let attention = try #require(layer.selfAttn)
@@ -55,15 +48,16 @@ struct Qwen35DecodeAttentionTests {
         let output = layer.attentionCacheStep(
             queries: queries, keys: keys, values: values, cache: cache, mask: .none)
         let expected = Qwen35AttentionLayerFixture.kernelOutput(
-            Self.kernel, rotatedQueries: rotatedQueries, attention: attention, cache: cache)
+            DecodeAttentionKernelTests.call.attention, rotatedQueries: rotatedQueries,
+            attention: attention, cache: cache)
 
-        #expect(cache.offset == Self.cachedKeys + 1)
-        #expect(arrayEqual(output, expected).item(Bool.self))
+        Qwen35AttentionLayerFixture.expectTheStep(
+            output, gives: expected, cache: cache, keys: Self.cachedKeys + 1)
     }
 
     @Test func theGeneralAttentionBodyGivesTheKernelOutput() throws {
         try Self.fixture.expectTheAttentionBodyGivesTheKernelOutput(
             cachedKeys: Self.cachedKeys, tokens: 1, mask: .none, seeds: Self.seeds,
-            kernel: Self.kernel)
+            kernel: DecodeAttentionKernelTests.call.attention)
     }
 }

@@ -127,6 +127,37 @@ comments:
     - evidence: 3 files — Tests/MLXLMTests/AttentionKernelTolerance.swift, Tests/MLXLMTests/DecodeAttentionKernelTests.swift, Tests/MLXLMTests/PrefillAttentionKernelTests.swift. `swift build --build-tests`: 0 compiler warnings (only the known build-system warning `missing creator for mutated node`). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 716 XCTest, 0 failures; Swift Testing 1498 tests in 122 suites passed. Positive controls pass. swiftlint no_magic_numbers: 0 on the 3 changed files.
     - next: /review. Both findings of "Review Findings (2026-10-15 12:47)" are ticked. The task stays in doing.
   timestamp: 2026-10-15T17:57:25.082127+00:00
+- actor: claude-code
+  id: 01m50bh21dashtfrfhgbrykaxb
+  text: |-
+    ### review — findings
+    - evidence: `review sha HEAD~1..HEAD` (commit c2f163f only): 2 findings, 2 confirmed, 0 refuted. Tests/MLXLMTests/DecodeAttentionKernelTests.swift:55, Tests/MLXLMTests/PrefillAttentionKernelTests.swift:64 (`reuse/reuse`, the two `routed` helpers are copies).
+    - next: Make one shared `routed` helper on `AttentionKernelOperands` that takes the route as a closure. Call it from the two suites. Then review again. The task stays in review.
+  timestamp: 2026-10-15T17:59:57.741639+00:00
+- actor: claude-code
+  id: 01m50bhh4tkb07qagta9rhyqtg
+  text: |-
+    ### finish iteration 3 — findings
+    - implement: changed — 3 test files; tolerance table, operand helpers
+    - test: green — MLXLMTests 716 XCTest and 1498 Swift Testing, 0 failures, 0 warnings
+    - commit: c2f163f
+    - review: findings — Tests/MLXLMTests/DecodeAttentionKernelTests.swift:55, Tests/MLXLMTests/PrefillAttentionKernelTests.swift:64
+  timestamp: 2026-10-15T18:00:13.210447+00:00
+- actor: claude-code
+  id: 01m50bqad8hgywbfgbn7536q59
+  text: 'Picked up the 2026-10-15 12:58 findings (two `routed` copies). Research: the two suites also repeat the unpack of the operands into `canRun`, `attention` and `scaledDotProductAttention` calls, the `#expect(runs)` lists, the bit-exact route checks, and the positive-control gap check. Qwen35DecodeAttentionTests and Qwen35PrefillAttentionTests repeat the decode and prefill kernel closures. Plan: add `AttentionKernelCall` (check, attention, causal flag) and `AttentionKernelOperands.Route` with `routed(mask:through:)` in AttentionKernelTolerance.swift; each suite gives only its kernel functions to the shared helpers.'
+  timestamp: 2026-10-15T18:03:22.920081+00:00
+- actor: claude-code
+  id: 01m50ceq1qdnxvd6gevawd2sty
+  text: |-
+    ### implement — changed
+    - Findings 12:58: fixed. `AttentionKernelOperands.routed(mask:through:)` takes the route as a closure (`Route`). The two private `routed` helpers are gone. Each suite gives only `X.scaledDotProductAttention`.
+    - Full pass, same cause removed: new `AttentionKernelCall` (canRun, attention, causal) in AttentionKernelTolerance.swift. Each suite gives its kernel one time (`DecodeAttentionKernelTests.call`, `PrefillAttentionKernelTests.call(causal:)`). Shared checks: `expectInsideTheTolerance(of:)` and `expectSpacedHeadNumbersStayInsideTheTolerance(of:)` (they now `#require` that the kernel runs, and `#require` the tolerance; no `guard` in test code), `AttentionKernelCall.expectReads(_:skips:)` (all canRun lists), `expectTheRoute(_:picks:)` and `expectTheRoute(_:keepsTheSDPAWith:)` (all bit-exact route checks), `AttentionKernelTolerance.expectPastEachTolerance` (all positive-control gap checks, against the largest tolerance of the table), `AttentionKernelTolerance.expectBitForBit`, `Qwen35AttentionLayerFixture.expectTheStep`. The private `kernel`, `runs`, `routed` helpers of both suites are gone. The fixture `Kernel` typealias is now `AttentionKernelCall.Attention`. Qwen35DecodeAttentionTests and Qwen35PrefillAttentionTests use the suite kernels and not their own copies.
+    - Did not work: a third `@Test` argument list (`causalMasks`) on the prefill tolerance test. Swift Testing takes at most two argument lists; the test keeps a loop over the masks.
+    - Positive-control check: a mutant (score factor x 1.5 in both suite kernels) failed 55 tests (45 issues): every tolerance, spaced-keys and route test of both suites and both Qwen3.5 suites. Mutant removed.
+    - evidence: 6 files — Tests/MLXLMTests/AttentionKernelTolerance.swift, DecodeAttentionKernelTests.swift, PrefillAttentionKernelTests.swift, Qwen35AttentionLayerFixture.swift, Qwen35DecodeAttentionTests.swift, Qwen35PrefillAttentionTests.swift. `swift build --build-tests`: 0 compiler warnings (only the known build-system warning `missing creator for mutated node`). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 716 XCTest, 0 failures; Swift Testing 1498 tests in 122 suites passed. swiftlint no_magic_numbers: 0 on the 6 files.
+    - next: /review. Both findings of "Review Findings (2026-10-15 12:58)" are ticked. The task stays in doing.
+  timestamp: 2026-10-15T18:16:09.527690+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Qwen3.8 prefill speed: fused attention kernel for head dim 256 (no full score tensor)'
@@ -178,3 +209,14 @@ The user decided to keep this change because peak memory decreases from 20.7 GiB
 
 - [x] `Tests/MLXLMTests/AttentionKernelTolerance.swift:39` `code-hygiene/data-driven` — The switch over DType has one case for each of two dtypes and a default case. The cases are different only in their constants (float32, float16, bfloat16). Thus the switch is a table of three rows that is written as control flow. The default case also gives the bfloat16 tolerance to all other dtypes, without a check. Write the three pairs of dtype and tolerance as one table (for example, a dictionary with DType keys, or an array of pairs), and look up the value in that table. Decide what occurs for a dtype that is not in the table. If that dtype must fail, make the lookup fail visibly. Do not use bfloat16 silently as a fallback.
 - [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:106` `reuse/reuse` — The test makes three `AttentionKernelOperands` literals by hand (`narrow`, `twoPerKVHead` and `fourPerKVHead`). These literals are almost the same. Each literal writes the queries, keys, values and scale again. The existing `firstKeys(_:)` helper makes this type of variant for keys, but there is no equivalent helper for queries. Thus each variant is a parallel copy. Add a helper next to `firstKeys(_:)`, for example `firstHeads(_ count: Int, headDim: Int? = nil)`, or `withQueries(_:)` that takes a slice closure. Then make `twoPerKVHead` and `fourPerKVHead` with that helper, so that the code that makes the operands is written one time, in `AttentionKernelTolerance.swift`.
+
+## Review Findings (2026-10-15 12:58)
+
+> Scope: `review sha HEAD~1..HEAD` (commit c2f163f only) — reviewed the diffs only — lines this change added or modified. 3 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4ZD6PV6CR1AJNT03JAHAYPG.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4ZD6PV6CR1AJNT03JAHAYPG.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/DecodeAttentionKernelTests.swift:55` `reuse/reuse` — The private `routed` helper repeats the body of `routed` in `PrefillAttentionKernelTests`. The two helpers call the `scaledDotProductAttention` of a kernel with the same operands and mask. The only difference is the name of the kernel. Thus the test route is written two times, and the two copies can become different. Move one shared helper into `AttentionKernelOperands` that takes the route as a closure, for example `routed(mask:through:)`. The closure calls the `scaledDotProductAttention` of the kernel. Then each suite gives only the route of its kernel.
+- [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:64` `reuse/reuse` — The private `routed` helper repeats the body of `routed` in `DecodeAttentionKernelTests`. The only difference between the two helpers is the kernel whose `scaledDotProductAttention` they call. With two copies, you must keep the same route logic in two locations. Replace the two helpers with one shared helper on `AttentionKernelOperands` that takes the route as a closure, as the finding for the Decode file tells. Call that helper from the two suites.

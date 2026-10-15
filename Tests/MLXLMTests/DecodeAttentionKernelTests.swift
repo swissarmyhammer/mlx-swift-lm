@@ -37,46 +37,29 @@ struct DecodeAttentionKernelTests {
     private static let random = AttentionKernelRandomOperands(
         queries: 20_261_015, keys: 20_261_016, values: 20_261_017)
 
-    /// The kernel output over the operands. The prefill suite also reads it.
-    static func kernel(_ operands: AttentionKernelOperands) -> MLXArray {
-        DecodeAttentionKernel.attention(
-            queries: operands.queries, keys: operands.keys, values: operands.values,
-            scale: operands.scale)
-    }
-
-    /// Tells if the kernel runs over the operands.
-    private static func runs(_ operands: AttentionKernelOperands) -> Bool {
-        DecodeAttentionKernel.canRun(
-            queries: operands.queries, keys: operands.keys, values: operands.values)
-    }
-
-    /// The output of an attention call over the operands, on the route that
-    /// ``DecodeAttentionKernel`` picks.
-    private static func routed(
-        _ operands: AttentionKernelOperands, mask: MLXFast.ScaledDotProductAttentionMaskMode
-    ) -> MLXArray {
-        DecodeAttentionKernel.scaledDotProductAttention(
-            queries: operands.queries, keys: operands.keys, values: operands.values,
-            scale: operands.scale, mask: mask)
+    /// The kernel under test. It reads no mask. The prefill suite and the
+    /// Qwen3.5 decode suite also read it.
+    static var call: AttentionKernelCall {
+        AttentionKernelCall(
+            canRun: DecodeAttentionKernel.canRun, attention: DecodeAttentionKernel.attention,
+            causal: false)
     }
 
     @Test(arguments: attentionCases, AttentionKernelTolerance.dtypes)
     func theKernelStaysInsideTheToleranceOfTheSDPA(
         attentionCase: AttentionKernelCase, dtype: DType
-    ) {
-        let operands = Self.random.operands(attentionCase, dtype: dtype)
-
-        #expect(Self.runs(operands))
-        operands.expectInsideTheTolerance(kernel: Self.kernel(operands), causal: false)
+    ) throws {
+        try Self.random.operands(attentionCase, dtype: dtype)
+            .expectInsideTheTolerance(of: Self.call)
     }
 
     /// Keys and values whose head numbers do not stand side by side, from a
     /// transposed buffer, take the strided read of the kernel and stay inside
     /// the tolerance too, in each dtype.
     @Test(arguments: AttentionKernelTolerance.dtypes)
-    func keysWithSpacedHeadNumbersStayInsideTheTolerance(dtype: DType) {
-        Self.random.operands(Self.attentionCases[0], dtype: dtype)
-            .expectSpacedHeadNumbersStayInsideTheTolerance(causal: false, kernel: Self.kernel)
+    func keysWithSpacedHeadNumbersStayInsideTheTolerance(dtype: DType) throws {
+        try Self.random.operands(Self.attentionCases[0], dtype: dtype)
+            .expectSpacedHeadNumbersStayInsideTheTolerance(of: Self.call)
     }
 
     /// Each dtype that the kernels read has a tolerance, and a dtype that they
@@ -100,7 +83,7 @@ struct DecodeAttentionKernelTests {
         let full = operands.reference(causal: false)
         let short = operands.firstKeys(attentionCase.keys - lastBlock).reference(causal: false)
 
-        #expect(AttentionKernelTolerance.worstGap(short, full) > AttentionKernelTolerance.bfloat16)
+        AttentionKernelTolerance.expectPastEachTolerance(short, full)
     }
 
     /// The kernel reads one query over enough keys: below
@@ -111,9 +94,7 @@ struct DecodeAttentionKernelTests {
         let twoQueries = enough.withQueries(
             concatenated([enough.queries, enough.queries], axis: AttentionKernelOperands.rowAxis))
 
-        #expect(Self.runs(enough))
-        #expect(!Self.runs(few))
-        #expect(!Self.runs(twoQueries))
+        Self.call.expectReads([enough], skips: [few, twoQueries])
     }
 
     /// The kernel reads only head shapes it holds in registers: a whole
@@ -125,9 +106,7 @@ struct DecodeAttentionKernelTests {
         let unevenGroup = operands.firstQueryHeads(10)
         let narrow = operands.firstHeadNumbers(200)
 
-        #expect(!Self.runs(oddGroup))
-        #expect(!Self.runs(unevenGroup))
-        #expect(!Self.runs(narrow))
+        Self.call.expectReads([operands], skips: [oddGroup, unevenGroup, narrow])
     }
 
     /// Key counts at each edge of the block count rule.
@@ -147,10 +126,8 @@ struct DecodeAttentionKernelTests {
     @Test func aCallTheKernelDoesNotReadKeepsTheSDPA() {
         let operands = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys - 1)
 
-        let routed = Self.routed(operands, mask: .none)
-        let sdpa = operands.sdpa(mask: .none)
-
-        #expect(arrayEqual(routed, sdpa).item(Bool.self))
+        operands.expectTheRoute(
+            DecodeAttentionKernel.scaledDotProductAttention, keepsTheSDPAWith: .none)
     }
 
     /// A call the kernel reads gives the kernel output, bit for bit, and a
@@ -158,11 +135,8 @@ struct DecodeAttentionKernelTests {
     @Test func aCallTheKernelReadsGivesTheKernelOutput() {
         let operands = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys)
 
-        let routed = Self.routed(operands, mask: .none)
-        let masked = Self.routed(operands, mask: .causal)
-        let sdpa = operands.sdpa(mask: .causal)
-
-        #expect(arrayEqual(routed, Self.kernel(operands)).item(Bool.self))
-        #expect(arrayEqual(masked, sdpa).item(Bool.self))
+        operands.expectTheRoute(DecodeAttentionKernel.scaledDotProductAttention, picks: Self.call)
+        operands.expectTheRoute(
+            DecodeAttentionKernel.scaledDotProductAttention, keepsTheSDPAWith: .causal)
     }
 }

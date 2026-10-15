@@ -32,10 +32,7 @@ struct Qwen35PrefillAttentionTests {
 
     @Test func thePrefillBlockGivesTheKernelOutput() throws {
         try Self.fixture.expectTheAttentionBodyGivesTheKernelOutput(
-            cachedKeys: Self.cachedKeys, tokens: Self.blockTokens, mask: .causal, seeds: Self.seeds
-        ) {
-            PrefillAttentionKernel.attention(
-                queries: $0, keys: $1, values: $2, scale: $3, causal: true)
-        }
+            cachedKeys: Self.cachedKeys, tokens: Self.blockTokens, mask: .causal,
+            seeds: Self.seeds, kernel: PrefillAttentionKernelTests.call(causal: true).attention)
     }
 }

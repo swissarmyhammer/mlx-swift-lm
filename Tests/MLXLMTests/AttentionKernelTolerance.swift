@@ -1,6 +1,7 @@
 // Copyright © 2026 Apple Inc.
 //
-// The tolerance and the shared operands of the attention kernel tests.
+// The tolerance, the shared operands and the shared checks of the attention
+// kernel tests.
 //
 // An attention kernel adds the keys with an online softmax, in float32, in
 // another order than the SDPA of MLX. Thus the two paths are not bit-exact,
@@ -40,6 +41,10 @@ enum AttentionKernelTolerance {
     /// of the value.
     static let bfloat16: Float = 8e-3
 
+    /// The largest tolerance of ``table``. A gap past it breaks the tolerance
+    /// of each dtype.
+    static let largest = table.map(\.tolerance).reduce(0, max)
+
     /// The tolerance of one dtype, from ``table``.
     ///
     /// - Parameter dtype: The dtype of the kernel inputs.
@@ -55,6 +60,79 @@ enum AttentionKernelTolerance {
         let reference = expected.asType(.float32)
         let gap = abs(got.asType(.float32) - reference).max().item(Float.self)
         return gap / abs(reference).max().item(Float.self)
+    }
+
+    /// The check of a positive control: a wrong output is farther from the
+    /// expected output than the tolerance of each dtype.
+    ///
+    /// - Parameters:
+    ///   - wrong: The output of a kernel with a known error.
+    ///   - expected: The correct output.
+    ///   - sourceLocation: The location that a failure reports.
+    static func expectPastEachTolerance(
+        _ wrong: MLXArray, _ expected: MLXArray,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        let gap = worstGap(wrong, expected)
+        #expect(gap > largest, "worst gap \(gap)", sourceLocation: sourceLocation)
+    }
+
+    /// The check of a path that must give the output of a kernel bit for
+    /// bit, with no tolerance: a route, or a model layer that calls the
+    /// kernel.
+    ///
+    /// - Parameters:
+    ///   - got: The output of the path.
+    ///   - expected: The output that the path must give.
+    ///   - sourceLocation: The location that a failure reports.
+    static func expectBitForBit(
+        _ got: MLXArray, _ expected: MLXArray,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        #expect(arrayEqual(got, expected).item(Bool.self), sourceLocation: sourceLocation)
+    }
+}
+
+/// One attention kernel under test, with the mask of one causal flag. Each
+/// kernel suite gives its kernel to the shared checks through this value.
+struct AttentionKernelCall {
+
+    /// Tells if a kernel runs over queries, keys and values.
+    typealias Check = (_ queries: MLXArray, _ keys: MLXArray, _ values: MLXArray) -> Bool
+
+    /// An attention kernel over queries, keys, values and a score factor.
+    typealias Attention = (
+        _ queries: MLXArray, _ keys: MLXArray, _ values: MLXArray, _ scale: Float
+    ) -> MLXArray
+
+    /// Tells if the kernel runs over some operands.
+    let canRun: Check
+    /// The kernel output over some operands.
+    let attention: Attention
+    /// Tells if the kernel applies a causal mask.
+    let causal: Bool
+
+    /// Checks that the kernel runs over each of `read`, and does not run over
+    /// each of `skipped`.
+    ///
+    /// - Parameters:
+    ///   - read: The operands that the kernel must run over.
+    ///   - skipped: The operands that the kernel must not run over.
+    ///   - sourceLocation: The location that a failure reports.
+    func expectReads(
+        _ read: [AttentionKernelOperands], skips skipped: [AttentionKernelOperands],
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        for operands in read {
+            #expect(
+                operands.runs(by: canRun), "must run: \(operands.testDescription)",
+                sourceLocation: sourceLocation)
+        }
+        for operands in skipped {
+            #expect(
+                !operands.runs(by: canRun), "must not run: \(operands.testDescription)",
+                sourceLocation: sourceLocation)
+        }
     }
 }
 
@@ -237,10 +315,54 @@ struct AttentionKernelOperands {
         rows.swappedAxes(rowAxis, widthAxis).contiguous().swappedAxes(rowAxis, widthAxis)
     }
 
+    /// The text a failure shows for the operands.
+    var testDescription: String {
+        "queries \(queries.shape) over keys \(keys.shape) in \(queries.dtype)"
+    }
+
+    /// Tells if a kernel runs over the operands.
+    ///
+    /// - Parameter check: The check of the kernel.
+    /// - Returns: The result of the check.
+    func runs(by check: AttentionKernelCall.Check) -> Bool {
+        check(queries, keys, values)
+    }
+
+    /// The output of an attention kernel over the operands.
+    ///
+    /// - Parameter attention: The kernel.
+    /// - Returns: The kernel output.
+    func output(of attention: AttentionKernelCall.Attention) -> MLXArray {
+        attention(queries, keys, values, scale)
+    }
+
+    /// A route: an attention call over queries, keys, values, a score factor
+    /// and a mask.
+    typealias Route = (
+        _ queries: MLXArray, _ keys: MLXArray, _ values: MLXArray, _ scale: Float,
+        _ mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray
+
+    /// The output of an attention call over the operands and a mask, on the
+    /// route that a kernel picks.
+    ///
+    /// - Parameters:
+    ///   - mask: The mask of the call.
+    ///   - route: The `scaledDotProductAttention` of a kernel, which picks
+    ///     the kernel or the SDPA of MLX.
+    /// - Returns: The output of the route.
+    func routed(
+        mask: MLXFast.ScaledDotProductAttentionMaskMode, through route: Route
+    ) -> MLXArray {
+        route(queries, keys, values, scale, mask)
+    }
+
     /// The SDPA of MLX over the operands, in their own dtype.
     func sdpa(mask: MLXFast.ScaledDotProductAttentionMaskMode) -> MLXArray {
-        MLXFast.scaledDotProductAttention(
-            queries: queries, keys: keys, values: values, scale: scale, mask: mask)
+        routed(mask: mask) {
+            MLXFast.scaledDotProductAttention(
+                queries: $0, keys: $1, values: $2, scale: $3, mask: $4)
+        }
     }
 
     /// The SDPA of MLX over the operands, in float32.
@@ -250,17 +372,63 @@ struct AttentionKernelOperands {
             .sdpa(mask: Self.maskMode(causal: causal))
     }
 
-    /// Checks that a kernel output over the operands has the shape and the
-    /// dtype of the queries, and stays inside the tolerance of the SDPA of
-    /// MLX in float32.
+    /// Checks that a route over the operands picks a kernel: it gives the
+    /// kernel output bit for bit, with the mask of the causal flag of the
+    /// kernel.
     ///
     /// - Parameters:
-    ///   - kernel: The kernel output over the operands.
-    ///   - causal: Tells if the kernel ran with a causal mask.
+    ///   - route: The route under test.
+    ///   - call: The kernel that the route must pick.
     ///   - sourceLocation: The location that a failure reports.
-    func expectInsideTheTolerance(
-        kernel: MLXArray, causal: Bool, sourceLocation: SourceLocation = #_sourceLocation
+    func expectTheRoute(
+        _ route: Route, picks call: AttentionKernelCall,
+        sourceLocation: SourceLocation = #_sourceLocation
     ) {
+        expectTheRoute(
+            route, mask: Self.maskMode(causal: call.causal), gives: output(of: call.attention),
+            sourceLocation: sourceLocation)
+    }
+
+    /// Checks that a route over the operands keeps the SDPA of MLX: it gives
+    /// the SDPA output bit for bit, with the same mask.
+    ///
+    /// - Parameters:
+    ///   - route: The route under test.
+    ///   - mask: The mask of the call.
+    ///   - sourceLocation: The location that a failure reports.
+    func expectTheRoute(
+        _ route: Route, keepsTheSDPAWith mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        expectTheRoute(route, mask: mask, gives: sdpa(mask: mask), sourceLocation: sourceLocation)
+    }
+
+    /// Checks that a route over the operands and a mask gives an expected
+    /// output bit for bit.
+    private func expectTheRoute(
+        _ route: Route, mask: MLXFast.ScaledDotProductAttentionMaskMode, gives expected: MLXArray,
+        sourceLocation: SourceLocation
+    ) {
+        AttentionKernelTolerance.expectBitForBit(
+            routed(mask: mask, through: route), expected, sourceLocation: sourceLocation)
+    }
+
+    /// Checks that a kernel runs over the operands, that its output has the
+    /// shape and the dtype of the queries, and that its output stays inside
+    /// the tolerance of the SDPA of MLX in float32.
+    ///
+    /// - Parameters:
+    ///   - call: The kernel under test.
+    ///   - sourceLocation: The location that a failure reports.
+    /// - Throws: A failed requirement when the kernel does not run over the
+    ///   operands; the kernel call would then stop on its precondition.
+    func expectInsideTheTolerance(
+        of call: AttentionKernelCall, sourceLocation: SourceLocation = #_sourceLocation
+    ) throws {
+        try #require(
+            runs(by: call.canRun), "must run: \(testDescription)", sourceLocation: sourceLocation)
+        let kernel = output(of: call.attention)
+        let causal = call.causal
         let reference = reference(causal: causal)
         let dtype = queries.dtype
 
@@ -269,10 +437,9 @@ struct AttentionKernelOperands {
         #expect(
             abs(reference).max().item(Float.self) > 0, "every reference value was zero",
             sourceLocation: sourceLocation)
-        guard let tolerance = AttentionKernelTolerance.of(dtype) else {
-            Issue.record("no tolerance for \(dtype)", sourceLocation: sourceLocation)
-            return
-        }
+        let tolerance = try #require(
+            AttentionKernelTolerance.of(dtype), "no tolerance for \(dtype)",
+            sourceLocation: sourceLocation)
         let gap = AttentionKernelTolerance.worstGap(kernel, reference)
         #expect(
             gap <= tolerance,
@@ -283,19 +450,17 @@ struct AttentionKernelOperands {
     /// stand side by side, and stays inside the tolerance of the SDPA of MLX.
     ///
     /// - Parameters:
-    ///   - causal: Tells if the kernel runs with a causal mask.
+    ///   - call: The kernel under test.
     ///   - sourceLocation: The location that a failure reports.
-    ///   - kernel: The kernel call over some operands.
+    /// - Throws: A failed requirement of ``expectInsideTheTolerance(of:sourceLocation:)``.
     func expectSpacedHeadNumbersStayInsideTheTolerance(
-        causal: Bool, sourceLocation: SourceLocation = #_sourceLocation,
-        kernel: (AttentionKernelOperands) -> MLXArray
-    ) {
+        of call: AttentionKernelCall, sourceLocation: SourceLocation = #_sourceLocation
+    ) throws {
         let spaced = withSpacedHeadNumbers()
 
         #expect(
             spaced.keys.asData(access: .noCopy).strides[Self.widthAxis] != 1,
             sourceLocation: sourceLocation)
-        spaced.expectInsideTheTolerance(
-            kernel: kernel(spaced), causal: causal, sourceLocation: sourceLocation)
+        try spaced.expectInsideTheTolerance(of: call, sourceLocation: sourceLocation)
     }
 }

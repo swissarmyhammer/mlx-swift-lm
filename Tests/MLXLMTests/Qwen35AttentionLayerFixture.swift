@@ -14,12 +14,6 @@ import Testing
 /// one KV head, as in Qwen3.8, and a head width that each test picks.
 struct Qwen35AttentionLayerFixture {
 
-    /// An attention kernel over rotated queries and the cached keys and
-    /// values, with the score factor of the layer.
-    typealias Kernel = (
-        _ queries: MLXArray, _ keys: MLXArray, _ values: MLXArray, _ scale: Float
-    ) -> MLXArray
-
     /// The seed of each random operand of one test.
     struct Seeds: Sendable {
         /// The seed of the filled cache.
@@ -110,14 +104,15 @@ struct Qwen35AttentionLayerFixture {
     /// The kernel output over the cache after the step wrote its keys.
     ///
     /// - Parameters:
-    ///   - kernel: The attention kernel.
+    ///   - kernel: The attention kernel, over rotated queries and the cached
+    ///     keys and values, with the score factor of the layer.
     ///   - rotatedQueries: The queries of the step, from ``rotated(_:attention:cache:)``.
     ///   - attention: The attention of the layer.
     ///   - cache: The cache after the step.
     /// - Returns: The kernel output.
     static func kernelOutput(
-        _ kernel: Kernel, rotatedQueries: MLXArray, attention: Qwen35Attention,
-        cache: KVCacheSimple
+        _ kernel: AttentionKernelCall.Attention, rotatedQueries: MLXArray,
+        attention: Qwen35Attention, cache: KVCacheSimple
     ) -> MLXArray {
         let state = cache.state
         return kernel(rotatedQueries, state[0], state[1], attention.scale)
@@ -136,7 +131,8 @@ struct Qwen35AttentionLayerFixture {
     ///   - kernel: The attention kernel that the body must call.
     func expectTheAttentionBodyGivesTheKernelOutput(
         cachedKeys: Int, tokens: Int, mask: MLXFast.ScaledDotProductAttentionMaskMode,
-        seeds: Seeds, sourceLocation: SourceLocation = #_sourceLocation, kernel: Kernel
+        seeds: Seeds, sourceLocation: SourceLocation = #_sourceLocation,
+        kernel: AttentionKernelCall.Attention
     ) throws {
         let attention = try #require(try layer().selfAttn, sourceLocation: sourceLocation)
         let cache = filledCache(keys: cachedKeys, seed: seeds.cache)
@@ -150,7 +146,25 @@ struct Qwen35AttentionLayerFixture {
                 kernel, rotatedQueries: rotatedQueries, attention: attention, cache: cache),
             gate: gate)
 
-        #expect(cache.offset == cachedKeys + tokens, sourceLocation: sourceLocation)
-        #expect(arrayEqual(output, expected).item(Bool.self), sourceLocation: sourceLocation)
+        Self.expectTheStep(
+            output, gives: expected, cache: cache, keys: cachedKeys + tokens,
+            sourceLocation: sourceLocation)
+    }
+
+    /// Checks that a step wrote its keys into the cache and gave the kernel
+    /// output bit for bit.
+    ///
+    /// - Parameters:
+    ///   - output: The output of the step.
+    ///   - expected: The kernel output, from ``kernelOutput(_:rotatedQueries:attention:cache:)``.
+    ///   - cache: The cache after the step.
+    ///   - keys: The number of keys the cache must hold after the step.
+    ///   - sourceLocation: The location that a failure reports.
+    static func expectTheStep(
+        _ output: MLXArray, gives expected: MLXArray, cache: KVCacheSimple, keys: Int,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        #expect(cache.offset == keys, sourceLocation: sourceLocation)
+        AttentionKernelTolerance.expectBitForBit(output, expected, sourceLocation: sourceLocation)
     }
 }
