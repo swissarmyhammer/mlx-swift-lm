@@ -91,6 +91,42 @@ comments:
     - evidence: swift build --build-tests 0 compiler warnings (only the SwiftPM note "missing creator for mutated node"); xcrun xctest MLXLMTests 716 XCTest 0 failures, 1497 Swift Testing passed (positive controls pass); swiftlint no_magic_numbers 0 and swift format lint clean on the 6 files. Findings 12:26 all ticked.
     - next: review
   timestamp: 2026-10-15T17:46:39.754261+00:00
+- actor: claude-code
+  id: 01m50ayk96j1jsrae8t3errdn6
+  text: |-
+    ### review — findings
+    - scope: review sha HEAD~1..HEAD (commit 0e8db14 only)
+    - evidence: 2 findings (2 confirmed, 0 refuted) — Tests/MLXLMTests/AttentionKernelTolerance.swift:39, Tests/MLXLMTests/PrefillAttentionKernelTests.swift:106
+    - prior findings: the 4 items in "Review Findings (2026-10-15 12:26)" are all ticked.
+    - acceptance: the item "Prefill at 32k is faster, measured" is closed by the decision of the user (see "Decision (2026-10-15)").
+    - next: do the 2 items in "Review Findings (2026-10-15 12:47)". The task stays in review.
+  timestamp: 2026-10-15T17:49:52.806705+00:00
+- actor: claude-code
+  id: 01m50az2hp93k6tmw763dsddf9
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — 6 test files; each accepted dtype tested, shared test helpers
+    - test: green — MLXLMTests 716 XCTest and 1497 Swift Testing, 0 failures, 0 warnings
+    - commit: 0e8db14
+    - review: findings — Tests/MLXLMTests/AttentionKernelTolerance.swift:39, Tests/MLXLMTests/PrefillAttentionKernelTests.swift:106
+  timestamp: 2026-10-15T17:50:08.438860+00:00
+- actor: claude-code
+  id: 01m50bcaxvdtyx6mes35zmt3y4
+  text: |-
+    Fixed the 2 findings of "Review Findings (2026-10-15 12:47)".
+
+    1. data-driven: `AttentionKernelTolerance` now holds one private `table` of (dtype, tolerance) rows. `dtypes` comes from the table. `of(_:)` looks up the table and gives `Float?`: no other dtype gives its tolerance in place of a missing dtype. `expectInsideTheTolerance` records an issue ("no tolerance for <dtype>") when the lookup gives nil, thus a dtype outside the table fails visibly. New test `DecodeAttentionKernelTests.onlyTheKernelDtypesHaveATolerance` checks each kernel dtype has a tolerance and `.int32` has none. RED evidence: before the change, the compiler said `of(.int32) == nil` "always returns false".
+    2. reuse: new helpers on `AttentionKernelOperands`, next to `firstKeys(_:)`: `withQueries(_:)`, `withKeysAndValues(_:)`, `firstQueryHeads(_:)`, `firstHeadNumbers(_:)` and `sdpa(mask:)`. `firstKeys`, `withSpacedHeadNumbers` and `reference(causal:)` now use them, thus only `withQueries` and `withKeysAndValues` write an operands literal.
+    Same cause, removed in the other files: the Prefill head-shape test (`narrow`, `twoPerKVHead`, `fourPerKVHead`); the Decode head-shape test (three `canRun` calls with hand-sliced queries/keys/values); the Decode two-queries check; the repeated `X.scaledDotProductAttention(queries:keys:values:scale:mask:)` argument lists (new private `routed(_:mask:)` in each suite, and `operands.sdpa(mask:)`); the Prefill array-mask `canRun` call (new `runs(_:mask:)`); the Prefill copy of the decode kernel call (now `DecodeAttentionKernelTests.kernel`, made internal).
+    The Qwen35 fixture and the two Qwen35 suites have no switch table and no set of near-identical operand literals; no change there.
+  timestamp: 2026-10-15T17:57:23.003161+00:00
+- actor: claude-code
+  id: 01m50bccytyhbeaqc77v06fte4
+  text: |-
+    ### implement — changed
+    - evidence: 3 files — Tests/MLXLMTests/AttentionKernelTolerance.swift, Tests/MLXLMTests/DecodeAttentionKernelTests.swift, Tests/MLXLMTests/PrefillAttentionKernelTests.swift. `swift build --build-tests`: 0 compiler warnings (only the known build-system warning `missing creator for mutated node`). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 716 XCTest, 0 failures; Swift Testing 1498 tests in 122 suites passed. Positive controls pass. swiftlint no_magic_numbers: 0 on the 3 changed files.
+    - next: /review. Both findings of "Review Findings (2026-10-15 12:47)" are ticked. The task stays in doing.
+  timestamp: 2026-10-15T17:57:25.082127+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Qwen3.8 prefill speed: fused attention kernel for head dim 256 (no full score tensor)'
@@ -131,3 +167,14 @@ The user decided to keep this change because peak memory decreases from 20.7 GiB
 - [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:173` `reuse/reuse` — `qwen38Operands(queries:keys:dtype:)` is a near-match of the private `qwen38Operands(keys:)` in `DecodeAttentionKernelTests`. The prefill helper adds a query count and a dtype parameter. The author wrote a parallel fixture, but it was possible to make the existing fixture more general. Lift the Qwen3.8 shape fixture to a shared helper with `queries`, `keys` and `dtype` parameters, and have both `DecodeAttentionKernelTests` and `PrefillAttentionKernelTests` call it. Keep the single-query decode call as a parameter value, not a separate function.
 - [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:223` `reuse/reuse` — `keysWithSpacedHeadNumbersStayInsideTheTolerance` repeats the body of the same-named test in `DecodeAttentionKernelTests`. Both transpose the keys and values, call a kernel, and check the worst gap against the tolerance. The prefill copy is a parallel test instead of an extension of the existing one. Move the spaced-layout operand builder and the stride assertion into a shared helper, such as the one used for `operands`. Parameterize the kernel call and the causal flag so both suites call one test body.
 - [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:224` `completeness/invariant-propagation` — The narrow-load branch of the kernel (`wide == false`, used when key and value head numbers do not stand side by side) is checked only for float32 inputs. Its bfloat16 and float16 forms are not checked against the SDPA of MLX, although the kernel accepts both dtypes and the wide and narrow branches use different load types (`Unit` is `T` instead of `uint4`). Parameterize `keysWithSpacedHeadNumbersStayInsideTheTolerance` over `dtypes` (after `dtypes` includes `.float16`), and pick the tolerance with `AttentionKernelTolerance.of(dtype)`, so the narrow load is checked for every dtype the kernel accepts.
+
+## Review Findings (2026-10-15 12:47)
+
+> Scope: `review sha HEAD~1..HEAD` (commit 0e8db14 only) — reviewed the diffs only — lines this change added or modified. 6 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4ZD6PV6CR1AJNT03JAHAYPG.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4ZD6PV6CR1AJNT03JAHAYPG.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/AttentionKernelTolerance.swift:39` `code-hygiene/data-driven` — The switch over DType has one case for each of two dtypes and a default case. The cases are different only in their constants (float32, float16, bfloat16). Thus the switch is a table of three rows that is written as control flow. The default case also gives the bfloat16 tolerance to all other dtypes, without a check. Write the three pairs of dtype and tolerance as one table (for example, a dictionary with DType keys, or an array of pairs), and look up the value in that table. Decide what occurs for a dtype that is not in the table. If that dtype must fail, make the lookup fail visibly. Do not use bfloat16 silently as a fallback.
+- [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:106` `reuse/reuse` — The test makes three `AttentionKernelOperands` literals by hand (`narrow`, `twoPerKVHead` and `fourPerKVHead`). These literals are almost the same. Each literal writes the queries, keys, values and scale again. The existing `firstKeys(_:)` helper makes this type of variant for keys, but there is no equivalent helper for queries. Thus each variant is a parallel copy. Add a helper next to `firstKeys(_:)`, for example `firstHeads(_ count: Int, headDim: Int? = nil)`, or `withQueries(_:)` that takes a slice closure. Then make `twoPerKVHead` and `fourPerKVHead` with that helper, so that the code that makes the operands is written one time, in `AttentionKernelTolerance.swift`.

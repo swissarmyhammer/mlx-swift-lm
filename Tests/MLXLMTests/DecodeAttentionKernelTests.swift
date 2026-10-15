@@ -37,8 +37,8 @@ struct DecodeAttentionKernelTests {
     private static let random = AttentionKernelRandomOperands(
         queries: 20_261_015, keys: 20_261_016, values: 20_261_017)
 
-    /// The kernel output over the operands.
-    private static func kernel(_ operands: AttentionKernelOperands) -> MLXArray {
+    /// The kernel output over the operands. The prefill suite also reads it.
+    static func kernel(_ operands: AttentionKernelOperands) -> MLXArray {
         DecodeAttentionKernel.attention(
             queries: operands.queries, keys: operands.keys, values: operands.values,
             scale: operands.scale)
@@ -48,6 +48,16 @@ struct DecodeAttentionKernelTests {
     private static func runs(_ operands: AttentionKernelOperands) -> Bool {
         DecodeAttentionKernel.canRun(
             queries: operands.queries, keys: operands.keys, values: operands.values)
+    }
+
+    /// The output of an attention call over the operands, on the route that
+    /// ``DecodeAttentionKernel`` picks.
+    private static func routed(
+        _ operands: AttentionKernelOperands, mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray {
+        DecodeAttentionKernel.scaledDotProductAttention(
+            queries: operands.queries, keys: operands.keys, values: operands.values,
+            scale: operands.scale, mask: mask)
     }
 
     @Test(arguments: attentionCases, AttentionKernelTolerance.dtypes)
@@ -69,6 +79,16 @@ struct DecodeAttentionKernelTests {
             .expectSpacedHeadNumbersStayInsideTheTolerance(causal: false, kernel: Self.kernel)
     }
 
+    /// Each dtype that the kernels read has a tolerance, and a dtype that they
+    /// do not read has no tolerance. Thus a test in that dtype fails, and does
+    /// not use the tolerance of another dtype.
+    @Test func onlyTheKernelDtypesHaveATolerance() {
+        for dtype in AttentionKernelTolerance.dtypes {
+            #expect(AttentionKernelTolerance.of(dtype) != nil, "\(dtype)")
+        }
+        #expect(AttentionKernelTolerance.of(.int32) == nil)
+    }
+
     /// The positive control of the tolerance test: a kernel that did not read
     /// the keys of its last block would break the tolerance.
     @Test(arguments: attentionCases)
@@ -88,14 +108,12 @@ struct DecodeAttentionKernelTests {
     @Test func theKernelReadsOnlyOneQueryOverEnoughKeys() {
         let enough = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys)
         let few = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys - 1)
-        let twoQueries = concatenated(
-            [enough.queries, enough.queries], axis: AttentionKernelOperands.rowAxis)
+        let twoQueries = enough.withQueries(
+            concatenated([enough.queries, enough.queries], axis: AttentionKernelOperands.rowAxis))
 
         #expect(Self.runs(enough))
         #expect(!Self.runs(few))
-        #expect(
-            !DecodeAttentionKernel.canRun(
-                queries: twoQueries, keys: enough.keys, values: enough.values))
+        #expect(!Self.runs(twoQueries))
     }
 
     /// The kernel reads only head shapes it holds in registers: a whole
@@ -103,20 +121,13 @@ struct DecodeAttentionKernelTests {
     /// head width that the lanes of a SIMD group share evenly.
     @Test func theKernelReadsOnlyTheHeadShapesItHolds() {
         let operands = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys)
-        let oddGroup = operands.queries[0..., ..<12]
-        let unevenGroup = operands.queries[0..., ..<10]
-        let narrowKeys = operands.keys[.ellipsis, ..<200]
+        let oddGroup = operands.firstQueryHeads(12)
+        let unevenGroup = operands.firstQueryHeads(10)
+        let narrow = operands.firstHeadNumbers(200)
 
-        #expect(
-            !DecodeAttentionKernel.canRun(
-                queries: oddGroup, keys: operands.keys, values: operands.values))
-        #expect(
-            !DecodeAttentionKernel.canRun(
-                queries: unevenGroup, keys: operands.keys, values: operands.values))
-        #expect(
-            !DecodeAttentionKernel.canRun(
-                queries: operands.queries[.ellipsis, ..<200], keys: narrowKeys,
-                values: operands.values[.ellipsis, ..<200]))
+        #expect(!Self.runs(oddGroup))
+        #expect(!Self.runs(unevenGroup))
+        #expect(!Self.runs(narrow))
     }
 
     /// Key counts at each edge of the block count rule.
@@ -136,12 +147,8 @@ struct DecodeAttentionKernelTests {
     @Test func aCallTheKernelDoesNotReadKeepsTheSDPA() {
         let operands = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys - 1)
 
-        let routed = DecodeAttentionKernel.scaledDotProductAttention(
-            queries: operands.queries, keys: operands.keys, values: operands.values,
-            scale: operands.scale, mask: .none)
-        let sdpa = MLXFast.scaledDotProductAttention(
-            queries: operands.queries, keys: operands.keys, values: operands.values,
-            scale: operands.scale, mask: .none)
+        let routed = Self.routed(operands, mask: .none)
+        let sdpa = operands.sdpa(mask: .none)
 
         #expect(arrayEqual(routed, sdpa).item(Bool.self))
     }
@@ -151,15 +158,9 @@ struct DecodeAttentionKernelTests {
     @Test func aCallTheKernelReadsGivesTheKernelOutput() {
         let operands = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys)
 
-        let routed = DecodeAttentionKernel.scaledDotProductAttention(
-            queries: operands.queries, keys: operands.keys, values: operands.values,
-            scale: operands.scale, mask: .none)
-        let masked = DecodeAttentionKernel.scaledDotProductAttention(
-            queries: operands.queries, keys: operands.keys, values: operands.values,
-            scale: operands.scale, mask: .causal)
-        let sdpa = MLXFast.scaledDotProductAttention(
-            queries: operands.queries, keys: operands.keys, values: operands.values,
-            scale: operands.scale, mask: .causal)
+        let routed = Self.routed(operands, mask: .none)
+        let masked = Self.routed(operands, mask: .causal)
+        let sdpa = operands.sdpa(mask: .causal)
 
         #expect(arrayEqual(routed, Self.kernel(operands)).item(Bool.self))
         #expect(arrayEqual(masked, sdpa).item(Bool.self))

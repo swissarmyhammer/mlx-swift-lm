@@ -46,11 +46,27 @@ struct PrefillAttentionKernelTests {
             scale: operands.scale, causal: causal)
     }
 
+    /// Tells if the kernel runs the operands with a mask.
+    private static func runs(
+        _ operands: AttentionKernelOperands, mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> Bool {
+        PrefillAttentionKernel.canRun(
+            queries: operands.queries, keys: operands.keys, values: operands.values, mask: mask)
+    }
+
     /// Tells if the kernel runs the operands with the mask of a causal flag.
     private static func runs(_ operands: AttentionKernelOperands, causal: Bool) -> Bool {
-        PrefillAttentionKernel.canRun(
+        runs(operands, mask: AttentionKernelOperands.maskMode(causal: causal))
+    }
+
+    /// The output of a prefill call over the operands, on the route that
+    /// ``PrefillAttentionKernel`` picks.
+    private static func routed(
+        _ operands: AttentionKernelOperands, mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray {
+        PrefillAttentionKernel.scaledDotProductAttention(
             queries: operands.queries, keys: operands.keys, values: operands.values,
-            mask: AttentionKernelOperands.maskMode(causal: causal))
+            scale: operands.scale, mask: mask)
     }
 
     @Test(arguments: attentionCases, AttentionKernelTolerance.dtypes)
@@ -103,15 +119,9 @@ struct PrefillAttentionKernelTests {
     @Test func theKernelReadsOnlyTheHeadShapesItHolds() {
         let fewest = PrefillAttentionKernel.fewestQueries
         let operands = Self.random.qwen38(queries: fewest, keys: fewest)
-        let narrow = AttentionKernelOperands(
-            queries: operands.queries[.ellipsis, ..<128], keys: operands.keys[.ellipsis, ..<128],
-            values: operands.values[.ellipsis, ..<128], scale: operands.scale)
-        let twoPerKVHead = AttentionKernelOperands(
-            queries: operands.queries[0..., ..<8], keys: operands.keys, values: operands.values,
-            scale: operands.scale)
-        let fourPerKVHead = AttentionKernelOperands(
-            queries: operands.queries[0..., ..<16], keys: operands.keys, values: operands.values,
-            scale: operands.scale)
+        let narrow = operands.firstHeadNumbers(128)
+        let twoPerKVHead = operands.firstQueryHeads(8)
+        let fourPerKVHead = operands.firstQueryHeads(16)
 
         #expect(Self.runs(operands, causal: true))
         #expect(!Self.runs(narrow, causal: true))
@@ -144,19 +154,14 @@ struct PrefillAttentionKernelTests {
         }
         #expect(!Self.runs(fewerKeys, causal: true))
         #expect(Self.runs(fewerKeys, causal: false))
-        #expect(
-            !PrefillAttentionKernel.canRun(
-                queries: operands.queries, keys: operands.keys, values: operands.values,
-                mask: .array(arrayMask)))
+        #expect(!Self.runs(operands, mask: .array(arrayMask)))
     }
 
     /// A prefill call gives the kernel output, bit for bit.
     @Test func aPrefillCallGivesTheKernelOutput() {
         let operands = Self.random.qwen38(queries: 96, keys: 160)
 
-        let routed = PrefillAttentionKernel.scaledDotProductAttention(
-            queries: operands.queries, keys: operands.keys, values: operands.values,
-            scale: operands.scale, mask: .causal)
+        let routed = Self.routed(operands, mask: .causal)
 
         #expect(arrayEqual(routed, Self.kernel(operands, causal: true)).item(Bool.self))
     }
@@ -169,17 +174,10 @@ struct PrefillAttentionKernelTests {
         let prefill = Self.random.qwen38(queries: 96, keys: 96)
         let arrayMask = MLXArray.zeros([96, 96], dtype: .bfloat16)
 
-        let routedDecode = PrefillAttentionKernel.scaledDotProductAttention(
-            queries: decode.queries, keys: decode.keys, values: decode.values,
-            scale: decode.scale, mask: .none)
-        let decodeKernel = DecodeAttentionKernel.attention(
-            queries: decode.queries, keys: decode.keys, values: decode.values, scale: decode.scale)
-        let routedMasked = PrefillAttentionKernel.scaledDotProductAttention(
-            queries: prefill.queries, keys: prefill.keys, values: prefill.values,
-            scale: prefill.scale, mask: .array(arrayMask))
-        let sdpa = MLXFast.scaledDotProductAttention(
-            queries: prefill.queries, keys: prefill.keys, values: prefill.values,
-            scale: prefill.scale, mask: .array(arrayMask))
+        let routedDecode = Self.routed(decode, mask: .none)
+        let decodeKernel = DecodeAttentionKernelTests.kernel(decode)
+        let routedMasked = Self.routed(prefill, mask: .array(arrayMask))
+        let sdpa = prefill.sdpa(mask: .array(arrayMask))
 
         #expect(arrayEqual(routedDecode, decodeKernel).item(Bool.self))
         #expect(arrayEqual(routedMasked, sdpa).item(Bool.self))

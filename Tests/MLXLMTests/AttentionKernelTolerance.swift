@@ -13,9 +13,15 @@ import Testing
 /// The tolerance of an attention kernel against the SDPA of MLX.
 enum AttentionKernelTolerance {
 
+    /// The tolerance of each dtype that the attention kernels read, one row
+    /// for each dtype.
+    private static let table: [(dtype: DType, tolerance: Float)] = [
+        (.float32, float32), (.float16, float16), (.bfloat16, bfloat16),
+    ]
+
     /// The dtypes that each attention kernel reads. Each tolerance test runs
     /// every one of them.
-    static let dtypes: [DType] = [.float32, .float16, .bfloat16]
+    static let dtypes = table.map(\.dtype)
 
     /// The largest gap allowed between a kernel and the SDPA of MLX, as a
     /// part of the largest reference value, for float32 inputs. Both paths
@@ -34,13 +40,13 @@ enum AttentionKernelTolerance {
     /// of the value.
     static let bfloat16: Float = 8e-3
 
-    /// The tolerance of one dtype.
-    static func of(_ dtype: DType) -> Float {
-        switch dtype {
-        case .float32: float32
-        case .float16: float16
-        default: bfloat16
-        }
+    /// The tolerance of one dtype, from ``table``.
+    ///
+    /// - Parameter dtype: The dtype of the kernel inputs.
+    /// - Returns: The tolerance, or `nil` when the kernels do not read the
+    ///   dtype. No other dtype gives its tolerance in its place.
+    static func of(_ dtype: DType) -> Float? {
+        table.first { $0.dtype == dtype }?.tolerance
     }
 
     /// The largest gap between two outputs, as a part of the largest
@@ -184,18 +190,44 @@ struct AttentionKernelOperands {
         causal ? .causal : .none
     }
 
+    /// The operands with other queries, and the same keys, values and scale.
+    ///
+    /// - Parameter newQueries: The queries of the new operands.
+    /// - Returns: The operands.
+    func withQueries(_ newQueries: MLXArray) -> AttentionKernelOperands {
+        AttentionKernelOperands(queries: newQueries, keys: keys, values: values, scale: scale)
+    }
+
+    /// The operands with one change to the keys and to the values, and the
+    /// same queries and scale.
+    ///
+    /// - Parameter change: The change that the keys and the values each get.
+    /// - Returns: The operands.
+    func withKeysAndValues(_ change: (MLXArray) -> MLXArray) -> AttentionKernelOperands {
+        AttentionKernelOperands(
+            queries: queries, keys: change(keys), values: change(values), scale: scale)
+    }
+
     /// The operands with only the first `count` keys and values.
     func firstKeys(_ count: Int) -> AttentionKernelOperands {
-        AttentionKernelOperands(
-            queries: queries, keys: keys[.ellipsis, ..<count, 0...],
-            values: values[.ellipsis, ..<count, 0...], scale: scale)
+        withKeysAndValues { $0[.ellipsis, ..<count, 0...] }
+    }
+
+    /// The operands with only the first `count` query heads.
+    func firstQueryHeads(_ count: Int) -> AttentionKernelOperands {
+        withQueries(queries[0..., ..<count])
+    }
+
+    /// The operands with only the first `width` numbers of each head of the
+    /// queries, the keys and the values, and the same scale.
+    func firstHeadNumbers(_ width: Int) -> AttentionKernelOperands {
+        withQueries(queries[.ellipsis, ..<width]).withKeysAndValues { $0[.ellipsis, ..<width] }
     }
 
     /// The operands with the same keys and values, read from a transposed
     /// buffer, thus the numbers of one head do not stand side by side.
     func withSpacedHeadNumbers() -> AttentionKernelOperands {
-        let spaced = AttentionKernelOperands(
-            queries: queries, keys: Self.spaced(keys), values: Self.spaced(values), scale: scale)
+        let spaced = withKeysAndValues(Self.spaced)
         eval(spaced.keys, spaced.values)
         return spaced
     }
@@ -205,11 +237,17 @@ struct AttentionKernelOperands {
         rows.swappedAxes(rowAxis, widthAxis).contiguous().swappedAxes(rowAxis, widthAxis)
     }
 
+    /// The SDPA of MLX over the operands, in their own dtype.
+    func sdpa(mask: MLXFast.ScaledDotProductAttentionMaskMode) -> MLXArray {
+        MLXFast.scaledDotProductAttention(
+            queries: queries, keys: keys, values: values, scale: scale, mask: mask)
+    }
+
     /// The SDPA of MLX over the operands, in float32.
     func reference(causal: Bool) -> MLXArray {
-        MLXFast.scaledDotProductAttention(
-            queries: queries.asType(.float32), keys: keys.asType(.float32),
-            values: values.asType(.float32), scale: scale, mask: Self.maskMode(causal: causal))
+        withQueries(queries.asType(.float32))
+            .withKeysAndValues { $0.asType(.float32) }
+            .sdpa(mask: Self.maskMode(causal: causal))
     }
 
     /// Checks that a kernel output over the operands has the shape and the
@@ -231,9 +269,13 @@ struct AttentionKernelOperands {
         #expect(
             abs(reference).max().item(Float.self) > 0, "every reference value was zero",
             sourceLocation: sourceLocation)
+        guard let tolerance = AttentionKernelTolerance.of(dtype) else {
+            Issue.record("no tolerance for \(dtype)", sourceLocation: sourceLocation)
+            return
+        }
         let gap = AttentionKernelTolerance.worstGap(kernel, reference)
         #expect(
-            gap <= AttentionKernelTolerance.of(dtype),
+            gap <= tolerance,
             "\(dtype), causal \(causal), worst gap \(gap)", sourceLocation: sourceLocation)
     }
 
