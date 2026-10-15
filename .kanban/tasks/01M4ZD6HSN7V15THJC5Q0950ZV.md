@@ -87,8 +87,60 @@ comments:
     - evidence: 5 files — Libraries/MLXLMCommon/MetalSimdWidth.swift (new), Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift, Libraries/MLXLMCommon/GatedDelta.swift, Libraries/MLXLMCommon/DecodeAttentionKernel.swift, Tests/MLXLMTests/Qwen35GDNDecodeKernelTests.swift. swiftlint no_magic_numbers: 37 -> 0. `swift build --build-tests`: 0 compiler warnings (only the SwiftPM notice "missing creator for mutated node"). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: XCTest 716 tests 0 failures; Swift Testing 1488 tests in 120 suites passed. Real weights (xcodebuild -only-testing Qwen35SessionPromptCacheTests + Qwen35CheckpointIntegrationTests): 7 tests in 2 suites passed. Finding flipped to [x]. Not committed.
     - next: /review
   timestamp: 2026-10-15T14:52:45.783443+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m500xcjqmv2a7x8zw5hj05z8
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (8a7739c): 1 finding, 1 confirmed, 0 refuted. Libraries/MLXLMCommon/GatedDelta.swift:39 reuse/reuse.
+    - next: implement the open finding in the 2026-10-15 09:53 section. Keep one state-axis enum for the two files.
+  timestamp: 2026-10-15T14:54:27.415702+00:00
+- actor: claude-code
+  id: 01m500xwym853qdm8m2n1xxf8v
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — 5 files; named kernel constants, shared metalSimdWidth
+    - test: green — MLXLMTests 716 XCTest and 1488 Swift Testing, 0 failures, 0 warnings; Qwen35 integration 7/7
+    - commit: 8a7739c
+    - review: findings — Libraries/MLXLMCommon/GatedDelta.swift:39
+  timestamp: 2026-10-15T14:54:44.180611+00:00
+- actor: claude-code
+  id: 01m501q3e9a5f6xxvcjz3q3hvt
+  text: |-
+    Fix of the finding `reuse/reuse` (pure refactor, same values). The cause was removed in GatedDelta.swift, GatedDeltaDecodeKernel.swift, DecodeAttentionKernel.swift and MetalSimdWidth.swift:
+
+    - New Libraries/MLXLMCommon/HeadRowsAxis.swift: internal enum `HeadRowsAxis` (batch 0, head 1, row 2, width 3, count 4) for each `(batch, heads, rows, width)` tensor. It replaces three copies of one layout: `GatedDeltaStateAxis` (GatedDelta.swift), the state axes of `GatedDeltaDecodeKernel.Axis` (head, valueRow, keyNumber, stateCount, and the batch axis of the state), and the private `DecodeAttentionKernel.Axis` (sequence, head, row, width, count). The queries and KV caches of attention and the gated delta recurrent state have this one layout. The enum is in its own file because two kernels in two domains use it; GatedDelta.swift would be the wrong home for the attention axes.
+    - `GatedDeltaAxis` (GatedDelta.swift) is now internal, not private. The decode kernel reads the batch and token axes of its token inputs from `GatedDeltaAxis.batch` and `GatedDeltaAxis.step` (the `(batch, 1, ...)` inputs have the `(batch, steps, ...)` layout). Before, the decode kernel declared `batch = 0` and `token = 1` a second time.
+    - `GatedDeltaDecodeKernel.Axis` keeps only the private axes that no shared layout names: `channel` (conv input) and `tap` (conv weight).
+    - MetalSimdWidth.swift: new `metalSimdWidthDeclaration`, the one Metal line `constexpr constant int SIMD_WIDTH = ...;`. Before, `gatedDeltaMetalHeader` and `DecodeAttentionKernel.header` each wrote that line. The Metal text of both headers is the same as before.
+    - Checked and not changed: `GatedDeltaStepRank` (no second copy), the threadgroup limits `mostThreadgroupThreads` / `mostThreadgroupBytes` (only in GatedDeltaDecodeKernel.swift in these four files), `gatedDeltaStepSimdGroups = 4` against `DecodeAttentionKernel.blockSimdGroups = 4` (same number, different meaning), `inputTypes` against `floatTypes` (different sets), `GatedDeltaRecompute.Input` (no second copy).
+    - swift-format re-indented the two `header` string literals (the literal content does not change, the closing delimiter moved with the lines). The 16 `AlwaysUseLowerCamelCase` lint notes on `B`, `T`, `Hk`, ... in GatedDelta.swift were there at HEAD too.
+    - Note: the `files` tool `replace_all: true` made only 1 replacement in each call here; edit each block one time.
+  timestamp: 2026-10-15T15:08:30.025991+00:00
+- actor: claude-code
+  id: 01m501q949vem07htjjgwphqkf
+  text: |-
+    ### implement — changed
+    - evidence: 5 files — Libraries/MLXLMCommon/HeadRowsAxis.swift (new), Libraries/MLXLMCommon/GatedDelta.swift, Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift, Libraries/MLXLMCommon/DecodeAttentionKernel.swift, Libraries/MLXLMCommon/MetalSimdWidth.swift. `swift build --build-tests`: 0 compiler warnings (only the SwiftPM notice "missing creator for mutated node"). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` on the final tree: XCTest 716 tests 0 failures; Swift Testing 1488 tests in 120 suites passed. swiftlint no_magic_numbers on the 5 files: 0 violations. Real weights (xcodebuild -only-testing Qwen35SessionPromptCacheTests + Qwen35CheckpointIntegrationTests): 7 tests in 2 suites passed. Finding flipped to [x]. Not committed.
+    - next: /review
+  timestamp: 2026-10-15T15:08:35.849112+00:00
+- actor: claude-code
+  id: 01m501tcx32tpn3e0gqwt09tsb
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (c9865d8). 0 findings, 0 confirmed, 0 refuted. 5 files reviewed. 2 kanban files had no validator. All prior findings are checked.
+    - next: The task is in done. No more work is necessary.
+  timestamp: 2026-10-15T15:10:18.019153+00:00
+- actor: claude-code
+  id: 01m501tvcn48500tb1e94j6s4r
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — 5 files; one HeadRowsAxis layout, shared metalSimdWidthDeclaration
+    - test: green — MLXLMTests 716 XCTest and 1488 Swift Testing, 0 failures, 0 warnings; Qwen35 integration 7/7
+    - commit: c9865d8
+    - review: clean — 0 findings; 2 prior findings checked
+  timestamp: 2026-10-15T15:10:32.853966+00:00
+position_column: done
+position_ordinal: ffd680
 title: 'Qwen3.8 decode speed: fuse the small GDN kernels of each linear-attention layer'
 ---
 ## What
@@ -122,3 +174,13 @@ scratchpad/qwen38bench at 32k: profile and step modes for decode (two runs each,
 > - `.kanban/tasks/01M5000W20Q4CW37GXFZNZPVZB.md` — no validator matches this file
 
 - [x] `Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift:496` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+
+## Review Findings (2026-10-15 09:53)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 5 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4ZD6HSN7V15THJC5Q0950ZV.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4ZD6HSN7V15THJC5Q0950ZV.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/GatedDelta.swift:39` `reuse/reuse` — The new `GatedDeltaStateAxis` enum repeats the axis constants that already exist in the private `Axis` enum of `GatedDeltaDecodeKernel`. Both name the same layout of the `(batch, heads, valueRows, keyNumbers)` recurrent state with the same indices (head = 1, valueRow = 2, keyNumber = 3). Two copies of one layout can drift apart, and a change to one would not reach the other. Keep one internal state-axis enum, for example in GatedDelta.swift, and have `GatedDeltaDecodeKernel.Axis` reuse it for the state axes. Keep the token-input axes private to the decode kernel. Both files sit in the same module, so the enum does not need to be public.

@@ -23,8 +23,10 @@ private let computeGatedDeltaG: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXA
 
 // MARK: - Axes
 
-/// The axes of the `(batch, steps, heads, width)` q, k, v and y tensors.
-private enum GatedDeltaAxis {
+/// The axes of the `(batch, steps, heads, width)` q, k, v and y tensors. The
+/// token inputs of ``GatedDeltaDecodeKernel`` hold their sequences and their
+/// tokens on the same axes. The recurrent state is a ``HeadRowsAxis`` tensor.
+enum GatedDeltaAxis {
     /// The axis that holds the sequences.
     static let batch = 0
     /// The axis that holds the steps.
@@ -33,16 +35,6 @@ private enum GatedDeltaAxis {
     static let head = 2
     /// The axis that holds the numbers of one head.
     static let width = 3
-}
-
-/// The axes of the `(batch, heads, valueRows, keyNumbers)` recurrent state.
-private enum GatedDeltaStateAxis {
-    /// The axis that holds the heads.
-    static let head = 1
-    /// The axis that holds the value rows.
-    static let valueRow = 2
-    /// The axis that holds the key numbers of one row.
-    static let keyNumber = 3
 }
 
 /// The ranks of the gate and of the mask of one step of the ops path.
@@ -75,40 +67,40 @@ private let gatedDeltaStepSimdGroups = 4
 ///
 /// MLX writes the kernel signature directly after the header, thus the
 /// header ends in a line break.
-let gatedDeltaMetalHeader = """
-    constexpr constant int SIMD_WIDTH = \(metalSimdWidth);
+let gatedDeltaMetalHeader =
+    metalSimdWidthDeclaration + """
 
-    template <int N>
-    inline float gated_delta_row(
-        thread float (&state)[N], thread const float (&k)[N], thread const float (&q)[N],
-        float g, float beta, float v) {
-      float kv_mem = 0.0f;
-      {
-        #pragma clang fp reassociate(off)
-        #pragma clang fp contract(off)
-        float kv_compensation = 0.0f;
-        for (int i = 0; i < N; ++i) {
-          state[i] = state[i] * g;
-          auto product = state[i] * k[i];
-          auto corrected = product - kv_compensation;
-          auto next_sum = kv_mem + corrected;
-          kv_compensation = (next_sum - kv_mem) - corrected;
-          kv_mem = next_sum;
+        template <int N>
+        inline float gated_delta_row(
+            thread float (&state)[N], thread const float (&k)[N], thread const float (&q)[N],
+            float g, float beta, float v) {
+          float kv_mem = 0.0f;
+          {
+            #pragma clang fp reassociate(off)
+            #pragma clang fp contract(off)
+            float kv_compensation = 0.0f;
+            for (int i = 0; i < N; ++i) {
+              state[i] = state[i] * g;
+              auto product = state[i] * k[i];
+              auto corrected = product - kv_compensation;
+              auto next_sum = kv_mem + corrected;
+              kv_compensation = (next_sum - kv_mem) - corrected;
+              kv_mem = next_sum;
+            }
+          }
+          kv_mem = simd_sum(kv_mem);
+
+          auto delta = (v - kv_mem) * beta;
+
+          float out = 0.0f;
+          for (int i = 0; i < N; ++i) {
+            state[i] = state[i] + k[i] * delta;
+            out += state[i] * q[i];
+          }
+          return simd_sum(out);
         }
-      }
-      kv_mem = simd_sum(kv_mem);
 
-      auto delta = (v - kv_mem) * beta;
-
-      float out = 0.0f;
-      for (int i = 0; i < N; ++i) {
-        state[i] = state[i] + k[i] * delta;
-        out += state[i] * q[i];
-      }
-      return simd_sum(out);
-    }
-
-    """
+        """
 
 private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
     let maskSource = hasMask ? "mask[b_idx * T + t]" : "true"
@@ -270,34 +262,29 @@ private func gatedDeltaStepOps(
     let oldState = state
     let decay: MLXArray
     if g.ndim == GatedDeltaStepRank.perHead {
-        decay = expandedDimensions(
-            g, axes: [GatedDeltaStateAxis.valueRow, GatedDeltaStateAxis.keyNumber])
+        decay = expandedDimensions(g, axes: [HeadRowsAxis.row, HeadRowsAxis.width])
     } else if g.ndim == GatedDeltaStepRank.perHeadNumber {
-        decay = expandedDimensions(g, axis: GatedDeltaStateAxis.valueRow)
+        decay = expandedDimensions(g, axis: HeadRowsAxis.row)
     } else {
         fatalError("Unsupported gating shape \(g.shape)")
     }
 
     var state = state * decay
-    let kvMem = (state * expandedDimensions(k, axis: GatedDeltaStateAxis.valueRow)).sum(axis: -1)
+    let kvMem = (state * expandedDimensions(k, axis: HeadRowsAxis.row)).sum(axis: -1)
     let delta = (v - kvMem) * expandedDimensions(beta, axis: -1)
     state =
-        state + expandedDimensions(k, axis: GatedDeltaStateAxis.valueRow)
+        state + expandedDimensions(k, axis: HeadRowsAxis.row)
         * expandedDimensions(delta, axis: -1)
-    let y = (state * expandedDimensions(q, axis: GatedDeltaStateAxis.valueRow)).sum(axis: -1)
+    let y = (state * expandedDimensions(q, axis: HeadRowsAxis.row)).sum(axis: -1)
 
     if let mask {
         let expandedMask: MLXArray
         if mask.ndim == GatedDeltaStepRank.perSequence {
             expandedMask = expandedDimensions(
-                mask,
-                axes: [
-                    GatedDeltaStateAxis.head, GatedDeltaStateAxis.valueRow,
-                    GatedDeltaStateAxis.keyNumber,
-                ])
+                mask, axes: [HeadRowsAxis.head, HeadRowsAxis.row, HeadRowsAxis.width])
         } else if mask.ndim == GatedDeltaStepRank.perHead {
             expandedMask = expandedDimensions(
-                mask, axes: [GatedDeltaStateAxis.valueRow, GatedDeltaStateAxis.keyNumber])
+                mask, axes: [HeadRowsAxis.row, HeadRowsAxis.width])
         } else if mask.ndim == GatedDeltaStepRank.perHeadNumber {
             expandedMask = expandedDimensions(mask, axis: -1)
         } else {

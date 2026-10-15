@@ -171,24 +171,14 @@ package enum GatedDeltaDecodeKernel {
     /// The dtypes of the token inputs the kernel reads.
     private static let inputTypes: [DType] = [.float16, .bfloat16]
 
-    /// The axes of the `(batch, 1, channels)` token inputs and of the
-    /// `(batch, heads, rows, width)` recurrent state.
+    /// The axes of this kernel that ``GatedDeltaAxis`` and ``HeadRowsAxis``
+    /// do not name. The `(batch, 1, channels)` conv input holds its sequences
+    /// and its token on the ``GatedDeltaAxis`` axes. The recurrent state is a
+    /// ``HeadRowsAxis`` tensor.
     private enum Axis {
-        /// The axis that holds the sequences.
-        static let batch = 0
-        /// The axis that holds the tokens of the token inputs.
-        static let token = 1
         /// The axis that holds the channels of the conv input and the rows of
         /// the conv state.
         static let channel = 2
-        /// The axis that holds the value heads of the recurrent state.
-        static let head = 1
-        /// The axis that holds the value rows of the recurrent state.
-        static let valueRow = 2
-        /// The axis that holds the key numbers of the recurrent state.
-        static let keyNumber = 3
-        /// The number of axes of the recurrent state.
-        static let stateCount = 4
         /// The axis that holds the taps of the conv weight.
         static let tap = 1
     }
@@ -386,11 +376,11 @@ package enum GatedDeltaDecodeKernel {
     private static func headShape(
         inputs: Inputs, recurrentState: MLXArray, weights: Weights
     ) -> HeadShape? {
-        guard recurrentState.ndim == Axis.stateCount, inputs.qkv.ndim == Axis.channel + 1
+        guard recurrentState.ndim == HeadRowsAxis.count, inputs.qkv.ndim == Axis.channel + 1
         else { return nil }
-        let valueHeads = recurrentState.dim(Axis.head)
-        let valueHeadDim = recurrentState.dim(Axis.valueRow)
-        let keyHeadDim = recurrentState.dim(Axis.keyNumber)
+        let valueHeads = recurrentState.dim(HeadRowsAxis.head)
+        let valueHeadDim = recurrentState.dim(HeadRowsAxis.row)
+        let keyHeadDim = recurrentState.dim(HeadRowsAxis.width)
         let keyChannels = inputs.qkv.dim(Axis.channel) - valueHeads * valueHeadDim
         let keyBlockWidth = queryKeyBlocks * keyHeadDim
         guard valueHeads > 0, keyHeadDim > 0, keyChannels > 0, keyChannels % keyBlockWidth == 0
@@ -420,14 +410,14 @@ package enum GatedDeltaDecodeKernel {
         _ shape: HeadShape, inputs: Inputs, convState: MLXArray, recurrentState: MLXArray,
         weights: Weights
     ) -> Bool {
-        let batch = inputs.qkv.dim(Axis.batch)
+        let batch = inputs.qkv.dim(GatedDeltaAxis.batch)
         let channels = inputs.qkv.dim(Axis.channel)
         let gates = [batch, 1, shape.valueHeads]
-        return inputs.qkv.dim(Axis.token) == 1
+        return inputs.qkv.dim(GatedDeltaAxis.step) == 1
             && inputs.z.shape == [batch, 1, shape.valueHeads, shape.valueHeadDim]
             && inputs.b.shape == gates && inputs.a.shape == gates
             && convState.shape == [batch, shape.taps - 1, channels]
-            && recurrentState.dim(Axis.batch) == batch
+            && recurrentState.dim(HeadRowsAxis.batch) == batch
             && weights.conv.shape == [channels, shape.taps, 1]
             && weights.aLog.shape == [shape.valueHeads]
             && weights.dtBias.shape == [shape.valueHeads]
@@ -494,7 +484,7 @@ package enum GatedDeltaDecodeKernel {
         guard
             let shape = headShape(inputs: inputs, recurrentState: recurrentState, weights: weights)
         else { preconditionFailure("canRun checks the head shape") }
-        let batch = inputs.qkv.dim(Axis.batch)
+        let batch = inputs.qkv.dim(GatedDeltaAxis.batch)
         let outputs = kernel(
             [
                 inputs.qkv, inputs.z, inputs.b, inputs.a, weights.aLog, weights.dtBias,

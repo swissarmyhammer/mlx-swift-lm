@@ -56,20 +56,6 @@ package enum DecodeAttentionKernel {
     /// The most blocks of one KV head.
     private static let mostBlocks = 128
 
-    /// The axes of a `(batch, heads, rows, width)` tensor.
-    private enum Axis {
-        /// The axis that holds the sequences.
-        static let sequence = 0
-        /// The axis that holds the heads.
-        static let head = 1
-        /// The axis that holds the query tokens or the cached keys.
-        static let row = 2
-        /// The axis that holds the numbers of one head.
-        static let width = 3
-        /// The number of axes.
-        static let count = 4
-    }
-
     /// The axis of the `(rows, blocks)` block results that holds the blocks.
     private static let blockAxis = 1
 
@@ -79,9 +65,9 @@ package enum DecodeAttentionKernel {
     /// The Metal header.
     ///
     /// The upper-case constants are the layout constants of this type and
-    /// the tensor axes, written once here so that a kernel call names only
-    /// the template arguments that change with the shape. A short call list
-    /// keeps the graph build of a decode step cheap.
+    /// the ``HeadRowsAxis`` axes, written once here so that a kernel call
+    /// names only the template arguments that change with the shape. A short
+    /// call list keeps the graph build of a decode step cheap.
     ///
     /// `lowestScore` stands below every real score. `UNROLL_FULL` unrolls a
     /// loop with a count the compiler knows. Each loop that indexes the
@@ -96,72 +82,72 @@ package enum DecodeAttentionKernel {
     ///
     /// MLX writes the kernel signature directly after the header, thus the
     /// header ends in a line break.
-    private static let header = """
-        constexpr constant int SIMD_WIDTH = \(metalSimdWidth);
-        constexpr constant int HEAD_GROUPS = \(headGroups);
-        constexpr constant int BLOCK_SIMD_GROUPS = \(blockSimdGroups);
-        constexpr constant int COMBINE_SIMD_GROUPS = \(combineSimdGroups);
-        constexpr constant int SEQUENCE_AXIS = \(Axis.sequence);
-        constexpr constant int HEAD_AXIS = \(Axis.head);
-        constexpr constant int ROW_AXIS = \(Axis.row);
-        constexpr constant int WIDTH_AXIS = \(Axis.width);
-        constexpr constant int BLOCK_AXIS = \(blockAxis);
-        constexpr constant float lowestScore = -metal::numeric_limits<float>::max();
-        #define UNROLL_FULL _Pragma("clang loop unroll(full)")
+    private static let header =
+        metalSimdWidthDeclaration + """
+            constexpr constant int HEAD_GROUPS = \(headGroups);
+            constexpr constant int BLOCK_SIMD_GROUPS = \(blockSimdGroups);
+            constexpr constant int COMBINE_SIMD_GROUPS = \(combineSimdGroups);
+            constexpr constant int SEQUENCE_AXIS = \(HeadRowsAxis.batch);
+            constexpr constant int HEAD_AXIS = \(HeadRowsAxis.head);
+            constexpr constant int ROW_AXIS = \(HeadRowsAxis.row);
+            constexpr constant int WIDTH_AXIS = \(HeadRowsAxis.width);
+            constexpr constant int BLOCK_AXIS = \(blockAxis);
+            constexpr constant float lowestScore = -metal::numeric_limits<float>::max();
+            #define UNROLL_FULL _Pragma("clang loop unroll(full)")
 
-        template <typename T>
-        struct LaneRows {
-            const device T* first;
-            int64_t rowStep;
-            int64_t numberStep;
+            template <typename T>
+            struct LaneRows {
+                const device T* first;
+                int64_t rowStep;
+                int64_t numberStep;
 
-            template <bool UNIT_STEP, int COUNT>
-            inline void read(int row, thread float (&numbers)[COUNT]) const {
-                const device T* source = first + row * rowStep;
-                UNROLL_FULL for (int number = 0; number < COUNT; number++) {
-                    numbers[number] = float(source[UNIT_STEP ? number : number * numberStep]);
-                }
-            }
-        };
-
-        template <int HEADS, int NUMBERS>
-        struct GroupSoftmax {
-            float query[HEADS][NUMBERS];
-            float output[HEADS][NUMBERS];
-            float largest[HEADS];
-            float total[HEADS];
-
-            inline void add(thread const float (&keyRow)[NUMBERS], thread const float (&valueRow)[NUMBERS]) {
-                UNROLL_FULL for (int head = 0; head < HEADS; head++) {
-                    float score = 0.0f;
-                    UNROLL_FULL for (int number = 0; number < NUMBERS; number++) {
-                        score += query[head][number] * keyRow[number];
-                    }
-                    score = simd_sum(score);
-                    float next = max(largest[head], score);
-                    float factor = exp(largest[head] - next);
-                    float weight = exp(score - next);
-                    largest[head] = next;
-                    total[head] = total[head] * factor + weight;
-                    UNROLL_FULL for (int number = 0; number < NUMBERS; number++) {
-                        output[head][number] = output[head][number] * factor + weight * valueRow[number];
+                template <bool UNIT_STEP, int COUNT>
+                inline void read(int row, thread float (&numbers)[COUNT]) const {
+                    const device T* source = first + row * rowStep;
+                    UNROLL_FULL for (int number = 0; number < COUNT; number++) {
+                        numbers[number] = float(source[UNIT_STEP ? number : number * numberStep]);
                     }
                 }
-            }
+            };
 
-            template <bool UNIT_STEP, typename T>
-            inline void add_stream(LaneRows<T> keys, LaneRows<T> values, int first, int end, int step) {
-                for (int key = first; key < end; key += step) {
-                    float keyRow[NUMBERS];
-                    float valueRow[NUMBERS];
-                    keys.template read<UNIT_STEP>(key, keyRow);
-                    values.template read<UNIT_STEP>(key, valueRow);
-                    add(keyRow, valueRow);
+            template <int HEADS, int NUMBERS>
+            struct GroupSoftmax {
+                float query[HEADS][NUMBERS];
+                float output[HEADS][NUMBERS];
+                float largest[HEADS];
+                float total[HEADS];
+
+                inline void add(thread const float (&keyRow)[NUMBERS], thread const float (&valueRow)[NUMBERS]) {
+                    UNROLL_FULL for (int head = 0; head < HEADS; head++) {
+                        float score = 0.0f;
+                        UNROLL_FULL for (int number = 0; number < NUMBERS; number++) {
+                            score += query[head][number] * keyRow[number];
+                        }
+                        score = simd_sum(score);
+                        float next = max(largest[head], score);
+                        float factor = exp(largest[head] - next);
+                        float weight = exp(score - next);
+                        largest[head] = next;
+                        total[head] = total[head] * factor + weight;
+                        UNROLL_FULL for (int number = 0; number < NUMBERS; number++) {
+                            output[head][number] = output[head][number] * factor + weight * valueRow[number];
+                        }
+                    }
                 }
-            }
-        };
 
-        """
+                template <bool UNIT_STEP, typename T>
+                inline void add_stream(LaneRows<T> keys, LaneRows<T> values, int first, int end, int step) {
+                    for (int key = first; key < end; key += step) {
+                        float keyRow[NUMBERS];
+                        float valueRow[NUMBERS];
+                        keys.template read<UNIT_STEP>(key, keyRow);
+                        values.template read<UNIT_STEP>(key, valueRow);
+                        add(keyRow, valueRow);
+                    }
+                }
+            };
+
+            """
 
     /// The block pass.
     ///
@@ -374,17 +360,17 @@ package enum DecodeAttentionKernel {
     /// - Returns: True when the kernels run the call.
     static func canRun(queries: MLXArray, keys: MLXArray, values: MLXArray) -> Bool {
         guard Device.defaultDevice().deviceType == .gpu,
-            queries.ndim == Axis.count, keys.ndim == Axis.count,
+            queries.ndim == HeadRowsAxis.count, keys.ndim == HeadRowsAxis.count,
             values.shape == keys.shape,
-            queries.dim(Axis.row) == 1, keys.dim(Axis.row) >= fewestKeys,
-            queries.dim(Axis.sequence) == keys.dim(Axis.sequence),
-            queries.dim(Axis.width) == keys.dim(Axis.width),
+            queries.dim(HeadRowsAxis.row) == 1, keys.dim(HeadRowsAxis.row) >= fewestKeys,
+            queries.dim(HeadRowsAxis.batch) == keys.dim(HeadRowsAxis.batch),
+            queries.dim(HeadRowsAxis.width) == keys.dim(HeadRowsAxis.width),
             floatTypes.contains(queries.dtype),
             keys.dtype == queries.dtype, values.dtype == queries.dtype
         else { return false }
         return headShapeFits(
-            queryHeads: queries.dim(Axis.head), kvHeads: keys.dim(Axis.head),
-            headDim: queries.dim(Axis.width))
+            queryHeads: queries.dim(HeadRowsAxis.head), kvHeads: keys.dim(HeadRowsAxis.head),
+            headDim: queries.dim(HeadRowsAxis.width))
     }
 
     /// Tells if one SIMD group holds the queries of one head group in
@@ -417,9 +403,9 @@ package enum DecodeAttentionKernel {
             canRun(queries: queries, keys: keys, values: values),
             "the decode attention kernel cannot read queries \(queries.shape) "
                 + "over keys \(keys.shape)")
-        let rows = queries.dim(Axis.sequence) * queries.dim(Axis.head)
-        let headDim = queries.dim(Axis.width)
-        let keyCount = keys.dim(Axis.row)
+        let rows = queries.dim(HeadRowsAxis.batch) * queries.dim(HeadRowsAxis.head)
+        let headDim = queries.dim(HeadRowsAxis.width)
+        let keyCount = keys.dim(HeadRowsAxis.row)
         let blocks = blockCount(keys: keyCount)
         let blockThreads = blockSimdGroups * metalSimdWidth
         let results = blockKernel(
@@ -429,9 +415,11 @@ package enum DecodeAttentionKernel {
             ],
             template: [
                 ("T", queries.dtype), ("DIM", headDim),
-                ("GQA", queries.dim(Axis.head) / keys.dim(Axis.head)),
+                ("GQA", queries.dim(HeadRowsAxis.head) / keys.dim(HeadRowsAxis.head)),
             ],
-            grid: (blockThreads, keys.dim(Axis.sequence) * keys.dim(Axis.head), blocks),
+            grid: (
+                blockThreads, keys.dim(HeadRowsAxis.batch) * keys.dim(HeadRowsAxis.head), blocks
+            ),
             threadGroup: (blockThreads, 1, 1),
             outputShapes: [[rows, blocks, headDim], [rows, blocks], [rows, blocks]],
             outputDTypes: [.float32, .float32, .float32])
