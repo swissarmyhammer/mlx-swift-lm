@@ -1,8 +1,15 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '8e80'
+comments:
+- actor: claude-code
+  id: 01m4z96g6wy5g7z55tvan8qf2t
+  text: |-
+    ### closed by the user
+    - The caller sets the prefill step (GenerateParameters.prefillStepSize). No library change.
+  timestamp: 2026-10-15T08:00:00.220761+00:00
+position_column: done
+position_ordinal: ffd380
 title: 'DeepSeek-V4: let the model give a preferred prefill step (4096 measured +3.5 % at 32k)'
 ---
 ## What

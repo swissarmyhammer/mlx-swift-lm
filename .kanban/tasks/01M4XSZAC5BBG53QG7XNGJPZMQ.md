@@ -27,8 +27,14 @@ comments:
     - evidence: The window slab can remove 0 ms at 32k. Every prefill block of the 32k run (15 x 2008, 1 x 1997 tokens) goes to the fused kernel of ^f4ztxgj, which already reads only the visible window rows (128 or fewer). The op path runs for 0 blocks of 2 to 63 tokens. Decode and the last token read the 128-row RotatingKVCache window, so a slab cannot read fewer rows. Repository files changed: 0. Prefill step 4096 measured: 579.6 / 579.0 tok/s, peak 145 GiB, decode 30.4 / 30.3 ms/token. Step 2048: 559.9 / 559.5 / 559.5 tok/s, peak 143 GiB, decode 30.4 ms/token. Logs: scratchpad ngj-step4096-full-1.log, ngj-step4096-full-2.log, ngj-step2048-full-1.log.
     - next: a person decides to close this card as overtaken by ^f4ztxgj. The step-size finding is in the new task ^jyfka2h.
   timestamp: 2026-10-14T22:01:30.798881+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m4z96ee4tkjz81cg76xa1rk5
+  text: |-
+    ### closed by the user
+    - The ^f4ztxgj fused kernel already reads only the visible window rows. The slab gives 0 ms at 32k. No code change.
+  timestamp: 2026-10-15T07:59:58.404247+00:00
+position_column: done
+position_ordinal: ffd280
 title: 'DeepSeek-V4 prefill speed: each query block reads only its own window rows, not all window keys of the block'
 ---
 ## What
