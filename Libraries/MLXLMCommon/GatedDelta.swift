@@ -23,6 +23,58 @@ private let computeGatedDeltaG: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXA
 
 // MARK: - Metal Kernel
 
+/// The number of lanes of one SIMD group. One SIMD group holds one row of the
+/// recurrent state, and each lane holds `Dk / gatedDeltaSimdWidth` of its
+/// numbers.
+let gatedDeltaSimdWidth = 32
+
+/// The Metal helpers that the gated delta kernels share.
+///
+/// `gated_delta_row` runs one token of the gated delta rule on one row of the
+/// recurrent state: the decay, the delta update, and the output of the row.
+/// One lane holds `N` numbers of the row and the same `N` numbers of the key
+/// and the query. The lanes of the SIMD group hold the whole row.
+///
+/// The first sum keeps Kahan compensation under the default fast math of
+/// Metal, for parity with mlx-lm.
+///
+/// MLX writes the kernel signature directly after the header, thus the
+/// header ends in a line break.
+let gatedDeltaMetalHeader = """
+    constexpr constant int SIMD_WIDTH = \(gatedDeltaSimdWidth);
+
+    template <int N>
+    inline float gated_delta_row(
+        thread float (&state)[N], thread const float (&k)[N], thread const float (&q)[N],
+        float g, float beta, float v) {
+      float kv_mem = 0.0f;
+      {
+        #pragma clang fp reassociate(off)
+        #pragma clang fp contract(off)
+        float kv_compensation = 0.0f;
+        for (int i = 0; i < N; ++i) {
+          state[i] = state[i] * g;
+          auto product = state[i] * k[i];
+          auto corrected = product - kv_compensation;
+          auto next_sum = kv_mem + corrected;
+          kv_compensation = (next_sum - kv_mem) - corrected;
+          kv_mem = next_sum;
+        }
+      }
+      kv_mem = simd_sum(kv_mem);
+
+      auto delta = (v - kv_mem) * beta;
+
+      float out = 0.0f;
+      for (int i = 0; i < N; ++i) {
+        state[i] = state[i] + k[i] * delta;
+        out += state[i] * q[i];
+      }
+      return simd_sum(out);
+    }
+
+    """
+
 private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
     let maskSource = hasMask ? "mask[b_idx * T + t]" : "true"
 
@@ -31,7 +83,7 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
             auto b_idx = n / Hv;
             auto hv_idx = n % Hv;
             auto hk_idx = hv_idx / (Hv / Hk);
-            constexpr int n_per_t = Dk / 32;
+            constexpr int n_per_t = Dk / SIMD_WIDTH;
 
             // q, k: [B, T, Hk, Dk]
             auto q_ = q + b_idx * T * Hk * Dk + hk_idx * Dk;
@@ -60,33 +112,15 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
 
             for (int t = 0; t < T; ++t) {
               if (\(maskSource)) {
-                float kv_mem = 0.0f;
-                {
-                  // Preserve Kahan summation under Metal's default fast math.
-                  #pragma clang fp reassociate(off)
-                  #pragma clang fp contract(off)
-                  float kv_compensation = 0.0f;
-                  for (int i = 0; i < n_per_t; ++i) {
-                    auto s_idx = n_per_t * dk_idx + i;
-                    state[i] = state[i] * g_[hv_idx];
-                    auto product = state[i] * k_[s_idx];
-                    auto corrected = product - kv_compensation;
-                    auto next_sum = kv_mem + corrected;
-                    kv_compensation = (next_sum - kv_mem) - corrected;
-                    kv_mem = next_sum;
-                  }
-                }
-                kv_mem = simd_sum(kv_mem);
-
-                auto delta = (v_[dv_idx] - kv_mem) * beta_[hv_idx];
-
-                float out = 0.0f;
+                float k_row[n_per_t];
+                float q_row[n_per_t];
                 for (int i = 0; i < n_per_t; ++i) {
                   auto s_idx = n_per_t * dk_idx + i;
-                  state[i] = state[i] + k_[s_idx] * delta;
-                  out += state[i] * q_[s_idx];
+                  k_row[i] = static_cast<float>(k_[s_idx]);
+                  q_row[i] = static_cast<float>(q_[s_idx]);
                 }
-                out = simd_sum(out);
+                float out = gated_delta_row(
+                    state, k_row, q_row, g_[hv_idx], beta_[hv_idx], static_cast<float>(v_[dv_idx]));
                 if (thread_index_in_simdgroup == 0) {
                   y[dv_idx] = static_cast<InT>(out);
                 }
@@ -118,7 +152,8 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
         name: "gated_delta_step\(suffix)",
         inputNames: inputNames,
         outputNames: ["y", "state_out"],
-        source: source
+        source: source,
+        header: gatedDeltaMetalHeader
     )
 }
 

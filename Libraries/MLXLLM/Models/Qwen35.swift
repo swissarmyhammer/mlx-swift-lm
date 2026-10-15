@@ -369,6 +369,20 @@ final class Qwen35GatedDeltaNet: Module {
         )
     }
 
+    /// The epsilon of the q and k RMSNorm.
+    static let queryKeyNormEps: Float = 1e-6
+
+    /// The power of the key head width that gives the k factor:
+    /// `1 / sqrt(headKDim)`.
+    private static let keyScalePower: Float = -0.5
+
+    /// The factors of the normalized q and k: `1 / headKDim` and
+    /// `1 / sqrt(headKDim)`.
+    var queryKeyScales: (query: Float, key: Float) {
+        let invScale = pow(Float(headKDim), Self.keyScalePower)
+        return (invScale * invScale, invScale)
+    }
+
     /// The GDN body with state passed explicitly in and out so it can be
     /// traced.
     func forward(
@@ -390,7 +404,57 @@ final class Qwen35GatedDeltaNet: Module {
 
         if let mask {
             qkv = MLX.where(mask[.ellipsis, .newAxis], qkv, 0)
+        } else if let step = decodeKernelStep(
+            qkv: qkv, z: z, b: b, a: a, convState: convState, recState: recState)
+        {
+            return (outProj(step.output), step.convState, step.recurrentState, nil)
         }
+
+        let body = recurrentBody(
+            qkv: qkv, z: z, b: b, a: a, convState: convState, recState: recState, mask: mask,
+            checkpointAfter: checkpointAfter)
+        return (outProj(body.output), body.convState, body.recurrentState, body.checkpoint)
+    }
+
+    /// The body of one decode token in one Metal kernel
+    /// (``GatedDeltaDecodeKernel``), or nil when the kernel does not run the
+    /// token: the layer trains (the kernel has no gradient), the recurrent
+    /// state is not there yet, or the shapes and dtypes are not the ones the
+    /// kernel reads. The output is the input of the output projection.
+    func decodeKernelStep(
+        qkv: MLXArray, z: MLXArray, b: MLXArray, a: MLXArray, convState: MLXArray,
+        recState: MLXArray?
+    ) -> GatedDeltaDecodeKernel.Step? {
+        guard !training, let recState else { return nil }
+        let scales = queryKeyScales
+        let inputs = GatedDeltaDecodeKernel.Inputs(qkv: qkv, z: z, b: b, a: a)
+        let weights = GatedDeltaDecodeKernel.Weights(
+            conv: conv1d.weight, aLog: aLog, dtBias: dtBias, norm: norm.weight,
+            normEps: norm.eps, queryKeyNormEps: Self.queryKeyNormEps,
+            queryScale: scales.query, keyScale: scales.key)
+        guard
+            GatedDeltaDecodeKernel.canRun(
+                inputs: inputs, convState: convState, recurrentState: recState, weights: weights)
+        else { return nil }
+        return GatedDeltaDecodeKernel.step(
+            inputs: inputs, convState: convState, recurrentState: recState, weights: weights)
+    }
+
+    /// The op path of the body, for any number of tokens: the conv, the q
+    /// and k norms, the gated delta rule and the gated RMSNorm. The output,
+    /// shape `(batch, tokens, valueDim)`, is the input of the output
+    /// projection.
+    func recurrentBody(
+        qkv: MLXArray, z: MLXArray, b: MLXArray, a: MLXArray, convState: MLXArray,
+        recState: MLXArray?, mask: MLXArray?, checkpointAfter: Int? = nil
+    ) -> (
+        output: MLXArray,
+        convState: MLXArray,
+        recurrentState: MLXArray,
+        checkpoint: (conv: MLXArray, recurrent: MLXArray)?
+    ) {
+        let B = qkv.dim(0)
+        let S = qkv.dim(1)
 
         let fusedDecode =
             S == 1 && mask == nil && (qkv.dtype == .float16 || qkv.dtype == .bfloat16)
@@ -406,13 +470,13 @@ final class Qwen35GatedDeltaNet: Module {
         let v = convSplit[2].reshaped(B, S, numVHeads, headVDim)
 
         let dtype = q.dtype
-        let invScale = pow(Float(headKDim), -0.5)
+        let scales = queryKeyScales
         let qNormed =
-            MLXArray(pow(invScale, 2)).asType(dtype)
-            * MLXFast.rmsNorm(q, weight: MLXArray.mlxNone, eps: 1e-6)
+            MLXArray(scales.query).asType(dtype)
+            * MLXFast.rmsNorm(q, weight: MLXArray.mlxNone, eps: Self.queryKeyNormEps)
         let kNormed =
-            MLXArray(invScale).asType(dtype)
-            * MLXFast.rmsNorm(k, weight: MLXArray.mlxNone, eps: 1e-6)
+            MLXArray(scales.key).asType(dtype)
+            * MLXFast.rmsNorm(k, weight: MLXArray.mlxNone, eps: Self.queryKeyNormEps)
 
         let out: MLXArray
         let newRecState: MLXArray
@@ -471,7 +535,7 @@ final class Qwen35GatedDeltaNet: Module {
         }
 
         let gated = norm(out, gate: z)
-        return (outProj(gated.reshaped(B, S, -1)), newConvState, newRecState, checkpoint)
+        return (gated.reshaped(B, S, -1), newConvState, newRecState, checkpoint)
     }
 
     /// The S == 1 depthwise conv as elementwise multiply-adds, so `compile`
