@@ -568,16 +568,38 @@ final class Qwen35Attention: Module {
         let queries = applyRotaryPosition(rope, to: q, offset: offset)
         let keys = applyRotaryPosition(rope, to: k, offset: offset)
 
-        let output = attentionWithCacheUpdate(
-            queries: queries,
-            keys: keys,
-            values: values,
-            cache: cache,
-            scale: scale,
-            mask: mask
-        )
+        let output = attend(queries: queries, keys: keys, values: values, cache: cache, mask: mask)
 
         return mergeHeadsAndProject(attention: output, gate: gate)
+    }
+
+    /// The attention of the rotated queries over the cache, after the cache
+    /// takes the new keys and values. A plain key cache gives its keys to
+    /// ``DecodeAttentionKernel``, which reads one query over a long cache
+    /// faster than the SDPA of MLX and keeps that SDPA for every other call.
+    /// A quantized, TurboQuant or cache-native cache keeps its own route.
+    ///
+    /// - Parameters:
+    ///   - queries: The rotated queries, shape `(batch, heads, tokens, headDim)`.
+    ///   - keys: The rotated new keys, shape `(batch, kvHeads, tokens, headDim)`.
+    ///   - values: The new values, of the shape of `keys`.
+    ///   - cache: The cache of this layer, or `nil`.
+    ///   - mask: The attention mask of the call.
+    /// - Returns: The attention output, of the shape of `queries`.
+    func attend(
+        queries: MLXArray, keys: MLXArray, values: MLXArray, cache: KVCache?,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray {
+        guard let cache, usesPlainAttentionCacheRoute(cache),
+            !(cache is KVCacheAttentionProtocol)
+        else {
+            return attentionWithCacheUpdate(
+                queries: queries, keys: keys, values: values, cache: cache, scale: scale,
+                mask: mask)
+        }
+        let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
+        return DecodeAttentionKernel.scaledDotProductAttention(
+            queries: queries, keys: cachedKeys, values: cachedValues, scale: scale, mask: mask)
     }
 
     /// Projections up to (not including) rope: `x` → (queries, gate, keys,
@@ -822,12 +844,11 @@ final class Qwen35DecoderLayer: Module {
     ) -> MLXArray {
         let attn = selfAttn!
         let offset = cache.ropeOffset
-        return attentionWithCacheUpdate(
+        return attn.attend(
             queries: applyRotaryPosition(attn.rope, to: queries, offset: offset),
             keys: applyRotaryPosition(attn.rope, to: keys, offset: offset),
             values: values,
             cache: cache,
-            scale: attn.scale,
             mask: mask
         )
     }

@@ -1,8 +1,89 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '8880'
+comments:
+- actor: claude-code
+  id: 01m4zpktwbh7nq6vt3pbh959q7
+  text: |-
+    Research and micro-benchmark (bench mode `qwen38bench attn <ctx> [layers] [iters] [blocks]`, files Sources/qwen38bench/AttnBench.swift and AttnProto.swift; 16 layers of own K/V, bf16, 24 q heads, 4 KV heads, D 256; time of eval only, graph build not timed).
+
+    Facts:
+    - The KV read at 32k is 2.15 GB for each token (16 x 2 x 4 x 256 x 32768 x 2 B), not 1.07 GB. Thus MLX SDPA reads at about 465 GB/s, not 247 GB/s. Reference: a plain sum over K and V reads at about 635 GB/s.
+    - MLX SDPA at 32k: 0.287 ms/layer (4.6 ms for 16 layers). MLX already groups the 6 q heads of one KV head in one threadgroup, but each simdgroup reads the K/V row again (6 reads from cache).
+    - MLX_SDPA_BLOCKS sweep at 32k (ms/layer): default(512) 0.288, 32 0.398, 64 0.327, 128 0.299, 256 0.293, 512 0.291, 1024 0.304. No value is faster than the default. No change from this step.
+    - Do not time the graph build: a first bench version timed it, and `ProcessInfo.environment` lookups in the call path made the prototype look slow. After the fix the numbers repeat.
+    - Custom 2-pass kernel (each simdgroup reads its own keys, holds 3 of the 6 heads of the KV head, two simdgroups share each key row; 4 simdgroups; float32 partials; 128 blocks at 32k): 0.223-0.229 ms/layer at 32k (about 600 GB/s), against 0.287 for MLX. 16 layers: about 3.6 ms against 4.6 ms. Faster from 1024 keys up to 131072 keys (131072: 0.86 against 1.09 ms/layer). MLX is faster below 1024 keys (MLX 1-pass path), so the kernel needs a lower limit of 1024 keys.
+    - Variants that did not help: more keys for each step (TK 2, 4, 8: register pressure, slower); all 6 heads in one simdgroup (0.241); vector loads spread over the simdgroup; a sequential combine with less threadgroup memory (slower); 3 or 6 head groups (slower).
+    - Best block count by context: 1k-2k: 32, 8k: 64, 16k and more: 128. Rule: clamp(power of two below keys / 128, 32, 128).
+    - Upstream MLX 0e3ff364 (#4596): unrolls 4 keys for each step in sdpa_vector_2pass_1 with the same layout (one simdgroup for each q head). It does not remove the 6 reads of each K/V row. Not measured (no MLX update in this task).
+  timestamp: 2026-10-15T11:54:28.619332+00:00
+- actor: claude-code
+  id: 01m4zrrwh77gkbvjnmzkh27r8d
+  text: |-
+    Implementation landed (not committed):
+    - New `Libraries/MLXLMCommon/DecodeAttentionKernel.swift` (package enum, 2 Metal kernels via MLXFast.metalKernel: block pass + combine pass). Used only when one query token reads >= 1024 keys, no mask, GQA even, head width a multiple of 32, (GQA/2)*(D/32) <= 24, float dtypes. Else the SDPA of MLX runs (bit-exact as before).
+    - `Qwen35Attention.attend(...)`: one route for both decode paths (`callAsFunction` and `attentionCacheStep`). Plain caches give their keys to the kernel router; quantized, TurboQuant and cache-native caches keep `attentionWithCacheUpdate`.
+    - Tests: `Tests/MLXLMTests/DecodeAttentionKernelTests.swift` (tolerance against MLX SDPA in float32 for 4 shapes x 2 dtypes, strided head numbers, positive control that drops one block, canRun limits, block rule, routing bit-exact) and `Tests/MLXLMTests/Qwen35DecodeAttentionTests.swift` (both Qwen35 decode paths give the kernel output bit for bit; RED before the wiring).
+
+    Lessons (do not repeat):
+    - A Metal loop over per-lane arrays that does not unroll fully puts the arrays in thread memory: 0.43 ms/layer instead of 0.22. Every loop that indexes those arrays has `UNROLL_FULL`.
+    - A runtime stride multiply on the head-number axis in the hot loop also costs about 40 %. The kernel tests the stride one time (uniform branch) and runs a loop with side-by-side reads for every cache layout.
+    - First model A/B (before these two fixes) was slower: 34.0 against 30.7 ms/token. The micro-benchmark of the library code found the cause.
+    - CPU cost of one kernel call (graph build) is about 13.5 us against 0.4 us for MLX SDPA (MLXFast.metalKernel call overhead), about 0.2 ms per token for 16 layers. Fewer template arguments (constants in the header) cut it from 15.9 us.
+    - Background CPU load: sourcekit-lsp 200-290 % and SourceKitService about 100 % during all runs (not ours to stop). One run showed sync decode 42 ms from this load.
+  timestamp: 2026-10-15T12:32:11.303143+00:00
+- actor: claude-code
+  id: 01m4zvnr8xd96f4w5x1mf66vsy
+  text: |-
+    Measurements at 32k (bench `qwen38bench`, model Qwen3.8-27B-mxfp4). "base" = HEAD 9f9bd58 exported to scratchpad/dak-base, built as its own bench; "new" = this change. GPU idle (0 %) before each run. CPU load in every run: sourcekit-lsp 90-360 %, SourceKitService 40-130 %, fseventsd about 100 % (other processes).
+
+    Micro-benchmark, 16 layers of own K/V, eval time only (attn mode): MLX SDPA 0.287 ms/layer (4.59 ms, 467 GB/s); kernel 0.225 ms/layer (3.60 ms, 597 GB/s). Graph build: 13.5 us per kernel call against 0.4 us for MLX SDPA.
+
+    profile mode (interleaved new, base, new, base), decode B pipelined / A sync / graph build:
+    - new #1: 30.31 / 32.45 / 2.18 ms
+    - base #2: 30.87 / 32.43 / 1.84 ms
+    - new #3: 30.33 / 32.19 / 2.10 ms
+    - base #4: 30.96 / 32.42 / 1.82 ms
+    Prefill 398.2, 398.1, 394.1, 390.9 tok/s (no change expected).
+
+    step mode (2 rounds each), B direct pipelined and C library generate:
+    - new #1 (CPU load sourcekit-lsp 285 %): B 31.95 / 30.13, C 31.21 / 31.38
+    - base #2 (load 89 %): B 30.34 / 30.41, C 29.91 / 29.99
+    - new #3 (load 89 %): B 29.99 / 29.74, C 29.38 / 29.32
+    - base #4 (load 89 %): B 30.27 / 30.44, C 29.80 / 29.79
+    At the same load, new is about 0.5 ms/token faster (C 29.35 against 29.85). Under the high load of new #1 it was slower: the 16 kernel calls add about 0.2-0.3 ms of CPU graph build per token, and a busy CPU then slows the pipeline.
+
+    full mode (QWEN38_THINKING_KEY=enable_thinking), new #1 / #2: prefill 396.4 / 396.3 tok/s, decode 29.82 / 29.59 ms/token (128 tokens), peak 20.7 GiB (base in PROFILE.md: 395.1 / 373.2 tok/s, 30.98 / 30.62 ms/token, 20.7 GiB). Prompt-cache check at 32k, thinking off and on, both runs: reuse on turn 2 YES, warm == cold turn 2 (text) YES, tie-aware PASS, HARD reuse check PASS.
+
+    Result: decode attention at 32k is faster: about 1.0 ms/token less GPU time for 16 layers in the micro-benchmark, about 0.5-0.6 ms/token (about 2 %) less in pipelined decode and in generate. Sync decode is about equal, because the graph build costs about 0.3 ms more. The card target of 2.7 ms for attention is not reached: the kernel reads at about 600 GB/s (3.6 ms for 16 layers); a plain sum over the same K and V reads at about 635 GB/s, so the remaining room in this layout is small.
+
+    Logs: scratchpad/qwen38/dak-final-profile-*.txt, dak-final-step-*.txt, dak-final-full-new-*.txt, attn-sweep-*.txt, attn-proto-*.txt.
+  timestamp: 2026-10-15T13:22:54.365655+00:00
+- actor: claude-code
+  id: 01m4zvpj6j4m2fhvx4h3cbkcns
+  text: |-
+    ### implement — changed
+    - evidence: 4 files — Libraries/MLXLMCommon/DecodeAttentionKernel.swift (new), Libraries/MLXLLM/Models/Qwen35.swift, Tests/MLXLMTests/DecodeAttentionKernelTests.swift (new), Tests/MLXLMTests/Qwen35DecodeAttentionTests.swift (new). `swift build --build-tests`: 0 warnings (only the known "missing creator" note). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 716 XCTest + 1483 Swift Testing, 0 failures. Real weights: `xcodebuild test -only-testing:IntegrationTestingTests/Qwen35SessionPromptCacheTests -only-testing:IntegrationTestingTests/Qwen35CheckpointIntegrationTests`: 7 tests passed, TEST SUCCEEDED. 32k decode: pipelined about 30.3 against 30.9 ms/token (profile), generate 29.35 against 29.85 ms/token (step, same load), full 29.8 / 29.6 ms/token, prefill and peak unchanged, reuse check PASS. MLX_SDPA_BLOCKS sweep: no value faster than the default. Follow-up task ^nz5ev88 (other GQA decode paths).
+    - next: /review
+  timestamp: 2026-10-15T13:23:20.914673+00:00
+- actor: claude-code
+  id: 01m4zvx61xn6g30hy4c13f6nbx
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (ece83ed). 0 findings, 0 confirmed, 0 refuted. 7 validator runs attempted, 0 failed. 4 source files reviewed. 4 .kanban files not reviewed because no validator matches them.
+    - next: none. The task is in done.
+  timestamp: 2026-10-15T13:26:57.853006+00:00
+- actor: claude-code
+  id: 01m4zvxhr0hn0bpyfxc20q29e0
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 4 files; 32k decode about 30.9 → 30.3 ms/token (profile), 29.85 → 29.35 (step); prefill and peak no change
+    - test: green — MLXLMTests 716 XCTest and 1483 Swift Testing, 0 failures, 0 warnings; Qwen35 integration 7/7
+    - commit: ece83ed
+    - review: clean — 0 findings
+  timestamp: 2026-10-15T13:27:09.824294+00:00
+position_column: done
+position_ordinal: ffd580
 title: 'Qwen3.8 decode speed: attention at 32k reads the KV cache at only 247 GB/s'
 ---
 ## What
@@ -21,6 +102,6 @@ scratchpad/qwen38bench at 32k: profile and step modes for decode ms/token (two r
 
 ## Acceptance Criteria
 
-- [ ] Decode attention at 32k is faster, measured, or the card records why no change is faster.
-- [ ] A tolerance test compares any new kernel with the MLX SDPA, with a positive control.
-- [ ] All MLXLMTests pass, with 0 compiler warnings. #qwen3-8 #performance
+- [x] Decode attention at 32k is faster, measured, or the card records why no change is faster.
+- [x] A tolerance test compares any new kernel with the MLX SDPA, with a positive control.
+- [x] All MLXLMTests pass, with 0 compiler warnings. #qwen3-8 #performance
