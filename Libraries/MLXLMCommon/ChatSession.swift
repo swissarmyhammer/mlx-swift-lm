@@ -1103,14 +1103,14 @@ public final class ChatSession {
                             && PromptCacheCheckpoint.applies(to: kvCache.cache)
                         var checkpointBoundary: Int?
                         if keepsCheckpoints {
-                            checkpointBoundary = await Self.lastMessageEnd(
-                                of: preparedInput,
-                                probe: UserInput(
-                                    chat: templateMessages
-                                        + [.user(PromptCacheCheckpoint.boundaryProbeText)],
-                                    processing: processing,
-                                    tools: tools, additionalContext: additionalContext),
-                                processor: processor)
+                            checkpointBoundary = await PromptCacheCheckpoint.lastMessageEnd(
+                                of: preparedInput, messages: templateMessages
+                            ) { messages in
+                                try await processor.prepare(
+                                    input: UserInput(
+                                        chat: messages, processing: processing,
+                                        tools: tools, additionalContext: additionalContext))
+                            }
                         }
                         var checkpointPrefill: CheckpointPrefill?
                         if var currentConversation = conversation {
@@ -1712,32 +1712,6 @@ extension ChatSession {
         let time: TimeInterval
     }
 
-    /// The index of `prompt` where its last message ends: the start of the
-    /// generation prompt that the chat template writes after it.
-    ///
-    /// The Qwen 3.8 template ends a prompt with `<think>\n`, and writes the same
-    /// assistant turn as `<think>\n\n</think>` in the next render. The next
-    /// render thus parts from the cached tokens inside the generation prompt,
-    /// where the recurrent caches of a hybrid model cannot rewind. A checkpoint
-    /// at the end of the last message serves that render.
-    ///
-    /// - Parameters:
-    ///   - prompt: the prepared prompt of this pass.
-    ///   - probe: the input of `prompt` plus one user message with the text
-    ///     ``PromptCacheCheckpoint/boundaryProbeText``.
-    ///   - processor: the processor that rendered `prompt`.
-    /// - Returns: the length of the prefix that `prompt` and the render of
-    ///   `probe` share, or nil when the processor refuses `probe`. A template
-    ///   can refuse two user messages after each other, and then the pass
-    ///   takes no checkpoint at the end of the last message.
-    private static func lastMessageEnd(
-        of prompt: LMInput, probe: UserInput, processor: any UserInputProcessor
-    ) async -> Int? {
-        guard let rendered = try? await processor.prepare(input: probe) else { return nil }
-        return commonPrefixLength(
-            of: prompt.text.tokens.asArray(Int.self), and: rendered.text.tokens.asArray(Int.self))
-    }
-
     /// The caches at the longest checkpoint of `conversation` that
     /// `promptTokens` starts with.
     ///
@@ -1789,19 +1763,19 @@ extension ChatSession {
         from start: Int, into storage: KVCacheStorage, state: LMOutput.State?,
         model: any LanguageModel, parameters: GenerateParameters
     ) throws -> CheckpointPrefill? {
-        guard boundary > start, boundary < promptTokens.count else { return nil }
         let begin = Date.timeIntervalSinceReferenceDate
-        let fedState = try PromptCacheCheckpoint.prefill(
-            Array(promptTokens[start ..< boundary]), into: storage.cache, state: state,
-            model: model, prefill: parameters.prefill)
+        guard
+            let feed = try PromptCacheCheckpoint.prefillToCheckpoint(
+                at: boundary, of: promptTokens, representing: representedTokens, from: start,
+                into: storage.cache, state: state, model: model, prefill: parameters.prefill)
+        else {
+            return nil
+        }
         storage.commitProcessedTokens(boundary - start)
         return CheckpointPrefill(
             remainingInput: LMInput(tokens: MLXArray(Array(promptTokens[boundary...]))),
-            state: fedState,
-            checkpoint: PromptCacheCheckpoint(
-                caches: storage.cache,
-                tokens: Array(representedTokens.dropLast(promptTokens.count - boundary)),
-                state: fedState),
+            state: feed.state,
+            checkpoint: feed.checkpoint,
             tokenCount: boundary - start,
             time: Date.timeIntervalSinceReferenceDate - begin)
     }

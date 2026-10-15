@@ -86,10 +86,10 @@ extension MLXLanguageModel.Executor {
         /// the executor keeps a checkpoint at the point where the two
         /// renders part.
         ///
-        /// This method finds that point: it renders `messages` plus one user
-        /// message with the same template variables, tools and closed block
-        /// as `prompt`, and takes the prefix the two renders share. With no
-        /// generation prompt, the point is the end of `prompt`.
+        /// This method finds that point with
+        /// ``PromptCacheCheckpoint/lastMessageEnd(of:messages:render:)``,
+        /// which renders with the same template variables, tools and closed
+        /// block as `prompt`.
         ///
         /// - Parameters:
         ///   - prompt: the prepared prompt of `messages`, which this render
@@ -108,15 +108,13 @@ extension MLXLanguageModel.Executor {
             context: ModelContext
         ) async -> Int? {
             guard prompt.image == nil, prompt.video == nil, prompt.audio == nil,
-                PromptCacheCheckpoint.applies(to: context.model),
-                let probe = try? await prepare(
-                    messages: messages + [.user(PromptCacheCheckpoint.boundaryProbeText)],
-                    tools: tools, context: context)
+                PromptCacheCheckpoint.applies(to: context.model)
             else {
                 return nil
             }
-            return commonPrefixLength(
-                of: prompt.text.tokens.asArray(Int.self), and: probe.text.tokens.asArray(Int.self))
+            return await PromptCacheCheckpoint.lastMessageEnd(of: prompt, messages: messages) {
+                try await prepare(messages: $0, tools: tools, context: context)
+            }
         }
 
         /// `input` with `block` in place of the open reasoning block at its

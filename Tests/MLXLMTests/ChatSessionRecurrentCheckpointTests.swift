@@ -332,4 +332,118 @@ struct ChatSessionRecurrentCheckpointTests {
 
         #expect(!allClose(stale, try coldLogits(model: model), atol: Self.logitTolerance).item())
     }
+
+    // MARK: - The end of the last message
+
+    /// The tokens of a prompt: the messages, then the generation prompt.
+    private static let promptWithGenerationPrompt = [1, 2, 3, 4, 5, 6, 7]
+
+    /// The tokens a render of the messages plus a probe message writes: the
+    /// messages, then the probe message in place of the generation prompt.
+    private static let renderWithProbe = [1, 2, 3, 4, 5, 9, 9, 9]
+
+    /// The length of the prefix ``promptWithGenerationPrompt`` and
+    /// ``renderWithProbe`` share.
+    private static let sharedPrefixLength = 5
+
+    /// The error a render that refuses its messages throws.
+    private struct RefusedRender: Error {}
+
+    /// A prepared input of `tokens`.
+    private static func input(_ tokens: [Int]) -> LMInput {
+        LMInput(tokens: MLXArray(tokens))
+    }
+
+    @Test("the end of the last message is the prefix the prompt and the probe render share")
+    func theEndOfTheLastMessageIsThePrefixThePromptAndTheProbeRenderShare() async {
+        let end = await PromptCacheCheckpoint.lastMessageEnd(
+            of: Self.input(Self.promptWithGenerationPrompt),
+            messages: [.user(Self.firstTurn)]
+        ) { _ in Self.input(Self.renderWithProbe) }
+
+        #expect(end == Self.sharedPrefixLength)
+    }
+
+    @Test("the probe render gets the messages plus one user message with the probe text")
+    func theProbeRenderGetsTheMessagesPlusOneUserMessageWithTheProbeText() async {
+        var rendered: [Chat.Message] = []
+        _ = await PromptCacheCheckpoint.lastMessageEnd(
+            of: Self.input(Self.promptWithGenerationPrompt),
+            messages: [.user(Self.firstTurn)]
+        ) { messages in
+            rendered = messages
+            return Self.input(Self.renderWithProbe)
+        }
+
+        #expect(rendered.map(\.role) == [.user, .user])
+        #expect(rendered.map(\.content) == [Self.firstTurn, PromptCacheCheckpoint.boundaryProbeText])
+    }
+
+    @Test("a render that refuses the probe message gives no end of the last message")
+    func aRenderThatRefusesTheProbeMessageGivesNoEndOfTheLastMessage() async {
+        let end = await PromptCacheCheckpoint.lastMessageEnd(
+            of: Self.input(Self.promptWithGenerationPrompt),
+            messages: [.user(Self.firstTurn)]
+        ) { _ in throw RefusedRender() }
+
+        #expect(end == nil)
+    }
+
+    // MARK: - The feed up to a checkpoint
+
+    /// The tokens of a prompt that a feed stops inside.
+    private static let fedPrompt = checkpointTokens + droppedTokens
+
+    /// A generated token that a protocol rule keeps in the caches, where the
+    /// render writes another token.
+    private static let keptGeneratedToken = 11
+
+    /// The tokens the caches represent after the whole of ``fedPrompt``: a
+    /// protocol rule kept ``keptGeneratedToken`` in place of the first prompt
+    /// token.
+    private static let fedRepresentedTokens = [keptGeneratedToken] + fedPrompt.dropFirst()
+
+    @Test("a feed to a checkpoint stops at the boundary and takes the checkpoint there")
+    func aFeedToACheckpointStopsAtTheBoundaryAndTakesTheCheckpointThere() throws {
+        let model = try hybridContext(historyShape: .closesTheThinkBlock).model
+        let caches = try model.newCache(parameters: nil)
+
+        let feed = try #require(
+            try PromptCacheCheckpoint.prefillToCheckpoint(
+                at: Self.checkpointTokens.count, of: Self.fedPrompt,
+                representing: Self.fedRepresentedTokens, from: 0, into: caches, state: nil,
+                model: model, prefill: .init()))
+
+        #expect(caches.allSatisfy { $0.offset == Self.checkpointTokens.count })
+        #expect(
+            feed.checkpoint?.tokens
+                == Array(Self.fedRepresentedTokens.prefix(Self.checkpointTokens.count)))
+    }
+
+    @Test("a feed to a checkpoint the caches hold already feeds nothing")
+    func aFeedToACheckpointTheCachesHoldAlreadyFeedsNothing() throws {
+        let model = try hybridContext(historyShape: .closesTheThinkBlock).model
+        let caches = try model.newCache(parameters: nil)
+
+        let feed = try PromptCacheCheckpoint.prefillToCheckpoint(
+            at: Self.checkpointTokens.count, of: Self.fedPrompt,
+            representing: Self.fedPrompt, from: Self.checkpointTokens.count, into: caches,
+            state: nil, model: model, prefill: .init())
+
+        #expect(feed == nil)
+        #expect(caches.allSatisfy { $0.offset == 0 })
+    }
+
+    @Test("a feed to a checkpoint at the end of the prompt feeds nothing")
+    func aFeedToACheckpointAtTheEndOfThePromptFeedsNothing() throws {
+        let model = try hybridContext(historyShape: .closesTheThinkBlock).model
+        let caches = try model.newCache(parameters: nil)
+
+        let feed = try PromptCacheCheckpoint.prefillToCheckpoint(
+            at: Self.fedPrompt.count, of: Self.fedPrompt, representing: Self.fedPrompt,
+            from: 0, into: caches, state: nil, model: model, prefill: .init())
+
+        #expect(feed == nil)
+        #expect(caches.allSatisfy { $0.offset == 0 })
+    }
 }

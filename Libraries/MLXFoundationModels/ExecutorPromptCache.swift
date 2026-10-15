@@ -1156,23 +1156,24 @@ struct ExecutorPromptCachePlan {
     func prefillingToCheckpoint(
         at boundary: Int, model: any LanguageModel, parameters: GenerateParameters
     ) throws -> ExecutorPromptCachePlan {
-        guard boundary > reusedTokenCount, boundary < promptTokens.count else { return self }
-        let boundaryState = try PromptCacheCheckpoint.prefill(
-            Array(promptTokens[reusedTokenCount ..< boundary]), into: caches, state: state,
-            model: model, prefill: parameters.prefill)
+        guard
+            let feed = try PromptCacheCheckpoint.prefillToCheckpoint(
+                at: boundary, of: promptTokens, representing: representedTokens,
+                from: reusedTokenCount, into: caches, state: state, model: model,
+                prefill: parameters.prefill)
+        else {
+            return self
+        }
         var plan = ExecutorPromptCachePlan(
             caches: caches,
             input: Self.narrowed(input, to: Array(promptTokens[boundary...])),
             reusedTokenCount: reusedTokenCount,
             promptTokens: promptTokens,
             representedTokens: representedTokens,
-            state: boundaryState,
+            state: feed.state,
             decision: decision)
         plan.prefilledTokenCount = boundary - reusedTokenCount
-        plan.checkpoint = PromptCacheCheckpoint(
-            caches: caches,
-            tokens: Array(representedTokens.dropLast(promptTokens.count - boundary)),
-            state: boundaryState)
+        plan.checkpoint = feed.checkpoint
         return plan
     }
 

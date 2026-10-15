@@ -58,8 +58,58 @@ comments:
   id: 01m4zmhm23b9zy3qv8epjjqqkc
   text: 'Correction to the step record: the file count is 7, not 8 (the 7 files that the record names).'
   timestamp: 2026-10-15T11:18:18.947589+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m4zmrzmw7yc2a1a48yxapqwe
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (commit 3a9c7e9). Counts: 1 finding, 1 confirmed, 1 refuted. Libraries/MLXLMCommon/ChatSession.swift:1736 (reuse/reuse).
+    - next: Implement the finding: move the probe-and-common-prefix logic into one shared helper. Then make `ChatSession.lastMessageEnd` and `ThinkingRender.transcriptBoundary` call it. The task stays in review.
+  timestamp: 2026-10-15T11:22:20.188236+00:00
+- actor: claude-code
+  id: 01m4zmscn2v6w2t19f85737vsb
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 7 files; 32k turn 2 86-95 s → 0.45 s, reuse check PASS, warm == cold
+    - test: green — MLXLMTests 716 XCTest and 1467 Swift Testing, MLXFoundationModelsTests 367, Qwen35SessionPromptCacheTests 5/5, 0 warnings
+    - commit: 3a9c7e9
+    - review: findings — Libraries/MLXLMCommon/ChatSession.swift:1736
+  timestamp: 2026-10-15T11:22:33.506380+00:00
+- actor: claude-code
+  id: 01m4zn95a1jfv0fya612ja9ecf
+  text: |-
+    Review finding fixed (reuse/reuse, ChatSession.swift lastMessageEnd). Not committed.
+
+    - New shared helper `PromptCacheCheckpoint.lastMessageEnd(of:messages:render:)`: it adds the probe user message (`boundaryProbeText`), calls the render closure, and takes `commonPrefixLength` against the prompt. It gives nil when the render throws. `ChatSession` passes a closure on `processor.prepare(input: UserInput(...))`. `ThinkingRender.transcriptBoundary` keeps its media and hybrid guards and passes a closure on its own `prepare(messages:tools:context:)`. The private `ChatSession.lastMessageEnd` is deleted.
+    - The same correction for all of the change: `ChatSession.prefillToCheckpoint` and `ExecutorPromptCachePlan.prefillingToCheckpoint` had the same copy of the feed to the boundary (the range guard, the feed of `promptTokens[start ..< boundary]`, the checkpoint with `representedTokens.dropLast(promptTokens.count - boundary)`). That copy is now one helper, `PromptCacheCheckpoint.prefillToCheckpoint(at:of:representing:from:into:state:model:prefill:)`, which gives the fed state and the checkpoint, or nil when the boundary is out of range. Both callers use it and keep only their own parts (ChatSession: the commit of processed tokens, the time, the remaining input; the executor: the narrowed input and the plan).
+    - Looked at and kept: the restore paths (`ChatSession.restoringCheckpoint` and `ExecutorPromptCachePlan.restoring`) only call the shared `longest(serving:)` / `serves` and `restored(onto:)`, and the rest is the type of each caller. The media guard in `ExecutorPromptCache.swift` was there before this change.
+    - Tests (TDD): 6 new tests in `ChatSessionRecurrentCheckpointTests` (3 for `lastMessageEnd`: the shared prefix, the probe message that the render gets, nil on a refused render; 3 for `prefillToCheckpoint`: the feed stops at the boundary with the checkpoint tokens from the represented tokens, and nil with no feed for a boundary at `start` or at the end of the prompt). RED: the build failed on the missing members. GREEN: 13/13 in the suite.
+    - Note: one edit of ChatSession.swift was done with a python replace in the shell, because the files tool output was too large to show. The diff is correct.
+  timestamp: 2026-10-15T11:31:10.273939+00:00
+- actor: claude-code
+  id: 01m4zn9812fpsebjrc0tcdfbd5
+  text: |-
+    ### implement — changed
+    - evidence: 5 files — Libraries/MLXLMCommon/PromptCacheCheckpoint.swift, Libraries/MLXLMCommon/ChatSession.swift, Libraries/MLXFoundationModels/ThinkingRender.swift, Libraries/MLXFoundationModels/ExecutorPromptCache.swift, Tests/MLXLMTests/ChatSessionRecurrentCheckpointTests.swift. `swift build --build-tests`: 0 warnings (only the known "missing creator" note). `xcrun xctest MLXLMTests.xctest`: 716 XCTest + 1473 Swift Testing, 0 failures. `MLXFoundationModelsTests.xctest`: 367 pass. `xcodebuild -only-testing:IntegrationTestingTests/Qwen35SessionPromptCacheTests` (real weights, GPU idle before): 5/5 pass, TEST SUCCEEDED. Finding flipped to [x].
+    - next: /review. Task stays in doing. Not committed.
+  timestamp: 2026-10-15T11:31:13.058136+00:00
+- actor: claude-code
+  id: 01m4znckwavr7vs1axfewhgg1p
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (commit 4807d46). 0 findings, 0 confirmed, 0 refuted. 5 files reviewed. The 2 .kanban files have no validator. The one earlier finding is checked.
+    - next: none. The task is in done.
+  timestamp: 2026-10-15T11:33:03.498271+00:00
+- actor: claude-code
+  id: 01m4znd0h8dhdzgevzw594g58m
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 5 files; shared lastMessageEnd and prefillToCheckpoint helpers
+    - test: green — MLXLMTests 716 XCTest and 1473 Swift Testing, MLXFoundationModelsTests 367, Qwen35SessionPromptCacheTests 5/5, 0 warnings
+    - commit: 4807d46
+    - review: clean — 0 findings; prior finding checked
+  timestamp: 2026-10-15T11:33:16.456750+00:00
+position_column: done
+position_ordinal: ffd480
 title: 'Qwen3.8 speed: reuse the prompt cache on the next chat turn (snapshot of the GDN state)'
 ---
 ## What
@@ -83,3 +133,9 @@ Bench: scratchpad/qwen38bench, full mode, 32k. Before and after: turn 2 time, pr
 - [x] The second chat turn at 32k prefills only the new tokens. The bench reuse check passes with thinking off and on.
 - [x] A unit test proves the reuse for a hybrid cache, with a positive control.
 - [x] All MLXLMTests pass, with 0 compiler warnings. #qwen3-8 #performance
+
+## Review Findings (2026-10-15 06:19)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 7 file(s) reviewed, 22 not reviewed (`.kanban/` files, no validator matches).
+
+- [x] `Libraries/MLXLMCommon/ChatSession.swift:1736` `reuse/reuse` — `lastMessageEnd` reimplements the boundary search that `ThinkingRender.transcriptBoundary` already performs: render `messages` plus a probe user message with `PromptCacheCheckpoint.boundaryProbeText`, then take `commonPrefixLength` against the prompt. Two copies of the same capability will drift, for example when the probe text or the refusal handling changes in one place only. Move the probe-and-common-prefix logic into one shared helper, such as a `PromptCacheCheckpoint` static func that takes a closure or a `(UserInput) async -> LMInput?` renderer. Have both `ChatSession.lastMessageEnd` and `ThinkingRender.transcriptBoundary` call it, passing their own render path as the parameter.

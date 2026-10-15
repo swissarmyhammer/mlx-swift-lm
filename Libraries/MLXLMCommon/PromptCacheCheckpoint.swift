@@ -148,6 +148,76 @@ package struct PromptCacheCheckpoint {
         eval(caches.flatMap(\.state))
         return state
     }
+
+    /// Feeds the prompt from `start` up to `boundary` into `caches`, and takes
+    /// a checkpoint there.
+    ///
+    /// - Parameters:
+    ///   - boundary: the index of the prompt where the checkpoint goes.
+    ///   - promptTokens: the whole rendered prompt of the pass.
+    ///   - representedTokens: the tokens the caches represent once the pass has
+    ///     fed the whole prompt. A protocol rule can keep generated tokens here
+    ///     that the render does not hold.
+    ///   - start: the leading prompt tokens the caches already hold.
+    ///   - caches: the live caches, one for each layer of the model.
+    ///   - state: the model state to seed the first forward pass with, or nil.
+    ///   - model: the model that feeds the caches.
+    ///   - prefill: cuts the tokens into forward passes.
+    /// - Returns: the model state the fed tokens left and the checkpoint at
+    ///   `boundary`, which is nil when a cache did not stand there. Nil when
+    ///   `boundary` is not after `start` or not before the end of the prompt:
+    ///   the caches hold that position already, or only the prefill of the
+    ///   generation reaches it.
+    /// - Throws: `CancellationError` when the task is cancelled between two
+    ///   forward passes.
+    package static func prefillToCheckpoint(
+        at boundary: Int, of promptTokens: [Int], representing representedTokens: [Int],
+        from start: Int, into caches: [KVCache], state: LMOutput.State?,
+        model: any LanguageModel, prefill: PrefillParameters
+    ) throws -> (state: LMOutput.State?, checkpoint: PromptCacheCheckpoint?)? {
+        guard boundary > start, boundary < promptTokens.count else { return nil }
+        let fedState = try Self.prefill(
+            Array(promptTokens[start ..< boundary]), into: caches, state: state, model: model,
+            prefill: prefill)
+        let checkpoint = PromptCacheCheckpoint(
+            caches: caches,
+            tokens: Array(representedTokens.dropLast(promptTokens.count - boundary)),
+            state: fedState)
+        return (fedState, checkpoint)
+    }
+
+    /// The index of `prompt` where its last message ends: the start of the
+    /// generation prompt that the chat template writes after it.
+    ///
+    /// A chat template writes a generation prompt after the last message (Qwen
+    /// 3.8: `<think>\n`), and a next render can write the same assistant turn
+    /// in a different form (`<think>\n\n</think>`). The next render thus parts
+    /// from the cached tokens inside the generation prompt, where the recurrent
+    /// caches of a hybrid model cannot rewind. A checkpoint at the end of the
+    /// last message serves that render.
+    ///
+    /// This function renders `messages` plus one user message with the text
+    /// ``boundaryProbeText``, and takes the prefix that render and `prompt`
+    /// share. With no generation prompt, the index is the end of `prompt`.
+    ///
+    /// - Parameters:
+    ///   - prompt: the prepared prompt of `messages`.
+    ///   - messages: the chat messages `prompt` renders from.
+    ///   - render: renders messages the way `prompt` was rendered, with the
+    ///     same template variables and tools.
+    /// - Returns: the index, or nil when `render` throws. A template can refuse
+    ///   two user messages after each other, and then the pass takes no
+    ///   checkpoint at the end of the last message.
+    package static func lastMessageEnd(
+        of prompt: LMInput, messages: [Chat.Message],
+        render: ([Chat.Message]) async throws -> LMInput
+    ) async -> Int? {
+        guard let probe = try? await render(messages + [.user(boundaryProbeText)]) else {
+            return nil
+        }
+        return commonPrefixLength(
+            of: prompt.text.tokens.asArray(Int.self), and: probe.text.tokens.asArray(Int.self))
+    }
 }
 
 /// The checkpoints a session keeps of its caches, and the choice of the one a
