@@ -25,7 +25,7 @@ import Testing
 struct ChatSessionRecurrentCheckpointTests {
 
     /// How the template writes a past assistant turn.
-    enum HistoryShape {
+    enum HistoryShape: CaseIterable {
         /// The past turn opens with a closed think block where the generation
         /// prompt opened an empty one, as the Qwen 3.8 template does when the
         /// session records the reasoning as content.
@@ -124,7 +124,15 @@ struct ChatSessionRecurrentCheckpointTests {
                 tokens += opening(of: message["role"] as? String) + content
                 tokens.append(TemplateToken.endOfTurn)
             }
-            return tokens + [TemplateToken.assistant, TemplateToken.openThink]
+            return tokens + [TemplateToken.assistant, generationThinkBlock(additionalContext)]
+        }
+
+        /// The think block of the generation prompt: the closed block when the
+        /// template variables turn thinking off, as the Qwen 3.8 template writes
+        /// it, and else the open block.
+        private func generationThinkBlock(_ additionalContext: [String: any Sendable]?) -> Int {
+            additionalContext?[ChatSessionRecurrentCheckpointTests.thinkingFlag] as? Bool == false
+                ? TemplateToken.closedThink : TemplateToken.openThink
         }
 
         /// The tokens that open a message of `role`.
@@ -335,48 +343,153 @@ struct ChatSessionRecurrentCheckpointTests {
 
     // MARK: - The end of the last message
 
+    /// The template variable that turns thinking on and off, as the Qwen 3.8
+    /// template reads it.
+    static let thinkingFlag = "enable_thinking"
+
     /// The tokens of a prompt: the messages, then the generation prompt.
     private static let promptWithGenerationPrompt = [1, 2, 3, 4, 5, 6, 7]
 
-    /// The tokens a render of the messages plus a probe message writes: the
-    /// messages, then the probe message in place of the generation prompt.
-    private static let renderWithProbe = [1, 2, 3, 4, 5, 9, 9, 9]
+    /// The instructions of a conversation.
+    private static let instructions = "terse"
 
-    /// The length of the prefix ``promptWithGenerationPrompt`` and
-    /// ``renderWithProbe`` share.
-    private static let sharedPrefixLength = 5
+    /// The answer of the assistant to the first user turn.
+    private static let firstAnswer = "ok"
+
+    /// The result of a tool call, after the first answer.
+    private static let toolResult = "result"
 
     /// The error a render that refuses its messages throws.
     private struct RefusedRender: Error {}
+
+    /// A conversation whose end of the last message the suite finds: the role
+    /// and the text of each message, in order.
+    struct ProbedConversation: CustomTestStringConvertible {
+        let testDescription: String
+        let turns: [(role: Chat.Message.Role, text: String)]
+
+        /// The messages of the conversation.
+        var messages: [Chat.Message] {
+            turns.map { Chat.Message(role: $0.role, content: $0.text) }
+        }
+    }
+
+    /// The conversations of the comparison with the full probe.
+    static let probedConversations = [
+        ProbedConversation(testDescription: "one user turn", turns: [(.user, firstTurn)]),
+        ProbedConversation(
+            testDescription: "instructions and one user turn",
+            turns: [(.system, instructions), (.user, firstTurn)]),
+        ProbedConversation(
+            testDescription: "a second user turn",
+            turns: [(.user, firstTurn), (.assistant, firstAnswer), (.user, secondTurn)]),
+        ProbedConversation(
+            testDescription: "a tool result",
+            turns: [(.user, firstTurn), (.assistant, firstAnswer), (.tool, toolResult)]),
+    ]
+
+    /// How the template renders a conversation: the shape of a past assistant
+    /// turn, and thinking on or off.
+    struct Rendering: CustomTestStringConvertible {
+        let historyShape: HistoryShape
+        let thinking: Bool
+
+        var testDescription: String { "\(historyShape), thinking \(thinking ? "on" : "off")" }
+    }
+
+    /// Each history shape, with thinking on and with thinking off.
+    static let renderings = HistoryShape.allCases.flatMap { shape in
+        [true, false].map { Rendering(historyShape: shape, thinking: $0) }
+    }
 
     /// A prepared input of `tokens`.
     private static func input(_ tokens: [Int]) -> LMInput {
         LMInput(tokens: MLXArray(tokens))
     }
 
-    @Test("the end of the last message is the prefix the prompt and the probe render share")
-    func theEndOfTheLastMessageIsThePrefixThePromptAndTheProbeRenderShare() async {
-        let end = await PromptCacheCheckpoint.lastMessageEnd(
-            of: Self.input(Self.promptWithGenerationPrompt),
-            messages: [.user(Self.firstTurn)]
-        ) { _ in Self.input(Self.renderWithProbe) }
-
-        #expect(end == Self.sharedPrefixLength)
+    /// The tokens of `messages` as the template renders them in `rendering`.
+    private static func render(_ messages: [Chat.Message], _ rendering: Rendering) throws -> [Int] {
+        try CheckpointTemplateTokenizer(historyShape: rendering.historyShape).applyChatTemplate(
+            messages: DefaultMessageGenerator().generate(messages: messages), tools: nil,
+            additionalContext: [thinkingFlag: rendering.thinking])
     }
 
-    @Test("the probe render gets the messages plus one user message with the probe text")
-    func theProbeRenderGetsTheMessagesPlusOneUserMessageWithTheProbeText() async {
-        var rendered: [Chat.Message] = []
-        _ = await PromptCacheCheckpoint.lastMessageEnd(
-            of: Self.input(Self.promptWithGenerationPrompt),
-            messages: [.user(Self.firstTurn)]
-        ) { messages in
-            rendered = messages
-            return Self.input(Self.renderWithProbe)
-        }
+    /// The reference: the end of the last message as the full probe finds it,
+    /// which is the prefix that the prompt shares with a render of the messages
+    /// plus one user message.
+    private static func fullProbeEnd(of messages: [Chat.Message], _ rendering: Rendering) throws
+        -> Int
+    {
+        commonPrefixLength(
+            of: try render(messages, rendering),
+            and: try render(
+                messages + [.user(PromptCacheCheckpoint.boundaryProbeText)], rendering))
+    }
 
-        #expect(rendered.map(\.role) == [.user, .user])
-        #expect(rendered.map(\.content) == [Self.firstTurn, PromptCacheCheckpoint.boundaryProbeText])
+    /// The end of the last message that the session finds for `messages`, and
+    /// each message list the session renders to find it.
+    private static func lastMessageEnd(of messages: [Chat.Message], _ rendering: Rendering)
+        async throws -> (end: Int?, renders: [[String]])
+    {
+        var renders: [[String]] = []
+        let end = await PromptCacheCheckpoint.lastMessageEnd(
+            of: input(try render(messages, rendering)), messages: messages
+        ) { probe in
+            renders.append(probe.map(\.content))
+            return input(try render(probe, rendering))
+        }
+        return (end, renders)
+    }
+
+    @Test(
+        "the end of the last message is the end the full probe finds",
+        arguments: probedConversations, renderings)
+    func theEndOfTheLastMessageIsTheEndTheFullProbeFinds(
+        conversation: ProbedConversation, rendering: Rendering
+    ) async throws {
+        let found = try await Self.lastMessageEnd(of: conversation.messages, rendering)
+
+        #expect(found.end == (try Self.fullProbeEnd(of: conversation.messages, rendering)))
+    }
+
+    @Test(
+        "the control: a render that rewrites the first token ends the last message away from the generation prompt",
+        arguments: probedConversations)
+    func aRenderThatRewritesTheFirstTokenEndsTheLastMessageAwayFromTheGenerationPrompt(
+        conversation: ProbedConversation
+    ) throws {
+        let rendering = Rendering(historyShape: .rewritesTheFirstToken, thinking: true)
+        let prompt = try Self.render(conversation.messages, rendering)
+
+        #expect(
+            try Self.fullProbeEnd(of: conversation.messages, rendering)
+                != prompt.count - Self.generationPromptTokenCount)
+    }
+
+    @Test("a conversation that ends with a user message renders no full probe")
+    func aConversationThatEndsWithAUserMessageRendersNoFullProbe() async throws {
+        let messages: [Chat.Message] = [
+            .user(Self.firstTurn), .assistant(Self.firstAnswer), .user(Self.secondTurn),
+        ]
+
+        let found = try await Self.lastMessageEnd(
+            of: messages, Rendering(historyShape: .closesTheThinkBlock, thinking: true))
+
+        #expect(!found.renders.contains { $0.contains(Self.secondTurn) })
+    }
+
+    @Test("a conversation that ends with a tool result renders the full probe")
+    func aConversationThatEndsWithAToolResultRendersTheFullProbe() async throws {
+        let messages: [Chat.Message] = [
+            .user(Self.firstTurn), .assistant(Self.firstAnswer), .tool(Self.toolResult),
+        ]
+
+        let found = try await Self.lastMessageEnd(
+            of: messages, Rendering(historyShape: .closesTheThinkBlock, thinking: true))
+
+        #expect(
+            found.renders.contains(
+                messages.map(\.content) + [PromptCacheCheckpoint.boundaryProbeText]))
     }
 
     @Test("a render that refuses the probe message gives no end of the last message")

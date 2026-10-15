@@ -196,9 +196,18 @@ package struct PromptCacheCheckpoint {
     /// caches of a hybrid model cannot rewind. A checkpoint at the end of the
     /// last message serves that render.
     ///
-    /// This function renders `messages` plus one user message with the text
-    /// ``boundaryProbeText``, and takes the prefix that render and `prompt`
-    /// share. With no generation prompt, the index is the end of `prompt`.
+    /// The index is the prefix that `prompt` shares with a render of
+    /// `messages` plus one user message with the text ``boundaryProbeText``
+    /// (the full probe). With no generation prompt, the index is the end of
+    /// `prompt`.
+    ///
+    /// The full probe costs as much as the render of `prompt`, thus this
+    /// function renders the full probe only when it must. When the last
+    /// message is a user message, it finds the tail that the generation prompt
+    /// writes from a small sample conversation (see
+    /// ``generationPromptTail(after:render:)``). When `prompt` ends with that
+    /// tail, the index is the start of the tail. Else, and when the last
+    /// message is not a user message, it renders the full probe.
     ///
     /// - Parameters:
     ///   - prompt: the prepared prompt of `messages`.
@@ -212,11 +221,67 @@ package struct PromptCacheCheckpoint {
         of prompt: LMInput, messages: [Chat.Message],
         render: ([Chat.Message]) async throws -> LMInput
     ) async -> Int? {
+        let promptTokens = prompt.text.tokens.asArray(Int.self)
+        if let tail = await generationPromptTail(after: messages, render: render),
+            promptTokens.suffix(tail.count).elementsEqual(tail)
+        {
+            return promptTokens.count - tail.count
+        }
+        return await probedLastMessageEnd(of: promptTokens, messages: messages, render: render)
+    }
+
+    /// The index of `promptTokens` where its last message ends, from a render
+    /// of `messages` plus one user message with the text ``boundaryProbeText``:
+    /// the prefix that render and `promptTokens` share.
+    ///
+    /// - Parameters:
+    ///   - promptTokens: the tokens of the prepared prompt of `messages`.
+    ///   - messages: the chat messages the prompt renders from.
+    ///   - render: renders messages the way the prompt was rendered.
+    /// - Returns: the index, or nil when `render` throws.
+    private static func probedLastMessageEnd(
+        of promptTokens: [Int], messages: [Chat.Message],
+        render: ([Chat.Message]) async throws -> LMInput
+    ) async -> Int? {
         guard let probe = try? await render(messages + [.user(boundaryProbeText)]) else {
             return nil
         }
-        return commonPrefixLength(
-            of: prompt.text.tokens.asArray(Int.self), and: probe.text.tokens.asArray(Int.self))
+        return commonPrefixLength(of: promptTokens, and: probe.text.tokens.asArray(Int.self))
+    }
+
+    /// The tokens that a render writes after the end of the last message when
+    /// that message is a user message: the generation prompt, from the point
+    /// where one more user message parts from it.
+    ///
+    /// The function renders a small sample conversation: the leading system
+    /// messages of `messages` and one user message with the text
+    /// ``boundaryProbeText``. The full probe of that sample gives the end of
+    /// its last message, and the tokens after that end are the tail. The
+    /// sample is small, thus its two renders cost little.
+    ///
+    /// The tail serves only a conversation whose last message is a user
+    /// message. One more user message does not change how a template such as
+    /// Qwen 3.8 renders the messages before it then. After a tool message, the
+    /// Qwen 3.8 template can render the reasoning of a past assistant turn in
+    /// a different way, thus the caller must render the full probe.
+    ///
+    /// - Parameters:
+    ///   - messages: the chat messages of the prompt.
+    ///   - render: renders messages the way the prompt was rendered.
+    /// - Returns: the tail, or nil when the last message is not a user message
+    ///   or when `render` throws.
+    private static func generationPromptTail(
+        after messages: [Chat.Message], render: ([Chat.Message]) async throws -> LMInput
+    ) async -> [Int]? {
+        guard messages.last?.role == .user else { return nil }
+        let sample = messages.prefix { $0.role == .system } + [.user(boundaryProbeText)]
+        guard let sampleTokens = try? await render(Array(sample)).text.tokens.asArray(Int.self),
+            let end = await probedLastMessageEnd(
+                of: sampleTokens, messages: Array(sample), render: render)
+        else {
+            return nil
+        }
+        return Array(sampleTokens[end...])
     }
 }
 

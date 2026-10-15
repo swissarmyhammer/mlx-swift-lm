@@ -14,10 +14,12 @@
 
 import Foundation
 import HuggingFace
+import MLX
 import MLXHuggingFace
-import MLXLMCommon
 import Testing
 import Tokenizers
+
+@testable import MLXLMCommon
 
 /// Downloads nothing new: the files of the pinned revision stand in the local cache.
 private let qwen35TemplateDownloader: any Downloader = #hubDownloader()
@@ -187,6 +189,122 @@ struct Qwen35ThinkingOffTemplateTests {
             secondText.hasPrefix(tokenizer.decode(tokenIds: first) + generated),
             "second <<<\(secondText)>>>")
         #expect(Array(second.prefix(first.count)) == first)
+    }
+
+    // MARK: - The end of the last message
+
+    /// The result of a tool call, after the first answer.
+    private static let toolResult = "teal is a blue-green color"
+
+    /// The template variable that keeps or drops the reasoning of a past assistant turn.
+    private static let preserveThinkingFlag = "preserve_thinking"
+
+    /// How a render states thinking: on or off as the template flag, or off as the closed
+    /// block of the Qwen 3.5 protocol.
+    enum ThinkingState {
+        case flag(Bool)
+        case closedBlock
+
+        /// Thinking on, thinking off as the flag, and thinking off as the closed block.
+        static let all: [ThinkingState] = [.flag(true), .flag(false), .closedBlock]
+    }
+
+    /// The end of the last message that `PromptCacheCheckpoint.lastMessageEnd` finds is the
+    /// end that the full probe finds: the prefix that the prompt shares with a render of the
+    /// messages plus one user message (card `^phckrdd`).
+    @Test(arguments: ThinkingState.all, [false, true])
+    func theEndOfTheLastMessageIsTheEndTheFullProbeFinds(
+        thinking: ThinkingState, withTools: Bool
+    ) async throws {
+        let tokenizer = try await loadTokenizer()
+        let render = probeRender(
+            thinking: thinking, tools: withTools ? [Self.tool] : nil, tokenizer: tokenizer)
+        let firstTurn: [Chat.Message] = [.system(Self.instructions), .user(Self.firstPrompt)]
+        let secondTurn =
+            firstTurn + [
+                .assistant(Self.firstAnswer, reasoning: Self.firstReasoning),
+                .user(Self.secondPrompt),
+            ]
+
+        for messages in [firstTurn, secondTurn] {
+            let end = await PromptCacheCheckpoint.lastMessageEnd(
+                of: try render(messages), messages: messages, render: render)
+
+            #expect(end == (try fullProbeEnd(of: messages, render: render)))
+        }
+    }
+
+    /// The control: after a tool result, with `preserve_thinking` false, the full probe parts
+    /// from the prompt inside the past assistant turn, because one more user message drops
+    /// its reasoning. The end of the last message is then not the start of the generation
+    /// prompt, and `PromptCacheCheckpoint.lastMessageEnd` still finds the end of the full probe.
+    @Test func afterAToolResultTheEndOfTheLastMessageIsTheEndTheFullProbeFinds() async throws {
+        let tokenizer = try await loadTokenizer()
+        let render = templateRender(
+            context: [thinkingFlag: true, Self.preserveThinkingFlag: false], tools: nil,
+            tokenizer: tokenizer)
+        let messages: [Chat.Message] = [
+            .system(Self.instructions), .user(Self.firstPrompt),
+            .assistant(Self.firstAnswer, reasoning: Self.firstReasoning), .tool(Self.toolResult),
+        ]
+        let prompt = try render(messages)
+
+        let reference = try fullProbeEnd(of: messages, render: render)
+        let end = await PromptCacheCheckpoint.lastMessageEnd(
+            of: prompt, messages: messages, render: render)
+
+        let shared = tokenizer.decode(
+            tokenIds: Array(prompt.text.tokens.asArray(Int.self).prefix(reference)))
+        #expect(!shared.contains(Self.firstReasoning), "shared <<<\(shared)>>>")
+        #expect(end == reference)
+    }
+
+    /// The reference: the prefix that the prompt of `messages` shares with a render of
+    /// `messages` plus one user message.
+    private func fullProbeEnd(
+        of messages: [Chat.Message], render: ([Chat.Message]) throws -> LMInput
+    ) throws -> Int {
+        commonPrefixLength(
+            of: try render(messages).text.tokens.asArray(Int.self),
+            and: try render(messages + [.user(PromptCacheCheckpoint.boundaryProbeText)]).text
+                .tokens.asArray(Int.self))
+    }
+
+    /// Renders messages with the real template, in the thinking state `thinking`.
+    private func probeRender(
+        thinking: ThinkingState, tools: [[String: any Sendable]]?,
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) -> ([Chat.Message]) throws -> LMInput {
+        switch thinking {
+        case .flag(let enabled):
+            return templateRender(
+                context: [thinkingFlag: enabled], tools: tools, tokenizer: tokenizer)
+        case .closedBlock:
+            return { messages in
+                Self.input(
+                    try thinkingOffRender(
+                        messages: DefaultMessageGenerator().generate(messages: messages),
+                        tools: tools, tokenizer: tokenizer))
+            }
+        }
+    }
+
+    /// Renders messages with the real template and the template variables `context`.
+    private func templateRender(
+        context: [String: any Sendable], tools: [[String: any Sendable]]?,
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) -> ([Chat.Message]) throws -> LMInput {
+        { messages in
+            Self.input(
+                try tokenizer.applyChatTemplate(
+                    messages: DefaultMessageGenerator().generate(messages: messages), tools: tools,
+                    additionalContext: context))
+        }
+    }
+
+    /// A prepared input of `tokens`.
+    private static func input(_ tokens: [Int]) -> LMInput {
+        LMInput(tokens: MLXArray(tokens))
     }
 
     // MARK: - Fixtures
