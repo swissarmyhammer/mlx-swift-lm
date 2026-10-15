@@ -80,19 +80,13 @@ enum DeepSeekV4IndexerScoreKernel {
     /// The number of SIMD groups that split the chunks of one tile.
     private static let columnGroups = 2
 
-    /// The number of lanes in one Apple GPU SIMD group.
-    private static let simdGroupWidth = 32
-
     /// The floats each tile row takes after its `blockDepth` values, which
     /// keeps the rows of a fragment load in different memory banks.
     private static let tilePad = 4
 
-    /// The number of floats one tile load reads at a time. The head width
-    /// must be a multiple of it.
-    private static let vectorWidth = 4
-
     /// The number of threads in one threadgroup.
-    private static let threadsPerGroup = rowGroups * columnGroups * simdGroupWidth
+    private static let threadsPerGroup =
+        rowGroups * columnGroups * DeepSeekV4MetalKernel.simdGroupWidth
 
     /// The axis of the `(batch, heads, tokens, headDim)` queries that holds
     /// the heads.
@@ -104,10 +98,6 @@ enum DeepSeekV4IndexerScoreKernel {
 
     /// The axis of the `(batch, chunks, headDim)` keys that holds the chunks.
     private static let keyChunkAxis = 1
-
-    /// The last axis of a tensor: the head width of the queries and of the
-    /// keys.
-    private static let widthAxis = -1
 
     /// The Metal source. The template arguments are `HEADS`, the number of
     /// heads; `DIM`, the head width; `CHUNK_WIDTH`, the raw positions of one
@@ -129,9 +119,9 @@ enum DeepSeekV4IndexerScoreKernel {
     /// tiles: the last barrier of the product loop ends every read of the
     /// tiles before the first store of the sums.
     ///
-    /// The source keeps no `device` pointer into an input. MLX gives an input
-    /// of fewer than 8 values in the `constant` address space, and a `device`
-    /// pointer to such an input does not compile. Thus the source indexes
+    /// The source keeps no `device` pointer into an input, because an input
+    /// can hold fewer values than
+    /// ``DeepSeekV4MetalKernel/smallestDeviceInput``. Thus the source indexes
     /// each input from a base offset, and the tile load of the header takes
     /// either address space.
     private static let source = """
@@ -261,8 +251,9 @@ enum DeepSeekV4IndexerScoreKernel {
     /// into `source`, and `rowStride` is the distance in floats between two
     /// of its rows. A row from `count` on and a column from `WIDTH` on load
     /// as zero. The source is a template argument, and `load_four` has one
-    /// form for each address space, because MLX gives an input of fewer than
-    /// 8 values in the `constant` address space.
+    /// form for each address space, because an input of fewer values than
+    /// ``DeepSeekV4MetalKernel/smallestDeviceInput`` is in the `constant`
+    /// address space.
     ///
     /// MLX writes the kernel signature directly after the header, thus the
     /// header ends in a line break.
@@ -312,12 +303,13 @@ enum DeepSeekV4IndexerScoreKernel {
 
     /// Tells if the kernel can run. It is a Metal kernel, thus it runs only
     /// when the default device is the GPU, and its tile loads read the head
-    /// width in whole float4 vectors.
+    /// width in whole vectors of ``DeepSeekV4MetalKernel/vectorWidth``
+    /// floats.
     ///
     /// - Parameter headDim: The width of one indexer head.
     /// - Returns: True when the kernel can score heads of this width.
     static func canRun(headDim: Int) -> Bool {
-        Device.defaultDevice().deviceType == .gpu && headDim % vectorWidth == 0
+        DeepSeekV4MetalKernel.deviceIsGPU && headDim % DeepSeekV4MetalKernel.vectorWidth == 0
     }
 
     /// The indexer score of each pooled chunk for each query.
@@ -339,8 +331,9 @@ enum DeepSeekV4IndexerScoreKernel {
         let batch = queries.dim(0)
         let heads = queries.dim(queryHeadAxis)
         let tokens = queries.dim(queryTokenAxis)
-        let headDim = queries.dim(widthAxis)
+        let headDim = queries.dim(DeepSeekV4MetalKernel.widthAxis)
         let chunks = keys.dim(keyChunkAxis)
+        let vectorWidth = DeepSeekV4MetalKernel.vectorWidth
         precondition(
             headDim % vectorWidth == 0,
             "the kernel reads heads of a multiple of \(vectorWidth) floats, not \(headDim)")
@@ -352,8 +345,8 @@ enum DeepSeekV4IndexerScoreKernel {
         var scalars = [Float](repeating: 0, count: ScalarSlot.count)
         scalars[ScalarSlot.scale] = scale
         scalars[ScalarSlot.maskedScore] = visibility.maskedScore
-        let chunkTiles = (chunks + blockChunks - 1) / blockChunks
-        let tokenTiles = (tokens + blockTokens - 1) / blockTokens
+        let chunkTiles = DeepSeekV4MetalKernel.groupCount(covering: chunks, groupSize: blockChunks)
+        let tokenTiles = DeepSeekV4MetalKernel.groupCount(covering: tokens, groupSize: blockTokens)
         return kernel(
             [
                 queries.asType(.float32), keys.asType(.float32), headWeights.asType(.float32),
@@ -363,7 +356,8 @@ enum DeepSeekV4IndexerScoreKernel {
                 ("HEADS", heads), ("DIM", headDim), ("CHUNK_WIDTH", visibility.chunkWidth),
                 ("BLOCK_CHUNKS", blockChunks), ("BLOCK_DEPTH", blockDepth),
                 ("BLOCK_TOKENS", blockTokens), ("ROW_GROUPS", rowGroups),
-                ("COLUMN_GROUPS", columnGroups), ("SIMD_WIDTH", simdGroupWidth),
+                ("COLUMN_GROUPS", columnGroups),
+                ("SIMD_WIDTH", DeepSeekV4MetalKernel.simdGroupWidth),
                 ("TILE_PAD", tilePad), ("VECTOR_WIDTH", vectorWidth),
                 ("SCALE_SLOT", ScalarSlot.scale), ("MASKED_SCORE_SLOT", ScalarSlot.maskedScore),
                 ("QUERY_TOKEN_AXIS", queryTokenAxis), ("KEY_CHUNK_AXIS", keyChunkAxis),

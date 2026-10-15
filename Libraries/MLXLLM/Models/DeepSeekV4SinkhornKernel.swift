@@ -57,30 +57,17 @@ import MLX
 /// barrier.
 enum DeepSeekV4SinkhornKernel {
 
-    /// The number of threads in the threadgroup of one token.
+    /// The number of threads in the threadgroup of one token. The Sinkhorn
+    /// half runs in the first SIMD group of the threadgroup, one row of the
+    /// mixing matrix in each lane, thus this number must not be less than
+    /// ``DeepSeekV4MetalKernel/simdGroupWidth``.
     private static let threadsPerToken = 256
-
-    /// The number of lanes in one Apple GPU SIMD group. The Sinkhorn half
-    /// runs in the first SIMD group of the threadgroup, one row of the mixing
-    /// matrix in each lane, thus ``threadsPerToken`` must not be less than
-    /// this number.
-    private static let simdGroupWidth = 32
 
     /// The number of values one thread of the MLX softmax kernel reads and
     /// adds in index order, `SOFTMAX_N_READS` in kernels/defines.h. The
     /// kernel adds each group of this many values of a softmax row first,
     /// and then adds the group sums, as the MLX kernel does.
     private static let softmaxReadWidth = 4
-
-    /// The axis of the residual stream that holds the copies.
-    private static let copyAxis = -2
-
-    /// The axis of the residual stream that holds the numbers of one copy.
-    private static let widthAxis = -1
-
-    /// The number of trailing axes of the residual stream that one token
-    /// holds: the copy axis and the width axis.
-    private static let tokenAxisCount = 2
 
     /// The largest place of a field scale inside the learned scale vector.
     /// The scale vector must hold one more value than this place.
@@ -139,7 +126,8 @@ enum DeepSeekV4SinkhornKernel {
     /// `COMB_OFFSET`, the place of the first logit of the mixing matrix in
     /// the mixes vector; `PRE_SCALE`, `POST_SCALE` and `COMB_SCALE`, the
     /// place of each field scale in the scale vector; `SOFTMAX_READS`, the
-    /// group width of the softmax sum; and `EPS_BITS` and `POST_GAIN_BITS`,
+    /// group width of the softmax sum; `VECTOR_WIDTH`, the number of values
+    /// of one vector load; and `EPS_BITS` and `POST_GAIN_BITS`,
     /// the bit patterns of the float32 epsilon and of the `post` gain. The
     /// `pre` field starts at place 0 of the mixes vector and the `post`
     /// field follows its `HC` values.
@@ -158,9 +146,8 @@ enum DeepSeekV4SinkhornKernel {
     /// step is a row normalization and an even step is a column
     /// normalization.
     ///
-    /// The weighted sum reads the width in groups of `vectorWidth`, the
-    /// number of floats in one `float4`, when the width is a multiple of
-    /// that number.
+    /// The weighted sum reads the width in groups of `VECTOR_WIDTH` values
+    /// when the width is a multiple of that number.
     ///
     /// Lane `r` of the first SIMD group keeps row `r` in registers. A row
     /// normalization adds the row of the lane. A column normalization reads
@@ -170,9 +157,8 @@ enum DeepSeekV4SinkhornKernel {
     /// write its answer.
     ///
     /// The source indexes `mixes`, `scale` and `base` and keeps no pointer
-    /// into them. MLX gives an input of fewer than 8 values in the
-    /// `constant` address space, and a `device` pointer to such an input does
-    /// not compile.
+    /// into them, because each one can hold fewer values than
+    /// ``DeepSeekV4MetalKernel/smallestDeviceInput``.
     private static let source = """
         uint token = threadgroup_position_in_grid.x;
         uint lane = thread_position_in_threadgroup.x;
@@ -250,18 +236,18 @@ enum DeepSeekV4SinkhornKernel {
         }
         const device T* copies = stream + token * HC * D;
         device T* single = collapsed + token * D;
-        constexpr uint vectorWidth = sizeof(float4) / sizeof(float);
-        if (D % vectorWidth == 0) {
-            constexpr uint groups = D / vectorWidth;
-            const device vec<T, vectorWidth>* copies4 =
-                (const device vec<T, vectorWidth>*)copies;
-            device vec<T, vectorWidth>* single4 = (device vec<T, vectorWidth>*)single;
+        if (D % VECTOR_WIDTH == 0) {
+            typedef vec<float, VECTOR_WIDTH> floatVector;
+            constexpr uint groups = D / VECTOR_WIDTH;
+            const device vec<T, VECTOR_WIDTH>* copyVectors =
+                (const device vec<T, VECTOR_WIDTH>*)copies;
+            device vec<T, VECTOR_WIDTH>* singleVectors = (device vec<T, VECTOR_WIDTH>*)single;
             for (uint i = lane; i < groups; i += THREADS) {
-                float4 total = float4(0.0f);
+                floatVector total = floatVector(0.0f);
                 for (int c = 0; c < HC; c++) {
-                    total += weight[c] * float4(copies4[c * groups + i]);
+                    total += weight[c] * floatVector(copyVectors[c * groups + i]);
                 }
-                single4[i] = vec<T, vectorWidth>(total);
+                singleVectors[i] = vec<T, VECTOR_WIDTH>(total);
             }
         } else {
             for (uint d = lane; d < D; d += THREADS) {
@@ -324,8 +310,8 @@ enum DeepSeekV4SinkhornKernel {
     ///   ``splitSinkhornCollapse(mixes:scale:base:stream:iters:eps:)`` can
     ///   take the collapse.
     static func canRun(on stream: MLXArray, iters: Int) -> Bool {
-        Device.defaultDevice().deviceType == .gpu && iters > 0 && stream.size > 0
-            && stream.dim(copyAxis) <= simdGroupWidth
+        DeepSeekV4MetalKernel.deviceIsGPU && iters > 0 && stream.size > 0
+            && stream.dim(DeepSeekV4MetalKernel.copyAxis) <= DeepSeekV4MetalKernel.simdGroupWidth
     }
 
     /// Takes the split activations, the Sinkhorn steps and the weighted sum
@@ -358,12 +344,13 @@ enum DeepSeekV4SinkhornKernel {
         eps: Float
     ) -> (post: MLXArray, comb: MLXArray, collapsed: MLXArray) {
         precondition(iters > 0, "the fused kernel needs 1 or more Sinkhorn steps, not \(iters)")
-        let copies = stream.dim(copyAxis)
+        let copies = stream.dim(DeepSeekV4MetalKernel.copyAxis)
+        let simdGroupWidth = DeepSeekV4MetalKernel.simdGroupWidth
         precondition(
             copies <= simdGroupWidth,
             "the fused kernel takes \(simdGroupWidth) or fewer copies, not \(copies)")
-        let width = stream.dim(widthAxis)
-        let leading = Array(stream.shape.dropLast(tokenAxisCount))
+        let width = stream.dim(DeepSeekV4MetalKernel.widthAxis)
+        let leading = DeepSeekV4MetalKernel.tokenShape(of: stream)
         let mixWidth = DeepSeekV4Math.mixWidth(hcMult: copies)
         precondition(
             mixes.shape == leading + [mixWidth],
@@ -404,13 +391,14 @@ enum DeepSeekV4SinkhornKernel {
     ) -> [(String, any KernelTemplateArg)] {
         [
             ("HC", copies), ("ITERS", iters), ("D", width),
-            ("THREADS", threadsPerToken), ("SIMD_WIDTH", simdGroupWidth),
+            ("THREADS", threadsPerToken), ("SIMD_WIDTH", DeepSeekV4MetalKernel.simdGroupWidth),
             ("MIX_WIDTH", DeepSeekV4Math.mixWidth(hcMult: copies)),
             ("COMB_OFFSET", DeepSeekV4Math.splitFieldCount * copies),
             ("PRE_SCALE", DeepSeekV4Math.preScaleIndex),
             ("POST_SCALE", DeepSeekV4Math.postScaleIndex),
             ("COMB_SCALE", DeepSeekV4Math.combScaleIndex),
             ("SOFTMAX_READS", softmaxReadWidth),
+            ("VECTOR_WIDTH", DeepSeekV4MetalKernel.vectorWidth),
             ("EPS_BITS", eps.templateBits),
             ("POST_GAIN_BITS", DeepSeekV4Math.postGain.templateBits),
         ]

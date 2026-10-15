@@ -39,14 +39,11 @@ enum DeepSeekV4TopKKernel {
 
     /// The number of threads in the threadgroup of one row. It must not be
     /// less than the number of bins of one digit, because each bin takes one
-    /// thread in the prefix sum over the bins.
+    /// thread in the prefix sum over the bins. The prefix sum over the
+    /// threads keeps one total for each SIMD group in the lanes of one SIMD
+    /// group, thus this number must not be more than the square of
+    /// ``DeepSeekV4MetalKernel/simdGroupWidth``.
     private static let threadsPerRow = 1024
-
-    /// The number of lanes in one Apple GPU SIMD group. The prefix sum over
-    /// the threads keeps one total for each SIMD group in the lanes of one
-    /// SIMD group, thus ``threadsPerRow`` must not be more than the square of
-    /// this number.
-    private static let simdGroupWidth = 32
 
     /// The number of key bits that one histogram pass fixes. A digit of this
     /// width gives a histogram of 256 bins, and a 32-bit key takes 4 passes.
@@ -72,9 +69,9 @@ enum DeepSeekV4TopKKernel {
     /// is a pick, and the first `remaining` keys equal to it, in index order,
     /// are picks.
     ///
-    /// The source indexes `scores` and keeps no pointer into it. MLX gives an
-    /// input of fewer than 8 values in the `constant` address space, and a
-    /// `device` pointer to such an input does not compile.
+    /// The source indexes `scores` and keeps no pointer into it, because a
+    /// row can hold fewer values than
+    /// ``DeepSeekV4MetalKernel/smallestDeviceInput``.
     private static let source = """
         uint row = threadgroup_position_in_grid.x;
         uint lane = thread_position_in_threadgroup.x;
@@ -214,7 +211,7 @@ enum DeepSeekV4TopKKernel {
     /// Tells if the kernel can run. It is a Metal kernel, thus it runs only
     /// when the default device is the GPU.
     static var canRun: Bool {
-        Device.defaultDevice().deviceType == .gpu
+        DeepSeekV4MetalKernel.deviceIsGPU
     }
 
     /// The indices of the `count` highest scores of each row, in ascending
@@ -242,7 +239,8 @@ enum DeepSeekV4TopKKernel {
         return kernel(
             [scores.asType(.float32)],
             template: [
-                ("COUNT", count), ("THREADS", threadsPerRow), ("SIMD_WIDTH", simdGroupWidth),
+                ("COUNT", count), ("THREADS", threadsPerRow),
+                ("SIMD_WIDTH", DeepSeekV4MetalKernel.simdGroupWidth),
                 ("KEY_BITS", UInt32.bitWidth), ("DIGIT_BITS", digitBits),
             ],
             grid: (rows * threadsPerRow, 1, 1),

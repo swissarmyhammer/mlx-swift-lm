@@ -37,28 +37,8 @@ import MLX
 /// matrix multiply, thus its answer is not the bits of the op path.
 enum DeepSeekV4ExpandKernel {
 
-    /// The number of values of the width one thread reads in one vector
-    /// load.
-    private static let vectorWidth = 4
-
     /// The number of threads of one threadgroup.
     private static let threadsPerGroup = 256
-
-    /// The smallest input MLX gives a kernel in the `device` address space.
-    /// MLX gives an input of fewer values in the `constant` address space,
-    /// and the vector loads of the kernel need a `device` pointer.
-    private static let smallestDeviceInput = 8
-
-    /// The axis of the residual stream that holds the copies.
-    private static let copyAxis = -2
-
-    /// The axis of the residual stream and of the block output that holds
-    /// the numbers of one copy.
-    private static let widthAxis = -1
-
-    /// The number of trailing axes of the residual stream that one token
-    /// holds: the copy axis and the width axis.
-    private static let tokenAxisCount = 2
 
     /// The Metal source. The template arguments are `T`, the dtype of the
     /// block output and of the answer; `R`, the dtype of the residual
@@ -67,9 +47,9 @@ enum DeepSeekV4ExpandKernel {
     ///
     /// Thread `i` takes vector `i % (D / VECTOR_WIDTH)` of the width of token
     /// `i / (D / VECTOR_WIDTH)`. The source indexes `post` and `comb` and
-    /// keeps no pointer into them, because MLX gives an input of fewer than
-    /// 8 values in the `constant` address space, and the `post` of one
-    /// token of 4 copies holds 4 values.
+    /// keeps no pointer into them, because the `post` of one token of 4
+    /// copies holds fewer values than
+    /// ``DeepSeekV4MetalKernel/smallestDeviceInput``.
     private static let source = """
         typedef vec<float, VECTOR_WIDTH> floatVector;
         constexpr uint vectors = D / VECTOR_WIDTH;
@@ -121,8 +101,10 @@ enum DeepSeekV4ExpandKernel {
     /// - Returns: `true` when
     ///   ``expand(blockOutput:residual:post:comb:)`` can take the expand.
     static func canRun(blockOutput: MLXArray, residual: MLXArray) -> Bool {
-        Device.defaultDevice().deviceType == .gpu && blockOutput.size >= smallestDeviceInput
-            && blockOutput.dim(widthAxis) % vectorWidth == 0
+        DeepSeekV4MetalKernel.deviceIsGPU
+            && blockOutput.size >= DeepSeekV4MetalKernel.smallestDeviceInput
+            && blockOutput.dim(DeepSeekV4MetalKernel.widthAxis) % DeepSeekV4MetalKernel.vectorWidth
+                == 0
             && blockOutput.shape == blockOutputShape(of: residual)
     }
 
@@ -133,7 +115,8 @@ enum DeepSeekV4ExpandKernel {
     ///   `(..., copies, width)`.
     /// - Returns: The shape `(..., width)`.
     private static func blockOutputShape(of residual: MLXArray) -> [Int] {
-        Array(residual.shape.dropLast(tokenAxisCount)) + [residual.dim(widthAxis)]
+        DeepSeekV4MetalKernel.tokenShape(of: residual)
+            + [residual.dim(DeepSeekV4MetalKernel.widthAxis)]
     }
 
     /// Writes a block output back into the parallel copies of the residual
@@ -164,10 +147,12 @@ enum DeepSeekV4ExpandKernel {
         return kernel(
             [blockOutput, residual, post.asType(.float32), comb.asType(.float32)],
             template: [
-                ("T", blockOutput.dtype), ("R", residual.dtype), ("HC", residual.dim(copyAxis)),
-                ("D", residual.dim(widthAxis)), ("VECTOR_WIDTH", vectorWidth),
+                ("T", blockOutput.dtype), ("R", residual.dtype),
+                ("HC", residual.dim(DeepSeekV4MetalKernel.copyAxis)),
+                ("D", residual.dim(DeepSeekV4MetalKernel.widthAxis)),
+                ("VECTOR_WIDTH", DeepSeekV4MetalKernel.vectorWidth),
             ],
-            grid: (blockOutput.size / vectorWidth, 1, 1),
+            grid: (blockOutput.size / DeepSeekV4MetalKernel.vectorWidth, 1, 1),
             threadGroup: (threadsPerGroup, 1, 1),
             outputShapes: [residual.shape],
             outputDTypes: [blockOutput.dtype])[0]

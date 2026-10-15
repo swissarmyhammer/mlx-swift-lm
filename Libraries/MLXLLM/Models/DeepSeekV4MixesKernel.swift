@@ -49,8 +49,8 @@ enum DeepSeekV4MixesKernel {
     private struct Layout {
 
         /// The number of tokens of one threadgroup, one in each group of
-        /// `simdGroupWidth / tokensPerGroup` lanes. It divides the width of
-        /// one SIMD group.
+        /// ``DeepSeekV4MetalKernel/simdGroupWidth`` `/ tokensPerGroup` lanes.
+        /// It divides the width of one SIMD group.
         let tokensPerGroup: Int
 
         /// The number of rows of the projection one threadgroup reads.
@@ -80,26 +80,12 @@ enum DeepSeekV4MixesKernel {
 
     /// The layout of a prefill block: one token in each lane of a SIMD group.
     private static let blockLayout = Layout(
-        tokensPerGroup: simdGroupWidth, rowsPerGroup: blockRowsPerGroup, threads: blockThreads)
+        tokensPerGroup: DeepSeekV4MetalKernel.simdGroupWidth, rowsPerGroup: blockRowsPerGroup,
+        threads: blockThreads)
 
     /// The smallest number of tokens that takes ``blockLayout``. The scan
     /// measured the two layouts equal at about 256 tokens.
     static let blockLayoutMinimumTokens = 256
-
-    /// The number of lanes in one Apple GPU SIMD group.
-    private static let simdGroupWidth = 32
-
-    /// The number of values the kernel reads in one vector load.
-    private static let vectorWidth = 4
-
-    /// The smallest input MLX gives a kernel in the `device` address space.
-    /// MLX gives an input of fewer values in the `constant` address space,
-    /// and the vector loads of the kernel need a `device` pointer.
-    private static let smallestDeviceInput = 8
-
-    /// The number of trailing axes of the residual stream that one token
-    /// holds: the copy axis and the width axis.
-    private static let tokenAxisCount = 2
 
     /// The Metal source. The template arguments are `T`, the dtype of the
     /// stream; `W`, the dtype of the projection; `FEATURES`, the width of the
@@ -213,9 +199,17 @@ enum DeepSeekV4MixesKernel {
     /// - Returns: `true` when ``mixes(of:projection:normEps:)`` can take the
     ///   stream.
     static func canRun(on stream: MLXArray) -> Bool {
-        let features = stream.shape.suffix(tokenAxisCount).reduce(1, *)
-        return Device.defaultDevice().deviceType == .gpu && stream.size >= smallestDeviceInput
-            && features % vectorWidth == 0
+        DeepSeekV4MetalKernel.deviceIsGPU
+            && stream.size >= DeepSeekV4MetalKernel.smallestDeviceInput
+            && features(of: stream) % DeepSeekV4MetalKernel.vectorWidth == 0
+    }
+
+    /// The width of the flattened copies of one token of a residual stream.
+    ///
+    /// - Parameter stream: The residual stream, shape `(..., copies, width)`.
+    /// - Returns: `copies * width`.
+    private static func features(of stream: MLXArray) -> Int {
+        stream.shape.suffix(DeepSeekV4MetalKernel.tokenAxisCount).reduce(1, *)
     }
 
     /// Takes the RMS reduction of the flattened copies of each token and the
@@ -234,23 +228,26 @@ enum DeepSeekV4MixesKernel {
     ///   - normEps: The epsilon of the reduction, from `rms_norm_eps`.
     /// - Returns: The mixes vector, shape `(..., mixes)`, in float32.
     static func mixes(of stream: MLXArray, projection: MLXArray, normEps: Float) -> MLXArray {
-        let leading = Array(stream.shape.dropLast(tokenAxisCount))
-        let features = stream.shape.suffix(tokenAxisCount).reduce(1, *)
+        let leading = DeepSeekV4MetalKernel.tokenShape(of: stream)
+        let features = Self.features(of: stream)
         let mixWidth = projection.dim(0)
         precondition(
             projection.shape == [mixWidth, features],
             "the projection must be shape \([mixWidth, features]), and it is \(projection.shape)")
         let tokens = leading.reduce(1, *)
         let layout = tokens >= blockLayoutMinimumTokens ? blockLayout : stepLayout
-        let tokenGroups = (tokens + layout.tokensPerGroup - 1) / layout.tokensPerGroup
-        let rowGroups = (mixWidth + layout.rowsPerGroup - 1) / layout.rowsPerGroup
+        let tokenGroups = DeepSeekV4MetalKernel.groupCount(
+            covering: tokens, groupSize: layout.tokensPerGroup)
+        let rowGroups = DeepSeekV4MetalKernel.groupCount(
+            covering: mixWidth, groupSize: layout.rowsPerGroup)
         return kernel(
             [stream, projection, MLXArray([Int32(tokens)])],
             template: [
                 ("T", stream.dtype), ("W", projection.dtype), ("FEATURES", features),
                 ("MIX_WIDTH", mixWidth), ("TOKENS_PER_GROUP", layout.tokensPerGroup),
                 ("ROWS_PER_GROUP", layout.rowsPerGroup), ("THREADS", layout.threads),
-                ("SIMD_WIDTH", simdGroupWidth), ("VECTOR_WIDTH", vectorWidth),
+                ("SIMD_WIDTH", DeepSeekV4MetalKernel.simdGroupWidth),
+                ("VECTOR_WIDTH", DeepSeekV4MetalKernel.vectorWidth),
                 ("EPS_BITS", normEps.templateBits),
             ],
             grid: (tokenGroups * rowGroups * layout.threads, 1, 1),

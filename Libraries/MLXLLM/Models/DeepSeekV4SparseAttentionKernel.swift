@@ -90,10 +90,6 @@ enum DeepSeekV4SparseAttentionKernel {
     /// group holds.
     private static let dimSlice = 64
 
-    /// The number of lanes in one Apple GPU SIMD group. One key tile holds
-    /// one key for each lane.
-    private static let simdGroupWidth = 32
-
     /// The number of neighbouring head-width columns one lane loads at a
     /// time. The head width must be a multiple of it.
     private static let columnsPerLoad = 2
@@ -118,9 +114,6 @@ enum DeepSeekV4SparseAttentionKernel {
     /// The axis of the `(batch, tokens, picks)` picks that holds the picks of
     /// one query.
     private static let pickAxis = 2
-
-    /// The last axis of a tensor: the head width.
-    private static let widthAxis = -1
 
     /// The place of each value in the `scalars` input of the kernel.
     private enum ScalarSlot {
@@ -147,8 +140,10 @@ enum DeepSeekV4SparseAttentionKernel {
     /// query, or the chunks a ranking picked. A row of `-1` takes no weight.
     ///
     /// `attend_query` holds the whole method for one query token and one
-    /// block of heads. The pointer types are template arguments, because MLX
-    /// gives an input of fewer than 8 values in the `constant` address space.
+    /// block of heads. One key tile holds one key for each lane of a SIMD
+    /// group. The pointer types are template arguments, because an input of
+    /// fewer values than ``DeepSeekV4MetalKernel/smallestDeviceInput`` is in
+    /// the `constant` address space.
     ///
     /// MLX writes the kernel signature directly after the header, thus the
     /// header ends in a line break.
@@ -536,8 +531,8 @@ enum DeepSeekV4SparseAttentionKernel {
     static func canRun(queries: MLXArray) -> Bool {
         let threadgroups =
             queries.dim(0) * queries.dim(tokenAxis) * headBlocks(of: queries.dim(headAxis))
-        return Device.defaultDevice().deviceType == .gpu
-            && queries.dim(widthAxis) % columnsPerLoad == 0
+        return DeepSeekV4MetalKernel.deviceIsGPU
+            && queries.dim(DeepSeekV4MetalKernel.widthAxis) % columnsPerLoad == 0
             && threadgroups >= fewestThreadgroups
     }
 
@@ -546,7 +541,7 @@ enum DeepSeekV4SparseAttentionKernel {
     /// - Parameter heads: The number of query heads.
     /// - Returns: The number of blocks of ``headBlock`` heads that cover them.
     private static func headBlocks(of heads: Int) -> Int {
-        (heads + headBlock - 1) / headBlock
+        DeepSeekV4MetalKernel.groupCount(covering: heads, groupSize: headBlock)
     }
 
     /// The attention output of each query over its window rows, its pooled
@@ -568,7 +563,7 @@ enum DeepSeekV4SparseAttentionKernel {
         let batch = queries.dim(0)
         let heads = queries.dim(headAxis)
         let tokens = queries.dim(tokenAxis)
-        let headDim = queries.dim(widthAxis)
+        let headDim = queries.dim(DeepSeekV4MetalKernel.widthAxis)
         let dtype = queries.dtype
         precondition(
             headDim % columnsPerLoad == 0,
@@ -579,12 +574,13 @@ enum DeepSeekV4SparseAttentionKernel {
                 + "keys \(window.keys.shape) with values \(window.values.shape) do not")
         var scalars = [Float](repeating: 0, count: ScalarSlot.count)
         scalars[ScalarSlot.scale] = scale
-        let simdGroups = (headDim + dimSlice - 1) / dimSlice
+        let simdGroups = DeepSeekV4MetalKernel.groupCount(covering: headDim, groupSize: dimSlice)
         let common = [
             queries, window.keys.asType(dtype), window.values.asType(dtype),
             sinks?.asType(dtype) ?? MLXArray.zeros([heads], dtype: dtype), MLXArray(scalars),
         ]
         let (kernel, poolInputs) = Self.kernel(for: pooled, dtype: dtype)
+        let simdGroupWidth = DeepSeekV4MetalKernel.simdGroupWidth
         let threads = simdGroups * simdGroupWidth
         return kernel(
             common + poolInputs,
