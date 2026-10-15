@@ -4,7 +4,8 @@
 // ``PrefillAttentionKernel``: the general attention body of a full-attention
 // layer gives the queries of the block to it. The kernel is deterministic,
 // thus the body must give the kernel output bit for bit. The SDPA of MLX adds
-// in another order, so a body that kept it fails this test.
+// in another order, so a body that kept it fails this test. A block with a
+// mask array keeps the SDPA of MLX, bit for bit.
 
 import Foundation
 import MLX
@@ -30,9 +31,14 @@ struct Qwen35PrefillAttentionTests {
     private static let seeds = Qwen35AttentionLayerFixture.Seeds(
         cache: 20_261_120, tokens: 20_261_121)
 
-    @Test func thePrefillBlockGivesTheKernelOutput() throws {
-        try Self.fixture.expectTheAttentionBodyGivesTheKernelOutput(
-            cachedKeys: Self.cachedKeys, tokens: Self.blockTokens, mask: .causal,
-            seeds: Self.seeds, kernel: PrefillAttentionKernelTests.call(causal: true).attention)
+    /// The prefill block gives the kernel output with a causal mask and with
+    /// no mask, and the SDPA of MLX with a mask array, in each dtype.
+    @Test(arguments: AttentionKernelTolerance.dtypes, AttentionMaskKind.allCases)
+    func thePrefillBlockGivesTheKernelOutputOrTheSDPA(
+        dtype: DType, mask: AttentionMaskKind
+    ) throws {
+        try Self.fixture.expectTheAttentionBodyGivesTheRouteOutput(
+            cachedKeys: Self.cachedKeys, tokens: Self.blockTokens, dtype: dtype, mask: mask,
+            picksFrom: PrefillAttentionKernelTests.kernels, seeds: Self.seeds)
     }
 }

@@ -45,6 +45,13 @@ struct DecodeAttentionKernelTests {
             causal: false)
     }
 
+    /// The kernel that the route picks for each mask kind: the kernel for no
+    /// mask. The route gives a causal mask and a mask array to the SDPA of
+    /// MLX. The prefill suite and the Qwen3.5 decode suite also read it.
+    static var kernels: AttentionKernelTable {
+        [call.maskKind: call]
+    }
+
     @Test(arguments: attentionCases, AttentionKernelTolerance.dtypes)
     func theKernelStaysInsideTheToleranceOfTheSDPA(
         attentionCase: AttentionKernelCase, dtype: DType
@@ -69,7 +76,7 @@ struct DecodeAttentionKernelTests {
         for dtype in AttentionKernelTolerance.dtypes {
             #expect(AttentionKernelTolerance.of(dtype) != nil, "\(dtype)")
         }
-        #expect(AttentionKernelTolerance.of(.int32) == nil)
+        #expect(AttentionKernelTolerance.of(AttentionKernelTolerance.refusedDtype) == nil)
     }
 
     /// The positive control of the tolerance test: a kernel that did not read
@@ -86,15 +93,25 @@ struct DecodeAttentionKernelTests {
         AttentionKernelTolerance.expectPastEachTolerance(short, full)
     }
 
-    /// The kernel reads one query over enough keys: below
+    /// The kernel reads one query over enough keys, in each dtype: below
     /// ``DecodeAttentionKernel/fewestKeys`` the SDPA of MLX is faster.
-    @Test func theKernelReadsOnlyOneQueryOverEnoughKeys() {
-        let enough = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys)
-        let few = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys - 1)
+    @Test(arguments: AttentionKernelTolerance.dtypes)
+    func theKernelReadsOnlyOneQueryOverEnoughKeys(dtype: DType) {
+        let fewest = DecodeAttentionKernel.fewestKeys
+        let enough = Self.random.qwen38(queries: 1, keys: fewest, dtype: dtype)
+        let few = Self.random.qwen38(queries: 1, keys: fewest - 1, dtype: dtype)
         let twoQueries = enough.withQueries(
             concatenated([enough.queries, enough.queries], axis: AttentionKernelOperands.rowAxis))
 
         Self.call.expectReads([enough], skips: [few, twoQueries])
+    }
+
+    /// The kernel does not read a dtype outside the float dtypes, or keys and
+    /// values in another dtype than the queries.
+    @Test func theKernelRefusesOtherDtypes() {
+        let operands = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys)
+
+        Self.call.expectReads([], skips: operands.inRefusedDtypes())
     }
 
     /// The kernel reads only head shapes it holds in registers: a whole
@@ -122,21 +139,36 @@ struct DecodeAttentionKernelTests {
         #expect(DecodeAttentionKernel.blockCount(keys: keys) == blocks)
     }
 
-    /// A call the kernel does not read keeps the SDPA of MLX, bit for bit.
-    @Test func aCallTheKernelDoesNotReadKeepsTheSDPA() {
-        let operands = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys - 1)
+    /// A call over too few keys keeps the SDPA of MLX bit for bit, in each
+    /// dtype and with each mask kind.
+    @Test(arguments: AttentionKernelTolerance.dtypes, AttentionMaskKind.allCases)
+    func aCallOverTooFewKeysKeepsTheSDPA(dtype: DType, mask: AttentionMaskKind) {
+        let operands = Self.random.qwen38(
+            queries: 1, keys: DecodeAttentionKernel.fewestKeys - 1, dtype: dtype)
 
         operands.expectTheRoute(
-            DecodeAttentionKernel.scaledDotProductAttention, keepsTheSDPAWith: .none)
+            DecodeAttentionKernel.scaledDotProductAttention, keepsTheSDPAWith: mask)
     }
 
-    /// A call the kernel reads gives the kernel output, bit for bit, and a
-    /// masked call keeps the SDPA of MLX.
-    @Test func aCallTheKernelReadsGivesTheKernelOutput() {
+    /// A call over enough keys gives the kernel output bit for bit with no
+    /// mask, and keeps the SDPA of MLX bit for bit with a causal mask or a
+    /// mask array, in each dtype.
+    @Test(arguments: AttentionKernelTolerance.dtypes, AttentionMaskKind.allCases)
+    func aCallOverEnoughKeysGivesTheKernelOutputOrTheSDPA(dtype: DType, mask: AttentionMaskKind) {
+        let operands = Self.random.qwen38(
+            queries: 1, keys: DecodeAttentionKernel.fewestKeys, dtype: dtype)
+
+        operands.expectTheRoute(
+            DecodeAttentionKernel.scaledDotProductAttention, with: mask, picksFrom: Self.kernels)
+    }
+
+    /// A call with keys and values in another dtype than the queries keeps
+    /// the SDPA of MLX bit for bit, with each mask kind.
+    @Test(arguments: AttentionMaskKind.allCases)
+    func aCallOfMixedDtypesKeepsTheSDPA(mask: AttentionMaskKind) {
         let operands = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys)
 
-        operands.expectTheRoute(DecodeAttentionKernel.scaledDotProductAttention, picks: Self.call)
-        operands.expectTheRoute(
-            DecodeAttentionKernel.scaledDotProductAttention, keepsTheSDPAWith: .causal)
+        operands.withKeysInAnotherDtype().expectTheRoute(
+            DecodeAttentionKernel.scaledDotProductAttention, keepsTheSDPAWith: mask)
     }
 }

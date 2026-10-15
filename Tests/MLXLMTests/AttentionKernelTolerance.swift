@@ -24,6 +24,9 @@ enum AttentionKernelTolerance {
     /// every one of them.
     static let dtypes = table.map(\.dtype)
 
+    /// A dtype that the attention kernels do not read. It has no tolerance.
+    static let refusedDtype = DType.int32
+
     /// The largest gap allowed between a kernel and the SDPA of MLX, as a
     /// part of the largest reference value, for float32 inputs. Both paths
     /// add in float32, each in its own order.
@@ -79,7 +82,9 @@ enum AttentionKernelTolerance {
 
     /// The check of a path that must give the output of a kernel bit for
     /// bit, with no tolerance: a route, or a model layer that calls the
-    /// kernel.
+    /// kernel. The two outputs must have the same dtype. A NaN in the same
+    /// position of the two outputs is equal: a causal query row with no key,
+    /// when a call has fewer keys than queries, gives NaN on each path.
     ///
     /// - Parameters:
     ///   - got: The output of the path.
@@ -89,7 +94,10 @@ enum AttentionKernelTolerance {
         _ got: MLXArray, _ expected: MLXArray,
         sourceLocation: SourceLocation = #_sourceLocation
     ) {
-        #expect(arrayEqual(got, expected).item(Bool.self), sourceLocation: sourceLocation)
+        #expect(got.dtype == expected.dtype, sourceLocation: sourceLocation)
+        #expect(
+            arrayEqual(got, expected, equalNAN: true).item(Bool.self),
+            sourceLocation: sourceLocation)
     }
 }
 
@@ -112,6 +120,11 @@ struct AttentionKernelCall {
     /// Tells if the kernel applies a causal mask.
     let causal: Bool
 
+    /// The mask kind that the kernel applies.
+    var maskKind: AttentionMaskKind {
+        AttentionMaskKind(causal: causal)
+    }
+
     /// Checks that the kernel runs over each of `read`, and does not run over
     /// each of `skipped`.
     ///
@@ -133,6 +146,58 @@ struct AttentionKernelCall {
                 !operands.runs(by: canRun), "must not run: \(operands.testDescription)",
                 sourceLocation: sourceLocation)
         }
+    }
+}
+
+/// The kernel that a route must pick for each mask kind. A mask kind with no
+/// kernel is a mask kind that the route gives to the SDPA of MLX.
+typealias AttentionKernelTable = [AttentionMaskKind: AttentionKernelCall]
+
+/// A kind of attention mask that a call gives to a route.
+enum AttentionMaskKind: CaseIterable, CustomTestStringConvertible, Sendable {
+    /// A causal mask.
+    case causal
+    /// No mask.
+    case unmasked
+    /// An additive mask array of zeros over each query and each key.
+    case array
+
+    /// The mask kind of a causal flag: a causal mask, or no mask.
+    init(causal: Bool) {
+        self = causal ? .causal : .unmasked
+    }
+
+    /// The text the test report shows for this mask kind.
+    var testDescription: String {
+        "\(self)"
+    }
+
+    /// The mask of this kind.
+    ///
+    /// - Parameters:
+    ///   - queries: The number of query tokens.
+    ///   - keys: The number of keys.
+    ///   - dtype: The dtype of the mask array.
+    /// - Returns: The mask.
+    func mode(queries: Int, keys: Int, dtype: DType) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        switch self {
+        case .causal: .causal
+        case .unmasked: .none
+        case .array: .array(MLXArray.zeros([queries, keys], dtype: dtype))
+        }
+    }
+
+    /// The mask of this kind over queries and keys, in the dtype of the
+    /// queries.
+    ///
+    /// - Parameters:
+    ///   - queries: The queries, shape `(batch, heads, queries, width)`.
+    ///   - keys: The keys, shape `(batch, kvHeads, keys, width)`.
+    /// - Returns: The mask.
+    func mode(queries: MLXArray, keys: MLXArray) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        mode(
+            queries: queries.dim(AttentionKernelOperands.rowAxis),
+            keys: keys.dim(AttentionKernelOperands.rowAxis), dtype: queries.dtype)
     }
 }
 
@@ -263,9 +328,10 @@ struct AttentionKernelOperands {
     /// The factor the scores take before the softmax.
     let scale: Float
 
-    /// The mask mode of a causal flag.
-    static func maskMode(causal: Bool) -> MLXFast.ScaledDotProductAttentionMaskMode {
-        causal ? .causal : .none
+    /// The mask of one kind over the queries and the keys, in the dtype of
+    /// the queries.
+    func mask(_ kind: AttentionMaskKind) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        kind.mode(queries: queries, keys: keys)
     }
 
     /// The operands with other queries, and the same keys, values and scale.
@@ -308,6 +374,27 @@ struct AttentionKernelOperands {
         let spaced = withKeysAndValues(Self.spaced)
         eval(spaced.keys, spaced.values)
         return spaced
+    }
+
+    /// The operands with the keys and the values in another dtype that the
+    /// kernels read, and the same queries. The kernels do not read keys of
+    /// another dtype than the queries.
+    func withKeysInAnotherDtype() -> AttentionKernelOperands {
+        let other =
+            AttentionKernelTolerance.dtypes.first { $0 != queries.dtype }
+            ?? AttentionKernelTolerance.refusedDtype
+        return withKeysAndValues { $0.asType(other) }
+    }
+
+    /// The operands in dtypes that the kernels do not read: each operand in
+    /// ``AttentionKernelTolerance/refusedDtype``, and keys and values in
+    /// another dtype than the queries.
+    func inRefusedDtypes() -> [AttentionKernelOperands] {
+        let refused = AttentionKernelTolerance.refusedDtype
+        return [
+            withQueries(queries.asType(refused)).withKeysAndValues { $0.asType(refused) },
+            withKeysInAnotherDtype(),
+        ]
     }
 
     /// The same rows from a transposed buffer.
@@ -367,50 +454,57 @@ struct AttentionKernelOperands {
 
     /// The SDPA of MLX over the operands, in float32.
     func reference(causal: Bool) -> MLXArray {
-        withQueries(queries.asType(.float32))
-            .withKeysAndValues { $0.asType(.float32) }
-            .sdpa(mask: Self.maskMode(causal: causal))
+        let float32 = withQueries(queries.asType(.float32)).withKeysAndValues {
+            $0.asType(.float32)
+        }
+        return float32.sdpa(mask: float32.mask(AttentionMaskKind(causal: causal)))
     }
 
-    /// Checks that a route over the operands picks a kernel: it gives the
-    /// kernel output bit for bit, with the mask of the causal flag of the
-    /// kernel.
+    /// The output that a route must give over the operands with a mask of
+    /// one kind: the output of the kernel of that mask kind in `kernels`, or
+    /// the SDPA of MLX with the mask when `kernels` holds no kernel for it.
+    ///
+    /// - Parameters:
+    ///   - kind: The mask kind of the call.
+    ///   - kernels: The kernel that the route picks for each mask kind.
+    /// - Returns: The expected output.
+    func expectedRouteOutput(
+        with kind: AttentionMaskKind, picksFrom kernels: AttentionKernelTable
+    ) -> MLXArray {
+        kernels[kind].map { output(of: $0.attention) } ?? sdpa(mask: mask(kind))
+    }
+
+    /// Checks that a route over the operands, with a mask of one kind, gives
+    /// bit for bit the output of the kernel of that mask kind in `kernels`,
+    /// or the output of the SDPA of MLX when `kernels` holds no kernel for
+    /// it.
     ///
     /// - Parameters:
     ///   - route: The route under test.
-    ///   - call: The kernel that the route must pick.
+    ///   - kind: The mask kind of the call.
+    ///   - kernels: The kernel that the route must pick for each mask kind.
     ///   - sourceLocation: The location that a failure reports.
     func expectTheRoute(
-        _ route: Route, picks call: AttentionKernelCall,
+        _ route: Route, with kind: AttentionMaskKind, picksFrom kernels: AttentionKernelTable,
         sourceLocation: SourceLocation = #_sourceLocation
-    ) {
-        expectTheRoute(
-            route, mask: Self.maskMode(causal: call.causal), gives: output(of: call.attention),
-            sourceLocation: sourceLocation)
-    }
-
-    /// Checks that a route over the operands keeps the SDPA of MLX: it gives
-    /// the SDPA output bit for bit, with the same mask.
-    ///
-    /// - Parameters:
-    ///   - route: The route under test.
-    ///   - mask: The mask of the call.
-    ///   - sourceLocation: The location that a failure reports.
-    func expectTheRoute(
-        _ route: Route, keepsTheSDPAWith mask: MLXFast.ScaledDotProductAttentionMaskMode,
-        sourceLocation: SourceLocation = #_sourceLocation
-    ) {
-        expectTheRoute(route, mask: mask, gives: sdpa(mask: mask), sourceLocation: sourceLocation)
-    }
-
-    /// Checks that a route over the operands and a mask gives an expected
-    /// output bit for bit.
-    private func expectTheRoute(
-        _ route: Route, mask: MLXFast.ScaledDotProductAttentionMaskMode, gives expected: MLXArray,
-        sourceLocation: SourceLocation
     ) {
         AttentionKernelTolerance.expectBitForBit(
-            routed(mask: mask, through: route), expected, sourceLocation: sourceLocation)
+            routed(mask: mask(kind), through: route),
+            expectedRouteOutput(with: kind, picksFrom: kernels), sourceLocation: sourceLocation)
+    }
+
+    /// Checks that a route over the operands, with a mask of one kind, keeps
+    /// the SDPA of MLX: it gives the SDPA output bit for bit.
+    ///
+    /// - Parameters:
+    ///   - route: The route under test.
+    ///   - kind: The mask kind of the call.
+    ///   - sourceLocation: The location that a failure reports.
+    func expectTheRoute(
+        _ route: Route, keepsTheSDPAWith kind: AttentionMaskKind,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        expectTheRoute(route, with: kind, picksFrom: [:], sourceLocation: sourceLocation)
     }
 
     /// Checks that a kernel runs over the operands, that its output has the

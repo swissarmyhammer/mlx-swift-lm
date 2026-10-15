@@ -158,8 +158,95 @@ comments:
     - evidence: 6 files — Tests/MLXLMTests/AttentionKernelTolerance.swift, DecodeAttentionKernelTests.swift, PrefillAttentionKernelTests.swift, Qwen35AttentionLayerFixture.swift, Qwen35DecodeAttentionTests.swift, Qwen35PrefillAttentionTests.swift. `swift build --build-tests`: 0 compiler warnings (only the known build-system warning `missing creator for mutated node`). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 716 XCTest, 0 failures; Swift Testing 1498 tests in 122 suites passed. swiftlint no_magic_numbers: 0 on the 6 files.
     - next: /review. Both findings of "Review Findings (2026-10-15 12:58)" are ticked. The task stays in doing.
   timestamp: 2026-10-15T18:16:09.527690+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m50cm1tc3mw5ejx8cm3n97w9
+  text: |-
+    ### review — findings
+    - evidence: `review sha HEAD~1..HEAD` (commit c333ae8 only). counts: 2 findings, 2 confirmed, 0 refuted. Tests/MLXLMTests/PrefillAttentionKernelTests.swift:143, Tests/MLXLMTests/PrefillAttentionKernelTests.swift:151. All 8 earlier findings are ticked.
+    - next: /implement. Do the 2 open items in "Review Findings (2026-10-15 13:16)". The task stays in review.
+  timestamp: 2026-10-15T18:19:04.396512+00:00
+- actor: claude-code
+  id: 01m50cmh4wk9rmggzq8f57s4yz
+  text: |-
+    ### finish iteration 4 — findings
+    - implement: changed — 6 test files; one AttentionKernelCall description and shared checks
+    - test: green — MLXLMTests 716 XCTest and 1498 Swift Testing, 0 failures, 0 warnings; mutant run 45 issues
+    - commit: c333ae8
+    - review: findings — Tests/MLXLMTests/PrefillAttentionKernelTests.swift:143, Tests/MLXLMTests/PrefillAttentionKernelTests.swift:151
+  timestamp: 2026-10-15T18:19:20.092990+00:00
+- actor: claude-code
+  id: 01m50ctnpdd3z5qzkjmbhnkvzs
+  text: |-
+    Picked up the 2 findings of "Review Findings (2026-10-15 13:16)". Coverage matrix of the 4 suites, before this change. Kernels: D = DecodeAttentionKernel (reads no mask; refuses causal and array in its route, its canRun has no mask), P = PrefillAttentionKernel (reads causal and no mask; refuses array), L = the Qwen3.5 layer (`Qwen35Attention.attend` gives each call to the route of P). Dtypes that each kernel reads: f32, f16, bf16. Refused dtypes: a dtype outside that list (int32), and keys and values in another dtype than the queries.
+
+    | Kernel | Check | causal | no mask | array | refused dtype |
+    |---|---|---|---|---|---|
+    | D | canRun reads | n/a (route refuses) | f32/f16/bf16 only through the tolerance `#require`; explicit list bf16 only | n/a | GAP: no refusal check |
+    | D | canRun refuses shapes (few keys, 2 queries, heads) | n/a | bf16 only | n/a | - |
+    | D | tolerance | refused | f32/f16/bf16 (+ spaced keys) | refused | - |
+    | D | route picks D bit for bit | refused | bf16 only; GAP f32/f16 | refused | - |
+    | D | route keeps SDPA | bf16 only; GAP f32/f16 | few keys bf16 only | GAP all dtypes | GAP |
+    | P | canRun reads | f32/f16/bf16 | f32 only (finding 1); GAP f16/bf16 | refused | GAP: no refusal check |
+    | P | canRun refuses | causal over fewer keys f32 only; few queries bf16 only | few queries: GAP | bf16 only; GAP f32/f16 | GAP |
+    | P | tolerance | f32/f16/bf16 (+ spaced keys) | f32/f16/bf16 (+ spaced keys) | refused | - |
+    | P | route picks P bit for bit | bf16 only | GAP (finding 2) | refused | - |
+    | P | route keeps the D route / SDPA | decode shape: GAP; few queries: GAP; fewer keys: GAP | decode shape bf16 only; few queries: GAP | 96 x 96 bf16 only | GAP |
+    | L prefill body | picks P / keeps SDPA | f32 only | GAP | GAP | - |
+    | L decode body | picks D / keeps SDPA | GAP | f32 only | GAP | - |
+    | L traced decode step | picks D / keeps SDPA | GAP | f32 only | GAP | - |
+
+    Plan: add `AttentionMaskKind` (causal, no mask, array) and one table of the kernel of each mask kind for each suite (`kernels`). One shared check `expectTheRoute(_:with:picksFrom:)` picks the kernel of the table, or the SDPA of MLX when the table has no kernel for the mask. Each route test, canRun test and layer test runs over each dtype x each mask kind. Add refusal checks for a dtype outside the list and for mixed dtypes. Tolerance and canRun are kernel checks; the layer suites own only the route checks, now in each dtype and each mask kind.
+  timestamp: 2026-10-15T18:22:41.357592+00:00
+- actor: claude-code
+  id: 01m50dx7504e6sgezcgp9vtbch
+  text: |-
+    Fixed the 2 findings of "Review Findings (2026-10-15 13:16)" and filled each gap of the coverage matrix (see the matrix comment).
+
+    Shared helpers (AttentionKernelTolerance.swift): new `AttentionMaskKind` (causal, unmasked, array) with `mode(queries:keys:dtype:)`; `AttentionKernelTable` = the kernel that a route picks for each mask kind; `AttentionKernelCall.maskKind`; `AttentionKernelOperands.mask(_:)`, `expectedRouteOutput(with:picksFrom:)`, `expectTheRoute(_:with:picksFrom:)`, `expectTheRoute(_:keepsTheSDPAWith:)` (now takes a mask kind), `withKeysInAnotherDtype()`, `inRefusedDtypes()`; `AttentionKernelTolerance.refusedDtype`. `maskMode(causal:)` and `expectTheRoute(_:picks:)` are gone; the table form replaces them. `DecodeAttentionKernelTests.kernels` = [unmasked: call]; `PrefillAttentionKernelTests.kernels` = [causal: call(true), unmasked: call(false)].
+
+    Matrix after the change (each cell in f32, f16 and bf16):
+    - D canRun: reads 1 query over enough keys; refuses few keys, 2 queries, head shapes, int32, mixed dtypes (`theKernelRefusesOtherDtypes`).
+    - D route: enough keys x {causal, unmasked, array} (kernel for unmasked, SDPA for the others); too few keys x each mask keeps SDPA; mixed dtypes x each mask keeps SDPA.
+    - P canRun: causal and unmasked x enough queries, head shapes; causal refuses fewer keys, unmasked reads fewer keys; array refused (finding 1); int32 and mixed dtypes refused for each causal flag.
+    - P route: 96 x 160 x {causal, unmasked, array} (finding 2: unmasked picks `call(causal: false)` bit for bit); 96 x 95 x each mask (causal keeps SDPA, unmasked picks the kernel); decode shape x each mask picks the D table; 63 queries x each mask keeps SDPA; mixed dtypes x each mask keeps SDPA.
+    - Layer (Qwen35 prefill body, decode body, traced decode step): each dtype x each mask kind gives the route output bit for bit. The fixture now casts the layer weights, the cache and the tokens to the dtype.
+
+    Discoveries:
+    - A causal call over fewer keys than queries gives NaN rows on the SDPA of MLX (row 0 sees no key). `expectBitForBit` now uses `arrayEqual(..., equalNAN: true)` and also checks that the two dtypes are the same (arrayEqual casts the second array to the dtype of the first).
+    - The SDPA of MLX accepts keys in another dtype than the queries (it promotes), so the mixed-dtype route cells run. An int32 call is checked only through canRun, because the SDPA of MLX does not read int32.
+    - Mutant that failed: `causal: causal || true` in the prefill route, and `.none -> nil` in `causalFlag`, stop the run on the precondition of `attention` (the expected output calls the kernel). Use a route mutant that keeps canRun as it is.
+
+    Positive controls (temporary mutants in production code, all reverted; `git diff Libraries` is empty):
+    - Run A (prefill route picks the kernel only for causal; decode route ignores the mask; prefill canRun ignores the dtype list): 41 issues in 9 tests; each mutant fails in f32, f16 and bf16: unmasked prefill route and layer prefill unmasked, decode causal/array route and both layer decode tests, decode-shape route through the prefill route, `theKernelReadsOnlyTheMasksItHolds`, `theKernelRefusesOtherDtypes`.
+    - Run B (prefill reads an array mask as no mask): 15 issues; the array cell of `aPrefillCallGivesTheKernelOutputOrTheSDPA`, `aCallOverFewerKeysThanQueriesKeepsTheSDPAWhenCausal`, `thePrefillBlockGivesTheKernelOutputOrTheSDPA` and `theKernelReadsOnlyTheMasksItHolds`, each in 3 dtypes.
+  timestamp: 2026-10-15T18:41:33.344537+00:00
+- actor: claude-code
+  id: 01m50dxaebdvzgwn3pp5k19jn6
+  text: |-
+    ### implement — changed
+    - evidence: 6 files — Tests/MLXLMTests/AttentionKernelTolerance.swift, DecodeAttentionKernelTests.swift, PrefillAttentionKernelTests.swift, Qwen35AttentionLayerFixture.swift, Qwen35DecodeAttentionTests.swift, Qwen35PrefillAttentionTests.swift. `swift build --build-tests`: 0 compiler warnings (only the known build-system warning `missing creator for mutated node`). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 716 XCTest, 0 failures; Swift Testing 1503 tests in 122 suites passed, 0 issues. swiftlint no_magic_numbers: 0 on the 6 files. Mutant runs: A 41 issues, B 15 issues; production code restored.
+    - next: /review. Both findings of "Review Findings (2026-10-15 13:16)" are ticked. The task stays in doing.
+  timestamp: 2026-10-15T18:41:36.715445+00:00
+- actor: claude-code
+  id: 01m50e2hakczs30d7t5smx1qb8
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (8a48e92). 0 findings, 0 confirmed, 0 refuted. 7 pairs attempted, 0 failed. 6 files reviewed. The 2 kanban files had no validator.
+    - prior findings: all 10 items are checked.
+    - acceptance: the Decision (2026-10-15) closes "Prefill at 32k is faster".
+    - next: none. The task moved to done.
+  timestamp: 2026-10-15T18:44:27.603430+00:00
+- actor: claude-code
+  id: 01m50e2z11kf3yp93jtzbn34h3
+  text: |-
+    ### finish iteration 5 — clean
+    - implement: changed — 6 test files; each dtype and each mask kind checked for each kernel
+    - test: green — MLXLMTests 716 XCTest and 1503 Swift Testing, 0 failures, 0 warnings; mutant runs 41 and 15 issues
+    - commit: 8a48e92
+    - review: clean — 0 findings; 10 prior findings checked
+  timestamp: 2026-10-15T18:44:41.633716+00:00
+position_column: done
+position_ordinal: ffd780
 title: 'Qwen3.8 prefill speed: fused attention kernel for head dim 256 (no full score tensor)'
 ---
 ## What
@@ -220,3 +307,14 @@ The user decided to keep this change because peak memory decreases from 20.7 GiB
 
 - [x] `Tests/MLXLMTests/DecodeAttentionKernelTests.swift:55` `reuse/reuse` — The private `routed` helper repeats the body of `routed` in `PrefillAttentionKernelTests`. The two helpers call the `scaledDotProductAttention` of a kernel with the same operands and mask. The only difference is the name of the kernel. Thus the test route is written two times, and the two copies can become different. Move one shared helper into `AttentionKernelOperands` that takes the route as a closure, for example `routed(mask:through:)`. The closure calls the `scaledDotProductAttention` of the kernel. Then each suite gives only the route of its kernel.
 - [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:64` `reuse/reuse` — The private `routed` helper repeats the body of `routed` in `DecodeAttentionKernelTests`. The only difference between the two helpers is the kernel whose `scaledDotProductAttention` they call. With two copies, you must keep the same route logic in two locations. Replace the two helpers with one shared helper on `AttentionKernelOperands` that takes the route as a closure, as the finding for the Decode file tells. Call that helper from the two suites.
+
+## Review Findings (2026-10-15 13:16)
+
+> Scope: `review sha HEAD~1..HEAD` (commit c333ae8 only) — reviewed the diffs only — lines this change added or modified. 6 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4ZD6PV6CR1AJNT03JAHAYPG.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4ZD6PV6CR1AJNT03JAHAYPG.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:143` `completeness/invariant-propagation` — The no-mask branch checks only float32. The test's doc comment says the kernel reads the three float dtypes with a causal mask or with no mask. The causal branch on line 142 checks `typed` (all three dtypes), but the no-mask branch on line 143 checks only `fewerKeys`, which is built from `typed[0]`, the float32 operands. A no-mask read in float16 or bfloat16 is therefore never checked, so the dtype contract is proven only for float32 on this path. Check the no-mask read over `typed` too, for example `Self.call(causal: false).expectReads(typed, skips: [])`, or add a per-dtype `fewerKeys` for the no-mask skip. Both checks should cover every dtype the doc comment names.
+- [x] `Tests/MLXLMTests/PrefillAttentionKernelTests.swift:151` `completeness/inverse-operation-coverage` — The route test `aPrefillCallGivesTheKernelOutput` checks only the causal kernel. The prefill route with no mask, which the kernel also reads (the test above proves `canRun` for `causal: false`), is never checked bit for bit against `call(causal: false)`. The sibling decode suite checks both the picked kernel and the SDPA route for each mask, so this suite has a gap that the other one does not. Add a route check with `picks: Self.call(causal: false)` over the same operands, or over a no-mask prefill shape, so the route is proven bit for bit for both causal flags.

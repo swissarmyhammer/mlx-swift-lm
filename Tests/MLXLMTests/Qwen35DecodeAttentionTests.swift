@@ -5,7 +5,8 @@
 // it: the traced decode step (`attentionCacheStep`) and the general attention
 // body. The kernel is deterministic, thus each path must give the kernel
 // output bit for bit. The SDPA of MLX adds in another order, so a path that
-// kept it fails these tests.
+// kept it fails these tests. A step with a causal mask or a mask array keeps
+// the SDPA of MLX, bit for bit.
 
 import Foundation
 import MLX
@@ -32,32 +33,48 @@ struct Qwen35DecodeAttentionTests {
     /// and the values.
     private static let stepTensors = 3
 
-    @Test func theTracedDecodeStepGivesTheKernelOutput() throws {
-        let layer = try Self.fixture.layer()
+    /// The traced decode step gives the kernel output with no mask, and the
+    /// SDPA of MLX with a causal mask or a mask array, in each dtype.
+    @Test(arguments: AttentionKernelTolerance.dtypes, AttentionMaskKind.allCases)
+    func theTracedDecodeStepGivesTheKernelOutputOrTheSDPA(
+        dtype: DType, mask: AttentionMaskKind
+    ) throws {
+        let layer = try Self.fixture.layer(dtype: dtype)
         let attention = try #require(layer.selfAttn)
-        let cache = Self.fixture.filledCache(keys: Self.cachedKeys, seed: Self.seeds.cache)
+        let cache = Self.fixture.filledCache(
+            keys: Self.cachedKeys, dtype: dtype, seed: Self.seeds.cache)
         let step = MLXRandom.normal(
             [Self.stepTensors, 1, Qwen35AttentionLayerFixture.queryHeads, 1, Self.fixture.headDim],
-            key: MLXRandom.key(Self.seeds.tokens))
+            key: MLXRandom.key(Self.seeds.tokens)
+        ).asType(dtype)
         let queries = step[0]
         let keys = step[1][0..., ..<Qwen35AttentionLayerFixture.kvHeads]
         let values = step[2][0..., ..<Qwen35AttentionLayerFixture.kvHeads]
         let rotatedQueries = Qwen35AttentionLayerFixture.rotated(
             queries, attention: attention, cache: cache)
+        let stepKeys = Self.cachedKeys + 1
 
         let output = layer.attentionCacheStep(
-            queries: queries, keys: keys, values: values, cache: cache, mask: .none)
-        let expected = Qwen35AttentionLayerFixture.kernelOutput(
-            DecodeAttentionKernelTests.call.attention, rotatedQueries: rotatedQueries,
-            attention: attention, cache: cache)
+            queries: queries, keys: keys, values: values, cache: cache,
+            mask: Qwen35AttentionLayerFixture.mask(
+                mask, rotatedQueries: rotatedQueries, keys: stepKeys))
+        let expected = Qwen35AttentionLayerFixture.routeOutput(
+            with: mask, picksFrom: DecodeAttentionKernelTests.kernels,
+            rotatedQueries: rotatedQueries, attention: attention, cache: cache)
 
         Qwen35AttentionLayerFixture.expectTheStep(
-            output, gives: expected, cache: cache, keys: Self.cachedKeys + 1)
+            output, gives: expected, cache: cache, keys: stepKeys)
     }
 
-    @Test func theGeneralAttentionBodyGivesTheKernelOutput() throws {
-        try Self.fixture.expectTheAttentionBodyGivesTheKernelOutput(
-            cachedKeys: Self.cachedKeys, tokens: 1, mask: .none, seeds: Self.seeds,
-            kernel: DecodeAttentionKernelTests.call.attention)
+    /// The general attention body of one token gives the kernel output with
+    /// no mask, and the SDPA of MLX with a causal mask or a mask array, in
+    /// each dtype.
+    @Test(arguments: AttentionKernelTolerance.dtypes, AttentionMaskKind.allCases)
+    func theGeneralAttentionBodyGivesTheKernelOutputOrTheSDPA(
+        dtype: DType, mask: AttentionMaskKind
+    ) throws {
+        try Self.fixture.expectTheAttentionBodyGivesTheRouteOutput(
+            cachedKeys: Self.cachedKeys, tokens: 1, dtype: dtype, mask: mask,
+            picksFrom: DecodeAttentionKernelTests.kernels, seeds: Self.seeds)
     }
 }

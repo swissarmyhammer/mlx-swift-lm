@@ -35,26 +35,31 @@ struct PrefillAttentionKernelTests {
     /// The masks the kernel reads.
     static let causalMasks = [true, false]
 
-    /// The query and key count of the routing tests: more than the fewest
-    /// queries the kernel reads.
+    /// The query count of the routing tests: more than the fewest queries
+    /// the kernel reads.
     private static let routedTokens = 96
+
+    /// The key count of the routing tests: a cached prefix ahead of the
+    /// queries.
+    private static let routedKeys = 160
 
     /// The random operands of this suite, from its own seeds.
     private static let random = AttentionKernelRandomOperands(
         queries: 20_261_115, keys: 20_261_116, values: 20_261_117)
 
-    /// The check of the kernel with one mask.
-    private static func canRun(
-        mask: MLXFast.ScaledDotProductAttentionMaskMode
-    ) -> AttentionKernelCall.Check {
-        { PrefillAttentionKernel.canRun(queries: $0, keys: $1, values: $2, mask: mask) }
+    /// The check of the kernel with one mask kind.
+    private static func canRun(_ kind: AttentionMaskKind) -> AttentionKernelCall.Check {
+        {
+            PrefillAttentionKernel.canRun(
+                queries: $0, keys: $1, values: $2, mask: kind.mode(queries: $0, keys: $1))
+        }
     }
 
     /// The kernel under test with the mask of a causal flag. The Qwen3.5
     /// prefill suite also reads it.
     static func call(causal: Bool) -> AttentionKernelCall {
         AttentionKernelCall(
-            canRun: canRun(mask: AttentionKernelOperands.maskMode(causal: causal)),
+            canRun: canRun(AttentionMaskKind(causal: causal)),
             attention: {
                 PrefillAttentionKernel.attention(
                     queries: $0, keys: $1, values: $2, scale: $3, causal: causal)
@@ -62,9 +67,12 @@ struct PrefillAttentionKernelTests {
             causal: causal)
     }
 
-    /// An array mask over the query and key count of the routing tests.
-    private static func arrayMask() -> MLXFast.ScaledDotProductAttentionMaskMode {
-        .array(MLXArray.zeros([routedTokens, routedTokens], dtype: .bfloat16))
+    /// The kernel that the route picks for each mask kind: the kernel with a
+    /// causal mask, and the kernel with no mask. The route gives a mask array
+    /// to the route of ``DecodeAttentionKernel``. The Qwen3.5 prefill suite
+    /// also reads it.
+    static var kernels: AttentionKernelTable {
+        Dictionary(uniqueKeysWithValues: causalMasks.map(call).map { ($0.maskKind, $0) })
     }
 
     @Test(arguments: attentionCases, AttentionKernelTolerance.dtypes)
@@ -97,26 +105,30 @@ struct PrefillAttentionKernelTests {
         AttentionKernelTolerance.expectPastEachTolerance(missingToken, causal)
     }
 
-    /// The kernel reads only a prefill block of enough query tokens: below
+    /// The kernel reads only a prefill block of enough query tokens, in each
+    /// dtype and with each mask it reads: below
     /// ``PrefillAttentionKernel/fewestQueries`` the other routes are faster.
-    @Test func theKernelReadsOnlyEnoughQueries() {
+    @Test(arguments: AttentionKernelTolerance.dtypes, causalMasks)
+    func theKernelReadsOnlyEnoughQueries(dtype: DType, causal: Bool) {
         let fewest = PrefillAttentionKernel.fewestQueries
-        let enough = Self.random.qwen38(queries: fewest, keys: fewest)
-        let few = Self.random.qwen38(queries: fewest - 1, keys: fewest)
+        let enough = Self.random.qwen38(queries: fewest, keys: fewest, dtype: dtype)
+        let few = Self.random.qwen38(queries: fewest - 1, keys: fewest, dtype: dtype)
 
-        Self.call(causal: true).expectReads([enough], skips: [few])
+        Self.call(causal: causal).expectReads([enough], skips: [few])
     }
 
-    /// The kernel reads only the head shapes it holds: a head width of 256
-    /// and a whole number of threadgroup head groups for each KV head.
-    @Test func theKernelReadsOnlyTheHeadShapesItHolds() {
+    /// The kernel reads only the head shapes it holds, in each dtype and with
+    /// each mask it reads: a head width of 256 and a whole number of
+    /// threadgroup head groups for each KV head.
+    @Test(arguments: AttentionKernelTolerance.dtypes, causalMasks)
+    func theKernelReadsOnlyTheHeadShapesItHolds(dtype: DType, causal: Bool) {
         let fewest = PrefillAttentionKernel.fewestQueries
-        let operands = Self.random.qwen38(queries: fewest, keys: fewest)
+        let operands = Self.random.qwen38(queries: fewest, keys: fewest, dtype: dtype)
         let narrow = operands.firstHeadNumbers(128)
         let twoPerKVHead = operands.firstQueryHeads(8)
         let fourPerKVHead = operands.firstQueryHeads(16)
 
-        Self.call(causal: true).expectReads(
+        Self.call(causal: causal).expectReads(
             [operands], skips: [narrow, twoPerKVHead, fourPerKVHead])
     }
 
@@ -129,40 +141,84 @@ struct PrefillAttentionKernelTests {
             .expectSpacedHeadNumbersStayInsideTheTolerance(of: Self.call(causal: causal))
     }
 
-    /// The kernel reads the three float dtypes, with a causal mask over at
-    /// least as many keys as queries, or with no mask.
-    @Test func theKernelReadsOnlyTheDtypesAndMasksItHolds() {
+    /// In each dtype, the kernel reads a causal mask over at least as many
+    /// keys as queries, and no mask over each key count. It does not read a
+    /// mask array.
+    @Test(arguments: AttentionKernelTolerance.dtypes)
+    func theKernelReadsOnlyTheMasksItHolds(dtype: DType) {
         let fewest = PrefillAttentionKernel.fewestQueries
-        let typed = AttentionKernelTolerance.dtypes.map {
-            Self.random.qwen38(queries: fewest, keys: fewest, dtype: $0)
-        }
-        let fewerKeys = typed[0].firstKeys(fewest - 1)
-        let routed = Self.random.qwen38(queries: Self.routedTokens, keys: Self.routedTokens)
+        let operands = Self.random.qwen38(queries: fewest, keys: fewest, dtype: dtype)
+        let fewerKeys = operands.firstKeys(fewest - 1)
 
-        Self.call(causal: true).expectReads(typed, skips: [fewerKeys])
-        Self.call(causal: false).expectReads([fewerKeys], skips: [])
-        #expect(!routed.runs(by: Self.canRun(mask: Self.arrayMask())))
+        Self.call(causal: true).expectReads([operands], skips: [fewerKeys])
+        Self.call(causal: false).expectReads([operands, fewerKeys], skips: [])
+        for read in [operands, fewerKeys] {
+            #expect(!read.runs(by: Self.canRun(.array)), "\(read.testDescription)")
+        }
     }
 
-    /// A prefill call gives the kernel output, bit for bit.
-    @Test func aPrefillCallGivesTheKernelOutput() {
-        let operands = Self.random.qwen38(queries: Self.routedTokens, keys: 160)
+    /// The kernel does not read a dtype outside the float dtypes, or keys and
+    /// values in another dtype than the queries, with each mask it reads.
+    @Test(arguments: causalMasks)
+    func theKernelRefusesOtherDtypes(causal: Bool) {
+        let fewest = PrefillAttentionKernel.fewestQueries
+        let operands = Self.random.qwen38(queries: fewest, keys: fewest)
+
+        Self.call(causal: causal).expectReads([], skips: operands.inRefusedDtypes())
+    }
+
+    /// A prefill call gives the kernel output bit for bit with a causal mask
+    /// and with no mask, and keeps the SDPA of MLX bit for bit with a mask
+    /// array, in each dtype.
+    @Test(arguments: AttentionKernelTolerance.dtypes, AttentionMaskKind.allCases)
+    func aPrefillCallGivesTheKernelOutputOrTheSDPA(dtype: DType, mask: AttentionMaskKind) {
+        let operands = Self.random.qwen38(
+            queries: Self.routedTokens, keys: Self.routedKeys, dtype: dtype)
 
         operands.expectTheRoute(
-            PrefillAttentionKernel.scaledDotProductAttention, picks: Self.call(causal: true))
+            PrefillAttentionKernel.scaledDotProductAttention, with: mask, picksFrom: Self.kernels)
     }
 
-    /// A call the kernel does not read keeps the route of
-    /// ``DecodeAttentionKernel``, bit for bit: a decode step over a long
-    /// cache, and a prefill call with an array mask.
-    @Test func aCallTheKernelDoesNotReadKeepsTheDecodeRoute() {
-        let decode = Self.random.qwen38(queries: 1, keys: DecodeAttentionKernel.fewestKeys)
-        let prefill = Self.random.qwen38(queries: Self.routedTokens, keys: Self.routedTokens)
+    /// A causal prefill call over fewer keys than queries keeps the SDPA of
+    /// MLX bit for bit, and the same call with no mask gives the kernel
+    /// output, in each dtype.
+    @Test(arguments: AttentionKernelTolerance.dtypes, AttentionMaskKind.allCases)
+    func aCallOverFewerKeysThanQueriesKeepsTheSDPAWhenCausal(
+        dtype: DType, mask: AttentionMaskKind
+    ) {
+        let operands = Self.random.qwen38(
+            queries: Self.routedTokens, keys: Self.routedTokens - 1, dtype: dtype)
+
+        operands.expectTheRoute(
+            PrefillAttentionKernel.scaledDotProductAttention, with: mask,
+            picksFrom: Self.kernels.filter { !$0.value.causal })
+    }
+
+    /// A call of too few queries keeps the route of ``DecodeAttentionKernel``
+    /// bit for bit, in each dtype and with each mask kind: a decode step over
+    /// a long cache picks the decode kernel when it has no mask, and a block
+    /// below ``PrefillAttentionKernel/fewestQueries`` keeps the SDPA of MLX.
+    @Test(arguments: AttentionKernelTolerance.dtypes, AttentionMaskKind.allCases)
+    func aCallOfTooFewQueriesKeepsTheDecodeRoute(dtype: DType, mask: AttentionMaskKind) {
+        let fewest = PrefillAttentionKernel.fewestQueries
+        let decode = Self.random.qwen38(
+            queries: 1, keys: DecodeAttentionKernel.fewestKeys, dtype: dtype)
+        let fewQueries = Self.random.qwen38(queries: fewest - 1, keys: fewest, dtype: dtype)
 
         decode.expectTheRoute(
-            PrefillAttentionKernel.scaledDotProductAttention,
-            picks: DecodeAttentionKernelTests.call)
-        prefill.expectTheRoute(
-            PrefillAttentionKernel.scaledDotProductAttention, keepsTheSDPAWith: Self.arrayMask())
+            PrefillAttentionKernel.scaledDotProductAttention, with: mask,
+            picksFrom: DecodeAttentionKernelTests.kernels)
+        fewQueries.expectTheRoute(
+            PrefillAttentionKernel.scaledDotProductAttention, keepsTheSDPAWith: mask)
+    }
+
+    /// A prefill call with keys and values in another dtype than the queries
+    /// keeps the SDPA of MLX bit for bit, with each mask kind.
+    @Test(arguments: AttentionMaskKind.allCases)
+    func aCallOfMixedDtypesKeepsTheSDPA(mask: AttentionMaskKind) {
+        let operands = Self.random.qwen38(queries: Self.routedTokens, keys: Self.routedKeys)
+
+        operands.withKeysInAnotherDtype().expectTheRoute(
+            PrefillAttentionKernel.scaledDotProductAttention, keepsTheSDPAWith: mask)
     }
 }

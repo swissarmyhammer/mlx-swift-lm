@@ -66,21 +66,29 @@ struct Qwen35AttentionLayerFixture {
         return try JSONDecoder().decode(Qwen35TextConfiguration.self, from: Data(json.utf8))
     }
 
-    /// The full-attention layer of the configuration.
-    func layer() throws -> Qwen35DecoderLayer {
-        Qwen35DecoderLayer(try configuration(), layerIdx: Self.attentionLayer)
+    /// The full-attention layer of the configuration, with its weights in
+    /// one dtype.
+    ///
+    /// - Parameter dtype: The dtype of the weights.
+    /// - Returns: The layer.
+    func layer(dtype: DType) throws -> Qwen35DecoderLayer {
+        let layer = Qwen35DecoderLayer(try configuration(), layerIdx: Self.attentionLayer)
+        layer.update(parameters: layer.parameters().mapValues { $0.asType(dtype) })
+        return layer
     }
 
     /// A key cache that holds `keys` random keys and values.
     ///
     /// - Parameters:
     ///   - keys: The number of cached keys.
+    ///   - dtype: The dtype of the cached keys and values.
     ///   - seed: The seed of the random keys and values.
     /// - Returns: The filled cache.
-    func filledCache(keys: Int, seed: UInt64) -> KVCacheSimple {
+    func filledCache(keys: Int, dtype: DType, seed: UInt64) -> KVCacheSimple {
         let cache = KVCacheSimple()
         let rows = MLXRandom.normal(
-            [Self.keysAndValues, 1, Self.kvHeads, keys, headDim], key: MLXRandom.key(seed))
+            [Self.keysAndValues, 1, Self.kvHeads, keys, headDim], key: MLXRandom.key(seed)
+        ).asType(dtype)
         _ = cache.update(keys: rows[0], values: rows[1])
         eval(cache.state)
         return cache
@@ -101,62 +109,88 @@ struct Qwen35AttentionLayerFixture {
         applyRotaryPosition(attention.rope, to: queries, offset: cache.ropeOffset)
     }
 
-    /// The kernel output over the cache after the step wrote its keys.
+    /// The mask of one kind for a step: the new tokens over the cached keys
+    /// and the new keys, in the dtype of the rotated queries.
     ///
     /// - Parameters:
-    ///   - kernel: The attention kernel, over rotated queries and the cached
-    ///     keys and values, with the score factor of the layer.
+    ///   - kind: The mask kind.
+    ///   - rotatedQueries: The queries of the step, from ``rotated(_:attention:cache:)``.
+    ///   - keys: The number of keys the cache holds after the step.
+    /// - Returns: The mask.
+    static func mask(
+        _ kind: AttentionMaskKind, rotatedQueries: MLXArray, keys: Int
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        kind.mode(
+            queries: rotatedQueries.dim(AttentionKernelOperands.rowAxis), keys: keys,
+            dtype: rotatedQueries.dtype)
+    }
+
+    /// The output that the attention route must give over the cache after
+    /// the step wrote its keys: the output of the kernel of the mask kind,
+    /// or the SDPA of MLX when `kernels` holds no kernel for the mask kind.
+    ///
+    /// - Parameters:
+    ///   - kind: The mask kind of the step.
+    ///   - kernels: The kernel that the route picks for each mask kind.
     ///   - rotatedQueries: The queries of the step, from ``rotated(_:attention:cache:)``.
     ///   - attention: The attention of the layer.
     ///   - cache: The cache after the step.
-    /// - Returns: The kernel output.
-    static func kernelOutput(
-        _ kernel: AttentionKernelCall.Attention, rotatedQueries: MLXArray,
-        attention: Qwen35Attention, cache: KVCacheSimple
+    /// - Returns: The expected output.
+    static func routeOutput(
+        with kind: AttentionMaskKind, picksFrom kernels: AttentionKernelTable,
+        rotatedQueries: MLXArray, attention: Qwen35Attention, cache: KVCacheSimple
     ) -> MLXArray {
         let state = cache.state
-        return kernel(rotatedQueries, state[0], state[1], attention.scale)
+        return AttentionKernelOperands(
+            queries: rotatedQueries, keys: state[0], values: state[1], scale: attention.scale
+        ).expectedRouteOutput(with: kind, picksFrom: kernels)
     }
 
-    /// Checks that the general attention body of the layer gives the kernel
-    /// output bit for bit, for `tokens` random tokens after `cachedKeys`
-    /// cached keys.
+    /// Checks that the general attention body of the layer gives the output
+    /// of the route bit for bit, for `tokens` random tokens after
+    /// `cachedKeys` cached keys: the kernel of the mask kind, or the SDPA of
+    /// MLX when `kernels` holds no kernel for the mask kind.
     ///
     /// - Parameters:
     ///   - cachedKeys: The number of cached keys ahead of the step.
     ///   - tokens: The number of new tokens of the step.
-    ///   - mask: The mask the step gives the body.
+    ///   - dtype: The dtype of the weights, the tokens and the cache.
+    ///   - kind: The mask kind the step gives the body.
+    ///   - kernels: The kernel that the body must pick for each mask kind.
     ///   - seeds: The seed of each random operand.
     ///   - sourceLocation: The location that a failure reports.
-    ///   - kernel: The attention kernel that the body must call.
-    func expectTheAttentionBodyGivesTheKernelOutput(
-        cachedKeys: Int, tokens: Int, mask: MLXFast.ScaledDotProductAttentionMaskMode,
-        seeds: Seeds, sourceLocation: SourceLocation = #_sourceLocation,
-        kernel: AttentionKernelCall.Attention
+    func expectTheAttentionBodyGivesTheRouteOutput(
+        cachedKeys: Int, tokens: Int, dtype: DType, mask kind: AttentionMaskKind,
+        picksFrom kernels: AttentionKernelTable, seeds: Seeds,
+        sourceLocation: SourceLocation = #_sourceLocation
     ) throws {
-        let attention = try #require(try layer().selfAttn, sourceLocation: sourceLocation)
-        let cache = filledCache(keys: cachedKeys, seed: seeds.cache)
+        let attention = try #require(
+            try layer(dtype: dtype).selfAttn, sourceLocation: sourceLocation)
+        let cache = filledCache(keys: cachedKeys, dtype: dtype, seed: seeds.cache)
         let x = MLXRandom.normal([1, tokens, Self.hiddenSize], key: MLXRandom.key(seeds.tokens))
+            .asType(dtype)
         let (queries, gate, _, _) = attention.projectPreRope(x)
         let rotatedQueries = Self.rotated(queries, attention: attention, cache: cache)
+        let keys = cachedKeys + tokens
 
-        let output = attention(x, mask: mask, cache: cache)
+        let output = attention(
+            x, mask: Self.mask(kind, rotatedQueries: rotatedQueries, keys: keys), cache: cache)
         let expected = attention.mergeHeadsAndProject(
-            attention: Self.kernelOutput(
-                kernel, rotatedQueries: rotatedQueries, attention: attention, cache: cache),
+            attention: Self.routeOutput(
+                with: kind, picksFrom: kernels, rotatedQueries: rotatedQueries,
+                attention: attention, cache: cache),
             gate: gate)
 
         Self.expectTheStep(
-            output, gives: expected, cache: cache, keys: cachedKeys + tokens,
-            sourceLocation: sourceLocation)
+            output, gives: expected, cache: cache, keys: keys, sourceLocation: sourceLocation)
     }
 
-    /// Checks that a step wrote its keys into the cache and gave the kernel
-    /// output bit for bit.
+    /// Checks that a step wrote its keys into the cache and gave the
+    /// expected output bit for bit.
     ///
     /// - Parameters:
     ///   - output: The output of the step.
-    ///   - expected: The kernel output, from ``kernelOutput(_:rotatedQueries:attention:cache:)``.
+    ///   - expected: The output of the route, from ``routeOutput(with:picksFrom:rotatedQueries:attention:cache:)``.
     ///   - cache: The cache after the step.
     ///   - keys: The number of keys the cache must hold after the step.
     ///   - sourceLocation: The location that a failure reports.
