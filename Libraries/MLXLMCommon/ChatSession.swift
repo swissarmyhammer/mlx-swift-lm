@@ -187,9 +187,20 @@ public final class ChatSession {
             checkpoints.removeAll()
         }
 
+        /// Records the assistant turn of a generation, and advances the token
+        /// ledger by the tokens the caches now hold.
+        ///
+        /// - Parameters:
+        ///   - assistant: what the generation wrote.
+        ///   - reasoningHistory: how the history keeps the reasoning of the
+        ///     turn, or nil when the turn keeps its text whole.
+        ///   - generatedTokens: the tokens the generation returned.
+        ///   - processedTokenCount: the tokens the main caches now hold.
+        /// - Returns: whether the turn was recorded.
         @discardableResult
         mutating func record(
             _ assistant: AssistantGeneration,
+            reasoningHistory: ReasoningHistory?,
             generatedTokens: [Int],
             processedTokenCount: Int
         ) -> Bool {
@@ -218,11 +229,48 @@ public final class ChatSession {
                 invalidate()
             }
 
-            messages.append(
-                .assistant(
-                    assistant.content,
-                    toolCalls: assistant.toolCalls.isEmpty ? nil : assistant.toolCalls))
+            messages.append(assistant.message(reasoningHistory: reasoningHistory))
             return true
+        }
+    }
+
+    /// How the history keeps the reasoning of a generated turn.
+    ///
+    /// A model whose protocol replays reasoning into history
+    /// (``ReasoningConfig/replaysReasoningIntoHistory``) has a chat template that
+    /// writes the `reasoning_content` of a past turn inside its think block. The
+    /// session then records the reasoning of the turn there and the answer as
+    /// the content. The history render of the turn then holds the text the
+    /// model read while it wrote, thus the render of the next turn extends the
+    /// tokens the caches hold. A turn recorded whole as content renders inside
+    /// an empty think block instead: the model reads its own reasoning as an
+    /// answer, and the render parts from the cached tokens at the open block of
+    /// the generation prompt. Card `^z4aax33` measured that on Qwen 3.8.
+    private struct ReasoningHistory {
+        /// The reasoning protocol of the model.
+        let config: ReasoningConfig
+
+        /// Whether the prompt ended inside an open reasoning block, thus the
+        /// generation starts inside reasoning.
+        let primedInside: Bool
+
+        /// The history of a turn generated from `prompt`, or nil when the
+        /// protocol of the model does not replay reasoning into history.
+        ///
+        /// - Parameters:
+        ///   - configuration: the configuration of the model.
+        ///   - prompt: the rendered prompt of the turn.
+        ///   - tokenizer: the tokenizer of the model.
+        init?(configuration: ModelConfiguration, prompt: LMInput, tokenizer: any Tokenizer) {
+            guard let config = configuration.reasoningConfig,
+                config.replaysReasoningIntoHistory
+            else {
+                return nil
+            }
+            self.config = config
+            self.primedInside = ReasoningEventEmitter.promptEndsInsideReasoning(
+                promptTokens: prompt.text.tokens.asArray(Int.self), config: config,
+                tokenizer: tokenizer)
         }
     }
 
@@ -247,6 +295,25 @@ public final class ChatSession {
                 && rejectedToolCalls.isEmpty
                 && !wasTerminatedByConsumer
                 && stopReason != .cancelled
+        }
+
+        /// The assistant message that records this generation in the history.
+        ///
+        /// - Parameter reasoningHistory: how the history keeps the reasoning of
+        ///   the turn, or nil to record the whole text as the content.
+        /// - Returns: the message, with the reasoning apart from the content
+        ///   when `reasoningHistory` is set and the text holds reasoning.
+        func message(reasoningHistory: ReasoningHistory?) -> Chat.Message {
+            let calls = toolCalls.isEmpty ? nil : toolCalls
+            guard let reasoningHistory else {
+                return .assistant(content, toolCalls: calls)
+            }
+            let parts = ReasoningEventEmitter.separating(
+                content, config: reasoningHistory.config,
+                primedInside: reasoningHistory.primedInside)
+            return .assistant(
+                parts.response, toolCalls: calls,
+                reasoning: parts.reasoning.isEmpty ? nil : parts.reasoning)
         }
 
         mutating func consume(_ item: Generation) {
@@ -1067,6 +1134,9 @@ public final class ChatSession {
                         let preparedInput = try await processor.prepare(input: userInput)
                         var input = preparedInput
                         pendingMessages.removeAll()
+                        let reasoningHistory = ReasoningHistory(
+                            configuration: modelConfiguration, prompt: preparedInput,
+                            tokenizer: tokenizer)
 
                         let speculativeMemoryEvaluation: SpeculativeDecodingMemoryEvaluation?
                         if let speculativeDecoding,
@@ -1511,6 +1581,7 @@ public final class ChatSession {
                         if var currentConversation = conversation {
                             let recordedAssistant = currentConversation.record(
                                 assistant,
+                                reasoningHistory: reasoningHistory,
                                 generatedTokens: generatedTokens,
                                 processedTokenCount: kvCache.processedTokenCount)
                             if !recordedAssistant,

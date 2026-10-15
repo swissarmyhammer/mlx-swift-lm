@@ -45,6 +45,10 @@ private let openThinkBlock = "<think>\n"
 /// when the flag is false.
 private let closedThinkBlock = "<think>\n\n</think>\n\n"
 
+/// The text that the template writes between the reasoning and the answer of a past
+/// assistant turn, which is also the text the model writes to close its reasoning.
+private let reasoningClose = "\n</think>\n\n"
+
 /// The marker that ends a turn, and thus the system block.
 private let endOfTurn = "<|im_end|>"
 
@@ -154,6 +158,35 @@ struct Qwen35ThinkingOffTemplateTests {
         #expect(
             Array(thinkingOn.prefix(thinkingOff.count)) == thinkingOff,
             "on <<<\(tokenizer.decode(tokenIds: thinkingOn))>>>")
+    }
+
+    /// A turn with thinking on, after a turn with thinking on, extends the tokens of the
+    /// turn before it and the text the model wrote in that turn: the template keeps the
+    /// `reasoning_content` of a past turn inside its think block (card `^z4aax33`). Thus a
+    /// session that records the reasoning there keeps the generated region in the render
+    /// of the next turn, and the prompt cache can hold that region.
+    @Test(arguments: [false, true])
+    func aThinkingOnTurnKeepsTheReasoningOfThePastTurn(withTools: Bool) async throws {
+        let tokenizer = try await loadTokenizer()
+        let tools = withTools ? [Self.tool] : nil
+        let firstTurn = [system(), user(Self.firstPrompt)]
+        let secondTurn =
+            firstTurn + [
+                assistant(Self.firstAnswer, reasoning: Self.firstReasoning),
+                user(Self.secondPrompt),
+            ]
+
+        let first = try tokenizer.applyChatTemplate(
+            messages: firstTurn, tools: tools, additionalContext: [thinkingFlag: true])
+        let second = try tokenizer.applyChatTemplate(
+            messages: secondTurn, tools: tools, additionalContext: [thinkingFlag: true])
+
+        let generated = Self.firstReasoning + reasoningClose + Self.firstAnswer + endOfTurn
+        let secondText = tokenizer.decode(tokenIds: second)
+        #expect(
+            secondText.hasPrefix(tokenizer.decode(tokenIds: first) + generated),
+            "second <<<\(secondText)>>>")
+        #expect(Array(second.prefix(first.count)) == first)
     }
 
     // MARK: - Fixtures

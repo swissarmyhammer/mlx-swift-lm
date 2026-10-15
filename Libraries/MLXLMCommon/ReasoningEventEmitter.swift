@@ -236,3 +236,67 @@ public struct ReasoningEventEmitter: Sendable {
         return 0
     }
 }
+
+// MARK: - Whole texts and prompt tokens
+
+extension ReasoningEventEmitter {
+
+    /// The reasoning and the response of a whole generated text.
+    public struct Separation: Sendable, Equatable {
+        /// The text of every reasoning segment, in order.
+        public var reasoning: String
+        /// The text of every response segment, in order.
+        public var response: String
+    }
+
+    /// The count of prompt-tail tokens that
+    /// ``promptEndsInsideReasoning(promptTokens:config:tokenizer:)`` decodes.
+    ///
+    /// The open block of a generation prompt (`<think>\n`) is a few tokens. The
+    /// tail holds it with room to spare, and a decode of the tail stays cheap
+    /// for a long prompt.
+    public static let promptProbeTailTokenCount = 64
+
+    /// Whether the tokens of a rendered prompt end inside an open reasoning
+    /// block.
+    ///
+    /// The probe decodes only the last ``promptProbeTailTokenCount`` tokens and
+    /// reads them with ``promptEndsInsideReasoning(renderedPromptTail:config:)``.
+    ///
+    /// - Parameters:
+    ///   - promptTokens: the tokens of the rendered prompt.
+    ///   - config: the reasoning protocol of the model.
+    ///   - tokenizer: the tokenizer of the model.
+    /// - Returns: `true` when the model starts to write inside reasoning.
+    public static func promptEndsInsideReasoning(
+        promptTokens: [Int], config: ReasoningConfig, tokenizer: any Tokenizer
+    ) -> Bool {
+        let tail = tokenizer.decode(tokenIds: Array(promptTokens.suffix(promptProbeTailTokenCount)))
+        return promptEndsInsideReasoning(renderedPromptTail: tail, config: config)
+    }
+
+    /// Separates a whole generated text into its reasoning and its response.
+    ///
+    /// The text goes through one emitter as one chunk, and the segments of each
+    /// kind join in order. The emitter drops the delimiters and the whitespace
+    /// next to them, as it does for a stream.
+    ///
+    /// - Parameters:
+    ///   - text: the whole text the model generated after the prompt.
+    ///   - config: the reasoning protocol of the model.
+    ///   - primedInside: whether the prompt ended inside an open reasoning block.
+    /// - Returns: the reasoning and the response of `text`.
+    public static func separating(
+        _ text: String, config: ReasoningConfig, primedInside: Bool
+    ) -> Separation {
+        var emitter = ReasoningEventEmitter(config: config, primedInside: primedInside)
+        var separation = Separation(reasoning: "", response: "")
+        for segment in emitter.process(text) + emitter.finalize() {
+            switch segment {
+            case .reasoning(let reasoning): separation.reasoning += reasoning
+            case .response(let response): separation.response += response
+            }
+        }
+        return separation
+    }
+}

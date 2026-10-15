@@ -296,4 +296,92 @@ struct ReasoningEventEmitterTests {
         #expect(!e.isInsideReasoning)
         #expect(segments == [.reasoning("thinking"), .response("<tool_call>{}")])
     }
+
+    // MARK: - separating (the parts of a whole generated text)
+
+    /// One generated text and the parts it separates into.
+    struct SeparationCase: Sendable, CustomTestStringConvertible {
+        /// The name of the case in the test report.
+        let name: String
+        /// Whether the prompt ends inside an open reasoning block.
+        let primedInside: Bool
+        /// The whole generated text.
+        let text: String
+        /// The reasoning the text holds.
+        let reasoning: String
+        /// The response the text holds.
+        let response: String
+
+        var testDescription: String { name }
+    }
+
+    /// The generated texts, one row for each way a turn can end its reasoning.
+    static let separationCases: [SeparationCase] = [
+        SeparationCase(
+            name: "a primed turn that closes its block", primedInside: true,
+            text: "Paris first.\n</think>\n\nOK", reasoning: "Paris first.", response: "OK"),
+        SeparationCase(
+            name: "a primed turn that stops inside its block", primedInside: true,
+            text: "Paris first, then", reasoning: "Paris first, then", response: ""),
+        SeparationCase(
+            name: "a primed turn that leaves its block for a tool call", primedInside: true,
+            text: "Look it up.<tool_call>{}", reasoning: "Look it up.", response: "<tool_call>{}"),
+        SeparationCase(
+            name: "a turn that opens its own block", primedInside: false,
+            text: "<think>abc</think>xyz", reasoning: "abc", response: "xyz"),
+        SeparationCase(
+            name: "a turn with no block", primedInside: false,
+            text: "OK", reasoning: "", response: "OK"),
+    ]
+
+    @Test(arguments: separationCases)
+    func separatingAWholeTextGivesItsReasoningAndItsResponse(_ row: SeparationCase) {
+        let parts = ReasoningEventEmitter.separating(
+            row.text, config: Self.thinkThenToolConfig, primedInside: row.primedInside)
+
+        #expect(parts.reasoning == row.reasoning)
+        #expect(parts.response == row.response)
+    }
+
+    // MARK: - promptEndsInsideReasoning over prompt tokens
+
+    /// One rendered prompt and whether it ends inside an open reasoning block.
+    struct PromptTailCase: Sendable, CustomTestStringConvertible {
+        /// The name of the case in the test report.
+        let name: String
+        /// The text of the rendered prompt.
+        let prompt: String
+        /// Whether the prompt ends inside an open reasoning block.
+        let endsInside: Bool
+
+        var testDescription: String { name }
+    }
+
+    /// Text that fills more than the tail the probe decodes, one token for each
+    /// character of ``QwenHistoryTokenizer``.
+    private static let longerThanTheProbe = String(
+        repeating: "a", count: ReasoningEventEmitter.promptProbeTailTokenCount)
+
+    /// The prompts, one row for each way a prompt can end.
+    static let promptTailCases: [PromptTailCase] = [
+        PromptTailCase(
+            name: "an open block", prompt: "<|im_start|>assistant\n<think>\n", endsInside: true),
+        PromptTailCase(
+            name: "a closed, empty block",
+            prompt: "<|im_start|>assistant\n<think>\n\n</think>\n\n", endsInside: false),
+        PromptTailCase(
+            name: "an open block before the tail the probe decodes",
+            prompt: "<think>\n" + longerThanTheProbe, endsInside: false),
+    ]
+
+    @Test(arguments: promptTailCases)
+    func theTokensOfAPromptTellWhetherItEndsInsideReasoning(_ row: PromptTailCase) {
+        let tokenizer = QwenHistoryTokenizer()
+        let tokens = tokenizer.encode(text: row.prompt, addSpecialTokens: false)
+
+        #expect(
+            ReasoningEventEmitter.promptEndsInsideReasoning(
+                promptTokens: tokens, config: Self.thinkConfig, tokenizer: tokenizer)
+                == row.endsInside)
+    }
 }

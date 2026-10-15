@@ -105,65 +105,6 @@ final class DeepSeekV4CommittedTurnSessionTests: XCTestCase {
         }
     }
 
-    /// A model that writes one scripted token for each forward pass and records
-    /// what each pass received.
-    ///
-    /// The conformance is `@unchecked` because ``passes`` and `step` are mutable
-    /// and carry no lock. The invariant that makes it safe: one ``ChatSession``
-    /// owns this model, and a session runs its forward passes ONE AT A TIME, thus
-    /// every mutation happens inside ``callAsFunction(_:cache:)`` and no two
-    /// calls overlap. The test reads ``passes`` only after both `respond(to:)`
-    /// calls return, thus the read never races a write.
-    private final class ScriptedModel: Module, LLMModel, KVCacheDimensionProvider,
-        @unchecked Sendable
-    {
-        /// What one forward pass received.
-        struct Pass {
-            /// The position the cache held when the pass began.
-            var offset: Int
-            /// The number of tokens the pass fed.
-            var tokenCount: Int
-        }
-
-        let kvHeads: [Int] = [1]
-        let vocabularySize: Int
-        /// Every forward pass, in order.
-        private(set) var passes: [Pass] = []
-
-        private let script: [Int]
-        private var step = 0
-
-        /// - Parameters:
-        ///   - script: one token for each forward pass, in order.
-        ///   - vocabularySize: the size of the scripted vocabulary.
-        init(script: [Int], vocabularySize: Int) {
-            self.script = script
-            self.vocabularySize = vocabularySize
-            super.init()
-        }
-
-        func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-            let tokenCount = inputs.dim(-1)
-            passes.append(Pass(offset: cache?.first?.offset ?? 0, tokenCount: tokenCount))
-
-            let entry = MLXArray.zeros([1, 1, tokenCount, 1])
-            _ = cache?.first?.update(keys: entry, values: entry)
-
-            let token = step < script.count ? script[step] : Token.commit
-            step += 1
-            var row = [Float](repeating: -30, count: vocabularySize)
-            row[token] = 30
-            let logits = MLXArray(row, [1, 1, vocabularySize])
-            if tokenCount == 1 {
-                return logits
-            }
-            return concatenated(Array(repeating: logits, count: tokenCount), axis: 1)
-        }
-
-        var toolCallFormat: ToolCallFormat? { .dsml }
-        var loraLayers: [Module] { [] }
-    }
-
     /// The session feeds only the new tail of round 2, spliced onto the tokens
     /// the model wrote.
     ///
@@ -178,9 +119,10 @@ final class DeepSeekV4CommittedTurnSessionTests: XCTestCase {
             tokenizer: tokenizer,
             configuration: configuration,
             messageGenerator: DefaultMessageGenerator())
-        let model = ScriptedModel(
+        let model = ScriptedTokenModel(
             script: Self.firstGeneration + [Token.secondGeneratedBody, Token.commit],
-            vocabularySize: tokenizer.vocabularySize)
+            finalToken: Token.commit, vocabularySize: tokenizer.vocabularySize,
+            toolCallFormat: .dsml)
         let context = ModelContext(
             configuration: configuration,
             model: model,

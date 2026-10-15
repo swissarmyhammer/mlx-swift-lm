@@ -739,10 +739,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// processor. LLM processors produce rank-1 tokens (`[N]`).
         static let batchedPromptRank = 2
 
-        /// The count of prompt-tail tokens to decode when the executor checks
-        /// whether the rendered prompt ends inside an open reasoning block.
-        private static let reasoningProbeTailTokenCount = 64
-
         /// Names the session a request belongs to, for the prompt cache that
         /// session carries between its turns.
         ///
@@ -2751,11 +2747,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private static func reasoningPrimedInside(
             input: LMInput, config: ReasoningConfig, tokenizer: any Tokenizer
         ) -> Bool {
-            let tokens = input.text.tokens.asArray(Int.self)
-            let renderedTail = tokenizer.decode(
-                tokenIds: Array(tokens.suffix(Self.reasoningProbeTailTokenCount)))
-            return ReasoningEventEmitter.promptEndsInsideReasoning(
-                renderedPromptTail: renderedTail, config: config)
+            ReasoningEventEmitter.promptEndsInsideReasoning(
+                promptTokens: input.text.tokens.asArray(Int.self), config: config,
+                tokenizer: tokenizer)
         }
 
         /// Think-then-call Phase 1: generate reasoning unconstrained until
