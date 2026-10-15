@@ -65,7 +65,13 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// agrees with `tokens` up to the checkpoint. The checkpoint lives in
     /// memory only: ``ExecutorPromptCacheFile`` does not write it, thus an
     /// entry that comes back from disk carries none.
-    let checkpoint: ExecutorPromptCacheCheckpoint?
+    let checkpoint: PromptCacheCheckpoint?
+
+    /// The position of `checkpoint`: the number of tokens the caches held
+    /// there, or nil when the entry carries no checkpoint.
+    var checkpointPosition: Int? {
+        checkpoint?.tokens.count
+    }
 
     /// The bytes this entry holds in memory: the resident bytes of every
     /// cache, plus the arrays of `state`, plus the bytes of `checkpoint`.
@@ -88,7 +94,7 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     ///     `tokens`, or nil.
     init(
         caches: [KVCache], tokens: [Int], renderTokens: [Int] = [],
-        state: LMOutput.State? = nil, checkpoint: ExecutorPromptCacheCheckpoint? = nil
+        state: LMOutput.State? = nil, checkpoint: PromptCacheCheckpoint? = nil
     ) {
         self.caches = caches
         self.tokens = tokens
@@ -98,104 +104,6 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
         self.byteCount =
             caches.reduce(0) { $0 + $1.residentByteCount } + (state?.residentByteCount ?? 0)
             + (checkpoint?.byteCount ?? 0)
-    }
-}
-
-// MARK: - A checkpoint of the recurrent state
-
-/// The caches of a hybrid model at one position, kept so that a later turn
-/// can go back to that position.
-///
-/// An attention cache rewinds to any earlier position, but a recurrent cache
-/// (the linear layers of Qwen 3.5) holds one state that sums every token it
-/// saw, and it cannot rewind. The checkpoint thus keeps a copy of each cache
-/// that cannot rewind, and nothing for a cache that can: a restore trims
-/// that cache back to the checkpoint.
-///
-/// A recurrent layer puts new state arrays in its slots and does not write
-/// into the old ones, thus a copy holds the state of the checkpoint while
-/// the live caches move on.
-struct ExecutorPromptCacheCheckpoint {
-
-    /// The tokens the caches represented at the checkpoint, in order.
-    let tokens: [Int]
-
-    /// For each layer, a copy of a cache that cannot rewind, or nil for a
-    /// cache that a trim takes back to the checkpoint.
-    private let copies: [KVCache?]
-
-    /// The model state the prefill left at the checkpoint, or nil.
-    let state: LMOutput.State?
-
-    /// The bytes the copies and `state` hold in memory.
-    let byteCount: Int
-
-    /// Takes a checkpoint of `caches`, which represent `tokens`.
-    ///
-    /// - Parameters:
-    ///   - caches: the live caches, one for each layer of the model.
-    ///   - tokens: the tokens `caches` represents.
-    ///   - state: the model state the prefill left at this position, or nil.
-    /// - Returns: nil when every cache can rewind, because then a rewind
-    ///   serves every later render and a checkpoint adds nothing, or when a
-    ///   cache does not stand at the end of `tokens`.
-    init?(caches: [KVCache], tokens: [Int], state: LMOutput.State?) {
-        guard caches.contains(where: { !$0.isTrimmable }),
-            caches.allSatisfy({ $0.offset == tokens.count })
-        else {
-            return nil
-        }
-        let copies = caches.map { $0.isTrimmable ? nil : $0.copy() }
-        self.tokens = tokens
-        self.copies = copies
-        self.state = state
-        self.byteCount =
-            copies.reduce(0) { $0 + ($1?.residentByteCount ?? 0) }
-            + (state?.residentByteCount ?? 0)
-    }
-
-    /// Whether a model has a layer that cannot rewind, thus whether a
-    /// checkpoint can serve it.
-    ///
-    /// - Parameter model: the model whose fresh caches are read.
-    /// - Returns: `true` for a hybrid model.
-    static func applies(to model: any LanguageModel) -> Bool {
-        guard let caches = try? model.newCache(parameters: nil) else { return false }
-        return caches.contains { !$0.isTrimmable }
-    }
-
-    /// Whether this checkpoint can serve `promptTokens`: the prompt starts
-    /// with the tokens of the checkpoint and has at least one token more to
-    /// feed.
-    ///
-    /// - Parameter promptTokens: the whole rendered prompt.
-    /// - Returns: `true` when a restore can serve the prompt.
-    func serves(_ promptTokens: [Int]) -> Bool {
-        promptTokens.count > tokens.count && promptTokens.starts(with: tokens)
-    }
-
-    /// Takes `caches` back to this checkpoint.
-    ///
-    /// A cache that cannot rewind is replaced by a copy of its checkpoint
-    /// copy, thus the checkpoint itself stays as it is. Any other cache is
-    /// trimmed back to the checkpoint.
-    ///
-    /// - Parameter caches: the live caches, one for each layer of the model.
-    /// - Returns: the caches at the checkpoint, or nil when a cache did not
-    ///   land on the checkpoint and the caller must build new ones.
-    func restored(onto caches: [KVCache]) -> [KVCache]? {
-        guard caches.count == copies.count else { return nil }
-        var restored: [KVCache] = []
-        for (cache, copy) in zip(caches, copies) {
-            if let copy {
-                restored.append(copy.copy())
-            } else if rewindPromptCache([cache], to: tokens.count) {
-                restored.append(cache)
-            } else {
-                return nil
-            }
-        }
-        return restored
     }
 }
 
@@ -1102,7 +1010,7 @@ struct ExecutorPromptCachePlan {
 
     /// The checkpoint this pass took before generation, which the entry it
     /// commits carries to the next turn, or nil.
-    var checkpoint: ExecutorPromptCacheCheckpoint?
+    var checkpoint: PromptCacheCheckpoint?
 
     /// Plans what `entry` may serve for `input`, building fresh caches when it
     /// may serve nothing.
@@ -1249,7 +1157,7 @@ struct ExecutorPromptCachePlan {
         at boundary: Int, model: any LanguageModel, parameters: GenerateParameters
     ) throws -> ExecutorPromptCachePlan {
         guard boundary > reusedTokenCount, boundary < promptTokens.count else { return self }
-        let boundaryState = try Self.prefill(
+        let boundaryState = try PromptCacheCheckpoint.prefill(
             Array(promptTokens[reusedTokenCount ..< boundary]), into: caches, state: state,
             model: model, prefill: parameters.prefill)
         var plan = ExecutorPromptCachePlan(
@@ -1261,7 +1169,7 @@ struct ExecutorPromptCachePlan {
             state: boundaryState,
             decision: decision)
         plan.prefilledTokenCount = boundary - reusedTokenCount
-        plan.checkpoint = ExecutorPromptCacheCheckpoint(
+        plan.checkpoint = PromptCacheCheckpoint(
             caches: caches,
             tokens: Array(representedTokens.dropLast(promptTokens.count - boundary)),
             state: boundaryState)
@@ -1274,38 +1182,8 @@ struct ExecutorPromptCachePlan {
     /// - Parameter state: the model state the prefill left.
     /// - Returns: the checkpoint, or nil when every cache can rewind or a
     ///   cache does not stand at the end of the prompt.
-    func checkpointAtPromptEnd(state: LMOutput.State?) -> ExecutorPromptCacheCheckpoint? {
-        ExecutorPromptCacheCheckpoint(caches: caches, tokens: representedTokens, state: state)
-    }
-
-    /// Feeds `tokens` into `caches` in forward passes, the way a prefill
-    /// does, and gives the model state the last pass left.
-    ///
-    /// - Parameters:
-    ///   - tokens: the tokens to feed, which follow what `caches` holds.
-    ///   - caches: the live caches, one for each layer of the model.
-    ///   - state: the model state to seed the first pass with, or nil.
-    ///   - model: the model that feeds the caches.
-    ///   - prefill: cuts the tokens into forward passes.
-    /// - Returns: the model state the last pass left.
-    /// - Throws: `CancellationError` when the task is cancelled between two
-    ///   forward passes.
-    private static func prefill(
-        _ tokens: [Int], into caches: [KVCache], state: LMOutput.State?,
-        model: any LanguageModel, prefill: PrefillParameters
-    ) throws -> LMOutput.State? {
-        var state = state
-        let forward = { (range: Range<Int>) in
-            let chunk = MLXArray(Array(tokens[range])).expandedDimensions(axis: 0)
-            state = model(LMInput.Text(tokens: chunk), cache: caches, state: state).state
-            asyncEval(caches.flatMap(\.state))
-        }
-        let chunked = try prefill.forEachChunk(total: tokens.count, reserving: 0, forward)
-        if chunked < tokens.count {
-            forward(chunked ..< tokens.count)
-        }
-        eval(caches.flatMap(\.state))
-        return state
+    func checkpointAtPromptEnd(state: LMOutput.State?) -> PromptCacheCheckpoint? {
+        PromptCacheCheckpoint(caches: caches, tokens: representedTokens, state: state)
     }
 
     /// The rank of a token array a processor batched: one row for each
@@ -1673,7 +1551,7 @@ enum ExecutorPromptCacheReport {
         let head = "prompt cache commit \(session(key)) "
         switch outcome {
         case .checkedIn(let entry):
-            let checkpoint = entry.checkpoint.map { " checkpoint=\($0.tokens.count)" } ?? ""
+            let checkpoint = entry.checkpointPosition.map { " checkpoint=\($0)" } ?? ""
             return head + "ledger=\(entry.tokens.count)" + checkpoint
         case .refused(let refusal):
             return head + "checked in nothing: \(refusal.reason)"
@@ -1850,7 +1728,7 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     private var promptEndCheckpointPlan: ExecutorPromptCachePlan?
 
     /// The checkpoint the pass took at the end of its prompt, or nil.
-    private var promptEndCheckpoint: ExecutorPromptCacheCheckpoint?
+    private var promptEndCheckpoint: PromptCacheCheckpoint?
 
     /// The session the cache belongs to, which every log line names, or nil
     /// when the request names no session.

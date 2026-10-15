@@ -179,7 +179,7 @@ struct ExecutorPromptCacheCheckpointTests {
         let caches = try hybridModel().newCache(parameters: nil)
         feed(caches, tokenCount: Self.checkpointTokens.count)
         let checkpoint = try #require(
-            ExecutorPromptCacheCheckpoint(
+            PromptCacheCheckpoint(
                 caches: caches, tokens: Self.checkpointTokens, state: nil))
         feed(caches, tokenCount: Self.ledger.count - Self.checkpointTokens.count)
         return ExecutorPromptCacheEntry(
@@ -271,15 +271,15 @@ struct ExecutorPromptCacheCheckpointTests {
         feed(caches, tokenCount: Self.checkpointTokens.count)
 
         #expect(
-            ExecutorPromptCacheCheckpoint(caches: caches, tokens: Self.checkpointTokens, state: nil)
+            PromptCacheCheckpoint(caches: caches, tokens: Self.checkpointTokens, state: nil)
                 == nil)
     }
 
     @Test("only a model with a layer that cannot rewind is served by a checkpoint")
     func onlyAModelWithALayerThatCannotRewindIsServedByACheckpoint() {
-        #expect(ExecutorPromptCacheCheckpoint.applies(to: hybridModel()))
+        #expect(PromptCacheCheckpoint.applies(to: hybridModel()))
         #expect(
-            !ExecutorPromptCacheCheckpoint.applies(
+            !PromptCacheCheckpoint.applies(
                 to: ScriptedLanguageModel(rounds: [], cacheLayerCount: 1)))
     }
 

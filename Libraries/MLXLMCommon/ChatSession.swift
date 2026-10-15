@@ -172,12 +172,19 @@ public final class ChatSession {
         /// on record, thus no such rule may splice.
         var renderedTokens: [Int] = []
 
+        /// The checkpoints of a hybrid model that the last prefill took: one at
+        /// the end of the last message and one at the end of the prompt. A next
+        /// render that parts from `cachedTokens` where the recurrent caches
+        /// cannot rewind goes back to the longest one it starts with.
+        var checkpoints = PromptCacheCheckpoints()
+
         /// Forgets what the caches represent, which forces the next turn to
         /// rebuild from the retained messages.
         mutating func invalidate() {
             cachedTokens.removeAll()
             uncommittedTokens.removeAll()
             renderedTokens.removeAll()
+            checkpoints.removeAll()
         }
 
         @discardableResult
@@ -1088,6 +1095,24 @@ public final class ChatSession {
                         let carriesPreparedMedia =
                             preparedInput.image != nil || preparedInput.video != nil
                             || preparedInput.audio != nil
+                        // A hybrid model keeps checkpoints of its recurrent caches for a
+                        // text prompt that it generates from without a draft model.
+                        let keepsCheckpoints =
+                            speculativeDecoding == nil && !carriesPreparedMedia
+                            && !containsNewMedia && preparedInput.text.mask == nil
+                            && PromptCacheCheckpoint.applies(to: kvCache.cache)
+                        var checkpointBoundary: Int?
+                        if keepsCheckpoints {
+                            checkpointBoundary = await Self.lastMessageEnd(
+                                of: preparedInput,
+                                probe: UserInput(
+                                    chat: templateMessages
+                                        + [.user(PromptCacheCheckpoint.boundaryProbeText)],
+                                    processing: processing,
+                                    tools: tools, additionalContext: additionalContext),
+                                processor: processor)
+                        }
+                        var checkpointPrefill: CheckpointPrefill?
                         if var currentConversation = conversation {
                             let promptTokenIds = input.text.tokens.asArray(Int.self)
                             let cachedTokenIds = currentConversation.cachedTokens
@@ -1213,11 +1238,27 @@ public final class ChatSession {
                                 cachedPromptTokenCount = commonPrefixLength
 
                             case .rebuild:
-                                kvCache = KVCacheStorage(
-                                    try model.newCache(parameters: generateParameters),
-                                    plan: kvCachePlan)
+                                // No rule can rewind the recurrent caches of a hybrid
+                                // model, but a checkpoint that the prompt starts with
+                                // can still serve it.
+                                if keepsCheckpoints,
+                                    let restore = Self.restoringCheckpoint(
+                                        of: currentConversation, serving: promptTokenIds,
+                                        onto: kvCache, plan: kvCachePlan)
+                                {
+                                    kvCache = restore.storage
+                                    lmState = restore.checkpoint.state
+                                    cachedPromptTokenCount = restore.checkpoint.tokens.count
+                                    input = LMInput(
+                                        tokens: MLXArray(
+                                            Array(promptTokenIds[cachedPromptTokenCount...])))
+                                } else {
+                                    kvCache = KVCacheStorage(
+                                        try model.newCache(parameters: generateParameters),
+                                        plan: kvCachePlan)
+                                    lmState = nil
+                                }
                                 draftKVCache = nil
-                                lmState = nil
                             }
 
                             reusedMainCacheWithoutDraft =
@@ -1242,6 +1283,21 @@ public final class ChatSession {
                             // rendered region the caches now hold.
                             currentConversation.renderedTokens = promptTokenIds
                             currentConversation.uncommittedTokens.removeAll()
+                            // The checkpoints of the previous prefill served this
+                            // decision. This prefill takes its own.
+                            currentConversation.checkpoints.removeAll()
+                            if let checkpointBoundary,
+                                let prefill = try Self.prefillToCheckpoint(
+                                    at: checkpointBoundary, of: promptTokenIds,
+                                    representing: currentConversation.cachedTokens,
+                                    from: cachedPromptTokenCount, into: kvCache, state: lmState,
+                                    model: model, parameters: generateParameters)
+                            {
+                                currentConversation.checkpoints.append(prefill.checkpoint)
+                                lmState = prefill.state
+                                input = prefill.remainingInput
+                                checkpointPrefill = prefill
+                            }
                             conversation = currentConversation
                         }
 
@@ -1254,15 +1310,29 @@ public final class ChatSession {
                         func defaultGeneration() throws -> GenerationRun {
                             // Seed the carried state and read back the post-prefill state so the
                             // next turn, or the next tool restart, anchors correctly.
-                            let iterator = try TokenIterator(
+                            var iterator = try TokenIterator(
                                 input: input, model: model, cacheStorage: kvCache,
                                 state: lmState,
                                 parameters: generateParameters, components: components)
                             lmState = iterator.state
+                            // The tokens fed to take the checkpoint at the end of the
+                            // last message are part of the prefill of this pass.
+                            iterator.promptPrefillTime += checkpointPrefill?.time ?? 0
+                            if keepsCheckpoints,
+                                let representedTokens = conversation?.cachedTokens
+                            {
+                                // The prefill ends here, thus the caches stand at the
+                                // end of the prompt.
+                                conversation?.checkpoints.append(
+                                    PromptCacheCheckpoint(
+                                        caches: kvCache.cache, tokens: representedTokens,
+                                        state: iterator.state))
+                            }
 
                             return GenerationRun(
                                 MLXLMCommon.generateTaskRecordingTokens(
-                                    promptTokenCount: input.text.tokens.size,
+                                    promptTokenCount: input.text.tokens.size
+                                        + (checkpointPrefill?.tokenCount ?? 0),
                                     modelConfiguration: modelConfiguration,
                                     tokenizer: tokenizer,
                                     iterator: iterator,
@@ -1615,6 +1685,125 @@ public final class ChatSession {
                 throw ChatSessionError.noCacheAvailable
             }
         }
+    }
+}
+
+// MARK: - Checkpoints of a hybrid model
+
+extension ChatSession {
+
+    /// The part of a prompt that a pass feeds before generation, to take a
+    /// checkpoint at the end of the last message.
+    private struct CheckpointPrefill {
+        /// The rest of the prompt, which the generation feeds.
+        let remainingInput: LMInput
+
+        /// The model state the fed tokens left.
+        let state: LMOutput.State?
+
+        /// The checkpoint at the end of the fed tokens, or nil when the caches
+        /// did not stand there.
+        let checkpoint: PromptCacheCheckpoint?
+
+        /// The number of prompt tokens fed.
+        let tokenCount: Int
+
+        /// The time the feed took, in seconds.
+        let time: TimeInterval
+    }
+
+    /// The index of `prompt` where its last message ends: the start of the
+    /// generation prompt that the chat template writes after it.
+    ///
+    /// The Qwen 3.8 template ends a prompt with `<think>\n`, and writes the same
+    /// assistant turn as `<think>\n\n</think>` in the next render. The next
+    /// render thus parts from the cached tokens inside the generation prompt,
+    /// where the recurrent caches of a hybrid model cannot rewind. A checkpoint
+    /// at the end of the last message serves that render.
+    ///
+    /// - Parameters:
+    ///   - prompt: the prepared prompt of this pass.
+    ///   - probe: the input of `prompt` plus one user message with the text
+    ///     ``PromptCacheCheckpoint/boundaryProbeText``.
+    ///   - processor: the processor that rendered `prompt`.
+    /// - Returns: the length of the prefix that `prompt` and the render of
+    ///   `probe` share, or nil when the processor refuses `probe`. A template
+    ///   can refuse two user messages after each other, and then the pass
+    ///   takes no checkpoint at the end of the last message.
+    private static func lastMessageEnd(
+        of prompt: LMInput, probe: UserInput, processor: any UserInputProcessor
+    ) async -> Int? {
+        guard let rendered = try? await processor.prepare(input: probe) else { return nil }
+        return commonPrefixLength(
+            of: prompt.text.tokens.asArray(Int.self), and: rendered.text.tokens.asArray(Int.self))
+    }
+
+    /// The caches at the longest checkpoint of `conversation` that
+    /// `promptTokens` starts with.
+    ///
+    /// - Parameters:
+    ///   - conversation: the conversation that holds the checkpoints.
+    ///   - promptTokens: the whole rendered prompt of this pass.
+    ///   - storage: the live caches. A restore trims their attention caches.
+    ///   - plan: the cache plan of the session.
+    /// - Returns: the caches at the checkpoint and the checkpoint, or nil when
+    ///   no checkpoint serves the prompt or a cache did not land on it. After a
+    ///   nil answer the caller must build new caches.
+    private static func restoringCheckpoint(
+        of conversation: Conversation, serving promptTokens: [Int],
+        onto storage: KVCacheStorage, plan: KVCachePlan
+    ) -> (storage: KVCacheStorage, checkpoint: PromptCacheCheckpoint)? {
+        guard let checkpoint = conversation.checkpoints.longest(serving: promptTokens),
+            let caches = checkpoint.restored(onto: storage.cache)
+        else {
+            return nil
+        }
+        return (
+            KVCacheStorage(caches, plan: plan, processedTokenCount: checkpoint.tokens.count),
+            checkpoint
+        )
+    }
+
+    /// Feeds the prompt up to `boundary` into the caches, and takes a
+    /// checkpoint there.
+    ///
+    /// - Parameters:
+    ///   - boundary: the index of the prompt where its last message ends.
+    ///   - promptTokens: the whole rendered prompt of this pass.
+    ///   - representedTokens: the tokens the caches represent once the pass has
+    ///     fed the whole prompt. A protocol rule can keep generated tokens here
+    ///     that the render does not hold.
+    ///   - start: the leading prompt tokens the caches already hold.
+    ///   - storage: the live caches.
+    ///   - state: the model state to seed the first forward pass with.
+    ///   - model: the model that feeds the caches.
+    ///   - parameters: the generation parameters, whose prefill parameters cut
+    ///     the tokens into forward passes.
+    /// - Returns: the feed, or nil when `boundary` is not after `start` or not
+    ///   before the end of the prompt: the caches hold that position already,
+    ///   or only the prefill of the generation reaches it.
+    /// - Throws: `CancellationError` when the task is cancelled between two
+    ///   forward passes.
+    private static func prefillToCheckpoint(
+        at boundary: Int, of promptTokens: [Int], representing representedTokens: [Int],
+        from start: Int, into storage: KVCacheStorage, state: LMOutput.State?,
+        model: any LanguageModel, parameters: GenerateParameters
+    ) throws -> CheckpointPrefill? {
+        guard boundary > start, boundary < promptTokens.count else { return nil }
+        let begin = Date.timeIntervalSinceReferenceDate
+        let fedState = try PromptCacheCheckpoint.prefill(
+            Array(promptTokens[start ..< boundary]), into: storage.cache, state: state,
+            model: model, prefill: parameters.prefill)
+        storage.commitProcessedTokens(boundary - start)
+        return CheckpointPrefill(
+            remainingInput: LMInput(tokens: MLXArray(Array(promptTokens[boundary...]))),
+            state: fedState,
+            checkpoint: PromptCacheCheckpoint(
+                caches: storage.cache,
+                tokens: Array(representedTokens.dropLast(promptTokens.count - boundary)),
+                state: fedState),
+            tokenCount: boundary - start,
+            time: Date.timeIntervalSinceReferenceDate - begin)
     }
 }
 

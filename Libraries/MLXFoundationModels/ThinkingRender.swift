@@ -74,12 +74,6 @@ extension MLXLanguageModel.Executor {
                 tokenizer: context.tokenizer)
         }
 
-        /// The text of the user message that
-        /// ``transcriptBoundary(of:messages:tools:context:)`` adds to the
-        /// messages. The text does not matter: the render parts from the
-        /// prompt before it.
-        static let boundaryProbeText = "."
-
         /// The index of `prompt` where a next render of the same messages
         /// plus one new user message parts from it, for a hybrid model.
         ///
@@ -114,10 +108,10 @@ extension MLXLanguageModel.Executor {
             context: ModelContext
         ) async -> Int? {
             guard prompt.image == nil, prompt.video == nil, prompt.audio == nil,
-                ExecutorPromptCacheCheckpoint.applies(to: context.model),
+                PromptCacheCheckpoint.applies(to: context.model),
                 let probe = try? await prepare(
-                    messages: messages + [.user(Self.boundaryProbeText)], tools: tools,
-                    context: context)
+                    messages: messages + [.user(PromptCacheCheckpoint.boundaryProbeText)],
+                    tools: tools, context: context)
             else {
                 return nil
             }

@@ -1,0 +1,1 @@
+{"id":"01M4ZD65C70K7W42HA9NRV8BS5","timestamp":"2026-10-15T09:09:43.431045Z","op":"create","item_id":"01M4ZD65C612ES8165FH66S6E0","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: 7057ff\n+tag_name: qwen3-8\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: 7057ff\n-tag_name: qwen3-8\n","transaction_id":null}

@@ -245,7 +245,7 @@ struct Qwen35SessionPromptCacheTests {
         let firstEntryID = try #require(session.transcript.first?.id)
         let key = ExecutorPromptCacheKey(modelID: model.modelID, sessionID: firstEntryID)
         let checkpoint = try #require(
-            await ExecutorPromptCacheStore.shared.peek(key)?.checkpoint?.tokens.count)
+            await ExecutorPromptCacheStore.shared.peek(key)?.checkpointPosition)
 
         let entries = Array(session.transcript)
         let lastPrompt = try #require(
