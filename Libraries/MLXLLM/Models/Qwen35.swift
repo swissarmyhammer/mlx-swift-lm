@@ -696,7 +696,7 @@ final class Qwen35Attention: Module {
             attention
             .transposed(0, 2, 1, 3)
             .reshaped(attention.dim(0), attention.dim(2), -1)
-        return oProj(sigmoidMultiply(merged, gate))
+        return oProj(Qwen3NextElementwise.sigmoidMultiply(merged, gate))
     }
 }
 

@@ -12,12 +12,29 @@ import MLXNN
 
 // MARK: - Helpers
 
-func sigmoidMultiply(_ x: MLXArray, _ gate: MLXArray) -> MLXArray {
-    x * sigmoid(gate)
-}
+/// The elementwise steps of Qwen3-Next and Qwen3.5 as shapeless compiled
+/// functions. Without `compile`, each op of a step is one kernel that writes
+/// its full tensor to memory; in a prefill block these tensors are large.
+/// `compile` fuses each step into one kernel. MLX `compile` keeps the rounding
+/// of each node, thus the bits are the same as those of the plain ops (pinned
+/// by `Qwen3NextElementwiseTests`). The compiled decode traces inline them.
+enum Qwen3NextElementwise {
+    /// `x * sigmoid(gate)`: the output gate of the attention.
+    static let sigmoidMultiply: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
+        shapeless: true
+    ) { x, gate in
+        x * sigmoid(gate)
+    }
 
-private func preciseSwiGLU(_ hiddenStates: MLXArray, gate: MLXArray, x: MLXArray) -> MLXArray {
-    (silu(gate.asType(.float32)) * x.asType(.float32)).asType(hiddenStates.dtype)
+    /// The SwiGLU of the gated RMSNorm, in float32: `silu(gate) * normed`,
+    /// rounded one time to the dtype of `hiddenStates`. `hiddenStates` is an
+    /// input only for its dtype: a trace keys on the dtypes of its inputs, thus
+    /// each dtype of `hiddenStates` gets its own trace.
+    static let preciseSwiGLU: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray = compile(
+        shapeless: true
+    ) { hiddenStates, gate, normed in
+        (silu(gate.asType(.float32)) * normed.asType(.float32)).asType(hiddenStates.dtype)
+    }
 }
 
 // MARK: - Model Components
@@ -35,7 +52,7 @@ final class Qwen3NextRMSNormGated: Module {
     func callAsFunction(_ hiddenStates: MLXArray, gate: MLXArray? = nil) -> MLXArray {
         var x = MLXFast.rmsNorm(hiddenStates, weight: weight, eps: eps)
         if let gate {
-            x = preciseSwiGLU(hiddenStates, gate: gate, x: x)
+            x = Qwen3NextElementwise.preciseSwiGLU(hiddenStates, gate, x)
         }
         return x
     }
@@ -127,7 +144,7 @@ public final class Qwen3NextAttention: Module {
             attention
             .transposed(0, 2, 1, 3)
             .reshaped(attention.dim(0), attention.dim(2), -1)
-        return oProj(sigmoidMultiply(merged, gate))
+        return oProj(Qwen3NextElementwise.sigmoidMultiply(merged, gate))
     }
 }
 
@@ -143,7 +160,7 @@ final class Qwen3NextMLP: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(silu(gateProj(x)) * upProj(x))
+        downProj(compiledSiluProduct(gateProj(x), upProj(x)))
     }
 }
 
