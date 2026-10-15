@@ -646,7 +646,7 @@ struct DeepSeekV4HyperConnectionTests {
         #expect(fused.collapsed.shape == leading + [width])
         #expect(fused.post.dtype == .float32)
         #expect(fused.comb.dtype == .float32)
-        #expect(fused.collapsed.dtype == .float32)
+        #expect(fused.collapsed.dtype == dtype, "the collapse keeps the dtype of the stream")
         #expect(
             DeepSeekV4TestArrays.floats(fused.post) == DeepSeekV4TestArrays.floats(op.post),
             "the post gains")
@@ -655,7 +655,8 @@ struct DeepSeekV4HyperConnectionTests {
             "the Sinkhorn mixing matrix")
         #expect(
             DeepSeekV4TestArrays.floats(fused.collapsed)
-                == DeepSeekV4TestArrays.floats(opCollapsed), "the collapsed residual stream")
+                == DeepSeekV4TestArrays.floats(opCollapsed.asType(dtype)),
+            "the collapsed residual stream")
     }
 
     @Test
@@ -699,6 +700,209 @@ struct DeepSeekV4HyperConnectionTests {
             DeepSeekV4TestArrays.nodeCount(
                 [collapsed, post, comb], primitive: Self.softmaxPrimitive) == 0,
             "the collapse holds no softmax node")
+    }
+
+    // MARK: - The fused mixes and expand kernels
+
+    /// The gap the mixes kernel may keep from the op path, relative to the
+    /// larger of 1 and the op-path value. The kernel adds the products in
+    /// another order than the MLX matrix multiply, and it multiplies the
+    /// projection by the inverse RMS after the sum and not before it, thus
+    /// the two answers differ in the last float32 places.
+    private static let kernelTolerance: Float = 1e-5
+
+    /// The gap a bfloat16 answer of the expand kernel may keep from the op
+    /// path, relative to the larger of 1 and the op-path value: one unit in
+    /// the last place of a bfloat16, which holds 8 significant bits. The two
+    /// paths round a float32 sum that differs in its last places, thus a sum
+    /// close to a rounding boundary can round to the next bfloat16.
+    private static let bfloat16Tolerance: Float = 1.0 / 128
+
+    /// The RMS-norm epsilon of the kernel cases. It is the epsilon of the
+    /// DeepSeek-V4-Flash checkpoint, thus the reduction decides the mixes.
+    private static let checkpointNormEps: Float = 1e-6
+
+    /// Tells if every value of `got` is within `limit` of `expected`, read
+    /// relative to the larger of 1 and the expected value.
+    ///
+    /// - Parameters:
+    ///   - got: The values to check.
+    ///   - expected: The values `got` must match, of the same shape.
+    ///   - limit: The largest gap allowed.
+    /// - Returns: `true` when every value is within the limit.
+    private static func isClose(_ got: MLXArray, _ expected: MLXArray, limit: Float) -> Bool {
+        let values = DeepSeekV4TestArrays.floats(got)
+        let reference = DeepSeekV4TestArrays.floats(expected)
+        return values.count == reference.count
+            && zip(values, reference).allSatisfy { abs($0 - $1) <= limit * max(1, abs($1)) }
+    }
+
+    /// The cases of the mixes kernel test: the number of tokens, the number
+    /// of copies and the dtype of the stream. One token reads the layout of
+    /// a decode step and ``DeepSeekV4MixesKernel/blockLayoutMinimumTokens``
+    /// tokens read the layout of a prefill block, each in float32 and in the
+    /// bfloat16 of the checkpoint. Three copies give 15 mixes, which no
+    /// group of rows of either layout divides, and a token count that no
+    /// group of tokens divides.
+    private static let mixesKernelCases: [(tokens: Int, copies: Int, dtype: DType)] = [
+        (1, hcMult, .float32), (1, hcMult, .bfloat16),
+        (DeepSeekV4MixesKernel.blockLayoutMinimumTokens, hcMult, .float32),
+        (DeepSeekV4MixesKernel.blockLayoutMinimumTokens, hcMult, .bfloat16),
+        (DeepSeekV4MixesKernel.blockLayoutMinimumTokens + 1, oddCopies, .float32),
+        (oddTokenCount, oddCopies, .bfloat16),
+    ]
+
+    /// A copy count whose mixes vector of 15 values no group of rows of
+    /// either layout of the mixes kernel divides. With the fixture width of
+    /// 2 one token holds 6 values, which is not a whole vector group.
+    private static let oddCopies = 3
+
+    /// A token count of a decode-step layout that is not a power of two.
+    private static let oddTokenCount = 5
+
+    @Test(arguments: mixesKernelCases)
+    func theMixesKernelAgreesWithTheOpPath(tokens: Int, copies: Int, dtype: DType) {
+        let features = copies * Self.wideHiddenSize
+        let seed = UInt64(tokens * copies)
+        let stream = Self.randomArray([1, tokens, copies, Self.wideHiddenSize], seed: seed)
+            .asType(dtype)
+        let projection = Self.randomArray(
+            [DeepSeekV4Math.mixWidth(hcMult: copies), features], seed: seed + 1)
+        func opMixes(normEps: Float) -> MLXArray {
+            ManifoldStream.mixes(
+                of: stream.asType(.float32), projection: projection,
+                normWeight: MLXArray.ones([features]), normEps: normEps)
+        }
+
+        let fused = DeepSeekV4MixesKernel.mixes(
+            of: stream, projection: projection, normEps: Self.checkpointNormEps)
+
+        #expect(DeepSeekV4MixesKernel.canRun(on: stream))
+        #expect(fused.shape == [1, tokens, DeepSeekV4Math.mixWidth(hcMult: copies)])
+        #expect(fused.dtype == .float32)
+        #expect(
+            Self.isClose(
+                fused, opMixes(normEps: Self.checkpointNormEps), limit: Self.kernelTolerance),
+            "the mixes of the kernel")
+        // Positive control: the mixes of another reduction epsilon are
+        // outside the limit, thus the limit can see a wrong reduction.
+        #expect(
+            !Self.isClose(
+                fused, opMixes(normEps: Self.normEps), limit: Self.kernelTolerance),
+            "the mixes of another epsilon")
+    }
+
+    @Test
+    func theMixesKernelDoesNotTakeAStreamItCannotReadInVectorGroups() {
+        // The kernel reads the flattened copies in groups of 4 values through
+        // a `device` pointer. A token of 6 values is not whole groups, and
+        // MLX gives an input of fewer than 8 values in the `constant` address
+        // space. A stream of whole groups in the `device` space is the
+        // positive control.
+        let odd = MLXArray.zeros([1, Self.tokenCount, Self.oddCopies, Self.hiddenSize])
+        let small = MLXArray.zeros([1, 1, Self.hcMult, 1])
+        let whole = MLXArray.zeros([1, Self.tokenCount, Self.hcMult, Self.hiddenSize])
+
+        #expect(!DeepSeekV4MixesKernel.canRun(on: odd))
+        #expect(!DeepSeekV4MixesKernel.canRun(on: small))
+        #expect(DeepSeekV4MixesKernel.canRun(on: whole))
+    }
+
+    /// The cases of the expand kernel test: the number of tokens and the
+    /// dtype of the stream and of the block output, with the limit of that
+    /// dtype.
+    private static let expandKernelCases: [(tokens: Int, dtype: DType, limit: Float)] = [
+        (1, .float32, kernelTolerance), (1, .bfloat16, bfloat16Tolerance),
+        (wideTokenCount, .float32, kernelTolerance), (wideTokenCount, .bfloat16, bfloat16Tolerance),
+    ]
+
+    @Test(arguments: expandKernelCases)
+    func theExpandKernelAgreesWithTheOpPath(tokens: Int, dtype: DType, limit: Float) {
+        let seed = UInt64(tokens) + 100
+        let residual = Self.randomArray([1, tokens, Self.hcMult, Self.wideHiddenSize], seed: seed)
+            .asType(dtype)
+        let blockOutput = Self.randomArray([1, tokens, Self.wideHiddenSize], seed: seed + 1)
+            .asType(dtype)
+        let post = Self.randomArray([1, tokens, Self.hcMult], seed: seed + 2)
+        let comb = Self.randomArray([1, tokens, Self.hcMult, Self.hcMult], seed: seed + 3)
+        func opExpand(_ mixing: MLXArray) -> MLXArray {
+            ManifoldStream.expand(
+                blockOutput: blockOutput, residual: residual, post: post, comb: mixing)
+        }
+
+        let fused = DeepSeekV4ExpandKernel.expand(
+            blockOutput: blockOutput, residual: residual, post: post, comb: comb)
+
+        #expect(DeepSeekV4ExpandKernel.canRun(blockOutput: blockOutput, residual: residual))
+        #expect(fused.shape == residual.shape)
+        #expect(fused.dtype == dtype)
+        #expect(Self.isClose(fused, opExpand(comb), limit: limit), "the expanded stream")
+        // Positive control: the expand of the transposed mixing matrix is
+        // outside the limit, thus the limit can see a wrong reading of it.
+        #expect(
+            !Self.isClose(fused, opExpand(comb.swappedAxes(-1, -2)), limit: limit),
+            "the expand of the transposed mixing matrix")
+    }
+
+    @Test
+    func theExpandKernelDoesNotTakeAWidthItCannotReadInVectorGroups() {
+        // The fixture width of 2 is not a whole group of 4 values, thus that
+        // expand takes the op path. The wide width is the positive control.
+        let narrow = MLXArray.zeros([1, Self.tokenCount, Self.hiddenSize])
+        let wide = MLXArray.zeros([1, Self.tokenCount, Self.wideHiddenSize])
+
+        #expect(
+            !DeepSeekV4ExpandKernel.canRun(
+                blockOutput: narrow,
+                residual: MLXArray.zeros([1, Self.tokenCount, Self.hcMult, Self.hiddenSize])))
+        #expect(
+            DeepSeekV4ExpandKernel.canRun(
+                blockOutput: wide,
+                residual: MLXArray.zeros([1, Self.tokenCount, Self.hcMult, Self.wideHiddenSize])))
+    }
+
+    /// The dispatches of one collapse on the GPU: the mixes kernel, and the
+    /// kernel of the split, the Sinkhorn steps and the weighted sum.
+    private static let collapseDispatchCount = 2
+
+    /// The dispatches of one expand on the GPU: the expand kernel.
+    private static let expandDispatchCount = 1
+
+    /// The name `exportToDot(_:)` writes for the node of a custom Metal
+    /// kernel.
+    private static let customKernelPrimitive = "CustomKernel"
+
+    @Test(arguments: collapseGraphTokenCounts)
+    func theCollapseAndTheExpandTakeOnlyTheFusedKernelsOnTheGPU(tokens: Int) throws {
+        // Every input is evaluated, thus each primitive node of the graph is
+        // one dispatch of the collapse or of the expand. The op path of the
+        // same expand is the positive control of the count.
+        let hyperConnection = try Self.wideHyperConnection()
+        let stream = Self.randomArray([1, tokens, Self.hcMult, Self.wideHiddenSize], seed: 93)
+            .asType(.bfloat16)
+        let blockOutput = Self.randomArray([1, tokens, Self.wideHiddenSize], seed: 94)
+            .asType(.bfloat16)
+        eval(hyperConnection, stream, blockOutput)
+
+        let (collapsed, post, comb) = hyperConnection.collapse(stream)
+        let collapseNodes = DeepSeekV4TestArrays.primitiveNodeCount([collapsed, post, comb])
+        let collapseKernels = DeepSeekV4TestArrays.nodeCount(
+            [collapsed, post, comb], primitive: Self.customKernelPrimitive)
+        eval(collapsed, post, comb)
+        let expanded = hyperConnection.expand(
+            blockOutput: blockOutput, residual: stream, post: post, comb: comb)
+        let opExpanded = ManifoldStream.expand(
+            blockOutput: blockOutput, residual: stream, post: post, comb: comb)
+
+        #expect(collapsed.dtype == .bfloat16)
+        #expect(collapseNodes == Self.collapseDispatchCount, "the dispatches of the collapse")
+        #expect(collapseKernels == Self.collapseDispatchCount, "the kernels of the collapse")
+        #expect(
+            DeepSeekV4TestArrays.primitiveNodeCount([expanded]) == Self.expandDispatchCount,
+            "the dispatches of the expand")
+        #expect(
+            DeepSeekV4TestArrays.primitiveNodeCount([opExpanded]) > Self.expandDispatchCount,
+            "the op path of the expand takes more dispatches")
     }
 
     // MARK: - The head reduce

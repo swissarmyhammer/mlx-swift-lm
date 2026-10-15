@@ -117,9 +117,22 @@ enum DeepSeekV4SinkhornKernel {
             case .collapsed: leading + [width]
             }
         }
+
+        /// The dtype of the output.
+        ///
+        /// - Parameter stream: The dtype of the residual stream.
+        /// - Returns: float32 for the two fields of the mixing, and the dtype
+        ///   of the stream for the single stream.
+        func dtype(stream: DType) -> DType {
+            switch self {
+            case .post, .comb: .float32
+            case .collapsed: stream
+            }
+        }
     }
 
-    /// The Metal source. The template arguments are `HC`, the number of
+    /// The Metal source. The template arguments are `T`, the dtype of the
+    /// residual stream and of the single stream; `HC`, the number of
     /// copies; `ITERS`, the number of Sinkhorn steps; `D`, the width of one
     /// copy; `THREADS`, the threadgroup width; `SIMD_WIDTH`, the number of
     /// lanes in one SIMD group; `MIX_WIDTH`, the width of the mixes vector;
@@ -235,27 +248,28 @@ enum DeepSeekV4SinkhornKernel {
         for (int c = 0; c < HC; c++) {
             weight[c] = mlx_sigmoid(mixes[mixFirst + c] * preScale + base[c]) + eps;
         }
-        const device float* copies = stream + token * HC * D;
-        device float* single = collapsed + token * D;
+        const device T* copies = stream + token * HC * D;
+        device T* single = collapsed + token * D;
         constexpr uint vectorWidth = sizeof(float4) / sizeof(float);
         if (D % vectorWidth == 0) {
             constexpr uint groups = D / vectorWidth;
-            const device float4* copies4 = (const device float4*)copies;
-            device float4* single4 = (device float4*)single;
+            const device vec<T, vectorWidth>* copies4 =
+                (const device vec<T, vectorWidth>*)copies;
+            device vec<T, vectorWidth>* single4 = (device vec<T, vectorWidth>*)single;
             for (uint i = lane; i < groups; i += THREADS) {
                 float4 total = float4(0.0f);
                 for (int c = 0; c < HC; c++) {
-                    total += weight[c] * copies4[c * groups + i];
+                    total += weight[c] * float4(copies4[c * groups + i]);
                 }
-                single4[i] = total;
+                single4[i] = vec<T, vectorWidth>(total);
             }
         } else {
             for (uint d = lane; d < D; d += THREADS) {
                 float total = 0.0f;
                 for (int c = 0; c < HC; c++) {
-                    total += weight[c] * copies[c * D + d];
+                    total += weight[c] * float(copies[c * D + d]);
                 }
-                single[d] = total;
+                single[d] = T(total);
             }
         }
         """
@@ -317,11 +331,14 @@ enum DeepSeekV4SinkhornKernel {
     /// Takes the split activations, the Sinkhorn steps and the weighted sum
     /// of one collapse in one dispatch.
     ///
-    /// The answer has the same float32 bits as the answer of
+    /// The answer has the same bits as the answer of
     /// `DeepSeekV4Math.hcSplitSinkhorn(mixes:scale:base:hcMult:iters:eps:)`
     /// on the mixes and of the weighted sum of the copies of `stream` by its
-    /// `pre` weights, as separate MLX operations. Each input moves to float32
-    /// first, as on the op path.
+    /// `pre` weights, as separate MLX operations, with the weighted sum
+    /// changed back to the dtype of the stream. The kernel reads the stream
+    /// in its own dtype and moves each value to float32, as the float32 cast
+    /// of the op path does, thus the collapse reads no float32 copy of the
+    /// stream and writes no float32 copy of its answer.
     ///
     /// - Parameters:
     ///   - mixes: The projected mixes, shape `(..., (2 + copies) * copies)`.
@@ -334,8 +351,8 @@ enum DeepSeekV4SinkhornKernel {
     ///     `hc_eps`.
     /// - Returns: `post`, the gain of each copy, shape `(..., copies)`;
     ///   `comb`, the doubly stochastic matrix, shape `(..., copies, copies)`;
-    ///   and `collapsed`, the single stream, shape `(..., width)`. All three
-    ///   are float32.
+    ///   and `collapsed`, the single stream, shape `(..., width)`. `post` and
+    ///   `comb` are float32, and `collapsed` is in the dtype of `stream`.
     static func splitSinkhornCollapse(
         mixes: MLXArray, scale: MLXArray, base: MLXArray, stream: MLXArray, iters: Int,
         eps: Float
@@ -358,17 +375,15 @@ enum DeepSeekV4SinkhornKernel {
             "scale must hold \(lastScaleIndex + 1) values, and it holds \(scale.size)")
 
         let outputs = kernel(
-            [
-                mixes.asType(.float32), scale.asType(.float32), base.asType(.float32),
-                stream.asType(.float32),
-            ],
-            template: templateArguments(copies: copies, iters: iters, width: width, eps: eps),
+            [mixes.asType(.float32), scale.asType(.float32), base.asType(.float32), stream],
+            template: [("T", stream.dtype)]
+                + templateArguments(copies: copies, iters: iters, width: width, eps: eps),
             grid: (leading.reduce(1, *) * threadsPerToken, 1, 1),
             threadGroup: (threadsPerToken, 1, 1),
             outputShapes: Output.allCases.map {
                 $0.shape(leading: leading, copies: copies, width: width)
             },
-            outputDTypes: Output.allCases.map { _ in .float32 })
+            outputDTypes: Output.allCases.map { $0.dtype(stream: stream.dtype) })
         return (
             post: outputs[Output.post.rawValue], comb: outputs[Output.comb.rawValue],
             collapsed: outputs[Output.collapsed.rawValue]
@@ -396,18 +411,19 @@ enum DeepSeekV4SinkhornKernel {
             ("POST_SCALE", DeepSeekV4Math.postScaleIndex),
             ("COMB_SCALE", DeepSeekV4Math.combScaleIndex),
             ("SOFTMAX_READS", softmaxReadWidth),
-            ("EPS_BITS", bitPattern(of: eps)),
-            ("POST_GAIN_BITS", bitPattern(of: DeepSeekV4Math.postGain)),
+            ("EPS_BITS", eps.templateBits),
+            ("POST_GAIN_BITS", DeepSeekV4Math.postGain.templateBits),
         ]
     }
+}
 
-    /// The bit pattern of a float32 value as a template argument. The source
-    /// reads it back with `as_type<float>`, thus the kernel sees the exact
-    /// value and not a decimal text of it.
+extension Float {
+
+    /// The bit pattern of this float32 value as a Metal template argument.
     ///
-    /// - Parameter value: The float32 value.
-    /// - Returns: The bits of `value`, as a signed integer.
-    private static func bitPattern(of value: Float) -> Int {
-        Int(Int32(bitPattern: value.bitPattern))
+    /// The source of a kernel reads the value back with `as_type<float>`,
+    /// thus the kernel sees the exact value and not a decimal text of it.
+    var templateBits: Int {
+        Int(Int32(bitPattern: bitPattern))
     }
 }

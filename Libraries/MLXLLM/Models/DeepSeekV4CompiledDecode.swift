@@ -92,6 +92,10 @@ enum DeepSeekV4CompiledDecode {
 
     /// The compiled ``ManifoldStream/expand(blockOutput:residual:post:comb:)``.
     ///
+    /// Only the expand that the fused kernel ``DeepSeekV4ExpandKernel``
+    /// cannot take reads this function: an expand off the GPU, or a block
+    /// output the kernel cannot read in vector groups.
+    ///
     /// The expand reads no constant of the checkpoint, thus every layer shares
     /// this one function. It is shapeless, thus one trace serves each block.
     ///

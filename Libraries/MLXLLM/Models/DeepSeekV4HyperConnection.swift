@@ -37,10 +37,13 @@
 //     `hc_eps` of the checkpoint. The routine holds no epsilon of its own.
 //     On the GPU the collapse gives the split activations, the Sinkhorn
 //     steps and the weighted sum to one fused Metal kernel,
-//     Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift. On another
+//     Libraries/MLXLLM/Models/DeepSeekV4SinkhornKernel.swift, and the RMS
+//     reduction and the mixes projection to one more fused kernel,
+//     Libraries/MLXLLM/Models/DeepSeekV4MixesKernel.swift. On another
 //     device it calls the split half, `DeepSeekV4Math.hcSplitFields`, and
 //     then the Sinkhorn half, `DeepSeekV4Math.sinkhorn`. A parity test holds
-//     the kernel to the numbers of the op path.
+//     the Sinkhorn kernel to the bits of the op path, and a tolerance test
+//     holds the mixes kernel to the numbers of the op path.
 //
 // The Python reference above does not decide how the expand reads the mixing
 // matrix `comb`. Its `hc_post` reads `comb` the wrong way round. The official
@@ -384,11 +387,15 @@ class DeepSeekV4HyperConnection: Module {
     /// that the mixes projection runs one time for each sub-layer rather than
     /// two times.
     ///
-    /// On the GPU the collapse takes the mixes projection as MLX operations,
-    /// and one fused kernel, ``DeepSeekV4SinkhornKernel``, takes the split
-    /// activations, the Sinkhorn steps and the weighted sum. On another
-    /// device, or with no Sinkhorn step, the collapse takes every step as
-    /// MLX operations. The two paths give the same bits.
+    /// On the GPU the collapse takes two fused kernels and no other
+    /// dispatch. ``DeepSeekV4MixesKernel`` takes the RMS reduction and the
+    /// mixes projection, and ``DeepSeekV4SinkhornKernel`` takes the split
+    /// activations, the Sinkhorn steps and the weighted sum. Both read the
+    /// stream in its own dtype. The mixes kernel adds its products in another
+    /// order than the op path, thus the two paths differ in the last float32
+    /// places of the mixes. A stream the mixes kernel cannot read takes the
+    /// mixes projection as MLX operations. On another device, or with no
+    /// Sinkhorn step, the collapse takes every step as MLX operations.
     ///
     /// - Parameter stream: The residual stream, shape
     ///   `(batch, tokens, hcMult, hiddenSize)`.
@@ -407,15 +414,25 @@ class DeepSeekV4HyperConnection: Module {
             return (collapsed: collapsed.asType(stream.dtype), post: fields.post, comb: comb)
         }
 
-        let streamF32 = stream.asType(.float32)
-        let mixes = ManifoldStream.mixes(
-            of: streamF32, projection: mixProjection, normWeight: _normWeight, normEps: normEps)
         let fused = DeepSeekV4SinkhornKernel.splitSinkhornCollapse(
-            mixes: mixes, scale: mixScale, base: mixBias, stream: streamF32,
+            mixes: mixes(of: stream), scale: mixScale, base: mixBias, stream: stream,
             iters: sinkhornIterations, eps: hcEps)
-        return (
-            collapsed: fused.collapsed.asType(stream.dtype), post: fused.post, comb: fused.comb
-        )
+        return (collapsed: fused.collapsed, post: fused.post, comb: fused.comb)
+    }
+
+    /// Takes the RMS reduction and the mixes projection of the collapse on
+    /// the GPU.
+    ///
+    /// - Parameter stream: The residual stream, already checked.
+    /// - Returns: The mixes vector, shape `(batch, tokens, mixes)`, in
+    ///   float32.
+    private func mixes(of stream: MLXArray) -> MLXArray {
+        guard DeepSeekV4MixesKernel.canRun(on: stream) else {
+            return ManifoldStream.mixes(
+                of: stream.asType(.float32), projection: mixProjection, normWeight: _normWeight,
+                normEps: normEps)
+        }
+        return DeepSeekV4MixesKernel.mixes(of: stream, projection: mixProjection, normEps: normEps)
     }
 
     /// Takes the steps of the collapse that come before the Sinkhorn steps,
@@ -467,6 +484,12 @@ class DeepSeekV4HyperConnection: Module {
     /// reshapes the mixes row-major and takes the softmax over the last axis,
     /// as the official `hc_split_sinkhorn` kernel does.
     ///
+    /// On the GPU one fused kernel, ``DeepSeekV4ExpandKernel``, takes the
+    /// whole expand. It adds the products in another order than the op path,
+    /// thus the two paths differ in the last float32 places. A block output
+    /// the kernel cannot read, and every block off the GPU, takes the
+    /// compiled op path ``DeepSeekV4CompiledDecode/expand``.
+    ///
     /// - Parameters:
     ///   - blockOutput: The output of the sub-layer, shape
     ///     `(batch, tokens, hiddenSize)`.
@@ -481,7 +504,11 @@ class DeepSeekV4HyperConnection: Module {
     func expand(
         blockOutput: MLXArray, residual: MLXArray, post: MLXArray, comb: MLXArray
     ) -> MLXArray {
-        DeepSeekV4CompiledDecode.expand(blockOutput, residual, post, comb)
+        guard DeepSeekV4ExpandKernel.canRun(blockOutput: blockOutput, residual: residual) else {
+            return DeepSeekV4CompiledDecode.expand(blockOutput, residual, post, comb)
+        }
+        return DeepSeekV4ExpandKernel.expand(
+            blockOutput: blockOutput, residual: residual, post: post, comb: comb)
     }
 }
 

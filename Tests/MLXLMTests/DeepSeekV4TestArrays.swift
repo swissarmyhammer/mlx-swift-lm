@@ -59,6 +59,24 @@ enum DeepSeekV4TestArrays {
         exportToDot(arrays).components(separatedBy: "\"\(primitive)\"").count - 1
     }
 
+    /// The text `exportToDot(_:)` writes after the label of each primitive
+    /// node, and after no other node.
+    private static let primitiveNodeShape = "shape=rectangle"
+
+    /// Counts the primitive nodes of every kind in the graph that makes
+    /// `arrays`.
+    ///
+    /// Each primitive node is one kernel dispatch on each evaluation, thus a
+    /// test can hold a path to the number of dispatches it needs. An input
+    /// that was evaluated holds no primitive and does not count.
+    ///
+    /// - Parameter arrays: The outputs whose graph to read. The function does
+    ///   not evaluate them.
+    /// - Returns: The number of primitive nodes in the graph.
+    static func primitiveNodeCount(_ arrays: [MLXArray]) -> Int {
+        exportToDot(arrays).components(separatedBy: primitiveNodeShape).count - 1
+    }
+
     /// Counts the general gather nodes in the graph that makes `arrays`.
     ///
     /// Each gather node is one more kernel dispatch on each evaluation, thus
