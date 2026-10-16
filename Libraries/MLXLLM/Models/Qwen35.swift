@@ -369,13 +369,6 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
         )
     }
 
-    /// The weights of the layer that ``GatedDeltaDecodeKernel`` reads.
-    package var decodeKernelWeights: GatedDeltaDecodeKernel.Weights {
-        GatedDeltaDecodeKernel.Weights(
-            conv: conv1d.weight, aLog: aLog, dtBias: dtBias, norm: norm.weight,
-            normEps: norm.eps, keyHeadDim: headKDim)
-    }
-
     /// The GDN body with state passed explicitly in and out so it can be
     /// traced.
     func forward(
@@ -438,14 +431,8 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
         let k = convSplit[1].reshaped(B, S, numKHeads, headKDim)
         let v = convSplit[2].reshaped(B, S, numVHeads, headVDim)
 
-        let dtype = q.dtype
-        let scales = GatedDeltaQueryKeyNorm.scales(keyHeadDim: headKDim)
-        let qNormed =
-            MLXArray(scales.query).asType(dtype)
-            * MLXFast.rmsNorm(q, weight: MLXArray.mlxNone, eps: GatedDeltaQueryKeyNorm.eps)
-        let kNormed =
-            MLXArray(scales.key).asType(dtype)
-            * MLXFast.rmsNorm(k, weight: MLXArray.mlxNone, eps: GatedDeltaQueryKeyNorm.eps)
+        let (qNormed, kNormed) = GatedDeltaQueryKeyNorm.normalized(
+            query: q, key: k, dtype: q.dtype)
 
         let out: MLXArray
         let newRecState: MLXArray

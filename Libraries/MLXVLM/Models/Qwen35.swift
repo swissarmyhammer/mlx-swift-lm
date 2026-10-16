@@ -311,9 +311,9 @@ public enum Qwen35Language {
         return (qOut, kOut)
     }
 
-    final class RMSNormGated: Module {
-        @ParameterInfo(key: "weight") var weight: MLXArray
-        let eps: Float
+    package final class RMSNormGated: Module, GatedDeltaOutputNorm {
+        @ParameterInfo(key: "weight") package var weight: MLXArray
+        package let eps: Float
 
         init(dimensions: Int, eps: Float = 1e-6) {
             self.eps = eps
@@ -453,14 +453,14 @@ public enum Qwen35Language {
         let hiddenSize: Int
         let numVHeads: Int
         let numKHeads: Int
-        let headKDim: Int
+        package let headKDim: Int
         let headVDim: Int
         let keyDim: Int
         let valueDim: Int
         let convKernelSize: Int
         let convDim: Int
 
-        @ModuleInfo(key: "conv1d") var conv1d: Conv1d
+        @ModuleInfo(key: "conv1d") package var conv1d: Conv1d
         @ModuleInfo(key: "in_proj_qkv") var inProjQKV: Linear
         @ModuleInfo(key: "in_proj_z") var inProjZ: Linear
         @ModuleInfo(key: "in_proj_b") var inProjB: Linear
@@ -471,10 +471,10 @@ public enum Qwen35Language {
         private let fusedInputProjection = FusedQuantizedLinearProjectionCache()
         var fusedInputProjectionEnabled = qwen35FourGDNEnabled
 
-        @ParameterInfo(key: "dt_bias") var dtBias: MLXArray
-        @ParameterInfo(key: "A_log") var aLog: MLXArray
+        @ParameterInfo(key: "dt_bias") package var dtBias: MLXArray
+        @ParameterInfo(key: "A_log") package var aLog: MLXArray
 
-        @ModuleInfo(key: "norm") var norm: RMSNormGated
+        @ModuleInfo(key: "norm") package var norm: RMSNormGated
         @ModuleInfo(key: "out_proj") var outProj: Linear
 
         public init(_ args: Qwen35Configuration.TextConfiguration) {
@@ -551,13 +551,6 @@ public enum Qwen35Language {
         }
 
         var hasFusedInputProjection: Bool { fusedInputProjection.isPrepared }
-
-        /// The weights of the layer that ``GatedDeltaDecodeKernel`` reads.
-        package var decodeKernelWeights: GatedDeltaDecodeKernel.Weights {
-            GatedDeltaDecodeKernel.Weights(
-                conv: conv1d.weight, aLog: aLog, dtBias: dtBias, norm: norm.weight,
-                normEps: norm.eps, keyHeadDim: headKDim)
-        }
 
         @discardableResult
         func prepareFusedInputProjection() throws -> Bool {
@@ -647,14 +640,8 @@ public enum Qwen35Language {
             let v = split[2].reshaped(B, S, numVHeads, headVDim)
 
             var state = cache?[1]
-            let dtype = q.dtype
-            let scales = GatedDeltaQueryKeyNorm.scales(keyHeadDim: headKDim)
-            let qNormed =
-                MLXArray(scales.query).asType(dtype)
-                * MLXFast.rmsNorm(q, weight: MLXArray.mlxNone, eps: GatedDeltaQueryKeyNorm.eps)
-            let kNormed =
-                MLXArray(scales.key).asType(dtype)
-                * MLXFast.rmsNorm(k, weight: MLXArray.mlxNone, eps: GatedDeltaQueryKeyNorm.eps)
+            let (qNormed, kNormed) = GatedDeltaQueryKeyNorm.normalized(
+                query: q, key: k, dtype: q.dtype)
 
             let out: MLXArray
             if let split = checkpointAfter, split > 0, split < S {

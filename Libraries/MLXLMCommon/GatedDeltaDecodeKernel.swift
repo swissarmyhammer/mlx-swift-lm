@@ -509,40 +509,48 @@ package enum GatedDeltaDecodeKernel {
     }
 }
 
-extension GatedDeltaDecodeKernel.Weights {
-    /// Collects the weights of one Qwen3-Next or Qwen 3.5 layer, whose q and k
-    /// RMSNorm is ``GatedDeltaQueryKeyNorm``.
-    ///
-    /// - Parameters:
-    ///   - conv: The depthwise conv weight, shape `(convChannels, taps, 1)`.
-    ///   - aLog: The log of the decay rate of each value head.
-    ///   - dtBias: The bias of the decay step of each value head.
-    ///   - norm: The weight of the gated RMSNorm.
-    ///   - normEps: The epsilon of the gated RMSNorm.
-    ///   - keyHeadDim: The width of one key head.
-    package init(
-        conv: MLXArray, aLog: MLXArray, dtBias: MLXArray, norm: MLXArray, normEps: Float,
-        keyHeadDim: Int
-    ) {
-        let scales = GatedDeltaQueryKeyNorm.scales(keyHeadDim: keyHeadDim)
-        self.init(
-            conv: conv, aLog: aLog, dtBias: dtBias, norm: norm, normEps: normEps,
-            queryKeyNormEps: GatedDeltaQueryKeyNorm.eps, queryScale: scales.query,
-            keyScale: scales.key)
-    }
+/// The gated RMSNorm of the output of a gated delta net layer, as
+/// ``GatedDeltaDecodeKernel`` reads it.
+package protocol GatedDeltaOutputNorm: Module {
+    /// The weight of the norm, shape `(valueHeadDim)`.
+    var weight: MLXArray { get }
+    /// The epsilon of the norm.
+    var eps: Float { get }
 }
 
 /// A gated delta net layer whose body on one decode token can run in
 /// ``GatedDeltaDecodeKernel``: the Qwen3-Next layer and the Qwen 3.5 layers of
-/// MLXLLM and MLXVLM. Each layer gives its weights, and the shared
+/// MLXLLM and MLXVLM. Each layer gives the modules the kernel reads. The
+/// shared ``decodeKernelWeights`` collects their weights, and the shared
 /// ``decodeKernelStep(qkv:z:b:a:convState:recState:)`` decides if the kernel
-/// runs the token.
+/// runs the token. The q and k RMSNorm of each layer is
+/// ``GatedDeltaQueryKeyNorm``.
 package protocol GatedDeltaDecodeLayer: Module {
-    /// The weights of the layer that the kernel reads.
-    var decodeKernelWeights: GatedDeltaDecodeKernel.Weights { get }
+    /// The type of the gated RMSNorm of the output.
+    associatedtype OutputNorm: GatedDeltaOutputNorm
+
+    /// The width of one key head.
+    var headKDim: Int { get }
+    /// The depthwise conv.
+    var conv1d: Conv1d { get }
+    /// The log of the decay rate of each value head, shape `(valueHeads)`.
+    var aLog: MLXArray { get }
+    /// The bias of the decay step of each value head, shape `(valueHeads)`.
+    var dtBias: MLXArray { get }
+    /// The gated RMSNorm of the output.
+    var norm: OutputNorm { get }
 }
 
 extension GatedDeltaDecodeLayer {
+    /// The weights of the layer that ``GatedDeltaDecodeKernel`` reads.
+    package var decodeKernelWeights: GatedDeltaDecodeKernel.Weights {
+        let scales = GatedDeltaQueryKeyNorm.scales(keyHeadDim: headKDim)
+        return GatedDeltaDecodeKernel.Weights(
+            conv: conv1d.weight, aLog: aLog, dtBias: dtBias, norm: norm.weight,
+            normEps: norm.eps, queryKeyNormEps: GatedDeltaQueryKeyNorm.eps,
+            queryScale: scales.query, keyScale: scales.key)
+    }
+
     /// The body of one decode token in one Metal kernel
     /// (``GatedDeltaDecodeKernel``), or nil when the kernel does not run the
     /// token: the layer trains (the kernel has no gradient), the recurrent

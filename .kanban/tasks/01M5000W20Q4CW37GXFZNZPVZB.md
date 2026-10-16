@@ -43,8 +43,67 @@ comments:
     - evidence: 8 files — Libraries/MLXLMCommon/GatedDelta.swift, Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift, Libraries/MLXLLM/Models/Qwen35.swift, Libraries/MLXLLM/Models/Qwen3Next.swift, Libraries/MLXVLM/Models/Qwen35.swift, Tests/MLXLMTests/GDNDecodeKernelFixture.swift (new), Tests/MLXLMTests/GDNDecodeKernelLayerTests.swift (new), Tests/MLXLMTests/Qwen35GDNDecodeKernelTests.swift. `swift build --build-tests` 0 warnings; `xcrun xctest MLXLMTests.xctest` 721 XCTest + 1516 Swift Testing pass; integration 8/8 pass. Decode at 32k: Qwen3.8 MLXVLM -3.4 %, Qwen3-Next -17.8 %; prefill and peak unchanged.
     - next: /review (task stays in doing).
   timestamp: 2026-10-16T12:49:01.238309+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m52cc4ed8pnx5vm6h1mxc4vz
+  text: |-
+    ### review — findings
+    - evidence: `review sha HEAD~1..HEAD`, 6 findings (13 confirmed, 9 refuted). Libraries/MLXLLM/Models/Qwen3Next.swift:358, Libraries/MLXVLM/Models/Qwen35.swift:556, Libraries/MLXVLM/Models/Qwen35.swift:654, Tests/MLXLMTests/GDNDecodeKernelFixture.swift:131, Tests/MLXLMTests/GDNDecodeKernelFixture.swift:132, Tests/MLXLMTests/Qwen35GDNDecodeKernelTests.swift:42.
+    - next: /implement to correct each item in the section "Review Findings (2026-10-16 07:50)". The task stays in review.
+  timestamp: 2026-10-16T12:53:13.805655+00:00
+- actor: claude-code
+  id: 01m52ccq6naef7y5peh57wm2wr
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 8 files; decode at 32k -3.4 % (Qwen3.8 MLXVLM), -17.8 % (Qwen3-Next)
+    - test: green — run on the final tree by implement: MLXLMTests 721 + 1516, integration 8/8; 0 compiler warnings
+    - commit: ab97919
+    - review: findings — Libraries/MLXLLM/Models/Qwen3Next.swift:358, Libraries/MLXVLM/Models/Qwen35.swift:556, Libraries/MLXVLM/Models/Qwen35.swift:654, Tests/MLXLMTests/GDNDecodeKernelFixture.swift:131, Tests/MLXLMTests/GDNDecodeKernelFixture.swift:132, Tests/MLXLMTests/Qwen35GDNDecodeKernelTests.swift:42
+  timestamp: 2026-10-16T12:53:33.013403+00:00
+- actor: claude-code
+  id: 01m52dggh3x9aegrpwv3yyyzfx
+  text: |-
+    Review findings corrected (implement step, TDD).
+    - q/k norm: new `GatedDeltaQueryKeyNorm.normalized(query:key:dtype:)` in GatedDelta.swift. It has the same ops in the same order as the old inline code (`MLXArray(scale).asType(dtype) * MLXFast.rmsNorm(x, weight: mlxNone, eps)`), thus the bits do not change. The three op paths call it: Qwen3Next.swift, MLXLLM Qwen35.swift and MLXVLM Qwen35.swift. Qwen3-Next gives `dtype: inputs.dtype` (as before); the two Qwen 3.5 layers give `q.dtype` (as before). The kernel is not changed.
+    - Weights: `GatedDeltaDecodeLayer` now requires `headKDim`, `conv1d`, `aLog`, `dtBias` and `norm` (associated type `OutputNorm: GatedDeltaOutputNorm`, a new protocol with `weight` and `eps`). The protocol extension holds the one `decodeKernelWeights`. The three copies of the property and the convenience `Weights.init(...keyHeadDim:)` are deleted.
+    - Access: to satisfy the package protocol, `Qwen3NextRMSNormGated` and MLXVLM `Qwen35Language.RMSNormGated` are now `package` (with `package` weight and eps), and the five witness members of `Qwen3NextGatedDeltaNet` and MLXVLM `GatedDeltaNet` are `package`. No public API changes.
+    - Tests: fixture head shapes use named constants (`Qwen38Heads`, `SmallHeads`, `qwen38HeadCase`, `smallHeadCase`). The layer kinds are named (`mlxLLMQwen35`, `qwen3Next`, `mlxVLMQwen35`). `Qwen35GDNDecodeKernelTests.operands` calls `Fixture.layer(Fixture.mlxLLMQwen35, ...)` with `#require(... as? Qwen35GatedDeltaNet)`; the local `layer(_:dtype:)` is deleted. The `gatedNorm` stubs and the `headKDim` requirement of the test protocol are deleted (the shared protocol now gives `norm` and `headKDim`).
+    - New test `GatedDeltaQueryKeyNormTests` (table: key head widths of the fixture x dtypes): q and k against a float32 reference with factors 1/D and 1/sqrt(D). RED: build error, no member `normalized`. GREEN: 4 cases pass.
+    - Discovery: `replace_all` of the files tool replaced only one of three identical blocks; each stub needed its own edit.
+  timestamp: 2026-10-16T13:13:05.827367+00:00
+- actor: claude-code
+  id: 01m52dgnqv90687q6xqne4rwb9
+  text: |-
+    Verification after the corrections.
+    - `swift build --build-tests`: 0 warnings (only the known note "missing creator for mutated node").
+    - `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 721 XCTest, 0 failures; Swift Testing 1517 tests in 125 suites pass. Log: scratchpad/qwen3next/znz-fix-xctest.log.
+    - xcodebuild -only-testing Qwen35SessionPromptCacheTests and Qwen35CheckpointIntegrationTests: 8 tests in 2 suites pass, TEST SUCCEEDED. Log: scratchpad/qwen3next/znz-fix-integ.log.
+    - Decode at 32k, Qwen3-Next-80B-A3B-Instruct-4bit (`ab-znzpvzb.sh`, GPU idle before each run, 32153 prompt tokens, 256 decode tokens). `fix` = bench built from this tree (scratchpad/qwen38bench/fix-znzpvzb), `new` = the bench of commit ab97919. Order fix new fix new, then new fix fix new. fix: 14.83, 14.75, 14.33, 14.50 ms/token (mean 14.60). new: 14.61, 14.54, 14.53, 14.38 (mean 14.52). The gap is inside the noise (the second set has fix faster). Base was 17.45. Prefill 1765-1805 tok/s, peak 46.2 GiB for all. Results: scratchpad/qwen3next/znz-nextfix-*.txt and znz-nextfix2-*.txt.
+  timestamp: 2026-10-16T13:13:11.163992+00:00
+- actor: claude-code
+  id: 01m52dgs25cyrmsxrjjq1w7564
+  text: |-
+    ### implement — changed
+    - evidence: 8 files — Libraries/MLXLMCommon/GatedDelta.swift, Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift, Libraries/MLXLLM/Models/Qwen3Next.swift, Libraries/MLXLLM/Models/Qwen35.swift, Libraries/MLXVLM/Models/Qwen35.swift, Tests/MLXLMTests/GDNDecodeKernelFixture.swift, Tests/MLXLMTests/Qwen35GDNDecodeKernelTests.swift, Tests/MLXLMTests/GatedDeltaQueryKeyNormTests.swift (new). 6 of 6 findings checked. Build 0 warnings; MLXLMTests 721 XCTest + 1517 Swift Testing pass; integration 8/8 pass; Qwen3-Next decode at 32k 14.60 ms/token (commit binary 14.52, base 17.45).
+    - next: /review (task stays in doing).
+  timestamp: 2026-10-16T13:13:14.565058+00:00
+- actor: claude-code
+  id: 01m52dm9p83c6a9hfedcpj3y2t
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (554c2d5). 0 findings, 0 confirmed, 0 refuted. 7 validator runs, 0 failed. All 6 findings of round 1 are checked.
+    - next: none. The task is in done.
+  timestamp: 2026-10-16T13:15:09.896493+00:00
+- actor: claude-code
+  id: 01m52dmr78596gm4b68hyv9yy9
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 8 files; the 6 findings fixed; Qwen3-Next decode at 32k stays at about 14.6 ms/token
+    - test: green — run on the final tree by implement: MLXLMTests 721 + 1517, integration 8/8; 0 compiler warnings
+    - commit: 554c2d5
+    - review: clean — 0 findings; 6/6 prior findings checked; task moved to done
+  timestamp: 2026-10-16T13:15:24.776161+00:00
+position_column: done
+position_ordinal: ffe180
 title: Use the fused GDN decode kernel in Qwen3Next and in the MLXVLM Qwen 3.5 model
 ---
 ## What
@@ -65,3 +124,18 @@ title: Use the fused GDN decode kernel in Qwen3Next and in the MLXVLM Qwen 3.5 m
 - [x] Each layer uses the kernel on one decode token, with a tolerance test and a positive control.
 - [x] Decode is faster, measured, for each model.
 - [x] All MLXLMTests pass, with 0 compiler warnings. #performance
+
+## Review Findings (2026-10-16 07:50)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 8 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5000W20Q4CW37GXFZNZPVZB.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5000W20Q4CW37GXFZNZPVZB.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/Models/Qwen3Next.swift:358` `reuse/reuse` — The q and k RMSNorm with scale is written inline again. It matches the block in MLXLLM Qwen35.swift and MLXVLM Qwen35.swift. A shared helper should own it. Move the q/k normalization into a shared GatedDeltaQueryKeyNorm function and call it here instead of the inline scale and rmsNorm.
+- [x] `Libraries/MLXVLM/Models/Qwen35.swift:556` `reuse/reuse` — The decodeKernelWeights property repeats the body of the same property in the other two layer classes. The copies can diverge. Use one shared builder for GatedDeltaDecodeKernel.Weights, and call it from this property.
+- [x] `Libraries/MLXVLM/Models/Qwen35.swift:654` `reuse/reuse` — The q and k RMSNorm with scale is written inline a third time. The same math is in MLXLLM Qwen35.swift and Qwen3Next.swift. One shared helper should hold it. Call a shared GatedDeltaQueryKeyNorm normalization function here instead of the inline scale and rmsNorm.
+- [x] `Tests/MLXLMTests/GDNDecodeKernelFixture.swift:131` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/GDNDecodeKernelFixture.swift:132` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/Qwen35GDNDecodeKernelTests.swift:42` `reuse/reuse` — The new test helper layer(_:dtype:) builds and prepares a Qwen35GatedDeltaNet by hand. The new shared fixture already does this for every layer kind. The two copies can drift. Replace the local layer(_:dtype:) with a call to Fixture.layer(Fixture.layerKinds[0], headCase, dtype:) or a direct Fixture.layer call, and cast the result to Qwen35GatedDeltaNet if the test needs the concrete type.

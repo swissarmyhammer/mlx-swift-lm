@@ -23,12 +23,8 @@ protocol GDNDecodeKernelTestLayer: GatedDeltaDecodeLayer {
     var numVHeads: Int { get }
     /// The width of one value head.
     var headVDim: Int { get }
-    /// The width of one key head.
-    var headKDim: Int { get }
     /// The output projection.
     var outProj: Linear { get }
-    /// The gated RMSNorm.
-    var gatedNorm: Module { get }
 
     /// The slices of the input projection of `inputs`.
     ///
@@ -55,9 +51,6 @@ protocol GDNDecodeKernelTestLayer: GatedDeltaDecodeLayer {
 }
 
 extension Qwen35GatedDeltaNet: GDNDecodeKernelTestLayer {
-    /// The gated RMSNorm.
-    var gatedNorm: Module { norm }
-
     /// The layer body through `forward`.
     func runTokens(
         _ inputs: MLXArray, convState: MLXArray, recurrentState: MLXArray, mask: MLXArray?
@@ -69,9 +62,6 @@ extension Qwen35GatedDeltaNet: GDNDecodeKernelTestLayer {
 }
 
 extension Qwen3NextGatedDeltaNet: GDNDecodeKernelTestLayer {
-    /// The gated RMSNorm.
-    var gatedNorm: Module { norm }
-
     /// The layer body through `forward`.
     func runTokens(
         _ inputs: MLXArray, convState: MLXArray, recurrentState: MLXArray, mask: MLXArray?
@@ -83,9 +73,6 @@ extension Qwen3NextGatedDeltaNet: GDNDecodeKernelTestLayer {
 }
 
 extension Qwen35Language.GatedDeltaNet: GDNDecodeKernelTestLayer {
-    /// The gated RMSNorm.
-    var gatedNorm: Module { norm }
-
     /// The layer body through `callAsFunction`, which reads and writes the
     /// states in a cache.
     func runTokens(
@@ -123,17 +110,41 @@ enum GDNDecodeKernelFixture {
         }
     }
 
-    /// The shapes of the tolerance tests.
-    ///
-    /// 1. The Qwen3.8 GDN shape: 16 key heads and 48 value heads of 128.
-    /// 2. Two sequences of a small model: one SIMD group for each value row.
-    static let headCases = [
-        HeadCase(batch: 1, keyHeads: 16, valueHeads: 48, keyHeadDim: 128, valueHeadDim: 128),
-        HeadCase(batch: 2, keyHeads: 2, valueHeads: 4, keyHeadDim: 32, valueHeadDim: 32),
-    ]
+    /// The head shape of the GDN layers of Qwen3.8.
+    private enum Qwen38Heads {
+        /// The number of key heads.
+        static let keyHeads = 16
+        /// The number of value heads.
+        static let valueHeads = 48
+        /// The width of one key head and of one value head.
+        static let width = 128
+    }
+
+    /// The head shape of a small model: one SIMD group for each value row.
+    private enum SmallHeads {
+        /// The number of sequences.
+        static let batch = 2
+        /// The number of key heads.
+        static let keyHeads = 2
+        /// The number of value heads.
+        static let valueHeads = 4
+        /// The width of one key head and of one value head.
+        static let width = 32
+    }
+
+    /// The Qwen3.8 GDN shape, for one sequence.
+    static let qwen38HeadCase = HeadCase(
+        batch: 1, keyHeads: Qwen38Heads.keyHeads, valueHeads: Qwen38Heads.valueHeads,
+        keyHeadDim: Qwen38Heads.width, valueHeadDim: Qwen38Heads.width)
 
     /// The small head shape, for the tests that do not need the large one.
-    static var smallHeadCase: HeadCase { headCases[1] }
+    static let smallHeadCase = HeadCase(
+        batch: SmallHeads.batch, keyHeads: SmallHeads.keyHeads,
+        valueHeads: SmallHeads.valueHeads, keyHeadDim: SmallHeads.width,
+        valueHeadDim: SmallHeads.width)
+
+    /// The shapes of the tolerance tests.
+    static let headCases = [qwen38HeadCase, smallHeadCase]
 
     /// The dtypes the kernel reads.
     static let dtypes: [DType] = [.bfloat16, .float16]
@@ -147,19 +158,24 @@ enum GDNDecodeKernelFixture {
         let make: @Sendable (HeadCase) throws -> any GDNDecodeKernelTestLayer
     }
 
+    /// The GDN layer of the MLXLLM Qwen 3.5 model.
+    static let mlxLLMQwen35 = LayerKind(testDescription: "MLXLLM Qwen 3.5") { headCase in
+        Qwen35GatedDeltaNet(try configuration(Qwen35TextConfiguration.self, headCase))
+    }
+
+    /// The GDN layer of the Qwen3-Next model.
+    static let qwen3Next = LayerKind(testDescription: "Qwen3-Next") { headCase in
+        Qwen3NextGatedDeltaNet(try configuration(Qwen3NextConfiguration.self, headCase))
+    }
+
+    /// The GDN layer of the MLXVLM Qwen 3.5 model.
+    static let mlxVLMQwen35 = LayerKind(testDescription: "MLXVLM Qwen 3.5") { headCase in
+        Qwen35Language.GatedDeltaNet(
+            try configuration(Qwen35Configuration.TextConfiguration.self, headCase))
+    }
+
     /// The GDN layers that run their decode token through the kernel.
-    static let layerKinds = [
-        LayerKind(testDescription: "MLXLLM Qwen 3.5") { headCase in
-            Qwen35GatedDeltaNet(try configuration(Qwen35TextConfiguration.self, headCase))
-        },
-        LayerKind(testDescription: "Qwen3-Next") { headCase in
-            Qwen3NextGatedDeltaNet(try configuration(Qwen3NextConfiguration.self, headCase))
-        },
-        LayerKind(testDescription: "MLXVLM Qwen 3.5") { headCase in
-            Qwen35Language.GatedDeltaNet(
-                try configuration(Qwen35Configuration.TextConfiguration.self, headCase))
-        },
-    ]
+    static let layerKinds = [mlxLLMQwen35, qwen3Next, mlxVLMQwen35]
 
     /// The output of a layer over its tokens and the states after them.
     struct LayerStep {
@@ -278,7 +294,7 @@ enum GDNDecodeKernelFixture {
         layer.update(parameters: layer.parameters().mapValues { $0.asType(dtype) })
         let normWeight =
             1 + MLXRandom.normal([layer.headVDim], key: MLXRandom.key(Seed.normWeight))
-        try layer.gatedNorm.update(
+        try layer.norm.update(
             parameters: ModuleParameters.unflattened(["weight": normWeight.asType(dtype)]),
             verify: .all)
         layer.train(false)

@@ -38,19 +38,12 @@ struct Qwen35GDNDecodeKernelTests {
         let recurrentState: MLXArray
     }
 
-    /// A GDN layer of the head shape of a case, prepared in `dtype`.
-    static func layer(_ headCase: Fixture.HeadCase, dtype: DType) throws -> Qwen35GatedDeltaNet {
-        let layer = Qwen35GatedDeltaNet(
-            try Fixture.configuration(Qwen35TextConfiguration.self, headCase))
-        try Fixture.prepare(layer, dtype: dtype)
-        return layer
-    }
-
     /// Repeatable random operands for one case in one dtype. The token
     /// inputs are slices of one projected row, as the fused input projection
     /// gives them.
     static func operands(_ headCase: Fixture.HeadCase, dtype: DType) throws -> Operands {
-        let layer = try layer(headCase, dtype: dtype)
+        let layer = try #require(
+            Fixture.layer(Fixture.mlxLLMQwen35, headCase, dtype: dtype) as? Qwen35GatedDeltaNet)
         let valueDim = layer.valueDim
         let qkvEnd = layer.convDim
         let zEnd = qkvEnd + valueDim

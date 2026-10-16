@@ -59,6 +59,26 @@ package enum GatedDeltaQueryKeyNorm {
         let keyScale = pow(Float(keyHeadDim), keyScalePower)
         return (keyScale * keyScale, keyScale)
     }
+
+    /// The q and k of the op path of a layer: each row normalized, then
+    /// multiplied by its factor of ``scales(keyHeadDim:)`` in `dtype`.
+    ///
+    /// - Parameters:
+    ///   - query: The q heads, shape `(batch, steps, keyHeads, keyHeadDim)`.
+    ///   - key: The k heads, with the shape of `query`.
+    ///   - dtype: The dtype of the factors.
+    /// - Returns: The normalized q and k.
+    package static func normalized(query: MLXArray, key: MLXArray, dtype: DType) -> (
+        query: MLXArray, key: MLXArray
+    ) {
+        let scales = scales(keyHeadDim: query.dim(GatedDeltaAxis.width))
+        return (
+            MLXArray(scales.query).asType(dtype)
+                * MLXFast.rmsNorm(query, weight: MLXArray.mlxNone, eps: eps),
+            MLXArray(scales.key).asType(dtype)
+                * MLXFast.rmsNorm(key, weight: MLXArray.mlxNone, eps: eps)
+        )
+    }
 }
 
 /// The ranks of the gate and of the mask of one step of the ops path.

@@ -39,9 +39,9 @@ enum Qwen3NextElementwise {
 
 // MARK: - Model Components
 
-final class Qwen3NextRMSNormGated: Module {
-    @ParameterInfo(key: "weight") var weight: MLXArray
-    let eps: Float
+package final class Qwen3NextRMSNormGated: Module, GatedDeltaOutputNorm {
+    @ParameterInfo(key: "weight") package var weight: MLXArray
+    package let eps: Float
 
     init(dimensions: Int, eps: Float) {
         self.eps = eps
@@ -168,21 +168,21 @@ public final class Qwen3NextGatedDeltaNet: Module, GatedDeltaDecodeLayer {
     let hiddenSize: Int
     let numVHeads: Int
     let numKHeads: Int
-    let headKDim: Int
+    package let headKDim: Int
     let headVDim: Int
     let keyDim: Int
     let valueDim: Int
     let convKernelSize: Int
     let convDim: Int
 
-    @ModuleInfo(key: "conv1d") var conv1d: Conv1d
+    @ModuleInfo(key: "conv1d") package var conv1d: Conv1d
     @ModuleInfo(key: "in_proj_qkvz") var inProjQKVZ: Linear
     @ModuleInfo(key: "in_proj_ba") var inProjBA: Linear
 
-    @ParameterInfo(key: "dt_bias") var dtBias: MLXArray
-    @ParameterInfo(key: "A_log") var aLog: MLXArray
+    @ParameterInfo(key: "dt_bias") package var dtBias: MLXArray
+    @ParameterInfo(key: "A_log") package var aLog: MLXArray
 
-    @ModuleInfo(key: "norm") var norm: Qwen3NextRMSNormGated
+    @ModuleInfo(key: "norm") package var norm: Qwen3NextRMSNormGated
     @ModuleInfo(key: "out_proj") var outProj: Linear
 
     init(_ args: Qwen3NextConfiguration) {
@@ -281,13 +281,6 @@ public final class Qwen3NextGatedDeltaNet: Module, GatedDeltaDecodeLayer {
         return (qkv, z, b, a)
     }
 
-    /// The weights of the layer that ``GatedDeltaDecodeKernel`` reads.
-    package var decodeKernelWeights: GatedDeltaDecodeKernel.Weights {
-        GatedDeltaDecodeKernel.Weights(
-            conv: conv1d.weight, aLog: aLog, dtBias: dtBias, norm: norm.weight,
-            normEps: norm.eps, keyHeadDim: headKDim)
-    }
-
     public func callAsFunction(
         _ inputs: MLXArray,
         mask: MLXArray? = nil,
@@ -348,17 +341,11 @@ public final class Qwen3NextGatedDeltaNet: Module, GatedDeltaDecodeLayer {
         let convOut = silu(convPre)
         let convSplit = MLX.split(convOut, indices: [keyDim, 2 * keyDim], axis: -1)
 
-        var qOut = convSplit[0].reshaped(B, S, numKHeads, headKDim)
-        var kOut = convSplit[1].reshaped(B, S, numKHeads, headKDim)
+        let (qOut, kOut) = GatedDeltaQueryKeyNorm.normalized(
+            query: convSplit[0].reshaped(B, S, numKHeads, headKDim),
+            key: convSplit[1].reshaped(B, S, numKHeads, headKDim),
+            dtype: dtype)
         let vOut = convSplit[2].reshaped(B, S, numVHeads, headVDim)
-
-        let scales = GatedDeltaQueryKeyNorm.scales(keyHeadDim: headKDim)
-        qOut =
-            MLXArray(scales.query).asType(dtype)
-            * MLXFast.rmsNorm(qOut, weight: MLXArray.mlxNone, eps: GatedDeltaQueryKeyNorm.eps)
-        kOut =
-            MLXArray(scales.key).asType(dtype)
-            * MLXFast.rmsNorm(kOut, weight: MLXArray.mlxNone, eps: GatedDeltaQueryKeyNorm.eps)
 
         let (out, newState) = gatedDeltaUpdate(
             q: qOut,
