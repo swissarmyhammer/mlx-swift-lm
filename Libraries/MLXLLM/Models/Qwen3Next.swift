@@ -164,7 +164,7 @@ final class Qwen3NextMLP: Module, UnaryLayer {
     }
 }
 
-public final class Qwen3NextGatedDeltaNet: Module {
+public final class Qwen3NextGatedDeltaNet: Module, GatedDeltaDecodeLayer {
     let hiddenSize: Int
     let numVHeads: Int
     let numKHeads: Int
@@ -255,6 +255,39 @@ public final class Qwen3NextGatedDeltaNet: Module {
         return (q, k, v, z, b, a)
     }
 
+    /// The slices of the input projections of `inputs`, in the order the
+    /// conv and ``GatedDeltaDecodeKernel`` read them.
+    ///
+    /// - Parameters:
+    ///   - inputs: The hidden states, shape `(batch, sequence, hiddenSize)`.
+    ///   - batch: The number of sequences.
+    ///   - sequence: The number of tokens of each sequence.
+    /// - Returns: The conv input (the q heads, the k heads, then the value
+    ///   heads), the gate of the output, the beta input and the decay input.
+    func projectInputs(_ inputs: MLXArray, batch: Int, sequence: Int) -> (
+        qkv: MLXArray, z: MLXArray, b: MLXArray, a: MLXArray
+    ) {
+        let (q, k, v, z, b, a) = fixQueryKeyValueOrdering(
+            mixedQKVZ: inProjQKVZ(inputs),
+            mixedBA: inProjBA(inputs)
+        )
+        let qkv = concatenated(
+            [
+                q.reshaped(batch, sequence, -1), k.reshaped(batch, sequence, -1),
+                v.reshaped(batch, sequence, -1),
+            ],
+            axis: -1
+        )
+        return (qkv, z, b, a)
+    }
+
+    /// The weights of the layer that ``GatedDeltaDecodeKernel`` reads.
+    package var decodeKernelWeights: GatedDeltaDecodeKernel.Weights {
+        GatedDeltaDecodeKernel.Weights(
+            conv: conv1d.weight, aLog: aLog, dtBias: dtBias, norm: norm.weight,
+            normEps: norm.eps, keyHeadDim: headKDim)
+    }
+
     public func callAsFunction(
         _ inputs: MLXArray,
         mask: MLXArray? = nil,
@@ -292,21 +325,17 @@ public final class Qwen3NextGatedDeltaNet: Module {
         let B = inputs.dim(0)
         let S = inputs.dim(1)
 
-        let (q, k, v, z, b, a) = fixQueryKeyValueOrdering(
-            mixedQKVZ: inProjQKVZ(inputs),
-            mixedBA: inProjBA(inputs)
-        )
+        var (mixedQKV, z, b, a) = projectInputs(inputs, batch: B, sequence: S)
 
         let dtype = inputs.dtype
-
-        var mixedQKV = concatenated(
-            [q.reshaped(B, S, -1), k.reshaped(B, S, -1), v.reshaped(B, S, -1)],
-            axis: -1
-        )
 
         if let mask {
             mixedQKV = MLX.where(
                 expandedDimensions(mask, axis: -1), mixedQKV, MLXArray.zeros(like: mixedQKV))
+        } else if let step = decodeKernelStep(
+            qkv: mixedQKV, z: z, b: b, a: a, convState: convState, recState: recState)
+        {
+            return (outProj(step.output), step.convState, step.recurrentState)
         }
 
         let fusedDecode =
@@ -323,13 +352,13 @@ public final class Qwen3NextGatedDeltaNet: Module {
         var kOut = convSplit[1].reshaped(B, S, numKHeads, headKDim)
         let vOut = convSplit[2].reshaped(B, S, numVHeads, headVDim)
 
-        let invScale = pow(Float(headKDim), -0.5)
+        let scales = GatedDeltaQueryKeyNorm.scales(keyHeadDim: headKDim)
         qOut =
-            MLXArray(invScale * invScale).asType(dtype)
-            * MLXFast.rmsNorm(qOut, weight: MLXArray.mlxNone, eps: 1e-6)
+            MLXArray(scales.query).asType(dtype)
+            * MLXFast.rmsNorm(qOut, weight: MLXArray.mlxNone, eps: GatedDeltaQueryKeyNorm.eps)
         kOut =
-            MLXArray(invScale).asType(dtype)
-            * MLXFast.rmsNorm(kOut, weight: MLXArray.mlxNone, eps: 1e-6)
+            MLXArray(scales.key).asType(dtype)
+            * MLXFast.rmsNorm(kOut, weight: MLXArray.mlxNone, eps: GatedDeltaQueryKeyNorm.eps)
 
         let (out, newState) = gatedDeltaUpdate(
             q: qOut,

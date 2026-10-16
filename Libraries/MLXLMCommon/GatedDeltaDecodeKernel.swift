@@ -26,6 +26,7 @@
 
 import Foundation
 import MLX
+import MLXNN
 
 /// The body of a gated delta net layer on one decode token, in one Metal
 /// kernel.
@@ -505,5 +506,70 @@ package enum GatedDeltaDecodeKernel {
         return Step(
             output: outputs[Output.output], convState: outputs[Output.convState],
             recurrentState: outputs[Output.recurrentState])
+    }
+}
+
+extension GatedDeltaDecodeKernel.Weights {
+    /// Collects the weights of one Qwen3-Next or Qwen 3.5 layer, whose q and k
+    /// RMSNorm is ``GatedDeltaQueryKeyNorm``.
+    ///
+    /// - Parameters:
+    ///   - conv: The depthwise conv weight, shape `(convChannels, taps, 1)`.
+    ///   - aLog: The log of the decay rate of each value head.
+    ///   - dtBias: The bias of the decay step of each value head.
+    ///   - norm: The weight of the gated RMSNorm.
+    ///   - normEps: The epsilon of the gated RMSNorm.
+    ///   - keyHeadDim: The width of one key head.
+    package init(
+        conv: MLXArray, aLog: MLXArray, dtBias: MLXArray, norm: MLXArray, normEps: Float,
+        keyHeadDim: Int
+    ) {
+        let scales = GatedDeltaQueryKeyNorm.scales(keyHeadDim: keyHeadDim)
+        self.init(
+            conv: conv, aLog: aLog, dtBias: dtBias, norm: norm, normEps: normEps,
+            queryKeyNormEps: GatedDeltaQueryKeyNorm.eps, queryScale: scales.query,
+            keyScale: scales.key)
+    }
+}
+
+/// A gated delta net layer whose body on one decode token can run in
+/// ``GatedDeltaDecodeKernel``: the Qwen3-Next layer and the Qwen 3.5 layers of
+/// MLXLLM and MLXVLM. Each layer gives its weights, and the shared
+/// ``decodeKernelStep(qkv:z:b:a:convState:recState:)`` decides if the kernel
+/// runs the token.
+package protocol GatedDeltaDecodeLayer: Module {
+    /// The weights of the layer that the kernel reads.
+    var decodeKernelWeights: GatedDeltaDecodeKernel.Weights { get }
+}
+
+extension GatedDeltaDecodeLayer {
+    /// The body of one decode token in one Metal kernel
+    /// (``GatedDeltaDecodeKernel``), or nil when the kernel does not run the
+    /// token: the layer trains (the kernel has no gradient), the recurrent
+    /// state is not there yet, or the shapes and dtypes are not the ones the
+    /// kernel reads. The output is the input of the output projection.
+    ///
+    /// - Parameters:
+    ///   - qkv: The conv input of the token, shape `(batch, 1, convChannels)`.
+    ///   - z: The gate of the output, shape `(batch, 1, valueHeads, valueHeadDim)`.
+    ///   - b: The beta input, shape `(batch, 1, valueHeads)`.
+    ///   - a: The decay input, shape `(batch, 1, valueHeads)`.
+    ///   - convState: The conv state before the token.
+    ///   - recState: The recurrent state before the token, or nil.
+    /// - Returns: The output of the heads and the states after the token, or
+    ///   nil.
+    package func decodeKernelStep(
+        qkv: MLXArray, z: MLXArray, b: MLXArray, a: MLXArray, convState: MLXArray,
+        recState: MLXArray?
+    ) -> GatedDeltaDecodeKernel.Step? {
+        guard !training, let recState else { return nil }
+        let inputs = GatedDeltaDecodeKernel.Inputs(qkv: qkv, z: z, b: b, a: a)
+        let weights = decodeKernelWeights
+        guard
+            GatedDeltaDecodeKernel.canRun(
+                inputs: inputs, convState: convState, recurrentState: recState, weights: weights)
+        else { return nil }
+        return GatedDeltaDecodeKernel.step(
+            inputs: inputs, convState: convState, recurrentState: recState, weights: weights)
     }
 }

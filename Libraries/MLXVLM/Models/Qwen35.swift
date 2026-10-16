@@ -449,7 +449,7 @@ public enum Qwen35Language {
         }
     }
 
-    open class GatedDeltaNet: Module {
+    open class GatedDeltaNet: Module, GatedDeltaDecodeLayer {
         let hiddenSize: Int
         let numVHeads: Int
         let numKHeads: Int
@@ -552,6 +552,13 @@ public enum Qwen35Language {
 
         var hasFusedInputProjection: Bool { fusedInputProjection.isPrepared }
 
+        /// The weights of the layer that ``GatedDeltaDecodeKernel`` reads.
+        package var decodeKernelWeights: GatedDeltaDecodeKernel.Weights {
+            GatedDeltaDecodeKernel.Weights(
+                conv: conv1d.weight, aLog: aLog, dtBias: dtBias, norm: norm.weight,
+                normEps: norm.eps, keyHeadDim: headKDim)
+        }
+
         @discardableResult
         func prepareFusedInputProjection() throws -> Bool {
             try fusedInputProjection.prepare(
@@ -618,6 +625,14 @@ public enum Qwen35Language {
 
             if let mask {
                 mixedQKV = MLX.where(mask[.ellipsis, .newAxis], mixedQKV, 0)
+            } else if let cache,
+                let step = decodeKernelStep(
+                    qkv: mixedQKV, z: z, b: b, a: a, convState: convState, recState: cache[1])
+            {
+                cache[0] = step.convState
+                cache[1] = step.recurrentState
+                cache.advance(S)
+                return outProj(step.output)
             }
 
             let convInput = concatenated([convState, mixedQKV], axis: 1)
@@ -633,13 +648,13 @@ public enum Qwen35Language {
 
             var state = cache?[1]
             let dtype = q.dtype
-            let invScale = pow(Float(headKDim), -0.5)
+            let scales = GatedDeltaQueryKeyNorm.scales(keyHeadDim: headKDim)
             let qNormed =
-                MLXArray(pow(invScale, 2)).asType(dtype)
-                * MLXFast.rmsNorm(q, weight: MLXArray.mlxNone, eps: 1e-6)
+                MLXArray(scales.query).asType(dtype)
+                * MLXFast.rmsNorm(q, weight: MLXArray.mlxNone, eps: GatedDeltaQueryKeyNorm.eps)
             let kNormed =
-                MLXArray(invScale).asType(dtype)
-                * MLXFast.rmsNorm(k, weight: MLXArray.mlxNone, eps: 1e-6)
+                MLXArray(scales.key).asType(dtype)
+                * MLXFast.rmsNorm(k, weight: MLXArray.mlxNone, eps: GatedDeltaQueryKeyNorm.eps)
 
             let out: MLXArray
             if let split = checkpointAfter, split > 0, split < S {

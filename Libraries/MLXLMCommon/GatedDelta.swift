@@ -37,6 +37,30 @@ enum GatedDeltaAxis {
     static let width = 3
 }
 
+// MARK: - Query and key norm
+
+/// The q and k RMSNorm of the Qwen3-Next and Qwen 3.5 gated delta net layers.
+/// The op path of each layer and the weights of ``GatedDeltaDecodeKernel``
+/// read these values, thus the two paths normalize q and k the same way.
+package enum GatedDeltaQueryKeyNorm {
+    /// The epsilon of the q and k RMSNorm.
+    package static let eps: Float = 1e-6
+
+    /// The power of the key head width that gives the k factor:
+    /// `1 / sqrt(keyHeadDim)`.
+    private static let keyScalePower: Float = -0.5
+
+    /// The factors of the normalized q and k.
+    ///
+    /// - Parameter keyHeadDim: The width of one key head.
+    /// - Returns: The q factor `1 / keyHeadDim` and the k factor
+    ///   `1 / sqrt(keyHeadDim)`.
+    package static func scales(keyHeadDim: Int) -> (query: Float, key: Float) {
+        let keyScale = pow(Float(keyHeadDim), keyScalePower)
+        return (keyScale * keyScale, keyScale)
+    }
+}
+
 /// The ranks of the gate and of the mask of one step of the ops path.
 private enum GatedDeltaStepRank {
     /// One number for each sequence: `(batch)`.
