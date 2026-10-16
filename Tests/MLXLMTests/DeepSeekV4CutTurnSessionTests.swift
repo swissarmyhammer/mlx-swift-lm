@@ -163,20 +163,10 @@ struct DeepSeekV4CutTurnSessionTests {
     private static func session(
         model: ScriptedTokenModel, history: [Chat.Message], tokenBudget: Int
     ) -> ChatSession {
-        let tokenizer = DeepSeekV4EncodingTokenizer(wrapping: vocabulary)
-        let configuration = ModelConfiguration(
-            id: "deepseek-v4-cut-turn-test", toolCallFormat: .dsml,
-            reasoningConfig: DeepSeekV4EncodingTokenizer.reasoningConfig)
-        let context = ModelContext(
-            configuration: configuration, model: model,
-            processor: TestInputProcessor(
-                tokenizer: tokenizer, configuration: configuration,
-                messageGenerator: DefaultMessageGenerator()),
-            tokenizer: tokenizer)
-        let session = ChatSession(
-            context, history: history,
-            generateParameters: GenerateParameters(maxTokens: tokenBudget, temperature: 0))
-        session.thinkingEnabled = true
-        return session
+        ChatSession(
+            scripted: model, modelID: "deepseek-v4-cut-turn-test",
+            tokenizer: DeepSeekV4EncodingTokenizer(wrapping: vocabulary),
+            reasoningConfig: DeepSeekV4EncodingTokenizer.reasoningConfig, history: history,
+            tokenBudget: tokenBudget, thinkingEnabled: true)
     }
 }

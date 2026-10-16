@@ -396,23 +396,13 @@ struct ChatSessionReasoningHistoryTests {
         model: ScriptedTokenModel, reasoningConfig: ReasoningConfig?, thinking: ThinkingSetting,
         tokenizer: QwenHistoryTokenizer, tokenBudget: Int
     ) -> ChatSession {
-        let configuration = ModelConfiguration(
-            id: "qwen38-history-test", toolCallFormat: .qwen35,
-            reasoningConfig: reasoningConfig)
-        let context = ModelContext(
-            configuration: configuration, model: model,
-            processor: TestInputProcessor(
-                tokenizer: tokenizer, configuration: configuration,
-                messageGenerator: DefaultMessageGenerator()),
-            tokenizer: tokenizer)
-        let session = ChatSession(
-            context,
-            generateParameters: GenerateParameters(maxTokens: tokenBudget, temperature: 0),
+        ChatSession(
+            scripted: model, modelID: "qwen38-history-test", tokenizer: tokenizer,
+            reasoningConfig: reasoningConfig, tokenBudget: tokenBudget,
             additionalContext: thinking.templateFlag.map {
                 [QwenHistoryTokenizer.thinkingFlag: $0] as [String: any Sendable]
-            })
-        session.thinkingEnabled = thinking.sessionSwitch
-        return session
+            },
+            thinkingEnabled: thinking.sessionSwitch)
     }
 
     /// Runs one turn of `session` and returns its completion information.

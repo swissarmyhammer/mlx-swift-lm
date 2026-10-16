@@ -38,8 +38,51 @@ comments:
     - xcodebuild -only-testing DeepseekV4IntegrationTests + DeepseekV4AgenticPromptCacheAssessmentTests: 15 tests in 2 suites pass, TEST SUCCEEDED.
     - next: /review. The task stays in doing.
   timestamp: 2026-10-16T15:29:49.840660+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m52njp3cvzhqk6fqnm5qmdr2
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (dd228e6): 1 finding (1 confirmed, 2 refuted). Tests/MLXLMTests/DeepSeekV4CutTurnSessionTests.swift:163 reuse/reuse.
+    - next: Move the shared ChatSession test construction into one helper. Make the DeepSeek and the Qwen suites use it. Then do the review again.
+  timestamp: 2026-10-16T15:34:05.676011+00:00
+- actor: claude-code
+  id: 01m52nk9jv8mnzbms1rty4rcr7
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 18 files; Option A
+    - test: green — run on the final tree by implement: MLXLMTests 721 + 1522, MLXFoundationModelsTests 369, DeepSeek-V4 integration 15/15; 0 compiler warnings
+    - commit: dd228e6
+    - review: findings — Tests/MLXLMTests/DeepSeekV4CutTurnSessionTests.swift:163
+  timestamp: 2026-10-16T15:34:25.627719+00:00
+- actor: claude-code
+  id: 01m52ny6dgaqprc0zva0ba03bk
+  text: 'Fix of the reuse/reuse finding: the new file Tests/MLXLMTests/ScriptedChatSession.swift adds `ChatSession.init(scripted:modelID:tokenizer:reasoningConfig:history:tokenBudget:additionalContext:thinkingEnabled:)`. It builds the ModelConfiguration (the tool call format comes from the scripted model), the ModelContext, the TestInputProcessor and the greedy ChatSession one time. The DeepSeek-V4 suite gives `thinkingEnabled: true` and its history. The Qwen suite gives the `additionalContext` template flag and `thinkingEnabled: thinking.sessionSwitch`. Each suite keeps a short wrapper that gives only these settings. An empty history is the same as the init without history: `.history([])` and `.empty` both start a new cache with an empty conversation. No other test file of dd228e6 builds a ChatSession.'
+  timestamp: 2026-10-16T15:40:22.832242+00:00
+- actor: claude-code
+  id: 01m52nybj0kf57h2d131xjz5pa
+  text: |-
+    ### implement — changed
+    - evidence: 3 files — Tests/MLXLMTests/ScriptedChatSession.swift (new), Tests/MLXLMTests/DeepSeekV4CutTurnSessionTests.swift, Tests/MLXLMTests/ChatSessionReasoningHistoryTests.swift. `swift build --build-tests`: 0 warnings (only the known "missing creator for mutated node" note). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: XCTest 721 tests, 0 failures; Swift Testing 1522 tests in 127 suites pass, with ChatSessionReasoningHistoryTests and DeepSeekV4CutTurnSessionTests.
+    - next: review
+  timestamp: 2026-10-16T15:40:28.096538+00:00
+- actor: claude-code
+  id: 01m52p0rwhxkk6h2eqpjqqt3e8
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (8bbf032). 0 findings, 0 confirmed, 0 refuted. 7 validator runs, 0 failed. 3 files reviewed. 2 kanban files had no validator.
+    - next: none. All prior findings are checked. The task is in done.
+  timestamp: 2026-10-16T15:41:47.281552+00:00
+- actor: claude-code
+  id: 01m52p1c657405yyyyxtytgrt7
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 3 test files; one shared scripted ChatSession builder
+    - test: green — run on the final tree by implement: MLXLMTests 721 + 1522, 0 failures, 0 compiler warnings
+    - commit: 8bbf032
+    - review: clean — 0 findings; the prior finding is checked; task moved to done
+  timestamp: 2026-10-16T15:42:07.045478+00:00
+position_column: done
+position_ordinal: ffe280
 title: 'DeepSeek-V4 thinking mode: a turn cut by maxTokens before </think> renders differently cold and warm'
 ---
 ## What
@@ -76,3 +119,13 @@ Option A. The user asked to finish this task, and the orchestrator selected Opti
 
 `parse_message_from_completion_text` (mlx_lm `chat_templates/deepseek_v4.py`) reads the thinking part until `</think>` or the tool-call start, and asserts `stop_token == thinking_end_token` ("Invalid thinking format: missing </think>"). Then it asserts the EOS. Thus the reference cannot parse a turn cut by the token budget at all, and has no record for it. The record of this card is the record a caller gives the reference for such a turn (`reasoning_content=partial, content=""`), and the reference render of that record is `partial</think><｜end▁of▁sentence｜>` after `<｜Assistant｜><think>`. The Swift encoder writes the same text.
 #deepseek-v4
+
+## Review Findings (2026-10-16 10:30)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 18 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M4RVEA1XBB5GR66MBMF1MWAW.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M4RVEA1XBB5GR66MBMF1MWAW.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/DeepSeekV4CutTurnSessionTests.swift:163` `reuse/reuse` — The new `session(model:history:tokenBudget:)` rebuilds the same ModelConfiguration, ModelContext, TestInputProcessor and ChatSession wiring that the Qwen suite already builds in its own `session(model:reasoningConfig:thinking:tokenizer:tokenBudget:)`. The two copies must now stay in step by hand, and a fix to one will not reach the other. Move the shared construction into one helper, for example beside `PieceTokenizer` in Tests/MLXLMTests/PieceTokenizer.swift, that takes the model, tokenizer, reasoning config, template flag and token budget. Have both suites call it, and keep only the per-suite differences (the DeepSeek `thinkingEnabled = true` and the Qwen `additionalContext` flag) at the call sites.
