@@ -82,8 +82,8 @@ public enum Chat {
             }
 
             /// Tool calls emitted by an assistant message.
-            public static func calls(toolCalls: [ToolCall]) -> Self {
-                Self(storage: .calls(toolCalls))
+            public static func calls(_ calls: [ToolCall]) -> Self {
+                Self(storage: .calls(calls))
             }
 
             /// Identifies the assistant tool call answered by a tool message.
@@ -180,7 +180,7 @@ public enum Chat {
         ) -> Self {
             create(
                 role: .assistant, content: content, images: images, videos: videos,
-                tool: toolCalls.map { .calls(toolCalls: $0) }, reasoning: reasoning)
+                tool: toolCalls.map { .calls($0) }, reasoning: reasoning)
         }
 
         /// Creates a user message.
@@ -349,12 +349,19 @@ extension MessageGenerator {
         }
     }
 
+    /// Avoid truthy empty text parts on assistant tool calls.
+    /// Keep empty text parts elsewhere for templates that require nonempty lists.
     package func contentParts(
         for message: Chat.Message, layout: MessageContentLayout
     ) -> [[String: String]] {
         var parts: [[String: String]] = []
 
         func appendText(_ text: String) {
+            if text.isEmpty, message.role == .assistant, let calls = message.tool?.calls,
+                !calls.isEmpty
+            {
+                return
+            }
             parts.append(["type": "text", "text": text])
         }
 

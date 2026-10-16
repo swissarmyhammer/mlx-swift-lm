@@ -143,8 +143,8 @@ package struct PromptCacheState: Sendable {
     /// when absence matters.
     package var draftCacheIsAligned: Bool = true
 
-    /// Every cache supports rewinding.
-    package var isTrimmable: Bool = false
+    /// Exact rewind limit across all participating layers.
+    package var maxTrimCount: Int = 0
 }
 
 /// One reusability rule.
@@ -318,7 +318,7 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             && trimCount > 0
             && cache.mainCacheIsAligned
             && cache.draftCacheIsAligned
-            && cache.isTrimmable
+            && trimCount <= cache.maxTrimCount
             && !turn.carriesNewMedia
             && !turn.carriesPreparedMedia
             && !turn.carriesAttentionMask
@@ -446,7 +446,7 @@ package func reconcilePromptCache(
         previousRenderTokens: previousRenderTokens,
         processedTokenCount: caches.first?.offset ?? 0,
         mainCacheIsAligned: caches.allSatisfy { $0.offset == cachedTokens.count },
-        isTrimmable: canTrimPromptCache(caches))
+        maxTrimCount: caches.map(\.maxTrimCount).min() ?? 0)
 
     let verdict = PromptCacheReusePolicy(protocolRules: protocolRules).resolve(
         turn: turn, cache: cacheState)

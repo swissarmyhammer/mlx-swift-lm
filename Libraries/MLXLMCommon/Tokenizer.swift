@@ -35,6 +35,12 @@ public protocol Tokenizer: Sendable {
     /// - Returns: the token text, or `nil` when the ID is not in the vocabulary
     func convertIdToToken(_ id: Int) -> String?
 
+    /// Creates independent decoding state for one generated sequence.
+    /// Override to supply a tokenizer-specific incremental implementation.
+    ///
+    /// - Returns: a new detokenizer that holds no token yet
+    func makeStreamingDetokenizer() -> any StreamingDetokenizer
+
     /// The beginning-of-sequence token, or `nil` when the tokenizer does not
     /// define one.
     var bosToken: String? { get }
@@ -96,6 +102,14 @@ public protocol Tokenizer: Sendable {
 }
 
 extension Tokenizer {
+
+    /// The default streaming detokenizer: a ``NaiveStreamingDetokenizer`` over
+    /// this tokenizer.
+    ///
+    /// - Returns: a new detokenizer that holds no token yet
+    public func makeStreamingDetokenizer() -> any StreamingDetokenizer {
+        NaiveStreamingDetokenizer(tokenizer: self)
+    }
 
     /// Encodes text into token IDs, adding the tokenizer's special tokens.
     ///
@@ -352,6 +366,12 @@ public struct DeepSeekV4EncodingTokenizer: Tokenizer {
         base.convertIdToToken(id)
     }
 
+    /// Forwards to the wrapped tokenizer, which also decodes for this wrapper.
+    /// - Returns: a new detokenizer of the wrapped tokenizer.
+    public func makeStreamingDetokenizer() -> any StreamingDetokenizer {
+        base.makeStreamingDetokenizer()
+    }
+
     /// The beginning-of-sequence token of the wrapped tokenizer.
     public var bosToken: String? { base.bosToken }
 
@@ -415,15 +435,27 @@ public enum TokenizerError: LocalizedError {
     }
 }
 
-/// An incremental detokenizer: tokens are appended one at a time and
-/// ``IteratorProtocol/next()`` yields the newly decoded text — or `nil` when
-/// the appended tokens do not yet form a complete unicode character.
+/// An incremental detokenizer for one generated sequence: tokens are appended
+/// one at a time and ``IteratorProtocol/next()`` yields the newly decoded text,
+/// or `nil` until more tokens arrive. Preserve special tokens for downstream
+/// protocol parsing. Custom implementations should emit stable text, holding
+/// incomplete bytes or context-dependent suffixes as needed.
 public protocol StreamingDetokenizer: IteratorProtocol<String> {
 
     /// Appends a token to the stream to be decoded.
     ///
     /// - Parameter token: the token ID to append
     mutating func append(token: Int)
+
+    /// Ends the sequence and returns all remaining text, including any unread output.
+    /// Call after the last token and before finishing downstream parsers. Repeated calls
+    /// return nil. Create a new decoder before appending another sequence.
+    mutating func finish() -> String?
+}
+
+extension StreamingDetokenizer {
+    /// Preserves the legacy behavior for decoders without a final flush operation.
+    public mutating func finish() -> String? { nil }
 }
 
 /// A ``StreamingDetokenizer`` that decodes by re-running the tokenizer's

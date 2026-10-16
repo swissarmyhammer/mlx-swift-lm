@@ -973,20 +973,18 @@ struct PromptCacheTemplateRestoreTests {
         Self.expectSameContents(restored, source, "registered cache")
     }
 
-    @Test("An unregistered cache class saves as KVCache, and its load throws KVCacheError")
-    func unregisteredClassSavesAsSimpleCache() throws {
+    @Test("A cache class with no serialized class name throws KVCacheError on the save")
+    func unnamedClassDoesNotSave() throws {
         let url = Self.temporaryURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let className = try Self.savedFirstClassName([Self.filled(CustomSlotCache())], url: url)
         let error = #expect(throws: KVCacheError.self) {
-            try loadPromptCacheSnapshot(url: url)
+            try savePromptCache(url: url, cache: [Self.filled(CustomSlotCache())])
         }
 
-        #expect(className == "KVCache")
         #expect(
-            error?.message == "Corrupt prompt cache: invalid KVCacheSimple state or metadata shape."
-        )
+            error?.message == "CustomSlotCache has no serializedClassName, so it cannot be saved")
+        #expect(!FileManager.default.fileExists(atPath: url.path))
     }
 
     @Test("The registry check of a built-in part throws for a cache that is not a built-in leaf")
@@ -998,7 +996,7 @@ struct PromptCacheTemplateRestoreTests {
 
         for cache in caches {
             let error = #expect(throws: KVCacheError.self) {
-                try KVCacheSerializationRegistry.validate(
+                try validateBuiltInPromptCache(
                     state: saved.state, metaState: saved.metaState, for: cache)
             }
             #expect(
@@ -1037,7 +1035,10 @@ struct PromptCacheTemplateRestoreTests {
         let error = #expect(throws: KVCacheError.self) {
             try loadPromptCacheSnapshot(url: url)
         }
-        #expect(error?.message == "Unknown cache class: \(Self.unknownClassName)")
+        #expect(
+            error?.message
+                == "Unknown cache class: \(Self.unknownClassName). "
+                + "Register custom cache types with registerKVCacheType(_:).")
     }
 
     @Test("A file with an unknown class name does not restore into a KVCacheSimple template")
@@ -1561,7 +1562,7 @@ enum QuantizedConfigurationMismatch: String, CaseIterable, CustomTestStringConve
 
 // MARK: - Cache classes outside the library
 
-/// A cache class outside the library that no registry entry names, and that is not
+/// A cache class outside the library that has no serialized class name, and that is not
 /// `PromptCacheRestorable`. A filled instance holds more arrays than a `KVCacheSimple`.
 class CustomSlotCache: BaseKVCache {
     /// The arrays of the cache.
@@ -1574,20 +1575,27 @@ class CustomSlotCache: BaseKVCache {
     }
 }
 
-/// A cache class outside the library that `KVCacheSerializationRegistry` names, and that is not
+/// A cache class outside the library that the cache type registry names, and that is not
 /// `PromptCacheRestorable`.
 final class RegisteredSlotCache: CustomSlotCache {
     /// The class name that the registry holds for this class.
     static let className = "RegisteredSlotCache"
 
-    /// Registers the class one time, before the first instance exists.
-    private static let registration: Void = KVCacheSerializationRegistry.register(
-        RegisteredSlotCache.self, className: className
-    ) { state, _ in
+    /// The class name of the cache in a prompt cache file.
+    override class var serializedClassName: String? { className }
+
+    /// Rebuilds the cache from its saved arrays.
+    override class func restore(state: [MLXArray], metaState: [String]) throws -> any KVCache {
         let cache = RegisteredSlotCache()
         cache.slots = state
         return cache
     }
+
+    /// Registers the class one time, before the first instance exists.
+    private static let registration: Void = {
+        // The name is a constant that no other type uses, thus the registration cannot fail.
+        try! registerKVCacheType(RegisteredSlotCache.self)
+    }()
 
     /// Makes an empty cache, after the registration of the class.
     override init() {

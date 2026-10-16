@@ -89,7 +89,7 @@ struct DSMLCommittedTurnRuleTests {
             mainCacheIsAligned: processedTokenCount == cached.count,
             hasDraftCache: hasDraft,
             draftCacheIsAligned: draftAligned,
-            isTrimmable: true)
+            maxTrimCount: processedTokenCount)
     }
 
     // MARK: - Splicing

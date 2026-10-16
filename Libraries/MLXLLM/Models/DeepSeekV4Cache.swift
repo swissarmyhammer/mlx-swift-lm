@@ -972,7 +972,7 @@ public final class DeepSeekV4Cache: KVCache {
 
 extension DeepSeekV4Cache: PromptCacheRestorable {
     /// The class name that `savePromptCache` writes for this cache.
-    public static let promptCacheClassName = "DeepSeekV4Cache"
+    public static var serializedClassName: String? { "DeepSeekV4Cache" }
 
     /// Checks a saved state and meta state before any setter reads them.
     ///
@@ -995,7 +995,7 @@ extension DeepSeekV4Cache: PromptCacheRestorable {
             )
         }
         let parts = Self.stateParts(state)
-        try KVCacheSerializationRegistry.validate(
+        try validateBuiltInPromptCache(
             state: parts.window, metaState: Array(metaState.dropLast()), for: local)
         try attentionChunks.validateRestore(state: parts.attention)
         if let indexerChunks {

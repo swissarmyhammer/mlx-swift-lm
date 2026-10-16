@@ -52,7 +52,7 @@ struct QwenCommittedTurnRuleTests {
             previousRenderTokens: previousRender,
             processedTokenCount: processedTokenCount,
             mainCacheIsAligned: processedTokenCount == cached.count,
-            isTrimmable: false)
+            maxTrimCount: 0)
     }
 
     // MARK: - Splicing

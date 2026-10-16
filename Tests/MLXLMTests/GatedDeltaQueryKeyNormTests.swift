@@ -39,7 +39,8 @@ struct GatedDeltaQueryKeyNormTests {
     static func reference(_ rows: MLXArray, factor: Float) -> MLXArray {
         let rows = rows.asType(.float32)
         let meanSquare = mean(rows * rows, axis: -1, keepDims: true)
-        return factor * rows * rsqrt(meanSquare + GatedDeltaQueryKeyNorm.eps)
+        let eps = GatedDeltaQueryKeyNorm.eps(keyHeadDim: rows.dim(-1))
+        return factor * rows * rsqrt(meanSquare + eps)
     }
 
     @Test(arguments: keyHeadDims, Fixture.dtypes)

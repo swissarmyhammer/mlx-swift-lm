@@ -260,8 +260,11 @@ extension ReasoningEventEmitter {
     /// Whether the tokens of a rendered prompt end inside an open reasoning
     /// block.
     ///
-    /// The probe decodes only the last ``promptProbeTailTokenCount`` tokens and
+    /// The probe decodes the last ``promptProbeTailTokenCount`` tokens and
     /// reads them with ``promptEndsInsideReasoning(renderedPromptTail:config:)``.
+    /// When trailing whitespace fills that tail, the probe decodes a tail of
+    /// two times the tokens, until the text before the whitespace can hold
+    /// the start delimiter or the tail is the whole prompt.
     ///
     /// - Parameters:
     ///   - promptTokens: the tokens of the rendered prompt.
@@ -271,8 +274,15 @@ extension ReasoningEventEmitter {
     public static func promptEndsInsideReasoning(
         promptTokens: [Int], config: ReasoningConfig, tokenizer: any Tokenizer
     ) -> Bool {
-        let tail = tokenizer.decode(tokenIds: Array(promptTokens.suffix(promptProbeTailTokenCount)))
-        return promptEndsInsideReasoning(renderedPromptTail: tail, config: config)
+        var count = min(promptProbeTailTokenCount, promptTokens.count)
+        while true {
+            let tail = tokenizer.decode(tokenIds: Array(promptTokens.suffix(count)))
+            let textBeforeWhitespace = tail.reversed().drop(while: \.isWhitespace).count
+            if textBeforeWhitespace >= config.startDelimiter.count || count == promptTokens.count {
+                return promptEndsInsideReasoning(renderedPromptTail: tail, config: config)
+            }
+            count = min(promptTokens.count, count * 2)
+        }
     }
 
     /// Separates a whole generated text into its reasoning and its response.

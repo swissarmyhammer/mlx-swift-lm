@@ -1513,22 +1513,13 @@ public final class MiniMaxM3KVCache: KVCache {
     /// regular K/V buffers, has no maximum size limit.
     public var maxSize: Int? { nil }
 
-    /// Registers `MiniMaxM3KVCache` with `KVCacheSerializationRegistry` so
-    /// `savePromptCache`/`loadPromptCache` round-trip it correctly instead of
-    /// silently misclassifying it as a plain `KVCacheSimple` (which only
-    /// accepts a 2-array state and crashes once an `indexKeys` history is
-    /// present). Triggered once, lazily, from `init()` below -- guaranteed to
-    /// run before any instance could be saved.
+    /// Registers `MiniMaxM3KVCache` for prompt cache files, so that
+    /// `loadPromptCacheSnapshot(url:)` in a new process can restore it.
+    /// Triggered once, lazily, from `init()` below -- guaranteed to run before
+    /// any instance could be saved.
     private static let registerSerialization: Void = {
-        KVCacheSerializationRegistry.register(
-            MiniMaxM3KVCache.self, className: promptCacheClassName
-        ) {
-            state, metaState in
-            let cache = MiniMaxM3KVCache()
-            cache.state = state
-            cache.metaState = metaState
-            return cache
-        }
+        // The name is a constant that no other type uses, thus the registration cannot fail.
+        try! registerKVCacheType(MiniMaxM3KVCache.self)
     }()
 
     /// Creates an empty sparse-attention KV cache.
@@ -1671,9 +1662,24 @@ public final class MiniMaxM3KVCache: KVCache {
 }
 
 extension MiniMaxM3KVCache: PromptCacheRestorable {
-    /// The class name that `savePromptCache` writes for this cache. It is the name that
-    /// `KVCacheSerializationRegistry` holds for this type.
-    public static let promptCacheClassName = "MiniMaxM3KVCache"
+    /// The class name that `savePromptCache` writes for this cache.
+    public static var serializedClassName: String? { "MiniMaxM3KVCache" }
+
+    /// Rebuilds the cache from the values that a prompt cache file saved. The
+    /// values pass the check of ``validatePromptCacheRestore(state:metaState:)``
+    /// before any setter reads them.
+    ///
+    /// - Parameters:
+    ///   - state: The saved arrays: the keys and the values, then the index keys when present.
+    ///   - metaState: The saved meta state: the index-key count.
+    /// - Returns: The cache, with the saved values.
+    /// - Throws: `KVCacheError` when the values are not a state of this cache.
+    public static func restore(state: [MLXArray], metaState: [String]) throws -> any KVCache {
+        let cache = MiniMaxM3KVCache()
+        try cache.validatePromptCacheRestore(state: state, metaState: metaState)
+        cache.restorePromptCache(state: state, metaState: metaState)
+        return cache
+    }
 
     /// The rank of the keys, the values and the index keys: `[batch, heads, tokens, headDim]`.
     private static let savedArrayRank = 4

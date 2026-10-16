@@ -43,8 +43,21 @@ enum GatedDeltaAxis {
 /// The op path of each layer and the weights of ``GatedDeltaDecodeKernel``
 /// read these values, thus the two paths normalize q and k the same way.
 package enum GatedDeltaQueryKeyNorm {
+    /// The epsilon that the reference l2norm adds to the sum of the squares
+    /// of a row: `x / sqrt(sum(x^2) + 1e-6)`.
+    private static let sumOfSquaresEps: Float = 1e-6
+
     /// The epsilon of the q and k RMSNorm.
-    package static let eps: Float = 1e-6
+    ///
+    /// RMSNorm adds its epsilon to the mean of the squares, and the reference
+    /// l2norm adds its epsilon to the sum of the squares. Thus the RMSNorm
+    /// epsilon is the l2norm epsilon divided by the key head width.
+    ///
+    /// - Parameter keyHeadDim: The width of one key head.
+    /// - Returns: The epsilon to add to the mean of the squares of a row.
+    package static func eps(keyHeadDim: Int) -> Float {
+        sumOfSquaresEps / Float(keyHeadDim)
+    }
 
     /// The power of the key head width that gives the k factor:
     /// `1 / sqrt(keyHeadDim)`.
@@ -71,7 +84,9 @@ package enum GatedDeltaQueryKeyNorm {
     package static func normalized(query: MLXArray, key: MLXArray, dtype: DType) -> (
         query: MLXArray, key: MLXArray
     ) {
-        let scales = scales(keyHeadDim: query.dim(GatedDeltaAxis.width))
+        let keyHeadDim = query.dim(GatedDeltaAxis.width)
+        let scales = scales(keyHeadDim: keyHeadDim)
+        let eps = eps(keyHeadDim: keyHeadDim)
         return (
             MLXArray(scales.query).asType(dtype)
                 * MLXFast.rmsNorm(query, weight: MLXArray.mlxNone, eps: eps),

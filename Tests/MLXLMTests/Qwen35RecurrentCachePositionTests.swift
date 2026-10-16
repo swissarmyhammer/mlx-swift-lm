@@ -41,6 +41,23 @@ struct Qwen35RecurrentCachePositionTests {
             from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
     }
 
+    /// The text configuration of a hybrid model: ``hybridLayerCount`` layers,
+    /// with one full-attention layer for each ``hybridFullAttentionInterval``
+    /// layers.
+    ///
+    /// The decoder resolves the layer schedule from these two values, thus the
+    /// JSON gives them. A change to the values after the decode does not change
+    /// the schedule.
+    private func hybridTextConfiguration() throws -> MLXLLM.Qwen35TextConfiguration {
+        try JSONDecoder().decode(
+            MLXLLM.Qwen35TextConfiguration.self,
+            from: Data(
+                qwen35TextConfigJSON(
+                    mtpLayers: 1, hiddenLayers: Self.hybridLayerCount,
+                    fullAttentionInterval: Self.hybridFullAttentionInterval
+                ).utf8))
+    }
+
     /// The vision-language text configuration of the small models of this
     /// suite.
     private func visionTextConfiguration() throws
@@ -122,8 +139,7 @@ struct Qwen35RecurrentCachePositionTests {
 
     @Test("the compiled decode of a linear layer advances its cache by one")
     func theCompiledDecodeOfALinearLayerAdvancesItsCacheByOne() throws {
-        var configuration = try textConfiguration()
-        configuration.fullAttentionInterval = Self.hybridFullAttentionInterval
+        let configuration = try hybridTextConfiguration()
         let layer = MLXLLM.Qwen35DecoderLayer(configuration, layerIdx: 0)
         #expect(layer.isLinear, "the premise: layer 0 of a two-layer interval is linear")
         let cache = MambaCache()
@@ -137,9 +153,7 @@ struct Qwen35RecurrentCachePositionTests {
 
     @Test("every cache of a hybrid text model holds the position after prefill and decode")
     func everyCacheOfAHybridTextModelHoldsThePositionAfterPrefillAndDecode() throws {
-        var configuration = try textConfiguration()
-        configuration.hiddenLayers = Self.hybridLayerCount
-        configuration.fullAttentionInterval = Self.hybridFullAttentionInterval
+        let configuration = try hybridTextConfiguration()
         let model = MLXLLM.Qwen35TextModel(configuration)
         let caches = try model.newCache(parameters: nil)
         #expect(

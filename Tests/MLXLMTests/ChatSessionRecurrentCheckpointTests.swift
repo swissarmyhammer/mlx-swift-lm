@@ -182,10 +182,15 @@ struct ChatSessionRecurrentCheckpointTests {
     /// A small hybrid Qwen 3.5 model with a tokenizer that writes past turns in
     /// `historyShape`.
     private func hybridContext(historyShape: HistoryShape) throws -> ModelContext {
+        // The decoder resolves the layer schedule from the layer count and the
+        // interval, thus the JSON gives them.
         var configuration = try JSONDecoder().decode(
-            Qwen35TextConfiguration.self, from: Data(qwen35TextConfigJSON(mtpLayers: 0).utf8))
-        configuration.hiddenLayers = Self.hybridLayerCount
-        configuration.fullAttentionInterval = Self.hybridFullAttentionInterval
+            Qwen35TextConfiguration.self,
+            from: Data(
+                qwen35TextConfigJSON(
+                    mtpLayers: 0, hiddenLayers: Self.hybridLayerCount,
+                    fullAttentionInterval: Self.hybridFullAttentionInterval
+                ).utf8))
         configuration.vocabularySize = TemplateToken.vocabularySize
         MLXRandom.seed(Self.weightSeed)
         let model = Qwen35TextModel(configuration)

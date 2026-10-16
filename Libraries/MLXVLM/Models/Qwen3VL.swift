@@ -1018,7 +1018,9 @@ enum Qwen3VLVision {
             return (hiddenStates, deepstackOutputs)
         }
 
-        func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        static func sanitize(
+            weights: [String: MLXArray], config: Qwen3VLConfiguration.VisionConfiguration
+        ) -> [String: MLXArray] {
             var sanitized: [String: MLXArray] = [:]
             for (key, value) in weights {
                 if key.contains("position_ids") {
@@ -1034,6 +1036,10 @@ enum Qwen3VLVision {
                 }
             }
             return sanitized
+        }
+
+        func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+            Self.sanitize(weights: weights, config: config)
         }
     }
 }
@@ -2013,6 +2019,20 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
     }
 }
 
+extension Qwen3VL: PreparedInputSplitting {
+
+    public func splitPreparedInput(_ input: LMInput, droppingFirst prefixTokenCount: Int)
+        -> LMInput?
+    {
+        QwenVL.splitPreparedInput(
+            input,
+            droppingFirst: prefixTokenCount,
+            imageTokenId: config.imageTokenIndex,
+            videoTokenId: config.videoTokenIndex,
+            mergeSize: config.visionConfiguration.spatialMergeSize)
+    }
+}
+
 extension Array where Element == THW {
     fileprivate var nilIfEmpty: [THW]? { isEmpty ? nil : self }
 }
@@ -2033,6 +2053,7 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
     public init() {}
 
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
+        let message = Self.separatingImportedReasoning(message)
         var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
             "content": contentParts(for: message, layout: .imagesThenVideosThenText),
@@ -2044,6 +2065,37 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
         // from the tokens the model wrote and the prompt cache starts cold.
         addReasoningMetadata(to: &dictionary, for: message)
         return dictionary
+    }
+
+    /// The message with a completed think block at the start of its content
+    /// moved to ``Chat/Message/reasoning``.
+    ///
+    /// A history that a caller imports can keep the reasoning of an assistant
+    /// turn inside its content. The Qwen 3.8 chat template reads the reasoning
+    /// of a past turn only from `reasoning_content`, thus without this move it
+    /// renders the block as an answer. The move keeps all whitespace, because
+    /// the template trims the two parts itself.
+    ///
+    /// These messages stay as they are: a message that is not an assistant
+    /// turn, a message that already carries its reasoning (a turn that
+    /// ``ChatSession`` recorded), a content that does not start with the open
+    /// delimiter, and a block that does not close.
+    ///
+    /// - Parameter message: The structured chat message to convert.
+    /// - Returns: The message, with its completed think block apart from the
+    ///   content when it has one.
+    private static func separatingImportedReasoning(_ message: Chat.Message) -> Chat.Message {
+        let startDelimiter = QwenReasoningProtocol.tagged.startDelimiter
+        let endDelimiter = QwenReasoningProtocol.tagged.endDelimiter
+        guard message.role == .assistant, message.reasoning == nil,
+            message.content.hasPrefix(startDelimiter)
+        else { return message }
+        let block = message.content.dropFirst(startDelimiter.count)
+        guard let end = block.range(of: endDelimiter) else { return message }
+        var separated = message
+        separated.reasoning = String(block[..<end.lowerBound])
+        separated.content = String(block[end.upperBound...])
+        return separated
     }
 }
 

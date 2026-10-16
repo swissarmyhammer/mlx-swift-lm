@@ -2075,7 +2075,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 tokenizer: context.tokenizer,
                 tools: toolSpecs,
                 stopStrings: context.configuration.effectiveStopStrings)
-            var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+            var detokenizer = context.tokenizer.makeStreamingDetokenizer()
             var result = AllowedToolGenerationResult()
             var preparedState: LMOutput.State?
             let (stream, task) = try Self.startTrackedGeneration {
@@ -2463,7 +2463,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Routes thinking delimited by the model's reasoning markers to
         /// `.reasoning` events and the rest to `.response`, using a raw
         /// protocol-neutral token decoder when the format owns framing, or a
-        /// self-owned `NaiveStreamingDetokenizer` for ordinary formats. The loop
+        /// self-owned `StreamingDetokenizer` for ordinary formats. The loop
         /// sees real token IDs for an accurate reasoning token count.
         private func runReasoning(
             input: LMInput,
@@ -2498,7 +2498,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 tokenizer: context.tokenizer,
                 tools: nil,
                 stopStrings: context.configuration.effectiveStopStrings)
-            var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+            var detokenizer = context.tokenizer.makeStreamingDetokenizer()
             var reasoningTokenCount = 0
             var completionInfo: GenerateCompletionInfo?
             // Surfaced as a thrown error, as on the schema and allowed-tool

@@ -547,7 +547,7 @@ extension GatedDeltaDecodeLayer {
         let scales = GatedDeltaQueryKeyNorm.scales(keyHeadDim: headKDim)
         return GatedDeltaDecodeKernel.Weights(
             conv: conv1d.weight, aLog: aLog, dtBias: dtBias, norm: norm.weight,
-            normEps: norm.eps, queryKeyNormEps: GatedDeltaQueryKeyNorm.eps,
+            normEps: norm.eps, queryKeyNormEps: GatedDeltaQueryKeyNorm.eps(keyHeadDim: headKDim),
             queryScale: scales.query, keyScale: scales.key)
     }
 

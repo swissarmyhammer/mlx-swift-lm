@@ -4,6 +4,7 @@ import CoreImage
 import Foundation
 import MLX
 import MLXNN
+import MLXScriptedLM
 import Testing
 
 @testable import MLXLMCommon
@@ -883,9 +884,9 @@ struct MiniMaxM3Tests {
         // (KVCacheSimple) class name. Loading that back tried to assign a
         // 3-array state (keys, values, indexKeys) to a plain KVCacheSimple,
         // which only accepts 2 -- "MLXLMCommon/KVCache.swift:444: Fatal
-        // error: KVCacheSimple state must have exactly 2 arrays". Fixed via
-        // `KVCacheSerializationRegistry`, which MiniMaxM3KVCache registers
-        // itself into.
+        // error: KVCacheSimple state must have exactly 2 arrays". Fixed by the
+        // `serializedClassName` of MiniMaxM3KVCache, which registers the type
+        // with `registerKVCacheType(_:)`.
         let denseCache = KVCacheSimple()
         _ = denseCache.update(
             keys: MLXArray.zeros([1, 2, 3, 4]), values: MLXArray.zeros([1, 2, 3, 4]))
@@ -1383,7 +1384,8 @@ struct MiniMaxM3Tests {
             { "processor_class": "MiniMaxM3VLProcessor" }
             """.utf8)
         let processor = try await VLMProcessorTypeRegistry.shared.createModel(
-            configuration: data, processorType: "MiniMaxM3VLProcessor", tokenizer: TestTokenizer())
+            configuration: data, processorType: "MiniMaxM3VLProcessor",
+            tokenizer: PseudoWordTokenizer())
         #expect(processor is MiniMaxM3Processor)
     }
 
@@ -1426,7 +1428,7 @@ struct MiniMaxM3Tests {
     @Test("MiniMaxM3Processor tokenizes plain text prompts")
     func processorTokenizesTextPrompt() async throws {
         let processor = MiniMaxM3Processor(
-            MiniMaxM3ProcessorConfiguration(), tokenizer: TestTokenizer())
+            MiniMaxM3ProcessorConfiguration(), tokenizer: PseudoWordTokenizer())
         let input = try await processor.prepare(input: UserInput(prompt: "2+2="))
         #expect(input.text.tokens.size > 0)
         #expect(input.image == nil)
@@ -1435,10 +1437,10 @@ struct MiniMaxM3Tests {
 
     /// Deterministic stand-in tokenizer for exercising MiniMax-M3's
     /// image-placeholder chat-template splicing without a real BPE tokenizer
-    /// or Jinja renderer -- `TestTokenizer` can't be used here since its
-    /// `encode(text:)`/`applyChatTemplate` are both random and
-    /// content-independent, so a real placeholder-token occurrence could
-    /// never be found in its output.
+    /// or Jinja renderer -- `PseudoWordTokenizer` can't be used here since it
+    /// maps each unknown word to a hash and its template knows no image
+    /// block, so a real placeholder-token occurrence could never be found in
+    /// its output.
     ///
     /// `encode(text:)` maps each Unicode scalar to its integer value, so
     /// concatenated text always encodes to concatenated tokens (keeping
@@ -1516,9 +1518,9 @@ struct MiniMaxM3Tests {
         "MiniMaxM3Processor throws a descriptive error for image input when no chat template is configured"
     )
     func processorThrowsForImageInputWithoutChatTemplate() async throws {
-        // TestTokenizer's `applyChatTemplate` never throws
-        // `TokenizerError.missingChatTemplate` (it just returns random
-        // tokens), so this exercises the real "no template" failure via the
+        // PseudoWordTokenizer's `applyChatTemplate` never throws
+        // `TokenizerError.missingChatTemplate` (it renders its scripted
+        // template), so this exercises the real "no template" failure via the
         // fake tokenizer's own default `Tokenizer` extension instead: a
         // tokenizer with no chat template configured can't render the image
         // placeholder markup, so the image path must propagate a clear
@@ -1555,7 +1557,7 @@ struct MiniMaxM3Tests {
     @Test("MiniMaxM3Processor throws a descriptive error for video input instead of ignoring it")
     func processorThrowsForVideoInput() async throws {
         let processor = MiniMaxM3Processor(
-            MiniMaxM3ProcessorConfiguration(), tokenizer: TestTokenizer())
+            MiniMaxM3ProcessorConfiguration(), tokenizer: PseudoWordTokenizer())
         let video = UserInput.Video.url(URL(fileURLWithPath: "/nonexistent/video.mp4"))
 
         do {

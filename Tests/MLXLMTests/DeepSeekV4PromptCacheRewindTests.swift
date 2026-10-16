@@ -132,10 +132,17 @@ struct DeepSeekV4PromptCacheRewindTests {
 
     /// The gap card ^2nztex1 names. `rewindPromptCache` is what the
     /// `MLXFoundationModels` executor asked to take this cache back to the
-    /// render of the turn, and past the window it lands nowhere. A ledger that
-    /// names the render PLUS the generated tokens asks for no rewind, thus the
-    /// executor now keeps that ledger.
-    @Test func aPromptCachePastTheSlidingWindowRewindsToNoEarlierPosition() throws {
+    /// render of the turn. A ledger that names the render PLUS the generated
+    /// tokens asks for no rewind, thus the executor keeps that ledger.
+    ///
+    /// The counted rewind of `RotatingKVCache` (`maxTrimCount`) now gives
+    /// this cache a short rewind past the window: a block of keys that one
+    /// update wrote stays whole until the next update, thus the cache can drop
+    /// the last tokens of that block exactly. `canTrimPromptCache(_:)` still
+    /// answers false, because the cache cannot go back to ANY earlier position.
+    /// A `DeepSeekV4Cache` reports no counted rewind past the window, thus a
+    /// checkpoint with a compressor still lands nowhere.
+    @Test func aPromptCachePastTheSlidingWindowRewindsTheLastTokensOfABlock() throws {
         let (configuration, caches) = try Self.newCache()
         Self.feed(caches, of: configuration, tokenCount: Self.tokenCountPastTheWindow)
 
@@ -144,13 +151,13 @@ struct DeepSeekV4PromptCacheRewindTests {
         let renderTokenCount = Self.tokenCountPastTheWindow - 1
 
         #expect(
-            !rewindPromptCache(caches, to: renderTokenCount),
+            rewindPromptCache(caches, to: renderTokenCount),
             """
-            a prompt cache of \(Self.tokenCountPastTheWindow) tokens rewound to \
+            a prompt cache of \(Self.tokenCountPastTheWindow) tokens did not rewind to \
             \(renderTokenCount), past the \(configuration.slidingWindow)-token window.
             """)
         #expect(
-            caches.allSatisfy { $0.offset == Self.tokenCountPastTheWindow },
-            "a rewind that does not land leaves every cache where it stood")
+            caches.allSatisfy { $0.offset == renderTokenCount },
+            "a rewind that lands takes every cache to the same position")
     }
 }
