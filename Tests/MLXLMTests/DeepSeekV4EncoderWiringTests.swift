@@ -152,7 +152,8 @@ struct DeepSeekV4EncoderWiringTests {
     func thinkingModeTurnOneRenderIsATurnTwoPrefix() throws {
         let processor = try makeDeepSeekV4Processor()
         // `ChatSession` records the whole generated text as the content of
-        // the turn, because DeepSeek-V4 declares no reasoning decoder.
+        // the turn, because the reasoning protocol of DeepSeek-V4 does not
+        // replay reasoning into history.
         let generated =
             Self.firstReasoning + DeepSeekV4ChatEncoder.SpecialToken.thinkEnd + Self.firstAnswer
 
@@ -382,23 +383,40 @@ struct DeepSeekV4EncoderWiringTests {
         }
     }
 
-    @Test("a ChatSession over a DeepSeek-V4 model prompts through the encoder")
-    func chatSessionUsesTheEncoder() async throws {
+    /// Tokens each turn of a session over the synthetic model generates.
+    private static let sessionTokenBudget = 2
+
+    /// A session over the synthetic DeepSeek-V4 model, whose prompt tokenizer
+    /// wraps `recorder`.
+    ///
+    /// - Parameters:
+    ///   - configuration: the configuration of the model context.
+    ///   - recorder: the tokenizer that records every text the session encodes.
+    /// - Returns: the session.
+    private func makeRecordingSession(
+        configuration: ModelConfiguration, recorder: RecordingByteTokenizer
+    ) throws -> ChatSession {
         let model = DeepSeekV4Model(try DeepSeekV4SyntheticCheckpoint.configuration())
         eval(model)
-        let recorder = RecordingByteTokenizer()
         let tokenizer = model.promptTokenizer(wrapping: recorder)
         let processor = LLMUserInputProcessor(
             tokenizer: tokenizer,
-            configuration: ModelConfiguration(id: "test/deepseek-v4-synthetic"),
+            configuration: configuration,
             messageGenerator: DefaultMessageGenerator(),
             missingChatTemplateRefusal: model.missingChatTemplateRefusal)
         let context = ModelContext(
-            configuration: processor.configuration, model: model, processor: processor,
+            configuration: configuration, model: model, processor: processor,
             tokenizer: tokenizer)
+        return ChatSession(
+            context, generateParameters: GenerateParameters(maxTokens: Self.sessionTokenBudget))
+    }
 
-        let session = ChatSession(
-            context, generateParameters: GenerateParameters(maxTokens: 2))
+    @Test("a ChatSession over a DeepSeek-V4 model prompts through the encoder")
+    func chatSessionUsesTheEncoder() async throws {
+        let recorder = RecordingByteTokenizer()
+        let session = try makeRecordingSession(
+            configuration: ModelConfiguration(id: "test/deepseek-v4-synthetic"),
+            recorder: recorder)
         _ = try await session.respond(to: "Hello")
 
         let prompt = try #require(recorder.encodedPrompts.first)
@@ -514,5 +532,57 @@ struct DeepSeekV4EncoderWiringTests {
         #expect(
             text.contains(Self.publishedWeatherSchemaLine),
             "the prompt must carry the schema of the offered tool")
+    }
+
+    // MARK: - The thinking switch of the session
+
+    /// One value of the thinking switch of a session, and the generation mode
+    /// that the prompt must then ask for.
+    struct ThinkingSwitchCase: Sendable, CustomTestStringConvertible {
+        /// The name of the case in the test report.
+        let name: String
+        /// The thinking switch of the session, or nil when the switch is not set.
+        let sessionSwitch: Bool?
+        /// The generation mode of the prompt that the encoder must render.
+        let mode: DeepSeekV4ChatEncoder.ThinkingMode
+
+        var testDescription: String { name }
+    }
+
+    /// The cases, one row for each value of the switch.
+    static let thinkingSwitchCases: [ThinkingSwitchCase] = [
+        ThinkingSwitchCase(
+            name: "the control: no switch keeps the encoder default, thinking",
+            sessionSwitch: nil, mode: .thinking),
+        ThinkingSwitchCase(
+            name: "the switch on: the prompt opens the reasoning",
+            sessionSwitch: true, mode: .thinking),
+        ThinkingSwitchCase(
+            name: "the switch off: the prompt closes the reasoning",
+            sessionSwitch: false, mode: .chat),
+    ]
+
+    /// The prompt of a session over a loaded DeepSeek-V4 checkpoint asks for
+    /// the generation mode that the thinking switch of the session states.
+    ///
+    /// The configuration comes from the production load, thus the test reads
+    /// the reasoning protocol that the model declares.
+    @Test(arguments: thinkingSwitchCases)
+    func theSessionThinkingSwitchSelectsTheGenerationMode(_ row: ThinkingSwitchCase) async throws {
+        let directory = try writeSyntheticCheckpoint()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let loaded = try await loadSyntheticCheckpoint(at: directory)
+        let recorder = RecordingByteTokenizer()
+        let session = try makeRecordingSession(
+            configuration: loaded.configuration, recorder: recorder)
+        session.thinkingEnabled = row.sessionSwitch
+
+        _ = try await session.respond(to: Self.firstQuestion)
+
+        let expected = DeepSeekV4ChatEncoder().encode(
+            messages: [.user(content: Self.firstQuestion)], thinkingMode: row.mode)
+        #expect(
+            recorder.encodedPrompts.contains(expected),
+            "prompts <<<\(recorder.encodedPrompts)>>>")
     }
 }

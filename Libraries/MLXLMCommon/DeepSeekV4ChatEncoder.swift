@@ -79,8 +79,10 @@
 // is not shaped that way, because the model writes one stream of text and
 // `MLXLMCommon` keeps the whole of it as the content:
 //
-// 1. DeepSeek-V4 declares no `reasoningConfig`, thus no decoder splits the
-//    reasoning out and the content holds `reasoning` + `</think>` + the answer.
+// 1. The reasoning protocol of DeepSeek-V4
+//    (`DeepSeekV4EncodingTokenizer.reasoningConfig`) does not replay reasoning
+//    into history, thus `ChatSession` does not split the reasoning out and the
+//    content holds `reasoning` + `</think>` + the answer.
 //    ``holdsItsOwnReasoning(_:)`` finds such a content and writes no second
 //    close in front of it.
 // 2. The model writes a blank line between its answer and its block of calls,
@@ -634,8 +636,9 @@ public struct DeepSeekV4ChatEncoder: Sendable {
     /// closed reasoning block.
     ///
     /// `ChatSession` keeps the whole generated text of a turn as the content of
-    /// that turn, because DeepSeek-V4 declares no `reasoningConfig` and thus no
-    /// decoder splits the reasoning out of the token stream. Such a content
+    /// that turn, because the reasoning protocol of DeepSeek-V4 does not replay
+    /// reasoning into history, and thus the session does not split the
+    /// reasoning out of the token stream. Such a content
     /// already holds ``SpecialToken/thinkEnd``, thus one more in front of it
     /// makes a turn the model never wrote.
     ///

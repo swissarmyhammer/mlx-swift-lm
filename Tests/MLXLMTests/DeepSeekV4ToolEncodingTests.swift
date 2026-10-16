@@ -473,9 +473,10 @@ final class DeepSeekV4ToolEncodingTests: XCTestCase {
     /// The text the model writes in front of its block of calls.
     ///
     /// `ChatSession` keeps this text as the content of the assistant turn. It
-    /// holds the reasoning and the close of the reasoning, because DeepSeek-V4
-    /// declares no `reasoningConfig` and thus no decoder splits the reasoning
-    /// out. It also holds the blank line that the DSML syntax asks for in front
+    /// holds the reasoning and the close of the reasoning, because the
+    /// reasoning protocol of DeepSeek-V4 does not replay reasoning into
+    /// history, and thus `ChatSession` does not split the reasoning out. It
+    /// also holds the blank line that the DSML syntax asks for in front
     /// of the block, because the block itself leaves the text stream as a
     /// structured call.
     private static let generatedContent = "Reasoning.</think>I will look.\n\n"

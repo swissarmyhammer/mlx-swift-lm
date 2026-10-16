@@ -266,9 +266,29 @@ extension Tokenizer {
 public struct DeepSeekV4EncodingTokenizer: Tokenizer {
 
     /// The `additionalContext` key that selects between the two DeepSeek-V4
-    /// generation modes. It is the same key the family's `ReasoningConfig`
-    /// row injects, and the same default: absent means `thinking`.
+    /// generation modes. ``reasoningConfig`` injects this key.
     private static let thinkingKey = "thinking"
+
+    /// The generation mode when `additionalContext` holds no ``thinkingKey``:
+    /// `true` selects the thinking mode. ``reasoningConfig`` states the same
+    /// default.
+    private static let thinksByDefault = true
+
+    /// The reasoning protocol of DeepSeek-V4.
+    ///
+    /// The prompt strategy is the ``thinkingKey`` template flag, with the
+    /// default of ``thinksByDefault``. Thus the thinking switch of
+    /// ``ChatSession`` and of the `MLXFoundationModels` executor selects the
+    /// generation mode of this tokenizer. The delimiters are the reasoning
+    /// markers of ``DeepSeekV4ChatEncoder``.
+    ///
+    /// The protocol does not replay reasoning into history. ``ChatSession``
+    /// thus keeps the whole generated text of a turn as its content, and the
+    /// encoder renders that text as the model wrote it.
+    public static let reasoningConfig = ReasoningConfig(
+        startDelimiter: DeepSeekV4ChatEncoder.SpecialToken.thinkStart,
+        endDelimiter: DeepSeekV4ChatEncoder.SpecialToken.thinkEnd,
+        promptStrategy: .templateFlag(key: thinkingKey, defaultOn: thinksByDefault))
 
     /// The tokenizer that holds the vocabulary of the checkpoint.
     private let base: any Tokenizer
@@ -363,7 +383,7 @@ public struct DeepSeekV4EncodingTokenizer: Tokenizer {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        let thinking = additionalContext?[Self.thinkingKey] as? Bool ?? true
+        let thinking = additionalContext?[Self.thinkingKey] as? Bool ?? Self.thinksByDefault
         let prompt = DeepSeekV4ChatEncoder().encode(
             messages: DeepSeekV4ChatEncoder.Message.messages(from: messages, tools: tools),
             thinkingMode: thinking ? .thinking : .chat,

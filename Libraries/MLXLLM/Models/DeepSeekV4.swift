@@ -843,10 +843,16 @@ extension DeepSeekV4Model {
     /// `DSMLToolCallParser` reads the same markup back out of the answer.
     /// The architecture states the syntax, not the checkpoint, thus the model
     /// declares it here.
-    ///
-    /// This model declares no `reasoningConfig`. DeepSeek-V4 controls its
-    /// thinking through the thinking mode of the encoder, which the
-    /// chat-template flag drives, and not through a `<think>` delimiter pair
-    /// in the token stream.
     public var toolCallFormat: ToolCallFormat? { .dsml }
+
+    /// The reasoning protocol of DeepSeek-V4:
+    /// ``DeepSeekV4EncodingTokenizer/reasoningConfig``.
+    ///
+    /// DeepSeek-V4 controls its thinking through the thinking mode of the
+    /// encoder, which the `thinking` chat-template flag selects. The protocol
+    /// states that flag, thus the thinking switch of `ChatSession` and of the
+    /// `MLXFoundationModels` executor reaches this model. The architecture
+    /// states the protocol, not the checkpoint, thus the model declares it
+    /// here.
+    public var reasoningConfig: ReasoningConfig? { DeepSeekV4EncodingTokenizer.reasoningConfig }
 }
