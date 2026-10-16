@@ -164,7 +164,7 @@ private struct PassMeasurement {
 }
 
 /// What one generation pass produced, before the rendered token count joins it.
-private struct PassOutcome {
+struct PassOutcome {
     /// The text the pass generated.
     let text: String
     /// The tool calls the pass emitted.
@@ -179,7 +179,7 @@ private struct PassOutcome {
 /// - Returns: the text, the tool calls, and the completion info.
 /// - Throws: ``IntegrationTestFailure`` when the pass reports no completion
 ///   info, and any error the session raises.
-private func collect(
+func collect(
     _ stream: AsyncThrowingStream<Generation, Error>
 ) async throws -> PassOutcome {
     var text = ""

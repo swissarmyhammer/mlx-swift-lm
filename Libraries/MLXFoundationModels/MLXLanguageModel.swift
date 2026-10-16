@@ -735,10 +735,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// the point where the guided loop forces structural close.
         private static let hardReserveStructuralMultiplier = 8
 
-        /// The rank of a batched token tensor (`[1, N]`) from a VLM
-        /// processor. LLM processors produce rank-1 tokens (`[N]`).
-        static let batchedPromptRank = 2
-
         /// Names the session a request belongs to, for the prompt cache that
         /// session carries between its turns.
         ///
@@ -2735,7 +2731,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let promptTokens = input.text.tokens
             var appended = MLXArray(tokenIDs.map { Int32($0) })
                 .asType(promptTokens.dtype)
-            if promptTokens.ndim == Self.batchedPromptRank {
+            if promptTokens.ndim == LMInput.Text.batchedTokenRank {
                 appended = appended[.newAxis, 0...]
             }
             return LMInput(

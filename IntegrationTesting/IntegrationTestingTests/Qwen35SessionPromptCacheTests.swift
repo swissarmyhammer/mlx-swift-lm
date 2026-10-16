@@ -11,6 +11,9 @@
 // it appends, in which order, and whether the first entry keeps its identity.
 // The executor keys the session's cache on that identity.
 //
+// One test drives a `ChatSession` of `MLXLMCommon` through the same turns, with the
+// thinking switch of the session (`ChatSession.thinkingEnabled`, card `^2fm0eaq`).
+//
 // Every measurement line goes to the unified log, in the subsystem
 // `com.apple.FoundationModels-MLX` under the category
 // `Qwen35SessionPromptCache`, with the `QWEN35 SESSION:` prefix. Read the
@@ -64,6 +67,25 @@ private let thirdPrompt = "Name one fruit with that color. Answer with one word.
 /// The reasoning level that turns thinking off for one turn, as the recovery after a
 /// repeat stop asks for it.
 private let thinkingOffLevelName = "no_think"
+
+/// One turn of a `ChatSession` that sets the thinking switch of the session.
+private struct SwitchedTurn: Sendable {
+    /// The name of the turn in the log line.
+    let name: String
+    /// The user prompt of the turn.
+    let prompt: String
+    /// The value of `ChatSession.thinkingEnabled` for the turn.
+    let thinking: Bool
+}
+
+/// The recovery sequence of a `ChatSession` with its thinking switch: thinking on, a turn
+/// with the switch off, and a turn with the switch on again.
+private let switchedTurns = [
+    SwitchedTurn(name: "chat session turn 1 (thinking on)", prompt: firstPrompt, thinking: true),
+    SwitchedTurn(name: "chat session turn 2 (switch off)", prompt: secondPrompt, thinking: false),
+    SwitchedTurn(
+        name: "chat session turn 3 (switch on again)", prompt: thirdPrompt, thinking: true),
+]
 
 /// The model state key under which Qwen 3.5 keeps its M-RoPE anchor. The key in
 /// `Libraries/MLXVLM/Models/Qwen35.swift` is private, thus the suite names it again.
@@ -195,8 +217,56 @@ struct Qwen35SessionPromptCacheTests {
         await releaseAllGPUMemory()
     }
 
-    /// Logs the rule that the reuse of one turn shows, and records an issue unless the turn
-    /// reuses at least the whole render of the turn before it.
+    /// The thinking switch of a `ChatSession` (card `^2fm0eaq`) on the same recovery sequence:
+    /// thinking on, a turn with the switch off, and a turn with the switch on again. Each turn
+    /// reuses the whole render of the turn before it.
+    ///
+    /// The switch applies the prompt strategy of the Qwen 3.5 protocol, as the executor does:
+    /// with thinking off, the template flag stays on and the prompt ends with the closed think
+    /// block. Thus the system block does not change, and the hybrid caches extend or splice.
+    @Test func aChatSessionTurnWithTheThinkingSwitchOffAndOnAgainReusesTheTurnBefore()
+        async throws
+    {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectChatSessionTurnsWithTheThinkingSwitchReuseTheTurnBefore()
+        } else {
+            Issue.record("The test model needs iOS 27, macOS 27 or visionOS 27.")
+        }
+    }
+
+    /// Runs ``switchedTurns`` in one `ChatSession`, and records an issue unless each turn after
+    /// the first reuses the whole render of the turn before it.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectChatSessionTurnsWithTheThinkingSwitchReuseTheTurnBefore() async throws {
+        await releaseAllGPUMemory()
+        let model = makeReasoningTestModel(hybridModelID)
+        try model.requireLocalWeights()
+        let session = ChatSession(
+            try await model.loadContainer(), instructions: sessionInstructions,
+            generateParameters: GenerateParameters(maxTokens: generatedTokenBudget, temperature: 0))
+
+        var outcomes: [PassOutcome] = []
+        for turn in switchedTurns {
+            session.thinkingEnabled = turn.thinking
+            outcomes.append(try await collect(session.streamDetails(to: turn.prompt)))
+        }
+
+        let first = try #require(outcomes.first)
+        #expect(first.completionInfo.cachedPromptTokenCount == 0)
+        let pairs = zip(outcomes, outcomes.dropFirst())
+        for (turn, (before, outcome)) in zip(switchedTurns.dropFirst(), pairs) {
+            expectTheTurnReusesTheTurnBefore(
+                turn.name, cached: outcome.completionInfo.cachedPromptTokenCount,
+                rendered: outcome.completionInfo.totalPromptTokenCount,
+                renderedBefore: before.completionInfo.totalPromptTokenCount)
+        }
+        let recovery = try #require(outcomes.dropFirst().first)
+        #expect(recovery.text.lowercased().contains("teal"), "turn 2 <<<\(recovery.text)>>>")
+        await releaseAllGPUMemory()
+    }
+
+    /// Logs the rule that the reuse of one turn of a framework session shows, and records an
+    /// issue unless the turn reuses at least the whole render of the turn before it.
     ///
     /// - Parameters:
     ///   - turn: the name of the turn in the log line.
@@ -206,13 +276,28 @@ struct Qwen35SessionPromptCacheTests {
     private func expectTheTurnReusesTheTurnBefore(
         _ turn: String, usage: LanguageModelSession.Usage, before: LanguageModelSession.Usage
     ) {
-        let cached = usage.input.cachedTokenCount
+        expectTheTurnReusesTheTurnBefore(
+            turn, cached: usage.input.cachedTokenCount, rendered: usage.input.totalTokenCount,
+            renderedBefore: before.input.totalTokenCount)
+    }
+
+    /// Logs the rule that the reuse of one turn shows, and records an issue unless the turn
+    /// reuses at least the whole render of the turn before it.
+    ///
+    /// - Parameters:
+    ///   - turn: the name of the turn in the log line.
+    ///   - cached: the prompt tokens that the turn reused.
+    ///   - rendered: the prompt tokens that the turn rendered.
+    ///   - renderedBefore: the prompt tokens that the turn before it rendered.
+    private func expectTheTurnReusesTheTurnBefore(
+        _ turn: String, cached: Int, rendered: Int, renderedBefore: Int
+    ) {
         let rule = cached > 0 ? "extend or splice" : "rebuild"
         let line =
-            "\(measurementPrefix) \(turn) cached \(cached) of \(usage.input.totalTokenCount); "
-            + "the turn before rendered \(before.input.totalTokenCount); rule \(rule)"
+            "\(measurementPrefix) \(turn) cached \(cached) of \(rendered); "
+            + "the turn before rendered \(renderedBefore); rule \(rule)"
         measurementLog.info("\(line, privacy: .public)")
-        #expect(cached >= before.input.totalTokenCount, "\(line)")
+        #expect(cached >= renderedBefore, "\(line)")
     }
 
     /// A turn whose transcript drops the turn the model generated, and adds a user message in

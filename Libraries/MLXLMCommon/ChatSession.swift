@@ -404,6 +404,35 @@ public final class ChatSession {
     public var components: GenerationComponents
 
     public var additionalContext: [String: any Sendable]?
+
+    /// The thinking switch of the session: `true` turns thinking on, `false`
+    /// turns it off, and `nil` (the default) keeps the default of the chat
+    /// template.
+    ///
+    /// The switch is the same for each model. The session applies the prompt
+    /// strategy of the reasoning protocol of the model
+    /// (``ReasoningConfig/promptStrategy``) through ``ThinkingRender``, as the
+    /// executor of `MLXFoundationModels` does. A strategy with a template flag
+    /// gets its own flag. A strategy that renders thinking off as a closed
+    /// block (``ThinkingOffRender/closedBlock(_:)``, Qwen 3.5 and Qwen 3.8)
+    /// keeps the flag on and ends the prompt with the closed block, thus the
+    /// prompt cache of the session carries across turns with thinking on and
+    /// off.
+    ///
+    /// The switch applies only when the model declares a reasoning protocol
+    /// (``ModelConfiguration/reasoningConfig``). For a model with no reasoning
+    /// protocol, the switch does nothing: set the template key of that model in
+    /// ``additionalContext``.
+    ///
+    /// When the switch is set, the template key that it states replaces the
+    /// same key in ``additionalContext``. When the switch is `nil`,
+    /// ``additionalContext`` goes to the template unchanged.
+    ///
+    /// A turn with the switch `false` throws
+    /// ``ReasoningError/cannotDisableReasoning`` when the reasoning protocol of
+    /// the model cannot turn thinking off.
+    public var thinkingEnabled: Bool?
+
     public var tools: [ToolSpec]?
 
     /// Optional automatic dispatcher for accepted tool calls.
@@ -990,8 +1019,8 @@ public final class ChatSession {
             [
                 model,
                 instructions, processing, tools, toolDispatch,
-                additionalContext, cache, loadedDraftModel, generateParameters, components,
-                speculativeDecoding
+                additionalContext, thinkingEnabled, cache, loadedDraftModel, generateParameters,
+                components, speculativeDecoding
             ] in
             do {
                 // Automatic dispatch must always be schema-authorized. Treat a missing
@@ -1006,6 +1035,20 @@ public final class ChatSession {
                     let processor = await model.processor
                     let tokenizer = await model.tokenizer
                     let modelConfiguration = await model.configuration
+
+                    // The prompt and the checkpoint probe render through this one
+                    // closure, thus the probe sees the render of the prompt: the
+                    // same template variables and the same closed block.
+                    let thinkingRender = try ThinkingRender(
+                        thinkingSwitch: thinkingEnabled,
+                        config: modelConfiguration.reasoningConfig)
+                    let render = { (messages: [Chat.Message]) async throws -> LMInput in
+                        try await thinkingRender.prepare(
+                            UserInput(
+                                chat: messages, processing: processing, tools: tools,
+                                additionalContext: additionalContext),
+                            processor: processor, tokenizer: tokenizer)
+                    }
 
                     var leadingMessages: [Chat.Message] = []
                     if let instructions {
@@ -1127,11 +1170,7 @@ public final class ChatSession {
                         let structuredToolCallCount = modelConfiguration.toolCallFormat?
                             .promptCacheStructuredToolCallCount(in: templateMessages)
 
-                        let userInput = UserInput(
-                            chat: templateMessages,
-                            processing: processing,
-                            tools: tools, additionalContext: additionalContext)
-                        let preparedInput = try await processor.prepare(input: userInput)
+                        let preparedInput = try await render(templateMessages)
                         var input = preparedInput
                         pendingMessages.removeAll()
                         let reasoningHistory = ReasoningHistory(
@@ -1174,13 +1213,7 @@ public final class ChatSession {
                         var checkpointBoundary: Int?
                         if keepsCheckpoints {
                             checkpointBoundary = await PromptCacheCheckpoint.lastMessageEnd(
-                                of: preparedInput, messages: templateMessages
-                            ) { messages in
-                                try await processor.prepare(
-                                    input: UserInput(
-                                        chat: messages, processing: processing,
-                                        tools: tools, additionalContext: additionalContext))
-                            }
+                                of: preparedInput, messages: templateMessages, render: render)
                         }
                         var checkpointPrefill: CheckpointPrefill?
                         if var currentConversation = conversation {
