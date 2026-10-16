@@ -1,8 +1,15 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '9080'
+comments:
+- actor: claude-code
+  id: 01m5291nhvzc29yvsn43vraycf
+  text: |-
+    ### closed by the user
+    - The user closed this task without implementation.
+  timestamp: 2026-10-16T11:55:05.147348+00:00
+position_column: done
+position_ordinal: ffe080
 title: Use DecodeAttentionKernel in the other GQA decode paths (Qwen3Next, generic attention route)
 ---
 ## What
