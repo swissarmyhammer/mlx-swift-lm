@@ -14,6 +14,11 @@ import MLXNN
 /// prefill of a turn writes the first token of the turn, and each decode step
 /// writes the next one.
 ///
+/// The model has one attention layer. It can also have one recurrent layer,
+/// whose cache cannot rewind, as the caches of a hybrid model (Qwen 3.5). A
+/// session then keeps checkpoints of the caches, and each feed to a checkpoint
+/// is one more forward pass, which uses one token of the script.
+///
 /// The model is not `Sendable`, because ``passes`` and `step` are mutable and
 /// carry no lock. One ``ChatSession`` owns this model, and a session runs its
 /// forward passes ONE AT A TIME, thus every mutation happens inside
@@ -22,10 +27,12 @@ import MLXNN
 final class ScriptedTokenModel: Module, LLMModel, KVCacheDimensionProvider {
     /// What one forward pass received.
     struct Pass {
-        /// The position the cache held when the pass began.
+        /// The position the attention cache held when the pass began.
         var offset: Int
+        /// The tokens the pass fed.
+        var tokens: [Int]
         /// The number of tokens the pass fed.
-        var tokenCount: Int
+        var tokenCount: Int { tokens.count }
     }
 
     /// The logit of the scripted token. Every other token gets its negative.
@@ -39,6 +46,9 @@ final class ScriptedTokenModel: Module, LLMModel, KVCacheDimensionProvider {
 
     /// The response protocol the model declares.
     let toolCallFormat: ToolCallFormat?
+
+    /// Whether the model has a recurrent layer after its attention layer.
+    let hasRecurrentLayer: Bool
 
     /// Every forward pass, in order.
     private(set) var passes: [Pass] = []
@@ -57,21 +67,38 @@ final class ScriptedTokenModel: Module, LLMModel, KVCacheDimensionProvider {
     ///   - finalToken: the token of each pass after the script ends.
     ///   - vocabularySize: the size of the scripted vocabulary.
     ///   - toolCallFormat: the response protocol the model declares.
-    init(script: [Int], finalToken: Int, vocabularySize: Int, toolCallFormat: ToolCallFormat?) {
+    ///   - hasRecurrentLayer: whether the model has a recurrent layer, whose
+    ///     cache cannot rewind.
+    init(
+        script: [Int], finalToken: Int, vocabularySize: Int, toolCallFormat: ToolCallFormat?,
+        hasRecurrentLayer: Bool = false
+    ) {
         self.script = script
         self.finalToken = finalToken
         self.vocabularySize = vocabularySize
         self.toolCallFormat = toolCallFormat
+        self.hasRecurrentLayer = hasRecurrentLayer
         super.init()
+    }
+
+    /// One cache for the attention layer, and one recurrent cache when the
+    /// model has a recurrent layer.
+    func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        let attention = try makeAttentionKVCache(parameters: parameters)
+        return hasRecurrentLayer ? [attention, MambaCache()] : [attention]
     }
 
     /// Writes the next scripted token as the logits of the last position.
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         let tokenCount = inputs.dim(-1)
-        passes.append(Pass(offset: cache?.first?.offset ?? 0, tokenCount: tokenCount))
+        passes.append(
+            Pass(offset: cache?.first?.offset ?? 0, tokens: inputs.reshaped(-1).asArray(Int.self)))
 
         let entry = MLXArray.zeros([1, 1, tokenCount, 1])
         _ = cache?.first?.update(keys: entry, values: entry)
+        for recurrent in cache?.compactMap({ $0 as? MambaCache }) ?? [] {
+            recurrent.advance(tokenCount)
+        }
 
         let token = step < script.count ? script[step] : finalToken
         step += 1

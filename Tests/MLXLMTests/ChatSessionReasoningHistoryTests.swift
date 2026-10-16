@@ -14,6 +14,11 @@
 //
 // The tokenizer below writes that template shape for the messages it gets, and
 // the scripted model writes the tokens of a turn with reasoning.
+//
+// A turn that stops inside its reasoning leaves no `</think>` in the cache, but
+// the render of the next turn closes the think block (card `^ef2zynk`). The
+// second test runs a hybrid model and examines where the next turn starts to
+// feed the caches, and whether the caches then hold the cold render.
 
 import Foundation
 import MLX
@@ -97,7 +102,16 @@ struct ChatSessionReasoningHistoryTests {
     @Test(arguments: cases)
     func theHistoryRenderOfTurnOne(_ row: HistoryCase) async throws {
         let tokenizer = QwenHistoryTokenizer()
-        let session = try session(for: row, tokenizer: tokenizer)
+        let endOfTurn = try #require(tokenizer.convertTokenToId(QwenHistoryTokenizer.endOfTurn))
+        let script =
+            tokenizer.encode(text: row.generated, addSpecialTokens: false) + [endOfTurn]
+            + tokenizer.encode(text: Self.secondAnswer, addSpecialTokens: false) + [endOfTurn]
+        let model = ScriptedTokenModel(
+            script: script, finalToken: endOfTurn,
+            vocabularySize: QwenHistoryTokenizer.vocabularySize, toolCallFormat: .qwen35)
+        let session = session(
+            model: model, reasoningConfig: row.reasoningConfig, thinking: row.thinking,
+            tokenizer: tokenizer, tokenBudget: Self.generatedTokenBudget)
 
         let first = try #require(try await respond(session, to: Self.firstPrompt))
         let second = try #require(try await respond(session, to: Self.secondPrompt))
@@ -125,21 +139,108 @@ struct ChatSessionReasoningHistoryTests {
         }
     }
 
-    /// A session over the scripted model and `tokenizer`, with the template flag
-    /// of `row`.
+    // MARK: - A turn that ends inside its reasoning
+
+    /// One way turn 1 of a hybrid Qwen 3.8 model ends with thinking on, and
+    /// how turn 2 then reuses the caches (card `^ef2zynk`).
+    struct TurnEndCase: Sendable, CustomTestStringConvertible {
+        /// The name of the case in the test report.
+        let name: String
+        /// The text the model writes in turn 1, after the prompt.
+        let generated: String
+        /// Whether the model ends turn 1 with the end-of-turn token. When
+        /// false, turn 1 stops on the token budget.
+        let writesEndOfTurn: Bool
+        /// Whether turn 2 feeds after every token that turn 1 left in the
+        /// caches. When false, turn 2 goes back to the checkpoint at the end of
+        /// the turn-1 prompt.
+        let reusesTheLedger: Bool
+        /// Whether the caches hold the cold render of turn 2 when the prefill
+        /// of turn 2 ends.
+        let holdsTheColdRender: Bool
+
+        var testDescription: String { name }
+    }
+
+    /// Whitespace that the template trims from the end of the reasoning and
+    /// of the answer. A turn that ends with it does not render the tokens the
+    /// model wrote.
+    private static let trimmedWhitespace = " "
+
+    /// The cases, one row for each way turn 1 ends.
+    static let turnEndCases: [TurnEndCase] = [
+        TurnEndCase(
+            name: "stops inside reasoning that the template trims: the prompt-end checkpoint",
+            generated: reasoning + trimmedWhitespace, writesEndOfTurn: false,
+            reusesTheLedger: false, holdsTheColdRender: true),
+        TurnEndCase(
+            name: "stops inside reasoning that the render extends: the ledger extends",
+            generated: reasoning, writesEndOfTurn: false,
+            reusesTheLedger: true, holdsTheColdRender: true),
+        TurnEndCase(
+            name: "the control: closes its reasoning: the splice keeps the tokens the model wrote",
+            generated: reasonedTurn + trimmedWhitespace, writesEndOfTurn: true,
+            reusesTheLedger: true, holdsTheColdRender: false),
+    ]
+
+    /// Where turn 2 starts to feed the caches of a hybrid model, and whether
+    /// the caches then hold the cold render of turn 2.
+    @Test(arguments: turnEndCases)
+    func theTurnAfterTurnOneEnds(_ row: TurnEndCase) async throws {
+        let tokenizer = QwenHistoryTokenizer()
+        let endOfTurn = try #require(tokenizer.convertTokenToId(QwenHistoryTokenizer.endOfTurn))
+        let written =
+            tokenizer.encode(text: row.generated, addSpecialTokens: false)
+            + (row.writesEndOfTurn ? [endOfTurn] : [])
+        // The feed to the checkpoint at the end of the last message is one
+        // forward pass before the prefill, and nothing samples its token.
+        let model = ScriptedTokenModel(
+            script: [endOfTurn] + written, finalToken: endOfTurn,
+            vocabularySize: QwenHistoryTokenizer.vocabularySize, toolCallFormat: .qwen35,
+            hasRecurrentLayer: true)
+        let session = session(
+            model: model, reasoningConfig: QwenReasoningProtocol.qwen35, thinking: true,
+            tokenizer: tokenizer, tokenBudget: written.count)
+
+        let first = try #require(try await respond(session, to: Self.firstPrompt))
+        let firstTurnPassCount = model.passes.count
+        _ = try await respond(session, to: Self.secondPrompt)
+
+        let promptEnd = first.totalPromptTokenCount
+        let secondTurnStart = try #require(model.passes.dropFirst(firstTurnPassCount).first)
+        #expect(
+            secondTurnStart.offset == (row.reusesTheLedger ? promptEnd + written.count : promptEnd))
+
+        let coldRender = try #require(
+            tokenizer.renders.withLock { $0 }.last {
+                $0.messages.last?["content"] as? String == Self.secondPrompt
+            })
+        let coldTokens = tokenizer.encode(text: coldRender.text, addSpecialTokens: false)
+        let heldTokens = Self.attentionCacheTokens(after: model.passes)
+        #expect(
+            (Array(heldTokens.prefix(coldTokens.count)) == coldTokens) == row.holdsTheColdRender,
+            "held <<<\(tokenizer.decode(tokenIds: heldTokens))>>>")
+    }
+
+    /// The tokens the attention cache holds after `passes`. Each pass begins
+    /// where the cache stood, which drops the tokens a restore trimmed away.
+    private static func attentionCacheTokens(after passes: [ScriptedTokenModel.Pass]) -> [Int] {
+        passes.reduce(into: []) { held, pass in
+            held = Array(held.prefix(pass.offset)) + pass.tokens
+        }
+    }
+
+    // MARK: - Helpers
+
+    /// A session over `model` and `tokenizer`, with the thinking flag of the
+    /// template set to `thinking`.
     private func session(
-        for row: HistoryCase, tokenizer: QwenHistoryTokenizer
-    ) throws -> ChatSession {
+        model: ScriptedTokenModel, reasoningConfig: ReasoningConfig, thinking: Bool,
+        tokenizer: QwenHistoryTokenizer, tokenBudget: Int
+    ) -> ChatSession {
         let configuration = ModelConfiguration(
             id: "qwen38-history-test", toolCallFormat: .qwen35,
-            reasoningConfig: row.reasoningConfig)
-        let endOfTurn = try #require(tokenizer.convertTokenToId(QwenHistoryTokenizer.endOfTurn))
-        let script =
-            tokenizer.encode(text: row.generated, addSpecialTokens: false) + [endOfTurn]
-            + tokenizer.encode(text: Self.secondAnswer, addSpecialTokens: false) + [endOfTurn]
-        let model = ScriptedTokenModel(
-            script: script, finalToken: endOfTurn,
-            vocabularySize: QwenHistoryTokenizer.vocabularySize, toolCallFormat: .qwen35)
+            reasoningConfig: reasoningConfig)
         let context = ModelContext(
             configuration: configuration, model: model,
             processor: TestInputProcessor(
@@ -148,9 +249,8 @@ struct ChatSessionReasoningHistoryTests {
             tokenizer: tokenizer)
         return ChatSession(
             context,
-            generateParameters: GenerateParameters(
-                maxTokens: Self.generatedTokenBudget, temperature: 0),
-            additionalContext: [QwenHistoryTokenizer.thinkingFlag: row.thinking])
+            generateParameters: GenerateParameters(maxTokens: tokenBudget, temperature: 0),
+            additionalContext: [QwenHistoryTokenizer.thinkingFlag: thinking])
     }
 
     /// Runs one turn of `session` and returns its completion information.

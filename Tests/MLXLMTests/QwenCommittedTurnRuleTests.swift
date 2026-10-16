@@ -182,6 +182,124 @@ struct QwenCommittedTurnRuleTests {
                     processed: 9)) == nil)
     }
 
+    // MARK: - A turn that ends inside its reasoning
+
+    /// Stands in for the `<think>` token id.
+    private static let openThink = 2
+
+    /// Stands in for the `</think>` token id.
+    private static let closeThink = 3
+
+    /// Stands in for a token of the conversation before the generation prompt.
+    private static let conversation = 10
+
+    /// Stands in for the token that opens the assistant turn.
+    private static let assistant = 11
+
+    /// Stands in for the token that the render adds after the commit.
+    private static let nextTurn = 20
+
+    /// The render of a prompt with thinking on: it ends inside an open think
+    /// block.
+    private static let thinkingOnRender = [conversation, assistant, openThink]
+
+    /// The render of a prompt with thinking off: it ends with a closed, empty
+    /// think block.
+    private static let thinkingOffRender = [conversation, assistant, openThink, closeThink]
+
+    /// One way the previous turn ended, and what the rule decides for the
+    /// render of the next turn (card `^ef2zynk`).
+    struct ReasoningEndCase: Sendable, CustomTestStringConvertible {
+        /// The name of the case in the test report.
+        let name: String
+        /// The render of the previous prefill.
+        let previousRender: [Int]
+        /// The tokens the caches hold: the previous render and the tokens the
+        /// model wrote.
+        let cached: [Int]
+        /// The render of the next turn.
+        let prompt: [Int]
+        /// Whether the rule splices. When false, the rule declines.
+        let splices: Bool
+
+        var testDescription: String { name }
+    }
+
+    /// The cases, one row for each way the previous turn ended. The ledger of
+    /// each row that splices does not hold the commit.
+    static let reasoningEndCases: [ReasoningEndCase] = [
+        ReasoningEndCase(
+            name: "declines a turn that stopped on the budget inside its reasoning",
+            previousRender: thinkingOnRender,
+            cached: thinkingOnRender + [generatedOnly],
+            prompt: thinkingOnRender + [renderedOnly, closeThink, commit, nextTurn],
+            splices: false),
+        ReasoningEndCase(
+            name: "declines a turn that ended its turn inside its reasoning",
+            previousRender: thinkingOnRender,
+            cached: thinkingOnRender + [generatedOnly, commit],
+            prompt: thinkingOnRender + [renderedOnly, closeThink, commit, nextTurn],
+            splices: false),
+        ReasoningEndCase(
+            name: "splices a turn that closed its reasoning",
+            previousRender: thinkingOnRender,
+            cached: thinkingOnRender + [generatedOnly, closeThink, generatedOnly],
+            prompt: thinkingOnRender + [renderedOnly, closeThink, renderedOnly, commit, nextTurn],
+            splices: true),
+        ReasoningEndCase(
+            name: "splices a turn with thinking off",
+            previousRender: thinkingOffRender,
+            cached: thinkingOffRender + [generatedOnly],
+            prompt: thinkingOffRender + [renderedOnly, commit, nextTurn],
+            splices: true),
+    ]
+
+    /// The rule as the `qwen35` format makes it from a tokenizer that knows
+    /// the end-of-turn marker and the markers of the think block.
+    private static let reasoningRule = QwenCommittedTurnRule(
+        tokenizer: MarkerTokenizer(identifierOfMarker: [
+            QwenCommittedTurnRule.endOfTurnMarker: commit,
+            QwenCommittedTurnRule.openThinkMarker: openThink,
+            QwenCommittedTurnRule.closeThinkMarker: closeThink,
+        ]))
+
+    /// The splice onto a ledger that does not hold the commit: it starts AT
+    /// the commit of `prompt`, thus the fed suffix carries the commit.
+    private func spliceAtTheCommit(of prompt: [Int], onto cached: [Int]) throws
+        -> PromptCacheReuseDecision
+    {
+        let commitIndex = try #require(prompt.firstIndex(of: Self.commit))
+        return .appendSuffix(
+            suffixStart: commitIndex, representedTokens: cached + prompt[commitIndex...])
+    }
+
+    @Test(arguments: reasoningEndCases)
+    func `the splice after a turn that ends`(_ row: ReasoningEndCase) throws {
+        let rule = try #require(Self.reasoningRule)
+
+        let decision = rule.reuse(
+            turn: turn(prompt: row.prompt),
+            cache: alignedCache(row.cached, previousRender: row.previousRender))
+
+        let expected = row.splices ? try spliceAtTheCommit(of: row.prompt, onto: row.cached) : nil
+        #expect(decision == expected)
+    }
+
+    @Test func `a tokenizer without think markers keeps the splice inside reasoning`() throws {
+        // The rule cannot tell where reasoning ends, thus it splices as before.
+        let prompt =
+            Self.thinkingOnRender + [
+                Self.renderedOnly, Self.closeThink, Self.commit, Self.nextTurn,
+            ]
+        let cached = Self.thinkingOnRender + [Self.generatedOnly]
+
+        let decision = rule.reuse(
+            turn: turn(prompt: prompt),
+            cache: alignedCache(cached, previousRender: Self.thinkingOnRender))
+
+        #expect(decision == (try spliceAtTheCommit(of: prompt, onto: cached)))
+    }
+
     // MARK: - Composition with the standard rules
 
     @Test func `a hybrid cache that the rule declines rebuilds`() {
