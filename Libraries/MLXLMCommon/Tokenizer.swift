@@ -283,12 +283,20 @@ public struct DeepSeekV4EncodingTokenizer: Tokenizer {
     /// markers of ``DeepSeekV4ChatEncoder``.
     ///
     /// The protocol does not replay reasoning into history. ``ChatSession``
-    /// thus keeps the whole generated text of a turn as its content, and the
-    /// encoder renders that text as the model wrote it.
+    /// thus keeps the whole generated text of a turn that closes its
+    /// reasoning as its content, and the encoder renders that text as the
+    /// model wrote it.
+    ///
+    /// The protocol replays a turn that stopped inside its reasoning
+    /// (``ReasoningConfig/replaysUnclosedReasoningIntoHistory``). The encoder
+    /// writes the reasoning of a past turn and then `</think>`, thus the
+    /// session records that text as the reasoning, and the render is the text
+    /// the model wrote with the block closed (card `^mf1mwaw`).
     public static let reasoningConfig = ReasoningConfig(
         startDelimiter: DeepSeekV4ChatEncoder.SpecialToken.thinkStart,
         endDelimiter: DeepSeekV4ChatEncoder.SpecialToken.thinkEnd,
-        promptStrategy: .templateFlag(key: thinkingKey, defaultOn: thinksByDefault))
+        promptStrategy: .templateFlag(key: thinkingKey, defaultOn: thinksByDefault),
+        replaysUnclosedReasoningIntoHistory: true)
 
     /// The tokenizer that holds the vocabulary of the checkpoint.
     private let base: any Tokenizer

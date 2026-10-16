@@ -53,6 +53,15 @@ final class ScriptedTokenModel: Module, LLMModel, KVCacheDimensionProvider {
     /// Every forward pass, in order.
     private(set) var passes: [Pass] = []
 
+    /// The tokens the attention cache holds after every pass in ``passes``.
+    /// Each pass begins where the cache stood, which drops the tokens a
+    /// restore trimmed away.
+    var attentionCacheTokens: [Int] {
+        passes.reduce(into: []) { held, pass in
+            held = Array(held.prefix(pass.offset)) + pass.tokens
+        }
+    }
+
     /// One token for each forward pass, in order.
     private let script: [Int]
 

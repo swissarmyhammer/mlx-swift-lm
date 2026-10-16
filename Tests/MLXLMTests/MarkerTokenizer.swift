@@ -6,7 +6,7 @@
 /// which is all the failable initializer of a committed-turn rule reads.
 ///
 /// Shared by the rule suites of `DSMLCommittedTurnRule` and
-/// `QwenCommittedTurnRule`.
+/// `QwenCommittedTurnRule`, and by `CommittedTurnThinkBlockTests`.
 struct MarkerTokenizer: Tokenizer {
     /// The identifier of each marker text this tokenizer knows.
     let identifierOfMarker: [String: Int]

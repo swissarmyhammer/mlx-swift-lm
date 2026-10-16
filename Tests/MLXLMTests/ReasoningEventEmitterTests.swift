@@ -311,6 +311,9 @@ struct ReasoningEventEmitterTests {
         let reasoning: String
         /// The response the text holds.
         let response: String
+        /// Whether the whole text stays inside the block that the prompt
+        /// opened.
+        let staysInsidePrimedReasoning: Bool
 
         var testDescription: String { name }
     }
@@ -319,19 +322,31 @@ struct ReasoningEventEmitterTests {
     static let separationCases: [SeparationCase] = [
         SeparationCase(
             name: "a primed turn that closes its block", primedInside: true,
-            text: "Paris first.\n</think>\n\nOK", reasoning: "Paris first.", response: "OK"),
+            text: "Paris first.\n</think>\n\nOK", reasoning: "Paris first.", response: "OK",
+            staysInsidePrimedReasoning: false),
         SeparationCase(
             name: "a primed turn that stops inside its block", primedInside: true,
-            text: "Paris first, then", reasoning: "Paris first, then", response: ""),
+            text: "Paris first, then", reasoning: "Paris first, then", response: "",
+            staysInsidePrimedReasoning: true),
+        SeparationCase(
+            name: "a primed turn that stops on a part of the close", primedInside: true,
+            text: "Paris first</thi", reasoning: "Paris first</thi", response: "",
+            staysInsidePrimedReasoning: true),
         SeparationCase(
             name: "a primed turn that leaves its block for a tool call", primedInside: true,
-            text: "Look it up.<tool_call>{}", reasoning: "Look it up.", response: "<tool_call>{}"),
+            text: "Look it up.<tool_call>{}", reasoning: "Look it up.", response: "<tool_call>{}",
+            staysInsidePrimedReasoning: false),
         SeparationCase(
             name: "a turn that opens its own block", primedInside: false,
-            text: "<think>abc</think>xyz", reasoning: "abc", response: "xyz"),
+            text: "<think>abc</think>xyz", reasoning: "abc", response: "xyz",
+            staysInsidePrimedReasoning: false),
+        SeparationCase(
+            name: "a turn that opens its own block and stops inside it", primedInside: false,
+            text: "<think>abc", reasoning: "abc", response: "",
+            staysInsidePrimedReasoning: false),
         SeparationCase(
             name: "a turn with no block", primedInside: false,
-            text: "OK", reasoning: "", response: "OK"),
+            text: "OK", reasoning: "", response: "OK", staysInsidePrimedReasoning: false),
     ]
 
     @Test(arguments: separationCases)
@@ -341,6 +356,14 @@ struct ReasoningEventEmitterTests {
 
         #expect(parts.reasoning == row.reasoning)
         #expect(parts.response == row.response)
+    }
+
+    @Test(arguments: separationCases)
+    func aWholeTextTellsWhetherItStaysInsideThePrimedBlock(_ row: SeparationCase) {
+        #expect(
+            ReasoningEventEmitter.staysInsidePrimedReasoning(
+                row.text, config: Self.thinkThenToolConfig, primedInside: row.primedInside)
+                == row.staysInsidePrimedReasoning)
     }
 
     // MARK: - promptEndsInsideReasoning over prompt tokens

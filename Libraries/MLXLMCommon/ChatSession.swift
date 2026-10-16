@@ -246,6 +246,14 @@ public final class ChatSession {
     /// an empty think block instead: the model reads its own reasoning as an
     /// answer, and the render parts from the cached tokens at the open block of
     /// the generation prompt. Card `^z4aax33` measured that on Qwen 3.8.
+    ///
+    /// A model whose protocol replays only a turn that stopped inside its
+    /// reasoning (``ReasoningConfig/replaysUnclosedReasoningIntoHistory``)
+    /// keeps the whole text of every other turn as the content. A turn that
+    /// stopped inside the block its prompt opened has no close in its text,
+    /// thus the session records the whole text as the reasoning and an empty
+    /// content, and the render closes the block after the text the model
+    /// wrote. Card `^mf1mwaw` measured that on DeepSeek-V4.
     private struct ReasoningHistory {
         /// The reasoning protocol of the model.
         let config: ReasoningConfig
@@ -255,7 +263,7 @@ public final class ChatSession {
         let primedInside: Bool
 
         /// The history of a turn generated from `prompt`, or nil when the
-        /// protocol of the model does not replay reasoning into history.
+        /// protocol of the model replays no reasoning into history.
         ///
         /// - Parameters:
         ///   - configuration: the configuration of the model.
@@ -263,7 +271,7 @@ public final class ChatSession {
         ///   - tokenizer: the tokenizer of the model.
         init?(configuration: ModelConfiguration, prompt: LMInput, tokenizer: any Tokenizer) {
             guard let config = configuration.reasoningConfig,
-                config.replaysReasoningIntoHistory
+                config.replaysReasoningIntoHistory || config.replaysUnclosedReasoningIntoHistory
             else {
                 return nil
             }
@@ -271,6 +279,30 @@ public final class ChatSession {
             self.primedInside = ReasoningEventEmitter.promptEndsInsideReasoning(
                 promptTokens: prompt.text.tokens.asArray(Int.self), config: config,
                 tokenizer: tokenizer)
+        }
+
+        /// The assistant message that records a generated turn.
+        ///
+        /// - Parameters:
+        ///   - content: the whole text the generation wrote.
+        ///   - toolCalls: the tool calls of the turn, or nil for none.
+        /// - Returns: the message, with the reasoning apart from the content
+        ///   when the protocol replays the reasoning of this turn.
+        func message(content: String, toolCalls: [ToolCall]?) -> Chat.Message {
+            if config.replaysReasoningIntoHistory {
+                let parts = ReasoningEventEmitter.separating(
+                    content, config: config, primedInside: primedInside)
+                return .assistant(
+                    parts.response, toolCalls: toolCalls,
+                    reasoning: parts.reasoning.isEmpty ? nil : parts.reasoning)
+            }
+            guard
+                ReasoningEventEmitter.staysInsidePrimedReasoning(
+                    content, config: config, primedInside: primedInside)
+            else {
+                return .assistant(content, toolCalls: toolCalls)
+            }
+            return .assistant("", toolCalls: toolCalls, reasoning: content)
         }
     }
 
@@ -302,18 +334,13 @@ public final class ChatSession {
         /// - Parameter reasoningHistory: how the history keeps the reasoning of
         ///   the turn, or nil to record the whole text as the content.
         /// - Returns: the message, with the reasoning apart from the content
-        ///   when `reasoningHistory` is set and the text holds reasoning.
+        ///   when `reasoningHistory` replays the reasoning of this turn.
         func message(reasoningHistory: ReasoningHistory?) -> Chat.Message {
             let calls = toolCalls.isEmpty ? nil : toolCalls
             guard let reasoningHistory else {
                 return .assistant(content, toolCalls: calls)
             }
-            let parts = ReasoningEventEmitter.separating(
-                content, config: reasoningHistory.config,
-                primedInside: reasoningHistory.primedInside)
-            return .assistant(
-                parts.response, toolCalls: calls,
-                reasoning: parts.reasoning.isEmpty ? nil : parts.reasoning)
+            return reasoningHistory.message(content: content, toolCalls: calls)
         }
 
         mutating func consume(_ item: Generation) {

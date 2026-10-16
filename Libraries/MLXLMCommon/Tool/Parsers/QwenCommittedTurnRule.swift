@@ -30,15 +30,13 @@
 /// hold the marker — generation stops on it — and every later one belongs to a
 /// later message.
 ///
-/// The rule declines a turn whose cached tokens end inside an open think block:
-/// the generation stopped inside its reasoning, and the model wrote no
-/// `</think>`. The render of that turn closes the block (`\n</think>\n\n`)
-/// before the commit, and a splice would make the model read its unclosed
-/// reasoning and then the commit. Card `^ef2zynk` measured that on Qwen 3.8:
-/// the warm and the cold first token of the next turn were different. The
-/// standard rules then decide, and a hybrid model goes back to the checkpoint
-/// at the end of the previous prompt, which the new render starts with. The
-/// cost is one more prefill of the tokens the model wrote.
+/// The rule declines a turn whose cached tokens end inside an open think block,
+/// as ``CommittedTurnSplice`` states. The render of that turn closes the block
+/// (`\n</think>\n\n`) before the commit. Card `^ef2zynk` measured on Qwen 3.8
+/// that the warm and the cold first token of the next turn were different after
+/// a splice there. The standard rules then decide, and a hybrid model goes back
+/// to the checkpoint at the end of the previous prompt, which the new render
+/// starts with. The cost is one more prefill of the tokens the model wrote.
 ///
 /// It is the only place in the cache pipeline that knows the Qwen end-of-turn
 /// marker and the Qwen think-block markers.
@@ -55,31 +53,13 @@ struct QwenCommittedTurnRule: PromptCacheReuseRule {
     /// The text of the marker that closes a think block.
     static let closeThinkMarker = "</think>"
 
-    /// The identifiers of the two markers of a think block.
-    struct ThinkBlockTokens: Sendable {
-        /// The identifier of ``QwenCommittedTurnRule/openThinkMarker``.
-        let open: Int
-
-        /// The identifier of ``QwenCommittedTurnRule/closeThinkMarker``.
-        let close: Int
-
-        /// Whether `tokens` end inside an open think block: the last marker of
-        /// a think block in `tokens` opens one.
-        ///
-        /// - Parameter tokens: the tokens the caches hold.
-        /// - Returns: `true` when no close follows the last open.
-        func endsInsideBlock(_ tokens: [Int]) -> Bool {
-            tokens.last { $0 == open || $0 == close } == open
-        }
-    }
-
     /// The identifier of ``endOfTurnMarker`` in the model's tokenizer.
     let endOfTurnToken: Int
 
     /// The identifiers of the think-block markers, or nil when the tokenizer
     /// has none. Without them the rule cannot see where reasoning ends, thus
     /// it splices every turn.
-    let thinkBlock: ThinkBlockTokens?
+    let thinkBlock: CommittedTurnSplice.ThinkBlockTokens?
 
     /// A rule that knows no think-block markers, thus it splices every turn.
     ///
@@ -100,30 +80,23 @@ struct QwenCommittedTurnRule: PromptCacheReuseRule {
             return nil
         }
         self.endOfTurnToken = token
-        if let open = tokenizer.convertTokenToId(Self.openThinkMarker),
-            let close = tokenizer.convertTokenToId(Self.closeThinkMarker)
-        {
-            self.thinkBlock = ThinkBlockTokens(open: open, close: close)
-        } else {
-            self.thinkBlock = nil
-        }
+        self.thinkBlock = CommittedTurnSplice.ThinkBlockTokens(
+            tokenizer: tokenizer, open: Self.openThinkMarker, close: Self.closeThinkMarker)
     }
 
     /// Splices the new tail onto a cache that ends at a committed assistant
     /// turn, at the first commit the render adds after the render before it.
     ///
-    /// ``CommittedTurnSplice`` states the conditions the splice proves. This
-    /// rule also declines a cache that ends inside an open think block.
+    /// ``CommittedTurnSplice`` states the conditions the splice proves.
     ///
     /// - Parameters:
     ///   - turn: the prompt-side facts of this turn.
     ///   - cache: what the caches currently hold.
     /// - Returns: the splice, or `nil` to leave the turn to the next rule.
     func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
-        guard thinkBlock?.endsInsideBlock(cache.cachedTokens) != true else {
-            return nil
-        }
-        return CommittedTurnSplice(endOfTurnToken: endOfTurnToken, commitSelection: .first)
-            .decision(turn: turn, cache: cache)
+        CommittedTurnSplice(
+            endOfTurnToken: endOfTurnToken, commitSelection: .first, thinkBlock: thinkBlock
+        )
+        .decision(turn: turn, cache: cache)
     }
 }

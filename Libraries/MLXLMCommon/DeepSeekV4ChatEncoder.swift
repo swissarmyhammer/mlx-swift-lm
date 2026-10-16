@@ -84,7 +84,11 @@
 //    into history, thus `ChatSession` does not split the reasoning out and the
 //    content holds `reasoning` + `</think>` + the answer.
 //    ``holdsItsOwnReasoning(_:)`` finds such a content and writes no second
-//    close in front of it.
+//    close in front of it. A turn that stopped before `</think>` is the one
+//    exception: the protocol replays an unclosed turn into history, thus
+//    `ChatSession` records its text as the `reasoning` and an empty content,
+//    and the body writes `reasoning` + `</think>`, as the Python writes it for
+//    that turn (card ^mf1mwaw).
 // 2. The model writes a blank line between its answer and its block of calls,
 //    and the tool-call reader keeps that blank line with the answer.
 //    ``contentBeforeToolCalls(of:)`` takes those newlines away, because
@@ -635,10 +639,11 @@ public struct DeepSeekV4ChatEncoder: Sendable {
     /// Tells whether the content of an assistant turn already holds its own
     /// closed reasoning block.
     ///
-    /// `ChatSession` keeps the whole generated text of a turn as the content of
-    /// that turn, because the reasoning protocol of DeepSeek-V4 does not replay
-    /// reasoning into history, and thus the session does not split the
-    /// reasoning out of the token stream. Such a content
+    /// `ChatSession` keeps the whole generated text of a turn that closes its
+    /// reasoning as the content of that turn, because the reasoning protocol
+    /// of DeepSeek-V4 does not replay reasoning into history, and thus the
+    /// session does not split the reasoning out of the token stream. Such a
+    /// content
     /// already holds ``SpecialToken/thinkEnd``, thus one more in front of it
     /// makes a turn the model never wrote.
     ///

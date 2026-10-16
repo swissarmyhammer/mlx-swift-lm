@@ -26,6 +26,21 @@ struct ReasoningConfigTests {
         #expect(!ReasoningConfig.alwaysOnThinking.replaysReasoningIntoHistory)
     }
 
+    @Test func `the DeepSeek-V4 protocol replays an unclosed turn into history`() {
+        // Its encoder writes the reasoning of a past turn inside the block and
+        // closes the block, thus a turn that stopped inside its reasoning
+        // renders as the model wrote it (card `^mf1mwaw`). A closed turn
+        // still keeps its whole text as the content.
+        #expect(DeepSeekV4EncodingTokenizer.reasoningConfig.replaysUnclosedReasoningIntoHistory)
+        #expect(!DeepSeekV4EncodingTokenizer.reasoningConfig.replaysReasoningIntoHistory)
+    }
+
+    @Test func `a protocol keeps an unclosed turn whole unless it says otherwise`() {
+        #expect(!ReasoningConfig.thinkTagsWithEnableThinking.replaysUnclosedReasoningIntoHistory)
+        #expect(!ReasoningConfig.alwaysOnThinking.replaysUnclosedReasoningIntoHistory)
+        #expect(!QwenReasoningProtocol.tagged.replaysUnclosedReasoningIntoHistory)
+    }
+
     // MARK: - ReasoningPromptStrategy.additionalContext
 
     @Test func templateFlagThinkingOn() throws {

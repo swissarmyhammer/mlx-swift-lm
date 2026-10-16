@@ -31,6 +31,15 @@
 /// DeepSeek-V4 tool round is an ordinary user turn whose preceding assistant
 /// turn is the unrenderable one.
 ///
+/// The rule declines a turn whose cached tokens end inside an open think block,
+/// as ``CommittedTurnSplice`` states. A thinking turn that stopped on its token
+/// budget leaves `<think>` + the partial reasoning in the caches, and the
+/// session records that text as the reasoning of the turn, thus the render
+/// closes the block: `<think>partial</think><｜end▁of▁sentence｜>`. A splice at
+/// the commit would make the model read `<think>partial<｜end▁of▁sentence｜>`,
+/// which no cold render writes (card `^mf1mwaw`). The cached tokens are then a
+/// prefix of the new render, and the standard rules extend them.
+///
 /// It is the only place in the cache pipeline that knows about DSML.
 struct DSMLCommittedTurnRule: PromptCacheReuseRule {
 
@@ -39,17 +48,25 @@ struct DSMLCommittedTurnRule: PromptCacheReuseRule {
     /// turn.
     let endOfSentenceToken: Int
 
+    /// The identifiers of the think-block markers, or nil when the tokenizer
+    /// has none. Without them the rule cannot see where reasoning ends, thus
+    /// it splices every turn.
+    let thinkBlock: CommittedTurnSplice.ThinkBlockTokens?
+
+    /// A rule that knows no think-block markers, thus it splices every turn.
+    ///
     /// - Parameter endOfSentenceToken: the identifier of the marker that closes
     ///   an assistant turn.
     init(endOfSentenceToken: Int) {
         self.endOfSentenceToken = endOfSentenceToken
+        self.thinkBlock = nil
     }
 
     /// Fails when the tokenizer has no DeepSeek-V4 end-of-sentence marker, in
     /// which case the model is not running the DSML protocol and the standard
     /// rules apply unchanged.
     ///
-    /// - Parameter tokenizer: the tokenizer that names the marker.
+    /// - Parameter tokenizer: the tokenizer that names the markers.
     init?(tokenizer: any Tokenizer) {
         guard
             let token = tokenizer.convertTokenToId(
@@ -58,6 +75,9 @@ struct DSMLCommittedTurnRule: PromptCacheReuseRule {
             return nil
         }
         self.endOfSentenceToken = token
+        self.thinkBlock = CommittedTurnSplice.ThinkBlockTokens(
+            tokenizer: tokenizer, open: DeepSeekV4ChatEncoder.SpecialToken.thinkStart,
+            close: DeepSeekV4ChatEncoder.SpecialToken.thinkEnd)
     }
 
     /// Splices the new tail onto a cache that ends at a committed assistant
@@ -73,7 +93,9 @@ struct DSMLCommittedTurnRule: PromptCacheReuseRule {
     ///   - cache: what the caches currently hold.
     /// - Returns: the splice, or `nil` to leave the turn to the next rule.
     func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
-        CommittedTurnSplice(endOfTurnToken: endOfSentenceToken, commitSelection: .sole)
-            .decision(turn: turn, cache: cache)
+        CommittedTurnSplice(
+            endOfTurnToken: endOfSentenceToken, commitSelection: .sole, thinkBlock: thinkBlock
+        )
+        .decision(turn: turn, cache: cache)
     }
 }

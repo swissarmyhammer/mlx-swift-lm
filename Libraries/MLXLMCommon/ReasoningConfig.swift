@@ -165,6 +165,24 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// default `false` keeps its renders unchanged.
     public var replaysReasoningIntoHistory: Bool
 
+    /// Whether a past turn that stopped inside the reasoning block its prompt
+    /// opened goes back into the history render with its whole text as the
+    /// `reasoning_content` of its message, and an empty content.
+    ///
+    /// A generation that stops on its token budget before the end delimiter
+    /// leaves the open block and the partial reasoning in the caches. A chat
+    /// template that writes the `reasoning_content` of a past turn inside the
+    /// block, and then the end delimiter, renders that turn as the model wrote
+    /// it, and then closes the block. A record of the same text as the content
+    /// renders it after an empty, closed block, which is not the text the
+    /// model wrote. Card `^mf1mwaw` measured that on DeepSeek-V4.
+    ///
+    /// The flag changes only a turn that does not close its reasoning. A
+    /// protocol that also sets ``replaysReasoningIntoHistory`` already
+    /// records the reasoning of every turn apart from the content. The default
+    /// `false` keeps the renders of every other template unchanged.
+    public var replaysUnclosedReasoningIntoHistory: Bool
+
     /// Creates a reasoning protocol.
     ///
     /// - Parameters:
@@ -178,6 +196,9 @@ public struct ReasoningConfig: Sendable, Equatable {
     ///     budget, or `nil` when no safe transition is known.
     ///   - replaysReasoningIntoHistory: whether a past turn's reasoning goes
     ///     back into its history render.
+    ///   - replaysUnclosedReasoningIntoHistory: whether a past turn that
+    ///     stopped inside its reasoning goes back into its history render as
+    ///     reasoning.
     public init(
         startDelimiter: String,
         endDelimiter: String,
@@ -185,7 +206,8 @@ public struct ReasoningConfig: Sendable, Equatable {
         isSpecialToken: Bool = false,
         implicitEndDelimiters: [String] = [],
         budgetTransition: ReasoningBudgetTransition? = nil,
-        replaysReasoningIntoHistory: Bool = false
+        replaysReasoningIntoHistory: Bool = false,
+        replaysUnclosedReasoningIntoHistory: Bool = false
     ) {
         self.startDelimiter = startDelimiter
         self.endDelimiter = endDelimiter
@@ -194,6 +216,7 @@ public struct ReasoningConfig: Sendable, Equatable {
         self.implicitEndDelimiters = implicitEndDelimiters
         self.budgetTransition = budgetTransition
         self.replaysReasoningIntoHistory = replaysReasoningIntoHistory
+        self.replaysUnclosedReasoningIntoHistory = replaysUnclosedReasoningIntoHistory
     }
 
     // MARK: - Presets

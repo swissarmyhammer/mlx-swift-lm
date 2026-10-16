@@ -299,4 +299,26 @@ extension ReasoningEventEmitter {
         }
         return separation
     }
+
+    /// Whether a whole generated text stays inside the reasoning block that
+    /// its prompt opened.
+    ///
+    /// The text stays inside when the prompt ended inside an open block and
+    /// the text holds no end delimiter, canonical or implicit: the generation
+    /// stopped inside its reasoning, for example on its token budget. A part
+    /// of the end delimiter at the end of the text is not a close.
+    ///
+    /// - Parameters:
+    ///   - text: the whole text the model generated after the prompt.
+    ///   - config: the reasoning protocol of the model.
+    ///   - primedInside: whether the prompt ended inside an open reasoning block.
+    /// - Returns: `true` when the whole text is reasoning that never closed.
+    public static func staysInsidePrimedReasoning(
+        _ text: String, config: ReasoningConfig, primedInside: Bool
+    ) -> Bool {
+        guard primedInside else { return false }
+        var emitter = ReasoningEventEmitter(config: config, primedInside: primedInside)
+        _ = emitter.process(text)
+        return !emitter.hasClosedReasoning
+    }
 }

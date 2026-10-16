@@ -149,10 +149,10 @@ struct ChatSessionReasoningHistoryTests {
             model: model, reasoningConfig: row.reasoningConfig, thinking: row.thinking,
             tokenizer: tokenizer, tokenBudget: Self.generatedTokenBudget)
 
-        let first = try #require(try await respond(session, to: Self.firstPrompt))
+        let first = try #require(try await session.completionInfo(respondingTo: Self.firstPrompt))
         let firstPrompt = Self.promptOfTurnOne(
             of: model, promptTokenCount: first.totalPromptTokenCount, tokenizer: tokenizer)
-        let second = try #require(try await respond(session, to: Self.secondPrompt))
+        let second = try #require(try await session.completionInfo(respondingTo: Self.secondPrompt))
 
         let renders = tokenizer.renders.withLock { $0 }
         try #require(renders.count == 2)
@@ -272,18 +272,10 @@ struct ChatSessionReasoningHistoryTests {
             coldRender.messages.map(QwenHistoryTokenizer.render).joined()
             + QwenHistoryTokenizer.generationPrompt(thinking: row.promptThinks)
         let coldTokens = tokenizer.encode(text: coldPrompt, addSpecialTokens: false)
-        let heldTokens = Self.attentionCacheTokens(after: model.passes)
+        let heldTokens = model.attentionCacheTokens
         #expect(
             (Array(heldTokens.prefix(coldTokens.count)) == coldTokens) == row.holdsTheColdRender,
             "held <<<\(tokenizer.decode(tokenIds: heldTokens))>>>")
-    }
-
-    /// The tokens the attention cache holds after `passes`. Each pass begins
-    /// where the cache stood, which drops the tokens a restore trimmed away.
-    private static func attentionCacheTokens(after passes: [ScriptedTokenModel.Pass]) -> [Int] {
-        passes.reduce(into: []) { held, pass in
-            held = Array(held.prefix(pass.offset)) + pass.tokens
-        }
     }
 
     // MARK: - The thinking switch of the session
@@ -395,7 +387,7 @@ struct ChatSessionReasoningHistoryTests {
         of model: ScriptedTokenModel, promptTokenCount: Int, tokenizer: QwenHistoryTokenizer
     ) -> String {
         tokenizer.decode(
-            tokenIds: Array(attentionCacheTokens(after: model.passes).prefix(promptTokenCount)))
+            tokenIds: Array(model.attentionCacheTokens.prefix(promptTokenCount)))
     }
 
     /// A session over `model` and `tokenizer` that asks for thinking as
@@ -427,11 +419,7 @@ struct ChatSessionReasoningHistoryTests {
     private func respond(_ session: ChatSession, to prompt: String) async throws
         -> GenerateCompletionInfo?
     {
-        var info: GenerateCompletionInfo?
-        for try await item in session.streamDetails(to: prompt) {
-            info = item.info ?? info
-        }
-        return info
+        try await session.completionInfo(respondingTo: prompt)
     }
 }
 
@@ -447,7 +435,8 @@ struct QwenHistoryRender: Sendable {
 /// with no system block and no tools, and records each render.
 ///
 /// A special marker and a run of two newlines are one token each, as in the
-/// Qwen tokenizer. Every other character is its own token.
+/// Qwen tokenizer. Every other character is its own token: ``PieceTokenizer``
+/// encodes and decodes.
 struct QwenHistoryTokenizer: MLXLMCommon.Tokenizer {
 
     /// The chat template flag that turns thinking on and off.
@@ -465,22 +454,22 @@ struct QwenHistoryTokenizer: MLXLMCommon.Tokenizer {
     /// The marker that closes a think block.
     static let closeThink = "</think>"
 
-    /// The pieces of the vocabulary, in the order the encoder tries them: the
-    /// markers, two newlines before one, then each character of the alphabet.
-    static let pieces: [String] =
-        [startOfTurn, endOfTurn, openThink, closeThink, "\n\n", "\n"]
-        + "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ .,".map(String.init)
+    /// The vocabulary: the markers, two newlines before one, then each
+    /// character of the alphabet.
+    static let vocabulary = PieceTokenizer(
+        markers: [startOfTurn, endOfTurn, openThink, closeThink, "\n\n", "\n"],
+        endOfTurn: endOfTurn)
 
     /// The size of the vocabulary: each piece, and the unknown token.
-    static let vocabularySize = pieces.count + 1
+    static let vocabularySize = vocabulary.vocabularySize
 
     /// Every render, in order.
     let renders = OSAllocatedUnfairLock<[QwenHistoryRender]>(initialState: [])
 
     var bosToken: String? { nil }
-    var eosToken: String? { Self.endOfTurn }
+    var eosToken: String? { Self.vocabulary.eosToken }
     var unknownToken: String? { nil }
-    var unknownTokenId: Int? { Self.pieces.count }
+    var unknownTokenId: Int? { Self.vocabulary.unknownTokenId }
 
     func applyChatTemplate(
         messages: [[String: any Sendable]],
@@ -516,29 +505,18 @@ struct QwenHistoryTokenizer: MLXLMCommon.Tokenizer {
     }
 
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
-        var tokens: [Int] = []
-        var rest = Substring(text)
-        while !rest.isEmpty {
-            if let index = Self.pieces.firstIndex(where: { rest.hasPrefix($0) }) {
-                tokens.append(index)
-                rest = rest.dropFirst(Self.pieces[index].count)
-            } else {
-                tokens.append(Self.pieces.count)
-                rest = rest.dropFirst()
-            }
-        }
-        return tokens
+        Self.vocabulary.encode(text: text, addSpecialTokens: addSpecialTokens)
     }
 
     func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
-        tokenIds.compactMap(convertIdToToken).joined()
+        Self.vocabulary.decode(tokenIds: tokenIds, skipSpecialTokens: skipSpecialTokens)
     }
 
     func convertTokenToId(_ token: String) -> Int? {
-        Self.pieces.firstIndex(of: token)
+        Self.vocabulary.convertTokenToId(token)
     }
 
     func convertIdToToken(_ id: Int) -> String? {
-        Self.pieces.indices.contains(id) ? Self.pieces[id] : nil
+        Self.vocabulary.convertIdToToken(id)
     }
 }
