@@ -1,5 +1,12 @@
 # mlx-swift-lm
 
+## After you clone
+
+Run `scripts/setup-remotes.sh` once. GitHub records this fork's parent as
+`ctymoszek/mlx-swift-lm`, a stale fork, so `gh repo clone` points `upstream`
+there. The script points `upstream` at `ml-explore/mlx-swift-lm`, where upstream
+merges come from.
+
 ## How to run the tests
 
 Do not use `swift test`. It stops the whole test process at the first GPU test

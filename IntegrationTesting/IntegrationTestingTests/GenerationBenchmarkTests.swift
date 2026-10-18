@@ -125,4 +125,26 @@ struct GenerationBenchmarkTests {
             additionalContext: Self.museGlimmerContext,
             testName: "museGlimmerSystemPromptCacheWithRewindReserve")
     }
+
+    /// Plain against MTP decoding of Qwen3.8-27B-4bit with its 4-bit MTP head.
+    @Test
+    func qwen38FourBitMTPGeneration() async throws {
+        let targetID = "mlx-community/Qwen3.8-27B-4bit"
+        let drafterID = "mlx-community/Qwen3.8-27B-MTP-4bit"
+        guard hfSnapshotDir(modelId: targetID) != nil, hfSnapshotDir(modelId: drafterID) != nil
+        else {
+            print(
+                "Skipping qwen38FourBitMTPGeneration: no local copy of \(targetID) or \(drafterID)")
+            return
+        }
+        let context = try await LLMModelFactory.shared.load(
+            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+            configuration: ModelConfiguration(id: targetID))
+        await Qwen35TextMTPRegistration.register()
+        let drafter = try await MTPDrafterModelFactory.shared.load(
+            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+            configuration: ModelConfiguration(id: drafterID))
+        let results = try await benchmarkMTPGeneration(context: context, drafter: drafter.model)
+        #expect(results.allSatisfy { $0.acceptanceRate > 0 })
+    }
 }

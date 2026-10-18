@@ -748,3 +748,135 @@ public func benchmarkSystemPromptCache(
 
     return PromptCacheStats(cold: cold, fork: fork, followUp: followUp)
 }
+
+// MARK: - MTP Speculative Decoding Benchmarks
+
+/// A prompt for the MTP benchmark, named by the kind of text it asks for.
+public struct MTPBenchmarkPrompt: Sendable {
+    public let name: String
+    public let text: String
+
+    public init(name: String, text: String) {
+        self.name = name
+        self.text = text
+    }
+
+    /// Math, code and prose, the categories the DFlash2 measurements on Qwen3.8 use.
+    public static let defaults = [
+        MTPBenchmarkPrompt(
+            name: "math",
+            text: "A train leaves at 9:40 and arrives at 13:05. It stops twice for 12 minutes. "
+                + "How long was it moving? Then: a shop sells 3 pens for $4. How much do 18 pens cost?"
+        ),
+        MTPBenchmarkPrompt(
+            name: "code",
+            text: "Write a Swift function that returns the longest common subsequence of two "
+                + "strings, with a few unit tests."),
+        MTPBenchmarkPrompt(
+            name: "prose", text: "Write a short travel blog post about a weekend in Hawaii."),
+    ]
+}
+
+/// Plain and MTP decode timings for one prompt.
+public struct MTPGenerationResult: Sendable {
+    public let prompt: String
+    public let generatedTokenCount: Int
+    /// Median plain decode throughput, in tokens per second.
+    public let baselineTokensPerSecond: Double
+    /// Median MTP decode throughput, in tokens per second.
+    public let mtpTokensPerSecond: Double
+    /// Accepted drafts divided by proposed drafts, from the last MTP run.
+    public let acceptanceRate: Double
+    /// Tokens emitted per target verify pass, from the last MTP run. 1 is plain decoding.
+    public let acceptanceLength: Double
+    /// Whether the MTP tokens equal the plain greedy tokens.
+    public let matchesBaseline: Bool
+
+    public var speedup: Double { mtpTokensPerSecond / baselineTokensPerSecond }
+}
+
+/// Benchmark MTP speculative decoding against plain greedy decoding of the same
+/// model. Each prompt runs once to warm up, then `runs` timed times each way.
+public func benchmarkMTPGeneration(
+    context: ModelContext,
+    drafter: any MTPDrafterModel,
+    prompts: [MTPBenchmarkPrompt] = MTPBenchmarkPrompt.defaults,
+    maxTokens: Int = 192,
+    blockSize: Int = 2,
+    runs: Int = 3
+) async throws -> [MTPGenerationResult] {
+    let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+
+    func collect(_ stream: AsyncStream<TokenGeneration>) async throws -> (
+        tokens: [Int], info: GenerateCompletionInfo
+    ) {
+        var tokens = [Int]()
+        var info: GenerateCompletionInfo?
+        for await event in stream {
+            switch event {
+            case .token(let token): tokens.append(token)
+            case .info(let completion): info = completion
+            }
+        }
+        guard let info else { throw LLMGenerationBenchmarkError.missingCompletionInfo }
+        return (tokens, info)
+    }
+
+    var results: [MTPGenerationResult] = []
+    for prompt in prompts {
+        let input = try await context.processor.prepare(
+            input: UserInput(chat: [.user(prompt.text)]))
+        func plain() async throws -> (tokens: [Int], info: GenerateCompletionInfo) {
+            try await collect(
+                generateTokens(input: input, parameters: parameters, context: context))
+        }
+        func mtp() async throws -> (tokens: [Int], info: GenerateCompletionInfo) {
+            try await collect(
+                generateTokens(
+                    input: input, parameters: parameters, context: context,
+                    mtpDrafter: drafter, blockSize: blockSize))
+        }
+
+        _ = try await plain()
+        _ = try await mtp()
+
+        var plainRates: [Double] = []
+        var mtpRates: [Double] = []
+        var baseline: [Int] = []
+        var last: (tokens: [Int], info: GenerateCompletionInfo)?
+        for _ in 0 ..< runs {
+            let p = try await plain()
+            baseline = p.tokens
+            plainRates.append(p.info.tokensPerSecond)
+            let m = try await mtp()
+            mtpRates.append(m.info.tokensPerSecond)
+            last = m
+        }
+        guard let last else { continue }
+
+        let proposed = last.info.proposedDraftTokens ?? 0
+        let accepted = last.info.acceptedDraftTokens ?? 0
+        let rounds = last.info.speculativeDecodingTelemetry?.roundCount ?? 0
+        let result = MTPGenerationResult(
+            prompt: prompt.name,
+            generatedTokenCount: last.info.generationTokenCount,
+            baselineTokensPerSecond: BenchmarkStats(times: plainRates).median,
+            mtpTokensPerSecond: BenchmarkStats(times: mtpRates).median,
+            acceptanceRate: proposed > 0 ? Double(accepted) / Double(proposed) : 0,
+            acceptanceLength: rounds > 0
+                ? Double(last.info.generationTokenCount) / Double(rounds) : 1,
+            matchesBaseline: last.tokens == baseline)
+        results.append(result)
+        print(
+            "MTP \(prompt.name): \(result.generatedTokenCount) tok, "
+                + "plain \(String(format: "%.1f", result.baselineTokensPerSecond)) tok/s, "
+                + "MTP \(String(format: "%.1f", result.mtpTokensPerSecond)) tok/s "
+                + "(\(String(format: "%.2f", result.speedup))x), "
+                + "acceptance \(String(format: "%.1f", result.acceptanceRate * 100))%, "
+                + "\(String(format: "%.2f", result.acceptanceLength)) tok/verify, "
+                + "matches plain: \(result.matchesBaseline)"
+                + (last.info.passthroughReason.map { ", passthrough: \($0)" } ?? "")
+        )
+    }
+    return results
+}
