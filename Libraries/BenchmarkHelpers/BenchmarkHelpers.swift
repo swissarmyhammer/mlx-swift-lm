@@ -545,7 +545,19 @@ public func benchmarkLLMGeneration(
     let container = try await LLMModelFactory.shared.loadContainer(
         from: downloader, using: tokenizerLoader, configuration: configuration
     ) { _ in }
+    return try await benchmarkLLMGeneration(
+        container: container, prompt: prompt, promptCharacterCount: promptCharacterCount,
+        maxTokens: maxTokens, runs: runs)
+}
 
+/// Benchmark prefill and decode performance for an already loaded model.
+public func benchmarkLLMGeneration(
+    container: ModelContainer,
+    prompt: String? = nil,
+    promptCharacterCount: Int = 4_000,
+    maxTokens: Int = 64,
+    runs: Int = BenchmarkDefaults.loadingRuns
+) async throws -> LLMGenerationStats {
     let benchmarkPrompt: String
     if let prompt = prompt {
         benchmarkPrompt = prompt
@@ -602,4 +614,130 @@ public func benchmarkLLMGeneration(
         promptTimeStats: BenchmarkStats(times: promptTimes),
         generateTimeStats: BenchmarkStats(times: generateTimes)
     )
+}
+
+// MARK: - System Prompt Cache Benchmarks
+
+/// One turn of a system prompt cache run.
+public struct PromptCacheTurn: Sendable {
+    /// Prompt tokens that were prefilled.
+    public let promptTokenCount: Int
+    /// Prompt tokens served from the reused cache prefix.
+    public let cachedPromptTokenCount: Int
+    /// Prefill time reported by the generation, in milliseconds.
+    public let promptTimeMs: Double
+    /// Wall-clock time from the call to the first generated chunk, in milliseconds.
+    public let firstChunkMs: Double
+}
+
+/// Timings for sessions that share a cached system prompt.
+public struct PromptCacheStats: Sendable {
+    /// First turn of a new session: the whole prompt is prefilled.
+    public let cold: [PromptCacheTurn]
+    /// First turn of a session forked with an empty history: only the system prompt can match.
+    public let fork: [PromptCacheTurn]
+    /// Second turn of the cold session: the system prompt and the first turn can match.
+    public let followUp: [PromptCacheTurn]
+
+    public init(cold: [PromptCacheTurn], fork: [PromptCacheTurn], followUp: [PromptCacheTurn]) {
+        self.cold = cold
+        self.fork = fork
+        self.followUp = followUp
+    }
+
+    public func printSummary(label: String) {
+        print("\(label) system prompt cache results:")
+        let coldMedian = BenchmarkStats(times: cold.map(\.promptTimeMs)).median
+        for (name, turns) in [("Cold", cold), ("Fork", fork), ("Follow-up", followUp)] {
+            let prefill = BenchmarkStats(times: turns.map(\.promptTimeMs))
+            let first = BenchmarkStats(times: turns.map(\.firstChunkMs))
+            let turn = turns.last!
+            let total = turn.promptTokenCount + turn.cachedPromptTokenCount
+            let efficiency = total > 0 ? Double(turn.cachedPromptTokenCount) / Double(total) : 0
+            print(
+                "  \(name): prefilled \(turn.promptTokenCount) tok, cached \(turn.cachedPromptTokenCount) tok "
+                    + "(\(String(format: "%.1f", efficiency * 100))%), "
+                    + "prefill median \(String(format: "%.1f", prefill.median))ms "
+                    + "(stddev \(String(format: "%.1f", prefill.stdDev))ms, "
+                    + "\(String(format: "%.1f", coldMedian / prefill.median))x vs cold), "
+                    + "first chunk median \(String(format: "%.1f", first.median))ms"
+            )
+        }
+    }
+}
+
+/// Benchmark the reuse of a cached system prompt. Each run prefills the system
+/// prompt cold in a new ``ChatSession``. It then asks a second question two ways:
+/// in a fork of the session with an empty history, and as a follow-up turn of the
+/// session itself.
+///
+/// The questions differ, so a fork can match only the system prompt.
+public func benchmarkSystemPromptCache(
+    container: ModelContainer,
+    systemPrompt: String? = nil,
+    systemPromptCharacterCount: Int = 16_000,
+    coldQuestion: String = "In one sentence, who is the main character?",
+    warmQuestion: String = "In one sentence, where does the story begin?",
+    maxTokens: Int = 16,
+    runs: Int = 5
+) async throws -> PromptCacheStats {
+    let instructions: String
+    if let systemPrompt {
+        instructions = systemPrompt
+    } else {
+        let text = try await loadBenchmarkText(characterCount: systemPromptCharacterCount)
+        instructions = "Answer questions about this text.\n\n" + text
+    }
+    let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+
+    func turn(_ session: ChatSession, _ question: String) async throws -> PromptCacheTurn {
+        let start = CFAbsoluteTimeGetCurrent()
+        var firstChunk: Double?
+        var info: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: question) {
+            if case .info(let i) = item {
+                info = i
+            } else if firstChunk == nil {
+                firstChunk = (CFAbsoluteTimeGetCurrent() - start) * 1000
+            }
+        }
+        guard let info else { throw LLMGenerationBenchmarkError.missingCompletionInfo }
+        return PromptCacheTurn(
+            promptTokenCount: info.promptTokenCount,
+            cachedPromptTokenCount: info.cachedPromptTokenCount,
+            promptTimeMs: info.promptTime * 1000,
+            firstChunkMs: firstChunk ?? (CFAbsoluteTimeGetCurrent() - start) * 1000)
+    }
+
+    func run() async throws -> (PromptCacheTurn, PromptCacheTurn, PromptCacheTurn) {
+        let session = ChatSession(
+            container, instructions: instructions, generateParameters: parameters)
+        let cold = try await turn(session, coldQuestion)
+        let fork = try await turn(await session.fork(history: []), warmQuestion)
+        let followUp = try await turn(session, warmQuestion)
+        return (cold, fork, followUp)
+    }
+
+    // Warm-up run, not recorded.
+    _ = try await run()
+
+    var cold: [PromptCacheTurn] = []
+    var fork: [PromptCacheTurn] = []
+    var followUp: [PromptCacheTurn] = []
+    for i in 1 ... runs {
+        let (c, f, u) = try await run()
+        cold.append(c)
+        fork.append(f)
+        followUp.append(u)
+        print(
+            "Prompt cache run \(i): "
+                + "cold \(c.promptTokenCount) tok / \(String(format: "%.1f", c.promptTimeMs))ms, "
+                + "fork \(f.promptTokenCount) tok (cached \(f.cachedPromptTokenCount)) / "
+                + "\(String(format: "%.1f", f.promptTimeMs))ms, "
+                + "follow-up \(u.promptTokenCount) tok (cached \(u.cachedPromptTokenCount)) / "
+                + "\(String(format: "%.1f", u.promptTimeMs))ms"
+        )
+    }
+
+    return PromptCacheStats(cold: cold, fork: fork, followUp: followUp)
 }

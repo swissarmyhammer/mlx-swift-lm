@@ -178,7 +178,8 @@ public final class ChatSession {
         var renderedTokens: [Int] = []
 
         /// The checkpoints of a hybrid model that the last prefill took: one at
-        /// the end of the last message and one at the end of the prompt. A next
+        /// the end of the last message and one at the end of the prompt, plus
+        /// one at the end of the instructions that later prefills keep. A next
         /// render that parts from `cachedTokens` where the recurrent caches
         /// cannot rewind goes back to the longest one it starts with.
         var checkpoints = PromptCacheCheckpoints()
@@ -1315,6 +1316,7 @@ public final class ChatSession {
                                 of: preparedInput, messages: templateMessages, render: render)
                         }
                         var checkpointPrefill: CheckpointPrefill?
+                        var leadingPrefill: CheckpointPrefill?
                         if var currentConversation = conversation {
                             let promptTokenIds = preparedInput.text.tokens.asArray(Int.self)
                             let cachedTokenIds = currentConversation.cachedTokens
@@ -1492,13 +1494,33 @@ public final class ChatSession {
                             currentConversation.uncommittedTokens.removeAll()
                             currentConversation.transcriptBuiltCache = true
                             // The checkpoints of the previous prefill served this
-                            // decision. This prefill takes its own.
-                            currentConversation.checkpoints.removeAll()
+                            // decision. This prefill takes its own, but keeps the one
+                            // at the end of the instructions while the prompt starts
+                            // with it.
+                            currentConversation.checkpoints.removeAllButLeading(
+                                servingPrompt: promptTokenIds)
+                            var prefillStart = cachedPromptTokenCount
+                            if keepsCheckpoints, currentConversation.checkpoints.leading == nil,
+                                let leadingBoundary = await PromptCacheCheckpoint.leadingSystemEnd(
+                                    of: promptTokenIds, messages: templateMessages, render: render),
+                                leadingBoundary < checkpointBoundary ?? promptTokenIds.count,
+                                let prefill = try Self.prefillToCheckpoint(
+                                    at: leadingBoundary, of: promptTokenIds,
+                                    representing: currentConversation.cachedTokens,
+                                    from: prefillStart, into: kvCache, state: lmState,
+                                    model: model, parameters: generateParameters)
+                            {
+                                currentConversation.checkpoints.setLeading(prefill.checkpoint)
+                                lmState = prefill.state
+                                input = prefill.remainingInput
+                                leadingPrefill = prefill
+                                prefillStart = leadingBoundary
+                            }
                             if let checkpointBoundary,
                                 let prefill = try Self.prefillToCheckpoint(
                                     at: checkpointBoundary, of: promptTokenIds,
                                     representing: currentConversation.cachedTokens,
-                                    from: cachedPromptTokenCount, into: kvCache, state: lmState,
+                                    from: prefillStart, into: kvCache, state: lmState,
                                     model: model, parameters: generateParameters)
                             {
                                 currentConversation.checkpoints.append(prefill.checkpoint)
@@ -1525,7 +1547,8 @@ public final class ChatSession {
                             lmState = iterator.state
                             // The tokens fed to take the checkpoint at the end of the
                             // last message are part of the prefill of this pass.
-                            iterator.promptPrefillTime += checkpointPrefill?.time ?? 0
+                            iterator.promptPrefillTime +=
+                                (leadingPrefill?.time ?? 0) + (checkpointPrefill?.time ?? 0)
                             if keepsCheckpoints,
                                 let representedTokens = conversation?.cachedTokens
                             {
@@ -1540,6 +1563,7 @@ public final class ChatSession {
                             return GenerationRun(
                                 MLXLMCommon.generateTaskRecordingTokens(
                                     promptTokenCount: input.text.tokens.size
+                                        + (leadingPrefill?.tokenCount ?? 0)
                                         + (checkpointPrefill?.tokenCount ?? 0),
                                     modelConfiguration: modelConfiguration,
                                     tokenizer: tokenizer,

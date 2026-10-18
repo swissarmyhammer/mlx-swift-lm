@@ -564,4 +564,83 @@ struct ChatSessionRecurrentCheckpointTests {
         #expect(feed == nil)
         #expect(caches.allSatisfy { $0.offset == 0 })
     }
+
+    // MARK: - The end of the instructions
+
+    /// The instructions of a session whose forks share them.
+    private static let sessionInstructions = "answer briefly"
+
+    /// A session of the hybrid model with ``sessionInstructions``, or none.
+    private func instructedSession(_ instructions: String?) throws -> ChatSession {
+        ChatSession(
+            try hybridContext(historyShape: .closesTheThinkBlock), instructions: instructions,
+            generateParameters: Self.parameters)
+    }
+
+    /// The prompt tokens that a render of ``firstTurn`` and a render of
+    /// ``secondTurn`` share, both after `instructions`.
+    private func sharedPromptLength(instructions: String?) throws -> Int {
+        let tokenizer = CheckpointTemplateTokenizer(historyShape: .closesTheThinkBlock)
+        func render(_ prompt: String) throws -> [Int] {
+            let system: [[String: any Sendable]] =
+                instructions.map { [["role": "system", "content": $0]] } ?? []
+            return try tokenizer.applyChatTemplate(
+                messages: system + [["role": "user", "content": prompt]], tools: nil,
+                additionalContext: nil)
+        }
+        return commonPrefixLength(of: try render(Self.firstTurn), and: try render(Self.secondTurn))
+    }
+
+    @Test("a fork with an empty history reuses the instructions")
+    func aForkWithAnEmptyHistoryReusesTheInstructions() async throws {
+        let session = try instructedSession(Self.sessionInstructions)
+        _ = try await respond(session, to: Self.firstTurn)
+
+        let fork = try #require(
+            try await respond(await session.fork(history: []), to: Self.secondTurn).info)
+
+        #expect(
+            fork.cachedPromptTokenCount
+                == (try sharedPromptLength(instructions: Self.sessionInstructions)))
+        #expect(fork.cachedPromptTokenCount > 0)
+    }
+
+    @Test("a fork that reuses the instructions generates what a cold session generates")
+    func aForkThatReusesTheInstructionsGeneratesWhatAColdSessionGenerates() async throws {
+        let session = try instructedSession(Self.sessionInstructions)
+        _ = try await respond(session, to: Self.firstTurn)
+
+        let fork = try await respond(await session.fork(history: []), to: Self.secondTurn)
+        let cold = try await respond(
+            try instructedSession(Self.sessionInstructions), to: Self.secondTurn)
+
+        #expect(fork.text == cold.text)
+        #expect(cold.info?.cachedPromptTokenCount == 0)
+    }
+
+    @Test("the checkpoint at the end of the instructions outlives a follow-up turn")
+    func theCheckpointAtTheEndOfTheInstructionsOutlivesAFollowUpTurn() async throws {
+        let session = try instructedSession(Self.sessionInstructions)
+        _ = try await respond(session, to: Self.firstTurn)
+        _ = try await respond(session, to: Self.firstTurn)
+
+        let fork = try #require(
+            try await respond(await session.fork(history: []), to: Self.secondTurn).info)
+
+        #expect(
+            fork.cachedPromptTokenCount
+                == (try sharedPromptLength(instructions: Self.sessionInstructions)))
+    }
+
+    @Test("the control: a fork of a session without instructions reuses nothing")
+    func aForkOfASessionWithoutInstructionsReusesNothing() async throws {
+        let session = try instructedSession(nil)
+        _ = try await respond(session, to: Self.firstTurn)
+
+        let fork = try #require(
+            try await respond(await session.fork(history: []), to: Self.secondTurn).info)
+
+        #expect(fork.cachedPromptTokenCount == 0)
+        #expect(fork.promptTokenCount == fork.totalPromptTokenCount)
+    }
 }

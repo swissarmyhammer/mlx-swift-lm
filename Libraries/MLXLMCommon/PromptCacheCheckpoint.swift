@@ -230,6 +230,29 @@ package struct PromptCacheCheckpoint {
         return await probedLastMessageEnd(of: promptTokens, messages: messages, render: render)
     }
 
+    /// The index of `promptTokens` where its leading system messages end: the
+    /// prefix it shares with a render of those messages plus one user message
+    /// with the text ``boundaryProbeText``.
+    ///
+    /// A checkpoint there serves every conversation that starts with the same
+    /// instructions and tools, such as a fork with a new history.
+    ///
+    /// - Parameters:
+    ///   - promptTokens: the tokens of the prepared prompt of `messages`.
+    ///   - messages: the chat messages the prompt renders from.
+    ///   - render: renders messages the way the prompt was rendered.
+    /// - Returns: the index, or nil when `messages` does not start with a
+    ///   system message followed by another message, or when `render` throws.
+    package static func leadingSystemEnd(
+        of promptTokens: [Int], messages: [Chat.Message],
+        render: ([Chat.Message]) async throws -> LMInput
+    ) async -> Int? {
+        let system = messages.prefix { $0.role == .system }
+        guard !system.isEmpty, system.count < messages.count else { return nil }
+        return await probedLastMessageEnd(
+            of: promptTokens, messages: Array(system), render: render)
+    }
+
     /// The index of `promptTokens` where its last message ends, from a render
     /// of `messages` plus one user message with the text ``boundaryProbeText``:
     /// the prefix that render and `promptTokens` share.
@@ -292,8 +315,27 @@ package struct PromptCacheCheckpoints {
     /// The checkpoints, in the order the session took them.
     private var checkpoints: [PromptCacheCheckpoint] = []
 
+    /// The checkpoint at the end of the leading system messages, which outlives
+    /// the other checkpoints while each prompt starts with it.
+    private(set) var leading: PromptCacheCheckpoint?
+
     /// Creates an empty set.
     package init() {}
+
+    /// Keeps `checkpoint` as the checkpoint at the end of the leading system
+    /// messages.
+    package mutating func setLeading(_ checkpoint: PromptCacheCheckpoint?) {
+        leading = checkpoint
+    }
+
+    /// Forgets every checkpoint but the leading one, and that one too when
+    /// `promptTokens` does not start with it.
+    package mutating func removeAllButLeading(servingPrompt promptTokens: [Int]) {
+        checkpoints.removeAll()
+        if let leading, !leading.serves(promptTokens) {
+            self.leading = nil
+        }
+    }
 
     /// Adds `checkpoint` to the set.
     ///
@@ -308,6 +350,7 @@ package struct PromptCacheCheckpoints {
     /// Forgets every checkpoint.
     package mutating func removeAll() {
         checkpoints.removeAll()
+        leading = nil
     }
 
     /// The longest checkpoint that `promptTokens` starts with, thus the one
@@ -316,6 +359,8 @@ package struct PromptCacheCheckpoints {
     /// - Parameter promptTokens: the whole rendered prompt.
     /// - Returns: the checkpoint, or nil when none serves the prompt.
     package func longest(serving promptTokens: [Int]) -> PromptCacheCheckpoint? {
-        checkpoints.filter { $0.serves(promptTokens) }.max { $0.tokens.count < $1.tokens.count }
+        (checkpoints + [leading].compactMap { $0 })
+            .filter { $0.serves(promptTokens) }
+            .max { $0.tokens.count < $1.tokens.count }
     }
 }
