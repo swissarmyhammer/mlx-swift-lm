@@ -681,6 +681,7 @@ public func benchmarkSystemPromptCache(
     maxTokens: Int = 16,
     kvCache: KVCacheConfiguration? = nil,
     additionalContext: [String: any Sendable]? = nil,
+    dflash2Drafter: DFlash2DrafterContainer? = nil,
     runs: Int = 5
 ) async throws -> PromptCacheStats {
     let instructions: String
@@ -719,6 +720,7 @@ public func benchmarkSystemPromptCache(
         let session = ChatSession(
             container, instructions: instructions, generateParameters: parameters,
             additionalContext: additionalContext)
+        session.dflash2Drafter = dflash2Drafter
         let cold = try await turn(session, coldQuestion)
         let fork = try await turn(await session.fork(history: []), warmQuestion)
         let followUp = try await turn(session, warmQuestion)
@@ -805,8 +807,42 @@ public func benchmarkMTPGeneration(
     blockSize: Int = 2,
     runs: Int = 3
 ) async throws -> [MTPGenerationResult] {
-    let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+    try await benchmarkSpeculativeGeneration(
+        label: "MTP", context: context, prompts: prompts,
+        parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0), runs: runs
+    ) { input, parameters in
+        try generateTokens(
+            input: input, parameters: parameters, context: context, mtpDrafter: drafter,
+            blockSize: blockSize)
+    }
+}
 
+/// Benchmark DFlash2 block speculative decoding against plain decoding of the
+/// same model, with the same `parameters` both ways. Each prompt runs once to
+/// warm up, then `runs` timed times each way.
+public func benchmarkDFlash2Generation(
+    context: ModelContext,
+    drafter: any DFlash2DrafterModel,
+    prompts: [MTPBenchmarkPrompt] = MTPBenchmarkPrompt.defaults,
+    parameters: GenerateParameters = GenerateParameters(maxTokens: 192, temperature: 0),
+    runs: Int = 3
+) async throws -> [MTPGenerationResult] {
+    try await benchmarkSpeculativeGeneration(
+        label: "DFlash2", context: context, prompts: prompts, parameters: parameters, runs: runs
+    ) { input, parameters in
+        try generateTokens(
+            input: input, parameters: parameters, context: context, dflash2Drafter: drafter)
+    }
+}
+
+private func benchmarkSpeculativeGeneration(
+    label: String,
+    context: ModelContext,
+    prompts: [MTPBenchmarkPrompt],
+    parameters: GenerateParameters,
+    runs: Int,
+    speculative: (LMInput, GenerateParameters) throws -> AsyncStream<TokenGeneration>
+) async throws -> [MTPGenerationResult] {
     func collect(_ stream: AsyncStream<TokenGeneration>) async throws -> (
         tokens: [Int], info: GenerateCompletionInfo
     ) {
@@ -830,27 +866,24 @@ public func benchmarkMTPGeneration(
             try await collect(
                 generateTokens(input: input, parameters: parameters, context: context))
         }
-        func mtp() async throws -> (tokens: [Int], info: GenerateCompletionInfo) {
-            try await collect(
-                generateTokens(
-                    input: input, parameters: parameters, context: context,
-                    mtpDrafter: drafter, blockSize: blockSize))
+        func drafted() async throws -> (tokens: [Int], info: GenerateCompletionInfo) {
+            try await collect(speculative(input, parameters))
         }
 
         _ = try await plain()
-        _ = try await mtp()
+        _ = try await drafted()
 
         var plainRates: [Double] = []
-        var mtpRates: [Double] = []
+        var draftedRates: [Double] = []
         var baseline: [Int] = []
         var last: (tokens: [Int], info: GenerateCompletionInfo)?
         for _ in 0 ..< runs {
             let p = try await plain()
             baseline = p.tokens
             plainRates.append(p.info.tokensPerSecond)
-            let m = try await mtp()
-            mtpRates.append(m.info.tokensPerSecond)
-            last = m
+            let d = try await drafted()
+            draftedRates.append(d.info.tokensPerSecond)
+            last = d
         }
         guard let last else { continue }
 
@@ -861,16 +894,17 @@ public func benchmarkMTPGeneration(
             prompt: prompt.name,
             generatedTokenCount: last.info.generationTokenCount,
             baselineTokensPerSecond: BenchmarkStats(times: plainRates).median,
-            mtpTokensPerSecond: BenchmarkStats(times: mtpRates).median,
+            mtpTokensPerSecond: BenchmarkStats(times: draftedRates).median,
             acceptanceRate: proposed > 0 ? Double(accepted) / Double(proposed) : 0,
             acceptanceLength: rounds > 0
                 ? Double(last.info.generationTokenCount) / Double(rounds) : 1,
             matchesBaseline: last.tokens == baseline)
         results.append(result)
         print(
-            "MTP \(prompt.name): \(result.generatedTokenCount) tok, "
+            "\(label) \(prompt.name) (temperature \(parameters.temperature)): "
+                + "\(result.generatedTokenCount) tok, "
                 + "plain \(String(format: "%.1f", result.baselineTokensPerSecond)) tok/s, "
-                + "MTP \(String(format: "%.1f", result.mtpTokensPerSecond)) tok/s "
+                + "\(label) \(String(format: "%.1f", result.mtpTokensPerSecond)) tok/s "
                 + "(\(String(format: "%.2f", result.speedup))x), "
                 + "acceptance \(String(format: "%.1f", result.acceptanceRate * 100))%, "
                 + "\(String(format: "%.2f", result.acceptanceLength)) tok/verify, "
@@ -879,4 +913,112 @@ public func benchmarkMTPGeneration(
         )
     }
     return results
+}
+
+/// Acceptance of DFlash2 when the drafter sees the whole prompt, against when the
+/// target cache already holds all but the last `suffixTokenCount` prompt tokens.
+/// A warm chat turn is the second case: the drafter reads only the new suffix.
+public struct DFlash2WarmPrefixResult: Sendable {
+    public let promptTokenCount: Int
+    public let suffixTokenCount: Int
+    /// Tokens per verify pass with the whole prompt prefilled by the iterator.
+    public let coldAcceptanceLength: Double
+    /// Tokens per verify pass with only the suffix prefilled by the iterator.
+    public let warmAcceptanceLength: Double
+}
+
+/// Measure ``DFlash2WarmPrefixResult`` over a prompt of `promptCharacterCount`
+/// characters of the benchmark text followed by a question.
+public func benchmarkDFlash2WarmPrefix(
+    context: ModelContext,
+    drafter: any DFlash2DrafterModel,
+    promptCharacterCount: Int = 6_000,
+    suffixTokenCount: Int = 16,
+    maxTokens: Int = 192
+) async throws -> DFlash2WarmPrefixResult {
+    let text = try await loadBenchmarkText(characterCount: promptCharacterCount)
+    let input = try await context.processor.prepare(
+        input: UserInput(chat: [.user(text + "\n\nSummarize this passage in a few sentences.")]))
+    let promptTokens = input.text.tokens.asArray(Int.self)
+    let prefixCount = promptTokens.count - suffixTokenCount
+    let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+
+    func acceptanceLength(cache: [KVCache]?, prefilled: Int) throws -> Double {
+        var iterator = try DFlash2SpeculativeTokenIterator(
+            input: input, mainModel: context.model, drafter: drafter, mainCache: cache,
+            prefilledPrefixTokens: prefilled, parameters: parameters)
+        while iterator.next() != nil {}
+        let rounds = iterator.speculativeDecodingTelemetry?.roundCount ?? 0
+        return rounds > 0 ? Double(iterator.tokenCount) / Double(rounds) : 1
+    }
+
+    let cold = try acceptanceLength(cache: nil, prefilled: 0)
+
+    let cache = try context.model.newCache(parameters: parameters)
+    _ = try PromptCacheCheckpoint.prefill(
+        Array(promptTokens[..<prefixCount]), into: cache, state: nil, model: context.model,
+        prefill: parameters.prefill)
+    let warm = try acceptanceLength(cache: cache, prefilled: prefixCount)
+
+    let result = DFlash2WarmPrefixResult(
+        promptTokenCount: promptTokens.count, suffixTokenCount: suffixTokenCount,
+        coldAcceptanceLength: cold, warmAcceptanceLength: warm)
+    print(
+        "DFlash2 warm prefix: \(promptTokens.count)-token prompt, "
+            + "cold \(String(format: "%.2f", cold)) tok/verify, "
+            + "warm (drafter reads the last \(suffixTokenCount)) "
+            + "\(String(format: "%.2f", warm)) tok/verify")
+    return result
+}
+
+// MARK: - ChatSession Decode Benchmarks
+
+/// One turn of a ChatSession decode run.
+public struct ChatSessionDecodeTurn: Sendable {
+    public let prompt: String
+    public let text: String
+    public let generatedTokenCount: Int
+    public let tokensPerSecond: Double
+    public let cachedPromptTokenCount: Int
+    public let promptTokenCount: Int
+    public let proposedDraftTokens: Int
+    public let acceptedDraftTokens: Int
+}
+
+/// Run `prompts` as consecutive turns of one ``ChatSession`` and time each turn's
+/// decode. With `dflash2Drafter` set, the session speculates with it.
+public func benchmarkChatSessionDecode(
+    container: ModelContainer,
+    dflash2Drafter: DFlash2DrafterContainer?,
+    prompts: [MTPBenchmarkPrompt] = MTPBenchmarkPrompt.defaults,
+    parameters: GenerateParameters = GenerateParameters(maxTokens: 192, temperature: 0)
+) async throws -> [ChatSessionDecodeTurn] {
+    let session = ChatSession(container, generateParameters: parameters)
+    session.dflash2Drafter = dflash2Drafter
+    let label = dflash2Drafter == nil ? "plain" : "DFlash2"
+    var turns: [ChatSessionDecodeTurn] = []
+    for prompt in prompts {
+        var text = ""
+        var info: GenerateCompletionInfo?
+        for try await item in session.streamDetails(to: prompt.text) {
+            text += item.chunk ?? ""
+            info = item.info ?? info
+        }
+        guard let info else { throw LLMGenerationBenchmarkError.missingCompletionInfo }
+        let turn = ChatSessionDecodeTurn(
+            prompt: prompt.name, text: text, generatedTokenCount: info.generationTokenCount,
+            tokensPerSecond: info.tokensPerSecond,
+            cachedPromptTokenCount: info.cachedPromptTokenCount,
+            promptTokenCount: info.promptTokenCount,
+            proposedDraftTokens: info.proposedDraftTokens ?? 0,
+            acceptedDraftTokens: info.acceptedDraftTokens ?? 0)
+        turns.append(turn)
+        print(
+            "ChatSession \(label) \(prompt.name) (temperature \(parameters.temperature)): "
+                + "\(turn.generatedTokenCount) tok at "
+                + "\(String(format: "%.1f", turn.tokensPerSecond)) tok/s, "
+                + "prefilled \(turn.promptTokenCount), cached \(turn.cachedPromptTokenCount), "
+                + "drafts accepted \(turn.acceptedDraftTokens)/\(turn.proposedDraftTokens)")
+    }
+    return turns
 }

@@ -371,6 +371,13 @@ package final class KVCacheStorage {
 
     /// Debug-only consistency audit for native attention offsets. Recurrent
     /// entries intentionally do not participate in the shared timeline.
+    /// The offset of the first attention cache, or the processed count when
+    /// there is none.
+    package var attentionOffset: Int {
+        KVCacheTree.leaves(in: cache).first(where: \.isAttentionCache)?.cache.offset
+            ?? processedTokenCount
+    }
+
     package var nativeAttentionOffsetsAreAligned: Bool {
         KVCacheTree.leaves(in: cache)
             .filter(\.isAttentionCache)

@@ -147,4 +147,102 @@ struct GenerationBenchmarkTests {
         let results = try await benchmarkMTPGeneration(context: context, drafter: drafter.model)
         #expect(results.allSatisfy { $0.acceptanceRate > 0 })
     }
+
+    private static let dflash2TargetID = "mlx-community/Qwen3.8-27B-4bit"
+    private static let dflash2DrafterID = "incoai/Qwen3.8-27B-DFlash2"
+
+    /// The target and the DFlash2 drafter, or nil when either has no local copy.
+    private func dflash2Pair(testName: String) async throws -> (
+        context: ModelContext, drafter: any DFlash2DrafterModel
+    )? {
+        guard hfSnapshotDir(modelId: Self.dflash2TargetID) != nil,
+            hfSnapshotDir(modelId: Self.dflash2DrafterID) != nil
+        else {
+            print("Skipping \(testName): no local copy of the target or the DFlash2 drafter")
+            return nil
+        }
+        let context = try await LLMModelFactory.shared.load(
+            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+            configuration: ModelConfiguration(id: Self.dflash2TargetID))
+        await DFlash2Registration.register()
+        let drafter = try await DFlash2DrafterModelFactory.shared.load(
+            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+            configuration: ModelConfiguration(id: Self.dflash2DrafterID))
+        return (context, drafter.model)
+    }
+
+    /// Plain against DFlash2 decoding, greedy and at Qwen3.8's recommended sampling.
+    @Test
+    func qwen38FourBitDFlash2Generation() async throws {
+        guard let pair = try await dflash2Pair(testName: "qwen38FourBitDFlash2Generation")
+        else { return }
+        let greedy = try await benchmarkDFlash2Generation(
+            context: pair.context, drafter: pair.drafter)
+        let sampled = try await benchmarkDFlash2Generation(
+            context: pair.context, drafter: pair.drafter,
+            parameters: GenerateParameters(
+                maxTokens: 192, temperature: 1.0, topP: 0.95, topK: 20))
+        #expect((greedy + sampled).allSatisfy { $0.acceptanceRate > 0 })
+    }
+
+    @Test
+    func qwen38FourBitDFlash2WarmPrefix() async throws {
+        guard let pair = try await dflash2Pair(testName: "qwen38FourBitDFlash2WarmPrefix")
+        else { return }
+        _ = try await benchmarkDFlash2WarmPrefix(context: pair.context, drafter: pair.drafter)
+    }
+
+    /// A three-turn ChatSession on Qwen3.8-27B-4bit, plain and with DFlash2: the
+    /// same text and cache reuse per turn, and the decode speed of each.
+    @Test
+    func qwen38FourBitDFlash2ChatSession() async throws {
+        guard hfSnapshotDir(modelId: Self.dflash2DrafterID) != nil,
+            let container = try await qwen38FourBit.containerOrSkip(
+                testName: "qwen38FourBitDFlash2ChatSession")
+        else { return }
+        await DFlash2Registration.register()
+        let drafter = try await DFlash2DrafterModelFactory.shared.loadContainer(
+            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+            configuration: ModelConfiguration(id: Self.dflash2DrafterID))
+
+        // Warm up both paths once.
+        _ = try await benchmarkChatSessionDecode(
+            container: container, dflash2Drafter: drafter, prompts: [.defaults[0]])
+        _ = try await benchmarkChatSessionDecode(
+            container: container, dflash2Drafter: nil, prompts: [.defaults[0]])
+
+        let plain = try await benchmarkChatSessionDecode(
+            container: container, dflash2Drafter: nil)
+        let drafted = try await benchmarkChatSessionDecode(
+            container: container, dflash2Drafter: drafter)
+        for (p, d) in zip(plain, drafted) {
+            let shared = zip(p.text, d.text).prefix { $0 == $1 }.count
+            print(
+                "ChatSession \(p.prompt): \(String(format: "%.2f", d.tokensPerSecond / p.tokensPerSecond))x, "
+                    + "same text: \(p.text == d.text), first \(shared) of \(p.text.count) characters match"
+            )
+        }
+        // A greedy verify pass can break a near-tie the other way, so the histories, and
+        // the cached counts after them, agree only while the texts do.
+        #expect(drafted[0].cachedPromptTokenCount == plain[0].cachedPromptTokenCount)
+        #expect(drafted.dropFirst().allSatisfy { $0.cachedPromptTokenCount > 0 })
+        #expect(drafted.allSatisfy { $0.proposedDraftTokens > 0 })
+
+        let sampling = GenerateParameters(maxTokens: 192, temperature: 1.0, topP: 0.95, topK: 20)
+        let plainSampled = try await benchmarkChatSessionDecode(
+            container: container, dflash2Drafter: nil, parameters: sampling)
+        let draftedSampled = try await benchmarkChatSessionDecode(
+            container: container, dflash2Drafter: drafter, parameters: sampling)
+        for (p, d) in zip(plainSampled, draftedSampled) {
+            print(
+                "ChatSession sampled \(p.prompt): "
+                    + "\(String(format: "%.2f", d.tokensPerSecond / p.tokensPerSecond))x")
+        }
+
+        let cache = try await benchmarkSystemPromptCache(
+            container: container, dflash2Drafter: drafter)
+        cache.printSummary(label: "Qwen3.8-27B-4bit with DFlash2")
+        #expect(cache.fork.allSatisfy { $0.cachedPromptTokenCount > 0 })
+        #expect(cache.followUp.allSatisfy { $0.cachedPromptTokenCount > 0 })
+    }
 }

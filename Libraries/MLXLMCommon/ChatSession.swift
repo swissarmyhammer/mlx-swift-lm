@@ -507,6 +507,12 @@ public final class ChatSession {
     /// the model cannot turn thinking off.
     public var thinkingEnabled: Bool?
 
+    /// A DFlash2 drafter that speculates on the text turns of this session, or nil.
+    ///
+    /// The session keeps its prompt cache and checkpoints with the drafter, and
+    /// decodes a turn without it when the drafter cannot serve the turn.
+    public var dflash2Drafter: DFlash2DrafterContainer?
+
     public var tools: [ToolSpec]?
 
     /// Optional automatic dispatcher for accepted tool calls.
@@ -915,6 +921,7 @@ public final class ChatSession {
         self.additionalContext = source.additionalContext
         self.thinkingEnabled = source.thinkingEnabled
         self.speculativeDecoding = source.speculativeDecoding
+        self.dflash2Drafter = source.dflash2Drafter
     }
 
     /// Produces a response to a prompt.
@@ -1115,6 +1122,7 @@ public final class ChatSession {
                 model,
                 instructions, processing, tools, toolDispatch,
                 additionalContext, thinkingEnabled, cache, loadedDraftModel, generateParameters,
+                dflash2Drafter,
                 components, speculativeDecoding
             ] in
             do {
@@ -1164,6 +1172,9 @@ public final class ChatSession {
                     // be shared and that is the lock that is held here.
 
                     let model = await model.perform { context in
+                        SendableBox(context.model)
+                    }.consume()
+                    let dflash2Model = await dflash2Drafter?.perform { context in
                         SendableBox(context.model)
                     }.consume()
                     let kvCachePlan = try generateParameters.kvCachePlan()
@@ -1541,7 +1552,47 @@ public final class ChatSession {
 
                         // Select the token iterator based on speculative decoding configuration.
                         let generation: GenerationRun
+                        // The DFlash2 iterator writes the caches directly, so the storage
+                        // learns its tokens after the generation.
+                        var dflash2WroteCaches = false
+                        func dflash2Generation() throws -> GenerationRun? {
+                            // The iterator reads the whole prompt the caches will hold; only a
+                            // transcript ledger names it.
+                            guard let dflash2Model, !carriesPreparedMedia,
+                                let representedTokens = conversation?.cachedTokens
+                            else { return nil }
+                            var iterator: DFlash2SpeculativeTokenIterator
+                            do {
+                                iterator = try DFlash2SpeculativeTokenIterator(
+                                    input: LMInput(tokens: MLXArray(representedTokens)),
+                                    mainModel: model, drafter: dflash2Model,
+                                    mainCache: kvCache.cache,
+                                    prefilledPrefixTokens: kvCache.processedTokenCount,
+                                    parameters: generateParameters, components: components)
+                            } catch is DFlash2SpeculationError {
+                                // Thrown before the iterator touches a cache.
+                                return nil
+                            }
+                            lmState = iterator.state
+                            iterator.promptPrefillTime +=
+                                (leadingPrefill?.time ?? 0) + (checkpointPrefill?.time ?? 0)
+                            return GenerationRun(
+                                MLXLMCommon.generateTaskRecordingTokens(
+                                    promptTokenCount: input.text.tokens.size
+                                        + (leadingPrefill?.tokenCount ?? 0)
+                                        + (checkpointPrefill?.tokenCount ?? 0),
+                                    modelConfiguration: modelConfiguration,
+                                    tokenizer: tokenizer,
+                                    iterator: iterator,
+                                    tools: toolValidationSchemas,
+                                    toolCallPolicy: generateParameters.toolCallPolicy)
+                            )
+                        }
                         func defaultGeneration() throws -> GenerationRun {
+                            if let dflash2 = try dflash2Generation() {
+                                dflash2WroteCaches = true
+                                return dflash2
+                            }
                             // Seed the carried state and read back the post-prefill state so the
                             // next turn, or the next tool restart, anchors correctly.
                             var iterator = try TokenIterator(
@@ -1743,6 +1794,10 @@ public final class ChatSession {
                         // the case where we broke the loop early as the generation
                         // work may continue (briefly) and use the KVCache
                         let generatedTokens = await generation.task.value
+                        if dflash2WroteCaches {
+                            kvCache.commitProcessedTokens(
+                                kvCache.attentionOffset - kvCache.processedTokenCount)
+                        }
 
                         if var currentConversation = conversation {
                             let recordedAssistant = currentConversation.record(

@@ -51,7 +51,7 @@ public struct DFlash2SpeculativeTokenIterator: TokenIteratorProtocol {
     /// Tokens per verify pass: one anchor plus `blockSize - 1` drafts.
     public let blockSize: Int
 
-    public private(set) var promptPrefillTime: TimeInterval = 0
+    public internal(set) var promptPrefillTime: TimeInterval = 0
 
     private var pendingTokens = [Int]()
     private var pendingIndex = 0
