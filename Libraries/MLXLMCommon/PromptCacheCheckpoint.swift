@@ -8,13 +8,14 @@ import MLX
 ///
 /// An attention cache rewinds to any earlier position, but a recurrent cache
 /// (the linear layers of Qwen 3.5) holds one state that sums every token it
-/// saw, and it cannot rewind. The checkpoint thus keeps a copy of each cache
-/// that cannot rewind, and nothing for a cache that can: a restore trims that
-/// cache back to the checkpoint.
+/// saw, and it cannot rewind. A rotating cache (a sliding-window layer) rewinds
+/// only until its window wraps, which a later prefill can do. The checkpoint
+/// thus keeps a copy of each cache that can lose its rewind, and nothing for
+/// any other cache: a restore trims that cache back to the checkpoint.
 ///
-/// A recurrent layer puts new state arrays in its slots and does not write into
-/// the old ones, thus a copy holds the state of the checkpoint while the live
-/// caches move on.
+/// A copy shares the arrays of the live cache. MLX does not write into an array
+/// that another array still holds, thus a copy keeps the state of the
+/// checkpoint while the live caches move on.
 ///
 /// `ChatSession` and the executor of `MLXFoundationModels` both keep
 /// checkpoints. Each one takes a checkpoint at the end of the last message of a
@@ -47,14 +48,14 @@ package struct PromptCacheCheckpoint {
     ///   - caches: the live caches, one for each layer of the model.
     ///   - tokens: the tokens `caches` represents.
     ///   - state: the model state the prefill left at this position, or nil.
-    /// - Returns: nil when every cache can rewind, because then a rewind serves
-    ///   every later render and a checkpoint adds nothing, or when a cache does
-    ///   not stand at the end of `tokens`.
+    /// - Returns: nil when no cache can lose its rewind, because then a rewind
+    ///   serves every later render and a checkpoint adds nothing, or when a
+    ///   cache does not stand at the end of `tokens`.
     package init?(caches: [KVCache], tokens: [Int], state: LMOutput.State?) {
         guard Self.applies(to: caches), caches.allSatisfy({ $0.offset == tokens.count }) else {
             return nil
         }
-        let copies = caches.map { $0.isTrimmable ? nil : $0.copy() }
+        let copies = caches.map { Self.canLoseRewind($0) ? $0.copy() : nil }
         self.tokens = tokens
         self.copies = copies
         self.state = state
@@ -67,19 +68,39 @@ package struct PromptCacheCheckpoint {
     /// checkpoint can serve it.
     ///
     /// - Parameter model: the model whose fresh caches are read.
-    /// - Returns: `true` for a hybrid model.
+    /// - Returns: `true` for a hybrid or sliding-window model.
     package static func applies(to model: any LanguageModel) -> Bool {
         guard let caches = try? model.newCache(parameters: nil) else { return false }
         return applies(to: caches)
     }
 
-    /// Whether `caches` holds a cache that cannot rewind, thus whether a
-    /// checkpoint can serve them.
+    /// Whether `caches` holds a cache that cannot rewind, or can stop being able
+    /// to, thus whether a checkpoint can serve them.
     ///
     /// - Parameter caches: one cache for each layer of the model.
-    /// - Returns: `true` for the caches of a hybrid model.
+    /// - Returns: `true` for the caches of a hybrid or sliding-window model.
     package static func applies(to caches: [KVCache]) -> Bool {
-        caches.contains { !$0.isTrimmable }
+        caches.contains(where: canLoseRewind)
+    }
+
+    /// Whether `caches` can lose a rewind while they take `positions` more
+    /// tokens, thus whether a pass that feeds that many needs checkpoints.
+    ///
+    /// A rotating cache whose window the pass cannot wrap still rewinds after
+    /// it, and a checkpoint would only cost a copy.
+    ///
+    /// - Parameters:
+    ///   - caches: the live caches, one for each layer of the model.
+    ///   - positions: the most tokens the pass can add, prompt and generation.
+    /// - Returns: `true` when some cache cannot rewind after the pass.
+    package static func applies(to caches: [KVCache], adding positions: Int) -> Bool {
+        caches.contains { !$0.isTrimmable(after: positions) }
+    }
+
+    /// Whether `cache` cannot rewind now or can stop being able to: a fresh
+    /// rotating cache rewinds until its window wraps.
+    private static func canLoseRewind(_ cache: KVCache) -> Bool {
+        !cache.isTrimmable || cache is RotatingKVCache
     }
 
     /// Whether this checkpoint can serve `promptTokens`: the prompt starts with

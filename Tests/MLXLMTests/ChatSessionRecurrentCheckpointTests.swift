@@ -346,6 +346,31 @@ struct ChatSessionRecurrentCheckpointTests {
         #expect(!allClose(stale, try coldLogits(model: model), atol: Self.logitTolerance).item())
     }
 
+    /// Keys or values for `count` positions of a one-head cache.
+    private func rotatingRows(_ count: Int) -> MLXArray {
+        MLXRandom.normal([1, 1, count, 8])
+    }
+
+    @Test("a checkpoint of a rotating cache survives the wrap of its window")
+    func aCheckpointOfARotatingCacheSurvivesTheWrapOfItsWindow() throws {
+        let cache = RotatingKVCache(maxSize: 4)
+        let kept = rotatingRows(3)
+        _ = cache.update(keys: kept, values: kept)
+        #expect(cache.isTrimmable)
+        let checkpoint = try #require(
+            PromptCacheCheckpoint(caches: [cache], tokens: [1, 2, 3], state: nil))
+
+        let past = rotatingRows(5)
+        _ = cache.update(keys: past, values: past)
+        #expect(!cache.isTrimmable)
+
+        let restored = try #require(checkpoint.restored(onto: [cache]))
+        #expect(restored[0].offset == 3)
+        let next = rotatingRows(1)
+        let (keys, _) = restored[0].update(keys: next, values: next)
+        #expect(allClose(keys[0..., 0..., ..<3, 0...], kept).item())
+    }
+
     // MARK: - The end of the last message
 
     /// The template variable that turns thinking on and off, as the Qwen 3.8
@@ -642,5 +667,52 @@ struct ChatSessionRecurrentCheckpointTests {
 
         #expect(fork.cachedPromptTokenCount == 0)
         #expect(fork.promptTokenCount == fork.totalPromptTokenCount)
+    }
+
+    // MARK: - A sliding-window model
+
+    /// A small Gemma 3 model whose 8-token window the instructions alone wrap.
+    private func slidingWindowContext() -> ModelContext {
+        let configuration = Gemma3TextConfiguration(
+            modelType: "text",
+            hiddenSize: 64, hiddenLayers: 2, intermediateSize: 64, attentionHeads: 4,
+            headDim: 64,
+            rmsNormEps: 0.00001, vocabularySize: TemplateToken.vocabularySize, kvHeads: 4,
+            ropeTheta: 1_000_000, ropeLocalBaseFreq: 10_000,
+            ropeTraditional: false, queryPreAttnScalar: 256,
+            slidingWindow: 8, slidingWindowPattern: 2,
+            maxPositionEmbeddings: 1024
+        )
+        MLXRandom.seed(Self.weightSeed)
+        let model = Gemma3TextModel(configuration)
+        eval(model)
+        let tokenizer = CheckpointTemplateTokenizer(historyShape: .closesTheThinkBlock)
+        let modelConfiguration = ModelConfiguration(id: "sliding-window-test")
+        return ModelContext(
+            configuration: modelConfiguration, model: model,
+            processor: TestInputProcessor(
+                tokenizer: tokenizer, configuration: modelConfiguration,
+                messageGenerator: DefaultMessageGenerator()),
+            tokenizer: tokenizer)
+    }
+
+    @Test("a fork of a sliding-window model reuses the instructions past a wrapped window")
+    func aForkOfASlidingWindowModelReusesTheInstructionsPastAWrappedWindow() async throws {
+        let session = ChatSession(
+            slidingWindowContext(), instructions: Self.sessionInstructions,
+            generateParameters: Self.parameters)
+        _ = try await respond(session, to: Self.firstTurn)
+
+        let fork = try await respond(await session.fork(history: []), to: Self.secondTurn)
+        let cold = try await respond(
+            ChatSession(
+                slidingWindowContext(), instructions: Self.sessionInstructions,
+                generateParameters: Self.parameters),
+            to: Self.secondTurn)
+
+        #expect(
+            fork.info?.cachedPromptTokenCount
+                == (try sharedPromptLength(instructions: Self.sessionInstructions)))
+        #expect(fork.text == cold.text)
     }
 }

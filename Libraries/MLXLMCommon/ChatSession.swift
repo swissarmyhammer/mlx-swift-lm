@@ -1304,12 +1304,16 @@ public final class ChatSession {
                         let carriesPreparedMedia =
                             preparedInput.image != nil || preparedInput.video != nil
                             || preparedInput.audio != nil
-                        // A hybrid model keeps checkpoints of its recurrent caches for a
-                        // text prompt that it generates from without a draft model.
+                        // A hybrid or sliding-window model keeps checkpoints of the caches
+                        // that can lose their rewind, for a text prompt that it generates
+                        // from without a draft model.
                         let keepsCheckpoints =
                             speculativeDecoding == nil && !carriesPreparedMedia
                             && !containsNewMedia && preparedInput.text.mask == nil
-                            && PromptCacheCheckpoint.applies(to: kvCache.cache)
+                            && PromptCacheCheckpoint.applies(
+                                to: kvCache.cache,
+                                adding: preparedInput.text.tokens.size
+                                    + (generateParameters.maxTokens ?? Int.max / 2))
                         var checkpointBoundary: Int?
                         if keepsCheckpoints {
                             checkpointBoundary = await PromptCacheCheckpoint.lastMessageEnd(
