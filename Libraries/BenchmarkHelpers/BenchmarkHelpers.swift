@@ -679,6 +679,8 @@ public func benchmarkSystemPromptCache(
     coldQuestion: String = "In one sentence, who is the main character?",
     warmQuestion: String = "In one sentence, where does the story begin?",
     maxTokens: Int = 16,
+    kvCache: KVCacheConfiguration? = nil,
+    additionalContext: [String: any Sendable]? = nil,
     runs: Int = 5
 ) async throws -> PromptCacheStats {
     let instructions: String
@@ -688,7 +690,8 @@ public func benchmarkSystemPromptCache(
         let text = try await loadBenchmarkText(characterCount: systemPromptCharacterCount)
         instructions = "Answer questions about this text.\n\n" + text
     }
-    let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+    var parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+    parameters.kvCache = kvCache
 
     func turn(_ session: ChatSession, _ question: String) async throws -> PromptCacheTurn {
         let start = CFAbsoluteTimeGetCurrent()
@@ -702,6 +705,9 @@ public func benchmarkSystemPromptCache(
             }
         }
         guard let info else { throw LLMGenerationBenchmarkError.missingCompletionInfo }
+        if firstChunk == nil {
+            print("Warning: the turn produced no text, so the session does not record it")
+        }
         return PromptCacheTurn(
             promptTokenCount: info.promptTokenCount,
             cachedPromptTokenCount: info.cachedPromptTokenCount,
@@ -711,7 +717,8 @@ public func benchmarkSystemPromptCache(
 
     func run() async throws -> (PromptCacheTurn, PromptCacheTurn, PromptCacheTurn) {
         let session = ChatSession(
-            container, instructions: instructions, generateParameters: parameters)
+            container, instructions: instructions, generateParameters: parameters,
+            additionalContext: additionalContext)
         let cold = try await turn(session, coldQuestion)
         let fork = try await turn(await session.fork(history: []), warmQuestion)
         let followUp = try await turn(session, warmQuestion)
