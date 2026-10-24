@@ -312,15 +312,6 @@ public final class ChatSession {
         }
     }
 
-    private struct GenerationRun {
-        let stream: AsyncStream<Generation>
-        let task: Task<[Int], Never>
-
-        init(_ pair: (AsyncStream<Generation>, Task<[Int], Never>)) {
-            (stream, task) = pair
-        }
-    }
-
     private struct AssistantGeneration {
         var content = ""
         var toolCalls: [ToolCall] = []
@@ -1072,6 +1063,55 @@ public final class ChatSession {
         }
     }
 
+    /// Errors from a generation observation request.
+    public enum ObservationError: LocalizedError {
+        /// The selected speculative iterator cannot report token log probabilities.
+        case unsupportedSpeculativeDecoding
+
+        public var errorDescription: String? {
+            switch self {
+            case .unsupportedSpeculativeDecoding:
+                "Token log probabilities are unavailable with active speculative decoding. Use standard decoding for observation."
+            }
+        }
+    }
+
+    /// Stream details through a fresh composed handler for each generation pass.
+    ///
+    /// The transformer configures a copy of the session's parameters for this
+    /// request, including automatic tool restarts. Its output must forward all
+    /// base generation events so the session can maintain its transcript and cache.
+    /// Log-probability reporting with active speculative decoding throws
+    /// ``ObservationError/unsupportedSpeculativeDecoding``.
+    public func observe<T: GenerationTransformer>(
+        to prompt: String,
+        role: Chat.Message.Role = .user,
+        images: consuming [UserInput.Image] = [],
+        videos: consuming [UserInput.Video] = [],
+        audios: consuming [UserInput.Audio] = [],
+        using transformer: T
+    ) -> AsyncThrowingStream<T.Handler.Output, Error> {
+        streamMap(
+            messages: [
+                .init(role: role, content: prompt, images: images, videos: videos, audios: audios)
+            ],
+            transformer: transformer, requiresLogProbabilitySupport: true
+        ) { $0 }
+    }
+
+    /// Stream transformed details after appending structured messages.
+    ///
+    /// The transformer applies only to this request. The session retains its
+    /// transcript and KV cache, including across automatic tool restarts.
+    public func observe<T: GenerationTransformer>(
+        to messages: consuming [Chat.Message],
+        using transformer: T
+    ) -> AsyncThrowingStream<T.Handler.Output, Error> {
+        streamMap(
+            messages: messages, transformer: transformer, requiresLogProbabilitySupport: true
+        ) { $0 }
+    }
+
     /// Produces a streaming response to a prompt by transforming the
     /// raw `Generation` values.
     ///
@@ -1104,18 +1144,33 @@ public final class ChatSession {
         failOnRejectedToolCall: Bool = false,
         transform: @Sendable @escaping (Generation) -> R?
     ) -> AsyncThrowingStream<R, Error> {
+        streamMap(
+            messages: messages, failOnRejectedToolCall: failOnRejectedToolCall,
+            transformer: TextGenerationTransformer(), transform: transform)
+    }
+
+    private func streamMap<T: GenerationTransformer, R: Sendable>(
+        messages: consuming [Chat.Message],
+        failOnRejectedToolCall: Bool = false,
+        transformer: T,
+        requiresLogProbabilitySupport: Bool = false,
+        transform: @Sendable @escaping (T.Handler.Output) -> R?
+    ) -> AsyncThrowingStream<R, Error> {
         let (stream, continuation) = AsyncThrowingStream<R, Error>.makeStream()
 
         // images and videos are not Sendable (MLXArray) but they are consumed
         // and are only being sent to the inner async
         let inputMessages = SendableBox<[Chat.Message]>(messages)
 
+        var parameters = generateParameters
+        transformer.configure(&parameters)
+
         let task = Task {
             [
                 model,
                 instructions, processing, tools, toolDispatch,
-                additionalContext, thinkingEnabled, cache, loadedDraftModel, generateParameters,
-                components, speculativeDecoding
+                additionalContext, thinkingEnabled, cache, loadedDraftModel,
+                generateParameters = parameters, components, speculativeDecoding
             ] in
             do {
                 // Automatic dispatch must always be schema-authorized. Treat a missing
@@ -1540,7 +1595,29 @@ public final class ChatSession {
                         }
 
                         // Select the token iterator based on speculative decoding configuration.
+                        typealias GenerationRun = (
+                            events: AsyncStream<T.Handler.Output>, task: Task<[Int], Never>
+                        )
                         let generation: GenerationRun
+                        func startGeneration(
+                            _ iterator: consuming any TokenIteratorProtocol,
+                            promptTokenCount: Int? = nil
+                        ) -> GenerationRun {
+                            var base = TextToolTokenLoopHandler(
+                                tokenizer: tokenizer,
+                                stopStrings: modelConfiguration.effectiveStopStrings,
+                                format: modelConfiguration.toolCallFormat ?? .json,
+                                tools: toolValidationSchemas,
+                                toolCallPolicy: generateParameters.toolCallPolicy)
+                            base.cachedPromptTokenCount = cachedPromptTokenCount
+                            return MLXLMCommon.generateTaskRecordingTokens(
+                                promptTokenCount: promptTokenCount ?? input.text.tokens.size,
+                                modelConfiguration: modelConfiguration,
+                                tokenizer: tokenizer,
+                                iterator: iterator,
+                                handler: transformer.makeHandler(wrapping: base))
+                        }
+
                         func defaultGeneration() throws -> GenerationRun {
                             // Seed the carried state and read back the post-prefill state so the
                             // next turn, or the next tool restart, anchors correctly.
@@ -1564,17 +1641,11 @@ public final class ChatSession {
                                         state: iterator.state))
                             }
 
-                            return GenerationRun(
-                                MLXLMCommon.generateTaskRecordingTokens(
-                                    promptTokenCount: input.text.tokens.size
-                                        + (leadingPrefill?.tokenCount ?? 0)
-                                        + (checkpointPrefill?.tokenCount ?? 0),
-                                    modelConfiguration: modelConfiguration,
-                                    tokenizer: tokenizer,
-                                    iterator: iterator,
-                                    tools: toolValidationSchemas,
-                                    toolCallPolicy: generateParameters.toolCallPolicy)
-                            )
+                            return startGeneration(
+                                iterator,
+                                promptTokenCount: input.text.tokens.size
+                                    + (leadingPrefill?.tokenCount ?? 0)
+                                    + (checkpointPrefill?.tokenCount ?? 0))
                         }
 
                         // Carried model state is safe to speculate on: the anchors position from
@@ -1639,6 +1710,12 @@ public final class ChatSession {
 
                                     generation = try defaultGeneration()
                                 } else {
+                                    if requiresLogProbabilitySupport,
+                                        generateParameters.logProbabilities != nil
+                                    {
+                                        throw ObservationError.unsupportedSpeculativeDecoding
+                                    }
+
                                     if cachedDraftContainer == nil {
                                         await loadedDraftModel.update { storedDraftModel in
                                             if storedDraftModel == nil {
@@ -1690,14 +1767,7 @@ public final class ChatSession {
                                     // so the next turn keeps its anchor.
                                     lmState = iterator.state
 
-                                    generation = GenerationRun(
-                                        MLXLMCommon.generateTaskRecordingTokens(
-                                            promptTokenCount: input.text.tokens.size,
-                                            modelConfiguration: modelConfiguration,
-                                            tokenizer: tokenizer,
-                                            iterator: iterator,
-                                            tools: toolValidationSchemas,
-                                            toolCallPolicy: generateParameters.toolCallPolicy))
+                                    generation = startGeneration(iterator)
                                 }
                             }
                         } else {
@@ -1708,22 +1778,25 @@ public final class ChatSession {
                         var pendingToolCalls: [ToolCall] = []
                         var assistant = AssistantGeneration()
 
-                        for await item in generation.stream {
-                            let item = item.attributingCachedPromptTokens(cachedPromptTokenCount)
-                            assistant.consume(item)
+                        func emit(_ value: R) -> Bool {
+                            if case .terminated = continuation.yield(value) {
+                                assistant.wasTerminatedByConsumer = true
+                                generation.task.cancel()
+                                return false
+                            }
+                            return true
+                        }
 
-                            // collect tool calls for dispatch; if no
-                            // toolDispatch the caller handles them via
-                            // the transform (streamDetails path)
-                            if let toolCall = item.toolCall, toolDispatch != nil {
-                                pendingToolCalls.append(toolCall)
-                            } else if let value = transform(item) {
-                                if case .terminated = continuation.yield(value) {
-                                    assistant.wasTerminatedByConsumer = true
-                                    generation.task.cancel()
-                                    break
+                        for await event in generation.events {
+                            if let item = event.generation {
+                                assistant.consume(item)
+
+                                if let toolCall = item.toolCall, toolDispatch != nil {
+                                    pendingToolCalls.append(toolCall)
+                                    continue
                                 }
                             }
+                            if let value = transform(event), !emit(value) { break }
                         }
 
                         // The generation task is unstructured, so cancellation of
