@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m5smznwhypm896qzvtvssbqy
+  text: 'Change after the PR 581 port (commit 843854ec): the iterator `state` already returns the state without the MTP keys (`persistentTargetState`). What remains: the stop-token cache accounting, the passthrough order inside the iterator, `state:` on the public `generate` overloads, and log probabilities.'
+  timestamp: 2026-10-25T13:46:14.801203+00:00
 depends_on:
 - 01M5SK8FDMF5XH4FDH12H0FPX1
 position_column: todo

@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m5smzxkzg6vv47mbarf1fz2c
+  text: 'Change after the PR 581 port: a cache that cannot stage a verify block now throws `MTPInitializationError.unsupportedSpeculativeCache` before prefill, and ChatSession falls back with `SpeculativeDecodingFallbackReason.unsupportedCache`. Use this path for unsupported rotating/quantized combinations.'
+  timestamp: 2026-10-25T13:46:22.719346+00:00
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 - 01M5SJPFM01WFRYWMQXVGMA4MQ

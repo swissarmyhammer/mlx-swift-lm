@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m5smzv3pbye859tdw9xeanw4
+  text: 'Change after the PR 581 port (commit 843854ec): the MTP source is `SpeculativeDecodingConfig.Strategy.mtp(MTPDrafterContainer, blockSize)`. Add the deferred form to this enum.'
+  timestamp: 2026-10-25T13:46:20.150521+00:00
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 position_column: todo

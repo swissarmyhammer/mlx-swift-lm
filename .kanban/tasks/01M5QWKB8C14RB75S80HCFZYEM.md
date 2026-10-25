@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m5smzsqtgm76c5cdrd9n8pry
+  text: 'Change after the PR 581 port (commit 843854ec): `finalizeShiftedMTPDrafterState` requires `proposalAppended == 0`. Chained drafts leave tentative entries, so use the general trim/append API of task 33ctvty.'
+  timestamp: 2026-10-25T13:46:18.746946+00:00
 depends_on:
 - 01M5SKBV27GED43EB3T8MCSVWE
 - 01M5SKBCEWG4D25SZZNGG7BVM7

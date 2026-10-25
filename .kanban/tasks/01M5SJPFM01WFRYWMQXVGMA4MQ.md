@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m5smzjcpchtf2cj3f2knxdmr
+  text: 'Change after the PR 581 port (commit 843854ec): do not add a new type `MTPDrafterCacheState`. Extend the existing `MTPDrafterContinuation` (Libraries/MLXLMCommon/MTPDrafterModel.swift) with `byteCount`, a drafter identity, `isAligned(withMainTokenCount:drafterID:)`, and `arrays()` / `metadata()` / `init(arrays:metadata:drafter:)`. The deep copy for fork already exists in `RealizedCache.copy()`.'
+  timestamp: 2026-10-25T13:46:11.222975+00:00
 depends_on:
 - 01M5SK9FZ2HTB7XJDAPCBRDDM5
 position_column: todo

@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m5smzmkyf0j79q1m2f3qgh72
+  text: 'Change after the PR 581 port (commit 843854ec): the MLXVLM `prepareContinuation` now passes `state` and joins the hidden rows of each chunk, so the warm VLM continuation runs MTP (remove that acceptance item). The LLM prefill is still `stepSize = Int.max` when there is a continuation or `requiresPromptPrefill`, and the joined rows stay alive. Replace the joined rows with the per-chunk hook of this task.'
+  timestamp: 2026-10-25T13:46:13.502187+00:00
 depends_on:
 - 01M5SK9FZ2HTB7XJDAPCBRDDM5
 position_column: todo

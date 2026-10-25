@@ -5,24 +5,22 @@ depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 position_column: todo
 position_ordinal: '8380'
-title: 'MTP: drafter state through trim, hybrid checkpoint restore and fork in ChatSession'
+title: 'MTP: drafter continuation through hybrid checkpoint restore and rewind in ChatSession (fork is done by PR 581)'
 ---
 ## What
-After the ChatSession MTP task, the append-suffix case works. These in-session cache operations must also keep the MTP drafter state (`MTPDrafterCacheState`: drafter cache + pending hidden row) in step with the main cache. Snapshot save/load is a separate task. A drafter state cannot be trimmed by itself (entry j needs target hidden j, and no cache keeps old hidden rows), so it is restored from a checkpoint at the same position or dropped for a cold start.
+PR 581 (commit 843854ec) deep-copies the drafter continuation in `RealizedCache.copy()`, so fork works. But a stateful MTP drafter has the capability `appendOnly` (Libraries/MLXLMCommon/PromptCacheReusePolicy.swift), so every rewind gives `.trimToCommonPrefixMainOnly`: the drafter is dropped, the turn runs target-only, and MTP stays off for later turns on that cache. On Qwen3.8 a rewind happens through a checkpoint restore on each multi-turn chat whose history is rendered again, so this matters.
 
-- [ ] **Checkpoint creation** (ChatSession.swift ~1562-1642, and the `prefillToCheckpoint` end-of-instructions checkpoint): add a `copy()` of the drafter state at the checkpoint position to `PromptCacheCheckpoint` (Libraries/MLXLMCommon/PromptCacheCheckpoint.swift ~33-65), and add its bytes to the checkpoint byte count.
-- [ ] **Trim to a common prefix P / checkpoint restore** (ChatSession.swift ~1429-1450 and ~1508-1528): Qwen3.8 is hybrid, so a rewind restores a checkpoint. Restore the drafter state of that checkpoint together with the main caches. If no checkpoint gives an aligned drafter state, use the cold start. Never use a misaligned drafter.
-- [ ] Make sure that the MTP drafter state does not set `carriesModelState` in `PromptCacheTurn`. Update `PromptCacheReusePolicy` (Libraries/MLXLMCommon/PromptCacheReusePolicy.swift) so that an MTP session with a checkpoint restore keeps speculation on and does not use `requiresMainOnlyContinuation`. `maxTrimCount` takes the minimum over main and draft caches (~1421-1422); do not include the MTP drafter in it.
-- [ ] **Fork / copy** (`RealizedCache.copy()` ~407-410, fork ~1954-1960): copy the MTP drafter state with the session. A fork with a new history sets `transcriptBuiltCache = false`; the drafter state follows the same rule as the main cache.
+- [ ] Checkpoint creation (ChatSession.swift ~1562-1642): store a copy of the `MTPDrafterContinuation` at the checkpoint position in `PromptCacheCheckpoint` (Libraries/MLXLMCommon/PromptCacheCheckpoint.swift ~33-65) and count its bytes.
+- [ ] Checkpoint restore (~1508-1528) restores that continuation together with the main caches.
+- [ ] Policy: when a checkpoint gives an aligned continuation, keep speculation on; else use the cold start. Do not use `trimToCommonPrefixMainOnly` for the MTP strategy.
 
 ## Acceptance Criteria
-- [ ] Edit-and-regenerate (a turn that rewinds to an earlier message end) with MTP gives the same greedy text as plain decode, and does not feed the drafter again over the kept prefix.
-- [ ] A forked session and its source continue independently with MTP, and each gives the same text as plain decode.
-- [ ] A rewind with no aligned drafter checkpoint uses the cold start and still gives the same text as plain decode.
+- [ ] Edit-and-regenerate (a turn that goes back to an earlier message end) with MTP gives the same greedy text as plain decode and runs MTP (no target-only turn).
+- [ ] After a turn that ran target-only for any reason, the next turn runs MTP again (cold start or restored continuation).
 
 ## Tests
-- [ ] Tests/MLXLMTests: ChatSession tests on the scripted Qwen35 + MTP fixture for checkpoint restore, cold-start fallback, and fork.
-- [ ] Tests/MLXLMTests: a `PromptCacheReusePolicy` unit test where an MTP drafter state keeps rewind allowed.
+- [ ] Tests/MLXLMTests/ChatSessionQwenTextMTPTests.swift: checkpoint restore with MTP, recovery after a target-only turn.
+- [ ] Tests/MLXLMTests/PromptCacheReusePolicyTests.swift: the MTP strategy with an aligned checkpoint continuation keeps rewind with speculation.
 - [ ] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` passes.
 
 ## Workflow
