@@ -71,6 +71,7 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
     private static let logger = MLXLogger(label: "TokenStreamProtocol")
     private var decoder: any TokenStreamDecoder
     var cachedPromptTokenCount = 0
+    var speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
 
     public init(
         tokenizer: Tokenizer, stopStrings: Set<String> = [], format: ToolCallFormat,
@@ -116,11 +117,11 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
     }
 
     public func infoEvent(_ info: GenerateCompletionInfo) -> Generation {
-        .info(
-            info.withToolCallCounts(
-                rejected: decoder.rejectedToolCallCount,
-                recovered: decoder.recoveredToolCallCount)
-        ).attributingCachedPromptTokens(cachedPromptTokenCount)
+        var info = info.withToolCallCounts(
+            rejected: decoder.rejectedToolCallCount,
+            recovered: decoder.recoveredToolCallCount)
+        info.speculativeDecodingFallbackReason = speculativeDecodingFallbackReason
+        return Generation.info(info).attributingCachedPromptTokens(cachedPromptTokenCount)
     }
 
     private mutating func process(

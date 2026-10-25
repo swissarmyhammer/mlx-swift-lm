@@ -7,6 +7,18 @@ import MLX
 import CoreGraphics
 #endif
 
+/// Validation failures for speculative-decoding configuration.
+public enum SpeculativeDecodingConfigurationError: Error, Sendable, Equatable, LocalizedError {
+    case invalidMTPBlockSize(Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidMTPBlockSize(let value):
+            "MTP verification block size must be at least 2; received \(value)."
+        }
+    }
+}
+
 /// Configuration for speculative decoding in a `ChatSession`.
 ///
 /// Speculative decoding uses a small draft model to propose candidate tokens
@@ -47,22 +59,31 @@ public struct SpeculativeDecodingConfig: Sendable {
         case deferred(bytes: Int, @Sendable () async throws -> ModelContainer)
     }
 
-    package let draftModelSource: DraftModelSource
+    package enum Strategy: Sendable {
+        case draftModel(DraftModelSource)
+        case mtp(MTPDrafterContainer, blockSize: Int)
+    }
+
+    package let strategy: Strategy
 
     /// The lightweight model used to propose candidate tokens, when it was provided eagerly.
     ///
     /// Configurations initialized with a loader closure return `nil` because the
     /// draft model is loaded asynchronously by ``ChatSession`` only when speculation
-    /// is admitted by the memory policy.
+    /// is admitted by the memory policy. MTP configurations also return `nil`
+    /// because their drafter uses ``MTPDrafterContainer`` instead.
     public var draftModel: ModelContainer? {
-        if case .loaded(let draftModel) = draftModelSource {
+        if case .draftModel(.loaded(let draftModel)) = strategy {
             return draftModel
         }
         return nil
     }
 
-    /// Number of tokens proposed by the draft model per verification cycle.
-    /// The default value of 5 offers a good balance between speed and accuracy.
+    /// Number of candidate tokens proposed per verification cycle.
+    ///
+    /// The draft-model initializers default to 5. For MTP configurations this
+    /// is `blockSize - 1`, because the verification block also includes the
+    /// target model's current token.
     public let numDraftTokens: Int
 
     /// Optional memory policy used to decide whether auxiliary-model speculation should run.
@@ -76,7 +97,7 @@ public struct SpeculativeDecodingConfig: Sendable {
         numDraftTokens: Int = 5,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) {
-        self.draftModelSource = .loaded(draftModel)
+        self.strategy = .draftModel(.loaded(draftModel))
         self.numDraftTokens = numDraftTokens
         self.memoryPolicy = memoryPolicy
     }
@@ -99,24 +120,49 @@ public struct SpeculativeDecodingConfig: Sendable {
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
         loadDraftModel: @escaping @Sendable () async throws -> ModelContainer
     ) {
-        self.draftModelSource = .deferred(bytes: max(0, draftModelBytes), loadDraftModel)
+        self.strategy = .draftModel(
+            .deferred(bytes: max(0, draftModelBytes), loadDraftModel))
         self.numDraftTokens = numDraftTokens
         self.memoryPolicy = memoryPolicy
     }
 
+    /// Initialize speculative decoding with an MTP drafter.
+    ///
+    /// - Parameters:
+    ///   - mtpDrafter: drafter that proposes `blockSize - 1` tokens per verification cycle
+    ///   - blockSize: total number of tokens in each verification block
+    /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)``
+    ///   when `blockSize` is smaller than 2.
+    public init(
+        mtpDrafter: MTPDrafterContainer,
+        blockSize: Int = 2
+    ) throws {
+        guard blockSize >= 2 else {
+            throw SpeculativeDecodingConfigurationError.invalidMTPBlockSize(blockSize)
+        }
+
+        self.strategy = .mtp(mtpDrafter, blockSize: blockSize)
+        self.numDraftTokens = blockSize - 1
+        self.memoryPolicy = nil
+    }
+
     package var estimatedDraftModelBytes: Int? {
-        guard case .deferred(let bytes, _) = draftModelSource else {
+        guard case .draftModel(.deferred(let bytes, _)) = strategy else {
             return nil
         }
         return bytes
     }
 
     package func loadDraftModel() async throws -> ModelContainer {
-        switch draftModelSource {
+        guard case .draftModel(let source) = strategy else {
+            preconditionFailure("MTP speculation does not use a draft ModelContainer")
+        }
+
+        switch source {
         case .loaded(let draftModel):
-            draftModel
+            return draftModel
         case .deferred(_, let load):
-            try await load()
+            return try await load()
         }
     }
 }
@@ -312,6 +358,7 @@ public final class ChatSession {
         }
     }
 
+
     private struct AssistantGeneration {
         var content = ""
         var toolCalls: [ToolCall] = []
@@ -366,18 +413,21 @@ public final class ChatSession {
         let main: KVCacheStorage
         var draft: KVCacheStorage?
         var state: LMOutput.State?
+        var mtpDrafterContinuation: MTPDrafterContinuation?
         var conversation: Conversation?
 
         init(
             cache: consuming [KVCache],
             draft: consuming [KVCache]? = nil,
             state: LMOutput.State? = nil,
+            mtpDrafterContinuation: MTPDrafterContinuation? = nil,
             conversation: Conversation? = nil,
             plan: KVCachePlan
         ) {
             self.main = KVCacheStorage(cache, plan: plan)
             self.draft = draft.map { KVCacheStorage($0, plan: plan) }
             self.state = state
+            self.mtpDrafterContinuation = mtpDrafterContinuation
             self.conversation = conversation
         }
 
@@ -385,11 +435,13 @@ public final class ChatSession {
             main: KVCacheStorage,
             draft: KVCacheStorage? = nil,
             state: LMOutput.State? = nil,
+            mtpDrafterContinuation: MTPDrafterContinuation? = nil,
             conversation: Conversation? = nil
         ) {
             self.main = main
             self.draft = draft
             self.state = state
+            self.mtpDrafterContinuation = mtpDrafterContinuation
             self.conversation = conversation
         }
 
@@ -405,8 +457,14 @@ public final class ChatSession {
 
         /// A copy that shares no mutable state with this cache.
         func copy() -> RealizedCache {
-            RealizedCache(
-                main: main.copy(), draft: draft?.copy(), state: state, conversation: conversation)
+            let mtpContinuation = mtpDrafterContinuation.map { continuation in
+                var copied = continuation
+                copied.state.cache = continuation.state.cache.map { $0.copy() }
+                return copied
+            }
+            return RealizedCache(
+                main: main.copy(), draft: draft?.copy(), state: state,
+                mtpDrafterContinuation: mtpContinuation, conversation: conversation)
         }
     }
 
@@ -1229,6 +1287,7 @@ public final class ChatSession {
                     // across turns alongside the KV cache; updated after each
                     // prefill and stored back at the end of the turn.
                     var lmState: LMOutput.State?
+                    var mtpDrafterContinuation: MTPDrafterContinuation?
                     var conversation: Conversation?
                     switch cache {
                     case .empty:
@@ -1264,6 +1323,7 @@ public final class ChatSession {
                                 plan: kvCachePlan)
                             draftKVCache = nil
                             lmState = nil
+                            mtpDrafterContinuation = nil
                             conversation = restored
                         } else {
                             // Either the realized policy is unchanged, or this is a
@@ -1273,6 +1333,7 @@ public final class ChatSession {
                             kvCache = stored.main
                             draftKVCache = stored.draft
                             lmState = stored.state
+                            mtpDrafterContinuation = stored.mtpDrafterContinuation
                             conversation = stored.conversation
                         }
 
@@ -1296,6 +1357,7 @@ public final class ChatSession {
 
                     // loop can restart on tool calls
                     restart: while !pendingMessages.isEmpty {
+                        var speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
                         // Only a cache these calls were generated into can resume them.
                         let isToolResultContinuation =
                             pendingMessages.contains { $0.role == .tool }
@@ -1349,8 +1411,47 @@ public final class ChatSession {
                                 !$0.shouldUseSpeculativeDecoding && $0.action != .fail
                             } ?? false
 
+                        let mtpDrafter: (any MTPDrafterModel)?
+                        if let speculativeDecoding,
+                            case .mtp(let drafterContainer, _) = speculativeDecoding.strategy
+                        {
+                            mtpDrafter = await drafterContainer.perform { context in
+                                SendableBox(context.model)
+                            }.consume()
+                        } else {
+                            mtpDrafter = nil
+                        }
+                        let usesMTP = mtpDrafter != nil
+                        let speculationIsEligibleForParameters: Bool
+                        if let mtpDrafter {
+                            speculationIsEligibleForParameters =
+                                !mtpDrafter.requiresGreedySampling
+                                || generateParameters.temperature == 0
+                        } else {
+                            speculationIsEligibleForParameters = speculativeDecoding != nil
+                        }
+                        if let mtpDrafter, speculationIsEligibleForParameters {
+                            try mtpDrafter.validateCompatibility(with: model)
+                        }
+
+                        let mtpIsStateful = mtpDrafter is any StatefulMTPDrafterModel
+                        let mtpSupportsResumption =
+                            mtpDrafter is any ResumableMTPDrafterModel
+                        let mtpContinuationIsAligned =
+                            mtpDrafterContinuation?.targetProcessedTokenCount
+                            == kvCache.processedTokenCount
+                        let mtpSpeculativeStateIsReady =
+                            !mtpIsStateful
+                            || (mtpSupportsResumption && mtpContinuationIsAligned)
+
                         var reusedMainCacheWithoutDraft = false
-                        var requiresMainOnlyContinuation = false
+                        // A raw prompt cache has no transcript from which a stateful MTP drafter
+                        // can rebuild private state. Preserve the authoritative target cache and
+                        // continue target-only unless an aligned continuation exists.
+                        var requiresMainOnlyContinuation =
+                            usesMTP && mtpIsStateful && conversation == nil
+                            && kvCache.processedTokenCount > 0
+                            && !mtpSpeculativeStateIsReady
                         // Prompt tokens this turn does not prefill because the cache
                         // already represents them. Reported to the caller on `.info`.
                         var cachedPromptTokenCount = 0
@@ -1384,19 +1485,37 @@ public final class ChatSession {
                                 "Main attention cache offsets diverged from model-cache progress")
                             let mainCacheIsAligned =
                                 kvCache.processedTokenCount == cachedTokenIds.count
-                            let draftCacheIsAligned: Bool
+                            let ordinaryDraftCacheIsAligned: Bool
                             if let draftKVCache {
                                 assert(
                                     draftKVCache.nativeAttentionOffsetsAreAligned,
                                     "Draft attention cache offsets diverged from model-cache progress"
                                 )
-                                draftCacheIsAligned =
+                                ordinaryDraftCacheIsAligned =
                                     draftKVCache.processedTokenCount == cachedTokenIds.count
                             } else {
                                 // Tentatively reuse the main cache. If speculative
                                 // decoding is admitted below, both caches are rebuilt
                                 // from `preparedInput`; a fallback can keep this suffix.
-                                draftCacheIsAligned = true
+                                ordinaryDraftCacheIsAligned = true
+                            }
+
+                            let speculativeReuseCapability: SpeculativeCacheReuseCapability
+                            if usesMTP {
+                                if !mtpSpeculativeStateIsReady {
+                                    speculativeReuseCapability = .mainOnlyFallback
+                                } else if mtpIsStateful {
+                                    speculativeReuseCapability = .appendOnly
+                                } else {
+                                    speculativeReuseCapability = .reusable
+                                }
+                            } else if draftKVCache != nil {
+                                speculativeReuseCapability =
+                                    ordinaryDraftCacheIsAligned ? .reusable : .unavailable
+                            } else if speculativeDecoding != nil {
+                                speculativeReuseCapability = .rebuildableFromPrompt
+                            } else {
+                                speculativeReuseCapability = .unavailable
                             }
 
                             let turn = PromptCacheTurn(
@@ -1409,19 +1528,19 @@ public final class ChatSession {
                                 previousGenerationUncommittedTokens:
                                     currentConversation.uncommittedTokens,
                                 structuredToolCallCount: structuredToolCallCount,
-                                usesSpeculativeDecoding: speculativeDecoding != nil,
+                                usesSpeculativeDecoding: speculationIsEligibleForParameters,
                                 canSplitPreparedMedia: model is PreparedInputSplitting)
                             let cacheState = PromptCacheState(
                                 cachedTokens: cachedTokenIds,
                                 previousRenderTokens: currentConversation.renderedTokens,
                                 processedTokenCount: kvCache.processedTokenCount,
                                 mainCacheIsAligned: mainCacheIsAligned,
-                                hasDraftCache: draftKVCache != nil,
-                                draftCacheIsAligned: draftCacheIsAligned,
+                                speculativeReuseCapability: speculativeReuseCapability,
                                 maxTrimCount: (kvCache.cache + (draftKVCache?.cache ?? []))
                                     .map(\.maxTrimCount).min() ?? 0)
 
-                            var decision = promptCachePolicy.decide(turn: turn, cache: cacheState)
+                            var decision = promptCachePolicy.decide(
+                                turn: turn, cache: cacheState)
 
                             // Rewinding is the one decision that can fail while being
                             // applied: a cache may trim fewer tokens than requested.
@@ -1447,6 +1566,17 @@ public final class ChatSession {
                                     // the prefix, so the next write does not copy the rest.
                                     kvCache = kvCache.copy()
                                     draftKVCache = draftKVCache?.copy()
+                                }
+                            } else if case .trimToCommonPrefixMainOnly(
+                                let commonPrefixLength, let trimCount) = decision
+                            {
+                                let mainTrimmed = kvCache.trim(trimCount)
+                                if mainTrimmed != trimCount
+                                    || kvCache.processedTokenCount != commonPrefixLength
+                                {
+                                    decision = .rebuild
+                                } else if !currentConversation.transcriptBuiltCache {
+                                    kvCache = kvCache.copy()
                                 }
                             }
 
@@ -1485,10 +1615,11 @@ public final class ChatSession {
                                 input = LMInput(
                                     tokens: MLXArray(Array(promptTokenIds[suffixStart...])))
                                 cachedPromptTokenCount = suffixStart
-                                // The draft does not represent the same private
-                                // Harmony path. Preserve the authoritative main
-                                // cache and use it alone for this continuation.
+                                // The speculative state does not represent the
+                                // same continuation path. Preserve the authoritative
+                                // target cache and use it alone for this turn.
                                 draftKVCache = nil
+                                mtpDrafterContinuation = nil
                                 requiresMainOnlyContinuation = true
 
                             case .appendMediaSuffix(let suffixStart, _):
@@ -1504,6 +1635,15 @@ public final class ChatSession {
                                     tokens: MLXArray(
                                         Array(promptTokenIds.dropFirst(commonPrefixLength))))
                                 cachedPromptTokenCount = commonPrefixLength
+
+                            case .trimToCommonPrefixMainOnly(let commonPrefixLength, _):
+                                input = LMInput(
+                                    tokens: MLXArray(
+                                        Array(promptTokenIds.dropFirst(commonPrefixLength))))
+                                cachedPromptTokenCount = commonPrefixLength
+                                draftKVCache = nil
+                                mtpDrafterContinuation = nil
+                                requiresMainOnlyContinuation = true
 
                             case .rebuild:
                                 // No rule can rewind the recurrent caches of a hybrid
@@ -1527,11 +1667,12 @@ public final class ChatSession {
                                     lmState = nil
                                 }
                                 draftKVCache = nil
+                                mtpDrafterContinuation = nil
                             }
 
                             reusedMainCacheWithoutDraft =
-                                decision.reusesCachedPrefix
-                                && speculativeDecoding != nil
+                                !usesMTP && decision.reusesCachedPrefix
+                                && speculationIsEligibleForParameters
                                 && !willFallBackBeforeLoadingDraft
                                 && draftKVCache == nil
 
@@ -1542,7 +1683,8 @@ public final class ChatSession {
                                 .appendSuffixToMain(_, let representedTokens),
                                 .appendMediaSuffix(_, let representedTokens):
                                 currentConversation.cachedTokens = representedTokens
-                            case .prefillAll, .trimToCommonPrefix, .rebuild:
+                            case .prefillAll, .trimToCommonPrefix,
+                                .trimToCommonPrefixMainOnly, .rebuild:
                                 currentConversation.cachedTokens = promptTokenIds
                             }
                             // The render of THIS prefill, which the next turn
@@ -1596,7 +1738,8 @@ public final class ChatSession {
 
                         // Select the token iterator based on speculative decoding configuration.
                         typealias GenerationRun = (
-                            events: AsyncStream<T.Handler.Output>, task: Task<[Int], Never>
+                            events: AsyncStream<T.Handler.Output>,
+                            task: Task<SendableBox<RecordedGenerationResult>, Never>
                         )
                         let generation: GenerationRun
                         func startGeneration(
@@ -1610,6 +1753,8 @@ public final class ChatSession {
                                 tools: toolValidationSchemas,
                                 toolCallPolicy: generateParameters.toolCallPolicy)
                             base.cachedPromptTokenCount = cachedPromptTokenCount
+                            base.speculativeDecodingFallbackReason =
+                                speculativeDecodingFallbackReason
                             return MLXLMCommon.generateTaskRecordingTokens(
                                 promptTokenCount: promptTokenCount ?? input.text.tokens.size,
                                 modelConfiguration: modelConfiguration,
@@ -1657,18 +1802,57 @@ public final class ChatSession {
                         // input below. Without that ledger — a session restored from a snapshot —
                         // there is nothing to re-prefill the draft from, and handing mismatched
                         // caches to the iterator would throw rather than fall back.
+                        let mtpStateIsRecoverable =
+                            !mtpIsStateful || kvCache.processedTokenCount == 0
+                            || (mtpDrafterContinuation?.targetProcessedTokenCount
+                                == kvCache.processedTokenCount)
                         let draftCacheIsRecoverable =
-                            draftKVCache != nil || kvCache.processedTokenCount == 0
-                            || reusedMainCacheWithoutDraft
+                            usesMTP
+                            ? mtpStateIsRecoverable
+                            : draftKVCache != nil || kvCache.processedTokenCount == 0
+                                || reusedMainCacheWithoutDraft
                         if carriesPreparedMedia || !draftCacheIsRecoverable {
                             // Drop the draft cache as `.appendSuffixToMain` does: retaining it
                             // would leave it at an offset the main cache never visits.
                             draftKVCache = nil
+                            mtpDrafterContinuation = nil
                             requiresMainOnlyContinuation = true
                         }
 
-                        if speculativeDecoding != nil, requiresMainOnlyContinuation {
+                        if !speculationIsEligibleForParameters || requiresMainOnlyContinuation {
+                            if speculativeDecoding != nil {
+                                if !speculationIsEligibleForParameters {
+                                    speculativeDecodingFallbackReason = .unsupportedSampling
+                                } else if carriesPreparedMedia {
+                                    speculativeDecodingFallbackReason = .unsupportedMedia
+                                } else {
+                                    speculativeDecodingFallbackReason = .unavailableContinuation
+                                }
+                            }
                             generation = try defaultGeneration()
+                        } else if let speculativeDecoding,
+                            case .mtp(_, let blockSize) = speculativeDecoding.strategy,
+                            let drafter = mtpDrafter
+                        {
+                            do {
+                                let iterator = try MTPSpeculativeTokenIterator(
+                                    input: input,
+                                    mainModel: model,
+                                    drafter: drafter,
+                                    mainCacheStorage: kvCache,
+                                    mainState: lmState,
+                                    mtpContinuation: mtpDrafterContinuation,
+                                    parameters: generateParameters,
+                                    blockSize: blockSize,
+                                    components: components
+                                )
+
+                                generation = startGeneration(iterator)
+                            } catch MTPInitializationError.unsupportedSpeculativeCache {
+                                mtpDrafterContinuation = nil
+                                speculativeDecodingFallbackReason = .unsupportedCache
+                                generation = try defaultGeneration()
+                            }
                         } else if let speculativeDecoding {
                             var shouldFallBackBeforeLoadingDraft = false
                             if let memoryEvaluation = speculativeMemoryEvaluation {
@@ -1683,6 +1867,7 @@ public final class ChatSession {
                             }
 
                             if shouldFallBackBeforeLoadingDraft {
+                                speculativeDecodingFallbackReason = .memoryBudgetExceeded
                                 generation = try defaultGeneration()
                             } else {
                                 let cachedDraftContainer = await loadedDraftModel.read { $0 }
@@ -1708,6 +1893,7 @@ public final class ChatSession {
                                             evaluation: memoryEvaluation)
                                     }
 
+                                    speculativeDecodingFallbackReason = .memoryBudgetExceeded
                                     generation = try defaultGeneration()
                                 } else {
                                     if requiresLogProbabilitySupport,
@@ -1749,6 +1935,7 @@ public final class ChatSession {
                                                 main: kvCache,
                                                 draft: draftKVCache,
                                                 state: lmState,
+                                                mtpDrafterContinuation: mtpDrafterContinuation,
                                                 conversation: conversation))
                                     }
 
@@ -1815,7 +2002,12 @@ public final class ChatSession {
                         // wait for the task to complete -- this is important in
                         // the case where we broke the loop early as the generation
                         // work may continue (briefly) and use the KVCache
-                        let generatedTokens = await generation.task.value
+                        let generationResult = await generation.task.value
+                        let completedGeneration = generationResult.consume()
+                        let generatedTokens = completedGeneration.generatedTokens
+                        lmState = completedGeneration.state
+                        mtpDrafterContinuation =
+                            completedGeneration.mtpDrafterContinuation
 
                         if var currentConversation = conversation {
                             let recordedAssistant = currentConversation.record(
@@ -1823,31 +2015,35 @@ public final class ChatSession {
                                 reasoningHistory: reasoningHistory,
                                 generatedTokens: generatedTokens,
                                 processedTokenCount: kvCache.processedTokenCount)
-                            if !recordedAssistant,
-                                let conversationMessageCountBeforePending
-                            {
-                                // A cancelled or empty generation did not commit an
-                                // assistant turn. Roll back this restart's pending input
-                                // so a later request cannot produce invalid role sequences
-                                // such as user/user on strict chat templates.
-                                currentConversation.messages.removeSubrange(
-                                    conversationMessageCountBeforePending...)
+                            if !recordedAssistant {
+                                // The target ledger is invalidated below, so an MTP witness tied
+                                // to that boundary must not escape this generation pass.
+                                mtpDrafterContinuation = nil
+                                if let conversationMessageCountBeforePending {
+                                    // A cancelled or empty generation did not commit an
+                                    // assistant turn. Roll back this restart's pending input
+                                    // so a later request cannot produce invalid role sequences
+                                    // such as user/user on strict chat templates.
+                                    currentConversation.messages.removeSubrange(
+                                        conversationMessageCountBeforePending...)
+                                }
                             }
                             conversation = currentConversation
                         }
 
+                        // Commit the whole continuation aggregate before any tool dispatch,
+                        // restart, or error path can leave this generation pass.
+                        cache = .kvcache(
+                            .init(
+                                main: kvCache,
+                                draft: draftKVCache,
+                                state: lmState,
+                                mtpDrafterContinuation: mtpDrafterContinuation,
+                                conversation: conversation))
+
                         if let rejection = assistant.rejectedToolCalls.first,
                             failOnRejectedToolCall || toolDispatch != nil
                         {
-                            // The failed turn was rolled back above. Persist the
-                            // invalidated token ledger before surfacing the error
-                            // so the next request cannot reuse rejected output.
-                            cache = .kvcache(
-                                .init(
-                                    main: kvCache,
-                                    draft: draftKVCache,
-                                    state: lmState,
-                                    conversation: conversation))
                             throw RejectedToolCallError(rejection)
                         }
 
@@ -1877,6 +2073,7 @@ public final class ChatSession {
                             main: kvCache,
                             draft: draftKVCache,
                             state: lmState,
+                            mtpDrafterContinuation: mtpDrafterContinuation,
                             conversation: conversation))
 
                     continuation.finish()

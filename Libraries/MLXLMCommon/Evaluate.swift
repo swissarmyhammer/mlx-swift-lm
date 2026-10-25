@@ -2509,17 +2509,32 @@ package func generateTaskRecordingTokens(
         input: input, model: context.model, cache: cache, state: state,
         parameters: parameters, components: components)
     preparedState(iterator.state)
-    return generateTaskRecordingTokens(
+    return generateLoopTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
-        tools: tools)
+        tokenCollector: RecordingGeneratedTokenList(),
+        handler: TextToolTokenLoopHandler(
+            tokenizer: context.tokenizer,
+            stopStrings: context.configuration.effectiveStopStrings,
+            format: context.configuration.toolCallFormat ?? .json,
+            tools: tools,
+            toolCallPolicy: parameters.toolCallPolicy
+        )
+    )
 }
 
 /// Internal variant used by `ChatSession` to keep its token-prefix record in
-/// lockstep with the KV cache.
+/// lockstep with the KV cache and receive the iterator's finalized
+/// continuation state.
+struct RecordedGenerationResult {
+    let generatedTokens: [Int]
+    let state: LMOutput.State?
+    let mtpDrafterContinuation: MTPDrafterContinuation?
+}
+
 func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
@@ -2528,7 +2543,7 @@ func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil,
     toolCallPolicy: ToolCallPolicy = .init()
-) -> (AsyncStream<Generation>, Task<[Int], Never>) {
+) -> (AsyncStream<Generation>, Task<SendableBox<RecordedGenerationResult>, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
         modelConfiguration: modelConfiguration,
@@ -2553,7 +2568,7 @@ func generateTaskRecordingTokens<Handler: TokenLoopHandler>(
     tokenizer: Tokenizer,
     iterator: consuming any TokenIteratorProtocol,
     handler: consuming Handler
-) -> (AsyncStream<Handler.Output>, Task<[Int], Never>) {
+) -> (AsyncStream<Handler.Output>, Task<SendableBox<RecordedGenerationResult>, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
         modelConfiguration: modelConfiguration,
@@ -2853,7 +2868,7 @@ package func generateProtocolTokensTask(
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
-        tokenCollector: RecordingGeneratedTokens(),
+        tokenCollector: RecordingGeneratedTokenList(),
         handler: RawTokenLoopHandler(
             additionalStopTokenIDs: decoder?.additionalStopTokenIDs ?? [],
             receivesStopTokens: decoder?.receivesStopTokens ?? false)
@@ -2899,12 +2914,25 @@ private protocol GeneratedTokenCollector: Sendable {
     associatedtype Result: Sendable
 
     mutating func record(_ token: Int)
-    consuming func result() -> Result
+    consuming func result(iterator: any TokenIteratorProtocol) -> Result
 }
 
 private struct IgnoringGeneratedTokens: GeneratedTokenCollector {
     mutating func record(_ token: Int) {}
-    consuming func result() {}
+    consuming func result(iterator _: any TokenIteratorProtocol) {}
+}
+
+/// Records the generated tokens only, for callers that keep no iterator state.
+private struct RecordingGeneratedTokenList: GeneratedTokenCollector {
+    private var tokens: [Int] = []
+
+    mutating func record(_ token: Int) {
+        tokens.append(token)
+    }
+
+    consuming func result(iterator _: any TokenIteratorProtocol) -> [Int] {
+        tokens
+    }
 }
 
 private struct RecordingGeneratedTokens: GeneratedTokenCollector {
@@ -2914,8 +2942,17 @@ private struct RecordingGeneratedTokens: GeneratedTokenCollector {
         tokens.append(token)
     }
 
-    consuming func result() -> [Int] {
-        tokens
+    consuming func result(
+        iterator: any TokenIteratorProtocol
+    ) -> SendableBox<RecordedGenerationResult> {
+        let mtpContinuation =
+            (iterator as? any MTPDrafterContinuationProviding)?
+            .mtpDrafterContinuation
+        return SendableBox(
+            RecordedGenerationResult(
+                generatedTokens: tokens,
+                state: iterator.state,
+                mtpDrafterContinuation: mtpContinuation))
     }
 }
 
@@ -3136,10 +3173,12 @@ private func generateLoopTask<
             // Synchronize with the stream to ensure tasks are completed
             Stream.defaultStream.synchronize()
 
+            let result = tokenCollector.result(iterator: iterator)
+
             // Finalize the stream
             continuation.finish()
 
-            return tokenCollector.result()
+            return result
         }
 
         if let ticket = wiredMemoryTicket {
@@ -3253,14 +3292,20 @@ public struct GenerateCompletionInfo: Sendable {
     /// are non-nil and proposed > 0.
     public let acceptedDraftTokens: Int?
 
-    /// Non-nil when the MTP iterator transitioned into sticky-passthrough
-    /// mode for the remainder of the stream; carries the reason string
-    /// captured at the moment of engagement. Nil if the iterator stayed
-    /// speculative for the full stream or for non-MTP streams.
+    /// Non-nil when the MTP iterator transitioned into sticky passthrough or
+    /// could not export a resumable stateful boundary. Carries the first
+    /// failure reason. Nil when speculation completed with a resumable
+    /// boundary, or for non-MTP streams.
     public let passthroughReason: String?
 
     /// Speculative decoding telemetry, when generation used speculative decoding.
     public let speculativeDecodingTelemetry: SpeculativeDecodingTelemetry?
+
+    /// Why ``ChatSession`` selected ordinary generation despite configured speculation.
+    ///
+    /// Nil means no session fallback was recorded; it does not prove speculative rounds occurred.
+    /// Lower-level generation APIs leave this nil; MTP iterator diagnostics use ``passthroughReason``.
+    public internal(set) var speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
 
     /// Number of tool-call-shaped outputs rejected during this generation.
     public let rejectedToolCallCount: Int
@@ -3308,7 +3353,8 @@ public struct GenerateCompletionInfo: Sendable {
         passthroughReason: String? = nil,
         speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? = nil,
         rejectedToolCallCount: Int = 0,
-        recoveredToolCallCount: Int = 0
+        recoveredToolCallCount: Int = 0,
+        speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason? = nil
     ) {
         self.promptTokenCount = promptTokenCount
         self.cachedPromptTokenCount = cachedPromptTokenCount
@@ -3326,6 +3372,7 @@ public struct GenerateCompletionInfo: Sendable {
         self.speculativeDecodingTelemetry = speculativeDecodingTelemetry
         self.rejectedToolCallCount = rejectedToolCallCount
         self.recoveredToolCallCount = recoveredToolCallCount
+        self.speculativeDecodingFallbackReason = speculativeDecodingFallbackReason
     }
 
     /// A human-readable multi-line summary of prompt/generation token counts, throughput,
@@ -3367,7 +3414,8 @@ public struct GenerateCompletionInfo: Sendable {
             passthroughReason: passthroughReason,
             speculativeDecodingTelemetry: speculativeDecodingTelemetry,
             rejectedToolCallCount: rejected,
-            recoveredToolCallCount: recovered)
+            recoveredToolCallCount: recovered,
+            speculativeDecodingFallbackReason: speculativeDecodingFallbackReason)
     }
 }
 
@@ -3445,6 +3493,17 @@ public enum Generation: Sendable {
     func attributingCachedPromptTokens(_ count: Int) -> Generation {
         guard count > 0, case .info(var info) = self else { return self }
         info.cachedPromptTokenCount = count
+        return .info(info)
+    }
+
+    /// Adds session-owned cache and fallback metadata to `.info`; other events pass through.
+    func attributingSessionMetadata(
+        cachedPromptTokenCount: Int,
+        speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
+    ) -> Generation {
+        guard case .info(var info) = self else { return self }
+        info.cachedPromptTokenCount = cachedPromptTokenCount
+        info.speculativeDecodingFallbackReason = speculativeDecodingFallbackReason
         return .info(info)
     }
 }

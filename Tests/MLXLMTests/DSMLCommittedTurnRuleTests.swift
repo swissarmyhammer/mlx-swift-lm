@@ -87,8 +87,8 @@ struct DSMLCommittedTurnRuleTests {
             previousRenderTokens: previousRender,
             processedTokenCount: processedTokenCount,
             mainCacheIsAligned: processedTokenCount == cached.count,
-            hasDraftCache: hasDraft,
-            draftCacheIsAligned: draftAligned,
+            speculativeReuseCapability: hasDraft
+                ? (draftAligned ? .reusable : .unavailable) : .unavailable,
             maxTrimCount: processedTokenCount)
     }
 

@@ -21,9 +21,9 @@ package enum PromptCacheReuseDecision: Equatable {
     /// reproduce, in which case the ledger diverges from the render by design.
     case appendSuffix(suffixStart: Int, representedTokens: [Int])
 
-    /// Feed a suffix into the main cache while discarding an unusable draft
-    /// cache. The current generation must use the main model only; a later
-    /// turn may rebuild a draft cache from a reproducible prompt.
+    /// Feed a suffix into the main cache while discarding unusable speculative
+    /// state (an ordinary draft cache or an MTP continuation). The current
+    /// generation must use the main model only.
     case appendSuffixToMain(suffixStart: Int, representedTokens: [Int])
 
     /// The cache already represents a usable prefix, but this turn introduces
@@ -41,6 +41,10 @@ package enum PromptCacheReuseDecision: Equatable {
     /// feed `promptTokens[commonPrefixLength...]`.
     case trimToCommonPrefix(commonPrefixLength: Int, trimCount: Int)
 
+    /// Rewind only the target cache, discard speculative state, and continue
+    /// target-only from the common prefix.
+    case trimToCommonPrefixMainOnly(commonPrefixLength: Int, trimCount: Int)
+
     /// The cache cannot be reconciled with this prompt. Discard it, drop any
     /// carried model state, and feed the whole prompt.
     case rebuild
@@ -48,7 +52,8 @@ package enum PromptCacheReuseDecision: Equatable {
     /// `true` when a non-empty cached prefix is carried into this turn.
     var reusesCachedPrefix: Bool {
         switch self {
-        case .appendSuffix, .appendSuffixToMain, .appendMediaSuffix, .trimToCommonPrefix:
+        case .appendSuffix, .appendSuffixToMain, .appendMediaSuffix, .trimToCommonPrefix,
+            .trimToCommonPrefixMainOnly:
             return true
         case .prefillAll, .rebuild:
             return false
@@ -110,6 +115,35 @@ package struct PromptCacheTurn: Sendable {
     package var canSplitPreparedMedia: Bool = false
 }
 
+/// What speculative-cache reuse can safely accompany the authoritative main cache.
+package enum SpeculativeCacheReuseCapability: Sendable {
+    /// Aligned speculative state can follow both suffix appends and target rewinds.
+    case reusable
+
+    /// Aligned speculative state can follow suffix appends, but a rewind must
+    /// discard it and continue with the main cache only.
+    case appendOnly
+
+    /// Missing ordinary draft-model state can be reconstructed from the full prompt.
+    case rebuildableFromPrompt
+
+    /// Speculative state cannot be used, but the valid main cache may continue alone.
+    case mainOnlyFallback
+
+    /// Speculative state can neither be reused nor reconstructed for this prompt.
+    case unavailable
+
+    /// Whether an existing speculative continuation can be used without rebuilding it.
+    package var canContinueWithoutRebuild: Bool {
+        switch self {
+        case .reusable, .appendOnly:
+            true
+        case .rebuildableFromPrompt, .mainOnlyFallback, .unavailable:
+            false
+        }
+    }
+}
+
 /// What the caches currently hold.
 package struct PromptCacheState: Sendable {
     /// Exact tokens the main cache represents, per the session's ledger. Empty
@@ -134,14 +168,8 @@ package struct PromptCacheState: Sendable {
     /// The main cache's timeline agrees with the ledger length.
     package var mainCacheIsAligned: Bool = false
 
-    /// A live draft cache is available for the next generation.
-    package var hasDraftCache: Bool = false
-
-    /// The draft cache's timeline agrees with the ledger length. This remains
-    /// `true` when no draft exists so generic main-only cache decisions keep
-    /// their existing behavior; protocol rules can inspect `hasDraftCache`
-    /// when absence matters.
-    package var draftCacheIsAligned: Bool = true
+    /// The valid operations available for the auxiliary speculative state.
+    package var speculativeReuseCapability: SpeculativeCacheReuseCapability = .unavailable
 
     /// Exact rewind limit across all participating layers.
     package var maxTrimCount: Int = 0
@@ -250,13 +278,27 @@ struct ExtendCachedPrefixRule: PromptCacheReuseRule {
     func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
         guard !cache.cachedTokens.isEmpty,
             cache.mainCacheIsAligned,
-            cache.draftCacheIsAligned,
             !turn.carriesNewMedia,
             !turn.carriesAttentionMask,
             turn.promptTokens.count > cache.cachedTokens.count,
             turn.promptTokens.starts(with: cache.cachedTokens)
         else {
             return nil
+        }
+
+        if turn.usesSpeculativeDecoding {
+            switch cache.speculativeReuseCapability {
+            case .reusable, .appendOnly, .rebuildableFromPrompt:
+                return .appendSuffix(
+                    suffixStart: cache.cachedTokens.count,
+                    representedTokens: turn.promptTokens)
+            case .mainOnlyFallback:
+                return .appendSuffixToMain(
+                    suffixStart: cache.cachedTokens.count,
+                    representedTokens: turn.promptTokens)
+            case .unavailable:
+                return nil
+            }
         }
 
         return .appendSuffix(
@@ -286,7 +328,6 @@ struct AppendOnlyMediaRule: PromptCacheReuseRule {
             !turn.usesSpeculativeDecoding,
             !cache.cachedTokens.isEmpty,
             cache.mainCacheIsAligned,
-            cache.draftCacheIsAligned,
             turn.promptTokens.count > cache.cachedTokens.count,
             turn.promptTokens.starts(with: cache.cachedTokens)
         else {
@@ -317,7 +358,6 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             && sharedPrefixLength < turn.promptTokens.count
             && trimCount > 0
             && cache.mainCacheIsAligned
-            && cache.draftCacheIsAligned
             && trimCount <= cache.maxTrimCount
             && !turn.carriesNewMedia
             && !turn.carriesPreparedMedia
@@ -330,6 +370,19 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             // Rebuild rather than combining a mismatched prompt with stale
             // model state.
             return .rebuild
+        }
+
+        if turn.usesSpeculativeDecoding {
+            switch cache.speculativeReuseCapability {
+            case .reusable, .rebuildableFromPrompt:
+                return .trimToCommonPrefix(
+                    commonPrefixLength: sharedPrefixLength, trimCount: trimCount)
+            case .appendOnly, .mainOnlyFallback:
+                return .trimToCommonPrefixMainOnly(
+                    commonPrefixLength: sharedPrefixLength, trimCount: trimCount)
+            case .unavailable:
+                return .rebuild
+            }
         }
 
         return .trimToCommonPrefix(commonPrefixLength: sharedPrefixLength, trimCount: trimCount)
@@ -465,7 +518,10 @@ package func reconcilePromptCache(
             suffixStart: suffixStart, representedTokens: representedTokens,
             kind: verdict.isProtocolDecision ? .splice : .extend)
 
-    case .trimToCommonPrefix(let commonPrefixLength, _):
+    case .trimToCommonPrefix(let commonPrefixLength, _),
+        .trimToCommonPrefixMainOnly(let commonPrefixLength, _):
+        // This caller owns no speculative state, thus a main-only rewind is a
+        // plain rewind here.
         guard rewindPromptCache(caches, to: commonPrefixLength) else { return nil }
         return PromptCacheReuse(
             suffixStart: commonPrefixLength, representedTokens: promptTokens, kind: .rewind)

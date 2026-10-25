@@ -133,7 +133,7 @@ struct CommittedTurnSplice: Sendable {
         let representedTokens = cache.cachedTokens + turn.promptTokens[suffixStart...]
         let canContinueWithDraft =
             !turn.usesSpeculativeDecoding
-            || (cache.hasDraftCache && cache.draftCacheIsAligned)
+            || cache.speculativeReuseCapability.canContinueWithoutRebuild
         if canContinueWithDraft {
             return .appendSuffix(suffixStart: suffixStart, representedTokens: representedTokens)
         }
