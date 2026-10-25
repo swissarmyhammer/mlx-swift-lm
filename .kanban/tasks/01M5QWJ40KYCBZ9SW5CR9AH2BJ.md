@@ -2,9 +2,11 @@
 assignees:
 - claude-code
 depends_on:
-- 01M5SK9FZ2HTB7XJDAPCBRDDM5
+- 01M5SJNWMNA5D8N2VWEJJPT9A2
+- 01M5QWG18ZZAMS370KT33CTVTY
 - 01M5QWGEWP4506CZYXCPV3C64M
 - 01M5SJPFM01WFRYWMQXVGMA4MQ
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '8580'
 title: 'MTP: Qwen MTP at temperature > 0 (sample-and-match with argmax drafts; rejection math is done by PR 459)'

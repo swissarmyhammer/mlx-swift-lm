@@ -3,6 +3,7 @@ assignees:
 - claude-code
 depends_on:
 - 01M5SKBCEWG4D25SZZNGG7BVM7
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '8780'
 title: 'MTP: multi-row quantized matvec that reads the weights one time for 2–8 verify rows'

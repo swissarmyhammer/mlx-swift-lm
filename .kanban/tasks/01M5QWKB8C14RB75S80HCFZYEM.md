@@ -11,6 +11,7 @@ depends_on:
 - 01M5SKBCEWG4D25SZZNGG7BVM7
 - 01M5QWJXZ5EEBVH7Z9D3W7JKFN
 - 01M5QWJ40KYCBZ9SW5CR9AH2BJ
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '8880'
 title: 'MTP: draft more than one token per round by chaining the Qwen MTP head'

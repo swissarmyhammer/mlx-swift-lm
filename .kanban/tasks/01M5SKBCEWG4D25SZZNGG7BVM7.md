@@ -3,6 +3,7 @@ assignees:
 - claude-code
 depends_on:
 - 01M5QWJGM1679S6CWHFCST7WAN
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '9480'
 title: 'MTP: compiled multi-token verify schedule for Qwen35 (LLM and VLM targets)'

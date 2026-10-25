@@ -3,7 +3,9 @@ assignees:
 - claude-code
 depends_on:
 - 01M5QWJGM1679S6CWHFCST7WAN
-- 01M5SK9FZ2HTB7XJDAPCBRDDM5
+- 01M5SJNWMNA5D8N2VWEJJPT9A2
+- 01M5QWG18ZZAMS370KT33CTVTY
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '9580'
 title: 'MTP: rewind the hybrid main cache by more than one token after a verify'

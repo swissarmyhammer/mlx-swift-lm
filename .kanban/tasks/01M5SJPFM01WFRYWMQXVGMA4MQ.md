@@ -7,7 +7,9 @@ comments:
   text: 'Change after the PR 581 port (commit 843854ec): do not add a new type `MTPDrafterCacheState`. Extend the existing `MTPDrafterContinuation` (Libraries/MLXLMCommon/MTPDrafterModel.swift) with `byteCount`, a drafter identity, `isAligned(withMainTokenCount:drafterID:)`, and `arrays()` / `metadata()` / `init(arrays:metadata:drafter:)`. The deep copy for fork already exists in `RealizedCache.copy()`.'
   timestamp: 2026-10-25T13:46:11.222975+00:00
 depends_on:
-- 01M5SK9FZ2HTB7XJDAPCBRDDM5
+- 01M5SJNWMNA5D8N2VWEJJPT9A2
+- 01M5QWG18ZZAMS370KT33CTVTY
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '8e80'
 title: 'MTP: make the drafter state a portable cache value (copy, byte count, serialize, cold start)'

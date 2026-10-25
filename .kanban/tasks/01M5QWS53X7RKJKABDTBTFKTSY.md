@@ -4,6 +4,7 @@ assignees:
 depends_on:
 - 01M5QWHA34WP7DQMWQ4AHNB0J9
 - 01M5SJPFM01WFRYWMQXVGMA4MQ
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '8980'
 title: 'MTP: save and load the drafter state with PromptCacheSnapshot'

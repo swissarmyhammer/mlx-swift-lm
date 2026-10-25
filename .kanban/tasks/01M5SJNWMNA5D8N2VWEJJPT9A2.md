@@ -6,8 +6,13 @@ comments:
   id: 01m5smznwhypm896qzvtvssbqy
   text: 'Change after the PR 581 port (commit 843854ec): the iterator `state` already returns the state without the MTP keys (`persistentTargetState`). What remains: the stop-token cache accounting, the passthrough order inside the iterator, `state:` on the public `generate` overloads, and log probabilities.'
   timestamp: 2026-10-25T13:46:14.801203+00:00
+- actor: claude-code
+  id: 01m5swy825zkfyaew76ffc1kj0
+  text: 'Scope added from the removed task cbrddm5 (PR 581 did the rest of it): the public `generate` / `generateTokens(...mtpDrafter:)` overloads (Libraries/MLXLMCommon/Evaluate.swift ~2690-2790) take an optional `MTPDrafterContinuation` and give the final one back, so that callers other than ChatSession (the FoundationModels executor) can continue a drafter. Acceptance: two calls where the second continues the main cache and the continuation of the first give the same greedy tokens as one cold call and as plain decode; add tests for zero rounds and for cancellation in Tests/MLXLMTests/Qwen35MTPTests.swift.'
+  timestamp: 2026-10-25T16:05:16.485953+00:00
 depends_on:
 - 01M5SK8FDMF5XH4FDH12H0FPX1
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: 8d80
 title: 'MTP: fix the MTP iterator contract with the shared generate loop (stop token, passthrough order, state, logprobs)'

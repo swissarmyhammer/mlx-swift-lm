@@ -3,6 +3,7 @@ assignees:
 - claude-code
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '8380'
 title: 'MTP: drafter continuation through hybrid checkpoint restore and rewind in ChatSession (fork is done by PR 581)'

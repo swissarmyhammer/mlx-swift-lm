@@ -1,0 +1,1 @@
+{"id":"01M5SWXS9F1PRG7548DPY20W7Z","timestamp":"2026-10-25T16:05:01.359762Z","op":"create","item_id":"01M5SWXS9FR3CSXKXTZGW0P4J5","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: d73a4a\n+tag_name: upstream\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: d73a4a\n-tag_name: upstream\n","transaction_id":null}

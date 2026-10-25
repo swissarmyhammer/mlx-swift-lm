@@ -4,6 +4,7 @@ assignees:
 depends_on:
 - 01M5SJQ62SPB7ZA9CC9H91TTB2
 - 01M5SJPFM01WFRYWMQXVGMA4MQ
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '9080'
 title: 'MTP: FoundationModels — keep the drafter state in ExecutorPromptCache (reuse, checkpoint, spill, restore, evict)'

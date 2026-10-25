@@ -6,6 +6,8 @@ comments:
   id: 01m5smzr0ttt5993g35vame3b6
   text: 'Change after the PR 581/459 port (commits 843854ec, 82f273fd): the fake models and drafters of Tests/MLXLMTests/ChatSessionQwenTextMTPTests.swift, ChatSessionMTPEarlyTerminationTests.swift and MTPSpeculativeTokenIteratorTests.swift (MockDrafter, StatefulMockDrafter) are private to their files. Move them into the shared fixture target.'
   timestamp: 2026-10-25T13:46:16.986966+00:00
+depends_on:
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '9280'
 title: 'MTP: shared Qwen35 + MTP test fixture for MLXLMTests and MLXFoundationModelsTests'

@@ -1,6 +1,8 @@
 ---
 assignees:
 - claude-code
+depends_on:
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '8680'
 title: 'MTP: T-token GDN kernel with per-token state snapshot slots, and MambaCache slot selection'

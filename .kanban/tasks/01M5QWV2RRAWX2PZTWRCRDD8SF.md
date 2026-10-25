@@ -9,6 +9,7 @@ comments:
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 - 01M5SJPFM01WFRYWMQXVGMA4MQ
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: 8b80
 title: 'MTP: define drafter behaviour with maxKVSize (rotating) and quantized main KV caches'

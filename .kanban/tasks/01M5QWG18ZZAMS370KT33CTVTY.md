@@ -3,6 +3,7 @@ assignees:
 - claude-code
 depends_on:
 - 01M5SK8FDMF5XH4FDH12H0FPX1
+- 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: todo
 position_ordinal: '80'
 title: 'MTP: drafter cold start at a cached position, and a general trim/append API (resume is done by PR 581)'
