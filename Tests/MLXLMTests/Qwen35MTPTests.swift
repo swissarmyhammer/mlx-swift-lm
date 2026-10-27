@@ -973,6 +973,215 @@ struct Qwen35MTPDrafterStateTests {
     }
 }
 
+/// The MTP prefill of a prompt in chunks, each of which feeds the drafter, against the reference
+/// prefill of the whole prompt in one forward.
+@Suite(.serialized)
+struct Qwen35MTPChunkedPrefillTests {
+
+    /// A Qwen 3.5 target with its MTP drafter.
+    enum Target: String, CaseIterable, CustomTestStringConvertible {
+
+        /// The MLXLLM text target of ``Qwen35MTPFixture``.
+        case text
+
+        /// The MLXVLM target of ``Qwen35VLMMTPFixture``.
+        case visionLanguage
+
+        var testDescription: String { rawValue }
+
+        /// The target and its drafter, on seeded weights.
+        func models() throws -> (target: any LanguageModel, drafter: any MTPDrafterModel) {
+            switch self {
+            case .text:
+                let fixture = try Qwen35MTPFixture()
+                return (fixture.target, fixture.drafter)
+            case .visionLanguage:
+                let fixture = try Qwen35VLMMTPFixture()
+                return (fixture.target, fixture.drafter)
+            }
+        }
+    }
+
+    /// What one MTP decode left: its tokens, the drafter cache right after the prefill, and
+    /// whether it speculated.
+    private struct MTPDecode {
+        let tokens: [Int]
+        let drafterCache: [MLXArray]
+        let passthroughReason: String?
+        let proposedCount: Int
+    }
+
+    /// Prompt tokens of the chunked prefill: more than 300, so a step of ``stepSize`` cuts
+    /// several chunks.
+    private let promptLength = 320
+
+    /// The chunk ceiling of the chunked prefill.
+    private let stepSize = 64
+
+    /// The chunks the balanced prefill cuts from the 319 positions before the reserved logits
+    /// position at a ceiling of 64: five chunks of at most 64.
+    private let expectedChunkCount = 5
+
+    /// Prompt tokens a warm target cache already holds before the continuation.
+    private let cachedPrefixLength = 96
+
+    /// Tokens each decode generates.
+    private let generatedTokenCount = 8
+
+    /// Prompt tokens of the prefill whose peak memory is measured.
+    private let longPromptLength = 4096
+
+    /// The chunk ceiling of the prefill whose peak memory is measured.
+    private let longPromptStepSize = 512
+
+    /// The seed of the prompt tokens.
+    private let promptSeed: UInt64 = 7
+
+    /// `length` prompt tokens of the fixture vocabulary, from ``promptSeed``.
+    private func prompt(length: Int) -> MLXArray {
+        MLXRandom.randInt(
+            Int32(0) ..< Int32(Qwen35MTPFixture.vocabularySize), [length],
+            key: MLXRandom.key(promptSeed))
+    }
+
+    /// Generation parameters of a greedy decode with `prefill`.
+    private func parameters(prefill: PrefillParameters, maxTokens: Int) -> GenerateParameters {
+        var parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+        parameters.prefill = prefill
+        return parameters
+    }
+
+    /// Decodes greedily with MTP after `prompt`, on `cache` when it is given.
+    private func decode(
+        _ models: (target: any LanguageModel, drafter: any MTPDrafterModel), prompt: MLXArray,
+        prefill: PrefillParameters, cache: [KVCache]? = nil, state: LMOutput.State? = nil
+    ) throws -> MTPDecode {
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: prompt), mainModel: models.target, drafter: models.drafter,
+            mainCache: cache, mainState: state,
+            parameters: parameters(prefill: prefill, maxTokens: generatedTokenCount),
+            blockSize: Qwen35MTPFixture.blockSize)
+        let drafterCache = try #require(iterator.drafterState).cache.flatMap(\.state)
+        eval(drafterCache)
+        var tokens: [Int] = []
+        while let token = iterator.next() {
+            tokens.append(token)
+        }
+        return MTPDecode(
+            tokens: tokens, drafterCache: drafterCache,
+            passthroughReason: iterator.passthroughReason, proposedCount: iterator.proposedCount)
+    }
+
+    /// A cache of `target` that holds `prefix`, and the model state of that cache.
+    private func warmCache(_ target: any LanguageModel, prefix: MLXArray) throws -> (
+        cache: [KVCache], state: LMOutput.State
+    ) {
+        let cache = try target.newCache(parameters: nil)
+        var state: LMOutput.State?
+        if case .logits(let output) = try target.prepare(
+            LMInput(tokens: prefix), cache: cache, state: nil, prefill: .init())
+        {
+            state = output.state
+        }
+        return (cache, try #require(state))
+    }
+
+    @Test("a chunked MTP prefill matches the prefill in one forward", arguments: Target.allCases)
+    func chunkedPrefillMatchesUnchunked(target: Target) throws {
+        let models = try target.models()
+        let prompt = prompt(length: promptLength)
+
+        let unchunked = try decode(models, prompt: prompt, prefill: .init(chunking: .unchunked))
+        let chunked = try decode(models, prompt: prompt, prefill: .init(stepSize: stepSize))
+
+        #expect(chunked.tokens == unchunked.tokens)
+        #expect(chunked.passthroughReason == nil)
+        #expect(chunked.proposedCount > 0)
+        try #require(chunked.drafterCache.count == unchunked.drafterCache.count)
+        for (actual, expected) in zip(chunked.drafterCache, unchunked.drafterCache) {
+            try #require(actual.shape == expected.shape)
+            #expect(
+                allClose(
+                    actual, expected, rtol: drafterCacheTolerance, atol: drafterCacheTolerance
+                ).item(Bool.self))
+        }
+    }
+
+    @Test("the target prepare calls the chunk handler once for each chunk", arguments: Target.allCases)
+    func prepareCallsChunkHandlerForEachChunk(target: Target) throws {
+        let models = try target.models()
+        let prompt = prompt(length: promptLength)
+        var chunks: [(tokens: [Int32], hiddenRows: Int)] = []
+        var state = LMOutput.State()
+        state[mtpEmitFlagKey] = true
+        state[mtpPrefillChunkHandlerKey] = { tokens, hiddenStates, _ in
+            chunks.append((tokens.asArray(Int32.self), hiddenStates.dim(1)))
+        }
+
+        _ = try models.target.prepare(
+            LMInput(tokens: prompt), cache: try models.target.newCache(parameters: nil),
+            state: state, prefill: .init(stepSize: stepSize))
+
+        #expect(chunks.count == expectedChunkCount)
+        #expect(chunks.allSatisfy { $0.tokens.count == $0.hiddenRows })
+        #expect(chunks.allSatisfy { $0.tokens.count <= stepSize })
+        #expect(chunks.flatMap(\.tokens) == Array(prompt.asArray(Int32.self).dropLast()))
+    }
+
+    @Test("a warm VLM continuation prefilled in chunks speculates and matches greedy decode")
+    func warmVLMContinuationSpeculates() throws {
+        let fixture = try Qwen35VLMMTPFixture()
+        let prompt = prompt(length: promptLength)
+        let prefix = prompt[..<cachedPrefixLength]
+        let suffix = prompt[cachedPrefixLength...]
+
+        let plainStart = try warmCache(fixture.target, prefix: prefix)
+        var plainIterator = try TokenIterator(
+            input: LMInput(tokens: suffix), model: fixture.target, cache: plainStart.cache,
+            state: plainStart.state,
+            parameters: parameters(prefill: .init(stepSize: stepSize), maxTokens: generatedTokenCount))
+        var plainTokens: [Int] = []
+        while let token = plainIterator.next() {
+            plainTokens.append(token)
+        }
+
+        let mtpStart = try warmCache(fixture.target, prefix: prefix)
+        let mtp = try decode(
+            (fixture.target, fixture.drafter), prompt: suffix, prefill: .init(stepSize: stepSize),
+            cache: mtpStart.cache, state: mtpStart.state)
+
+        #expect(mtp.tokens == plainTokens)
+        #expect(mtp.passthroughReason == nil)
+        #expect(mtp.proposedCount > 0)
+    }
+
+    @Test("a chunked MTP prefill of a long prompt peaks lower than the prefill in one forward")
+    func chunkedPrefillPeaksLower() throws {
+        let fixture = try Qwen35MTPFixture()
+        let prompt = prompt(length: longPromptLength)
+
+        let unchunked = try peakPrefillMemory(fixture, prompt: prompt, prefill: .init(chunking: .unchunked))
+        let chunked = try peakPrefillMemory(
+            fixture, prompt: prompt, prefill: .init(stepSize: longPromptStepSize))
+
+        #expect(chunked < unchunked)
+    }
+
+    /// The peak memory of an MTP prefill of `prompt`, with the drafter state it builds.
+    private func peakPrefillMemory(
+        _ fixture: Qwen35MTPFixture, prompt: MLXArray, prefill: PrefillParameters
+    ) throws -> Int {
+        Memory.clearCache()
+        Memory.peakMemory = 0
+        let iterator = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: prompt), mainModel: fixture.target, drafter: fixture.drafter,
+            parameters: parameters(prefill: prefill, maxTokens: 1),
+            blockSize: Qwen35MTPFixture.blockSize)
+        eval(try #require(iterator.drafterState).cache.flatMap(\.state))
+        return Memory.peakMemory
+    }
+}
+
 private func collectQwenChatDetails(
     _ stream: AsyncThrowingStream<Generation, Error>
 ) async throws -> (text: String, info: GenerateCompletionInfo) {

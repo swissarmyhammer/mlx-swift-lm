@@ -1807,9 +1807,10 @@ public class Qwen35: Module, VLMModel {
     /// post-image text tail resumes with (`getRopeIndex` delta − `P`), so a
     /// caller threading state end-to-end continues that tail with the ordinary
     /// flat-continuation branch. When the caller requests MTP state, each
-    /// chunk's target hidden rows are retained and joined while the final
-    /// chunk supplies the cache metadata, so a warm drafter can resume over
-    /// the complete remainder. Decode stays caller-owned.
+    /// chunk's target hidden rows go to the state's
+    /// ``MLXLMCommon/mtpPrefillChunkHandlerKey`` handler, with the rope delta
+    /// the drafter positions the remainder at, and the returned state carries
+    /// the rows of the final forward only. Decode stays caller-owned.
     private func prepareContinuation(
         _ input: LMInput,
         inputIds: MLXArray,
@@ -1852,11 +1853,18 @@ public class Qwen35: Module, VLMModel {
         // builds window i+1 (same shape as the sibling chunked prefills).
         let typedCache = castCache(cache)
         let emitDrafterState = state?[mtpEmitFlagKey] ?? false
-        var emittedHiddenStates: [MLXArray] = []
+        let chunkHandler = state?.mtpPrefillChunkHandler
+
+        // Seed the post-image text tail's anchor. The vendor's flat-continuation
+        // branch positions tail token j at `tailCacheOffset + ropeDeltas + j`;
+        // after this remainder `tailCacheOffset = P + remainderLength`, so the
+        // delta the tail needs is the offset-frame `getRopeIndex` delta minus
+        // `P` (which `getRopeIndex` implicitly counted into `remainderLength`).
+        let resumeDelta = ropeDeltas - MLXArray(Int32(cacheOffset))
 
         /// One forward over `range`, slicing positions and embeddings in lockstep.
         func forward(_ range: Range<Int>) -> LMOutput {
-            let output = languageModel(
+            languageModel(
                 inputIds[0..., range],
                 inputsEmbeds: inputEmbeddings.map { $0[0..., range, 0...] },
                 cache: typedCache,
@@ -1869,14 +1877,13 @@ public class Qwen35: Module, VLMModel {
                 imageGridTHW: nil,
                 videoGridTHW: nil
             )
-            if emitDrafterState, let hidden = output.state?[mtpLastHiddenStatesKey] {
-                emittedHiddenStates.append(hidden)
-            }
-            return output
         }
 
         let processed = try prefill.forEachChunk(total: remainderLength) { range in
-            _ = forward(range)
+            let output = forward(range)
+            if let chunkHandler, let hiddenStates = output.state?[mtpLastHiddenStatesKey] {
+                chunkHandler(inputIds[0..., range], hiddenStates, resumeDelta)
+            }
             if let typedCache {
                 asyncEval(typedCache)
             }
@@ -1888,20 +1895,10 @@ public class Qwen35: Module, VLMModel {
         let lastOutput = forward(processed ..< remainderLength)
         prefill.progress?(remainderLength, remainderLength)
 
-        // Seed the post-image text tail's anchor. The vendor's flat-continuation
-        // branch positions tail token j at `tailCacheOffset + ropeDeltas + j`;
-        // after this remainder `tailCacheOffset = P + remainderLength`, so the
-        // delta the tail needs is the offset-frame `getRopeIndex` delta minus
-        // `P` (which `getRopeIndex` implicitly counted into `remainderLength`).
-        let resumeDelta = ropeDeltas - MLXArray(Int32(cacheOffset))
         var resumeState = lastOutput.state ?? state ?? LMOutput.State()
         resumeState[precomputedPositionIdsKey] = nil
         resumeState[ropeDeltasKey] = resumeDelta
-        if emitDrafterState, !emittedHiddenStates.isEmpty {
-            resumeState[mtpLastHiddenStatesKey] =
-                emittedHiddenStates.count == 1
-                ? emittedHiddenStates[0]
-                : concatenated(emittedHiddenStates, axis: 1)
+        if emitDrafterState {
             resumeState[mtpPositionDeltasKey] = resumeDelta
         }
 

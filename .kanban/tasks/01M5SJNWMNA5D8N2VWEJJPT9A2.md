@@ -52,11 +52,27 @@ comments:
     - evidence: swift build --build-tests (changed files touched, MLXLMCommon/BenchmarkHelpers recompiled) — 0 new warnings, only the known "missing creator ... mlx-swift_Cmlx.bundle" message; xcrun xctest MLXLMTests — 895 XCTest, 0 failures, plus 1854 Swift Testing passed; MLXFoundationModelsTests — 376 passed, 0 failures; only skip is the env-gated benchmarkVerification()
     - next: review
   timestamp: 2026-10-27T22:36:56.187533+00:00
+- actor: claude-code
+  id: 01m5zrdp0trg7h8zhgp61x5v4g
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (4b1bf67d) — 0 findings, 0 confirmed, 3 refuted, 14 attempted, 0 failed; 7 source files reviewed, 8 .kanban files had no matching validator. I also checked three things directly and found no defect. (1) hasCachedLastToken: true only for pending index < committedPendingTokenCount. That covers accepted drafts (committed = accepted) and the prefill bonus that a priming forward fed (committed = 1). It is false for the correction/bonus slot, for the prefill bonus without a priming forward (.tokens path and .logits path without priming), and for plain-decode tokens, because passthroughStep returns the freshly sampled token before any forward feeds it. So stopTokenFedToCache never names a token the cache does not hold. (2) standDownReason is decided in init before prepare. A stood-down stream gets no continuation, no drafterState, no staging probe, no emit flag in the prefill or bonus state, no priming forward and no primeDrafterState, and finalizeDrafterContinuation returns nil under passthrough. (3) @unchecked Sendable on MTPDrafterContinuation: the arrays are eval'd before hand-over. The iterator's drafterState shares the KVCache objects only until the generation task ends. The single-owner contract is the same one the main [KVCache] argument already relies on.
+    - next: none — task moved to done.
+  timestamp: 2026-10-27T22:41:46.010593+00:00
+- actor: claude-code
+  id: 01m5zre7h3svb9ye66bgn7ny3n
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 7 files (hasCachedLastToken, passthrough before prepare, logprobs passthrough, public continuation overloads)
+    - test: green — MLXLMTests 895 XCTest 0 failures + 1854 Swift Testing; FoundationModels 376; no new warnings
+    - commit: 4b1bf67d
+    - review: clean — 0 findings; task done
+  timestamp: 2026-10-27T22:42:03.939088+00:00
 depends_on:
 - 01M5SK8FDMF5XH4FDH12H0FPX1
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: ffe880
 title: 'MTP: fix the MTP iterator contract with the shared generate loop (stop token, passthrough order, state, logprobs)'
 ---
 ## What

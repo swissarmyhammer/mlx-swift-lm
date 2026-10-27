@@ -198,6 +198,18 @@ public struct MTPDrafterState {
         seedHidden = nil
         return isAligned
     }
+
+    /// Removes every entry and starts the empty cache at `position`.
+    ///
+    /// - Parameter position: The absolute position of the first entry the cache will hold.
+    /// - Returns: `false`, leaving the state unchanged, when the entries cannot be removed.
+    mutating func restart(at position: Int) -> Bool {
+        guard position >= 0, removeLastEntries(entryCount) else { return false }
+        cacheStartPosition = position
+        nextPosition = position
+        proposalAppended = 0
+        return true
+    }
 }
 
 /// Optional capability for MTP drafters that maintain per-stream state.
@@ -394,13 +406,10 @@ extension ResumableMTPDrafterModel {
     ) -> Bool {
         let suffix = normalizedMTPTokenBatch(suffixTokens)
         let suffixLength = suffix.dim(-1)
-        guard suffixLength > 0, position >= 0, suffixTargetHidden.dim(1) >= suffixLength,
-            state.removeLastEntries(state.entryCount)
+        guard suffixLength > 0, suffixTargetHidden.dim(1) >= suffixLength,
+            state.restart(at: position)
         else { return false }
 
-        state.cacheStartPosition = position
-        state.nextPosition = position
-        state.proposalAppended = 0
         return appendDrafterState(
             target: target,
             tokens: concatenated([suffix[0..., 1...], normalizedMTPColumn(firstBonus)], axis: 1),
@@ -657,6 +666,37 @@ public let mtpPositionDeltasKey =
 /// ``mtpLastHiddenStatesKey`` and ``mtpSharedKVStatesKey``. An absent key
 /// reads as `false` (no emit), so non-MTP callers are unaffected.
 public let mtpEmitFlagKey = LMOutput.Key<Bool>("mtp.emitDrafterState")
+
+/// Receives the target hidden rows of one prefill chunk, as a target's
+/// ``LanguageModel/prepare(_:cache:state:prefill:)`` evaluates it.
+///
+/// - Parameters:
+///   - tokens: The tokens of the chunk, shape `[B, n]`.
+///   - hiddenStates: One target hidden row per token of the chunk, shape `[B, n, hidden]`, in the
+///     representation of ``mtpLastHiddenStatesKey``.
+///   - positionDeltas: The position deltas the drafter applies to the chunk, as
+///     ``mtpPositionDeltasKey`` carries them, or `nil` for a target without them.
+public typealias MTPPrefillChunkHandler = (
+    _ tokens: MLXArray, _ hiddenStates: MLXArray, _ positionDeltas: MLXArray?
+) -> Void
+
+/// The MTP iterator sets this key, beside ``mtpEmitFlagKey``, on the ``LMOutput/State`` it passes
+/// to the target's ``LanguageModel/prepare(_:cache:state:prefill:)``. A target that prefills the
+/// prompt in chunks calls the handler after the forward of each chunk but the last one, with
+/// that chunk's hidden rows, so a drafter fills its own cache chunk by chunk and no chunk's rows
+/// outlive the next chunk. The ``mtpLastHiddenStatesKey`` of the state `prepare` returns, or of
+/// the iterator's forward over the tokens `prepare` returns, then holds the rows of the remaining
+/// positions only.
+public let mtpPrefillChunkHandlerKey = LMOutput.Key<MTPPrefillChunkHandler>(
+    "mtp.prefillChunkHandler")
+
+extension LMOutput.State {
+    /// The ``mtpPrefillChunkHandlerKey`` handler a target's chunked prefill calls, or `nil` when
+    /// the state carries none or does not ask the target for MTP drafter state at all.
+    package var mtpPrefillChunkHandler: MTPPrefillChunkHandler? {
+        self[mtpEmitFlagKey] == true ? self[mtpPrefillChunkHandlerKey] : nil
+    }
+}
 
 /// Requests a recurrent-cache checkpoint after this many verification input
 /// tokens. Hybrid Qwen models use `1` for MTP-1 so a rejected draft restores

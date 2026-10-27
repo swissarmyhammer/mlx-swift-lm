@@ -63,8 +63,8 @@ public struct Qwen35MTPFixture {
     public static let blockSize = 2
 
     /// The seed of the independent drafter is this far from the seed of the target, thus its
-    /// weights differ from the target's.
-    private static let drafterSeedOffset: UInt64 = 1
+    /// weights differ from the target's. ``Qwen35VLMMTPFixture`` seeds its drafter the same way.
+    public static let drafterSeedOffset: UInt64 = 1
 
     /// The parameter key of the target's token embeddings.
     private static let embeddingKey = "model.embed_tokens.weight"

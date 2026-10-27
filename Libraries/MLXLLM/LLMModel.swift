@@ -46,6 +46,10 @@ extension LLMModel {
     /// `TokenIterator`'s first forward. With `PrefillParameters.Chunking.balanced`
     /// (the default) the chunks are equal-sized, so no forward is a small
     /// remainder paying full attention cost against the whole prompt.
+    ///
+    /// When `state` asks for MTP drafter state and carries an
+    /// ``MLXLMCommon/mtpPrefillChunkHandlerKey`` handler, each chunk's hidden
+    /// rows go to the handler right after the chunk's forward.
     public func prepare(
         _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
     ) throws
@@ -67,12 +71,17 @@ extension LLMModel {
             // chunk N. Under .remainder the reserved tail is the legacy leftover
             // (up to a full step) rather than a single token.
             var state: LMOutput.State? = state
+            let chunkHandler = state?.mtpPrefillChunkHandler
             processed = try prefill.forEachChunk(
                 total: total, reserving: prefill.chunking == .remainder ? stepSize : 1
             ) { range in
                 let input = y[.newAxis, range]
                 let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
                 state = output.state
+                if let chunkHandler, let hiddenStates = output.state?[mtpLastHiddenStatesKey] {
+                    chunkHandler(
+                        input.tokens, hiddenStates, output.state?[mtpPositionDeltasKey])
+                }
                 asyncEval(cache)
             }
 

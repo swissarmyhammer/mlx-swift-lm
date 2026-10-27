@@ -346,11 +346,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
         var mtpPrefill = parameters.prefill
-        if speculates, drafter.requiresPromptPrefill || continuationToResume != nil {
-            // The target must expose one hidden row per prompt token so a
-            // private MTP cache can be filled or resumed over the suffix.
-            // Until model-specific chunk aggregation is available, use the
-            // reference single-forward computation for this architecture.
+        if speculates, drafter.requiresPromptPrefill || continuationToResume != nil,
+            !(drafter is any ResumableMTPDrafterModel)
+        {
+            // A resumable drafter takes the prompt chunk by chunk through the prefill's chunk
+            // handler. Any other drafter primes from one hidden row per prompt token at once, so
+            // its target runs the reference single-forward computation.
             mtpPrefill.stepSize = Int.max
             mtpPrefill.chunking = .unchunked
         }
@@ -408,6 +409,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         "logprobs requested; generating without speculation so each token reports the "
         + "log probabilities of plain decode"
 
+    /// The passthrough reason of a stream whose target did not report a hidden row for each
+    /// prompt position its drafter must take.
+    static let missingPromptHiddenReason =
+        "MTP drafter has no target hidden state for the prompt; continuing without speculation"
+
     static let missingSharedKVSourcesReason =
         "main model did not report which cache entries its shared K/V came from; continuing "
         + "without speculation"
@@ -449,8 +455,14 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // drafters are primed by the explicit one-token follow-up below.
         let bonusState: LMOutput.State? = passthrough ? persistentState : prefillState
 
-        let incomingPrefillState: LMOutput.State? =
+        // A resumable drafter takes the rows of each prefill chunk as the target evaluates it;
+        // the rows of the positions after the last chunk come with the target's final forward.
+        let feed =
+            needsFullPromptHidden
+            ? makePrefillFeed(cachePosition: cachePositionBeforePrefill) : nil
+        var incomingPrefillState: LMOutput.State? =
             needsFullPromptHidden ? prefillState : persistentState
+        incomingPrefillState?[mtpPrefillChunkHandlerKey] = feed?.chunkHandler
         switch try mainModel.prepare(
             input, cache: mainCache, state: incomingPrefillState, prefill: prefill)
         {
@@ -498,6 +510,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let token = sampleToken(from: prefillResult.logits)
             y = .init(tokens: token)
             mainState = prefillResult.state
+            // The returned state keeps what the prefill was handed, the chunk handler included.
+            mainState?[mtpPrefillChunkHandlerKey] = nil
             let placeable = reconcileSharedKVState(
                 &mainState, discarding: 0,
                 lengths: mainCacheStorage.emittedLength(forLeaf:))
@@ -554,7 +568,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let continuation = continuationToResume
         continuationToResume = nil
-        if !passthrough, drafter.requiresPromptPrefill || continuation != nil {
+        if !passthrough, let feed, feed.fedTokenCount > 0 {
+            primeDrafterState(
+                after: feed, promptTokens: input.text.tokens,
+                cachePosition: cachePositionBeforePrefill)
+        } else if !passthrough, drafter.requiresPromptPrefill || continuation != nil {
             primeDrafterState(
                 promptTokens: input.text.tokens, cachePosition: cachePositionBeforePrefill,
                 continuation: continuation)
@@ -613,20 +631,16 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let targetHidden = mainState?[mtpLastHiddenStatesKey],
             targetHidden.dim(1) >= promptLength
         else {
-            switchToPassthrough(
-                reason:
-                    "MTP drafter has no target hidden state for the prompt; continuing without speculation"
-            )
+            switchToPassthrough(reason: Self.missingPromptHiddenReason)
             return
         }
         let suffixHidden = targetHidden[0..., ..<promptLength, 0...]
-        let positionDeltas = mainState?[mtpPositionDeltasKey]
 
         guard cachePosition > 0 else {
             statefulDrafter.prepareDrafterState(
                 target: mainModel, promptTokens: promptTokens, targetHidden: suffixHidden,
-                firstBonus: y.tokens, positionDeltas: positionDeltas, state: &state,
-                sampler: sampler)
+                firstBonus: y.tokens, positionDeltas: mainState?[mtpPositionDeltasKey],
+                state: &state, sampler: sampler)
             drafterState = state
             return
         }
@@ -638,20 +652,46 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return
         }
 
-        if let continuation, continuation.targetProcessedTokenCount == cachePosition,
+        let alignedBoundary = continuation.flatMap {
+            $0.targetProcessedTokenCount == cachePosition ? $0.targetBoundaryHidden : nil
+        }
+        resumeOrColdStart(
+            resumableDrafter, segmentTokens: promptTokens, segmentHidden: suffixHidden,
+            boundary: alignedBoundary, position: cachePosition, state: state)
+    }
+
+    /// Primes a resumable drafter over a prompt segment the target just prefilled.
+    ///
+    /// The segment resumes the drafter from `boundary`. Without a boundary, or when the drafter
+    /// refuses the resume, the drafter cold-starts at the segment instead.
+    ///
+    /// - Parameters:
+    ///   - resumableDrafter: The drafter of the stream.
+    ///   - segmentTokens: The prompt segment, which ends the prompt.
+    ///   - segmentHidden: One target hidden row per segment token.
+    ///   - boundary: The target hidden row of the position before the segment, when `state` holds
+    ///     the entries up to that position.
+    ///   - position: The target cache position of the first segment token.
+    ///   - state: The drafter state to extend or replace.
+    private mutating func resumeOrColdStart(
+        _ resumableDrafter: any ResumableMTPDrafterModel, segmentTokens: MLXArray,
+        segmentHidden: MLXArray, boundary: MLXArray?, position: Int, state: MTPDrafterState
+    ) {
+        let positionDeltas = mainState?[mtpPositionDeltasKey]
+        var state = state
+        if let boundary,
             resumableDrafter.resumeDrafterState(
-                target: mainModel, suffixTokens: promptTokens, suffixTargetHidden: suffixHidden,
-                targetBoundaryHidden: continuation.targetBoundaryHidden, firstBonus: y.tokens,
+                target: mainModel, suffixTokens: segmentTokens, suffixTargetHidden: segmentHidden,
+                targetBoundaryHidden: boundary, firstBonus: y.tokens,
                 positionDeltas: positionDeltas, state: &state, sampler: sampler)
         {
             drafterState = state
             return
         }
-
         guard
             resumableDrafter.coldStartDrafterState(
-                target: mainModel, suffixTokens: promptTokens, suffixTargetHidden: suffixHidden,
-                firstBonus: y.tokens, position: cachePosition, positionDeltas: positionDeltas,
+                target: mainModel, suffixTokens: segmentTokens, suffixTargetHidden: segmentHidden,
+                firstBonus: y.tokens, position: position, positionDeltas: positionDeltas,
                 state: &state, sampler: sampler)
         else {
             switchToPassthrough(
@@ -661,6 +701,51 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return
         }
         drafterState = state
+    }
+
+    /// A feed that takes each prefill chunk of the prompt into a resumable drafter, or `nil`
+    /// when the drafter cannot take the prompt chunk by chunk.
+    ///
+    /// - Parameter cachePosition: The target cache position before the prefill.
+    /// - Returns: The feed, starting from the aligned continuation when the stream carries one.
+    private func makePrefillFeed(cachePosition: Int) -> MTPDrafterPrefillFeed? {
+        guard let resumableDrafter = drafter as? any ResumableMTPDrafterModel,
+            let drafterState
+        else { return nil }
+        return MTPDrafterPrefillFeed(
+            drafter: resumableDrafter, target: mainModel, sampler: sampler, state: drafterState,
+            cachePosition: cachePosition, continuation: continuationToResume)
+    }
+
+    /// Primes the drafter after the prefill chunks fed it, over the prompt positions the chunks
+    /// did not reach.
+    ///
+    /// The target's final forward evaluated those positions, so its hidden rows are the rows of
+    /// the final prompt segment. The segment resumes the drafter from the boundary the chunks
+    /// left. When a chunk did not reach the drafter, or the drafter refuses the resume, the
+    /// drafter cold-starts at the segment instead.
+    ///
+    /// - Parameters:
+    ///   - feed: The feed the prefill chunks went through.
+    ///   - promptTokens: The prompt tokens the target prefilled.
+    ///   - cachePosition: The target cache position before the prefill.
+    private mutating func primeDrafterState(
+        after feed: MTPDrafterPrefillFeed, promptTokens: MLXArray, cachePosition: Int
+    ) {
+        let segmentTokens = promptTokens[.ellipsis, feed.fedTokenCount...]
+        let segmentLength = segmentTokens.dim(-1)
+        guard let resumableDrafter = drafter as? any ResumableMTPDrafterModel,
+            let targetHidden = mainState?[mtpLastHiddenStatesKey],
+            segmentLength > 0, targetHidden.dim(1) >= segmentLength
+        else {
+            switchToPassthrough(reason: Self.missingPromptHiddenReason)
+            return
+        }
+        resumeOrColdStart(
+            resumableDrafter, segmentTokens: segmentTokens,
+            segmentHidden: targetHidden[0..., ..<segmentLength, 0...],
+            boundary: feed.isIntact ? feed.boundaryHidden : nil,
+            position: cachePosition + feed.fedTokenCount, state: feed.state)
     }
 
     /// Single round: draft `blockSize - 1` tokens, verify with main, accept
@@ -1381,6 +1466,7 @@ extension MTPSpeculativeTokenIterator {
 private func persistentTargetState(from state: LMOutput.State?) -> LMOutput.State? {
     guard var state else { return nil }
     state[mtpEmitFlagKey] = nil
+    state[mtpPrefillChunkHandlerKey] = nil
     state[mtpCacheCheckpointIndexKey] = nil
     state[mtpLastHiddenStatesKey] = nil
     state[mtpSharedKVStatesKey] = nil
