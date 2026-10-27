@@ -220,9 +220,22 @@ func testQwen35MTPDraftInstantiatesDedicatedEmbeddingWhenConfigured() throws {
     #expect(sanitized["model.embed_tokens.weight"] == nil)
 }
 
+/// Bound for float32 values compared at full precision: on machines whose float32 matmuls run
+/// in IEEE float32, and for values every run reaches through matmuls of the same shapes.
+private let ieeeFloat32Tolerance = 1e-5
+
+/// Bound for float32 values that the same inputs reach through matmuls of different shapes on
+/// machines whose float32 matmuls run as TF32; see ``MatmulPrecision``.
+private let tf32ReshapedMatmulTolerance = 2e-3
+
 /// Bound for comparing a gated-delta-net state reached two ways. Wider on machines whose
 /// float32 matmuls run as TF32; see ``MatmulPrecision``.
-private let gdnStateTolerance = MatmulPrecision.tolerance(float32: 1e-5, reduced: 2e-3)
+private let gdnStateTolerance = MatmulPrecision.tolerance(
+    float32: ieeeFloat32Tolerance, reduced: tf32ReshapedMatmulTolerance)
+
+/// Bound for comparing a gated-delta-net output computed with and without a checkpoint. Both
+/// runs go through matmuls of the same shapes, so full float32 precision holds on every machine.
+private let gdnCheckpointOutputTolerance = ieeeFloat32Tolerance
 
 @Suite(.serialized)
 struct Qwen35MTPMetalTests {
@@ -639,7 +652,11 @@ struct Qwen35MTPMetalTests {
         _ = layer(input[0..., ..<1, 0...], cache: prefixCache)
         eval(full, speculative)
 
-        #expect(allClose(speculative, full, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+        #expect(
+            allClose(
+                speculative, full, rtol: gdnCheckpointOutputTolerance,
+                atol: gdnCheckpointOutputTolerance
+            ).item(Bool.self))
         #expect(speculativeCache.hasSpeculativeCheckpoint)
         #expect(speculativeCache.restoreSpeculativeCheckpoint())
 
@@ -673,7 +690,11 @@ struct Qwen35MTPMetalTests {
         _ = layer(input[0..., ..<1, 0...], cache: prefixCache)
         eval(full, speculative)
 
-        #expect(allClose(speculative, full, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+        #expect(
+            allClose(
+                speculative, full, rtol: gdnCheckpointOutputTolerance,
+                atol: gdnCheckpointOutputTolerance
+            ).item(Bool.self))
         #expect(speculativeCache.restoreSpeculativeCheckpoint())
         for (actual, reference) in zip(speculativeCache.state, prefixCache.state) {
             eval(actual, reference)
@@ -713,7 +734,8 @@ struct Qwen35MTPMetalTests {
 /// Bound for comparing drafter cache entries that the same tokens reach through matmuls of
 /// different shapes. Wider on machines whose float32 matmuls run as TF32; see
 /// ``MatmulPrecision``.
-private let drafterCacheTolerance = MatmulPrecision.tolerance(float32: 1e-5, reduced: 2e-3)
+private let drafterCacheTolerance = MatmulPrecision.tolerance(
+    float32: ieeeFloat32Tolerance, reduced: tf32ReshapedMatmulTolerance)
 
 /// The drafter state API beyond a cold prefill at position zero: a cold start at a position
 /// the target cache already holds, and trimming and appending entries.
@@ -723,8 +745,26 @@ struct Qwen35MTPDrafterStateTests {
     /// Prompt tokens of the fixture vocabulary.
     private let prompt = [3, 9, 14, 22, 5, 40]
 
-    /// The token the target sampled after ``prompt``, as the iterator hands it to the drafter.
-    private let bonus = MLXArray([Int32(17)])
+    /// The token the target sampled after ``prompt``.
+    private let bonusToken: Int32 = 17
+
+    /// ``bonusToken`` as the iterator hands it to the drafter.
+    private var bonus: MLXArray { MLXArray([bonusToken]) }
+
+    /// The prompt token the next turn appends after ``bonusToken``.
+    private let nextTurnPromptToken: Int32 = 8
+
+    /// The token the target sampled after the next turn's suffix.
+    private let nextTurnBonusToken: Int32 = 11
+
+    /// Suffix tokens the VLM cold start feeds after the cached prefix.
+    private let vlmSuffixTokens: [Int32] = [5, 6]
+
+    /// The token the VLM target sampled after ``vlmSuffixTokens``.
+    private let vlmBonusToken: Int32 = 7
+
+    /// The multimodal RoPE position delta the VLM cold start applies.
+    private let vlmPositionDelta: Int32 = 2
 
     /// Entries the trim and append test removes and then appends again.
     private let replayedEntryCount = 3
@@ -867,7 +907,7 @@ struct Qwen35MTPDrafterStateTests {
                 positionDeltas: nil, state: &state))
         #expect(state.nextPosition == prompt.count - 1)
 
-        let nextSuffix = MLXArray([Int32(17), 8])[.newAxis, 0...]
+        let nextSuffix = MLXArray([bonusToken, nextTurnPromptToken])[.newAxis, 0...]
         #expect(
             fixture.drafter.resumeDrafterState(
                 target: fixture.target, suffixTokens: nextSuffix,
@@ -875,7 +915,7 @@ struct Qwen35MTPDrafterStateTests {
                     1, nextSuffix.dim(1), Qwen35MTPFixture.hiddenSize,
                 ]),
                 targetBoundaryHidden: suffixHidden[0..., (-1)..., 0...],
-                firstBonus: MLXArray([Int32(11)]), positionDeltas: nil, state: &state,
+                firstBonus: MLXArray([nextTurnBonusToken]), positionDeltas: nil, state: &state,
                 sampler: sampler))
         #expect(state.nextPosition == prompt.count + nextSuffix.dim(1))
         #expect(state.isAligned)
@@ -889,7 +929,7 @@ struct Qwen35MTPDrafterStateTests {
         let target = MLXVLM.Qwen35(cfg)
         let drafter = MLXVLM.Qwen35VLMNextNDraftModel(cfg)
         let sampler = GenerateParameters(temperature: 0).sampler()
-        let suffix = MLXArray([Int32(5), 6])[.newAxis, 0...]
+        let suffix = MLXArray(vlmSuffixTokens)[.newAxis, 0...]
         var state = drafter.makeState(parameters: nil)
 
         #expect(
@@ -897,8 +937,8 @@ struct Qwen35MTPDrafterStateTests {
                 target: target, suffixTokens: suffix,
                 suffixTargetHidden: MLXArray.zeros(
                     [1, suffix.dim(1), cfg.textConfiguration.hiddenSize]),
-                firstBonus: MLXArray([Int32(7)]), position: cachedPrefixLength,
-                positionDeltas: MLXArray([Int32(2)]), state: &state, sampler: sampler))
+                firstBonus: MLXArray([vlmBonusToken]), position: cachedPrefixLength,
+                positionDeltas: MLXArray([vlmPositionDelta]), state: &state, sampler: sampler))
         let seed = try #require(state.seedToken)
         eval(seed)
         #expect(state.cacheStartPosition == cachedPrefixLength)

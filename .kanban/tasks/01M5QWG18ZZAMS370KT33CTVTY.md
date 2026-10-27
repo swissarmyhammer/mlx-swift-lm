@@ -44,6 +44,38 @@ comments:
     - evidence: swift build --build-tests (forced full recompile of MLXLMCommon and test sources; only warning is the known "missing creator ... mlx-swift_Cmlx.bundle"); xcrun xctest MLXLMTests — 895 XCTest, 0 failures, and 1849 Swift Testing passed (benchmarkVerification() env-gated skip, known); MLXFoundationModelsTests — 376 passed. The warning at Tests/MLXLMTests/ChatSessionTests.swift (`constant 'first' inferred to have type 'Void?'`) was pre-existing and not caused by this change: it is the `AsyncStream<Void>` iterator in testTokenObservationStopsAfterCancellationAndReleasesTheCache, and no changed signature is involved. Fixed with an explicit `let first: Void?` annotation; the build now has zero warnings besides the known bundle one.
     - next: review; nothing committed.
   timestamp: 2026-10-27T21:46:25.835151+00:00
+- actor: claude-code
+  id: 01m5znj1cgg5afe793yepkbc6d
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (3d70f39e): 1 finding (confirmed 2, refuted 1, attempted 21, failed 0) — Tests/MLXLMTests/Qwen35MTPTests.swift:716 code-hygiene/magic-numbers-swift. Requested checks passed: (1) the drafter only proposes and the target verifies every token; a failed resume or cold start falls to passthrough. (2) removeLastEntries leaves cacheStartPosition unchanged, lowers nextPosition and proposalAppended, and re-checks per-layer offset == entryCount. RoPE uses absolute state.nextPosition. finalizeDrafterState removes tentative entries before the boundary trim. (3) For a resumable drafter, ChatSession readiness passes either the continuation state or a fresh state. A continuation is resumed only when targetProcessedTokenCount == cachePosition. Otherwise coldStartDrafterState removes every existing entry before it re-primes, so stale entries never reach a turn.
+    - next: replace the magic numbers on the drafterCacheTolerance line (1e-5, 2e-3) and the same cause across Qwen35MTPTests.swift with named constants, then re-review.
+  timestamp: 2026-10-27T21:51:42.992610+00:00
+- actor: claude-code
+  id: 01m5znjk6e7ygmnt5t4nmvdyc8
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 9 files (drafter append/trim API, cold start in iterator and ChatSession)
+    - test: green — MLXLMTests 895 XCTest 0 failures + 1849 Swift Testing; FoundationModels 376; fixed pre-existing Void? warning
+    - commit: 3d70f39e
+    - review: findings — Tests/MLXLMTests/Qwen35MTPTests.swift:716
+  timestamp: 2026-10-27T21:52:01.230980+00:00
+- actor: claude-code
+  id: 01m5zny87jtbc3t3y89bqa50pm
+  text: |-
+    Finding fix: `Tests/MLXLMTests/Qwen35MTPTests.swift:716` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+    - Cause: the tolerance literals 1e-5 / 2e-3 were written inline. The same pair also sat in `gdnStateTolerance`, which the review did not cite, and plain `1e-5` sat in the two GDN checkpoint-output `allClose` calls. All of them now use named, documented file-level constants: `ieeeFloat32Tolerance` (1e-5), `tf32ReshapedMatmulTolerance` (2e-3), and `gdnCheckpointOutputTolerance` (= ieeeFloat32Tolerance; both runs use the same matmul shapes, so it keeps full float32 precision under TF32 as well). `gdnStateTolerance` and `drafterCacheTolerance` are now built from the first two.
+    - Fixture literals in Qwen35MTPDrafterStateTests (the suite this task added) are now named stored properties: `bonusToken` (17; `bonus` is computed from it), `nextTurnPromptToken` (8), `nextTurnBonusToken` (11), `vlmSuffixTokens` ([5, 6]), `vlmBonusToken` (7), `vlmPositionDelta` (2).
+    - Checked by running swiftlint `no_magic_numbers` (allowed [0, 1, -1, 100], the validator's config) on the file: before the fix it reported 225:68, 225:83, 716:72, 716:87; after the fix it reports 0.
+    - Left unchanged on purpose: inline token and shape literals in suites added by earlier tasks on this branch (for example Qwen35MTPMetalTests `MLXArray([Int32(1), 2, 3])`). swiftlint does not flag them, and renaming them would refactor existing tests outside this card.
+  timestamp: 2026-10-27T21:58:23.218339+00:00
+- actor: claude-code
+  id: 01m5znyayrdb3s2kamwnzb6v4n
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Tests/MLXLMTests/Qwen35MTPTests.swift. swiftlint no_magic_numbers: 0 findings (4 before). `swift build --build-tests`: only warning is the known "missing creator ... mlx-swift_Cmlx.bundle". `xcrun xctest MLXLMTests.xctest`: 895 XCTest, 0 failures, and 1849 Swift Testing passed (benchmarkVerification env-gated skip, known). Finding flipped to [x].
+    - next: /review (task left in doing; not committed)
+  timestamp: 2026-10-27T21:58:26.008788+00:00
 depends_on:
 - 01M5SK8FDMF5XH4FDH12H0FPX1
 - 01M5SWXS9E09Y97PV3BV51TPYA
@@ -68,3 +100,15 @@ What remains:
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38
+
+## Review Findings (2026-10-27 16:46)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 10 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWG18ZZAMS370KT33CTVTY.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWG18ZZAMS370KT33CTVTY.md` — no validator matches this file
+> - `.kanban/tasks/01M5SK8FDMF5XH4FDH12H0FPX1.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5SK8FDMF5XH4FDH12H0FPX1.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/Qwen35MTPTests.swift:716` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
