@@ -89,6 +89,25 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     var processor: LogitProcessor?
     let sampler: LogitSampler
 
+    /// The top candidates whose log probabilities each token reports, or `nil` when the
+    /// stream does not ask for them. A stream that asks decodes without speculation.
+    let logProbabilityTopK: Int?
+
+    /// Log probabilities of the token sampled last. A stream that asks for them decodes
+    /// plainly from its start, thus the token sampled last is the token ``next()`` returns.
+    private var deferredLogProbabilities: DeferredTokenLogProbabilities?
+
+    /// Log probabilities for the token returned by the most recent ``next()`` call, or `nil`
+    /// when the stream does not ask for them.
+    public private(set) var lastLogProbabilities: DeferredTokenLogProbabilities?
+
+    /// Whether the main cache holds the token the most recent ``next()`` call returned.
+    ///
+    /// An accepted draft is in the cache when it is returned: the verify pass of its round
+    /// fed it. The final token of a round, the prefill bonus that no priming forward fed, and
+    /// each token of plain decode are returned before any forward pass feeds them.
+    public private(set) var hasCachedLastToken = false
+
     /// Distribution surface for non-greedy speculative sampling. Built-in
     /// temperature/top-p samplers conform; argmax intentionally does not and
     /// keeps the cheaper exact-token greedy path.
@@ -183,11 +202,28 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     // emitted `.info` event.
     public private(set) var passthroughReason: String?
 
+    /// Prefills the main model with `input` and prepares the drafter for the first round.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt, or the suffix of the prompt that `mainCache` does not hold.
+    ///   - mainModel: The target model the drafter speculates for.
+    ///   - drafter: The MTP drafter of `mainModel`.
+    ///   - mainCache: The cache of `mainModel`, or `nil` for a new cache.
+    ///   - mainState: The model state saved with `mainCache`, as ``state`` exported it.
+    ///   - mtpContinuation: The drafter continuation the generation that left `mainCache`
+    ///     gave back, or `nil` to start the drafter at the cached position.
+    ///   - parameters: The generation parameters.
+    ///   - blockSize: The tokens of each round: `blockSize - 1` drafts and the bonus.
+    ///   - components: Optional behavioral components, e.g. a custom ``LogitProcessor``.
+    /// - Throws: An ``MTPDrafterCompatibilityError`` when `drafter` cannot draft for
+    ///   `mainModel`, or the error of the prefill.
     public init(
         input: LMInput,
         mainModel: any LanguageModel,
         drafter: any MTPDrafterModel,
         mainCache: [KVCache]? = nil,
+        mainState: LMOutput.State? = nil,
+        mtpContinuation: MTPDrafterContinuation? = nil,
         parameters: GenerateParameters,
         blockSize: Int,
         components: GenerationComponents = .init()
@@ -201,6 +237,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             drafter: drafter,
             mainCacheStorage: KVCacheStorage(
                 mainCache ?? (try mainModel.newCache(parameters: parameters)), plan: kvCachePlan),
+            mainState: mainState,
+            mtpContinuation: mtpContinuation,
             parameters: parameters,
             blockSize: blockSize,
             components: components)
@@ -234,15 +272,24 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.mainCacheStorage = mainCacheStorage
         self.mainState = mainState
-        self.continuationToResume = mtpContinuation
-        self.drafterState =
-            mtpContinuation?.state
-            ?? (drafter as? any StatefulMTPDrafterModel)?
-            .makeState(parameters: parameters)
 
-        self.sampler = parameters.sampler()
+        let sampler = parameters.sampler()
+        // Decided before any prompt work: a stream that cannot speculate gets no
+        // drafter state, no emit-flag prefill, and no drafter prefill.
+        let standDownReason = Self.standDownReason(
+            drafter: drafter, parameters: parameters, sampler: sampler)
+        let speculates = standDownReason == nil
+        self.continuationToResume = speculates ? mtpContinuation : nil
+        self.drafterState =
+            speculates
+            ? mtpContinuation?.state
+                ?? (drafter as? any StatefulMTPDrafterModel)?.makeState(parameters: parameters)
+            : nil
+
+        self.sampler = sampler
         try components.validate(parameters: parameters)
-        self.distributionSampler = self.sampler as? any DistributionLogitSampler
+        self.distributionSampler = sampler as? any DistributionLogitSampler
+        self.logProbabilityTopK = parameters.logProbabilities.map { Swift.max($0, 0) }
         self.speculativeRandomState =
             parameters.seed.map {
                 MLXRandom.RandomState(seed: $0 &+ 0x9E37_79B9_7F4A_7C15)
@@ -283,7 +330,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             nativeRewindDepth >= effectiveBlockSize - 1
             && mainCache.contains { $0 is MambaCache }
             && mainCache.allSatisfy { $0.isTrimmable || $0 is MambaCache }
-        if !usesNativeHybridRewind {
+        // A stream that decodes plainly opens no round, so its cache need not stage one.
+        if speculates, !usesNativeHybridRewind {
             guard
                 let probe = self.mainCacheStorage.beginRound(
                     maximumPositions: effectiveBlockSize)
@@ -292,10 +340,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             }
             self.mainCacheStorage.rollback(probe)
         }
+        if let standDownReason {
+            switchToPassthrough(reason: standDownReason)
+        }
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
         var mtpPrefill = parameters.prefill
-        if drafter.requiresPromptPrefill || continuationToResume != nil {
+        if speculates, drafter.requiresPromptPrefill || continuationToResume != nil {
             // The target must expose one hidden row per prompt token so a
             // private MTP cache can be filled or resumed over the suffix.
             // Until model-specific chunk aggregation is available, use the
@@ -305,28 +356,57 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
         try prepare(input: input, prefill: mtpPrefill)
         self.promptPrefillTime = Date.timeIntervalSinceReferenceDate - prefillStart
+    }
 
+    /// Why a stream cannot speculate at all, or `nil` when it can.
+    ///
+    /// Every input is known before the prompt is read, so the decision comes before
+    /// the prefill: a stream that cannot speculate does no drafter work. A
+    /// mid-stream exit would also strand a staged round.
+    ///
+    /// - Parameters:
+    ///   - drafter: The drafter of the stream.
+    ///   - parameters: The generation parameters of the stream.
+    ///   - sampler: The sampler `parameters` makes.
+    /// - Returns: The passthrough reason, or `nil` when the stream can speculate.
+    private static func standDownReason(
+        drafter: any MTPDrafterModel, parameters: GenerateParameters, sampler: LogitSampler
+    ) -> String? {
         if drafter.requiresGreedySampling, parameters.temperature != 0 {
-            switchToPassthrough(
-                reason:
-                    "Qwen MTP currently requires temperature == 0; generating without speculation"
-            )
+            return greedySamplingReason
         }
-
         // Speculative sampling can only preserve the target distribution when
         // the drafter reports the distribution its proposals were drawn from.
         // A token-only drafter under a sampling configuration would silently
-        // bias the output, so fail safe to target-only generation. Decided
-        // once here rather than per round: both inputs are known at
-        // construction, and a mid-round exit would strand a staged round.
-        if distributionSampler != nil, !(drafter is any MTPDistributionDrafterModel) {
-            switchToPassthrough(reason: Self.samplingWithoutDraftLogitsReason)
+        // bias the output, so fail safe to target-only generation.
+        if sampler is any DistributionLogitSampler,
+            !(drafter is any MTPDistributionDrafterModel)
+        {
+            return samplingWithoutDraftLogitsReason
         }
+        if parameters.logProbabilities != nil {
+            return logProbabilitiesReason
+        }
+        return nil
     }
+
+    /// The passthrough reason of a sampled stream whose drafter drafts greedily only.
+    static let greedySamplingReason =
+        "Qwen MTP currently requires temperature == 0; generating without speculation"
 
     static let samplingWithoutDraftLogitsReason =
         "MTP drafter does not expose the draft distribution required for sampling; "
         + "generating without speculation"
+
+    /// The passthrough reason of a stream that asks for log probabilities.
+    ///
+    /// Plain decode reports the log probabilities of each token from the forward
+    /// pass that samples it, as ``TokenIterator`` does. A verify pass would report
+    /// them from the logits of a multi-token forward, which differ from plain
+    /// decode by rounding, so such a stream decodes without speculation.
+    static let logProbabilitiesReason =
+        "logprobs requested; generating without speculation so each token reports the "
+        + "log probabilities of plain decode"
 
     static let missingSharedKVSourcesReason =
         "main model did not report which cache entries its shared K/V came from; continuing "
@@ -351,13 +431,15 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
     /// Prefill the main model with the prompt. The drafter's own state starts
     /// empty; its first-round conditioning inputs come from the prefill's
-    /// `LMOutput.state`.
+    /// `LMOutput.state`. A stream that already decodes plainly asks the target
+    /// for no drafter state and leaves the drafter alone.
     mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
         prefill.prefix?(mainCacheStorage.processedTokenCount)
         let inputLength = input.text.cacheSequenceLength
         let cachePositionBeforePrefill = mainCacheStorage.processedTokenCount
-        let needsFullPromptHidden = drafter.requiresPromptPrefill || continuationToResume != nil
+        let needsFullPromptHidden =
+            !passthrough && (drafter.requiresPromptPrefill || continuationToResume != nil)
 
         let persistentState = persistentTargetState(from: mainState)
         var prefillState = persistentState ?? LMOutput.State()
@@ -365,6 +447,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // Stateful drafters and warm continuations need one hidden row per
         // prompt token, so their `prepare` call receives the emit flag. Other
         // drafters are primed by the explicit one-token follow-up below.
+        let bonusState: LMOutput.State? = passthrough ? persistentState : prefillState
 
         let incomingPrefillState: LMOutput.State? =
             needsFullPromptHidden ? prefillState : persistentState
@@ -380,12 +463,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             y = tokens
             // Final prompt position not yet evaluated -- run one forward to
             // produce the bonus token AND prime drafter state.
-            let result = mainModel(y[text: .newAxis], cache: mainCache, state: prefillState)
+            let result = mainModel(y[text: .newAxis], cache: mainCache, state: bonusState)
             mainCacheStorage.commitProcessedTokens(y.cacheSequenceLength)
-            var logits = result.logits[0..., -1, 0...]
-            logits = processor?.process(logits: logits) ?? logits
-            let token = sampler.sample(logits: logits)
-            processor?.didSample(token: token)
+            let token = sampleToken(from: result.logits)
             y = .init(tokens: token)
             mainState = result.state
             // Prefill emits too, and a multi-token prefill presents a sliding layer more than its
@@ -415,10 +495,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             // themselves and return logits directly; their `state` here may
             // or may not carry drafter state depending on whether the model
             // override threads it.
-            var logits = prefillResult.logits[0..., -1, 0...]
-            logits = processor?.process(logits: logits) ?? logits
-            let token = sampler.sample(logits: logits)
-            processor?.didSample(token: token)
+            let token = sampleToken(from: prefillResult.logits)
             y = .init(tokens: token)
             mainState = prefillResult.state
             let placeable = reconcileSharedKVState(
@@ -432,13 +509,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             // If prefill didn't emit drafter state, do one more forward call
             // with the just-sampled bonus token to prime the state. The cost
             // is one extra token's forward pass; acceptable. Skipped once the
-            // snapshot has been refused: it exists only to obtain drafter
-            // state, and this stream has stopped having a use for any.
+            // stream decodes plainly -- a refused snapshot included: it exists
+            // only to obtain drafter state, and such a stream has no use for any.
             let missingRequiredDrafterState =
                 mainState?[mtpLastHiddenStatesKey] == nil
                 || (drafter.requiresSharedTargetKV
                     && mainState?[mtpSharedKVStatesKey] == nil)
-            if placeable, missingRequiredDrafterState {
+            if !passthrough, missingRequiredDrafterState {
                 var primeState = mainState ?? prefillState
                 primeState[mtpEmitFlagKey] = true
                 let primed = mainModel(y[text: .newAxis], cache: mainCache, state: primeState)
@@ -454,10 +531,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 // Resample bonus from this forward's logits so the chain stays
                 // coherent at this position (the cache offset moves by 1, so
                 // we must re-pick the bonus from the new step's logits).
-                var newLogits = primed.logits[0..., -1, 0...]
-                newLogits = processor?.process(logits: newLogits) ?? newLogits
-                let newToken = sampler.sample(logits: newLogits)
-                processor?.didSample(token: newToken)
+                let newToken = sampleToken(from: primed.logits)
                 y = .init(tokens: newToken)
                 // Yield BOTH bonuses to the consumer, in sample order.
                 // `token` is the prefill-position-N sample (consumed by the
@@ -480,11 +554,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let continuation = continuationToResume
         continuationToResume = nil
-        if drafter.requiresPromptPrefill || continuation != nil {
+        if !passthrough, drafter.requiresPromptPrefill || continuation != nil {
             primeDrafterState(
                 promptTokens: input.text.tokens, cachePosition: cachePositionBeforePrefill,
                 continuation: continuation)
-        } else if cachePositionBeforePrefill > 0,
+        } else if !passthrough, cachePositionBeforePrefill > 0,
             drafter is any StatefulMTPDrafterModel
         {
             switchToPassthrough(
@@ -494,6 +568,29 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         try kvCachePlan.applyAndValidate(to: mainCacheStorage)
+    }
+
+    /// Samples a token from the logits of the last position of `logits`.
+    ///
+    /// The processor shapes the logits first and learns of the sampled token after. When the
+    /// stream asks for log probabilities, they are recorded from the processed logits.
+    ///
+    /// - Parameter logits: Target logits, shape `[B, positions, vocabulary]`.
+    /// - Returns: The sampled token, shape `[B]`.
+    private mutating func sampleToken(from logits: MLXArray) -> MLXArray {
+        var logits = logits[0..., -1, 0...]
+        logits = processor?.process(logits: logits) ?? logits
+        let token = sampler.sample(logits: logits)
+        deferredLogProbabilities = logProbabilityTopK.map {
+            LogProbabilityDistribution(logits: logits).recording(token: token, topK: $0)
+        }
+        if let deferredLogProbabilities {
+            // Settled with the token: the prefill runs on the caller's thread, and the
+            // generation worker that reads them cannot evaluate a graph naming its stream.
+            eval([token] + deferredLogProbabilities.arrays)
+        }
+        processor?.didSample(token: token)
+        return token
     }
 
     /// Primes the drafter-owned state over the prompt the target just prefilled.
@@ -1028,10 +1125,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let result = mainModel(y[text: .newAxis], cache: mainCache, state: stepState)
         mainState = result.state
         mainCacheStorage.commitProcessedTokens(y.cacheSequenceLength)
-        var logits = result.logits[0..., -1, 0...]
-        logits = processor?.process(logits: logits) ?? logits
-        let token = sampler.sample(logits: logits)
-        processor?.didSample(token: token)
+        let token = sampleToken(from: result.logits)
         eval(token)
         let tokenInt = token.item(Int.self)
 
@@ -1072,25 +1166,18 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         // Drain the pending buffer first — before the passthrough branch. A
-        // stand-down at the end of `init` leaves the prepare-time bonus
-        // sitting here, already committed to the cache (`y` is the token
-        // after it). Short-circuiting to `passthroughStep()` would drop it and
+        // stream that stands down in `init` leaves the prepare-time bonus
+        // sitting here, already sampled (`y` holds the token the next forward
+        // pass feeds). Short-circuiting to `passthroughStep()` would drop it and
         // start the stream one position ahead of an equivalent autoregressive
         // run. Rounds that flip passthrough mid-stream always clear the buffer
         // first, so this reordering is a no-op for them.
         if pendingIndex < pendingTokens.count {
-            let token = pendingTokens[pendingIndex]
-            pendingIndex += 1
-            telemetry.recordGeneratedToken()
-            return token
+            return nextPendingToken()
         }
 
         if passthrough {
-            if let token = passthroughStep() {
-                telemetry.recordGeneratedToken()
-                return token
-            }
-            return nil
+            return nextPlainToken()
         }
 
         // Run a new speculation round (may transition to passthrough).
@@ -1101,17 +1188,34 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         if pendingTokens.isEmpty {
             // speculateRound chose passthrough -- fall through.
-            if passthrough {
-                if let token = passthroughStep() {
-                    telemetry.recordGeneratedToken()
-                    return token
-                }
-            }
-            return nil
+            return passthrough ? nextPlainToken() : nil
         }
 
+        return nextPendingToken()
+    }
+
+    /// Returns the next token of the pending buffer.
+    ///
+    /// The first ``committedPendingTokenCount`` pending tokens are in the main cache: the
+    /// accepted drafts a verify pass fed, or a prefill bonus a priming forward fed. The token
+    /// after them waits for the next forward pass.
+    private mutating func nextPendingToken() -> Int {
         let token = pendingTokens[pendingIndex]
+        hasCachedLastToken = pendingIndex < committedPendingTokenCount
+        lastLogProbabilities = deferredLogProbabilities
         pendingIndex += 1
+        telemetry.recordGeneratedToken()
+        return token
+    }
+
+    /// Decodes one token without speculation, or returns `nil` at the token limit.
+    ///
+    /// The token is sampled from the forward pass of the token before it, thus no forward
+    /// pass has fed it yet.
+    private mutating func nextPlainToken() -> Int? {
+        guard let token = passthroughStep() else { return nil }
+        hasCachedLastToken = false
+        lastLogProbabilities = deferredLogProbabilities
         telemetry.recordGeneratedToken()
         return token
     }

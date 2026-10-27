@@ -76,11 +76,27 @@ comments:
     - evidence: 1 file — Tests/MLXLMTests/Qwen35MTPTests.swift. swiftlint no_magic_numbers: 0 findings (4 before). `swift build --build-tests`: only warning is the known "missing creator ... mlx-swift_Cmlx.bundle". `xcrun xctest MLXLMTests.xctest`: 895 XCTest, 0 failures, and 1849 Swift Testing passed (benchmarkVerification env-gated skip, known). Finding flipped to [x].
     - next: /review (task left in doing; not committed)
   timestamp: 2026-10-27T21:58:26.008788+00:00
+- actor: claude-code
+  id: 01m5zp076evpxggega39rep1c3
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (2bfa5601) — 0 findings (0 confirmed, 0 refuted; 7 validator passes attempted, 0 failed). The prior item Tests/MLXLMTests/Qwen35MTPTests.swift:716 code-hygiene/magic-numbers-swift is checked off, and nothing on the changed lines was flagged again. Inline numbers in older suites (e.g. Qwen35MTPMetalTests) are on lines this commit did not change, so the diff op does not review them, and the review skill drops findings that ask for refactors of tests that already existed.
+    - next: none — moved to done.
+  timestamp: 2026-10-27T21:59:27.694225+00:00
+- actor: claude-code
+  id: 01m5zp0hefqr7bhb45ddts6wa7
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 1 file (named tolerances and token values in Qwen35MTPTests.swift)
+    - test: green — implementer's run after the fix: MLXLMTests 895 XCTest 0 failures + 1849 Swift Testing; no separate tester run (test-only change, identical commands)
+    - commit: 2bfa5601
+    - review: clean — 0 findings, prior item verified; task done
+  timestamp: 2026-10-27T21:59:38.191304+00:00
 depends_on:
 - 01M5SK8FDMF5XH4FDH12H0FPX1
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: ffe780
 title: 'MTP: drafter cold start at a cached position, and a general trim/append API (resume is done by PR 581)'
 ---
 ## What

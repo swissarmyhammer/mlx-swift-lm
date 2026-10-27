@@ -1385,3 +1385,286 @@ struct Qwen35CheckpointLoadingTests {
         }
     }
 }
+
+/// Where a token of an MTP stream of the fixture sits in its round.
+enum Qwen35MTPRoundSlot: CaseIterable, Sendable {
+
+    /// An accepted draft. The verify pass of its round fed it to the main cache.
+    case draft
+
+    /// The verifier's correction after a rejected draft. No forward pass has fed it yet.
+    case correction
+
+    /// The verifier's bonus after every draft of its round was accepted. No forward pass has
+    /// fed it yet.
+    case bonus
+}
+
+/// How the first call of a continued decode ends.
+enum Qwen35MTPFirstCall: CaseIterable, Sendable {
+
+    /// The first call generates its whole token budget, over several MTP rounds.
+    case complete
+
+    /// The first call generates the prefill bonus only, and runs no MTP round.
+    case withoutRounds
+
+    /// The consumer stops reading the first call early, which cancels it.
+    case cancelled
+
+    /// The token budget of a complete first call: several rounds of ``Qwen35MTPFixture/blockSize``.
+    private static let completeTokenBudget = 6
+
+    /// The token budget of a first call that ends at its prefill bonus.
+    private static let prefillBonusOnlyTokenBudget = 1
+
+    /// The token budget of a cancelled first call: more than it generates before the
+    /// cancellation reaches it.
+    private static let cancelledTokenBudget = 24
+
+    /// The tokens the consumer reads before it cancels the first call.
+    private static let tokensReadBeforeCancellation = 2
+
+    /// The tokens the first call may generate.
+    var tokenBudget: Int {
+        switch self {
+        case .complete: Self.completeTokenBudget
+        case .withoutRounds: Self.prefillBonusOnlyTokenBudget
+        case .cancelled: Self.cancelledTokenBudget
+        }
+    }
+
+    /// The tokens the consumer reads before it stops, or `nil` to read the whole stream.
+    var consumedTokenCount: Int? {
+        switch self {
+        case .complete, .withoutRounds: nil
+        case .cancelled: Self.tokensReadBeforeCancellation
+        }
+    }
+}
+
+/// The contract between the MTP iterator and the shared generation loop: the cache state that a
+/// stop token reports, the drafter continuation that the token-task overload gives back, the
+/// state the iterator exports, and plain decode for log probabilities.
+@Suite(.serialized)
+struct Qwen35MTPGenerateLoopContractTests {
+
+    /// Prompt tokens of the fixture vocabulary.
+    private let prompt = [3, 9, 14, 22, 5, 40]
+
+    /// Tokens the slot classification decodes. Enough for each slot to hold a token that does
+    /// not occur earlier in the stream.
+    private let classifiedTokenCount = 32
+
+    /// Prompt tokens a second call appends after the sequence the cache holds.
+    private let followUpPrompt = [8, 30, 2]
+
+    /// Tokens a second call generates.
+    private let secondCallTokenCount = 8
+
+    /// The top candidates a stream asks the log probabilities of.
+    private let logProbabilityCandidateCount = 2
+
+    /// Plain decode and the plain fallback of the MTP iterator run the same forward passes over
+    /// the same cache, thus their log probabilities differ by float rounding at most.
+    private let logProbabilityTolerance: Float = 1e-4
+
+    /// The prompt as model input.
+    private var promptInput: LMInput { LMInput(tokens: MLXArray(prompt.map(Int32.init))) }
+
+    /// A greedy generation of `maxTokens` tokens.
+    private func greedyParameters(maxTokens: Int) -> GenerateParameters {
+        GenerateParameters(maxTokens: maxTokens, temperature: 0)
+    }
+
+    /// The tokens a cache holds, as the iterator infers them.
+    private func cachedTokenCount(_ cache: [KVCache]) -> Int {
+        KVCacheStorage(cache, plan: .disabled).processedTokenCount
+    }
+
+    /// Decodes ``classifiedTokenCount`` greedy MTP tokens after ``prompt`` and names the slot
+    /// of each, or `nil` for a token no round produced (the prefill bonus).
+    private func classifiedTokens(_ fixture: Qwen35MTPFixture) throws
+        -> [(token: Int, slot: Qwen35MTPRoundSlot?)]
+    {
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: promptInput, mainModel: fixture.target, drafter: fixture.drafter,
+            parameters: greedyParameters(maxTokens: classifiedTokenCount),
+            blockSize: Qwen35MTPFixture.blockSize)
+        var classified: [(token: Int, slot: Qwen35MTPRoundSlot?)] = []
+        var proposedCount = iterator.proposedCount
+        var acceptedCount = iterator.acceptedCount
+        var followsAcceptedDraft = false
+        while let token = iterator.next() {
+            let ranRound = iterator.proposedCount > proposedCount
+            let acceptedDraft = iterator.acceptedCount > acceptedCount
+            proposedCount = iterator.proposedCount
+            acceptedCount = iterator.acceptedCount
+            let roundSlot: Qwen35MTPRoundSlot = acceptedDraft ? .draft : .correction
+            classified.append((token, ranRound ? roundSlot : followsAcceptedDraft ? .bonus : nil))
+            followsAcceptedDraft = acceptedDraft
+        }
+        return classified
+    }
+
+    /// The first index of `slot` whose token does not occur earlier in `classified`, so that
+    /// a stop on that token stops there.
+    private func firstUnrepeatedIndex(
+        of slot: Qwen35MTPRoundSlot, in classified: [(token: Int, slot: Qwen35MTPRoundSlot?)]
+    ) -> Int? {
+        classified.indices.first { index in
+            classified[index].slot == slot
+                && !classified[..<index].contains { $0.token == classified[index].token }
+        }
+    }
+
+    @Test(
+        "a stop token reports whether the main cache holds it",
+        arguments: Qwen35MTPRoundSlot.allCases)
+    func stopTokenReportsCacheState(slot: Qwen35MTPRoundSlot) async throws {
+        let fixture = try Qwen35MTPFixture()
+        let classified = try classifiedTokens(fixture)
+        let stopIndex = try #require(firstUnrepeatedIndex(of: slot, in: classified))
+        let stopToken = classified[stopIndex].token
+        let cache = try fixture.target.newCache(parameters: nil)
+
+        let decode = try await Qwen35MTPFixture.collect(
+            try generateTokens(
+                input: promptInput, cache: cache,
+                parameters: greedyParameters(maxTokens: classifiedTokenCount),
+                context: fixture.makeModelContext(eosTokenIds: [stopToken]),
+                mtpDrafter: fixture.drafter, blockSize: Qwen35MTPFixture.blockSize))
+
+        #expect(decode.tokens == classified.prefix(stopIndex).map(\.token))
+        #expect(decode.info.stopReason == .stop)
+        #expect(decode.info.stopTokenFedToCache == (slot == .draft ? stopToken : nil))
+        let ledger =
+            decode.info.promptTokenCount + decode.info.generationTokenCount
+            + (decode.info.stopTokenFedToCache == nil ? 0 : 1)
+        #expect(cachedTokenCount(cache) == ledger)
+    }
+
+    /// What a decode in two calls leaves: the whole prompt of the second call, the tokens the
+    /// cache held between the calls, the continuation the first call gave back, and the second
+    /// call's tokens.
+    private struct ContinuedDecode {
+        let sequence: [Int]
+        let cachedTokenCount: Int
+        let continuation: MTPDrafterContinuation?
+        let second: Qwen35MTPFixture.GreedyDecode
+    }
+
+    /// Reads `stream` until it ends, or until it yielded `limit` tokens.
+    private func read(_ stream: AsyncStream<TokenGeneration>, upTo limit: Int?) async {
+        var received = 0
+        for await event in stream {
+            if case .token = event { received += 1 }
+            if received == limit { break }
+        }
+    }
+
+    /// Decodes after ``prompt`` in a first call, then continues the main cache and the drafter
+    /// continuation of that call with ``followUpPrompt`` in a second call.
+    private func continuedDecode(_ fixture: Qwen35MTPFixture, firstCall: Qwen35MTPFirstCall)
+        async throws -> ContinuedDecode
+    {
+        let reference = try await fixture.decodeGreedily(
+            prompt: prompt, maxTokens: firstCall.tokenBudget, speculative: true)
+        let context = fixture.makeModelContext()
+        let cache = try fixture.target.newCache(parameters: nil)
+        let (firstStream, firstTask) = try generateTokensTask(
+            input: promptInput, cache: cache,
+            parameters: greedyParameters(maxTokens: firstCall.tokenBudget), context: context,
+            mtpDrafter: fixture.drafter, blockSize: Qwen35MTPFixture.blockSize)
+        await read(firstStream, upTo: firstCall.consumedTokenCount)
+        let continuation = await firstTask.value
+
+        let cached = cachedTokenCount(cache)
+        let sequence = Array((prompt + reference.tokens).prefix(cached)) + followUpPrompt
+        let (secondStream, _) = try generateTokensTask(
+            input: LMInput(tokens: MLXArray(sequence[cached...].map(Int32.init))), cache: cache,
+            parameters: greedyParameters(maxTokens: secondCallTokenCount), context: context,
+            mtpDrafter: fixture.drafter, mtpContinuation: continuation,
+            blockSize: Qwen35MTPFixture.blockSize)
+        return ContinuedDecode(
+            sequence: sequence, cachedTokenCount: cached, continuation: continuation,
+            second: try await Qwen35MTPFixture.collect(secondStream))
+    }
+
+    @Test(
+        "a second call that continues the cache and the drafter matches a cold call and plain decode",
+        arguments: Qwen35MTPFirstCall.allCases)
+    func continuedCallMatchesColdCall(firstCall: Qwen35MTPFirstCall) async throws {
+        let fixture = try Qwen35MTPFixture()
+        let continued = try await continuedDecode(fixture, firstCall: firstCall)
+        let cold = try await fixture.decodeGreedily(
+            prompt: continued.sequence, maxTokens: secondCallTokenCount, speculative: true)
+        let plain = try await fixture.decodeGreedily(
+            prompt: continued.sequence, maxTokens: secondCallTokenCount, speculative: false)
+
+        let continuation = try #require(continued.continuation)
+        #expect(continuation.targetProcessedTokenCount == continued.cachedTokenCount)
+        #expect(continued.second.tokens == cold.tokens)
+        #expect(continued.second.tokens == plain.tokens)
+        #expect(continued.second.info.passthroughReason == nil)
+    }
+
+    @Test("the exported state of an MTP stream saves to a prompt cache")
+    func exportedStateSavesToPromptCache() throws {
+        let fixture = try Qwen35MTPFixture()
+        let cache = try fixture.target.newCache(parameters: nil)
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: promptInput, mainModel: fixture.target, drafter: fixture.drafter,
+            mainCache: cache, parameters: greedyParameters(maxTokens: secondCallTokenCount),
+            blockSize: Qwen35MTPFixture.blockSize)
+        while iterator.next() != nil {}
+
+        // The exchange values the target hands the drafter are not arrays, so a prompt cache
+        // cannot carry them; the exported state leaves them out.
+        #expect(iterator.mainState?[mtpSharedKVStatesKey] != nil)
+        #expect(throws: (any Error).self) {
+            try preparePromptCacheSave(cache: cache, state: iterator.mainState)
+        }
+        _ = try preparePromptCacheSave(cache: cache, state: iterator.state)
+    }
+
+    /// Reads the log probabilities of each of the `count` tokens `iterator` generates.
+    private func logProbabilities<Iterator: TokenIteratorProtocol>(
+        of iterator: inout Iterator, count: Int
+    ) throws -> [GenerateTokenLogProbabilities] {
+        try (0 ..< count).map { _ in
+            let token = iterator.next()
+            try #require(token != nil)
+            return try #require(iterator.lastLogProbabilities).materialize()
+        }
+    }
+
+    @Test("a stream that asks for log probabilities decodes plainly and reports them")
+    func logProbabilitiesDecodePlainly() throws {
+        let fixture = try Qwen35MTPFixture()
+        var parameters = greedyParameters(maxTokens: secondCallTokenCount)
+        parameters.logProbabilities = logProbabilityCandidateCount
+        var plain = try TokenIterator(
+            input: promptInput, model: fixture.target, parameters: parameters)
+        var speculative = try MTPSpeculativeTokenIterator(
+            input: promptInput, mainModel: fixture.target, drafter: fixture.drafter,
+            parameters: parameters, blockSize: Qwen35MTPFixture.blockSize)
+
+        let expected = try logProbabilities(of: &plain, count: secondCallTokenCount)
+        let actual = try logProbabilities(of: &speculative, count: secondCallTokenCount)
+
+        #expect(
+            speculative.passthroughReason
+                == MTPSpeculativeTokenIterator.logProbabilitiesReason)
+        #expect(speculative.proposedCount == 0)
+        #expect(actual.map(\.chosen.token) == expected.map(\.chosen.token))
+        #expect(
+            actual.map { $0.topLogProbabilities.map(\.token) }
+                == expected.map { $0.topLogProbabilities.map(\.token) })
+        for (reported, reference) in zip(actual, expected) {
+            #expect(
+                abs(reported.chosen.logProbability - reference.chosen.logProbability)
+                    <= logProbabilityTolerance)
+        }
+    }
+}

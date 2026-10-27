@@ -167,12 +167,18 @@ public struct Qwen35MTPFixture {
     /// A model context over the target, with the tokenizer and the input processor of the
     /// fixture.
     ///
+    /// The tokenizer of the fixture has no end-of-sequence token, thus a generation runs until
+    /// its token budget unless `eosTokenIds` names tokens that stop it.
+    ///
+    /// - Parameter eosTokenIds: The tokens that end a generation.
     /// - Returns: The context.
-    public func makeModelContext() -> ModelContext {
-        ModelContext(
-            configuration: modelConfiguration, model: target,
+    public func makeModelContext(eosTokenIds: Set<Int> = []) -> ModelContext {
+        var configuration = modelConfiguration
+        configuration.eosTokenIds = eosTokenIds
+        return ModelContext(
+            configuration: configuration, model: target,
             processor: ScalarTokenizerInputProcessor(
-                tokenizer: tokenizer, configuration: modelConfiguration),
+                tokenizer: tokenizer, configuration: configuration),
             tokenizer: tokenizer)
     }
 
@@ -250,6 +256,18 @@ public struct Qwen35MTPFixture {
                 input: input, parameters: parameters, context: context, mtpDrafter: drafter,
                 blockSize: Self.blockSize)
             : try generateTokens(input: input, parameters: parameters, context: context)
+        return try await Self.collect(stream)
+    }
+
+    /// Reads every event of a token stream.
+    ///
+    /// - Parameter stream: The stream of one generation.
+    /// - Returns: The generated tokens and the completion information.
+    /// - Throws: ``MissingCompletionInfo`` when the stream ends without its completion
+    ///   information.
+    public static func collect(_ stream: AsyncStream<TokenGeneration>) async throws
+        -> GreedyDecode
+    {
         var tokens: [Int] = []
         var info: GenerateCompletionInfo?
         for await event in stream {

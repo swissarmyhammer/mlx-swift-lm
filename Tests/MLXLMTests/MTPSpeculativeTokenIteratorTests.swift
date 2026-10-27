@@ -447,6 +447,35 @@ func testQwenStyleMTPRequiresGreedySampling() throws {
             == "Qwen MTP currently requires temperature == 0; generating without speculation")
 }
 
+/// The temperature of the sampled stream that a greedy-only drafter cannot speculate on.
+private let sampledStreamTemperature: Float = 0.7
+
+/// The tokens the sampled stream generates.
+private let sampledStreamTokenCount = 3
+
+@Test("a sampled stream with a greedy-only drafter does no drafter work")
+func sampledStreamSkipsDrafterPrefill() throws {
+    let probe = MTPStagingProbe()
+    let target = MTPStateEmittingTarget(probe: probe)
+    var iterator = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray([Int32(1), 2, 3])), mainModel: target,
+        drafter: QwenStyleMTPDrafter(probe: probe),
+        parameters: GenerateParameters(
+            maxTokens: sampledStreamTokenCount, temperature: sampledStreamTemperature),
+        blockSize: SyntheticMTPValues.qwenBlockSize)
+    var tokens: [Int] = []
+    while let token = iterator.next() {
+        tokens.append(token)
+    }
+
+    #expect(tokens.count == sampledStreamTokenCount)
+    // The drafter's prompt prefill is its cold start at position zero.
+    #expect(probe.coldStartPositions.isEmpty)
+    #expect(probe.draftCount == 0)
+    #expect(probe.preparations.map(\.emitsMTPState) == [false])
+    #expect(iterator.passthroughReason != nil)
+}
+
 // MARK: - sharedKV span across partial acceptance
 
 /// The drafter-conditioning observable that output-equivalence testing

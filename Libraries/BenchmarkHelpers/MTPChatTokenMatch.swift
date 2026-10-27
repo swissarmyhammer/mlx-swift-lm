@@ -8,8 +8,9 @@ public struct MTPChatToken: Sendable, Equatable {
     /// The vocabulary token ID.
     public let token: Int
     /// The most likely tokens at this step in descending order, or empty when
-    /// the session did not report them: a speculative session never does, and
-    /// no session reports them for its stop token.
+    /// the session did not report them: a speculative session does not ask for
+    /// them, because asking makes it decode without speculation, and no session
+    /// reports them for its stop token.
     public let candidates: [GenerateTokenLogProbability]
 
     /// Creates a token with the candidates of its step.
@@ -110,7 +111,7 @@ enum MTPChatTokenEvent: Sendable, GenerationProviding {
 /// from the logits either way and only reads the log probabilities beside them.
 struct MTPChatTokenRecorder: GenerationTransformer {
     /// The candidates to report for each step, or `nil` to report none. A
-    /// speculative session must report none.
+    /// speculative session must report none: asking for them turns its MTP off.
     let candidateCount: Int?
 
     func configure(_ parameters: inout GenerateParameters) {

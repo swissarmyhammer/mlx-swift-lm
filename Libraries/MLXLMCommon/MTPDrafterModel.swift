@@ -481,9 +481,15 @@ extension ResumableMTPDrafterModel {
 /// Iterator-owned MTP continuation carried atomically with a ChatSession's
 /// target cache, target model state, and transcript.
 ///
+/// A caller of ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:)``
+/// receives one when the generation ends, and hands it to the next generation
+/// that continues the same main cache. The value is opaque to callers outside
+/// the package.
+///
 /// `targetProcessedTokenCount` is only an alignment witness. The authoritative
 /// position remains `KVCacheStorage.processedTokenCount`.
-package struct MTPDrafterContinuation {
+// swiftlint:disable:next no_unchecked_sendable The generation evaluates every array before it hands the value over and keeps no reference to it; the value then passes to one generation at a time, which owns the drafter caches until it ends.
+public struct MTPDrafterContinuation: @unchecked Sendable {
     package var state: MTPDrafterState
     package let targetBoundaryHidden: MLXArray
     package let targetProcessedTokenCount: Int
