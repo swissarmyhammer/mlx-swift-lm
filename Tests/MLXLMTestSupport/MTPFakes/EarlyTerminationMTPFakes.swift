@@ -154,10 +154,8 @@ public final class EarlyTerminationMTPDrafter: Module, ResumableMTPDrafterModel 
     ) -> MLXArray {
         let token =
             queryOffset == 1
-            ? Int32(SyntheticMTPValues.endOfSequenceToken) : Int32(SyntheticMTPValues.ordinaryToken)
-        return MLXArray(
-            Array(repeating: token, count: batchSize * (blockSize - 1)),
-            [batchSize, blockSize - 1]
-        )
+            ? SyntheticMTPValues.endOfSequenceToken : SyntheticMTPValues.ordinaryToken
+        return SyntheticMTPValues.makeRepeatedDraft(
+            of: Int32(token), batchSize: batchSize, blockSize: blockSize)
     }
 }

@@ -1,5 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
+import MLX
+
 /// The values that the synthetic MTP targets and drafters write, named once for every fake.
 public enum SyntheticMTPValues {
 
@@ -27,4 +29,20 @@ public enum SyntheticMTPValues {
 
     /// The block size of a Qwen-style drafter: one drafted token and the bonus token.
     public static let qwenBlockSize = 2
+
+    /// Makes the draft block a fake drafter returns when it proposes one token at every
+    /// drafted position.
+    ///
+    /// - Parameters:
+    ///   - token: The token proposed at every drafted position.
+    ///   - batchSize: The number of rows of the block.
+    ///   - blockSize: The verification block size: the drafted tokens plus the bonus token.
+    /// - Returns: A `[batchSize, blockSize - 1]` array of `token`.
+    public static func makeRepeatedDraft(
+        of token: Int32, batchSize: Int, blockSize: Int
+    ) -> MLXArray {
+        let draftedCount = blockSize - 1
+        return MLXArray(
+            Array(repeating: token, count: batchSize * draftedCount), [batchSize, draftedCount])
+    }
 }

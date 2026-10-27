@@ -90,9 +90,8 @@ public final class StatefulMockDrafter: Module, StatefulMTPDrafterModel {
         let mutableCache = state.cache.first as? MutableOffsetKVCache
         receivedCacheOffsets.append(mutableCache?.offset)
         mutableCache?.offset += blockSize - 1
-        let batch = lastToken.dim(0)
-        let vals = Array(repeating: draftedTokenValue, count: (blockSize - 1) * batch)
-        return MLXArray(vals, [batch, blockSize - 1])
+        return SyntheticMTPValues.makeRepeatedDraft(
+            of: draftedTokenValue, batchSize: lastToken.dim(0), blockSize: blockSize)
     }
 }
 
@@ -164,8 +163,8 @@ public final class MockDrafter: Module, MTPDistributionDrafterModel {
         let batch = lastToken.dim(0)
         let vocab = MockMainModel.vocabularySize
         var processor = processor
-        var tokens = [MLXArray]()
-        var logitsRows = [MLXArray]()
+        var tokens: [MLXArray] = []
+        var logitsRows: [MLXArray] = []
         for _ in 0 ..< (blockSize - 1) {
             var values = [Float](repeating: 0, count: batch * vocab)
             for row in 0 ..< batch {
@@ -507,7 +506,7 @@ public final class PositionScriptedMainModel: Module, LanguageModel, KVCacheDime
 
         // Emitted verbatim: presenting a sliding layer more than its window is what the write
         // path does, and clamping it back is the consumer's job now, not the target's.
-        var sharedKV = [String: (MLXArray, MLXArray)]()
+        var sharedKV: [String: (MLXArray, MLXArray)] = [:]
         sharedKV["full_attention"] = presented[0]
         sharedKV["sliding_attention"] = presented[1]
         emittedSharedKVSpans.append(

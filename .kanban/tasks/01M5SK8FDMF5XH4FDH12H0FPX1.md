@@ -61,6 +61,45 @@ comments:
     - skipped: Swift Testing logs "benchmarkVerification() skipped" (Tests/MLXLMTests/MTPGreedyVerificationTests.swift, gated on MTP_GREEDY_BENCHMARK=1). The file is committed and untouched by this change; it is already inside the 1842 baseline. Reported, not changed (out of scope).
     - next: review
   timestamp: 2026-10-27T20:44:52.060510+00:00
+- actor: claude-code
+  id: 01m5zjb42jcagwg7weg9eqb8sq
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD — 6 findings (6 confirmed, 12 refuted) — Tests/MLXLMTestSupport/MTPFakes/EarlyTerminationMTPFakes.swift:158, Tests/MLXLMTestSupport/MTPFakes/MTPIteratorFakes.swift:167 (x2), Tests/MLXLMTestSupport/MTPFakes/MTPIteratorFakes.swift:168, Tests/MLXLMTestSupport/MTPFakes/MTPIteratorFakes.swift:510 (x2)
+    - next: implement the Review Findings (2026-10-27 15:45) checklist, then re-review
+  timestamp: 2026-10-27T20:55:30.642992+00:00
+- actor: claude-code
+  id: 01m5zjbqtz99s026ezg30hcv4g
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 20 files (MLXLMTestSupport target, fakes moved, FoundationModels fixture)
+    - test: green — MLXLMTests 895 XCTest 0 failures + 1842 Swift Testing; MLXFoundationModelsTests 376
+    - commit: be7f0e6d
+    - review: findings — Tests/MLXLMTestSupport/MTPFakes/EarlyTerminationMTPFakes.swift:158, Tests/MLXLMTestSupport/MTPFakes/MTPIteratorFakes.swift:167, :168, :510
+  timestamp: 2026-10-27T20:55:50.879613+00:00
+- actor: claude-code
+  id: 01m5zjps79qrvexxdxfa90w87x
+  text: |-
+    Review findings (2026-10-27 15:45) worked:
+    - Added `SyntheticMTPValues.makeRepeatedDraft(of:batchSize:blockSize:)` (SyntheticMTPValues.swift now imports MLX). Named with `make` per the swift/fluent-usage factory rule. Every drafter that built the repeated `[batch, blockSize - 1]` block now routes through it: EarlyTerminationMTPDrafter (EOS on queryOffset 1, else ordinary token), QwenStyleMTPDrafter and StatelessMTPDrafter (ChatSessionMTPFakes.swift), and StatefulMockDrafter (MTPIteratorFakes.swift, its draftedTokenValue) — the last was a fourth copy of the same block not named in the finding.
+    - MTPIteratorFakes.swift: `[MLXArray]()` x2 -> `var tokens: [MLXArray] = []` / `var logitsRows: [MLXArray] = []`; `[String: (MLXArray, MLXArray)]()` -> `var sharedKV: [String: (MLXArray, MLXArray)] = [:]`, exactly as the findings wrote. No other constructor-style empty collection is left in Tests/MLXLMTestSupport/MTPFakes/.
+    - Left as is (outside the MTPFakes files, and not a variable declaration): Tests/MLXLMTestSupport/Qwen35MTPCheckpointFixture.swift `root["vision_config"] = [String: Any]()` — a bare `[:]` there has no element type to infer from the `[String: Any]` subscript value; noting it for the next reviewer.
+    - Tool note: `update task` / `move task` return the whole board (~78 KB) and overflow the tool-result limit; the writes still land (verified in .kanban/tasks/01M5SK8FDMF5XH4FDH12H0FPX1.md).
+  timestamp: 2026-10-27T21:01:52.745547+00:00
+- actor: claude-code
+  id: 01m5zjpw07r58atjhnwxzd83r1
+  text: |-
+    ### implement — changed
+    - evidence: 4 files — Tests/MLXLMTestSupport/MTPFakes/{SyntheticMTPValues,EarlyTerminationMTPFakes,ChatSessionMTPFakes,MTPIteratorFakes}.swift. `swift build --build-tests` exit 0 (only the pre-existing "missing creator ... mlx-swift_Cmlx.bundle" warning); `xcrun xctest MLXLMTests.xctest` 895 XCTest 0 failures + 1842 Swift Testing passed; `xcrun xctest MLXFoundationModelsTests.xctest` 376 passed. All 6 Review Findings (2026-10-27 15:45) checked.
+    - next: /review
+  timestamp: 2026-10-27T21:01:55.591354+00:00
+- actor: claude-code
+  id: 01m5zjyyhg38z17aj4sh8ke1b7
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests (up to date; only the known "missing creator ... mlx-swift_Cmlx.bundle" SwiftPM message); xcrun xctest MLXLMTests.xctest — 895 XCTest, 0 failures, plus 1842 Swift Testing passed; MLXFoundationModelsTests.xctest — 376 passed, 0 failures. Only skip is the known env-gated benchmarkVerification() (upstream PR 724). No new warnings.
+    - next: review/commit
+  timestamp: 2026-10-27T21:06:20.336719+00:00
 depends_on:
 - 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: doing
@@ -85,3 +124,18 @@ Many MTP tasks need a small Qwen35 target with an MTP head that runs on random w
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38 #testing
+
+## Review Findings (2026-10-27 15:45)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 19 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5SK8FDMF5XH4FDH12H0FPX1.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5SK8FDMF5XH4FDH12H0FPX1.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTestSupport/MTPFakes/EarlyTerminationMTPFakes.swift:158` `reuse/reuse` — EarlyTerminationMTPDrafter.draftedTokens reimplements the repeated-token draft block that the drafters in ChatSessionMTPFakes.swift already build. It is a parallel copy instead of one shared helper. Route this drafter through the shared repeated-draft helper proposed for SyntheticMTPValues, passing the end-of-sequence or ordinary token as the parameter.
+- [x] `Tests/MLXLMTestSupport/MTPFakes/MTPIteratorFakes.swift:167` `swift/idioms` — The empty array is built with a constructor call, `[MLXArray]()`, instead of an annotated empty literal. The idiom is `var tokens: [MLXArray] = []`. Write `var tokens: [MLXArray] = []`.
+- [x] `Tests/MLXLMTestSupport/MTPFakes/MTPIteratorFakes.swift:167` `code-hygiene/idioms-swift` — AlwaysUseLiteralForEmptyCollectionInit: replace '[MLXArray]()' with ': [MLXArray] = []'.
+- [x] `Tests/MLXLMTestSupport/MTPFakes/MTPIteratorFakes.swift:168` `code-hygiene/idioms-swift` — AlwaysUseLiteralForEmptyCollectionInit: replace '[MLXArray]()' with ': [MLXArray] = []'.
+- [x] `Tests/MLXLMTestSupport/MTPFakes/MTPIteratorFakes.swift:510` `swift/idioms` — The empty dictionary is built with a constructor call, `[String: (MLXArray, MLXArray)]()`, instead of an annotated empty literal. Write `var sharedKV: [String: (MLXArray, MLXArray)] = [:]`.
+- [x] `Tests/MLXLMTestSupport/MTPFakes/MTPIteratorFakes.swift:510` `code-hygiene/idioms-swift` — AlwaysUseLiteralForEmptyCollectionInit: replace '[String: (MLXArray, MLXArray)]()' with ': [String: (MLXArray, MLXArray)] = [:]'.

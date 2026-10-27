@@ -187,12 +187,9 @@ public final class QwenStyleMTPDrafter: Module, ResumableMTPDrafterModel {
 
     private func draftedTokens(batchSize: Int, blockSize: Int) -> MLXArray {
         if let probe { probe.draftCount += 1 }
-        return MLXArray(
-            Array(
-                repeating: Int32(SyntheticMTPValues.ordinaryToken),
-                count: batchSize * (blockSize - 1)),
-            [batchSize, blockSize - 1]
-        )
+        return SyntheticMTPValues.makeRepeatedDraft(
+            of: Int32(SyntheticMTPValues.ordinaryToken), batchSize: batchSize,
+            blockSize: blockSize)
     }
 }
 
@@ -318,11 +315,9 @@ public class StatelessMTPDrafter: Module, MTPDrafterModel {
         blockSize: Int,
         sampler _: any LogitSampler
     ) -> MLXArray {
-        MLXArray(
-            Array(
-                repeating: Int32(SyntheticMTPValues.ordinaryToken),
-                count: lastToken.dim(0) * (blockSize - 1)),
-            [lastToken.dim(0), blockSize - 1])
+        SyntheticMTPValues.makeRepeatedDraft(
+            of: Int32(SyntheticMTPValues.ordinaryToken), batchSize: lastToken.dim(0),
+            blockSize: blockSize)
     }
 }
 
