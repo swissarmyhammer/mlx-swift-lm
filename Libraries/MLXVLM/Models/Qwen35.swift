@@ -1853,7 +1853,6 @@ public class Qwen35: Module, VLMModel {
         // builds window i+1 (same shape as the sibling chunked prefills).
         let typedCache = castCache(cache)
         let emitDrafterState = state?[mtpEmitFlagKey] ?? false
-        let chunkHandler = state?.mtpPrefillChunkHandler
 
         // Seed the post-image text tail's anchor. The vendor's flat-continuation
         // branch positions tail token j at `tailCacheOffset + ropeDeltas + j`;
@@ -1881,9 +1880,8 @@ public class Qwen35: Module, VLMModel {
 
         let processed = try prefill.forEachChunk(total: remainderLength) { range in
             let output = forward(range)
-            if let chunkHandler, let hiddenStates = output.state?[mtpLastHiddenStatesKey] {
-                chunkHandler(inputIds[0..., range], hiddenStates, resumeDelta)
-            }
+            state?.feedMTPPrefillChunk(
+                tokens: inputIds[0..., range], output: output, positionDeltas: resumeDelta)
             if let typedCache {
                 asyncEval(typedCache)
             }

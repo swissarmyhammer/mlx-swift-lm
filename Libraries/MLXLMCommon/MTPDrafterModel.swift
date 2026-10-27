@@ -696,6 +696,27 @@ extension LMOutput.State {
     package var mtpPrefillChunkHandler: MTPPrefillChunkHandler? {
         self[mtpEmitFlagKey] == true ? self[mtpPrefillChunkHandlerKey] : nil
     }
+
+    /// Hands one prefill chunk to the ``mtpPrefillChunkHandler``: the chunk's tokens, the
+    /// ``mtpLastHiddenStatesKey`` rows its forward emitted, and its position deltas. Does nothing
+    /// when the state carries no handler or the forward emitted no hidden rows.
+    ///
+    /// A target's chunked `prepare` calls this on the state it was handed, after each chunk's
+    /// forward.
+    ///
+    /// - Parameters:
+    ///   - tokens: The tokens of the chunk, shape `[B, n]`.
+    ///   - output: The output of the chunk's forward.
+    ///   - positionDeltas: The position deltas of the chunk, for a target that computes them
+    ///     before the forward; `nil` takes the ``mtpPositionDeltasKey`` deltas of `output`.
+    package func feedMTPPrefillChunk(
+        tokens: MLXArray, output: LMOutput, positionDeltas: MLXArray? = nil
+    ) {
+        guard let handler = mtpPrefillChunkHandler,
+            let hiddenStates = output.state?[mtpLastHiddenStatesKey]
+        else { return }
+        handler(tokens, hiddenStates, positionDeltas ?? output.state?[mtpPositionDeltasKey])
+    }
 }
 
 /// Requests a recurrent-cache checkpoint after this many verification input

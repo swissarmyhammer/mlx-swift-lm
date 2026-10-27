@@ -971,6 +971,94 @@ struct Qwen35MTPDrafterStateTests {
         #expect(iterator.proposedCount > 0)
         #expect(iterator.acceptedCount > 0)
     }
+
+    /// What an MTP decode with a carried continuation left: its tokens, where the drafter
+    /// entries began and ended right after the prefill, and whether the stream speculated.
+    private struct ContinuedDecode {
+        let tokens: [Int]
+        let drafterStartPosition: Int
+        let drafterNextPosition: Int
+        let drafterIsAligned: Bool
+        let passthroughReason: String?
+        let proposedCount: Int
+    }
+
+    /// A continuation whose drafter holds ``prompt`` and whose boundary witnesses
+    /// `targetProcessedTokenCount` target tokens.
+    private func continuation(
+        _ fixture: Qwen35MTPFixture, targetProcessedTokenCount: Int
+    ) throws -> MTPDrafterContinuation {
+        let sampler = GenerateParameters(temperature: 0).sampler()
+        let hidden = try targetHidden(fixture, tokens: prompt)
+        return MTPDrafterContinuation(
+            state: preparedState(fixture, hidden: hidden, sampler: sampler),
+            targetBoundaryHidden: hidden[0..., (-1)..., 0...],
+            targetProcessedTokenCount: targetProcessedTokenCount)
+    }
+
+    /// Decodes greedily with MTP after the tokens of ``prompt`` that `cache` does not hold,
+    /// carrying `continuation`. The prompt is shorter than one prefill chunk, so the target
+    /// prefills it without calling the chunk handler.
+    private func continuedDecode(
+        _ fixture: Qwen35MTPFixture, cache: [KVCache], cachedTokenCount: Int,
+        continuation: MTPDrafterContinuation
+    ) throws -> ContinuedDecode {
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: MLXArray(prompt.dropFirst(cachedTokenCount).map(Int32.init))),
+            mainModel: fixture.target, drafter: fixture.drafter, mainCache: cache,
+            mtpContinuation: continuation,
+            parameters: GenerateParameters(maxTokens: generatedTokenCount, temperature: 0),
+            blockSize: Qwen35MTPFixture.blockSize)
+        let primed = try #require(iterator.drafterState)
+        let drafterIsAligned = primed.isAligned
+        var tokens: [Int] = []
+        while let token = iterator.next() {
+            tokens.append(token)
+        }
+        return ContinuedDecode(
+            tokens: tokens, drafterStartPosition: primed.cacheStartPosition,
+            drafterNextPosition: primed.nextPosition, drafterIsAligned: drafterIsAligned,
+            passthroughReason: iterator.passthroughReason, proposedCount: iterator.proposedCount)
+    }
+
+    @Test("an unaligned continuation on a warm cache cold-starts the drafter at the cached position")
+    func unalignedContinuationColdStartsAtCachedPosition() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let plain = try await fixture.decodeGreedily(
+            prompt: prompt, maxTokens: generatedTokenCount, speculative: false)
+        let cache = try fixture.target.newCache(parameters: nil)
+        _ = try targetHidden(
+            fixture, tokens: Array(prompt.prefix(cachedPrefixLength)), cache: cache)
+
+        let decode = try continuedDecode(
+            fixture, cache: cache, cachedTokenCount: cachedPrefixLength,
+            continuation: try continuation(fixture, targetProcessedTokenCount: prompt.count))
+
+        #expect(decode.passthroughReason == nil)
+        #expect(decode.drafterStartPosition == cachedPrefixLength)
+        #expect(decode.drafterNextPosition == prompt.count)
+        #expect(decode.drafterIsAligned)
+        #expect(decode.proposedCount > 0)
+        #expect(decode.tokens == plain.tokens)
+    }
+
+    @Test("an unaligned continuation on an empty cache prefills the drafter from position zero")
+    func unalignedContinuationPrefillsFromPositionZero() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let plain = try await fixture.decodeGreedily(
+            prompt: prompt, maxTokens: generatedTokenCount, speculative: false)
+
+        let decode = try continuedDecode(
+            fixture, cache: try fixture.target.newCache(parameters: nil), cachedTokenCount: 0,
+            continuation: try continuation(fixture, targetProcessedTokenCount: cachedPrefixLength))
+
+        #expect(decode.passthroughReason == nil)
+        #expect(decode.drafterStartPosition == 0)
+        #expect(decode.drafterNextPosition == prompt.count)
+        #expect(decode.drafterIsAligned)
+        #expect(decode.proposedCount > 0)
+        #expect(decode.tokens == plain.tokens)
+    }
 }
 
 /// The MTP prefill of a prompt in chunks, each of which feeds the drafter, against the reference

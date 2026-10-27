@@ -47,6 +47,45 @@ comments:
     - evidence: swift build --build-tests (changed files touched) — only the known "missing creator ... mlx-swift_Cmlx.bundle" message, no compiler warnings; xcrun xctest MLXLMTests.xctest — 895 XCTest, 0 failures + 1858 Swift Testing in 165 suites, passed; MLXFoundationModelsTests — 376 passed; only skip is the env-gated benchmarkVerification(). Second MLXLMTests run: identical counts, 0 failures; Qwen35MTPChunkedPrefillTests (4096-token chunked vs single-pass peak memory) passed both times (3.1s, 3.8s) - stable across 2 runs.
     - next: review
   timestamp: 2026-10-27T23:23:12.827531+00:00
+- actor: claude-code
+  id: 01m5zv2xykr9038fhdh7d195cm
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (97d6385b) — engine counts findings 1 / confirmed 1 / refuted 2; plus 1 from the caller-requested alignment check. Libraries/MLXLLM/LLMModel.swift:81 (reuse/reuse), Libraries/MLXLMCommon/MTPDrafterPrefillFeed.swift:58 (unaligned continuation + unchunked suffix: feed init trims the shared drafter cache, fallback cold start refuses -> passthrough)
+    - caller checks: (1) non-MTP prepare: handler nil unless mtpEmitFlagKey and handler key are both set; per-chunk cost is one nil check, behavior unchanged — pass. (2) chunk alignment: row k pairs with token k+1, last row carried as boundary, final segment resumes from promptTokens[fedTokenCount...] — pass. (3) seed drop / asyncEval: MLX graphs hold strong refs, so nothing dangles; the evaluated boundary slice keeps one chunk's hidden buffer alive until the next chunk replaces it — pass.
+    - next: implementer resolves both unchecked items, re-run /review
+  timestamp: 2026-10-27T23:28:19.411796+00:00
+- actor: claude-code
+  id: 01m5zv3pp8w268h77enhxr265f
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 8 files (per-chunk drafter feed, MTPDrafterPrefillFeed, VLM fixture)
+    - test: green — MLXLMTests 895 XCTest 0 failures + 1858 Swift Testing (twice); FoundationModels 376
+    - commit: 97d6385b
+    - review: findings — Libraries/MLXLLM/LLMModel.swift:81, Libraries/MLXLMCommon/MTPDrafterPrefillFeed.swift:58
+  timestamp: 2026-10-27T23:28:44.744623+00:00
+- actor: claude-code
+  id: 01m5zvrq1sb7yhc5sr7kpmk4sr
+  text: |-
+    Review findings resolved (TDD):
+    - drafter-alignment: RED on 2 new tests in Qwen35MTPDrafterStateTests (shared Qwen35MTPFixture). (a) warm cache 4 tok + continuation witnessing 6 tok, 2-token suffix (no chunk): passthroughReason non-nil, drafter start 0 not 4, isAligned false, proposedCount 0 -- the exact passthrough the finding predicted. (b) empty cache + continuation witnessing 4 tok: tokens still equal plain, but isAligned false (prepareDrafterState ignored the refused restart). Fix: `MTPDrafterPrefillFeed.init` is no longer failable and never touches the state; it records `pendingRestartPosition`, and `append` calls `restartIfPending()` on the first chunk (before the entry-token count check, so a 1-token first chunk still restarts). A refused restart sets `isIntact = false`, so the final segment cold-starts (which refuses the same way -> passthrough, same outcome as the old `init?` returning nil). Checked the rest of the feed: the only other state mutation is appendDrafterState/seed clearing inside `append`, i.e. after a chunk exists, and from then on the iterator reads `feed.state` -- no other pre-chunk mutation.
+    - reuse: new `LMOutput.State.feedMTPPrefillChunk(tokens:output:positionDeltas:)` next to `mtpPrefillChunkHandler` in MTPDrafterModel.swift. It unwraps the handler, reads `mtpLastHiddenStatesKey` from the output, and passes `positionDeltas ?? output.state?[mtpPositionDeltasKey]`. LLMModel.prepare calls it on the state it was handed (the running chunk state var is renamed `chunkState` so the parameter stays reachable); MLXVLM Qwen35 prepareContinuation calls it with `positionDeltas: resumeDelta` (its forward output does not carry the deltas; they are known before the chunk loop).
+    GREEN: new tests + Qwen35MTPChunkedPrefillTests (6 tests, 2 suites) pass.
+  timestamp: 2026-10-27T23:40:13.241567+00:00
+- actor: claude-code
+  id: 01m5zvrv5hqgf4zefydjkv4a2e
+  text: |-
+    ### implement — changed
+    - evidence: 5 files — Libraries/MLXLMCommon/MTPDrafterPrefillFeed.swift, Libraries/MLXLMCommon/MTPDrafterModel.swift, Libraries/MLXLLM/LLMModel.swift, Libraries/MLXVLM/Models/Qwen35.swift, Tests/MLXLMTests/Qwen35MTPTests.swift. `swift build --build-tests` no new warnings (only the known missing-creator mlx-swift_Cmlx.bundle message); `xcrun xctest MLXLMTests.xctest` 895 XCTest 0 failures + 1860 Swift Testing passed (1858 baseline + 2 new); MLXFoundationModelsTests 376 passed; Release `qwen38FourBitMTPSystemPromptCache()` TEST SUCCEEDED with exactly the 2 known edit-turn-2 issues (mtpReusesCache, drafterPrefillsOnlyTheSuffix); cold turns MTP prefill 1734.7/1735.9 ms vs plain 1800.2/1807.5 ms, warm turns drafter prefilled == prompt prefilled, MTP decode 87.4–89.9 tok/s, all turns token-exact except thinking t2 (near-tie at token 9, gap 0.0). Both review findings checked.
+    - next: /review
+  timestamp: 2026-10-27T23:40:17.457866+00:00
+- actor: claude-code
+  id: 01m5zw1vcm136p4r7vnscqmxf8
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests (changed files touched) — 0 new warnings; xcrun xctest MLXLMTests.xctest — 895 XCTest + 1860 Swift Testing passed, 0 failures; MLXFoundationModelsTests.xctest — 376 passed, 0 failures. Only known pre-existing output: "missing creator ... mlx-swift_Cmlx.bundle" and the env-gated benchmarkVerification() skip.
+    - next: review/commit
+  timestamp: 2026-10-27T23:45:12.596595+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
@@ -78,3 +117,16 @@ llama.cpp uses the same design: a hook runs after each target ubatch (`common_sp
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38
+
+## Review Findings (2026-10-27 18:23)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 8 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWGEWP4506CZYXCPV3C64M.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWGEWP4506CZYXCPV3C64M.md` — no validator matches this file
+> - `.kanban/tasks/01M5SJNWMNA5D8N2VWEJJPT9A2.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5SJNWMNA5D8N2VWEJJPT9A2.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/LLMModel.swift:81` `reuse/reuse` — The chunk-handler dispatch (unwrap the handler, take the chunk's hidden rows from `output.state`, call the handler with tokens, hidden rows and position deltas) is written out again in the MLXVLM Qwen35 continuation path. Two copies of this protocol can drift, for example in which hidden-state key is read or whether the deltas are passed. Move the dispatch onto the shared type, for example a method on `LMOutput.State` next to `mtpPrefillChunkHandler` in MTPDrafterModel.swift that takes the chunk's tokens and the forward's output. Both `prepare` and `prepareContinuation` then call that one method, and each keeps only its own forward and `asyncEval`.
+- [x] `Libraries/MLXLMCommon/MTPDrafterPrefillFeed.swift:58` `caller-check/drafter-alignment` — `MTPDrafterPrefillFeed.init` calls `state.restart(at:)` before any chunk exists, on a copy of `drafterState` whose `cache` holds the same `KVCache` class instances as the iterator's `drafterState` (which is `mtpContinuation.state` when a continuation is carried). With an unaligned continuation (`targetProcessedTokenCount != cachePosition`) and a prompt the target does not chunk (length <= stepSize, or a `.logits` prepare with no chunk), `fedTokenCount` stays 0, so `prepare` falls back to `primeDrafterState(promptTokens:cachePosition:continuation:)` with the original `drafterState`: its cache layers are now trimmed to 0 while `cacheStartPosition`/`nextPosition` are stale, `isAligned` is false, `coldStartDrafterState` -> `restart` -> `removeLastEntries` refuses, and the stream switches to passthrough where it cold-started MTP before this change (at `cachePosition == 0`, `prepareDrafterState` ignores the refusal and keeps the misaligned state). Do not mutate the shared drafter cache until the first chunk arrives (restart lazily in `append`, or build the feed's state without touching the continuation's caches), and add a test for an unaligned continuation with a one-chunk suffix.

@@ -70,18 +70,14 @@ extension LLMModel {
             // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
             // chunk N. Under .remainder the reserved tail is the legacy leftover
             // (up to a full step) rather than a single token.
-            var state: LMOutput.State? = state
-            let chunkHandler = state?.mtpPrefillChunkHandler
+            var chunkState: LMOutput.State? = state
             processed = try prefill.forEachChunk(
                 total: total, reserving: prefill.chunking == .remainder ? stepSize : 1
             ) { range in
                 let input = y[.newAxis, range]
-                let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
-                state = output.state
-                if let chunkHandler, let hiddenStates = output.state?[mtpLastHiddenStatesKey] {
-                    chunkHandler(
-                        input.tokens, hiddenStates, output.state?[mtpPositionDeltasKey])
-                }
+                let output = self(input, cache: cache.isEmpty ? nil : cache, state: chunkState)
+                chunkState = output.state
+                state?.feedMTPPrefillChunk(tokens: input.tokens, output: output)
                 asyncEval(cache)
             }
 

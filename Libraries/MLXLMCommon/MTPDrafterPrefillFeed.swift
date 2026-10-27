@@ -33,8 +33,15 @@ final class MTPDrafterPrefillFeed {
     /// are only counted.
     private(set) var isIntact = true
 
+    /// The position the drafter state restarts at when the first chunk arrives, or `nil` when the
+    /// chunks extend the state as it is.
+    ///
+    /// The restart waits for a chunk because the state's cache layers are the stream's own: a
+    /// prefill that calls no chunk handler must leave them as the stream had them.
+    private var pendingRestartPosition: Int?
+
     /// Starts a feed at `cachePosition`, the position of the first prompt token the target
-    /// prefills.
+    /// prefills. Nothing in `state` changes before the first chunk arrives.
     ///
     /// - Parameters:
     ///   - drafter: The drafter the chunks feed.
@@ -44,18 +51,16 @@ final class MTPDrafterPrefillFeed {
     ///   - cachePosition: The target cache position before the prefill.
     ///   - continuation: The drafter continuation carried with the target cache, if any. A
     ///     continuation aligned with `cachePosition` keeps its entries and its boundary; else the
-    ///     drafter starts empty at `cachePosition`.
-    /// - Returns: `nil` when the entries of `state` cannot be removed for an empty start.
-    init?(
+    ///     first chunk starts the drafter empty at `cachePosition`.
+    init(
         drafter: any ResumableMTPDrafterModel, target: any LanguageModel,
         sampler: any LogitSampler, state: MTPDrafterState, cachePosition: Int,
         continuation: MTPDrafterContinuation?
     ) {
-        var state = state
         if let continuation, continuation.targetProcessedTokenCount == cachePosition {
             boundaryHidden = continuation.targetBoundaryHidden
         } else {
-            guard state.restart(at: cachePosition) else { return nil }
+            pendingRestartPosition = cachePosition
         }
         self.drafter = drafter
         self.target = target
@@ -84,6 +89,7 @@ final class MTPDrafterPrefillFeed {
         let tokens = normalizedMTPTokenBatch(tokens)
         let count = tokens.dim(-1)
         guard count > 0 else { return }
+        restartIfPending()
         let leadingRows = hiddenStates[0..., ..<(count - 1), 0...]
         let entryTokens = boundaryHidden == nil ? tokens[0..., 1...] : tokens
         let entryHidden =
@@ -101,5 +107,16 @@ final class MTPDrafterPrefillFeed {
         boundaryHidden = boundary
         fedTokenCount += count
         asyncEval(state.cache.flatMap(\.state) + [boundary])
+    }
+
+    /// Starts the drafter state empty at ``pendingRestartPosition`` before the first chunk, so the
+    /// chunks append to an empty cache. When the entries cannot be removed, no chunk reaches the
+    /// drafter state.
+    private func restartIfPending() {
+        guard let position = pendingRestartPosition else { return }
+        pendingRestartPosition = nil
+        if !state.restart(at: position) {
+            isIntact = false
+        }
     }
 }
