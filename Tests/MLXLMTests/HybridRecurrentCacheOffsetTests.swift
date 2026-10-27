@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import MLXVLM
 import Testing
@@ -126,7 +127,7 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     /// - Parameter experts: The number of experts of each MoE block, or 0 for a dense model.
     /// - Returns: The JSON text.
     private static func qwen35TextJSON(experts: Int = 0) -> String {
-        qwen35TextConfigJSON(
+        Qwen35FixtureJSON.text(
             mtpLayers: 0, numExperts: experts, expertsPerToken: qwen35ExpertsPerToken,
             hiddenLayers: qwen35LayerCount, fullAttentionInterval: qwen35FullAttentionInterval)
     }
@@ -136,7 +137,7 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     /// - Parameter experts: The number of experts of each MoE block, or 0 for a dense model.
     /// - Returns: The JSON text.
     private static func qwen35WrappedJSON(experts: Int = 0) -> String {
-        qwen35WrappedTextConfigJSON(
+        Qwen35FixtureJSON.wrappedText(
             modelType: qwen35ModelType, textConfigJSON: qwen35TextJSON(experts: experts))
     }
 
@@ -146,7 +147,7 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     /// - Parameter experts: The number of experts of each MoE block, or 0 for a dense model.
     /// - Returns: The JSON text.
     private static func qwen35VLJSON(experts: Int = 0) -> String {
-        qwen35VLMConfigJSON(textConfigJSON: qwen35TextJSON(experts: experts))
+        Qwen35FixtureJSON.visionLanguage(textConfigJSON: qwen35TextJSON(experts: experts))
     }
 
     /// Makes a BaichuanM1 model whose short-convolution weights are not zero.

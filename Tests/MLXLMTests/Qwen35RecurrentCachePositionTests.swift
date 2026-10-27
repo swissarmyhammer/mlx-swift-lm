@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXLMTestSupport
 import Testing
 
 @testable import MLXLLM
@@ -38,7 +39,7 @@ struct Qwen35RecurrentCachePositionTests {
     private func textConfiguration() throws -> MLXLLM.Qwen35TextConfiguration {
         try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
     }
 
     /// The text configuration of a hybrid model: ``hybridLayerCount`` layers,
@@ -52,7 +53,7 @@ struct Qwen35RecurrentCachePositionTests {
         try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
             from: Data(
-                qwen35TextConfigJSON(
+                Qwen35FixtureJSON.text(
                     mtpLayers: 1, hiddenLayers: Self.hybridLayerCount,
                     fullAttentionInterval: Self.hybridFullAttentionInterval
                 ).utf8))
@@ -65,7 +66,7 @@ struct Qwen35RecurrentCachePositionTests {
     {
         try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
     }
 
     /// A random hidden-state input of `tokenCount` tokens.

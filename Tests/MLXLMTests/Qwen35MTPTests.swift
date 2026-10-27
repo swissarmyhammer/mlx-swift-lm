@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import Testing
 
@@ -11,7 +12,7 @@ import Testing
 func testQwen35TextConfigurationDecodesMTPFields() throws {
     let cfg = try JSONDecoder().decode(
         MLXLLM.Qwen35TextConfiguration.self,
-        from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+        from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
 
     #expect(cfg.mtpNumHiddenLayers == 1)
     #expect(cfg.mtpUseDedicatedEmbeddings == false)
@@ -21,7 +22,7 @@ func testQwen35TextConfigurationDecodesMTPFields() throws {
 func testQwen35VLMTextConfigurationDecodesMTPFields() throws {
     let cfg = try JSONDecoder().decode(
         MLXVLM.Qwen35Configuration.TextConfiguration.self,
-        from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+        from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
 
     #expect(cfg.mtpNumHiddenLayers == 1)
     #expect(cfg.mtpUseDedicatedEmbeddings == false)
@@ -33,16 +34,16 @@ struct Qwen35MTPCompatibilityTests {
     func validatesTargetFamily() throws {
         let textConfig = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let textTarget = MLXLLM.Qwen35TextModel(textConfig)
         let textDrafter = MLXLLM.Qwen35MTPDraftModel(textConfig)
         let wrappedTextConfig = try JSONDecoder().decode(
             MLXLLM.Qwen35Configuration.self,
-            from: Data(qwen35WrappedTextConfigJSON(modelType: "qwen3_5").utf8))
+            from: Data(Qwen35FixtureJSON.wrappedText(modelType: "qwen3_5").utf8))
 
         let vlmConfig = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
-            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
         let vlmTarget = MLXVLM.Qwen35(vlmConfig)
         let vlmDrafter = MLXVLM.Qwen35VLMNextNDraftModel(vlmConfig)
 
@@ -62,12 +63,12 @@ struct Qwen35MTPCompatibilityTests {
     func textDrafterRejectsSameFamilyDimensionMismatches() throws {
         let drafterConfig = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let drafter = MLXLLM.Qwen35MTPDraftModel(drafterConfig)
 
         let hiddenSizeMismatch = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1, hiddenSize: 32).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1, hiddenSize: 32).utf8))
         #expect(throws: MTPDrafterCompatibilityError.self) {
             try drafter.validateCompatibility(
                 with: MLXLLM.Qwen35TextModel(hiddenSizeMismatch))
@@ -76,9 +77,9 @@ struct Qwen35MTPCompatibilityTests {
         let vocabularySizeMismatch = try JSONDecoder().decode(
             MLXLLM.Qwen35Configuration.self,
             from: Data(
-                qwen35WrappedTextConfigJSON(
+                Qwen35FixtureJSON.wrappedText(
                     modelType: "qwen3_5",
-                    textConfigJSON: qwen35TextConfigJSON(mtpLayers: 1, vocabularySize: 17)
+                    textConfigJSON: Qwen35FixtureJSON.text(mtpLayers: 1, vocabularySize: 17)
                 ).utf8))
         #expect(throws: MTPDrafterCompatibilityError.self) {
             try drafter.validateCompatibility(
@@ -90,12 +91,12 @@ struct Qwen35MTPCompatibilityTests {
     func vlmDrafterRejectsSameFamilyDimensionMismatches() throws {
         let drafterConfig = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
-            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
         let drafter = MLXVLM.Qwen35VLMNextNDraftModel(drafterConfig)
 
         let hiddenSizeMismatch = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
-            from: Data(qwen35VLMConfigJSON(mtpLayers: 1, hiddenSize: 32).utf8))
+            from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1, hiddenSize: 32).utf8))
         #expect(throws: MTPDrafterCompatibilityError.self) {
             try drafter.validateCompatibility(
                 with: MLXVLM.Qwen35(hiddenSizeMismatch))
@@ -103,7 +104,7 @@ struct Qwen35MTPCompatibilityTests {
 
         let vocabularySizeMismatch = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
-            from: Data(qwen35VLMConfigJSON(mtpLayers: 1, vocabularySize: 17).utf8))
+            from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1, vocabularySize: 17).utf8))
         #expect(throws: MTPDrafterCompatibilityError.self) {
             try drafter.validateCompatibility(
                 with: MLXVLM.Qwen35(vocabularySizeMismatch))
@@ -115,7 +116,7 @@ struct Qwen35MTPCompatibilityTests {
 func testQwen35MTPDraftSanitizeKeepsAndShiftsMTPNorms() throws {
     let cfg = try JSONDecoder().decode(
         MLXLLM.Qwen35TextConfiguration.self,
-        from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+        from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
     let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
 
     let sanitized = try drafter.sanitize(weights: [
@@ -143,7 +144,7 @@ func testQwen35MTPDraftSanitizeKeepsAndShiftsMTPNorms() throws {
 
 @Test(arguments: [false, true])
 func testQwen35MTPDraftSanitizeRejectsCompetingComponents(vision: Bool) throws {
-    let data = Data(qwen35TextConfigJSON(mtpLayers: 1).utf8)
+    let data = Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8)
     let drafter: any BaseLanguageModel
     if vision {
         drafter = MLXVLM.Qwen35VLMNextNDraftModel(
@@ -168,7 +169,7 @@ func testQwen35MTPDraftSanitizeRejectsCompetingComponents(vision: Bool) throws {
 func testQwen35StandaloneMTPDoesNotDoubleShiftConvertedNorms() throws {
     let cfg = try JSONDecoder().decode(
         MLXLLM.Qwen35Configuration.self,
-        from: Data(qwen35StandaloneMTPConfigJSON().utf8))
+        from: Data(Qwen35FixtureJSON.standaloneMTP().utf8))
     let drafter = MLXLLM.Qwen35MTPDraftModel(cfg, preconvertedNorms: true)
 
     let weight = MLXArray.zeros([16])
@@ -182,7 +183,7 @@ func testQwen35StandaloneMTPDoesNotDoubleShiftConvertedNorms() throws {
 func testQwen35MTPDraftSanitizeStacksPerExpertMoEWeights() throws {
     let cfg = try JSONDecoder().decode(
         MLXLLM.Qwen35TextConfiguration.self,
-        from: Data(qwen35TextConfigJSON(mtpLayers: 1, numExperts: 2).utf8))
+        from: Data(Qwen35FixtureJSON.text(mtpLayers: 1, numExperts: 2).utf8))
     let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
 
     let weights: [String: MLXArray] = [
@@ -207,7 +208,7 @@ func testQwen35MTPDraftInstantiatesDedicatedEmbeddingWhenConfigured() throws {
     let cfg = try JSONDecoder().decode(
         MLXLLM.Qwen35TextConfiguration.self,
         from: Data(
-            qwen35TextConfigJSON(mtpLayers: 1, mtpUseDedicatedEmbeddings: true).utf8))
+            Qwen35FixtureJSON.text(mtpLayers: 1, mtpUseDedicatedEmbeddings: true).utf8))
     let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
 
     #expect(drafter.mtp.embedTokens != nil)
@@ -229,7 +230,7 @@ struct Qwen35MTPMetalTests {
     func testQwen35MTPPredictorAdvancesEveryLayerCachePerToken() throws {
         let cfg = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 2).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 2).utf8))
         let predictor = MLXLLM.Qwen35MTPPredictor(cfg)
         let cache = predictor.newCache()
         let embeds = MLXArray.zeros([1, 1, 16])
@@ -288,7 +289,7 @@ struct Qwen35MTPMetalTests {
     func testQwen35TextModelEmitDrafterStateBySynthetic() throws {
         let cfg = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let model = MLXLLM.Qwen35TextModel(cfg)
         let cache = try model.newCache(parameters: nil as GenerateParameters?)
         var state = LMOutput.State()
@@ -315,7 +316,7 @@ struct Qwen35MTPMetalTests {
     func testQwen35TextModelEmitsPostFinalNormHiddenState() throws {
         let cfg = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let model = MLXLLM.Qwen35TextModel(cfg)
         let tokens = MLXArray([Int32(1), 2, 3, 4]).reshaped([1, 4])
         let expected = model.model.forward(tokens, applyFinalNorm: false)
@@ -335,7 +336,7 @@ struct Qwen35MTPMetalTests {
     func testQwen35VLMEmitsPostFinalNormHiddenState() throws {
         let cfg = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
-            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
         let model = MLXVLM.Qwen35(cfg)
         let tokens = MLXArray([Int32(1), 2, 3, 4]).reshaped([1, 4])
         let base = MLXArray(0 ..< 4).asType(.int32).reshaped([1, 1, 4])
@@ -359,7 +360,7 @@ struct Qwen35MTPMetalTests {
     func testQwen35DrafterCacheTracksVerifiedSequenceAcrossAcceptRejectPatterns() throws {
         let cfg = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let target = MLXLLM.Qwen35TextModel(cfg)
         let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
         let sampler = GenerateParameters(temperature: 0).sampler()
@@ -409,7 +410,7 @@ struct Qwen35MTPMetalTests {
     func testQwen35TextDrafterFinalizesAndResumesCanonicalBoundary() throws {
         let cfg = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let target = MLXLLM.Qwen35TextModel(cfg)
         let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
         let sampler = GenerateParameters(temperature: 0).sampler()
@@ -469,7 +470,7 @@ struct Qwen35MTPMetalTests {
     func testQwen35TextDrafterFinalizationAlsoDiscardsTargetLookahead() throws {
         let cfg = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let target = MLXLLM.Qwen35TextModel(cfg)
         let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
         let sampler = GenerateParameters(temperature: 0).sampler()
@@ -506,7 +507,7 @@ struct Qwen35MTPMetalTests {
     func testQwen35VLMDrafterResumeKeepsPositionDeltaAlignment() throws {
         let cfg = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
-            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
         let target = MLXVLM.Qwen35(cfg)
         let drafter = MLXVLM.Qwen35VLMNextNDraftModel(cfg)
         let sampler = GenerateParameters(temperature: 0).sampler()
@@ -544,32 +545,12 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35TextChatSessionResumesActualDrafterState() async throws {
-        let cfg = try JSONDecoder().decode(
-            MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
-        let target = MLXLLM.Qwen35TextModel(cfg)
-        let tokenizer = ReversibleQwenMTPTokenizer()
-        let processor = ReversibleQwenMTPInputProcessor(tokenizer: tokenizer)
-        let context = ModelContext(
-            configuration: processor.configuration,
-            model: target,
-            processor: processor,
-            tokenizer: tokenizer)
-        let drafterContainer = MTPDrafterContainer(
-            context: MTPDrafterContext(
-                configuration: processor.configuration,
-                model: MLXLLM.Qwen35MTPDraftModel(cfg)))
-        let speculative = ChatSession(
-            context,
-            speculativeDecoding: try SpeculativeDecodingConfig(
-                mtpDrafter: drafterContainer, blockSize: 2),
-            generateParameters: .init(maxTokens: 4, temperature: 0))
-        let targetOnly = ChatSession(
-            context,
-            generateParameters: .init(maxTokens: 4, temperature: 0))
+        let fixture = try Qwen35MTPFixture(drafter: .independent)
+        let speculative = try fixture.makeChatSession(speculative: true, maxTokens: 4)
+        let targetOnly = try fixture.makeChatSession(speculative: false, maxTokens: 4)
 
-        let firstPrompt = tokenizer.text(for: 1)
-        let secondPrompt = tokenizer.text(for: 2)
+        let firstPrompt = fixture.text(for: [1])
+        let secondPrompt = fixture.text(for: [2])
         let speculativeFirst = try await collectQwenChatDetails(
             speculative.streamDetails(to: firstPrompt))
         let targetFirst = try await collectQwenChatDetails(
@@ -599,10 +580,12 @@ struct Qwen35MTPMetalTests {
     func testQwen35VLMChatSessionResumesActualDrafterState() async throws {
         let cfg = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
-            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
         let target = MLXVLM.Qwen35(cfg)
-        let tokenizer = ReversibleQwenMTPTokenizer()
-        let processor = ReversibleQwenMTPInputProcessor(tokenizer: tokenizer)
+        let tokenizer = ScalarTokenizer(vocabularySize: Qwen35FixtureJSON.defaultVocabularySize)
+        let processor = ScalarTokenizerInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "tiny-qwen-mtp-chat-session"))
         let context = ModelContext(
             configuration: processor.configuration,
             model: target,
@@ -644,7 +627,7 @@ struct Qwen35MTPMetalTests {
     func testQwen35GDNCheckpointMatchesPrefixWithoutReplayingProjections() throws {
         let cfg = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let layer = MLXLLM.Qwen35GatedDeltaNet(cfg)
         let input = MLXRandom.normal([1, 2, 16])
         let fullCache = MambaCache()
@@ -678,7 +661,7 @@ struct Qwen35MTPMetalTests {
     func testQwen35VLMGDNCheckpointMatchesPrefix() throws {
         let cfg = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let layer = MLXVLM.Qwen35Language.GatedDeltaNet(cfg)
         let input = MLXRandom.normal([1, 2, 16])
         let fullCache = MambaCache()
@@ -727,59 +710,6 @@ struct Qwen35MTPMetalTests {
     }
 }
 
-private struct ReversibleQwenMTPTokenizer: Tokenizer {
-    private let scalarBase = 0xE000
-
-    var bosToken: String? { nil }
-    var eosToken: String? { nil }
-    var unknownToken: String? { nil }
-
-    func text(for token: Int) -> String {
-        String(UnicodeScalar(scalarBase + token)!)
-    }
-
-    func encode(text: String, addSpecialTokens _: Bool) -> [Int] {
-        text.unicodeScalars.map { scalar in
-            let value = Int(scalar.value) - scalarBase
-            return (0 ..< 16).contains(value) ? value : 1
-        }
-    }
-
-    func decode(tokenIds: [Int], skipSpecialTokens _: Bool) -> String {
-        tokenIds.map(text(for:)).joined()
-    }
-
-    func convertTokenToId(_: String) -> Int? { nil }
-    func convertIdToToken(_ id: Int) -> String? { text(for: id) }
-
-    func applyChatTemplate(
-        messages: [[String: any Sendable]],
-        tools _: [[String: any Sendable]]?,
-        additionalContext _: [String: any Sendable]?
-    ) throws -> [Int] {
-        messages.flatMap { message in
-            encode(
-                text: message["content"] as? String ?? "",
-                addSpecialTokens: false)
-        }
-    }
-}
-
-private struct ReversibleQwenMTPInputProcessor: UserInputProcessor {
-    let tokenizer: ReversibleQwenMTPTokenizer
-    let configuration = ModelConfiguration(id: "tiny-qwen-mtp-chat-session")
-
-    func prepare(input: UserInput) async throws -> LMInput {
-        let messages = DefaultMessageGenerator().generate(from: input)
-        return LMInput(
-            tokens: MLXArray(
-                try tokenizer.applyChatTemplate(
-                    messages: messages,
-                    tools: input.tools,
-                    additionalContext: input.additionalContext)))
-    }
-}
-
 private func collectQwenChatDetails(
     _ stream: AsyncThrowingStream<Generation, Error>
 ) async throws -> (text: String, info: GenerateCompletionInfo) {
@@ -799,24 +729,24 @@ struct Qwen35MTPRegistrationTests {
         await MLXLLM.Qwen35TextMTPRegistration.register()
 
         let textModel = try await MTPDrafterTypeRegistry.shared.createModel(
-            configuration: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8),
+            configuration: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8),
             modelType: "qwen3_5_text")
         #expect(textModel is MLXLLM.Qwen35MTPDraftModel)
 
         await MLXVLM.Qwen35VLMMTPRegistration.register()
 
         let wrappedTextModel = try await MTPDrafterTypeRegistry.shared.createModel(
-            configuration: Data(qwen35WrappedTextConfigJSON(modelType: "qwen3_5").utf8),
+            configuration: Data(Qwen35FixtureJSON.wrappedText(modelType: "qwen3_5").utf8),
             modelType: "qwen3_5")
         #expect(wrappedTextModel is MLXLLM.Qwen35MTPDraftModel)
 
         let vlmModel = try await MTPDrafterTypeRegistry.visionLanguage.createModel(
-            configuration: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8),
+            configuration: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8),
             modelType: "qwen3_5")
         #expect(vlmModel is MLXVLM.Qwen35VLMNextNDraftModel)
 
         let standalone = try await MTPDrafterTypeRegistry.shared.createModel(
-            configuration: Data(qwen35StandaloneMTPConfigJSON().utf8),
+            configuration: Data(Qwen35FixtureJSON.standaloneMTP().utf8),
             modelType: "qwen3_5_mtp")
         #expect(standalone is MLXLLM.Qwen35MTPDraftModel)
         #expect(standalone.maximumBlockSize == 2)
@@ -825,16 +755,16 @@ struct Qwen35MTPRegistrationTests {
         #expect(standalone.requiresGreedySampling)
 
         let standaloneVLM = try await MTPDrafterTypeRegistry.visionLanguage.createModel(
-            configuration: Data(qwen35StandaloneMTPConfigJSON().utf8),
+            configuration: Data(Qwen35FixtureJSON.standaloneMTP().utf8),
             modelType: "qwen3_5_mtp")
         #expect(standaloneVLM is MLXVLM.Qwen35VLMNextNDraftModel)
 
         let textConfig = try JSONDecoder.json5().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let vlmConfig = try JSONDecoder.json5().decode(
             MLXVLM.Qwen35Configuration.self,
-            from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
         let textTarget = MLXLLM.Qwen35TextModel(textConfig)
         let vlmTarget = MLXVLM.Qwen35(vlmConfig)
 
@@ -850,148 +780,22 @@ struct Qwen35MTPRegistrationTests {
         await MLXLLM.Qwen35TextMTPRegistration.register()
 
         let vlmModel = try await MTPDrafterTypeRegistry.visionLanguage.createModel(
-            configuration: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8),
+            configuration: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8),
             modelType: "qwen3_5")
         #expect(vlmModel is MLXVLM.Qwen35VLMNextNDraftModel)
 
         let textModel = try await MTPDrafterTypeRegistry.shared.createModel(
-            configuration: Data(qwen35WrappedTextConfigJSON(modelType: "qwen3_5").utf8),
+            configuration: Data(Qwen35FixtureJSON.wrappedText(modelType: "qwen3_5").utf8),
             modelType: "qwen3_5")
         #expect(textModel is MLXLLM.Qwen35MTPDraftModel)
     }
-}
-
-/// The JSON of a small Qwen 3.5 text configuration. Shared with
-/// `Qwen35RecurrentCachePositionTests` and `HybridRecurrentCacheOffsetTests`, thus one fixture
-/// serves each suite.
-///
-/// - Parameters:
-///   - mtpLayers: The number of multi-token prediction layers.
-///   - mtpUseDedicatedEmbeddings: Whether the prediction layers have their own embeddings.
-///   - numExperts: The number of experts of each MoE block, or 0 for a dense model.
-///   - expertsPerToken: The number of experts that each token uses in an MoE block.
-///   - hiddenLayers: The number of decoder layers.
-///   - fullAttentionInterval: One layer of each interval is a full-attention layer, and each
-///     other layer is a linear (recurrent) layer. 1 makes every layer a full-attention layer.
-/// - Returns: The JSON text.
-func qwen35TextConfigJSON(
-    mtpLayers: Int,
-    mtpUseDedicatedEmbeddings: Bool = false,
-    numExperts: Int = 0,
-    expertsPerToken: Int = 1,
-    hiddenLayers: Int = 1,
-    fullAttentionInterval: Int = 1,
-    hiddenSize: Int = 16,
-    vocabularySize: Int = 16
-) -> String {
-    """
-    {
-      "model_type": "qwen3_5_text",
-      "hidden_size": \(hiddenSize),
-      "num_hidden_layers": \(hiddenLayers),
-      "intermediate_size": 32,
-      "num_attention_heads": 2,
-      "num_key_value_heads": 1,
-      "head_dim": 8,
-      "linear_num_value_heads": 2,
-      "linear_num_key_heads": 1,
-      "linear_key_head_dim": 8,
-      "linear_value_head_dim": 8,
-      "linear_conv_kernel_dim": 2,
-      "rms_norm_eps": 1e-6,
-      "vocab_size": \(vocabularySize),
-      "rope_theta": 100000.0,
-      "partial_rotary_factor": 0.25,
-      "max_position_embeddings": 64,
-      "tie_word_embeddings": true,
-      "attention_bias": false,
-      "full_attention_interval": \(fullAttentionInterval),
-      "mtp_num_hidden_layers": \(mtpLayers),
-      "mtp_use_dedicated_embeddings": \(mtpUseDedicatedEmbeddings),
-      "num_experts": \(numExperts),
-      "num_experts_per_tok": \(numExperts == 0 ? 0 : expertsPerToken),
-      "moe_intermediate_size": 16,
-      "shared_expert_intermediate_size": 16,
-      "rope_parameters": {
-        "type": "default",
-        "rope_theta": 100000.0,
-        "partial_rotary_factor": 0.25
-      }
-    }
-    """
-}
-
-private func qwen35VLMConfigJSON(
-    mtpLayers: Int,
-    hiddenSize: Int = 16,
-    vocabularySize: Int = 16
-) -> String {
-    qwen35VLMConfigJSON(
-        textConfigJSON: qwen35TextConfigJSON(
-            mtpLayers: mtpLayers, hiddenSize: hiddenSize, vocabularySize: vocabularySize))
-}
-
-/// The JSON of a small Qwen 3.5 vision-language configuration. Shared with
-/// `HybridRecurrentCacheOffsetTests`.
-///
-/// - Parameter textConfigJSON: The JSON of the text configuration, from `qwen35TextConfigJSON`.
-/// - Returns: The JSON text, with a tiny vision tower.
-func qwen35VLMConfigJSON(textConfigJSON: String) -> String {
-    """
-    {
-      "model_type": "qwen3_5",
-      "text_config": \(textConfigJSON),
-      "vision_config": {
-        "model_type": "qwen3_5_vit",
-        "depth": 1,
-        "hidden_size": 16,
-        "intermediate_size": 32,
-        "out_hidden_size": 16,
-        "num_heads": 2,
-        "patch_size": 2,
-        "spatial_merge_size": 1,
-        "temporal_patch_size": 1,
-        "num_position_embeddings": 16
-      }
-    }
-    """
-}
-
-/// The JSON of a Qwen 3.5 configuration that wraps a small text configuration without a vision
-/// tower. Shared with `HybridRecurrentCacheOffsetTests`.
-///
-/// - Parameters:
-///   - modelType: The model type of the wrapper.
-///   - textConfigJSON: The JSON of the text configuration.
-/// - Returns: The JSON text.
-func qwen35WrappedTextConfigJSON(
-    modelType: String, textConfigJSON: String = qwen35TextConfigJSON(mtpLayers: 1)
-) -> String {
-    """
-    {
-      "model_type": "\(modelType)",
-      "text_config": \(textConfigJSON)
-    }
-    """
-}
-
-private func qwen35StandaloneMTPConfigJSON() -> String {
-    """
-    {
-      "model_type": "qwen3_5_mtp",
-      "block_size": 3,
-      "text_config": \(qwen35TextConfigJSON(mtpLayers: 1)),
-      "tie_word_embeddings": true,
-      "vision_config": {}
-    }
-    """
 }
 
 @Suite(.serialized)
 struct Qwen35CheckpointLoadingTests {
     @Test(arguments: [false, true])
     func convertedEmbeddedFactoryPreservesMixedPrecision(vision: Bool) async throws {
-        let fixture = try await makeFixture(
+        let fixture = try await Qwen35MTPCheckpointFixture(
             vision: vision, standalone: false, prefix: "language_model.mtp.", bits: 4)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let context = try await fixture.factory.load(
@@ -1009,7 +813,7 @@ struct Qwen35CheckpointLoadingTests {
     @Test(arguments: [false, true])
     func drafterDoesNotReadTargetTensors(vision: Bool) async throws {
         for standalone in [false, true] {
-            let fixture = try await makeFixture(
+            let fixture = try await Qwen35MTPCheckpointFixture(
                 vision: vision, standalone: standalone, prefix: standalone ? "" : "mtp.")
             defer { try? FileManager.default.removeItem(at: fixture.directory) }
             let context = try await fixture.factory.load(
@@ -1031,7 +835,8 @@ struct Qwen35CheckpointLoadingTests {
 
     @Test(arguments: [false, true])
     func targetLoaderExcludesConvertedMTPComponent(vision: Bool) async throws {
-        let data = try fixtureConfiguration(vision: vision, standalone: false, bits: nil)
+        let data = try Qwen35MTPCheckpointFixture.configuration(
+            vision: vision, standalone: false, bits: nil)
         let target: any BaseLanguageModel
         if vision {
             target = MLXVLM.Qwen35(
@@ -1058,7 +863,8 @@ struct Qwen35CheckpointLoadingTests {
 
     @Test
     func conversionRoundTripRetainsNormConvention() async throws {
-        let fixture = try await makeFixture(vision: false, standalone: false, prefix: "mtp.")
+        let fixture = try await Qwen35MTPCheckpointFixture(
+            vision: false, standalone: false, prefix: "mtp.")
         let output = FileManager.default.temporaryDirectory.appendingPathComponent(
             UUID().uuidString)
         defer {
@@ -1113,7 +919,8 @@ struct Qwen35CheckpointLoadingTests {
 
     @Test(arguments: [false, true], [4, 5, 8])
     func standaloneFactoryLoadsPublishedLayout(vision: Bool, bits: Int) async throws {
-        let fixture = try await makeFixture(vision: vision, standalone: true, bits: bits)
+        let fixture = try await Qwen35MTPCheckpointFixture(
+            vision: vision, standalone: true, bits: bits)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let context = try await fixture.factory.load(
             from: fixture.directory, using: UnusedTokenizerLoader())
@@ -1133,7 +940,7 @@ struct Qwen35CheckpointLoadingTests {
     func registeredFactoriesLoadQwen38Components(vision: Bool, standalone: Bool) async throws {
         await Qwen35TextMTPRegistration.register()
         await Qwen35VLMMTPRegistration.register()
-        let fixture = try await makeFixture(
+        let fixture = try await Qwen35MTPCheckpointFixture(
             vision: vision, standalone: standalone,
             prefix: standalone ? "" : "language_model.mtp.", bits: 4, family: "qwen3_8")
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
@@ -1155,7 +962,7 @@ struct Qwen35CheckpointLoadingTests {
     @Test(arguments: ["qwen3_5", "qwen3_8"])
     func standaloneVLMRegistrationUsesOuterModelType(family: String) async throws {
         await Qwen35VLMMTPRegistration.register()
-        let fixture = try await makeFixture(
+        let fixture = try await Qwen35MTPCheckpointFixture(
             vision: true, standalone: true, bits: 4, family: family)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let context = try await MTPDrafterModelFactory.visionLanguage.load(
@@ -1168,7 +975,8 @@ struct Qwen35CheckpointLoadingTests {
     func embeddedFactoryLoadsComponentWithoutTargetWeights(vision: Bool, prefix: String)
         async throws
     {
-        let fixture = try await makeFixture(vision: vision, standalone: false, prefix: prefix)
+        let fixture = try await Qwen35MTPCheckpointFixture(
+            vision: vision, standalone: false, prefix: prefix)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let context = try await fixture.factory.load(
             from: fixture.directory, using: UnusedTokenizerLoader())
@@ -1270,7 +1078,8 @@ struct Qwen35CheckpointLoadingTests {
     @Test(arguments: ["qwen3_5", "qwen3_8"])
     func unknownAndMissingWeightsStillFailStrictFactoryLoading(family: String) async throws {
         for missing in [false, true] {
-            let fixture = try await makeFixture(vision: false, standalone: true, family: family)
+            let fixture = try await Qwen35MTPCheckpointFixture(
+                vision: false, standalone: true, family: family)
             defer { try? FileManager.default.removeItem(at: fixture.directory) }
             let url = fixture.directory.appendingPathComponent("model.safetensors")
             var weights = try loadArrays(url: url)
@@ -1311,109 +1120,5 @@ struct Qwen35CheckpointLoadingTests {
                 .init(weights: ["\(prefix).0.up_proj.weight": MLXArray.zeros([64, 64])]),
                 mtpNumHiddenLayers: 1, numExperts: 2)
         }
-    }
-
-    private struct Fixture {
-        let directory: URL
-        let factory: MTPDrafterModelFactory
-    }
-
-    private func makeFixture(
-        vision: Bool, standalone: Bool, prefix: String = "", bits: Int? = nil,
-        family: String = "qwen3_5"
-    ) async throws -> Fixture {
-        let config = try fixtureConfiguration(
-            vision: vision, standalone: standalone, bits: bits, prefix: prefix, family: family)
-        let registry = ModelTypeRegistry<any MTPDrafterModel>()
-        let modelType = standalone ? family + "_mtp" : family
-        await registry.registerModelType(modelType) { data in
-            try makeDrafter(configuration: data, vision: vision)
-        }
-        let model = try makeDrafter(configuration: config, vision: vision)
-        if let bits {
-            quantize(model: model) { path, _ in (32, path == "mtp.fc" ? 8 : bits, .affine) }
-        }
-        var weights = [String: MLXArray]()
-        for (name, array) in model.parameters().flattened() {
-            let serialized = prefix + name.dropFirst("mtp.".count)
-            let isNorm = name.contains("norm")
-            weights[serialized] = isNorm ? MLXArray.ones(array.shape) : array
-            if prefix == "mtp.", isNorm { weights[serialized] = MLXArray.zeros(array.shape) }
-        }
-        if !standalone { weights["model.embed_tokens.weight"] = MLXArray.zeros([16, 64]) }
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        do {
-            try config.write(to: directory.appendingPathComponent("config.json"))
-            try save(
-                arrays: weights, metadata: standalone ? ["format": "mlx"] : [:],
-                url: directory.appendingPathComponent("model.safetensors"))
-        } catch {
-            try? FileManager.default.removeItem(at: directory)
-            throw error
-        }
-        return Fixture(
-            directory: directory,
-            factory: MTPDrafterModelFactory(
-                typeRegistry: registry, modelRegistry: MTPDrafterRegistry.shared))
-    }
-
-    private func fixtureConfiguration(
-        vision: Bool, standalone: Bool, bits: Int?, prefix: String = "mtp.",
-        family: String = "qwen3_5"
-    ) throws -> Data {
-        let json =
-            vision
-            ? qwen35VLMConfigJSON(mtpLayers: 1)
-            : qwen35WrappedTextConfigJSON(modelType: "qwen3_5")
-        let sized = json.replacingOccurrences(
-            of: "\"hidden_size\": 16", with: "\"hidden_size\": 64"
-        )
-        .replacingOccurrences(of: "\"intermediate_size\": 32", with: "\"intermediate_size\": 128")
-        .replacingOccurrences(of: "\"head_dim\": 8", with: "\"head_dim\": 32")
-        var root = try #require(
-            JSONSerialization.jsonObject(with: Data(sized.utf8)) as? [String: Any])
-        root["model_type"] = standalone ? family + "_mtp" : family
-        if var text = root["text_config"] as? [String: Any] {
-            text["model_type"] = family + "_text"
-            root["text_config"] = text
-        }
-        if standalone { root["vision_config"] = [String: Any]() }
-        if let bits {
-            root["quantization"] = [
-                "group_size": 32, "bits": bits,
-                (standalone ? "fc" : prefix + "fc"): ["group_size": 32, "bits": 8],
-            ]
-        }
-        return try JSONSerialization.data(withJSONObject: root)
-    }
-}
-
-private func makeDrafter(configuration: Data, vision: Bool) throws -> any MTPDrafterModel {
-    if vision {
-        let config = try JSONDecoder().decode(QwenMTPFixtureConfiguration.self, from: configuration)
-        return MLXVLM.Qwen35VLMNextNDraftModel(
-            config.textConfiguration,
-            checkpointPolicy: .init(modelType: config.modelType, preconvertedNorms: false))
-    }
-    return MLXLLM.Qwen35MTPDraftModel(
-        try JSONDecoder().decode(MLXLLM.Qwen35Configuration.self, from: configuration))
-}
-
-private struct QwenMTPFixtureConfiguration: Decodable {
-    let modelType: String
-    let textConfiguration: MLXVLM.Qwen35Configuration.TextConfiguration
-
-    enum CodingKeys: String, CodingKey {
-        case modelType = "model_type"
-        case textConfiguration = "text_config"
-    }
-}
-
-private struct UnusedTokenizerLoader: TokenizerLoader {
-    func load(from url: URL) async throws -> any Tokenizer {
-        throw ModelFactoryError.invalidConfiguration(
-            "MTP checkpoints must borrow the target tokenizer.")
     }
 }
