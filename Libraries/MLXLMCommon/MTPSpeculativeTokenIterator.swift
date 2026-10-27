@@ -15,6 +15,24 @@ enum MTPInitializationError: Error, LocalizedError {
     }
 }
 
+func batchedGreedyMTPVerification(
+    logits: MLXArray, draftTokens: MLXArray
+) -> (tokens: [Int], accepted: Int, finalToken: MLXArray) {
+    let targetTokens = argMax(logits, axis: -1)
+    // Materialize drafts and target samples together with one GPU readback.
+    let tokens = concatenated([draftTokens.asType(targetTokens.dtype), targetTokens])
+        .asArray(Int.self)
+    let numDraft = draftTokens.size
+    var accepted = 0
+    while accepted < numDraft, tokens[accepted] == tokens[numDraft + accepted] {
+        accepted += 1
+    }
+    return (
+        Array(tokens[numDraft ..< (numDraft + accepted + 1)]), accepted,
+        targetTokens[accepted].reshaped([1])
+    )
+}
+
 /// Generator of tokens using MTP (Multi-Token Prediction) speculative
 /// decoding.
 ///
@@ -696,34 +714,50 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let mainLogits = mainResult.logits
         mainState = mainResult.state
 
-        let selection: (accepted: Int, emitted: [MLXArray])
-        if let distributionSampler, let draftOutput {
-            selection = selectDistributionPreservingTokens(
-                targetLogits: mainLogits,
-                targetStart: verifyStart,
-                draftTokens: flatDraftTokens,
-                draftProcessedLogits: draftOutput.processedLogits,
-                numDraft: numDraft,
-                sampler: distributionSampler
-            )
+        let accepted: Int
+        let emittedFinalToken: MLXArray
+        let usesDistributionVerification = distributionSampler != nil && draftOutput != nil
+        // Other processors can depend on didSample updates between rows.
+        if !usesDistributionVerification, sampler is ArgMaxSampler,
+            processor == nil || processor is SuppressTokensProcessor
+        {
+            var logits = mainLogits[0, verifyStart ..< (verifyStart + numDraft + 1), 0...]
+            logits = processor?.process(logits: logits) ?? logits
+            let result = batchedGreedyMTPVerification(
+                logits: logits, draftTokens: flatDraftTokens)
+            pendingTokens.append(contentsOf: result.tokens)
+            accepted = result.accepted
+            emittedFinalToken = result.finalToken
         } else {
-            selection = selectGreedyTokens(
-                targetLogits: mainLogits,
-                targetStart: verifyStart,
-                draftTokens: flatDraftTokens,
-                numDraft: numDraft
-            )
+            let selection: (accepted: Int, emitted: [MLXArray])
+            if let distributionSampler, let draftOutput {
+                selection = selectDistributionPreservingTokens(
+                    targetLogits: mainLogits,
+                    targetStart: verifyStart,
+                    draftTokens: flatDraftTokens,
+                    draftProcessedLogits: draftOutput.processedLogits,
+                    numDraft: numDraft,
+                    sampler: distributionSampler
+                )
+            } else {
+                selection = selectGreedyTokens(
+                    targetLogits: mainLogits,
+                    targetStart: verifyStart,
+                    draftTokens: flatDraftTokens,
+                    numDraft: numDraft
+                )
+            }
+
+            let emittedTokens = concatenated(selection.emitted)
+            eval(emittedTokens, flatDraftTokens)
+            let emittedTokenList = emittedTokens.asArray(Int.self)
+            // `didSample` already ran inside the selection walk, for emitted
+            // tokens only.
+            pendingTokens.append(contentsOf: emittedTokenList)
+
+            accepted = selection.accepted
+            emittedFinalToken = selection.emitted.last!
         }
-
-        let emittedTokens = concatenated(selection.emitted)
-        eval(emittedTokens, flatDraftTokens)
-        let emittedTokenList = emittedTokens.asArray(Int.self)
-        // `didSample` already ran inside the selection walk, for emitted
-        // tokens only.
-        pendingTokens.append(contentsOf: emittedTokenList)
-
-        let accepted = selection.accepted
-        let emittedFinalToken = selection.emitted.last!
         // Lookahead bookkeeping for early finalization: the accepted drafts
         // are the pending tokens whose K/V is already committed.
         committedPendingTokenCount = accepted
