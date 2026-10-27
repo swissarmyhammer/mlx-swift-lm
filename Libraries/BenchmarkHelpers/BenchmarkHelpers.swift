@@ -1033,10 +1033,17 @@ public struct MTPChatTurn: Sendable {
     public let acceptedDraftTokenCount: Int?
     /// The generated text.
     public let text: String
+    /// The generated tokens, with the candidates of each step when the session
+    /// reported them.
+    public let tokens: [MTPChatToken]
 
-    init(index: Int, isEdit: Bool, info: GenerateCompletionInfo, text: String) {
+    init(
+        index: Int, isEdit: Bool, info: GenerateCompletionInfo, text: String,
+        tokens: [MTPChatToken]
+    ) {
         self.index = index
         self.isEdit = isEdit
+        self.tokens = tokens
         self.promptTokenCount = info.promptTokenCount
         self.cachedPromptTokenCount = info.cachedPromptTokenCount
         self.promptTimeMs = info.promptTime * 1000
@@ -1117,9 +1124,11 @@ public struct MTPChatScenarioResult: Sendable {
     public func printSummary() {
         for (mtpTurn, plainTurn) in zip(mtp, plain) {
             let speedup = mtpTurn.decodeTokensPerSecond / plainTurn.decodeTokensPerSecond
+            let match = MTPChatTokenMatch(mtp: mtpTurn.tokens, plain: plainTurn.tokens)
             BenchmarkLog.line(
                 mtpTurn.summaryLine(scenario: scenario.name, session: "MTP  ")
                     + ", text equal to plain: \(mtpTurn.text == plainTurn.text), "
+                    + "tokens match plain: \(match.summary), "
                     + "decode \(String(format: "%.2f", speedup))x plain")
             BenchmarkLog.line(plainTurn.summaryLine(scenario: scenario.name, session: "plain"))
             BenchmarkLog.line(
@@ -1157,6 +1166,11 @@ private struct MTPChatSessionRunner {
     let instructions: String
     let speculativeDecoding: SpeculativeDecodingConfig?
 
+    /// The candidates each turn reports for each step: the two best for a plain
+    /// session, so a parting from it can be told a near-tie, and none for a
+    /// speculative session, which cannot report them.
+    var candidateCount: Int? { speculativeDecoding == nil ? 2 : nil }
+
     /// Runs the prompts of `scenario` in a new session, then its edit in a fork
     /// whose history ends at the reply the edit goes back to.
     func run(_ scenario: MTPChatScenario) async throws -> [MTPChatTurn] {
@@ -1167,7 +1181,7 @@ private struct MTPChatSessionRunner {
         var turns: [MTPChatTurn] = []
         var history: [Chat.Message] = []
         for (index, prompt) in scenario.prompts.enumerated() {
-            let turn = try await Self.respond(in: session, to: prompt, index: index, isEdit: false)
+            let turn = try await respond(in: session, to: prompt, index: index, isEdit: false)
             turns.append(turn)
             history += [.user(prompt), .assistant(turn.text)]
         }
@@ -1175,25 +1189,29 @@ private struct MTPChatSessionRunner {
         let branch = await session.fork(
             history: Array(history.prefix(edit.keptTurnCount * Self.messagesPerTurn)))
         turns.append(
-            try await Self.respond(in: branch, to: edit.prompt, index: turns.count, isEdit: true))
+            try await respond(in: branch, to: edit.prompt, index: turns.count, isEdit: true))
         return turns
     }
 
-    /// Asks `prompt` in `session` and collects the text and the `.info` event.
-    private static func respond(
+    /// Asks `prompt` in `session` and collects the text, the tokens and the
+    /// `.info` event.
+    private func respond(
         in session: ChatSession, to prompt: String, index: Int, isEdit: Bool
     ) async throws -> MTPChatTurn {
         var text = ""
+        var tokens: [MTPChatToken] = []
         var info: GenerateCompletionInfo?
-        for try await item in session.streamDetails(to: prompt) {
-            switch item {
-            case .chunk(let chunk): text += chunk
-            case .info(let completion): info = completion
-            case .toolCall, .rejectedToolCall: break
+        let recorder = MTPChatTokenRecorder(candidateCount: candidateCount)
+        for try await event in session.observe(to: prompt, using: recorder) {
+            switch event {
+            case .token(let token): tokens.append(token)
+            case .generation(.chunk(let chunk)): text += chunk
+            case .generation(.info(let completion)): info = completion
+            case .generation(.toolCall), .generation(.rejectedToolCall): break
             }
         }
         guard let info else { throw LLMGenerationBenchmarkError.missingCompletionInfo }
-        return MTPChatTurn(index: index, isEdit: isEdit, info: info, text: text)
+        return MTPChatTurn(index: index, isEdit: isEdit, info: info, text: text, tokens: tokens)
     }
 }
 

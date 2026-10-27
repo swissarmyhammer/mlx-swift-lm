@@ -199,6 +199,7 @@ let package = Package(
                 "MLXRerankers",
                 "MLXTestPrecision",
                 "MLXScriptedLM",
+                "BenchmarkHelpers",
             ],
             path: "Tests/MLXLMTests",
             exclude: [

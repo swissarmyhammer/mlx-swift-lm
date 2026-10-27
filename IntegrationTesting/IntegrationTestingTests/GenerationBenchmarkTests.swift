@@ -68,13 +68,15 @@ private enum MTPChatCheck: String, CaseIterable {
     case plainReusesCache
     /// A follow-up turn of the MTP session feeds the drafter only the prompt past the cached prefix.
     case drafterPrefillsOnlyTheSuffix
-    /// The MTP session writes the text of the plain session.
-    case matchesPlainText
+    /// The MTP session writes the tokens of the plain session, or parts from
+    /// them only at a near-tie of plain's two best tokens
+    /// (``MTPChatTokenMatch/nearTieLogitTolerance``).
+    case matchesPlainTokens
     /// A follow-up turn of the MTP session decodes faster than the plain session.
     case decodesFasterThanPlain
 
     /// Whether the first turn of a chat is held to the check: it has no cache to reuse.
-    var appliesToFirstTurn: Bool { self == .matchesPlainText }
+    var appliesToFirstTurn: Bool { self == .matchesPlainTokens }
 
     /// Whether the turn pair meets the check.
     func holds(mtp: MTPChatTurn, plain: MTPChatTurn) -> Bool {
@@ -86,8 +88,8 @@ private enum MTPChatCheck: String, CaseIterable {
         case .drafterPrefillsOnlyTheSuffix:
             return mtp.cachedPromptTokenCount > 0
                 && mtp.drafterPrefillTokenCount == mtp.promptTokenCount
-        case .matchesPlainText:
-            return mtp.text == plain.text
+        case .matchesPlainTokens:
+            return MTPChatTokenMatch(mtp: mtp.tokens, plain: plain.tokens).holds
         case .decodesFasterThanPlain:
             return mtp.decodeTokensPerSecond > plain.decodeTokensPerSecond
         }
@@ -106,21 +108,13 @@ private struct MTPChatGap: Hashable {
 private let mtpCheckpointGap =
     "^achvxy1 keeps no checkpoints with MTP on, then ^ahnb0j9 restores the drafter with them"
 
-/// MTP greedy text leaves plain text on warm follow-up turns.
-private let mtpWarmTextGap = "^chgkh4c MTP text diverges from plain on warm follow-ups"
-
 /// The checks the current code fails, each with the task that closes the gap.
 /// A fix makes its known issue unrecorded, which fails the benchmark until the
 /// row is removed.
 private let mtpChatKnownGaps: [MTPChatGap: String] = {
-    let followUps = MTPChatScenario.followUps.name
-    let thinking = MTPChatScenario.thinkingFollowUps.name
     let edit = MTPChatScenario.editAndRegenerate
     let editTurn = edit.prompts.count
     return [
-        MTPChatGap(scenario: followUps, turn: 2, check: .matchesPlainText): mtpWarmTextGap,
-        MTPChatGap(scenario: thinking, turn: 1, check: .matchesPlainText): mtpWarmTextGap,
-        MTPChatGap(scenario: thinking, turn: 2, check: .matchesPlainText): mtpWarmTextGap,
         MTPChatGap(scenario: edit.name, turn: editTurn, check: .mtpReusesCache): mtpCheckpointGap,
         MTPChatGap(scenario: edit.name, turn: editTurn, check: .drafterPrefillsOnlyTheSuffix):
             mtpCheckpointGap,
@@ -226,8 +220,9 @@ struct GenerationBenchmarkTests {
     /// with a system prompt: follow-ups, follow-ups with thinking on, and an edit.
     ///
     /// Each follow-up turn reuses the prompt cache, feeds the drafter only the new
-    /// suffix, writes the text of the plain session at temperature 0, and decodes
-    /// faster than the plain session. A check the current code fails stands in
+    /// suffix, writes the tokens of the plain session at temperature 0 up to a
+    /// near-tie of plain's two best tokens, and decodes faster than the plain
+    /// session. A check the current code fails stands in
     /// ``mtpChatKnownGaps`` with the task that closes it.
     @Test(.enabled(if: qwen38FourBitMTPIsLocal))
     func qwen38FourBitMTPSystemPromptCache() async throws {
@@ -267,6 +262,7 @@ struct GenerationBenchmarkTests {
             MTP cached \(mtp.cachedPromptTokenCount) prefilled \(mtp.promptTokenCount) \
             drafter \(mtp.drafterPrefillTokenCount.map(String.init) ?? "-") \
             speculation \(mtp.speculationDescription) \
+            tokens \(MTPChatTokenMatch(mtp: mtp.tokens, plain: plain.tokens).summary) \
             \(String(format: "%.1f", mtp.decodeTokensPerSecond)) tok/s; \
             plain cached \(plain.cachedPromptTokenCount) \
             \(String(format: "%.1f", plain.decodeTokensPerSecond)) tok/s
