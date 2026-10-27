@@ -819,7 +819,7 @@ public class ChatSessionTests: XCTestCase {
             }
         }
         var iterator = observations.makeAsyncIterator()
-        let first = await iterator.next()
+        let first: Void? = await iterator.next()
         XCTAssertNotNil(first)
         task.cancel()
         _ = await task.result

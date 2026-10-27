@@ -710,6 +710,229 @@ struct Qwen35MTPMetalTests {
     }
 }
 
+/// Bound for comparing drafter cache entries that the same tokens reach through matmuls of
+/// different shapes. Wider on machines whose float32 matmuls run as TF32; see
+/// ``MatmulPrecision``.
+private let drafterCacheTolerance = MatmulPrecision.tolerance(float32: 1e-5, reduced: 2e-3)
+
+/// The drafter state API beyond a cold prefill at position zero: a cold start at a position
+/// the target cache already holds, and trimming and appending entries.
+@Suite(.serialized)
+struct Qwen35MTPDrafterStateTests {
+
+    /// Prompt tokens of the fixture vocabulary.
+    private let prompt = [3, 9, 14, 22, 5, 40]
+
+    /// The token the target sampled after ``prompt``, as the iterator hands it to the drafter.
+    private let bonus = MLXArray([Int32(17)])
+
+    /// Entries the trim and append test removes and then appends again.
+    private let replayedEntryCount = 3
+
+    /// Tokens of the prompt that a warm target cache already holds.
+    private let cachedPrefixLength = 4
+
+    /// Tokens each greedy decode generates.
+    private let generatedTokenCount = 8
+
+    /// The target hidden rows of `tokens`, emitted as the MTP iterator asks for them.
+    private func targetHidden(
+        _ fixture: Qwen35MTPFixture, tokens: [Int], cache: [KVCache]? = nil
+    ) throws -> MLXArray {
+        var state = LMOutput.State()
+        state[mtpEmitFlagKey] = true
+        let output = fixture.target(
+            LMInput.Text(tokens: MLXArray(tokens.map(Int32.init))[.newAxis, 0...]),
+            cache: cache, state: state)
+        let hidden = try #require(output.state?[mtpLastHiddenStatesKey])
+        eval(hidden)
+        return hidden
+    }
+
+    /// A drafter state prefilled over ``prompt`` from position zero.
+    private func preparedState(
+        _ fixture: Qwen35MTPFixture, hidden: MLXArray, sampler: any LogitSampler
+    ) -> MTPDrafterState {
+        var state = fixture.drafter.makeState(parameters: nil)
+        fixture.drafter.prepareDrafterState(
+            target: fixture.target,
+            promptTokens: MLXArray(prompt.map(Int32.init))[.newAxis, 0...],
+            targetHidden: hidden, firstBonus: bonus, positionDeltas: nil, state: &state,
+            sampler: sampler)
+        return state
+    }
+
+    /// Consumes the seed proposal, then drafts one tentative entry past it.
+    private func appendTentativeEntry(
+        _ fixture: Qwen35MTPFixture, hidden: MLXArray, state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) {
+        for _ in 0 ..< Qwen35MTPFixture.blockSize {
+            let proposal = fixture.drafter.draftBlock(
+                target: fixture.target, lastToken: bonus,
+                lastHidden: hidden[0..., (-1)..., 0...], sharedKV: [:], positionDeltas: nil,
+                queryOffset: state.nextPosition, blockSize: Qwen35MTPFixture.blockSize,
+                state: &state, sampler: sampler)
+            eval(proposal)
+        }
+    }
+
+    @Test("trimming entries and appending them again matches a cold prefill")
+    func trimAndAppendMatchColdPrefill() throws {
+        let fixture = try Qwen35MTPFixture()
+        let sampler = GenerateParameters(temperature: 0).sampler()
+        let hidden = try targetHidden(fixture, tokens: prompt)
+        let cold = preparedState(fixture, hidden: hidden, sampler: sampler)
+        var replayed = preparedState(fixture, hidden: hidden, sampler: sampler)
+        appendTentativeEntry(fixture, hidden: hidden, state: &replayed, sampler: sampler)
+        #expect(replayed.proposalAppended == 1)
+
+        let removed = replayed.removeLastEntries(replayed.proposalAppended + replayedEntryCount)
+        #expect(removed)
+        #expect(replayed.proposalAppended == 0)
+        #expect(replayed.seedToken == nil)
+        let keptEntries = prompt.count - replayedEntryCount
+        let tokens = MLXArray(prompt[(keptEntries + 1)...].map(Int32.init))[.newAxis, 0...]
+        #expect(
+            fixture.drafter.appendDrafterState(
+                target: fixture.target,
+                tokens: concatenated([tokens, bonus[.newAxis, 0...]], axis: 1),
+                targetHidden: hidden[0..., keptEntries..., 0...], positionDeltas: nil,
+                state: &replayed, sampler: sampler))
+
+        #expect(replayed.nextPosition == cold.nextPosition)
+        #expect(replayed.isAligned)
+        let replayedArrays = replayed.cache.flatMap(\.state)
+        let coldArrays = cold.cache.flatMap(\.state)
+        #expect(replayedArrays.count == coldArrays.count)
+        for (actual, expected) in zip(replayedArrays, coldArrays) {
+            eval(actual, expected)
+            try #require(actual.shape == expected.shape)
+            #expect(
+                allClose(
+                    actual, expected, rtol: drafterCacheTolerance, atol: drafterCacheTolerance
+                ).item(Bool.self))
+        }
+        let replayedSeed = try #require(replayed.seedToken)
+        let coldSeed = try #require(cold.seedToken)
+        #expect(replayedSeed.asArray(Int32.self) == coldSeed.asArray(Int32.self))
+    }
+
+    @Test("finalization drops tentative proposal entries before the target boundary")
+    func finalizationDropsTentativeEntries() throws {
+        let fixture = try Qwen35MTPFixture()
+        let sampler = GenerateParameters(temperature: 0).sampler()
+        let hidden = try targetHidden(fixture, tokens: prompt)
+        var state = preparedState(fixture, hidden: hidden, sampler: sampler)
+        appendTentativeEntry(fixture, hidden: hidden, state: &state, sampler: sampler)
+
+        #expect(
+            fixture.drafter.finalizeDrafterState(
+                target: fixture.target, targetBoundaryHidden: hidden[0..., (-1)..., 0...],
+                targetProcessedTokenCount: prompt.count, discardedTargetTokens: 0,
+                positionDeltas: nil, state: &state))
+        #expect(state.nextPosition == prompt.count - 1)
+        #expect(state.proposalAppended == 0)
+        #expect(state.isAligned)
+    }
+
+    @Test("a cold start at a cached position resumes as a continuation")
+    func coldStartAtCachedPositionResumes() throws {
+        let fixture = try Qwen35MTPFixture()
+        let sampler = GenerateParameters(temperature: 0).sampler()
+        let cache = try fixture.target.newCache(parameters: nil)
+        _ = try targetHidden(
+            fixture, tokens: Array(prompt.prefix(cachedPrefixLength)), cache: cache)
+        let suffix = Array(prompt.dropFirst(cachedPrefixLength))
+        let suffixHidden = try targetHidden(fixture, tokens: suffix, cache: cache)
+        var state = fixture.drafter.makeState(parameters: nil)
+
+        #expect(
+            fixture.drafter.coldStartDrafterState(
+                target: fixture.target,
+                suffixTokens: MLXArray(suffix.map(Int32.init))[.newAxis, 0...],
+                suffixTargetHidden: suffixHidden, firstBonus: bonus,
+                position: cachedPrefixLength, positionDeltas: nil, state: &state,
+                sampler: sampler))
+        let seed = try #require(state.seedToken)
+        eval(seed)
+        #expect(state.cacheStartPosition == cachedPrefixLength)
+        #expect(state.nextPosition == prompt.count)
+        #expect(state.cache.allSatisfy { $0.offset == suffix.count })
+
+        #expect(
+            fixture.drafter.finalizeDrafterState(
+                target: fixture.target, targetBoundaryHidden: suffixHidden[0..., (-1)..., 0...],
+                targetProcessedTokenCount: prompt.count, discardedTargetTokens: 0,
+                positionDeltas: nil, state: &state))
+        #expect(state.nextPosition == prompt.count - 1)
+
+        let nextSuffix = MLXArray([Int32(17), 8])[.newAxis, 0...]
+        #expect(
+            fixture.drafter.resumeDrafterState(
+                target: fixture.target, suffixTokens: nextSuffix,
+                suffixTargetHidden: MLXArray.zeros([
+                    1, nextSuffix.dim(1), Qwen35MTPFixture.hiddenSize,
+                ]),
+                targetBoundaryHidden: suffixHidden[0..., (-1)..., 0...],
+                firstBonus: MLXArray([Int32(11)]), positionDeltas: nil, state: &state,
+                sampler: sampler))
+        #expect(state.nextPosition == prompt.count + nextSuffix.dim(1))
+        #expect(state.isAligned)
+    }
+
+    @Test("the VLM drafter cold-starts at a cached position with its position deltas")
+    func vlmColdStartAtCachedPosition() throws {
+        let cfg = try JSONDecoder().decode(
+            MLXVLM.Qwen35Configuration.self,
+            from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
+        let target = MLXVLM.Qwen35(cfg)
+        let drafter = MLXVLM.Qwen35VLMNextNDraftModel(cfg)
+        let sampler = GenerateParameters(temperature: 0).sampler()
+        let suffix = MLXArray([Int32(5), 6])[.newAxis, 0...]
+        var state = drafter.makeState(parameters: nil)
+
+        #expect(
+            drafter.coldStartDrafterState(
+                target: target, suffixTokens: suffix,
+                suffixTargetHidden: MLXArray.zeros(
+                    [1, suffix.dim(1), cfg.textConfiguration.hiddenSize]),
+                firstBonus: MLXArray([Int32(7)]), position: cachedPrefixLength,
+                positionDeltas: MLXArray([Int32(2)]), state: &state, sampler: sampler))
+        let seed = try #require(state.seedToken)
+        eval(seed)
+        #expect(state.cacheStartPosition == cachedPrefixLength)
+        #expect(state.nextPosition == cachedPrefixLength + suffix.dim(1))
+        #expect(state.isAligned)
+    }
+
+    @Test("a warm target cache without a continuation speculates and matches greedy decode")
+    func warmCacheWithoutContinuationSpeculates() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let plain = try await fixture.decodeGreedily(
+            prompt: prompt, maxTokens: generatedTokenCount, speculative: false)
+        let cache = try fixture.target.newCache(parameters: nil)
+        _ = try targetHidden(
+            fixture, tokens: Array(prompt.prefix(cachedPrefixLength)), cache: cache)
+
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: LMInput(
+                tokens: MLXArray(prompt.dropFirst(cachedPrefixLength).map(Int32.init))),
+            mainModel: fixture.target, drafter: fixture.drafter, mainCache: cache,
+            parameters: GenerateParameters(maxTokens: generatedTokenCount, temperature: 0),
+            blockSize: Qwen35MTPFixture.blockSize)
+        var tokens: [Int] = []
+        while let token = iterator.next() {
+            tokens.append(token)
+        }
+
+        #expect(tokens == plain.tokens)
+        #expect(iterator.passthroughReason == nil)
+        #expect(iterator.proposedCount > 0)
+        #expect(iterator.acceptedCount > 0)
+    }
+}
+
 private func collectQwenChatDetails(
     _ stream: AsyncThrowingStream<Generation, Error>
 ) async throws -> (text: String, info: GenerateCompletionInfo) {

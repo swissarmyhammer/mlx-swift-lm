@@ -358,7 +358,6 @@ public final class ChatSession {
         }
     }
 
-
     private struct AssistantGeneration {
         var content = ""
         var toolCalls: [ToolCall] = []
@@ -1435,19 +1434,15 @@ public final class ChatSession {
                         }
 
                         let mtpIsStateful = mtpDrafter is any StatefulMTPDrafterModel
-                        let mtpSupportsResumption =
-                            mtpDrafter is any ResumableMTPDrafterModel
-                        let mtpContinuationIsAligned =
-                            mtpDrafterContinuation?.targetProcessedTokenCount
-                            == kvCache.processedTokenCount
+                        // A resumable drafter continues an aligned continuation, and otherwise
+                        // cold-starts at the cached position, so its state is always ready.
                         let mtpSpeculativeStateIsReady =
-                            !mtpIsStateful
-                            || (mtpSupportsResumption && mtpContinuationIsAligned)
+                            !mtpIsStateful || mtpDrafter is any ResumableMTPDrafterModel
 
                         var reusedMainCacheWithoutDraft = false
                         // A raw prompt cache has no transcript from which a stateful MTP drafter
                         // can rebuild private state. Preserve the authoritative target cache and
-                        // continue target-only unless an aligned continuation exists.
+                        // continue target-only unless the drafter can resume or cold-start.
                         var requiresMainOnlyContinuation =
                             usesMTP && mtpIsStateful && conversation == nil
                             && kvCache.processedTokenCount > 0
@@ -1803,9 +1798,7 @@ public final class ChatSession {
                         // there is nothing to re-prefill the draft from, and handing mismatched
                         // caches to the iterator would throw rather than fall back.
                         let mtpStateIsRecoverable =
-                            !mtpIsStateful || kvCache.processedTokenCount == 0
-                            || (mtpDrafterContinuation?.targetProcessedTokenCount
-                                == kvCache.processedTokenCount)
+                            mtpSpeculativeStateIsReady || kvCache.processedTokenCount == 0
                         let draftCacheIsRecoverable =
                             usesMTP
                             ? mtpStateIsRecoverable

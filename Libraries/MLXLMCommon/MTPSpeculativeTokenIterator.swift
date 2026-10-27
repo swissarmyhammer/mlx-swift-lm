@@ -474,65 +474,16 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             }
         }
 
-        let promptLength = input.text.tokens.dim(-1)
         if let targetHidden = mainState?[mtpLastHiddenStatesKey], targetHidden.dim(1) > 0 {
             targetBoundaryHidden = targetHidden[0..., (-1)..., 0...]
         }
 
-        if let continuation = continuationToResume {
-            defer { continuationToResume = nil }
-            guard continuation.targetProcessedTokenCount == cachePositionBeforePrefill,
-                let resumableDrafter = drafter as? any ResumableMTPDrafterModel,
-                var currentDrafterState = drafterState,
-                let suffixTargetHidden = mainState?[mtpLastHiddenStatesKey],
-                suffixTargetHidden.dim(1) >= promptLength
-            else {
-                switchToPassthrough(
-                    reason:
-                        "MTP continuation is missing target suffix state or is not aligned; continuing without speculation"
-                )
-                return
-            }
-
-            let resumed = resumableDrafter.resumeDrafterState(
-                target: mainModel,
-                suffixTokens: input.text.tokens,
-                suffixTargetHidden: suffixTargetHidden[0..., ..<promptLength, 0...],
-                targetBoundaryHidden: continuation.targetBoundaryHidden,
-                firstBonus: y.tokens,
-                positionDeltas: mainState?[mtpPositionDeltasKey],
-                state: &currentDrafterState,
-                sampler: sampler)
-            guard resumed else {
-                switchToPassthrough(
-                    reason:
-                        "MTP drafter refused the warm continuation; continuing without speculation"
-                )
-                return
-            }
-            drafterState = currentDrafterState
-        } else if drafter.requiresPromptPrefill {
-            guard cachePositionBeforePrefill == 0,
-                let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
-                var currentDrafterState = drafterState,
-                let targetHidden = mainState?[mtpLastHiddenStatesKey],
-                targetHidden.dim(1) >= promptLength
-            else {
-                switchToPassthrough(
-                    reason:
-                        "stateful MTP drafter cannot initialize from a warm target suffix; continuing without speculation"
-                )
-                return
-            }
-            statefulDrafter.prepareDrafterState(
-                target: mainModel,
-                promptTokens: input.text.tokens,
-                targetHidden: targetHidden,
-                firstBonus: y.tokens,
-                positionDeltas: mainState?[mtpPositionDeltasKey],
-                state: &currentDrafterState,
-                sampler: sampler)
-            drafterState = currentDrafterState
+        let continuation = continuationToResume
+        continuationToResume = nil
+        if drafter.requiresPromptPrefill || continuation != nil {
+            primeDrafterState(
+                promptTokens: input.text.tokens, cachePosition: cachePositionBeforePrefill,
+                continuation: continuation)
         } else if cachePositionBeforePrefill > 0,
             drafter is any StatefulMTPDrafterModel
         {
@@ -543,6 +494,76 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         try kvCachePlan.applyAndValidate(to: mainCacheStorage)
+    }
+
+    /// Primes the drafter-owned state over the prompt the target just prefilled.
+    ///
+    /// A prompt that starts at position zero prefills the drafter from scratch. On a warm target
+    /// cache an aligned continuation resumes; when there is none, or the drafter refuses it, a
+    /// resumable drafter cold-starts at the cached position instead. Only a drafter that can do
+    /// none of these leaves the stream to the target alone.
+    ///
+    /// - Parameters:
+    ///   - promptTokens: The prompt tokens the target prefilled.
+    ///   - cachePosition: The target cache position before the prefill.
+    ///   - continuation: The drafter continuation carried with the target cache, if any.
+    private mutating func primeDrafterState(
+        promptTokens: MLXArray, cachePosition: Int, continuation: MTPDrafterContinuation?
+    ) {
+        let promptLength = promptTokens.dim(-1)
+        guard let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
+            var state = drafterState,
+            let targetHidden = mainState?[mtpLastHiddenStatesKey],
+            targetHidden.dim(1) >= promptLength
+        else {
+            switchToPassthrough(
+                reason:
+                    "MTP drafter has no target hidden state for the prompt; continuing without speculation"
+            )
+            return
+        }
+        let suffixHidden = targetHidden[0..., ..<promptLength, 0...]
+        let positionDeltas = mainState?[mtpPositionDeltasKey]
+
+        guard cachePosition > 0 else {
+            statefulDrafter.prepareDrafterState(
+                target: mainModel, promptTokens: promptTokens, targetHidden: suffixHidden,
+                firstBonus: y.tokens, positionDeltas: positionDeltas, state: &state,
+                sampler: sampler)
+            drafterState = state
+            return
+        }
+        guard let resumableDrafter = drafter as? any ResumableMTPDrafterModel else {
+            switchToPassthrough(
+                reason:
+                    "stateful MTP drafter cannot initialize from a warm target suffix; continuing without speculation"
+            )
+            return
+        }
+
+        if let continuation, continuation.targetProcessedTokenCount == cachePosition,
+            resumableDrafter.resumeDrafterState(
+                target: mainModel, suffixTokens: promptTokens, suffixTargetHidden: suffixHidden,
+                targetBoundaryHidden: continuation.targetBoundaryHidden, firstBonus: y.tokens,
+                positionDeltas: positionDeltas, state: &state, sampler: sampler)
+        {
+            drafterState = state
+            return
+        }
+
+        guard
+            resumableDrafter.coldStartDrafterState(
+                target: mainModel, suffixTokens: promptTokens, suffixTargetHidden: suffixHidden,
+                firstBonus: y.tokens, position: cachePosition, positionDeltas: positionDeltas,
+                state: &state, sampler: sampler)
+        else {
+            switchToPassthrough(
+                reason:
+                    "MTP drafter could not start at the cached position; continuing without speculation"
+            )
+            return
+        }
+        drafterState = state
     }
 
     /// Single round: draft `blockSize - 1` tokens, verify with main, accept

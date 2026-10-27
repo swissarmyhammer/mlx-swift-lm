@@ -100,10 +100,26 @@ comments:
     - evidence: swift build --build-tests (up to date; only the known "missing creator ... mlx-swift_Cmlx.bundle" SwiftPM message); xcrun xctest MLXLMTests.xctest — 895 XCTest, 0 failures, plus 1842 Swift Testing passed; MLXFoundationModelsTests.xctest — 376 passed, 0 failures. Only skip is the known env-gated benchmarkVerification() (upstream PR 724). No new warnings.
     - next: review/commit
   timestamp: 2026-10-27T21:06:20.336719+00:00
+- actor: claude-code
+  id: 01m5zk10fg83tp23p8jrn3g59w
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (94d74e41) — 0 findings, 0 confirmed, 0 refuted (7 attempted, 4 files reviewed). All 6 items of Review Findings (2026-10-27 15:45) checked and verified: SyntheticMTPValues.makeRepeatedDraft is used by EarlyTerminationMTPFakes, ChatSessionMTPFakes (x2), MTPIteratorFakes; no `[MLXArray]()` / `[String: (MLXArray, MLXArray)]()` constructors remain in MTPIteratorFakes.swift.
+    - next: none — task moved to done.
+  timestamp: 2026-10-27T21:07:27.856622+00:00
+- actor: claude-code
+  id: 01m5zk1ew1xjpsfy3tkvyybvke
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 4 files (shared makeRepeatedDraft helper, empty literals)
+    - test: green — MLXLMTests 895 XCTest 0 failures + 1842 Swift Testing; MLXFoundationModelsTests 376
+    - commit: 94d74e41
+    - review: clean — 0 findings, prior 6/6 verified; task done
+  timestamp: 2026-10-27T21:07:42.593423+00:00
 depends_on:
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: ffe680
 title: 'MTP: shared Qwen35 + MTP test fixture for MLXLMTests and MLXFoundationModelsTests'
 ---
 ## What

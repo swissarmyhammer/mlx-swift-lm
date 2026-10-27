@@ -155,7 +155,35 @@ public final class QwenStyleMTPDrafter: Module, ResumableMTPDrafterModel {
         state _: inout MTPDrafterState,
         sampler _: any LogitSampler
     ) -> Bool {
-        true
+        !(probe?.refusesResumption ?? false)
+    }
+
+    public func appendDrafterState(
+        target _: any LanguageModel,
+        tokens: MLXArray,
+        targetHidden _: MLXArray,
+        positionDeltas _: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler _: any LogitSampler
+    ) -> Bool {
+        state.nextPosition += tokens.dim(-1)
+        return true
+    }
+
+    public func coldStartDrafterState(
+        target _: any LanguageModel,
+        suffixTokens: MLXArray,
+        suffixTargetHidden _: MLXArray,
+        firstBonus _: MLXArray,
+        position: Int,
+        positionDeltas _: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler _: any LogitSampler
+    ) -> Bool {
+        probe?.coldStartPositions.append(position)
+        state.cacheStartPosition = position
+        state.nextPosition = position + suffixTokens.dim(-1)
+        return true
     }
 
     public func draftBlock(
@@ -237,6 +265,12 @@ public final class MTPStagingProbe {
 
     /// Whether the target throws from `prepare` after it wrote the input into its cache.
     public var failAfterPreparationWrite = false
+
+    /// Whether the drafter refuses to resume a continuation.
+    public var refusesResumption = false
+
+    /// The target cache position of each drafter cold start, in order.
+    public var coldStartPositions: [Int] = []
 
     /// Makes a probe with nothing recorded.
     public init() {}

@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLLM
 import MLXLMTestSupport
 import MLXNN
 import Testing
@@ -242,7 +243,7 @@ struct ChatSessionQwenTextMTPTests {
         #expect(regularResult.info.speculativeDecodingFallbackReason == nil)
     }
 
-    @Test("a target-only sampling turn drops the warm MTP continuation")
+    @Test("a target-only sampling turn drops the continuation and the next turn cold-starts MTP")
     func samplingChangeDropsMTPContinuationWithoutDroppingTargetCache() async throws {
         let session = ChatSession(
             makeModelContext(),
@@ -261,11 +262,62 @@ struct ChatSessionQwenTextMTPTests {
         #expect(targetOnly.info.proposedDraftTokens == nil)
         #expect(targetOnly.info.speculativeDecodingFallbackReason == .unsupportedSampling)
         // A target-only pass commits its final token directly, so the next
-        // append has only the new user token left to prefill.
+        // append has only the new user token left to prefill. With no
+        // continuation to resume, the drafter cold-starts at the cached position.
         #expect(afterDrop.info.promptTokenCount == 1)
         #expect(afterDrop.info.cachedPromptTokenCount > 0)
-        #expect(afterDrop.info.proposedDraftTokens == nil)
-        #expect(afterDrop.info.speculativeDecodingFallbackReason == .unavailableContinuation)
+        #expect((afterDrop.info.proposedDraftTokens ?? 0) > 0)
+        #expect(afterDrop.info.passthroughReason == nil)
+        #expect(afterDrop.info.speculativeDecodingFallbackReason == nil)
+    }
+
+    @Test("a refused continuation cold-starts the drafter at the cached position")
+    func refusedContinuationColdStartsDrafter() async throws {
+        let probe = MTPStagingProbe()
+        let session = ChatSession(
+            makeModelContext(probe: probe),
+            speculativeDecoding: try makeMTPConfiguration(model: QwenStyleMTPDrafter(probe: probe)),
+            generateParameters: .init(maxTokens: 4, temperature: 0)
+        )
+
+        _ = try await collect(session.streamDetails(to: "a"))
+        let firstProcessedTokenCount = try #require(
+            try await session.cacheStatus().processedTokenCount)
+        probe.refusesResumption = true
+        let second = try await collect(session.streamDetails(to: "b"))
+
+        // The first turn's prompt prefill is itself a cold start, at position zero.
+        #expect(probe.coldStartPositions == [0, firstProcessedTokenCount])
+        #expect(second.info.cachedPromptTokenCount == firstProcessedTokenCount)
+        #expect((second.info.proposedDraftTokens ?? 0) > 0)
+        #expect(second.info.passthroughReason == nil)
+        #expect(second.info.speculativeDecodingFallbackReason == nil)
+    }
+
+    @Test("a warm Qwen cache without a continuation cold-starts MTP, then the next turn resumes")
+    func qwenWarmCacheColdStartsThenResumes() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let parameters = GenerateParameters(maxTokens: 6, temperature: 0)
+        let speculative = ChatSession(
+            fixture.makeModelContext(), cache: try prefilledQwenCache(fixture),
+            speculativeDecoding: try fixture.makeSpeculativeDecodingConfig(),
+            generateParameters: parameters)
+        let plain = ChatSession(
+            fixture.makeModelContext(), cache: try prefilledQwenCache(fixture),
+            generateParameters: parameters)
+
+        for prompt in [[2], [11]] {
+            let text = fixture.text(for: prompt)
+            let result = try await collect(speculative.streamDetails(to: text))
+            let expected = try await collect(plain.streamDetails(to: text))
+
+            #expect(result.text == expected.text)
+            #expect(result.info.promptTokenCount == prompt.count)
+            #expect((result.info.proposedDraftTokens ?? 0) > 0)
+            #expect((result.info.acceptedDraftTokens ?? 0) > 0)
+            #expect(result.info.passthroughReason == nil)
+            #expect(result.info.speculativeDecodingFallbackReason == nil)
+        }
     }
 
     @Test("a cache-plan change rebuilds target and MTP state together")
@@ -346,8 +398,8 @@ struct ChatSessionQwenTextMTPTests {
         #expect(second.info.speculativeDecodingFallbackReason == .unavailableContinuation)
     }
 
-    @Test("raw prompt cache keeps its prefix and falls back to target-only generation")
-    func rawPromptCacheFallsBackWithoutDiscardingPrefix() async throws {
+    @Test("raw prompt cache keeps its prefix and cold-starts the MTP drafter")
+    func rawPromptCacheColdStartsWithoutDiscardingPrefix() async throws {
         let rawCache = KVCacheSimple()
         _ = rawCache.update(
             keys: MLXArray.zeros([1, 1, 3, 1]),
@@ -364,12 +416,12 @@ struct ChatSessionQwenTextMTPTests {
         let status = try await session.cacheStatus()
 
         #expect(result.info.promptTokenCount == 1)
-        #expect(result.info.proposedDraftTokens == nil)
-        #expect(result.info.acceptedDraftTokens == nil)
-        #expect(result.info.speculativeDecodingTelemetry == nil)
-        #expect(result.info.speculativeDecodingFallbackReason == .unavailableContinuation)
-        // Existing raw prefix (3) + rendered fragment (1) + generated tokens (4).
-        #expect(status.processedTokenCount == 8)
+        #expect((result.info.proposedDraftTokens ?? 0) > 0)
+        #expect(result.info.passthroughReason == nil)
+        #expect(result.info.speculativeDecodingFallbackReason == nil)
+        // Existing raw prefix (3) + rendered fragment (1) + generated tokens (4), less the final
+        // verifier sample a speculative pass leaves uncommitted.
+        #expect(status.processedTokenCount == 7)
     }
 
     @Test(
@@ -615,6 +667,20 @@ struct ChatSessionQwenTextMTPTests {
             }
         }
         return (text, infos)
+    }
+
+    /// Tokens a restored raw Qwen fixture cache already holds.
+    private let qwenCachedPrefix = [3, 9, 14, 22]
+
+    /// A Qwen fixture cache that already holds ``qwenCachedPrefix``, as a restored raw cache
+    /// does: the session has no transcript and no drafter continuation for it.
+    private func prefilledQwenCache(_ fixture: Qwen35MTPFixture) throws -> [KVCache] {
+        let cache = try fixture.target.newCache(parameters: nil)
+        _ = fixture.target(
+            LMInput.Text(tokens: MLXArray(qwenCachedPrefix.map(Int32.init))[.newAxis, 0...]),
+            cache: cache, state: nil)
+        eval(cache)
+        return cache
     }
 }
 

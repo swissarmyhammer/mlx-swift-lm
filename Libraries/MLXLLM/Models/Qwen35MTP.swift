@@ -143,86 +143,34 @@ public final class Qwen35MTPDraftModel: Module, ResumableMTPDrafterModel {
         MTPDrafterState(cache: mtp.newCache())
     }
 
-    public func prepareDrafterState(
+    public func appendDrafterState(
         target: any LanguageModel,
-        promptTokens: MLXArray,
+        tokens: MLXArray,
         targetHidden: MLXArray,
-        firstBonus: MLXArray,
-        positionDeltas _: MLXArray?,
-        state: inout MTPDrafterState,
-        sampler: any LogitSampler
-    ) {
-        let (targetEmbedTokens, lmHead) = targetEmbeddingAndHead(target)
-        let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
-        let prompt = normalizedMTPTokenBatch(promptTokens)
-        let bonus = normalizedMTPColumn(firstBonus)
-        guard prompt.dim(-1) > 0 else { return }
-
-        let shifted = concatenated([prompt[0..., 1...], bonus], axis: 1)
-        let hidden = targetHidden[0..., ..<shifted.dim(1), 0...]
-        state.nextPosition = 0
-        let mtpHidden = mtp(
-            inputsEmbeds: inputEmbedding(shifted),
-            hiddenStates: hidden,
-            cache: state.cache,
-            positionOffset: 0)
-        state.nextPosition = shifted.dim(1)
-        state.seedHidden = mtpHidden[0..., (-1)..., 0...]
-        state.seedToken = sampleMTPSeed(
-            hidden: state.seedHidden!, targetEmbedTokens: targetEmbedTokens,
-            lmHead: lmHead, sampler: sampler)
-        state.proposalAppended = 0
-    }
-
-    public func finalizeDrafterState(
-        target _: any LanguageModel,
-        targetBoundaryHidden _: MLXArray,
-        targetProcessedTokenCount: Int,
-        discardedTargetTokens: Int,
-        positionDeltas _: MLXArray?,
-        state: inout MTPDrafterState
-    ) -> Bool {
-        finalizeShiftedMTPDrafterState(
-            targetProcessedTokenCount: targetProcessedTokenCount,
-            discardedTargetTokens: discardedTargetTokens,
-            state: &state)
-    }
-
-    public func resumeDrafterState(
-        target: any LanguageModel,
-        suffixTokens: MLXArray,
-        suffixTargetHidden: MLXArray,
-        targetBoundaryHidden: MLXArray,
-        firstBonus: MLXArray,
         positionDeltas _: MLXArray?,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) -> Bool {
-        let suffix = normalizedMTPTokenBatch(suffixTokens)
-        let suffixLength = suffix.dim(-1)
-        guard suffixLength > 0,
-            suffixTargetHidden.dim(1) >= suffixLength,
-            targetBoundaryHidden.dim(1) == 1,
-            state.proposalAppended == 0,
-            state.cache.allSatisfy({ $0.offset == state.nextPosition })
+        let tokens = normalizedMTPTokenBatch(tokens)
+        let count = tokens.dim(-1)
+        guard count > 0, targetHidden.dim(1) >= count, state.proposalAppended == 0,
+            state.isAligned
         else { return false }
 
         let (targetEmbedTokens, lmHead) = targetEmbeddingAndHead(target)
         let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
-        let tokens = concatenated(
-            [suffix, normalizedMTPColumn(firstBonus)], axis: 1)
-        let hiddens = concatenated(
-            [targetBoundaryHidden, suffixTargetHidden[0..., ..<suffixLength, 0...]], axis: 1)
         let mtpHidden = mtp(
-            inputsEmbeds: inputEmbedding(tokens), hiddenStates: hiddens,
+            inputsEmbeds: inputEmbedding(tokens),
+            hiddenStates: targetHidden.dim(1) == count
+                ? targetHidden : targetHidden[0..., ..<count, 0...],
             cache: state.cache, positionOffset: state.nextPosition)
-        state.nextPosition += tokens.dim(1)
-        state.seedHidden = mtpHidden[0..., (-1)..., 0...]
+        state.nextPosition += count
+        let seedHidden = mtpHidden[0..., (-1)..., 0...]
+        state.seedHidden = seedHidden
         state.seedToken = sampleMTPSeed(
-            hidden: state.seedHidden!, targetEmbedTokens: targetEmbedTokens,
-            lmHead: lmHead, sampler: sampler)
-        state.proposalAppended = 0
-        return state.cache.allSatisfy { $0.offset == state.nextPosition }
+            hidden: seedHidden, targetEmbedTokens: targetEmbedTokens, lmHead: lmHead,
+            sampler: sampler)
+        return state.isAligned
     }
 
     public func draftBlock(
@@ -289,49 +237,6 @@ public final class Qwen35MTPDraftModel: Module, ResumableMTPDrafterModel {
         }
         state.nextPosition += state.proposalAppended
         return proposed
-    }
-
-    public func commitDrafterState(
-        target: any LanguageModel,
-        targetHidden: MLXArray,
-        draftTokens: MLXArray,
-        acceptedCount: Int,
-        finalToken: MLXArray,
-        positionDeltas _: MLXArray?,
-        state: inout MTPDrafterState,
-        sampler: any LogitSampler
-    ) {
-        let keepAppended = Swift.min(acceptedCount, state.proposalAppended)
-        let trim = state.proposalAppended - keepAppended
-        if trim > 0 {
-            trimPromptCache(state.cache, numTokens: trim)
-            state.nextPosition -= trim
-        }
-
-        var tokens = [MLXArray]()
-        var hiddens = [MLXArray]()
-        for index in keepAppended ..< acceptedCount {
-            tokens.append(draftTokens[0..., index ..< (index + 1)])
-            hiddens.append(targetHidden[0..., index ..< (index + 1), 0...])
-        }
-        tokens.append(normalizedMTPColumn(finalToken))
-        hiddens.append(targetHidden[0..., acceptedCount ..< (acceptedCount + 1), 0...])
-
-        let (targetEmbedTokens, lmHead) = targetEmbeddingAndHead(target)
-        let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
-        let committedTokens = concatenated(tokens, axis: 1)
-        let committedHidden = concatenated(hiddens, axis: 1)
-        let mtpHidden = mtp(
-            inputsEmbeds: inputEmbedding(committedTokens),
-            hiddenStates: committedHidden,
-            cache: state.cache,
-            positionOffset: state.nextPosition)
-        state.nextPosition += committedTokens.dim(1)
-        state.seedHidden = mtpHidden[0..., (-1)..., 0...]
-        state.seedToken = sampleMTPSeed(
-            hidden: state.seedHidden!, targetEmbedTokens: targetEmbedTokens,
-            lmHead: lmHead, sampler: sampler)
-        state.proposalAppended = 0
     }
 
     public var excludedCheckpointNamespaces: [String] {

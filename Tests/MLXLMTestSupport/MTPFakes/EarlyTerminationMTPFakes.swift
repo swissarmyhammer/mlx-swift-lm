@@ -118,6 +118,18 @@ public final class EarlyTerminationMTPDrafter: Module, ResumableMTPDrafterModel 
         true
     }
 
+    public func appendDrafterState(
+        target _: any LanguageModel,
+        tokens: MLXArray,
+        targetHidden _: MLXArray,
+        positionDeltas _: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler _: any LogitSampler
+    ) -> Bool {
+        state.nextPosition += tokens.dim(-1)
+        return true
+    }
+
     public func draftBlock(
         target _: any LanguageModel,
         lastToken: MLXArray,

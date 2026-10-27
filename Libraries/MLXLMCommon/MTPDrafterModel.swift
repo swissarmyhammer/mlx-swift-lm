@@ -137,6 +137,13 @@ public protocol SpeculativeCacheRewindModel {
 public struct MTPDrafterState {
     public var cache: [KVCache]
 
+    /// Absolute position of the first entry in `cache`.
+    ///
+    /// Zero for a drafter prefilled from the start of the prompt. A cold start at a position
+    /// the target cache already holds begins its entries there, because the target hidden rows
+    /// of the earlier positions are no longer available.
+    public var cacheStartPosition: Int
+
     /// Absolute next position in a drafter-owned autoregressive cache.
     public var nextPosition: Int
 
@@ -150,16 +157,46 @@ public struct MTPDrafterState {
 
     public init(
         cache: [KVCache],
+        cacheStartPosition: Int = 0,
         nextPosition: Int = 0,
         seedToken: MLXArray? = nil,
         seedHidden: MLXArray? = nil,
         proposalAppended: Int = 0
     ) {
         self.cache = cache
+        self.cacheStartPosition = cacheStartPosition
         self.nextPosition = nextPosition
         self.seedToken = seedToken
         self.seedHidden = seedHidden
         self.proposalAppended = proposalAppended
+    }
+
+    /// Entries the cache holds: committed entries, then the tentative entries of the current
+    /// proposal.
+    public var entryCount: Int { nextPosition - cacheStartPosition }
+
+    /// Whether every cache layer holds exactly ``entryCount`` entries. A state without cache
+    /// layers tracks positions only, and is always aligned.
+    public var isAligned: Bool { cache.allSatisfy { $0.offset == entryCount } }
+
+    /// Removes the last `count` entries: tentative proposal entries first, then committed ones.
+    ///
+    /// The precomputed seed proposal belongs to the removed tail, so it is dropped too.
+    ///
+    /// - Parameter count: The entries to remove.
+    /// - Returns: `false`, leaving the state unchanged, when the state is not aligned, holds
+    ///   fewer than `count` entries, or a cache layer cannot trim them.
+    public mutating func removeLastEntries(_ count: Int) -> Bool {
+        guard count > 0 else { return count == 0 && isAligned }
+        guard isAligned, count <= entryCount,
+            cache.isEmpty || trimPromptCache(cache, numTokens: count) == count
+        else { return false }
+
+        nextPosition -= count
+        proposalAppended = Swift.max(0, proposalAppended - count)
+        seedToken = nil
+        seedHidden = nil
+        return isAligned
     }
 }
 
@@ -218,9 +255,15 @@ public protocol StatefulMTPDrafterModel: MTPDrafterModel {
 /// `ChatSession` deliberately does not know how a drafter's cache is shifted,
 /// which seed values are speculative, or how target hidden states must be
 /// paired with suffix tokens. The MTP iterator owns that lifecycle and calls
-/// this interface at the model seam. Stateful drafters that do not conform are
+/// this interface at the model seam. A conforming drafter also cold-starts at a
+/// position a warm target cache already holds, so a warm cache without an aligned
+/// continuation still speculates. Stateful drafters that do not conform are
 /// still usable for cold generations; a warm target cache continues without
 /// speculation rather than combining it with a fresh drafter state.
+///
+/// The default implementations describe a shifted drafter (Qwen NextN), which
+/// pairs each input token with the target hidden state of the preceding
+/// position. Such a drafter implements only ``appendDrafterState(target:tokens:targetHidden:positionDeltas:state:sampler:)``.
 public protocol ResumableMTPDrafterModel: StatefulMTPDrafterModel {
     /// Convert `state` to a canonical boundary after the target cache has
     /// discarded any verified-but-unemitted lookahead.
@@ -254,32 +297,185 @@ public protocol ResumableMTPDrafterModel: StatefulMTPDrafterModel {
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) -> Bool
+
+    /// Append one committed entry for each token of `tokens` at `state.nextPosition`, and
+    /// seed the next proposal from the last appended entry.
+    ///
+    /// Entry `i` pairs `tokens[i]` with the target hidden row `targetHidden[i]`, the row of
+    /// the position before the token. Together with
+    /// ``MTPDrafterState/removeLastEntries(_:)`` this edits the drafter state the same way a
+    /// cold prefill over the resulting tokens would build it.
+    ///
+    /// - Parameters:
+    ///   - target: The main language model the drafter speculates for.
+    ///   - tokens: The tokens to append, shape `[B, n]`.
+    ///   - targetHidden: At least `n` target hidden rows, shape `[B, ≥n, hidden]`.
+    ///   - positionDeltas: Optional target position deltas for multimodal RoPE.
+    ///   - state: The drafter state. It must be aligned and hold no tentative entries.
+    ///   - sampler: The sampler of the seed proposal.
+    /// - Returns: `false`, leaving the state unchanged, when the inputs or the state do not
+    ///   allow the append.
+    func appendDrafterState(
+        target: any LanguageModel,
+        tokens: MLXArray,
+        targetHidden: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool
+
+    /// Start an empty drafter state at `position`, a position the warm target cache already
+    /// holds, and prime it over the prompt suffix the target just prefilled.
+    ///
+    /// The entry for the first suffix token needs the target hidden row of the position before
+    /// it, which no cache keeps, so the entries begin with the second suffix token. Speculation
+    /// stays exact without the earlier entries: only the acceptance rate depends on them.
+    ///
+    /// - Parameters:
+    ///   - target: The main language model the drafter speculates for.
+    ///   - suffixTokens: The prompt suffix the target prefilled at `position`, shape `[B, n]`.
+    ///   - suffixTargetHidden: One target hidden row per suffix token.
+    ///   - firstBonus: The token the target sampled after the suffix.
+    ///   - position: The target cache position of the first suffix token.
+    ///   - positionDeltas: Optional target position deltas for multimodal RoPE.
+    ///   - state: The drafter state to replace. Any entries it holds are removed.
+    ///   - sampler: The sampler of the seed proposal.
+    /// - Returns: `false` when the drafter cannot start at `position`.
+    func coldStartDrafterState(
+        target: any LanguageModel,
+        suffixTokens: MLXArray,
+        suffixTargetHidden: MLXArray,
+        firstBonus: MLXArray,
+        position: Int,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool
 }
 
-/// Normalize a shifted drafter cache at a resumable target boundary.
-///
-/// Shifted MTP drafters pair each input token with the target hidden state from
-/// the preceding position. At a generation boundary their private cache must
-/// therefore end one position before the target cache so the saved boundary
-/// hidden state can bridge the next prompt suffix.
-package func finalizeShiftedMTPDrafterState(
-    targetProcessedTokenCount: Int,
-    discardedTargetTokens: Int,
-    state: inout MTPDrafterState
-) -> Bool {
-    let trim = discardedTargetTokens + 1
-    guard state.proposalAppended == 0,
-        targetProcessedTokenCount > 0,
-        state.nextPosition == targetProcessedTokenCount + discardedTargetTokens,
-        state.nextPosition >= trim,
-        trimPromptCache(state.cache, numTokens: trim) == trim
-    else { return false }
+extension ResumableMTPDrafterModel {
+    /// Resumes a shifted drafter: the boundary hidden row pairs with the first suffix token, and
+    /// each suffix hidden row pairs with the token after it, ending with `firstBonus`.
+    public func resumeDrafterState(
+        target: any LanguageModel,
+        suffixTokens: MLXArray,
+        suffixTargetHidden: MLXArray,
+        targetBoundaryHidden: MLXArray,
+        firstBonus: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool {
+        let suffix = normalizedMTPTokenBatch(suffixTokens)
+        let suffixLength = suffix.dim(-1)
+        guard suffixLength > 0, suffixTargetHidden.dim(1) >= suffixLength,
+            targetBoundaryHidden.dim(1) == 1
+        else { return false }
 
-    state.nextPosition -= trim
-    state.seedToken = nil
-    state.seedHidden = nil
-    return state.nextPosition == targetProcessedTokenCount - 1
-        && state.cache.allSatisfy { $0.offset == state.nextPosition }
+        return appendDrafterState(
+            target: target,
+            tokens: concatenated([suffix, normalizedMTPColumn(firstBonus)], axis: 1),
+            targetHidden: concatenated(
+                [targetBoundaryHidden, suffixTargetHidden[0..., ..<suffixLength, 0...]], axis: 1),
+            positionDeltas: positionDeltas, state: &state, sampler: sampler)
+    }
+
+    /// Cold-starts a shifted drafter: each suffix hidden row pairs with the token after it,
+    /// ending with `firstBonus`, so the entries begin at `position`.
+    public func coldStartDrafterState(
+        target: any LanguageModel,
+        suffixTokens: MLXArray,
+        suffixTargetHidden: MLXArray,
+        firstBonus: MLXArray,
+        position: Int,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool {
+        let suffix = normalizedMTPTokenBatch(suffixTokens)
+        let suffixLength = suffix.dim(-1)
+        guard suffixLength > 0, position >= 0, suffixTargetHidden.dim(1) >= suffixLength,
+            state.removeLastEntries(state.entryCount)
+        else { return false }
+
+        state.cacheStartPosition = position
+        state.nextPosition = position
+        state.proposalAppended = 0
+        return appendDrafterState(
+            target: target,
+            tokens: concatenated([suffix[0..., 1...], normalizedMTPColumn(firstBonus)], axis: 1),
+            targetHidden: suffixTargetHidden[0..., ..<suffixLength, 0...],
+            positionDeltas: positionDeltas, state: &state, sampler: sampler)
+    }
+
+    /// Prefills a shifted drafter over the whole prompt: a cold start at position zero.
+    public func prepareDrafterState(
+        target: any LanguageModel,
+        promptTokens: MLXArray,
+        targetHidden: MLXArray,
+        firstBonus: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) {
+        _ = coldStartDrafterState(
+            target: target, suffixTokens: promptTokens, suffixTargetHidden: targetHidden,
+            firstBonus: firstBonus, position: 0, positionDeltas: positionDeltas, state: &state,
+            sampler: sampler)
+    }
+
+    /// Commits a verified round to a shifted drafter: removes the rejected tentative entries,
+    /// then appends the accepted drafts that have no entry yet and `finalToken`, each paired
+    /// with the verifier hidden row of the position before it.
+    public func commitDrafterState(
+        target: any LanguageModel,
+        targetHidden: MLXArray,
+        draftTokens: MLXArray,
+        acceptedCount: Int,
+        finalToken: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) {
+        let keptTentative = Swift.min(acceptedCount, state.proposalAppended)
+        _ = state.removeLastEntries(state.proposalAppended - keptTentative)
+        state.proposalAppended = 0
+
+        let finalColumn = normalizedMTPColumn(finalToken)
+        let tokens =
+            acceptedCount > keptTentative
+            ? concatenated(
+                [draftTokens[0..., keptTentative ..< acceptedCount], finalColumn], axis: 1)
+            : finalColumn
+        _ = appendDrafterState(
+            target: target, tokens: tokens,
+            targetHidden: targetHidden[0..., keptTentative ..< (acceptedCount + 1), 0...],
+            positionDeltas: positionDeltas, state: &state, sampler: sampler)
+    }
+
+    /// Normalizes a shifted drafter at a resumable target boundary.
+    ///
+    /// A shifted drafter pairs each input token with the target hidden state from the
+    /// preceding position. At a generation boundary its private cache must therefore end one
+    /// position before the target cache so the saved boundary hidden state can bridge the next
+    /// prompt suffix. Tentative entries of a proposal the target never verified are removed
+    /// first.
+    public func finalizeDrafterState(
+        target _: any LanguageModel,
+        targetBoundaryHidden _: MLXArray,
+        targetProcessedTokenCount: Int,
+        discardedTargetTokens: Int,
+        positionDeltas _: MLXArray?,
+        state: inout MTPDrafterState
+    ) -> Bool {
+        let committedPosition = state.nextPosition - state.proposalAppended
+        guard targetProcessedTokenCount > 0,
+            committedPosition == targetProcessedTokenCount + discardedTargetTokens,
+            state.removeLastEntries(state.proposalAppended + discardedTargetTokens + 1)
+        else { return false }
+
+        return state.nextPosition == targetProcessedTokenCount - 1
+    }
 }
 
 /// Iterator-owned MTP continuation carried atomically with a ChatSession's
