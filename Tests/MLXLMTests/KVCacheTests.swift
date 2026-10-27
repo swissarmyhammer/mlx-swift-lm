@@ -2724,3 +2724,239 @@ private func singleTokenKV(fill: Float, kvHeads: Int = 2, headDim: Int = 4) -> (
     eval(cacheB.state)
     assertArraysClose(cacheA.state, cacheB.state)
 }
+
+// MARK: - MambaCache speculative snapshot slots
+//
+// A verify pass of the gated delta net kernel keeps the recurrent state after
+// each of its tokens, and the conv input window, as transient speculative data
+// of the cache. A rollback selects one slot; nothing else reads the slots.
+
+/// The slots of one verify, without a model: each slot and each window row
+/// holds its own numbers, so a test sees which one the cache selected.
+private enum SnapshotSlotFixture {
+    /// The tokens of the verify.
+    static let tokenCount = 4
+
+    /// The fewest tokens of a verify.
+    static let fewestTokens = 2
+
+    /// The rows of the conv state: the conv taps less one.
+    static let stateRows = 3
+
+    /// The sequences of the batch.
+    static let batch = 2
+
+    /// The heads, and the rows and width of each head's state.
+    static let heads = 2
+    static let headRows = 2
+    static let headWidth = 2
+
+    /// The shape of one recurrent state: `(batch, heads, rows, width)`.
+    static let stateShape = [batch, heads, headRows, headWidth]
+
+    /// The conv channels.
+    static let channels = 2
+
+    /// The position of the cache before the verify.
+    static let startOffset = 7
+
+    /// The left padding of each sequence before the verify: different for
+    /// each sequence, so a test sees that the cache keeps them apart.
+    static let firstLeftPadding = 9
+    static let secondLeftPadding = 11
+    static let leftPadding = [firstLeftPadding, secondLeftPadding]
+
+    /// The salts that give the recurrent slots and the conv window
+    /// different numbers.
+    static let recurrentSalt = 1
+    static let windowSalt = 2
+
+    /// The snapshot slots of a verify of `tokens` tokens.
+    ///
+    /// - Parameter tokens: The tokens of the verify.
+    /// - Returns: The slots.
+    static func snapshots(tokens: Int = tokenCount) -> GatedDeltaDecodeKernel.Snapshots {
+        let recurrent = deterministicTensor(shape: [tokens] + stateShape, salt: recurrentSalt)
+            .asType(.float32)
+        let window = deterministicTensor(
+            shape: [batch, stateRows + tokens, channels], salt: windowSalt)
+        eval(recurrent, window)
+        return GatedDeltaDecodeKernel.Snapshots(recurrent: recurrent, convWindow: window)
+    }
+
+    /// A cache after a verify, the way a layer leaves it: the states after the
+    /// last token, the slots saved, then one `advance`.
+    ///
+    /// - Parameters:
+    ///   - snapshots: The slots of the verify.
+    ///   - checkpointAfter: The token after which the checkpoint stands.
+    /// - Returns: The cache.
+    static func cache(
+        after snapshots: GatedDeltaDecodeKernel.Snapshots, checkpointAfter: Int = 1
+    ) -> MambaCache {
+        let cache = MambaCache(leftPadding: leftPadding)
+        cache.offset = startOffset
+        cache[0] = snapshots.convState(afterToken: snapshots.tokenCount)
+        cache[1] = snapshots.recurrentState(afterToken: snapshots.tokenCount)
+        cache.saveSpeculativeSnapshots(snapshots, checkpointAfter: checkpointAfter)
+        cache.advance(snapshots.tokenCount)
+        return cache
+    }
+
+    /// A cache that holds the same states and position, with no slots.
+    ///
+    /// - Parameter cache: The cache to match.
+    /// - Returns: The cache without slots.
+    static func plainCache(like cache: MambaCache) -> MambaCache {
+        let plain = MambaCache()
+        plain.state = cache.state
+        plain.offset = cache.offset
+        return plain
+    }
+
+    /// Tells if a cache holds the states after `accepted` tokens of the
+    /// verify, at the position of those tokens.
+    static func holdsTheSlot(
+        _ cache: MambaCache, of snapshots: GatedDeltaDecodeKernel.Snapshots, accepted: Int
+    ) -> Bool {
+        guard let conv = cache[0], let recurrent = cache[1] else { return false }
+        return cache.offset == startOffset + accepted
+            && cache.leftPaddingValues == leftPadding.map { $0 - accepted }
+            && arrayEqual(conv, snapshots.convWindow[0..., accepted ..< accepted + stateRows])
+                .item(Bool.self)
+            && arrayEqual(recurrent, snapshots.recurrent[accepted - 1]).item(Bool.self)
+    }
+}
+
+@Test func mambaCacheSelectsTheSnapshotSlotOfEachRollback() throws {
+    for rollback in 1 ..< SnapshotSlotFixture.tokenCount {
+        let snapshots = SnapshotSlotFixture.snapshots()
+        let cache = SnapshotSlotFixture.cache(after: snapshots)
+        #expect(cache.speculativeSlotCount == SnapshotSlotFixture.tokenCount)
+
+        #expect(cache.selectSpeculativeSlot(rollingBack: rollback))
+
+        let accepted = SnapshotSlotFixture.tokenCount - rollback
+        #expect(SnapshotSlotFixture.holdsTheSlot(cache, of: snapshots, accepted: accepted))
+        #expect(cache.speculativeSlotCount == 0)
+        #expect(!cache.hasSpeculativeCheckpoint)
+    }
+}
+
+@Test func mambaCacheRefusesARollbackItHoldsNoSlotFor() throws {
+    let snapshots = SnapshotSlotFixture.snapshots()
+    let cache = SnapshotSlotFixture.cache(after: snapshots)
+    let offset = cache.offset
+
+    #expect(!cache.selectSpeculativeSlot(rollingBack: 0))
+    #expect(!cache.selectSpeculativeSlot(rollingBack: SnapshotSlotFixture.tokenCount))
+    #expect(cache.offset == offset)
+    #expect(cache.speculativeSlotCount == SnapshotSlotFixture.tokenCount)
+    #expect(!MambaCache().selectSpeculativeSlot(rollingBack: 1))
+}
+
+@Test func restoringTheSpeculativeCheckpointSelectsTheSlotAfterTheCheckpointToken() throws {
+    for checkpointAfter in 1 ..< SnapshotSlotFixture.tokenCount {
+        let snapshots = SnapshotSlotFixture.snapshots()
+        let cache = SnapshotSlotFixture.cache(after: snapshots, checkpointAfter: checkpointAfter)
+        #expect(cache.hasSpeculativeCheckpoint)
+
+        #expect(cache.restoreSpeculativeCheckpoint())
+
+        #expect(SnapshotSlotFixture.holdsTheSlot(cache, of: snapshots, accepted: checkpointAfter))
+        #expect(cache.speculativeSlotCount == 0)
+        #expect(!cache.hasSpeculativeCheckpoint)
+    }
+}
+
+@Test func rewindingAHybridCacheByOneTokenSelectsTheSlotBeforeTheLastToken() throws {
+    let attention = KVCacheSimple()
+    let keys = MLXArray.zeros([1, 1, SnapshotSlotFixture.tokenCount, 2])
+    _ = attention.update(keys: keys, values: keys)
+    let snapshots = SnapshotSlotFixture.snapshots()
+    let recurrent = SnapshotSlotFixture.cache(
+        after: snapshots, checkpointAfter: SnapshotSlotFixture.tokenCount - 1)
+
+    #expect(rewindSpeculativePromptCache([attention, recurrent], numTokens: 1) == 1)
+
+    #expect(attention.offset == SnapshotSlotFixture.tokenCount - 1)
+    #expect(
+        SnapshotSlotFixture.holdsTheSlot(
+            recurrent, of: snapshots, accepted: SnapshotSlotFixture.tokenCount - 1))
+    #expect(recurrent.speculativeSlotCount == 0)
+}
+
+@Test func discardingTheSpeculativeCheckpointsReleasesTheSlots() throws {
+    let snapshots = SnapshotSlotFixture.snapshots()
+    let cache = SnapshotSlotFixture.cache(after: snapshots)
+    let offset = cache.offset
+
+    discardSpeculativePromptCacheCheckpoints([cache])
+
+    #expect(cache.speculativeSlotCount == 0)
+    #expect(!cache.hasSpeculativeCheckpoint)
+    #expect(!cache.restoreSpeculativeCheckpoint())
+    #expect(cache.offset == offset)
+    #expect(
+        SnapshotSlotFixture.holdsTheSlot(
+            cache, of: snapshots, accepted: SnapshotSlotFixture.tokenCount))
+}
+
+@Test func aSavedCheckpointReplacesTheSlotsOfAnEarlierVerify() throws {
+    let snapshots = SnapshotSlotFixture.snapshots()
+    let cache = SnapshotSlotFixture.cache(after: snapshots)
+    let conv = MLXArray.ones([SnapshotSlotFixture.batch, SnapshotSlotFixture.stateRows, 1])
+    let state = MLXArray.ones(SnapshotSlotFixture.stateShape)
+
+    cache.saveSpeculativeCheckpoint(convState: conv, recurrentState: state, advancedBy: 1)
+
+    #expect(cache.speculativeSlotCount == 0)
+    #expect(cache.restoreSpeculativeCheckpoint())
+    #expect(arrayEqual(try #require(cache[1]), state).item(Bool.self))
+}
+
+@Test func theSnapshotSlotsAreLeftOutOfACopy() throws {
+    let cache = SnapshotSlotFixture.cache(after: SnapshotSlotFixture.snapshots())
+
+    let copied = try #require(cache.copy() as? MambaCache)
+
+    #expect(copied.speculativeSlotCount == 0)
+    #expect(!copied.hasSpeculativeCheckpoint)
+    #expect(copied.offset == cache.offset)
+    assertArraysClose(copied.state, cache.state)
+}
+
+@Test func theSnapshotSlotsAreLeftOutOfTheByteCount() throws {
+    let few = SnapshotSlotFixture.cache(
+        after: SnapshotSlotFixture.snapshots(tokens: SnapshotSlotFixture.fewestTokens))
+    let many = SnapshotSlotFixture.cache(
+        after: SnapshotSlotFixture.snapshots(tokens: GatedDeltaDecodeKernel.mostTokens))
+
+    #expect(few.residentByteCount == SnapshotSlotFixture.plainCache(like: few).residentByteCount)
+    #expect(few.residentByteCount == many.residentByteCount)
+}
+
+@Test func theSnapshotSlotsAreLeftOutOfAPromptCacheCheckpoint() throws {
+    let cache = SnapshotSlotFixture.cache(after: SnapshotSlotFixture.snapshots())
+    let tokens = Array(0 ..< cache.offset)
+
+    let withSlots = try #require(PromptCacheCheckpoint(caches: [cache], tokens: tokens, state: nil))
+    let withoutSlots = try #require(
+        PromptCacheCheckpoint(
+            caches: [SnapshotSlotFixture.plainCache(like: cache)], tokens: tokens, state: nil))
+
+    #expect(withSlots.byteCount == withoutSlots.byteCount)
+}
+
+@Test func theSnapshotSlotsAreLeftOutOfASavedPromptCache() throws {
+    let cache = SnapshotSlotFixture.cache(after: SnapshotSlotFixture.snapshots())
+    let url = tempURL()
+
+    try savePromptCache(url: url, cache: [cache], metadata: [:])
+    let (loaded, _) = try loadPromptCache(url: url)
+
+    let restored = try #require(loaded.first as? MambaCache)
+    #expect(restored.speculativeSlotCount == 0)
+    #expect(restored.state.count == cache.state.count)
+    assertArraysClose(restored.state, cache.state)
+}

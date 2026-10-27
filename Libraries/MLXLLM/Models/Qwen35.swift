@@ -352,17 +352,14 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
     ) -> MLXArray {
         let convState =
             cache?[0] ?? zeroStates(batch: inputs.dim(0), dtype: inputs.dtype).conv
-        let (out, newConvState, newRecState, checkpoint) = forward(
+        let (out, newConvState, newRecState, speculative) = forward(
             inputs, convState: convState, recState: cache?[1], mask: mask,
             checkpointAfter: checkpointAfter)
         if let cache {
             cache[0] = newConvState
             cache[1] = newRecState
-            if let checkpoint, let checkpointAfter {
-                cache.saveSpeculativeCheckpoint(
-                    convState: checkpoint.conv,
-                    recurrentState: checkpoint.recurrent,
-                    advancedBy: checkpointAfter)
+            if let speculative, let checkpointAfter {
+                cache.saveSpeculativeStates(speculative, checkpointAfter: checkpointAfter)
             }
             cache.advance(inputs.dim(1))
         }
@@ -381,6 +378,11 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
 
     /// The GDN body with state passed explicitly in and out so it can be
     /// traced.
+    ///
+    /// A verify pass (`checkpointAfter` inside the tokens) of two to
+    /// ``GatedDeltaDecodeKernel/mostTokens`` tokens runs in one kernel that
+    /// keeps the states after each token; any other verify pass keeps the
+    /// states after token `checkpointAfter` from the op path.
     func forward(
         _ x: MLXArray,
         convState: MLXArray,
@@ -391,12 +393,13 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
         output: MLXArray,
         convState: MLXArray,
         recurrentState: MLXArray,
-        checkpoint: (conv: MLXArray, recurrent: MLXArray)?
+        speculative: GatedDeltaSpeculativeStates?
     ) {
         let B = x.dim(0)
         let S = x.dim(1)
 
         var (qkv, z, b, a) = projectInputs(x, batch: B, sequence: S)
+        let checkpointAfter = checkpointAfter.flatMap { (1 ..< S).contains($0) ? $0 : nil }
 
         if let mask {
             qkv = MLX.where(mask[.ellipsis, .newAxis], qkv, 0)
@@ -404,12 +407,23 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
             qkv: qkv, z: z, b: b, a: a, convState: convState, recState: recState)
         {
             return (outProj(step.output), step.convState, step.recurrentState, nil)
+        } else if checkpointAfter != nil,
+            let step = speculativeKernelStep(
+                qkv: qkv, z: z, b: b, a: a, convState: convState, recState: recState),
+            let snapshots = step.snapshots
+        {
+            return (
+                outProj(step.output), step.convState, step.recurrentState, .snapshots(snapshots)
+            )
         }
 
         let body = recurrentBody(
             qkv: qkv, z: z, b: b, a: a, convState: convState, recState: recState, mask: mask,
             checkpointAfter: checkpointAfter)
-        return (outProj(body.output), body.convState, body.recurrentState, body.checkpoint)
+        return (
+            outProj(body.output), body.convState, body.recurrentState,
+            body.checkpoint.map { .checkpoint(conv: $0.conv, recurrent: $0.recurrent) }
+        )
     }
 
     /// The op path of the body, for any number of tokens: the conv, the q

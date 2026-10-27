@@ -695,11 +695,8 @@ public enum Qwen35Language {
                     cache[0] = result.convState
                 }
                 cache[1] = result.recurrentState
-                if let checkpoint = result.checkpoint, let checkpointAfter {
-                    cache.saveSpeculativeCheckpoint(
-                        convState: checkpoint.conv,
-                        recurrentState: checkpoint.recurrent,
-                        advancedBy: checkpointAfter)
+                if let speculative = result.speculative, let checkpointAfter {
+                    cache.saveSpeculativeStates(speculative, checkpointAfter: checkpointAfter)
                 }
                 cache.advance(inputs.dim(1))
             }
@@ -716,6 +713,11 @@ public enum Qwen35Language {
         }
 
         /// The GDN body with cache state passed explicitly for compiled decode.
+        ///
+        /// A verify pass (`checkpointAfter` inside the tokens) of two to
+        /// ``GatedDeltaDecodeKernel/mostTokens`` tokens runs in one kernel that
+        /// keeps the states after each token; any other verify pass keeps the
+        /// states after token `checkpointAfter` from the op path.
         func forward(
             _ x: MLXArray,
             convState: MLXArray,
@@ -726,18 +728,28 @@ public enum Qwen35Language {
             output: MLXArray,
             convState: MLXArray,
             recurrentState: MLXArray,
-            checkpoint: (conv: MLXArray, recurrent: MLXArray)?
+            speculative: GatedDeltaSpeculativeStates?
         ) {
             let B = x.dim(0)
             let S = x.dim(1)
 
             var (mixedQKV, z, b, a) = projectInputs(x, batch: B, sequence: S)
+            let checkpointAfter = checkpointAfter.flatMap { (1 ..< S).contains($0) ? $0 : nil }
             if let mask {
                 mixedQKV = MLX.where(mask[.ellipsis, .newAxis], mixedQKV, 0)
             } else if let step = decodeKernelStep(
                 qkv: mixedQKV, z: z, b: b, a: a, convState: convState, recState: recState)
             {
                 return (outProj(step.output), step.convState, step.recurrentState, nil)
+            } else if checkpointAfter != nil,
+                let step = speculativeKernelStep(
+                    qkv: mixedQKV, z: z, b: b, a: a, convState: convState, recState: recState),
+                let snapshots = step.snapshots
+            {
+                return (
+                    outProj(step.output), step.convState, step.recurrentState,
+                    .snapshots(snapshots)
+                )
             }
 
             let convInput = concatenated([convState, mixedQKV], axis: 1)
@@ -816,7 +828,8 @@ public enum Qwen35Language {
 
             let gated = norm(out, gate: z)
             return (
-                outProj(gated.reshaped(B, S, -1)), newConvState, newRecState, checkpoint
+                outProj(gated.reshaped(B, S, -1)), newConvState, newRecState,
+                checkpoint.map { .checkpoint(conv: $0.conv, recurrent: $0.recurrent) }
             )
         }
     }

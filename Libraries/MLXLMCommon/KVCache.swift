@@ -1819,14 +1819,58 @@ public class MambaCache: ArraysCache {
         try restoreBuiltInCache(className: "MambaCache", state: state, metaState: metaState)
     }
 
-    private struct SpeculativeCheckpoint {
-        var state: [MLXArray?]
+    /// The position of the cache: its offset and its batch masks.
+    private struct Position {
         var offset: Int
         var leftPadding: MLXArray?
         var lengths: MLXArray?
+
+        /// The position `tokenCount` tokens further on.
+        func advanced(by tokenCount: Int) -> Position {
+            Position(
+                offset: offset + tokenCount,
+                leftPadding: leftPadding.map { $0 - tokenCount },
+                lengths: lengths.map { $0 - tokenCount })
+        }
     }
 
-    private var speculativeCheckpoint: SpeculativeCheckpoint?
+    /// The states of the cache after the checkpoint token of a verify pass.
+    private struct SpeculativeCheckpoint {
+        var state: [MLXArray?]
+        var position: Position
+    }
+
+    /// The snapshot slots of the last verify pass: the states after each of
+    /// its tokens, from the position before the pass.
+    private struct SpeculativeSlots {
+        var snapshots: GatedDeltaDecodeKernel.Snapshots
+        /// The token after which ``restoreSpeculativeCheckpoint()`` stands.
+        var checkpointAfter: Int
+        /// The position before the verify pass.
+        var start: Position
+    }
+
+    /// The transient speculative data of the last verify pass: what a
+    /// rollback of that pass restores. It is never part of the state, a copy,
+    /// a prompt cache checkpoint, a saved prompt cache or the byte count.
+    private enum Speculative {
+        /// The states after the checkpoint token, from the op path.
+        case checkpoint(SpeculativeCheckpoint)
+        /// The states after each token, from the gated delta decode kernel.
+        case slots(SpeculativeSlots)
+    }
+
+    private var speculative: Speculative?
+
+    /// The position of the cache now.
+    private var position: Position {
+        get { Position(offset: offset, leftPadding: leftPadding, lengths: lengths) }
+        set {
+            offset = newValue.offset
+            leftPadding = newValue.leftPadding
+            lengths = newValue.lengths
+        }
+    }
 
     public init(leftPadding: [Int]? = nil) {
         super.init(size: 2, leftPadding: leftPadding)
@@ -1837,35 +1881,118 @@ public class MambaCache: ArraysCache {
     ///
     /// The caller saves BEFORE it moves this cache past the whole input, thus
     /// the checkpoint's position is the current position plus `tokenCount`.
+    /// The checkpoint replaces the slots of an earlier verify pass.
     package func saveSpeculativeCheckpoint(
         convState: MLXArray,
         recurrentState: MLXArray,
         advancedBy tokenCount: Int
     ) {
-        speculativeCheckpoint = SpeculativeCheckpoint(
-            state: [convState, recurrentState],
-            offset: offset + tokenCount,
-            leftPadding: leftPadding.map { $0 - tokenCount },
-            lengths: lengths.map { $0 - tokenCount })
+        speculative = .checkpoint(
+            SpeculativeCheckpoint(
+                state: [convState, recurrentState], position: position.advanced(by: tokenCount)))
+    }
+
+    /// Keep the snapshot slots of a verify pass of the gated delta decode
+    /// kernel, as transient speculative data: a rollback of `r` tokens selects
+    /// the slot after token `T - r` (``selectSpeculativeSlot(rollingBack:)``),
+    /// and ``restoreSpeculativeCheckpoint()`` selects the slot after token
+    /// `checkpointAfter`.
+    ///
+    /// The caller saves BEFORE it moves this cache past the whole input, as
+    /// for ``saveSpeculativeCheckpoint(convState:recurrentState:advancedBy:)``.
+    /// The slots replace the checkpoint or the slots of an earlier verify pass.
+    ///
+    /// - Parameters:
+    ///   - snapshots: The states after each token of the verify pass.
+    ///   - tokenCount: The token after which the checkpoint stands, from 1
+    ///     to the tokens of the pass less one.
+    package func saveSpeculativeSnapshots(
+        _ snapshots: GatedDeltaDecodeKernel.Snapshots, checkpointAfter tokenCount: Int
+    ) {
+        precondition(
+            (1 ..< snapshots.tokenCount).contains(tokenCount),
+            "a verify of \(snapshots.tokenCount) tokens has no checkpoint after token \(tokenCount)"
+        )
+        speculative = .slots(
+            SpeculativeSlots(snapshots: snapshots, checkpointAfter: tokenCount, start: position))
+    }
+
+    /// Save what a verify pass of a gated delta net layer keeps for a
+    /// rollback: the checkpoint of the op path or the slots of the kernel.
+    ///
+    /// - Parameters:
+    ///   - states: The states the pass keeps.
+    ///   - tokenCount: The token after which the checkpoint stands.
+    package func saveSpeculativeStates(
+        _ states: GatedDeltaSpeculativeStates, checkpointAfter tokenCount: Int
+    ) {
+        switch states {
+        case .checkpoint(let conv, let recurrent):
+            saveSpeculativeCheckpoint(
+                convState: conv, recurrentState: recurrent, advancedBy: tokenCount)
+        case .snapshots(let snapshots):
+            saveSpeculativeSnapshots(snapshots, checkpointAfter: tokenCount)
+        }
+    }
+
+    /// The number of snapshot slots of the last verify pass this cache keeps:
+    /// zero when it keeps none.
+    package var speculativeSlotCount: Int {
+        guard case .slots(let slots) = speculative else { return 0 }
+        return slots.snapshots.tokenCount
     }
 
     package var hasSpeculativeCheckpoint: Bool {
-        speculativeCheckpoint != nil
+        speculative != nil
+    }
+
+    /// Roll the last verify pass back by `tokenCount` tokens: the cache takes
+    /// the states after the accepted tokens from their slot, and releases the
+    /// slots.
+    ///
+    /// Each selected state is a separate array, a copy of its slot rather than
+    /// a view of it, so that the `(tokens, …)` snapshot buffer goes once the
+    /// copy is evaluated: ``rewindSpeculativePromptCache(_:numTokens:)``
+    /// evaluates the copies of every layer together.
+    ///
+    /// - Parameter tokenCount: The rejected tokens, from 1 to the tokens of
+    ///   the pass less one.
+    /// - Returns: False when the cache keeps no slots, or no slot for that
+    ///   rollback; the cache is then left as it was.
+    @discardableResult
+    package func selectSpeculativeSlot(rollingBack tokenCount: Int) -> Bool {
+        guard case .slots(let slots) = speculative,
+            (1 ..< slots.snapshots.tokenCount).contains(tokenCount)
+        else { return false }
+        let accepted = slots.snapshots.tokenCount - tokenCount
+        cache = [
+            contiguous(slots.snapshots.convState(afterToken: accepted)),
+            contiguous(slots.snapshots.recurrentState(afterToken: accepted)),
+        ]
+        position = slots.start.advanced(by: accepted)
+        speculative = nil
+        return true
     }
 
     @discardableResult
     package func restoreSpeculativeCheckpoint() -> Bool {
-        guard let checkpoint = speculativeCheckpoint else { return false }
-        cache = checkpoint.state
-        offset = checkpoint.offset
-        leftPadding = checkpoint.leftPadding
-        lengths = checkpoint.lengths
-        speculativeCheckpoint = nil
-        return true
+        switch speculative {
+        case .checkpoint(let checkpoint):
+            cache = checkpoint.state
+            position = checkpoint.position
+            speculative = nil
+            return true
+        case .slots(let slots):
+            return selectSpeculativeSlot(
+                rollingBack: slots.snapshots.tokenCount - slots.checkpointAfter)
+        case nil:
+            return false
+        }
     }
 
+    /// Release the transient speculative data: the checkpoint or the slots.
     package func discardSpeculativeCheckpoint() {
-        speculativeCheckpoint = nil
+        speculative = nil
     }
 
     public override func copy() -> any KVCache {
@@ -3789,9 +3916,23 @@ public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
 
 /// Rewind a one-token speculative tail in a hybrid attention/recurrent cache.
 /// Attention entries trim normally; Mamba entries restore the checkpoint the
-/// model captured after the round's committed bonus token.
+/// model captured after the round's committed bonus token, or select its
+/// snapshot slot. The restored recurrent states are evaluated together, so
+/// that the snapshot buffers of the verify pass go without a wait.
 @discardableResult
 package func rewindSpeculativePromptCache(
+    _ cache: [KVCache], numTokens: Int
+) -> Int {
+    let rewound = rewindSpeculativeEntries(cache, numTokens: numTokens)
+    if rewound > 0 {
+        asyncEval(cache.compactMap { $0 as? MambaCache }.flatMap(\.state))
+    }
+    return rewound
+}
+
+/// The rewind of ``rewindSpeculativePromptCache(_:numTokens:)``, before the
+/// restored states are evaluated.
+private func rewindSpeculativeEntries(
     _ cache: [KVCache], numTokens: Int
 ) -> Int {
     guard numTokens == 1,
