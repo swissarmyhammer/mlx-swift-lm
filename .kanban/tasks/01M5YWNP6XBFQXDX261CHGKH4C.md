@@ -1,0 +1,24 @@
+---
+assignees:
+- claude-code
+position_column: todo
+position_ordinal: '9680'
+title: 'MTP: greedy ChatSession text diverges from plain decoding on warm follow-up turns'
+---
+## What
+Found by the session benchmark of ^gwyhs9h (`qwen38FourBitMTPSystemPromptCache`, Release, Qwen3.8-27B-4bit + Qwen3.8-27B-MTP-4bit, blockSize 2, temperature 0). The MTP `ChatSession` writes different text from the plain `ChatSession` on 3 of 6 warm follow-up turns. This happened in both runs, so it is deterministic. Every cold turn matches: all three turn-0s, and the edit turn that rebuilds from scratch.
+
+- follow-ups turn 2 (same history in both sessions, cached 2544 / prefilled 29 in both): the texts differ after 3 characters. MTP `To add 15% sales tax to the price of $24` vs plain `To find the total with 15% sales tax`.
+- thinking turn 1 (same history, cached 2302 vs 2303): the texts differ inside the reasoning after 133 characters.
+- thinking turn 2: the texts differ at character 0.
+
+The divergence starts within the first few tokens after the warm suffix prefill. Both sessions prefill the same suffix over prefixes of the same length. The difference between the two sessions is how the target cache was built: MTP verification batches of T=2 tokens (the T-token GDN kernel of c4cacecb, and the `MTPSpeculativeTokenIterator` prefill) against sequential decode. That cache state carries into the next turn.
+
+- [ ] Find whether this is a near-tie that the batched-verify numerics flip, or a real state error in the warm path. One way: compare the target logits of the first token after the warm suffix prefill in the MTP session and the plain session, and compare against a cold MTP run over the same full prompt.
+- [ ] Fix it, or record why exact equality cannot hold and change the benchmark expectation to a documented tolerance.
+
+## Acceptance Criteria
+- [ ] `qwen38FourBitMTPSystemPromptCache()` gives MTP text equal to plain text on every turn, and the `matchesPlainText` rows of `mtpChatKnownGaps` (GenerationBenchmarkTests.swift) are removed.
+
+## Workflow
+- Use `/tdd`: write failing tests first, then implement to make them pass. #mtp #qwen38 #chat-session
