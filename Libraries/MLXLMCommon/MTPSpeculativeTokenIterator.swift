@@ -792,8 +792,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// the longest matching prefix, emit the bonus correction.
     mutating func speculateRound() {
         guard !passthrough else { return }
-        // A prior all-accepted round may keep one recurrent checkpoint until
-        // its pending output is drained so early finalization can rewind it.
+        // A prior round keeps the recurrent snapshot slots of the tokens it accepted until its
+        // pending output is drained, so early finalization can rewind its accepted drafts.
         discardSpeculativePromptCacheCheckpoints(mainCache)
 
         // A speculative round can emit up to `numDraft + 1` tokens: the
@@ -957,7 +957,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 )
                 // Qwen MTP: attention KV trims the rejected drafts while every
                 // GDN cache selects the snapshot slot of its last accepted
-                // token. The target's weights are not replayed on rejection.
+                // token, and keeps the slots of the accepted tokens for
+                // `finalizeGeneration`. The target's weights are not replayed
+                // on rejection.
                 mainCacheStorage.commitProcessedTokens(accepted + 1)
             }
             snapshotPlaced = reconcileSharedKVState(
@@ -1386,9 +1388,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
     mutating func finalizeGeneration() {
         defer { processor?.finalizeGeneration() }
-        // A fully consumed all-accepted round can still retain the recurrent
-        // checkpoint used for early-finalization rollback. Release it even
-        // when no committed lookahead remains.
+        // A round retains the recurrent snapshot slots of the tokens it accepted, the
+        // checkpoint of an early-finalization rewind, whether it rejected drafts or not.
+        // Release them even when no committed lookahead remains.
         var discardedTargetTokens = 0
         defer {
             discardSpeculativePromptCacheCheckpoints(mainCache)

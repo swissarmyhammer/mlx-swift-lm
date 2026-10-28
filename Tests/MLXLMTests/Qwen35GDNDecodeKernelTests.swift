@@ -312,8 +312,11 @@ struct Qwen35GDNDecodeKernelTests {
                 #expect(cache.selectSpeculativeSlot(rollingBack: rollback))
 
                 let accepted = try Self.plainKernelRun(operands.prefix(tokens - rollback))
-                #expect(cache.offset == tokens - rollback)
-                #expect(cache.speculativeSlotCount == 0)
+                let kept = tokens - rollback
+                #expect(cache.offset == kept)
+                // A cache that holds only the bonus token of the pass has no slot left to
+                // roll back into, and releases the slots.
+                #expect(cache.speculativeSlotCount == (kept > 1 ? kept : 0))
                 #expect(Self.sameBits(try #require(cache[0]), accepted.convState))
                 #expect(Self.sameBits(try #require(cache[1]), accepted.recurrentState))
             }

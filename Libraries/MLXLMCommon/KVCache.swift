@@ -674,8 +674,11 @@ public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
 /// normally; Mamba entries select the snapshot slot the verify kept after its
 /// last accepted token. A verify of `T` tokens keeps `T` slots and rewinds
 /// one to `T - 1` tokens: the bonus token at its head is always committed.
-/// The restored recurrent states are evaluated together, so that the
-/// snapshot buffers of the verify pass go without a wait.
+/// A rewind keeps the slots of the tokens it keeps, thus a later rewind of the
+/// same verify, short of its bonus token, rewinds further: a stream that stops
+/// before it returns its accepted drafts rewinds them. The restored recurrent
+/// states are evaluated together, so that no state holds on to a snapshot
+/// buffer of the verify pass once the slots are released.
 ///
 /// - Parameters:
 ///   - cache: The cache of each layer.

@@ -233,6 +233,16 @@ private enum SnapshotSlotFixture {
         return plain
     }
 
+    /// The slots a cache keeps after a rollback that kept `kept` tokens of the
+    /// verify: their slots, or none when it kept the bonus token only, since
+    /// no rollback can reject that token.
+    ///
+    /// - Parameter kept: The tokens the rollback kept.
+    /// - Returns: The slot count.
+    static func slotCount(keeping kept: Int) -> Int {
+        kept > 1 ? kept : 0
+    }
+
     /// Tells if a cache holds the states after `accepted` tokens of the
     /// verify, at the position of those tokens.
     static func holdsTheSlot(
@@ -257,7 +267,25 @@ private enum SnapshotSlotFixture {
 
         let accepted = SnapshotSlotFixture.tokenCount - rollback
         #expect(SnapshotSlotFixture.holdsTheSlot(cache, of: snapshots, accepted: accepted))
-        #expect(cache.speculativeSlotCount == 0)
+        #expect(cache.speculativeSlotCount == SnapshotSlotFixture.slotCount(keeping: accepted))
+    }
+}
+
+@Test func aRollbackKeepsTheSlotsOfTheKeptTokensForAFurtherRollback() throws {
+    for rollback in 1 ..< SnapshotSlotFixture.tokenCount {
+        let kept = SnapshotSlotFixture.tokenCount - rollback
+        for furtherRollback in 1 ..< kept {
+            let snapshots = SnapshotSlotFixture.snapshots()
+            let cache = SnapshotSlotFixture.cache(after: snapshots)
+
+            #expect(cache.selectSpeculativeSlot(rollingBack: rollback))
+            #expect(cache.selectSpeculativeSlot(rollingBack: furtherRollback))
+
+            let accepted = kept - furtherRollback
+            #expect(SnapshotSlotFixture.holdsTheSlot(cache, of: snapshots, accepted: accepted))
+            #expect(cache.speculativeSlotCount == SnapshotSlotFixture.slotCount(keeping: accepted))
+            #expect(!cache.selectSpeculativeSlot(rollingBack: accepted))
+        }
     }
 }
 
@@ -296,7 +324,28 @@ private func hybridCacheAfterAVerify(of snapshots: GatedDeltaDecodeKernel.Snapsh
         let accepted = SnapshotSlotFixture.tokenCount - rollback
         #expect(attention.offset == accepted)
         #expect(SnapshotSlotFixture.holdsTheSlot(recurrent, of: snapshots, accepted: accepted))
-        #expect(recurrent.speculativeSlotCount == 0)
+        #expect(recurrent.speculativeSlotCount == SnapshotSlotFixture.slotCount(keeping: accepted))
+    }
+}
+
+@Test func aRewoundHybridCacheRewindsItsKeptTokensAgain() throws {
+    for rollback in 1 ..< SnapshotSlotFixture.tokenCount {
+        let kept = SnapshotSlotFixture.tokenCount - rollback
+        for furtherRollback in 1 ..< kept {
+            let snapshots = SnapshotSlotFixture.snapshots()
+            let (attention, recurrent) = hybridCacheAfterAVerify(of: snapshots)
+
+            #expect(
+                rewindSpeculativePromptCache([attention, recurrent], numTokens: rollback)
+                    == rollback)
+            #expect(
+                rewindSpeculativePromptCache([attention, recurrent], numTokens: furtherRollback)
+                    == furtherRollback)
+
+            let accepted = kept - furtherRollback
+            #expect(attention.offset == accepted)
+            #expect(SnapshotSlotFixture.holdsTheSlot(recurrent, of: snapshots, accepted: accepted))
+        }
     }
 }
 

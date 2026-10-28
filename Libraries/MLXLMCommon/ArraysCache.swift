@@ -256,6 +256,10 @@ public class MambaCache: ArraysCache {
         var snapshots: GatedDeltaDecodeKernel.Snapshots
         /// The position before the verify pass.
         var start: Position
+        /// The tokens of the pass the cache holds: all of them after the pass,
+        /// the kept tokens after a rollback. A rollback selects among the slots
+        /// of these tokens only.
+        var keptTokenCount: Int
     }
 
     /// The transient speculative data of the last verify pass: what a
@@ -290,41 +294,57 @@ public class MambaCache: ArraysCache {
     ///
     /// - Parameter snapshots: The states after each token of the verify pass.
     package func saveSpeculativeSnapshots(_ snapshots: GatedDeltaDecodeKernel.Snapshots) {
-        speculative = SpeculativeSlots(snapshots: snapshots, start: position)
+        speculative = SpeculativeSlots(
+            snapshots: snapshots, start: position, keptTokenCount: snapshots.tokenCount)
     }
 
-    /// The number of snapshot slots of the last verify pass this cache keeps:
-    /// zero when it keeps none.
+    /// The number of snapshot slots of the last verify pass this cache can
+    /// select: the tokens of the pass it holds, or zero when it keeps no slots.
     package var speculativeSlotCount: Int {
-        speculative?.snapshots.tokenCount ?? 0
+        speculative?.keptTokenCount ?? 0
     }
 
     /// Roll the last verify pass back by `tokenCount` tokens: the cache takes
-    /// the states after the accepted tokens from their slot, and releases the
-    /// slots.
+    /// the states after the accepted tokens from their slot.
+    ///
+    /// The cache keeps the slots of the accepted tokens, as it keeps the slots
+    /// of a pass that accepted every token, so that a later rollback of the
+    /// same pass rewinds into them: a stream that stops before it returns the
+    /// accepted tokens rewinds them again. The slots go with
+    /// ``discardSpeculativeCheckpoint()`` or with the slots of the next pass,
+    /// and at once when the rollback keeps the bonus token of the pass only.
     ///
     /// Each selected state is a separate array, a copy of its slot rather than
-    /// a view of it, so that the `(tokens, …)` snapshot buffer goes once the
-    /// copy is evaluated: ``rewindSpeculativePromptCache(_:numTokens:)``
+    /// a view of it, so that the `(tokens, …)` snapshot buffer goes with the
+    /// slots and not with the states: ``rewindSpeculativePromptCache(_:numTokens:)``
     /// evaluates the copies of every layer together.
     ///
-    /// - Parameter tokenCount: The rejected tokens, from 1 to the tokens of
-    ///   the pass less one.
+    /// - Parameter tokenCount: The rejected tokens, from 1 to the kept tokens
+    ///   of the pass less one.
     /// - Returns: False when the cache keeps no slots, or no slot for that
     ///   rollback; the cache is then left as it was.
     @discardableResult
     package func selectSpeculativeSlot(rollingBack tokenCount: Int) -> Bool {
-        guard let slots = speculative, (1 ..< slots.snapshots.tokenCount).contains(tokenCount)
+        guard let slots = speculative, (1 ..< slots.keptTokenCount).contains(tokenCount)
         else { return false }
-        let accepted = slots.snapshots.tokenCount - tokenCount
+        let accepted = slots.keptTokenCount - tokenCount
         cache = [
             contiguous(slots.snapshots.convState(afterToken: accepted)),
             contiguous(slots.snapshots.recurrentState(afterToken: accepted)),
         ]
         position = slots.start.advanced(by: accepted)
-        speculative = nil
+        // No rollback rejects the head token of a pass, thus a pass that holds only that token
+        // has no slot left to roll back into, and gives its snapshot buffer back at once.
+        speculative =
+            accepted > Self.unrejectableHeadTokenCount
+            ? SpeculativeSlots(
+                snapshots: slots.snapshots, start: slots.start, keptTokenCount: accepted)
+            : nil
         return true
     }
+
+    /// The tokens at the head of a verify pass that no rollback rejects: its bonus token.
+    private static let unrejectableHeadTokenCount = 1
 
     /// Release the transient speculative data: the snapshot slots.
     package func discardSpeculativeCheckpoint() {

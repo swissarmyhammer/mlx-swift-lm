@@ -1,72 +1,10 @@
 import Foundation
 import MLX
 import MLXLMTestSupport
-import MLXNN
 import Testing
 
 @testable import MLXLLM
 @testable import MLXLMCommon
-
-/// A drafter that proposes the tokens of a script: the plain greedy decode of the target. In
-/// each round it spoils the draft at one depth, so that the target rejects every draft from that
-/// depth on. The depths of the rounds cycle through each count of accepted drafts, the last of
-/// which spoils nothing.
-///
-/// A round is known by its position, the tokens the target cache holds before it, thus the
-/// drafter keeps no state of its own. The plan of positions follows from the depths: a round
-/// that accepts `d` drafts moves the position by `d + 1`.
-private final class ScriptedRejectionDrafter: Module, MTPDrafterModel {
-
-    /// The prompt and the plain greedy tokens after it.
-    private let script: [Int]
-
-    /// The count of accepted drafts of the round at each position of the plan.
-    private let acceptedDraftsAtPosition: [Int: Int]
-
-    /// The tokens of the vocabulary of the target.
-    private let vocabularySize: Int
-
-    var maximumBlockSize: Int? { nil }
-    var requiresSharedTargetKV: Bool { false }
-    var requiresGreedySampling: Bool { true }
-
-    /// - Parameters:
-    ///   - script: The prompt and the plain greedy tokens after it.
-    ///   - promptLength: The tokens of the prompt: the position of the first round.
-    ///   - blockSize: The tokens of each round: the drafts and the bonus token.
-    ///   - vocabularySize: The tokens of the vocabulary of the target.
-    init(script: [Int], promptLength: Int, blockSize: Int, vocabularySize: Int) {
-        self.script = script
-        self.vocabularySize = vocabularySize
-        var plan: [Int: Int] = [:]
-        var position = promptLength
-        var round = 0
-        while position < script.count {
-            let accepted = round % blockSize
-            plan[position] = accepted
-            position += accepted + 1
-            round += 1
-        }
-        self.acceptedDraftsAtPosition = plan
-    }
-
-    func validateCompatibility(with target: any LanguageModel) throws {}
-
-    func draftBlock(
-        target: any LanguageModel, lastToken: MLXArray, lastHidden: MLXArray,
-        sharedKV: [String: (MLXArray, MLXArray)], positionDeltas: MLXArray?, queryOffset: Int,
-        blockSize: Int, sampler: any LogitSampler
-    ) -> MLXArray {
-        let draftCount = blockSize - 1
-        let spoiledDepth = acceptedDraftsAtPosition[queryOffset] ?? draftCount
-        let drafts = (0 ..< draftCount).map { depth in
-            let position = queryOffset + 1 + depth
-            let token = position < script.count ? script[position] : 0
-            return Int32(depth == spoiledDepth ? (token + 1) % vocabularySize : token)
-        }
-        return MLXArray(drafts, [lastToken.dim(0), draftCount])
-    }
-}
 
 /// A verify of a hybrid target followed by a rewind of its rejected drafts leaves the main cache
 /// of a run of the kept tokens only, for each count of rejected drafts.
@@ -87,7 +25,7 @@ struct Qwen35VerifyRewindTests {
     private static let verifyTokenCount = GatedDeltaDecodeKernel.mostTokens
 
     /// The prompt of each greedy decode of the iterator tests.
-    private static let decodePrompt = [3, 14, 15, 9, 2, 6, 5, 35]
+    static let decodePrompt = [3, 14, 15, 9, 2, 6, 5, 35]
 
     /// The tokens each greedy decode of the iterator tests generates: two cycles of the plan of
     /// the largest block size.
@@ -96,10 +34,6 @@ struct Qwen35VerifyRewindTests {
     /// The block sizes of the iterator tests: one draft, up to the most drafts a hybrid target
     /// rewinds.
     static let blockSizes = Array(2 ... GatedDeltaDecodeKernel.mostTokens)
-
-    /// The bound of a cache that MTP decode built against a cache that one prefill built: both
-    /// add in float32, each in its own order.
-    private static let rebuiltCacheTolerance = AttentionKernelTolerance.float32
 
     /// The cache of `model` after the prompt.
     private func promptCache(_ model: Qwen35TextModel) throws -> [KVCache] {
@@ -179,8 +113,9 @@ struct Qwen35VerifyRewindTests {
     ) throws -> ScriptedDecode {
         let cache = try fixture.target.newCache(parameters: nil)
         let drafter = ScriptedRejectionDrafter(
-            script: script, promptLength: Self.decodePrompt.count, blockSize: blockSize,
-            vocabularySize: Qwen35MTPFixture.vocabularySize)
+            plan: ScriptedDraftPlan(
+                script: script, promptLength: Self.decodePrompt.count, blockSize: blockSize,
+                vocabularySize: Qwen35MTPFixture.vocabularySize))
         var iterator = try MTPSpeculativeTokenIterator(
             input: LMInput(tokens: MLXArray(Self.decodePrompt.map(Int32.init))),
             mainModel: fixture.target, drafter: drafter, mainCache: cache,
@@ -221,16 +156,6 @@ struct Qwen35VerifyRewindTests {
         #expect(decode.rejectedDraftCounts == Set(0 ..< blockSize))
 
         let held = KVCacheStorage(decode.cache, plan: .disabled).processedTokenCount
-        let rebuilt = try fixture.target.newCache(parameters: nil)
-        eval(
-            fixture.target(
-                LMInput.Text(tokens: MLXArray(script[..<held].map(Int32.init))[.newAxis]),
-                cache: rebuilt, state: nil
-            ).logits)
-        #expect(decode.cache.map(\.offset) == rebuilt.map(\.offset))
-        for (got, expected) in zip(decode.cache.flatMap(\.state), rebuilt.flatMap(\.state)) {
-            let gap = AttentionKernelTolerance.worstGap(got, expected)
-            #expect(gap <= Self.rebuiltCacheTolerance, "worst gap \(gap)")
-        }
+        try fixture.expectCache(decode.cache, holdsThePrefillOf: Array(script[..<held]))
     }
 }
