@@ -23,9 +23,12 @@ private let stateStep: Float = 1
 /// The places of the attention head outputs among the outputs of a segment.
 private typealias Head = CompiledDecodeSegment.AttentionOutput
 
-/// What ``ArithmeticHybridLayer`` adds to its normed input for each output of its attention
-/// head, in the order of ``Head``, so each output differs from the others.
-private let headOffsets: [Float] = [1, 2, 3, 4]
+/// What ``ArithmeticHybridLayer`` adds to its normed input for the attention head output at
+/// `place` (one of the places of ``Head``): one more than the place, so each output differs
+/// from the others and from the normed input.
+private func headOffset(_ place: Int) -> Float {
+    Float(place + 1)
+}
 
 /// A hybrid decoder layer whose blocks are plain arithmetic, so each output of a shared body
 /// shows which blocks made it. Its norms are real `RMSNorm`s with their initial weights.
@@ -54,8 +57,8 @@ private final class ArithmeticHybridLayer: Module, HybridDecodeLayer {
         queries: MLXArray, gate: MLXArray, keys: MLXArray, values: MLXArray
     ) {
         (
-            x + headOffsets[Head.queries], x + headOffsets[Head.gate],
-            x + headOffsets[Head.keys], x + headOffsets[Head.values]
+            x + headOffset(Head.queries), x + headOffset(Head.gate),
+            x + headOffset(Head.keys), x + headOffset(Head.values)
         )
     }
 
@@ -129,10 +132,10 @@ private func expectEqual(
 
         let head = layer.attentionPreBody(x: x)
         let normed = layer.inputLayerNorm(x)
-        expectEqual(head.queries, normed + headOffsets[Head.queries])
-        expectEqual(head.gate, normed + headOffsets[Head.gate])
-        expectEqual(head.keys, normed + headOffsets[Head.keys])
-        expectEqual(head.values, normed + headOffsets[Head.values])
+        expectEqual(head.queries, normed + headOffset(Head.queries))
+        expectEqual(head.gate, normed + headOffset(Head.gate))
+        expectEqual(head.keys, normed + headOffset(Head.keys))
+        expectEqual(head.values, normed + headOffset(Head.values))
 
         expectEqual(
             layer.attentionPostBody(x: x, attention: attention, gate: gate),
@@ -164,8 +167,8 @@ private func expectEqual(
         expectEqual(outputs[0], hidden)
         expectEqual(outputs[1], convState + stateStep)
         expectEqual(outputs[2], recState + stateStep)
-        expectEqual(outputs[head + Head.queries], normed + headOffsets[Head.queries])
-        expectEqual(outputs[head + Head.values], normed + headOffsets[Head.values])
+        expectEqual(outputs[head + Head.queries], normed + headOffset(Head.queries))
+        expectEqual(outputs[head + Head.values], normed + headOffset(Head.values))
     }
 
     @Test func segmentBodyOfADecodeStepEndsWithTheFinalNorm() {

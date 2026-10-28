@@ -96,6 +96,38 @@ comments:
     - evidence: 6 files — Libraries/MLXLMCommon/HybridDecodeLayer.swift (new), Libraries/MLXLMCommon/CompiledDecodeSegments.swift, Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift, Libraries/MLXLLM/Models/Qwen35.swift, Tests/MLXLMTests/HybridDecodeLayerTests.swift (new), Tests/MLXLMTests/Qwen35MTPTests.swift. `swift build --build-tests` 0 compiler warnings; MLXLMTests 895 XCTest 0 failures + 1913 Swift Testing passed (HybridDecodeLayerTests, Qwen35CompiledVerifyTests green); MLXGuidedGenerationTests 70, MLXFoundationModelsTests 376, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 passed. Release qwen38FourBitMTPGeneration (load avg 11.2 before / 7.1 after, other projects' test runs active): plain 59.2 / 59.2 / 59.3, MTP 90.7 / 81.6 / 79.4 tok/s math/code/prose, acceptance 93.9% / 73.6% / 69.0%, matches plain: true x3, TEST SUCCEEDED.
     - next: /review (all 5 findings of 2026-10-28 09:47 checked); follow-up ^5fq4w2k for Qwen3Next/VLM.
   timestamp: 2026-10-28T15:07:32.827866+00:00
+- actor: claude-code
+  id: 01m61hky0zmv9e30da4qgwxkv8
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (c2b33e7c) — 1 finding (confirmed 3, refuted 0, attempted 7, failed 0): Tests/MLXLMTests/HybridDecodeLayerTests.swift:28 code-hygiene/magic-numbers-swift. All 5 findings from 2026-10-28 09:47 are checked and the re-review raised none of them again.
+    - next: replace the magic numbers in Tests/MLXLMTests/HybridDecodeLayerTests.swift (new in this commit) with named constants throughout the file, then re-review.
+  timestamp: 2026-10-28T15:21:19.647890+00:00
+- actor: claude-code
+  id: 01m61hmh3yghmxwkzkarf46rv0
+  text: |-
+    ### finish iteration 3 — findings
+    - implement: changed — 6 files (HybridDecodeLayer shared bodies, no force unwraps)
+    - test: green — 5 bundles (MLXLMTests 895 + 1913); Release qwen38FourBitMTPSystemPromptCache pass (edit turn 123 tok, MTP on); qwen38FourBitMTPGeneration 90.7/81.6/79.4, = plain
+    - commit: c2b33e7c
+    - review: findings — Tests/MLXLMTests/HybridDecodeLayerTests.swift:28
+  timestamp: 2026-10-28T15:21:39.198025+00:00
+- actor: claude-code
+  id: 01m61j1vtkavf9vrpsarr3my8e
+  text: |-
+    Review finding (2026-10-28 10:18) worked: Tests/MLXLMTests/HybridDecodeLayerTests.swift:28 code-hygiene/magic-numbers-swift — Magic numbers should be replaced by named constants.
+    - Cause: the `headOffsets: [Float] = [1, 2, 3, 4]` list. Its values are the places of `CompiledDecodeSegment.AttentionOutput` (queries 0, gate 1, keys 2, values 3) plus one. It is replaced by `headOffset(_ place: Int) -> Float { Float(place + 1) }`, and each call site uses `headOffset(Head.x)`. The values are unchanged, so the tests check the same thing.
+    - Check: swiftlint with the rule's child config (only_rules: [no_magic_numbers]; severity warning; test_parent_classes [QuickSpec, XCTestCase]; allowed_numbers [0, 1, -1, 100]; the repo has no .swiftlint.yml parent). Before the change it reported 3 violations, all on line 28. After: "Found 0 violations" in the file. The other literals (state offsets 10/20/5/7, indices, `0 ..< 3`) are not flagged by the rule.
+    - Note: the sah `files` `edit file` op with `replace_all: true` replaced only the first occurrence each time (replacements_made: 1). Edit the remaining call sites one by one, or check the count afterwards.
+    - `benchmarkVerification()` in MTPGreedyVerificationTests shows as skipped in every run. It was already there: it runs only when `MTP_GREEDY_BENCHMARK=1`. This change does not touch it.
+  timestamp: 2026-10-28T15:28:56.147226+00:00
+- actor: claude-code
+  id: 01m61j1yvczt5qnqpqpqrdkxj3
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Tests/MLXLMTests/HybridDecodeLayerTests.swift. swiftlint no_magic_numbers (review config): 0 violations in the file, down from 3. `swift build --build-tests` has 0 compiler warnings (only the SwiftPM "missing creator for mutated node" message about the Cmlx bundle, which was already there). xcrun xctest: MLXLMTests 895 XCTest with 0 failures + 1913 Swift Testing tests in 168 suites passed (HybridDecodeLayerTests passed; benchmarkVerification skipped, gated on MTP_GREEDY_BENCHMARK=1); MLXFoundationModelsTests 376 passed; MLXGuidedGenerationTests 70 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 5 XCTest with 0 failures.
+    - next: /review (finding of 2026-10-28 10:18 checked)
+  timestamp: 2026-10-28T15:28:59.244743+00:00
 depends_on:
 - 01M5QWJGM1679S6CWHFCST7WAN
 - 01M5SWXS9E09Y97PV3BV51TPYA
@@ -136,3 +168,17 @@ A verify pass has `x.dim(1) >= 2`. The guards in `Qwen35DecoderLayer.callAsFunct
 - [x] `Libraries/MLXLLM/Models/Qwen35.swift:1128` `duplication/duplication` — The changed `segmentBody(at:_:verify:)` is a near-verbatim copy of the segment body in two other models. The change added the verify path (checkpoint states, speculative outputs, and the final-norm guard) to this MLXLLM copy only, so the copies now diverge. Any fix to one side has to be re-applied by hand to the others. Extract one shared segment-body function, parameterized by the verify shape and by the layer and norm modules, and have Qwen35 call it. Qwen3Next and the VLM copy are outside this change, so either route them through the same shared function in a separate task or record the divergence as a known follow-up. Do not edit the counterparts inside this change.
 - [x] `Libraries/MLXLMCommon/CompiledDecodeSegments.swift:133` `code-hygiene/dead-code-swift` — var.instance `tokens` is assignOnlyProperty.
 - [x] `Tests/MLXLMTests/Qwen35MTPTests.swift:2040` `reuse/reuse` — The new `tokens(_:of:seed:)` helper reimplements the seeded-token generator that already exists as `prompt(length:)`. Both call `MLXRandom.randInt` over a vocabulary range with a seeded key and differ only in the vocabulary source, the seed, and the `[1, count]` shape. Keeping two copies means the token-generation logic can drift between the MTP and compiled-verify suites. Generalize the existing helper instead of adding a parallel one. Move the seeded-token generator to file scope (or a shared fixture) with parameters for vocabulary size, count, and seed, then have `prompt(length:)` and `tokens(_:of:seed:)` both call it. If the shapes must differ, keep the `[1, count]` reshape at the call site in `verify`.
+
+## Review Findings (2026-10-28 10:18)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 6 file(s) reviewed, 6 not reviewed.
+
+> 6 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWS53X7RKJKABDTBTFKTSY.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWS53X7RKJKABDTBTFKTSY.md` — no validator matches this file
+> - `.kanban/tasks/01M5SKBCEWG4D25SZZNGG7BVM7.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5SKBCEWG4D25SZZNGG7BVM7.md` — no validator matches this file
+> - `.kanban/tasks/01M61GS47DC6636NQJ95FQ4W2K.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M61GS47DC6636NQJ95FQ4W2K.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/HybridDecodeLayerTests.swift:28` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
