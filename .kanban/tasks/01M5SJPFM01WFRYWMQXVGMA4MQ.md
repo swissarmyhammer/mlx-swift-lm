@@ -123,6 +123,38 @@ comments:
     - evidence: swift build --build-tests (only known "missing creator ... mlx-swift_Cmlx.bundle" warning); xcrun xctest MLXLMTests — 895 XCTest, 0 failures, 1874 Swift Testing passed; MLXFoundationModelsTests — 376 passed; only skip is the env-gated benchmarkVerification() (known pre-existing)
     - next: review/commit (nothing committed by this step)
   timestamp: 2026-10-28T00:54:45.844869+00:00
+- actor: claude-code
+  id: 01m6004rnwhzfmsgf8haem2vcp
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (bea60e67) — 1 finding (confirmed 1, refuted 0): Tests/MLXLMTests/MTPDrafterContinuationTests.swift:375 reuse/reuse. Prior 19:35 items verified fixed in the diff: batch checks for seed token, seed hidden row and drafter caches against the boundary row (seedProposal/checkShape/checkCacheBatch) with seedHiddenBatch/seedTokenBatch/seedTokenCount/cacheBatch tamper cases; magic numbers replaced by batchAxis/hiddenAxis/excessSeedTokenCount. Drafter KV head count / head size validation is not in scope: this is a diff op, and that check concerns unchanged loader code that the engine did not flag.
+    - next: delete the test-local `batchAxis` and use `MTPDrafterContinuation.batchAxis`, then re-review.
+  timestamp: 2026-10-28T00:56:42.428917+00:00
+- actor: claude-code
+  id: 01m6005aa4xm3papsdhthb6jdd
+  text: |-
+    ### finish iteration 3 — findings
+    - implement: changed — 2 files (batch/seed shape checks on load; named axis constants)
+    - test: green — MLXLMTests 895 XCTest 0 failures + 1874 Swift Testing; FoundationModels 376
+    - commit: bea60e67
+    - review: findings — Tests/MLXLMTests/MTPDrafterContinuationTests.swift:375
+  timestamp: 2026-10-28T00:57:00.484514+00:00
+- actor: claude-code
+  id: 01m600f6agb67skwtcrzw1c0cf
+  text: |-
+    Picked back up from review for the 2026-10-27 19:55 finding (reuse/reuse, test-local `batchAxis`).
+    - Deleted the tamper enum's `private static let batchAxis = 0`; all three uses (`boundaryHiddenWidth` shape, `cacheBatch` concatenation, `writeSeed`) now read `MTPDrafterContinuation.batchAxis` directly (internal, visible through `@testable import MLXLMCommon`). `hiddenAxis` and `excessSeedTokenCount` kept: the library has no counterpart.
+    - Same cause elsewhere in the file: the `cacheKind` tamper hard-coded the prompt-cache class names "KVCache" and "RotatingKVCache", which the library defines as `KVCacheSimple.serializedClassName` and `RotatingKVCache.serializedClassName`. It now reads both through `try #require(...)` (they are `String?`).
+    - Checked and left: `"0"` (formatVersion tamper) is a deliberately unknown version, not a restatement of `serializationFormatVersion`; `"another drafter"` duplicates the suite's own `foreignDrafterID` text, not a library constant; the `1` middle dimension of hidden rows / seed tokens has no named library constant (the loader writes `[nil, 1, hiddenSize]` / `[batchSize, 1]` inline).
+    - TDD note: test-only refactor, no production change, so no RED step; the tamper test still runs all 12 cases and passes.
+  timestamp: 2026-10-28T01:02:24.080274+00:00
+- actor: claude-code
+  id: 01m600fanjc8nchwg5qz1s6p9d
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Tests/MLXLMTests/MTPDrafterContinuationTests.swift. `swift build --build-tests`: only the known "missing creator ... mlx-swift_Cmlx.bundle" warning. `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 895 XCTest, 0 failures; Swift Testing 1874 tests in 166 suites passed (tamper test 12 cases), only the known benchmarkVerification() skip. 2026-10-27 19:55 finding checked. Not committed.
+    - next: /review. Left in doing.
+  timestamp: 2026-10-28T01:02:28.530295+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
@@ -183,3 +215,13 @@ Give both caches one shared value type, so that the drafter rules are written on
 
 - [x] `Libraries/MLXLMCommon/MTPDrafterContinuationSerialization.swift:196` `completeness/invariant-propagation` — The new seed-row check validates the seed hidden row's rank, dim(1) and width against `hiddenSize`, but not its batch dimension. The seed token and the boundary row are never compared to it either. A file whose seed hidden row has a different batch size from the seed token or the boundary row still loads, and the mismatch surfaces at the first drafter call. That is the failure this change is meant to move to load time. In `checkHiddenRow` or in `drafterState`, require the batch dimension of the boundary row, the seed hidden row and the seed token to agree. Add one tamper case that changes the seed batch and asserts `KVCacheError` at load.
 - [x] `Tests/MLXLMTests/MTPDrafterContinuationTests.swift:383` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+
+## Review Findings (2026-10-27 19:55)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 2 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5SJPFM01WFRYWMQXVGMA4MQ.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5SJPFM01WFRYWMQXVGMA4MQ.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/MTPDrafterContinuationTests.swift:375` `reuse/reuse` — The tamper enum declares its own `private static let batchAxis = 0`, which repeats the axis constant the library already defines for the same purpose. The two copies can drift apart, and a test that uses its own axis could pass while the restore check reads a different axis. Delete the private `batchAxis` at line 375 and refer to `MTPDrafterContinuation.batchAxis` in its place. Keep `hiddenAxis` as is, since the library has no matching constant for it.

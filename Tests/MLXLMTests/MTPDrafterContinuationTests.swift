@@ -371,9 +371,6 @@ enum MTPDrafterContinuationTamper: String, CaseIterable, CustomTestStringConvert
     /// The shapes of a seed proposal, from the batch and the width of the boundary hidden row.
     typealias SeedShapes = (_ batch: Int, _ width: Int) -> (token: [Int], hidden: [Int])
 
-    /// The axis of the batch rows of every serialized array.
-    private static let batchAxis = 0
-
     /// The axis of the hidden columns of a hidden row.
     private static let hiddenAxis = -1
 
@@ -399,10 +396,12 @@ enum MTPDrafterContinuationTamper: String, CaseIterable, CustomTestStringConvert
             let next = try integer(Key.nextPosition, in: metadata)
             metadata[Key.cacheStartPosition] = String(next + 1)
         case .cacheKind:
-            let simpleCacheKeys = metadata.filter { $0.value == "KVCache" }.keys
+            let simpleClassName = try #require(KVCacheSimple.serializedClassName)
+            let rotatingClassName = try #require(RotatingKVCache.serializedClassName)
+            let simpleCacheKeys = metadata.filter { $0.value == simpleClassName }.keys
             guard !simpleCacheKeys.isEmpty else { throw MissingTarget() }
             for key in simpleCacheKeys {
-                metadata[key] = "RotatingKVCache"
+                metadata[key] = rotatingClassName
             }
         case .boundaryHidden:
             guard arrays.removeValue(forKey: Key.boundaryHidden) != nil else {
@@ -411,7 +410,8 @@ enum MTPDrafterContinuationTamper: String, CaseIterable, CustomTestStringConvert
         case .boundaryHiddenWidth:
             let row = try Self.boundaryRow(of: arrays)
             arrays[Key.boundaryHidden] = MLXArray.zeros(
-                [row.dim(Self.batchAxis), 1, row.dim(Self.hiddenAxis) + 1], dtype: row.dtype)
+                [row.dim(MTPDrafterContinuation.batchAxis), 1, row.dim(Self.hiddenAxis) + 1],
+                dtype: row.dtype)
         case .seedHiddenWidth:
             try Self.writeSeed(into: &arrays) { batch, width in
                 ([batch, 1], [batch, 1, width + 1])
@@ -432,7 +432,9 @@ enum MTPDrafterContinuationTamper: String, CaseIterable, CustomTestStringConvert
             let cacheKeys = arrays.keys.filter { $0.hasPrefix(Key.cachePrefix) }
             guard !cacheKeys.isEmpty else { throw MissingTarget() }
             for key in cacheKeys {
-                arrays[key] = arrays[key].map { concatenated([$0, $0], axis: Self.batchAxis) }
+                arrays[key] = arrays[key].map {
+                    concatenated([$0, $0], axis: MTPDrafterContinuation.batchAxis)
+                }
             }
         }
     }
@@ -446,7 +448,8 @@ enum MTPDrafterContinuationTamper: String, CaseIterable, CustomTestStringConvert
     static func writeSeed(into arrays: inout [String: MLXArray], shapes: SeedShapes) throws {
         typealias Key = MTPDrafterContinuation.SerializedKey
         let row = try boundaryRow(of: arrays)
-        let (token, hidden) = shapes(row.dim(batchAxis), row.dim(hiddenAxis))
+        let (token, hidden) = shapes(
+            row.dim(MTPDrafterContinuation.batchAxis), row.dim(hiddenAxis))
         arrays[Key.seedToken] = MLXArray.zeros(token, type: Int32.self)
         arrays[Key.seedHidden] = MLXArray.zeros(hidden, dtype: row.dtype)
     }
