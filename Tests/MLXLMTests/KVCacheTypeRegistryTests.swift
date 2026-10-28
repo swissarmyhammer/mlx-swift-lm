@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import Testing
 
 @testable import MLXLMCommon
@@ -69,11 +70,6 @@ private final class InheritedNameCache: KVCacheSimple {}
 
 struct KVCacheTypeRegistryTests {
 
-    static func temporaryURL() -> URL {
-        FileManager.default.temporaryDirectory
-            .appending(component: "prompt-cache-\(UUID().uuidString).safetensors")
-    }
-
     @Test func `a registered custom cache saves and restores with built-in caches`() throws {
         try registerKVCacheType(TokenListCache.self)
 
@@ -81,7 +77,7 @@ struct KVCacheTypeRegistryTests {
         _ = simple.update(keys: MLXArray.ones([1, 2, 3, 8]), values: MLXArray.ones([1, 2, 3, 8]))
         let custom = TokenListCache(tokens: [7, 8, 9])
 
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [simple, custom])
 
@@ -97,7 +93,7 @@ struct KVCacheTypeRegistryTests {
     @Test func `a custom cache inside a CacheList round-trips`() throws {
         try registerKVCacheType(TokenListCache.self)
 
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(
             url: url, cache: [CacheList(KVCacheSimple(), TokenListCache(tokens: [1, 2]))])
@@ -108,7 +104,7 @@ struct KVCacheTypeRegistryTests {
     }
 
     @Test func `saving registers the type so the same process can load it`() throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [SavedOnlyCache()])
 
@@ -126,7 +122,7 @@ struct KVCacheTypeRegistryTests {
             try registerKVCacheType(OtherTokenListCache.self)
         }
 
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(throws: (any Error).self) {
             try savePromptCache(url: url, cache: [OtherTokenListCache()])
@@ -143,7 +139,7 @@ struct KVCacheTypeRegistryTests {
     }
 
     @Test func `a cache without a serialized class name cannot be saved`() {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(throws: (any Error).self) {
             try savePromptCache(url: url, cache: [UnnamedCache()])
@@ -154,7 +150,7 @@ struct KVCacheTypeRegistryTests {
     }
 
     @Test func `a subclass that keeps its parent's name restores as the parent`() throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [InheritedNameCache()])
 

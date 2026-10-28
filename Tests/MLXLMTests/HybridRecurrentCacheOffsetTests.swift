@@ -490,7 +490,7 @@ struct HybridRecurrentCacheOffsetTests {
     private static func savedAndRestored(
         _ run: HybridRun, model: any LanguageModel
     ) throws -> HybridRun {
-        let url = PromptCacheTemplateRestoreTests.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: run.caches, state: run.state)
         let snapshot = try loadPromptCacheSnapshot(

@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import Testing
 
@@ -312,9 +313,7 @@ struct KVCacheConfigurationTests {
             keys: MLXArray.ones([1, 1, 8, 16]),
             values: MLXArray.ones([1, 1, 8, 16]))
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [cache])

@@ -198,7 +198,9 @@ try savePromptCache(
 let (loadedCache, metadata) = try loadPromptCache(url: fileURL)
 ```
 
-Cache files are `.safetensors` format with metadata.
+Cache files are `.safetensors` format with metadata. The save and load functions
+live in `Libraries/MLXLMCommon/PromptCacheFile.swift`, and the per-class restore
+and its checks in `Libraries/MLXLMCommon/PromptCacheRestore.swift`.
 
 An MTP generation leaves an `MTPDrafterContinuation` that stands where the main
 cache ends. Save it beside the cache so a restored session resumes the drafter

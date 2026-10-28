@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import MLXLMTestSupport
 import Testing
 
 @testable import MLXLMCommon
@@ -15,12 +16,6 @@ private let cacheCreators: [@Sendable () -> any KVCache] = [
 ]
 
 // MARK: - Helper
-
-private func tempURL() -> URL {
-    FileManager.default.temporaryDirectory
-        .appendingPathComponent(UUID().uuidString)
-        .appendingPathExtension("safetensors")
-}
 
 private func deterministicTensor(shape: [Int], salt: Int) -> MLXArray {
     let count = shape.reduce(1, *)
@@ -38,7 +33,7 @@ private struct SerializedCacheFixture {
 }
 
 private func writePromptCacheFixture(_ fixture: SerializedCacheFixture) throws -> URL {
-    let url = tempURL()
+    let url = TemporaryPromptCacheFile.makeURL()
     let arrays: [String: MLXArray] = Dictionary(
         uniqueKeysWithValues: (0 ..< fixture.arrayCount).map { index in
             (
@@ -226,7 +221,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
             }
         }
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
 
         try savePromptCache(url: url, cache: cache, metadata: [:])
         let (loadedCache, _) = try loadPromptCache(url: url)
@@ -253,7 +248,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         state[ropeDeltasKey] = ropeDeltas
         state[positionsKey] = positions
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(
             url: url, cache: [cache], metadata: ["source": "test"], state: state)
@@ -291,7 +286,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         _ = cache.update(
             keys: MLXArray.ones([1, 1, 1, 4]),
             values: MLXArray.zeros([1, 1, 1, 4]))
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [cache])
@@ -313,7 +308,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         let keys = MLXArray(0 ..< 32).reshaped([1, 2, 4, 4]).asType(.float32)
         let values = -keys
         _ = cache.update(keys: keys, values: values)
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache])
 
@@ -330,8 +325,8 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         _ = cache.update(
             keys: MLXArray.ones([1, 1, 1, 4]),
             values: MLXArray.zeros([1, 1, 1, 4]))
-        let legacyURL = tempURL()
-        let emptyStateURL = tempURL()
+        let legacyURL = TemporaryPromptCacheFile.makeURL()
+        let emptyStateURL = TemporaryPromptCacheFile.makeURL()
         defer {
             try? FileManager.default.removeItem(at: legacyURL)
             try? FileManager.default.removeItem(at: emptyStateURL)
@@ -355,7 +350,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         _ = cache.update(
             keys: MLXArray.ones([1, 1, 1, 4]),
             values: MLXArray.zeros([1, 1, 1, 4]))
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         #expect(throws: KVCacheError.self) {
@@ -373,7 +368,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         let unsupportedKey = LMOutput.Key<Bool>("test.unsupported")
         var state = LMOutput.State()
         state[unsupportedKey] = true
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         #expect(throws: LMOutput.State.SerializationError.self) {
@@ -390,7 +385,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         let key = LMOutput.Key<MLXArray>("test.state")
         var state = LMOutput.State()
         state[key] = MLXArray([Int32(1)])
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [cache], state: state)
@@ -417,7 +412,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         let key = LMOutput.Key<MLXArray>("test.state")
         var state = LMOutput.State()
         state[key] = MLXArray([Int32(1)])
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [cache], state: state)
@@ -442,7 +437,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         var state = LMOutput.State()
         state[firstKey] = MLXArray([Int32(1)])
         state[secondKey] = MLXArray([Int32(2)])
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [cache], state: state)
@@ -465,7 +460,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         let key = LMOutput.Key<MLXArray>("test.state")
         var state = LMOutput.State()
         state[key] = MLXArray([Int32(1)])
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [cache], state: state)
@@ -489,7 +484,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         let key = LMOutput.Key<MLXArray>("test.state")
         var state = LMOutput.State()
         state[key] = MLXArray([Int32(1)])
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [cache], state: state)
@@ -509,7 +504,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         _ = cache.update(
             keys: MLXArray.ones([1, 1, 1, 4]),
             values: MLXArray.zeros([1, 1, 1, 4]))
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [cache])
@@ -534,7 +529,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         #expect(cache.groupSize == 32)
         #expect(cache.bits == 4)
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -681,7 +676,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
             QuantizedKVCache(),
             ChunkedKVCache(chunkSize: 16),
         ]
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: caches)
@@ -709,7 +704,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         // slot 1 stays nil
         cache[2] = b
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -732,7 +727,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         cache[0] = a
         cache[1] = b
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -816,7 +811,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         cache.prepare(lengths: [4, 2])
         cache[0] = MLXArray.ones([2, 4], dtype: .float32)
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -1004,7 +999,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         cache[0] = a
         cache[1] = b
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -1027,7 +1022,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
 
         let cacheList = CacheList(simple, rotating)
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cacheList], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -1055,7 +1050,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
 
         let cacheList = CacheList(mamba, simple)
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cacheList], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -1076,7 +1071,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
         _ = cache.update(keys: keys, values: values)
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
         #expect(loaded.count == 1)
@@ -1090,7 +1085,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         cache[0] = MLXArray.ones([2, 4], dtype: .float32)
         cache[1] = MLXArray.ones([2, 4], dtype: .float32) * 2.0
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -1632,7 +1627,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         let (originalKeys, originalValues) = cache.update(keys: keys, values: values)
         eval(originalKeys, originalValues)
 
-        let url = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: ["kind": "variance-normalized"])
         let (loaded, metadata) = try loadPromptCache(url: url)
 
@@ -1659,7 +1654,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
             _ = cache.update(keys: keys, values: values)
             eval(cache.state)
 
-            let url = tempURL()
+            let url = TemporaryPromptCacheFile.makeURL()
             try savePromptCache(url: url, cache: [cache])
             let (loaded, _) = try loadPromptCache(url: url)
             let restored = try #require(loaded[0] as? VarianceNormalizedKVCache)
@@ -2472,9 +2467,9 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
     func testRotatingTrimSurvivesPromptCachePersistenceAndCopy(metadataCount: Int) throws {
         let source = RotatingKVCache(maxSize: 8)
         fillOneAtATime(source, positions: 0 ..< 16)
-        let url = tempURL()
-        let legacyURL = tempURL()
-        let roundTripURL = tempURL()
+        let url = TemporaryPromptCacheFile.makeURL()
+        let legacyURL = TemporaryPromptCacheFile.makeURL()
+        let roundTripURL = TemporaryPromptCacheFile.makeURL()
         defer {
             for file in [url, legacyURL, roundTripURL] {
                 try? FileManager.default.removeItem(at: file)
@@ -2950,7 +2945,7 @@ private enum SnapshotSlotFixture {
 
 @Test func theSnapshotSlotsAreLeftOutOfASavedPromptCache() throws {
     let cache = SnapshotSlotFixture.cache(after: SnapshotSlotFixture.snapshots())
-    let url = tempURL()
+    let url = TemporaryPromptCacheFile.makeURL()
 
     try savePromptCache(url: url, cache: [cache], metadata: [:])
     let (loaded, _) = try loadPromptCache(url: url)

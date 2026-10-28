@@ -1472,15 +1472,20 @@ public final class ChatSession {
                             mtpDrafter = nil
                         }
                         let usesMTP = mtpDrafter != nil
+                        // Whether the MTP drafter can draft for `model`, decided once for
+                        // both the continuation restore and the fallback reason.
+                        let mtpDrafterIsCompatible = mtpDrafter?.isCompatible(with: model) == true
                         if let saved = savedDrafterContinuation {
                             mtpDrafterContinuation = Self.restoredDrafterContinuation(
-                                saved, drafter: mtpDrafter, model: model)
+                                saved, drafter: mtpDrafter,
+                                drafterIsCompatible: mtpDrafterIsCompatible)
                             savedDrafterContinuation = nil
                         }
                         // Why an MTP turn decodes plainly, decided before any cache work.
                         let mtpFallbackReason = try mtpDrafter.flatMap {
                             try Self.mtpFallbackReason(
-                                drafter: $0, model: model, parameters: generateParameters,
+                                drafter: $0, drafterIsCompatible: mtpDrafterIsCompatible,
+                                model: model, parameters: generateParameters,
                                 memoryPolicy: speculativeDecoding?.memoryPolicy,
                                 continuation: mtpDrafterContinuation)
                         }
@@ -2467,6 +2472,7 @@ extension ChatSession {
     ///
     /// - Parameters:
     ///   - drafter: the MTP drafter of the session.
+    ///   - drafterIsCompatible: whether `drafter` can draft for `model`.
     ///   - model: the model the drafter speculates for.
     ///   - parameters: the generation parameters of the turn.
     ///   - memoryPolicy: the memory policy of the session, or nil.
@@ -2476,10 +2482,11 @@ extension ChatSession {
     ///   admit the drafter and its action is
     ///   ``SpeculativeDecodingMemoryAction/fail``.
     private static func mtpFallbackReason(
-        drafter: any MTPDrafterModel, model: any LanguageModel, parameters: GenerateParameters,
-        memoryPolicy: SpeculativeDecodingMemoryPolicy?, continuation: MTPDrafterContinuation?
+        drafter: any MTPDrafterModel, drafterIsCompatible: Bool, model: any LanguageModel,
+        parameters: GenerateParameters, memoryPolicy: SpeculativeDecodingMemoryPolicy?,
+        continuation: MTPDrafterContinuation?
     ) throws -> SpeculativeDecodingFallbackReason? {
-        guard drafter.isCompatible(with: model) else { return .incompatibleDrafter }
+        guard drafterIsCompatible else { return .incompatibleDrafter }
         guard !drafter.requiresGreedySampling || parameters.temperature == 0 else {
             return .unsupportedSampling
         }
@@ -2495,20 +2502,19 @@ extension ChatSession {
     /// pass, or nil when the drafter cold-starts at the cached position instead.
     ///
     /// The drafter cold-starts when the pass has no drafter that resumes continuations, when the
-    /// drafter cannot draft for `model`, and when it refuses the saved values: a continuation of
-    /// another drafter, or values a damaged file holds.
+    /// drafter cannot draft for the model, and when it refuses the saved values: a continuation
+    /// of another drafter, or values a damaged file holds.
     ///
     /// - Parameters:
     ///   - saved: the continuation the file saved.
     ///   - drafter: the MTP drafter of the pass, or nil.
-    ///   - model: the model the drafter speculates for.
+    ///   - drafterIsCompatible: whether `drafter` can draft for the model of the pass.
     /// - Returns: the restored continuation, or nil.
     private static func restoredDrafterContinuation(
         _ saved: SerializedMTPDrafterContinuation, drafter: (any MTPDrafterModel)?,
-        model: any LanguageModel
+        drafterIsCompatible: Bool
     ) -> MTPDrafterContinuation? {
-        guard let drafter = drafter as? any ResumableMTPDrafterModel,
-            drafter.isCompatible(with: model)
+        guard drafterIsCompatible, let drafter = drafter as? any ResumableMTPDrafterModel
         else { return nil }
         return try? saved.restored(by: drafter)
     }

@@ -3,6 +3,7 @@
 import CoreImage
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import MLXScriptedLM
 import Testing
@@ -900,9 +901,7 @@ struct MiniMaxM3Tests {
         _ = sparseCache.updateIndexAndFetch(MLXArray.zeros([1, 4, 3, 8]))
         #expect(sparseCache.state.count == 3)
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [denseCache, sparseCache])

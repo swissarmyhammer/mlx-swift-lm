@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 @_spi(Testing) import MLXLLM
+import MLXLMTestSupport
 import MLXNN
 import MLXOptimizers
 import MLXScriptedLM
@@ -2538,9 +2539,7 @@ public class ChatSessionTests: XCTestCase {
 
     func testSaveCacheThrowsBeforeGeneration() async throws {
         let session = ChatSession(model(), generateParameters: generationParameters)
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         do {
             try await session.saveCache(to: url)
             XCTFail("expected ChatSessionError.noCacheAvailable")
@@ -2554,9 +2553,7 @@ public class ChatSessionTests: XCTestCase {
         let initial = ChatSession(ctx, generateParameters: generationParameters)
         _ = try await initial.respond(to: "hello")
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         try await initial.saveCache(to: url)
 
         let promptCache = try loadPromptCacheSnapshot(url: url)
@@ -2578,9 +2575,7 @@ public class ChatSessionTests: XCTestCase {
         let promptCache = PromptCacheSnapshot(cache: [cache], metadata: [:], state: state)
         let session = ChatSession(
             model(), promptCache: promptCache, generateParameters: generationParameters)
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try await session.saveCache(to: url)
@@ -2621,9 +2616,7 @@ public class ChatSessionTests: XCTestCase {
         // A second turn must succeed with the anchor the speculative turn carried.
         _ = try await session.respond(to: "hello again")
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try await session.saveCache(to: url)
 
@@ -2641,9 +2634,7 @@ public class ChatSessionTests: XCTestCase {
         let session = ChatSession(context, generateParameters: generationParameters)
         _ = try await session.respond(to: "hello")
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try await session.saveCache(to: url)
 

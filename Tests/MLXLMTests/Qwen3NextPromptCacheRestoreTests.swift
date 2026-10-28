@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXLMTestSupport
 import Testing
 
 @testable import MLXLLM
@@ -99,7 +100,7 @@ struct Qwen3NextPromptCacheRestoreTests {
         let model = try Self.makeModel()
         let liveCaches = try model.newCache(parameters: nil)
         _ = Self.lastLogits(model, Self.prompt, caches: liveCaches)
-        let url = PromptCacheTemplateRestoreTests.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: liveCaches)
         let templates = try model.newCache(parameters: nil)
@@ -126,7 +127,7 @@ struct Qwen3NextPromptCacheRestoreTests {
         let model = try Self.makeModel()
         let liveCaches = try model.newCache(parameters: nil)
         var token = Self.greedyToken(Self.lastLogits(model, Self.prompt, caches: liveCaches))
-        let url = PromptCacheTemplateRestoreTests.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: liveCaches)
         let restoredCaches = try loadPromptCacheSnapshot(

@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLLM
+import MLXLMTestSupport
 import MLXNN
 import Testing
 import XCTest
@@ -1870,9 +1871,7 @@ final class TurboQuantIntegrationTests: XCTestCase {
         XCTAssertTrue(cache.isCompressed)
         XCTAssertEqual(cache.offset, prefill + 1)
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
 
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
@@ -1944,9 +1943,7 @@ final class TurboQuantIntegrationTests: XCTestCase {
             originalState.count, 5,
             "anisotropic key data should engage key calibration (5-array state)")
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
         let restored = try XCTUnwrap(loaded[0] as? TurboQuantKVCache)
@@ -2153,9 +2150,7 @@ final class TurboQuantIntegrationTests: XCTestCase {
         XCTAssertTrue(cache.isCompressed)
         XCTAssertEqual(cache.state.count, 5)
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
         let restored = try XCTUnwrap(loaded[0] as? TurboQuantKVCache)
@@ -2185,8 +2180,7 @@ final class TurboQuantIntegrationTests: XCTestCase {
         XCTAssertTrue(cache.isCompressed)
         XCTAssertEqual(cache.state.count, 3)
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString).appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
         let restored = try XCTUnwrap(loaded[0] as? TurboQuantKVCache)
@@ -2208,8 +2202,7 @@ final class TurboQuantIntegrationTests: XCTestCase {
         XCTAssertFalse(cache.isCompressed)
         XCTAssertEqual(cache.state.count, 2)
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString).appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
         let restored = try XCTUnwrap(loaded[0] as? TurboQuantKVCache)

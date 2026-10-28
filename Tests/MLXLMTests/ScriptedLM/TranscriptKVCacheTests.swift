@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXLMTestSupport
 import MLXScriptedLM
 import Testing
 
@@ -107,8 +108,7 @@ struct TranscriptKVCacheTests {
     }
 
     @Test func `a transcript round-trips through a prompt cache file`() throws {
-        let url = FileManager.default.temporaryDirectory
-            .appending(component: "transcript-\(UUID().uuidString).safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(
@@ -121,8 +121,7 @@ struct TranscriptKVCacheTests {
     }
 
     @Test func `an empty transcript round-trips`() throws {
-        let url = FileManager.default.temporaryDirectory
-            .appending(component: "transcript-\(UUID().uuidString).safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [KVCacheSimple(), TranscriptKVCache()])
