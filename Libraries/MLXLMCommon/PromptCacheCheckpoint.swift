@@ -84,6 +84,29 @@ package struct PromptCacheCheckpoint {
             + (state?.residentByteCount ?? 0) + (storedContinuation?.byteCount ?? 0)
     }
 
+    /// A copy of the drafter continuation this checkpoint keeps, which a
+    /// restore hands to the generation that resumes the drafter `drafterID`
+    /// here.
+    ///
+    /// Forks share a checkpoint, and a generation writes into the drafter
+    /// caches it resumes. A restore thus hands out a copy, and the checkpoint
+    /// keeps its own continuation for the next restore.
+    ///
+    /// - Parameter drafterID: the identity of the drafter of the generation.
+    /// - Returns: the copy, or nil when the checkpoint keeps no continuation or
+    ///   keeps one that the drafter `drafterID` cannot resume at this
+    ///   checkpoint. The drafter then cold-starts here.
+    package func drafterContinuation(resumableBy drafterID: MTPDrafterID)
+        -> MTPDrafterContinuation?
+    {
+        guard let drafterContinuation,
+            drafterContinuation.isAligned(withMainTokenCount: tokens.count, drafterID: drafterID)
+        else {
+            return nil
+        }
+        return drafterContinuation.copy()
+    }
+
     /// Whether a model has a layer that cannot rewind, thus whether a
     /// checkpoint can serve it.
     ///

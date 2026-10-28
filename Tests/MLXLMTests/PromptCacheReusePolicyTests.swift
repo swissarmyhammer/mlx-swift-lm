@@ -188,7 +188,7 @@ struct PromptCacheReusePolicyTests {
     @Test func `aligned resumable MTP state appends only the suffix`() {
         let decision = PromptCacheReusePolicy().decide(
             turn: turn(prompt: [1, 2, 3, 4], speculative: true),
-            cache: alignedCache([1, 2, 3], speculativeReuseCapability: .appendOnly))
+            cache: alignedCache([1, 2, 3], speculativeReuseCapability: .restartsOnRewind))
 
         #expect(decision == .appendSuffix(suffixStart: 3, representedTokens: [1, 2, 3, 4]))
     }
@@ -220,11 +220,20 @@ struct PromptCacheReusePolicyTests {
                 turn: turn(prompt: [9, 9, 9]), cache: alignedCache([1, 2, 3])) == .rebuild)
     }
 
-    @Test func `stateful MTP rewind keeps only the authoritative target cache`() {
+    @Test func `a resumable MTP drafter keeps speculation through a rewind`() {
         let decision = PromptCacheReusePolicy().decide(
             turn: turn(prompt: [1, 2, 9, 9], speculative: true),
             cache: alignedCache(
-                [1, 2, 3, 4, 5], speculativeReuseCapability: .appendOnly))
+                [1, 2, 3, 4, 5], speculativeReuseCapability: .restartsOnRewind))
+
+        #expect(decision == .trimToCommonPrefix(commonPrefixLength: 2, trimCount: 3))
+    }
+
+    @Test func `a stateful MTP drafter that cannot resume rewinds the target cache alone`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 9, 9], speculative: true),
+            cache: alignedCache(
+                [1, 2, 3, 4, 5], speculativeReuseCapability: .mainOnlyFallback))
 
         #expect(
             decision
@@ -241,7 +250,7 @@ struct PromptCacheReusePolicyTests {
     }
 
     @Test(arguments: [
-        SpeculativeCacheReuseCapability.reusable, .appendOnly,
+        SpeculativeCacheReuseCapability.reusable, .restartsOnRewind,
         .rebuildableFromPrompt, .mainOnlyFallback,
     ])
     func `speculative rewinds respect the exact cache rewind limit`(

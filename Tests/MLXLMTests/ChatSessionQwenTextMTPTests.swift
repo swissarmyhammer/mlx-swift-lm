@@ -607,9 +607,9 @@ struct ChatSessionQwenTextMTPTests {
     // MARK: - Checkpoints with MTP
 
     @Test(
-        "a two-turn MTP chat takes checkpoints, writes the plain text, and starts the drafter at the restored checkpoint"
+        "a two-turn MTP chat takes checkpoints, writes the plain text, and resumes the drafter the restored checkpoint keeps"
     )
-    func mtpChatTakesCheckpointsAndFeedsTheDrafterOnlyTheSuffix() async throws {
+    func mtpChatTakesCheckpointsAndResumesTheRestoredDrafterContinuation() async throws {
         let fixture = try Qwen35MTPFixture()
         let speculative = checkpointSession(
             fixture, speculativeDecoding: try fixture.makeSpeculativeDecodingConfig())
@@ -630,12 +630,94 @@ struct ChatSessionQwenTextMTPTests {
         }
 
         // The second render closes the think block the first prompt opened, so the second turn
-        // goes back to the checkpoint at the end of the first user message. The drafter starts
-        // there, thus it took only the prompt past that checkpoint.
+        // goes back to the checkpoint at the end of the first user message. The drafter resumes
+        // the continuation that checkpoint keeps, which the first turn started at position zero,
+        // instead of a cold start at the checkpoint.
         let second = try #require(lastTurn)
         #expect(second.cachedPromptTokenCount > 0)
         let continuation = try #require(await speculative.drafterContinuation())
-        #expect(continuation.state.cacheStartPosition == second.cachedPromptTokenCount)
+        #expect(continuation.state.cacheStartPosition == 0)
+    }
+
+    @Test(
+        "an edit-and-regenerate turn writes the plain text and resumes the drafter from a copy of the checkpoint continuation"
+    )
+    func editAndRegenerateResumesACopyOfTheCheckpointContinuation() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let speculative = checkpointSession(
+            fixture, speculativeDecoding: try fixture.makeSpeculativeDecodingConfig())
+        let plain = checkpointSession(fixture, speculativeDecoding: nil)
+        var history: [Chat.Message] = []
+        for prompt in checkpointPrompts {
+            let reply = try await collect(speculative.streamDetails(to: prompt))
+            _ = try await collect(plain.streamDetails(to: prompt))
+            history += [.user(prompt), .assistant(reply.text)]
+        }
+        let keptHistory = Array(history.prefix(messagesOfOneTurn))
+
+        let speculativeEdit = await speculative.fork(history: keptHistory)
+        let edit = try await collect(speculativeEdit.streamDetails(to: editPrompt))
+        let expected = try await collect(
+            plain.fork(history: keptHistory).streamDetails(to: editPrompt))
+
+        #expect(edit.text == expected.text)
+        #expect(edit.info.cachedPromptTokenCount == expected.info.cachedPromptTokenCount)
+        #expect(edit.info.cachedPromptTokenCount > 0)
+        #expect((edit.info.proposedDraftTokens ?? 0) > 0)
+        #expect(edit.info.passthroughReason == nil)
+        #expect(edit.info.speculativeDecodingFallbackReason == nil)
+        // The restored checkpoint keeps the continuation the first turn started at position zero.
+        let continuation = try #require(await speculativeEdit.drafterContinuation())
+        #expect(continuation.state.cacheStartPosition == 0)
+        // The edit resumed a copy: the checkpoints the source session keeps are as they were.
+        for checkpoint in await speculative.checkpointSummaries() {
+            let stored = try #require(checkpoint.drafterContinuation)
+            #expect(
+                stored.isAligned(
+                    withMainTokenCount: checkpoint.tokenCount, drafterID: fixture.drafter.drafterID)
+            )
+        }
+    }
+
+    @Test("after a target-only turn, the next turn of a chat that takes checkpoints runs MTP again")
+    func mtpRunsAgainAfterATargetOnlyCheckpointTurn() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let session = checkpointSession(
+            fixture, speculativeDecoding: try fixture.makeSpeculativeDecodingConfig())
+
+        _ = try await collect(session.streamDetails(to: checkpointPrompts[0]))
+        session.generateParameters.temperature = targetOnlyTemperature
+        let targetOnly = try await collect(session.streamDetails(to: checkpointPrompts[1]))
+        session.generateParameters.temperature = 0
+        let recovered = try await collect(session.streamDetails(to: checkpointFollowUpPrompt))
+
+        #expect(targetOnly.info.speculativeDecodingFallbackReason == .unsupportedSampling)
+        #expect(recovered.info.cachedPromptTokenCount > 0)
+        #expect((recovered.info.proposedDraftTokens ?? 0) > 0)
+        #expect(recovered.info.passthroughReason == nil)
+        #expect(recovered.info.speculativeDecodingFallbackReason == nil)
+    }
+
+    @Test("an edit that rewinds a trimmable target keeps MTP on and cold-starts the drafter")
+    func trimmableTargetRewindKeepsMTP() async throws {
+        let session = ChatSession(
+            makeModelContext(),
+            speculativeDecoding: try makeMTPConfiguration(),
+            generateParameters: .init(maxTokens: 4, temperature: 0)
+        )
+        let first = try await collect(session.streamDetails(to: "a"))
+        _ = try await collect(session.streamDetails(to: "b"))
+
+        // The render of the kept turn is the common prefix: the edit leaves the second user
+        // message, thus the cache rewinds to the end of the first reply.
+        let edit = try await collect(
+            session.fork(history: [.user("a"), .assistant(first.text)])
+                .streamDetails(to: "xb"))
+
+        #expect(edit.info.cachedPromptTokenCount == 1 + first.text.count)
+        #expect((edit.info.proposedDraftTokens ?? 0) > 0)
+        #expect(edit.info.passthroughReason == nil)
+        #expect(edit.info.speculativeDecodingFallbackReason == nil)
     }
 
     @Test("each checkpoint of an MTP turn keeps a drafter continuation aligned at its position")
@@ -695,6 +777,44 @@ struct ChatSessionQwenTextMTPTests {
 
         #expect(checkpoint.drafterContinuation == nil)
         #expect(checkpoint.byteCount == withoutDrafter.byteCount)
+    }
+
+    @Test("a checkpoint hands its drafter continuation to the same drafter as a copy of its own")
+    func checkpointHandsOutACopyOfItsDrafterContinuation() throws {
+        let live = makeLiveDrafterContinuation(aheadBy: 0)
+        let checkpoint = try #require(
+            PromptCacheCheckpoint(
+                caches: [live.mainCache], tokens: live.tokens, state: nil,
+                drafterContinuation: live.continuation))
+        let stored = try #require(checkpoint.drafterContinuation)
+
+        let restored = try #require(
+            checkpoint.drafterContinuation(resumableBy: live.continuation.drafterID))
+
+        #expect(
+            restored.isAligned(
+                withMainTokenCount: live.tokens.count, drafterID: live.continuation.drafterID))
+        // A generation writes into the drafter caches it resumes, which must leave the stored
+        // continuation aligned for the next restore.
+        let drafterRow = MLXRandom.normal([1, liveDrafterHeads, 1, liveDrafterHeadWidth])
+        for cache in restored.state.cache {
+            _ = cache.update(keys: drafterRow, values: drafterRow)
+        }
+        #expect(
+            stored.isAligned(
+                withMainTokenCount: live.tokens.count, drafterID: live.continuation.drafterID))
+    }
+
+    @Test("a checkpoint hands no drafter continuation to another drafter")
+    func checkpointHandsNoDrafterContinuationToAnotherDrafter() throws {
+        let live = makeLiveDrafterContinuation(aheadBy: 0)
+        let checkpoint = try #require(
+            PromptCacheCheckpoint(
+                caches: [live.mainCache], tokens: live.tokens, state: nil,
+                drafterContinuation: live.continuation))
+
+        #expect(checkpoint.drafterContinuation != nil)
+        #expect(checkpoint.drafterContinuation(resumableBy: MTPDrafterID("another-drafter")) == nil)
     }
 
     // MARK: - Incompatible drafter and memory policy
@@ -822,6 +942,19 @@ struct ChatSessionQwenTextMTPTests {
     /// The checkpoints a first turn with instructions takes: at the end of the instructions, at
     /// the end of the user message, and at the end of the prompt.
     private let checkpointsOfAFirstTurn = 3
+
+    /// The user turn that follows ``checkpointPrompts`` in a Qwen fixture chat.
+    private let checkpointFollowUpPrompt = "third"
+
+    /// The user turn an edit-and-regenerate writes in place of the second of ``checkpointPrompts``.
+    private let editPrompt = "edited"
+
+    /// The messages one turn adds to a history: the user message and the reply.
+    private let messagesOfOneTurn = 2
+
+    /// A sampling temperature the MTP drafter cannot draft for, thus a turn with it runs
+    /// target-only.
+    private let targetOnlyTemperature: Float = 0.6
 
     /// A greedy session over the Qwen fixture target with ``checkpointInstructions``, whose
     /// template writes a Qwen-like transcript: the generation prompt opens a think block that the

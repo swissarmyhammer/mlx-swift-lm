@@ -104,14 +104,30 @@ comments:
     - evidence: 3 files — Libraries/MLXLMCommon/ChatSession.swift, Libraries/MLXLMCommon/SpeculativeDecoding.swift, Tests/MLXLMTests/SpeculativeDecodingConfigTests.swift. `swift build --build-tests`: only the known Cmlx.bundle "missing creator" warning. `xcrun xctest MLXLMTests.xctest`: 895 XCTest, 0 failures; 1886 Swift Testing passed (1883 + 3 new; benchmarkVerification env-gated skip, known). MLXFoundationModelsTests: 376 passed. swift-format lint is clean. Release qwen38FourBitMTPSystemPromptCache(): TEST SUCCEEDED, no known issues. Edit turn 2 with MTP: 2169 cached / 123 prefilled in 170.4 ms, drafter prefilled 123, 88.4 tok/s, exact match with plain. The only Release compile warnings are the 6 pre-existing ones in HardReserveStressTests.swift and TokenizerVocabExtractorTests.swift. Both review findings are checked.
     - next: /review (task left in doing; not committed)
   timestamp: 2026-10-28T02:04:27.304441+00:00
+- actor: claude-code
+  id: 01m6043vak9pwc8x5krdeyhk9y
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (e5a96cab) — 0 findings (attempted 7, confirmed 0, refuted 0, failed 0); 3 files reviewed, 2 .kanban files skipped (no validator). Both prior items from 2026-10-27 20:47 are checked and fixed in the diff: ChatSession.swift duplication → `finishPrompt(_:drafterContinuation:)` used by both the plain and MTP paths; ChatSession.swift reuse → `SpeculativeDecodingMemoryPolicy.admitsSpeculation` used by `mtpFallbackReason` and both draft-model checks. Behavior kept: the before-loading verdict is captured as `Result` and only `.get()`-rethrown in the draft-model branch (`try?` in `willFallBackBeforeLoadingDraft` maps a fail error to "no fallback", as before); the drafter continuation closure is invoked only inside `if keepsCheckpoints`.
+    - next: none — task moved to done.
+  timestamp: 2026-10-28T02:06:06.675664+00:00
+- actor: claude-code
+  id: 01m6044ap0kzc6tfe8yehdrpsv
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 3 files (finishPrompt helper; SpeculativeDecodingMemoryPolicy.admitsSpeculation)
+    - test: green — implementer's run on the final code: MLXLMTests 895 XCTest 0 failures + 1886 Swift Testing; FoundationModels 376; Release SystemPromptCache passed, edit turn 2169/123 with MTP on
+    - commit: e5a96cab
+    - review: clean — 0 findings, prior 2/2 verified; task done
+  timestamp: 2026-10-28T02:06:22.400767+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
 - 01M5QWGEWP4506CZYXCPV3C64M
 - 01M5SJPFM01WFRYWMQXVGMA4MQ
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: ffeb80
 title: 'MTP: ChatSession MTP gaps after PR 581 (checkpoints, incompatible drafter, cold start, memory policy)'
 ---
 ## What

@@ -1439,6 +1439,10 @@ public final class ChatSession {
                             usesMTP ? mtpFallbackReason == nil : speculativeDecoding != nil
 
                         let mtpIsStateful = mtpDrafter is any StatefulMTPDrafterModel
+                        // The identity a drafter continuation must carry for this turn to
+                        // resume it, or nil when the drafter does not resume one.
+                        let resumableDrafterID =
+                            (mtpDrafter as? any ResumableMTPDrafterModel)?.drafterID
                         // A resumable drafter continues an aligned continuation, and otherwise
                         // cold-starts at the cached position, so its state is always ready.
                         let mtpSpeculativeStateIsReady =
@@ -1510,7 +1514,7 @@ public final class ChatSession {
                                 if !mtpSpeculativeStateIsReady {
                                     speculativeReuseCapability = .mainOnlyFallback
                                 } else if mtpIsStateful {
-                                    speculativeReuseCapability = .appendOnly
+                                    speculativeReuseCapability = .restartsOnRewind
                                 } else {
                                     speculativeReuseCapability = .reusable
                                 }
@@ -1640,6 +1644,10 @@ public final class ChatSession {
                                     tokens: MLXArray(
                                         Array(promptTokenIds.dropFirst(commonPrefixLength))))
                                 cachedPromptTokenCount = commonPrefixLength
+                                // The drafter continuation stands where the main cache
+                                // stood before the rewind, and the drafter cannot rewind
+                                // with it: the drafter cold-starts at the common prefix.
+                                mtpDrafterContinuation = nil
 
                             case .trimToCommonPrefixMainOnly(let commonPrefixLength, _):
                                 input = LMInput(
@@ -1661,6 +1669,12 @@ public final class ChatSession {
                                 {
                                     kvCache = restore.storage
                                     lmState = restore.checkpoint.state
+                                    // The drafter resumes the continuation the checkpoint
+                                    // keeps when it stands there, and cold-starts there
+                                    // otherwise.
+                                    mtpDrafterContinuation = resumableDrafterID.flatMap {
+                                        restore.checkpoint.drafterContinuation(resumableBy: $0)
+                                    }
                                     cachedPromptTokenCount = restore.checkpoint.tokens.count
                                     input = LMInput(
                                         tokens: MLXArray(
@@ -1670,9 +1684,9 @@ public final class ChatSession {
                                         try model.newCache(parameters: generateParameters),
                                         plan: kvCachePlan)
                                     lmState = nil
+                                    mtpDrafterContinuation = nil
                                 }
                                 draftKVCache = nil
-                                mtpDrafterContinuation = nil
                             }
 
                             reusedMainCacheWithoutDraft =

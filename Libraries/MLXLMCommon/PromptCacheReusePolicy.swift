@@ -120,9 +120,11 @@ package enum SpeculativeCacheReuseCapability: Sendable {
     /// Aligned speculative state can follow both suffix appends and target rewinds.
     case reusable
 
-    /// Aligned speculative state can follow suffix appends, but a rewind must
-    /// discard it and continue with the main cache only.
-    case appendOnly
+    /// Aligned speculative state can follow suffix appends. A rewind leaves it
+    /// behind, and speculation restarts at the rewound position: the drafter
+    /// resumes a continuation that a checkpoint keeps there, or cold-starts.
+    /// A resumable MTP drafter has this capability.
+    case restartsOnRewind
 
     /// Missing ordinary draft-model state can be reconstructed from the full prompt.
     case rebuildableFromPrompt
@@ -136,7 +138,7 @@ package enum SpeculativeCacheReuseCapability: Sendable {
     /// Whether an existing speculative continuation can be used without rebuilding it.
     package var canContinueWithoutRebuild: Bool {
         switch self {
-        case .reusable, .appendOnly:
+        case .reusable, .restartsOnRewind:
             true
         case .rebuildableFromPrompt, .mainOnlyFallback, .unavailable:
             false
@@ -288,7 +290,7 @@ struct ExtendCachedPrefixRule: PromptCacheReuseRule {
 
         if turn.usesSpeculativeDecoding {
             switch cache.speculativeReuseCapability {
-            case .reusable, .appendOnly, .rebuildableFromPrompt:
+            case .reusable, .restartsOnRewind, .rebuildableFromPrompt:
                 return .appendSuffix(
                     suffixStart: cache.cachedTokens.count,
                     representedTokens: turn.promptTokens)
@@ -374,10 +376,10 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
 
         if turn.usesSpeculativeDecoding {
             switch cache.speculativeReuseCapability {
-            case .reusable, .rebuildableFromPrompt:
+            case .reusable, .restartsOnRewind, .rebuildableFromPrompt:
                 return .trimToCommonPrefix(
                     commonPrefixLength: sharedPrefixLength, trimCount: trimCount)
-            case .appendOnly, .mainOnlyFallback:
+            case .mainOnlyFallback:
                 return .trimToCommonPrefixMainOnly(
                     commonPrefixLength: sharedPrefixLength, trimCount: trimCount)
             case .unavailable:
