@@ -184,6 +184,9 @@ final class ScriptedResumableDrafter: Module, ResumableMTPDrafterModel {
         sharedKV: [String: (MLXArray, MLXArray)], positionDeltas: MLXArray?, queryOffset: Int,
         blockSize: Int, state: inout MTPDrafterState, sampler: any LogitSampler
     ) -> MLXArray {
-        plan.drafts(queryOffset: queryOffset, blockSize: blockSize, batchSize: lastToken.dim(0))
+        draftBlock(
+            target: target, lastToken: lastToken, lastHidden: lastHidden, sharedKV: sharedKV,
+            positionDeltas: positionDeltas, queryOffset: queryOffset, blockSize: blockSize,
+            sampler: sampler)
     }
 }

@@ -316,7 +316,7 @@ struct Qwen35GDNDecodeKernelTests {
                 #expect(cache.offset == kept)
                 // A cache that holds only the bonus token of the pass has no slot left to
                 // roll back into, and releases the slots.
-                #expect(cache.speculativeSlotCount == (kept > 1 ? kept : 0))
+                #expect(cache.speculativeSlotCount == SnapshotSlotFixture.slotCount(keeping: kept))
                 #expect(Self.sameBits(try #require(cache[0]), accepted.convState))
                 #expect(Self.sameBits(try #require(cache[1]), accepted.recurrentState))
             }
@@ -379,7 +379,9 @@ struct Qwen35GDNDecodeKernelTests {
 
         #expect(verifyCache.selectSpeculativeSlot(rollingBack: tokens - acceptedTokens))
         #expect(verifyCache.offset == acceptedTokens)
-        #expect(verifyCache.speculativeSlotCount == 0)
+        #expect(
+            verifyCache.speculativeSlotCount
+                == SnapshotSlotFixture.slotCount(keeping: acceptedTokens))
         for (restored, expected) in zip(verifyCache.state, firstTokenCache.state) {
             let gap = Fixture.worstGap(restored, expected)
             #expect(gap <= Fixture.tolerance(dtype), "worst restored state gap \(gap)")

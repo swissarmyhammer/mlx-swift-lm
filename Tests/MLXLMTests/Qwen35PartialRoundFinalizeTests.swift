@@ -205,8 +205,10 @@ struct Qwen35PartialRoundFinalizeTests {
     func stopLeavesTheDrafterContinuationOfTheReturnedTokens(blockSize: Int) async throws {
         let fixture = try Qwen35MTPFixture()
         let script = try await script(fixture)
+        let stops = try partialRoundStops(fixture, script: script, blockSize: blockSize)
+        #expect(!stops.isEmpty)
 
-        for stop in try partialRoundStops(fixture, script: script, blockSize: blockSize) {
+        for stop in stops {
             let decode = try stoppedDecode(
                 fixture, script: script, blockSize: blockSize, stop: stop)
             let held = decode.heldTokenCount
@@ -221,11 +223,13 @@ struct Qwen35PartialRoundFinalizeTests {
             #expect(
                 continuation.state.cache.map(\.offset) == reference.state.cache.map(\.offset),
                 "stop \(stop)")
-            let pairs =
+            let statePairs = Array(
                 zip(
                     continuation.state.cache.flatMap(\.state),
-                    reference.state.cache.flatMap(\.state))
-                + [(continuation.targetBoundaryHidden, reference.targetBoundaryHidden)]
+                    reference.state.cache.flatMap(\.state)))
+            #expect(!statePairs.isEmpty, "stop \(stop)")
+            let pairs =
+                statePairs + [(continuation.targetBoundaryHidden, reference.targetBoundaryHidden)]
             for (got, expected) in pairs {
                 let gap = AttentionKernelTolerance.worstGap(got, expected)
                 #expect(
@@ -250,8 +254,10 @@ struct Qwen35PartialRoundFinalizeTests {
     func secondCallAfterTheStopEqualsColdAndPlainDecode(blockSize: Int) async throws {
         let fixture = try Qwen35MTPFixture()
         let script = try await script(fixture)
+        let stops = try partialRoundStops(fixture, script: script, blockSize: blockSize)
+        #expect(!stops.isEmpty)
 
-        for stop in try partialRoundStops(fixture, script: script, blockSize: blockSize) {
+        for stop in stops {
             let first = try stoppedDecode(
                 fixture, script: script, blockSize: blockSize, stop: stop)
             let continuation = try #require(first.continuation, "stop \(stop)")

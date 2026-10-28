@@ -156,7 +156,7 @@ private func singleTokenKV(fill: Float, kvHeads: Int = 2, headDim: Int = 4) -> (
 
 /// The slots of one verify, without a model: each slot and each window row
 /// holds its own numbers, so a test sees which one the cache selected.
-private enum SnapshotSlotFixture {
+enum SnapshotSlotFixture {
     /// The tokens of the verify.
     static let tokenCount = 4
 
