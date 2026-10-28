@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLLM
+import MLXLMTestSupport
 import MLXNN
 import Testing
 
@@ -124,11 +125,11 @@ private func legacyStatus(cache: [KVCache], maxKVSize: Int) throws -> KVCacheSta
 }
 
 @Test func cacheStatusReportsAllocatedMemory() {
+    let tokens = 3
+    let heads = 2
+    let headDimension = 8
     func attention() -> KVCacheSimple {
-        let cache = KVCacheSimple()
-        let tokens = MLXArray.zeros([1, 2, 3, 8])
-        _ = cache.update(keys: tokens, values: tokens)
-        return cache
+        ZeroFilledKVCache.make(tokens: tokens, heads: heads, headDimension: headDimension)
     }
     let recurrent = MambaCache()
     recurrent[0] = MLXArray.zeros([1, 3, 16])
@@ -138,7 +139,7 @@ private func legacyStatus(cache: [KVCache], maxKVSize: Int) throws -> KVCacheSta
         cache: [attention(), KVCacheSimple(), CacheList(recurrent, attention())])
 
     // Three tokens reserve a whole step of rows for keys and for values.
-    let attentionBytes = 2 * (2 * KVCacheSimple().step * 8) * 4
+    let attentionBytes = 2 * (heads * KVCacheSimple().step * headDimension) * 4
     let recurrentBytes = (3 * 16 + 2 * 4 * 8) * 4
     #expect(
         status.layers.map(\.memoryBytes)

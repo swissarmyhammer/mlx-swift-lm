@@ -400,11 +400,8 @@ struct ChatSessionQwenTextMTPTests {
 
     @Test("raw prompt cache keeps its prefix and cold-starts the MTP drafter")
     func rawPromptCacheColdStartsWithoutDiscardingPrefix() async throws {
-        let rawCache = KVCacheSimple()
-        _ = rawCache.update(
-            keys: MLXArray.zeros([1, 1, 3, 1]),
-            values: MLXArray.zeros([1, 1, 3, 1])
-        )
+        let prefixTokens = 3
+        let rawCache = ZeroFilledKVCache.make(tokens: prefixTokens)
         let session = ChatSession(
             makeModelContext(),
             cache: [rawCache],

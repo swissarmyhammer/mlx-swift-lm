@@ -888,13 +888,15 @@ struct MiniMaxM3Tests {
         // error: KVCacheSimple state must have exactly 2 arrays". Fixed by the
         // `serializedClassName` of MiniMaxM3KVCache, which registers the type
         // with `registerKVCacheType(_:)`.
-        let denseCache = KVCacheSimple()
-        _ = denseCache.update(
-            keys: MLXArray.zeros([1, 2, 3, 4]), values: MLXArray.zeros([1, 2, 3, 4]))
+        let tokens = 3
+        let heads = 2
+        let headDimension = 4
+        let denseCache = ZeroFilledKVCache.make(
+            tokens: tokens, heads: heads, headDimension: headDimension)
 
         let sparseCache = MiniMaxM3KVCache()
-        _ = sparseCache.update(
-            keys: MLXArray.zeros([1, 2, 3, 4]), values: MLXArray.zeros([1, 2, 3, 4]))
+        let entries = MLXArray.zeros([1, heads, tokens, headDimension])
+        _ = sparseCache.update(keys: entries, values: entries)
         // Populate `indexKeys` so the saved state has 3 arrays (keys, values,
         // indexKeys), not 2 -- the exact shape that crashed under the old
         // misclassification.

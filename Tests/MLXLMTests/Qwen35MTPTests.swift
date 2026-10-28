@@ -712,9 +712,8 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35HybridCacheRewindRestoresAttentionAndRecurrentStateAtomically() {
-        let attention = KVCacheSimple()
-        let keys = MLXArray.zeros([1, 1, 3, 2])
-        _ = attention.update(keys: keys, values: keys)
+        let verifiedTokens = 3
+        let attention = ZeroFilledKVCache.make(tokens: verifiedTokens)
 
         let recurrent = MambaCache()
         let checkpointConv = MLXArray.ones([1, 1, 4])
@@ -731,7 +730,7 @@ struct Qwen35MTPMetalTests {
 
         let rewound = rewindSpeculativePromptCache([attention, recurrent], numTokens: 1)
         #expect(rewound == 1)
-        #expect(attention.offset == 2)
+        #expect(attention.offset == verifiedTokens - 1)
         #expect(recurrent.speculativeSlotCount == 0)
 
         let restored = recurrent.state

@@ -278,10 +278,10 @@ private enum SnapshotSlotFixture {
 private func hybridCacheAfterAVerify(of snapshots: GatedDeltaDecodeKernel.Snapshots) -> (
     attention: KVCacheSimple, recurrent: MambaCache
 ) {
-    let attention = KVCacheSimple()
-    let keys = MLXArray.zeros([1, 1, snapshots.tokenCount, SnapshotSlotFixture.channels])
-    _ = attention.update(keys: keys, values: keys)
-    return (attention, SnapshotSlotFixture.cache(after: snapshots))
+    (
+        ZeroFilledKVCache.make(tokens: snapshots.tokenCount),
+        SnapshotSlotFixture.cache(after: snapshots)
+    )
 }
 
 @Test func rewindingAHybridCacheByEachDraftCountSelectsItsSlotAndTrimsTheAttention() throws {
