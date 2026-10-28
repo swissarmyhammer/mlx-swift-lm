@@ -74,20 +74,6 @@ struct Qwen35ChainedMTPDraftTests {
         }
     }
 
-    /// A greedy MTP iterator of the fixture's drafter over ``prompt``.
-    private func iterator(
-        _ fixture: Qwen35MTPFixture, blockSize: Int, minimumDraftProbability: Float = 0,
-        cache: [KVCache]? = nil,
-        parameters: GenerateParameters = GenerateParameters(
-            maxTokens: generatedTokenCount, temperature: 0)
-    ) throws -> MTPSpeculativeTokenIterator {
-        try MTPSpeculativeTokenIterator(
-            input: LMInput(tokens: MLXArray(Self.prompt.map(Int32.init))),
-            mainModel: fixture.target, drafter: fixture.drafter, mainCache: cache,
-            parameters: parameters, blockSize: blockSize,
-            minimumDraftProbability: minimumDraftProbability)
-    }
-
     /// A drafter state prefilled over the prompt of ``QwenMTPDistributionDraftTests`` with
     /// `floor`.
     private func preparedState(_ fixture: Qwen35MTPFixture, floor: Float) -> MTPDrafterState {
@@ -105,8 +91,8 @@ struct Qwen35ChainedMTPDraftTests {
         let fixture = try Qwen35MTPFixture(drafter: mode)
         let plain = try await fixture.decodeGreedily(
             prompt: Self.prompt, maxTokens: Self.generatedTokenCount, speculative: false)
-        var decode = try iterator(
-            fixture, blockSize: setting.blockSize,
+        var decode = try fixture.greedyMTPIterator(
+            over: Self.prompt, blockSize: setting.blockSize, maxTokens: Self.generatedTokenCount,
             minimumDraftProbability: setting.minimumDraftProbability)
 
         let tokens = drain(&decode)
@@ -128,10 +114,7 @@ struct Qwen35ChainedMTPDraftTests {
             input: input, mainModel: fixture.target, drafter: fixture.drafter,
             parameters: parameters, blockSize: blockSize)
 
-        var plainTokens: [Int] = []
-        while let token = plain.next() {
-            plainTokens.append(token)
-        }
+        let plainTokens = drain(&plain)
         let speculativeTokens = drain(&speculative)
 
         #expect(speculativeTokens == plainTokens)
@@ -145,8 +128,8 @@ struct Qwen35ChainedMTPDraftTests {
         arguments: settings)
     func drafterFollowsTheMainCacheAfterEveryRound(setting: ChainSetting) throws {
         let fixture = try Qwen35MTPFixture()
-        var decode = try iterator(
-            fixture, blockSize: setting.blockSize,
+        var decode = try fixture.greedyMTPIterator(
+            over: Self.prompt, blockSize: setting.blockSize, maxTokens: Self.generatedTokenCount,
             minimumDraftProbability: setting.minimumDraftProbability)
         var proposed = decode.proposedCount
         var accepted = decode.acceptedCount
@@ -184,8 +167,9 @@ struct Qwen35ChainedMTPDraftTests {
         let fixture = try Qwen35MTPFixture()
         let plain = try await fixture.decodeGreedily(
             prompt: Self.prompt, maxTokens: Self.generatedTokenCount, speculative: false)
-        var decode = try iterator(
-            fixture, blockSize: blockSize, minimumDraftProbability: Self.stoppingFloor)
+        var decode = try fixture.greedyMTPIterator(
+            over: Self.prompt, blockSize: blockSize, maxTokens: Self.generatedTokenCount,
+            minimumDraftProbability: Self.stoppingFloor)
 
         let tokens = drain(&decode)
         let telemetry = try #require(decode.speculativeDecodingTelemetry)
@@ -242,19 +226,11 @@ struct Qwen35ChainedMTPDraftTests {
         let fixture = try Qwen35MTPFixture()
 
         #expect(throws: SpeculativeDecodingConfigurationError.self) {
-            try iterator(
-                fixture, blockSize: Self.sampledBlockSize,
+            try fixture.greedyMTPIterator(
+                over: Self.prompt, blockSize: Self.sampledBlockSize,
+                maxTokens: Self.generatedTokenCount,
                 minimumDraftProbability: Self.stoppingFloor + 1)
         }
-    }
-
-    /// Reads every token of `decode`.
-    private func drain(_ decode: inout MTPSpeculativeTokenIterator) -> [Int] {
-        var tokens: [Int] = []
-        while let token = decode.next() {
-            tokens.append(token)
-        }
-        return tokens
     }
 
     @Test(
@@ -262,7 +238,8 @@ struct Qwen35ChainedMTPDraftTests {
         arguments: chainedBlockSizes)
     func firstRoundDraftsEveryDraftOfTheBlock(blockSize: Int) throws {
         let fixture = try Qwen35MTPFixture()
-        var decode = try iterator(fixture, blockSize: blockSize)
+        var decode = try fixture.greedyMTPIterator(
+            over: Self.prompt, blockSize: blockSize, maxTokens: Self.generatedTokenCount)
 
         // The first token is the prefill bonus; the second runs the first round.
         _ = decode.next()
@@ -281,8 +258,8 @@ struct Qwen35ChainedMTPDraftTests {
             maxTokens: Self.generatedTokenCount, temperature: Self.temperature, topP: Self.topP,
             seed: Self.seed)
         parameters.mtpSampledVerification = verification
-        var decode = try iterator(
-            fixture, blockSize: Self.sampledBlockSize, parameters: parameters)
+        var decode = try fixture.mtpIterator(
+            over: Self.prompt, blockSize: Self.sampledBlockSize, parameters: parameters)
 
         let tokens = drain(&decode)
         let telemetry = try #require(decode.speculativeDecodingTelemetry)
@@ -299,20 +276,17 @@ struct Qwen35ChainedMTPDraftTests {
     func chainedDecodeLeavesThePrefillContinuation(blockSize: Int) throws {
         let fixture = try Qwen35MTPFixture()
         let cache = try fixture.target.newCache(parameters: nil)
-        var decode = try iterator(fixture, blockSize: blockSize, cache: cache)
+        var decode = try fixture.greedyMTPIterator(
+            over: Self.prompt, blockSize: blockSize, maxTokens: Self.generatedTokenCount,
+            cache: cache)
         let tokens = drain(&decode)
         decode.finalizeGeneration()
         let continuation = try #require(
             decode.mtpDrafterContinuation, "\(decode.passthroughReason ?? "")")
-        let held = KVCacheStorage(cache, plan: .disabled).processedTokenCount
-        let heldTokens = Array((Self.prompt + tokens).prefix(held))
+        let held = heldTokenCount(of: cache)
         let reference = try #require(
-            try MTPSpeculativeTokenIterator(
-                input: LMInput(tokens: MLXArray(heldTokens.map(Int32.init))),
-                mainModel: fixture.target, drafter: fixture.drafter,
-                parameters: GenerateParameters(maxTokens: 1, temperature: 0),
-                blockSize: blockSize
-            ).promptBoundaryContinuation)
+            try fixture.prefillContinuation(
+                of: Array((Self.prompt + tokens).prefix(held)), blockSize: blockSize))
 
         // More drafts accepted than rounds: some round accepted a chained draft.
         #expect(decode.acceptedCount > decode.speculativeDecodingTelemetry?.roundCount ?? 0)

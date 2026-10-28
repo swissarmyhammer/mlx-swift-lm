@@ -108,9 +108,15 @@ public struct MTPBlockSetting: Sendable, Hashable, CustomStringConvertible {
     public static let sweptBlockSizes = Array(
         MTPDraftBlockOutput.minimumChainedMTPBlockSize ... GatedDeltaDecodeKernel.mostTokens)
 
-    /// The confidence floors a sweep measures: none, and the floor llama.cpp users report
-    /// fastest at five drafts.
-    public static let sweptMinimumDraftProbabilities: [Float] = [0, 0.75]
+    /// The confidence floor llama.cpp users report fastest at five drafts
+    /// (`--spec-draft-p-min 0.75`).
+    public static let reportedFastestMinimumDraftProbability: Float = 0.75
+
+    /// The confidence floors a sweep measures: none, and
+    /// ``reportedFastestMinimumDraftProbability``.
+    public static let sweptMinimumDraftProbabilities: [Float] = [
+        0, reportedFastestMinimumDraftProbability,
+    ]
 
     /// Every swept block size with every swept floor, except the floors of ``singleDraft``,
     /// whose one draft no floor stops.

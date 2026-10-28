@@ -49,6 +49,39 @@ comments:
     - evidence: 24 files — Libraries/MLXLMCommon/{QwenMTP,MTPDrafterModel,MTPSpeculativeTokenIterator,ChatSession,Evaluate,MTPDrafterContinuation,SpeculativeDecoding}.swift, Libraries/MLXLLM/Models/Qwen35MTP.swift, Libraries/MLXVLM/Models/Qwen35MTP.swift, Libraries/BenchmarkHelpers/{BenchmarkHelpers,MTPBlockSweep(new)}.swift, IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift, Tests/MLXLMTests/{Qwen35ChainedMTPDraftTests(new),Qwen35ChainedMTPCachingTests(new),ChatSessionQwenChainedMTPTests(new),SpeculativeDecodingDepthTelemetryTests(new),SpeculativeDecodingConfigTests,Qwen35MTPSamplingTests,Qwen35MTPTests,Qwen35ScriptedMTPSupport}.swift, plus kanban cards. swift build --build-tests 0 compiler warnings; xcrun xctest 5 bundles green (MLXLMTests 1966+920); Release qwen38FourBitMTPGeneration / SampledGeneration / SystemPromptCache PASS. Default stays blockSize 2 pMin 0 per DEFAULT RULE (numbers in comments).
     - next: /review
   timestamp: 2026-10-28T23:33:57.529230+00:00
+- actor: claude-code
+  id: 01m62e8s0dekxx0m5m771sr5sm
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (a9985516) — 6 findings (6 confirmed, 6 refuted): Libraries/BenchmarkHelpers/MTPBlockSweep.swift:113, Tests/MLXLMTests/Qwen35ChainedMTPCachingTests.swift:63, Tests/MLXLMTests/Qwen35ChainedMTPCachingTests.swift:133, Tests/MLXLMTests/Qwen35ChainedMTPDraftTests.swift:78, Tests/MLXLMTests/Qwen35ChainedMTPDraftTests.swift:131, Tests/MLXLMTests/Qwen35ChainedMTPDraftTests.swift:309
+    - next: /implement ^hcfzyem to resolve the 2026-10-28 18:34 Review Findings checklist
+  timestamp: 2026-10-28T23:42:02.765834+00:00
+- actor: claude-code
+  id: 01m62e9ckbvrxhy7b1pqetxxfc
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 24 files (chained drafts, pMin, depth telemetry; default stays bs2)
+    - test: green — 5 xctest bundles; Release MTPGeneration/SampledGeneration/SystemPromptCache pass, edit turn 123 tokens
+    - commit: a9985516
+    - review: findings — Libraries/BenchmarkHelpers/MTPBlockSweep.swift:113, Tests/MLXLMTests/Qwen35ChainedMTPCachingTests.swift:63, :133, Tests/MLXLMTests/Qwen35ChainedMTPDraftTests.swift:78, :131, :309
+  timestamp: 2026-10-28T23:42:22.827348+00:00
+- actor: claude-code
+  id: 01m62eqbmsxhdb1dt34ecjetzd
+  text: |-
+    Resolved the 2026-10-28 18:34 findings (pure refactor, no library behaviour change beyond the constant):
+    - MTPBlockSweep.swift: the 0.75 floor is now `MTPBlockSetting.reportedFastestMinimumDraftProbability` and `sweptMinimumDraftProbabilities` reads `[0, reportedFastestMinimumDraftProbability]`. Ran swiftlint 0.65.1 `no_magic_numbers` (allowed_numbers [0, 1, -1, 100], the validator's config) on the whole file: 0 violations, down from 1.
+    - Qwen35ScriptedMTPSupport.swift (8.6 KB -> 12.5 KB) gains `Qwen35MTPFixture.mtpIterator(over:blockSize:parameters:minimumDraftProbability:cache:mtpContinuation:)`, `greedyMTPIterator(over:blockSize:maxTokens:minimumDraftProbability:cache:mtpContinuation:)`, `prefillContinuation(of:blockSize:)`, plus global `heldTokenCount(of:)` and `drain(_:limit:)`, which is generic over `IteratorProtocol where Element == Int`.
+    - Both chained suites now use these helpers. Their private `iterator`, `drain` and `prefillContinuation` copies and the inline while-let loops are gone. The bounded loop in the caching suite's `stoppedCall` now uses `drain(&decode, limit: stop)`.
+    - The shared prefill reference uses maxTokens 1. The caching suite used 16 before; `promptBoundaryContinuation` is read before the first token, so maxTokens does not affect it.
+    - Left alone: Qwen35MTPSamplingTests and Qwen35PartialRoundFinalizeTests keep their own `drain` copies. Those are older tests outside this change.
+  timestamp: 2026-10-28T23:50:00.601625+00:00
+- actor: claude-code
+  id: 01m62eqejqqjsc35nt1yh726j4
+  text: |-
+    ### implement — changed
+    - evidence: 4 files — Libraries/BenchmarkHelpers/MTPBlockSweep.swift, Tests/MLXLMTests/Qwen35ScriptedMTPSupport.swift, Tests/MLXLMTests/Qwen35ChainedMTPCachingTests.swift, Tests/MLXLMTests/Qwen35ChainedMTPDraftTests.swift. `swift build --build-tests`: 0 compiler warnings (only the existing build-system "missing creator" note). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 1966 Swift Testing tests in 177 suites passed and 920 XCTest tests with 0 failures; Qwen35ChainedMTPDraftTests, Qwen35ChainedMTPCachingTests and ChatSessionQwenChainedMTPTests passed. All 6 findings checked.
+    - next: /review
+  timestamp: 2026-10-28T23:50:03.607426+00:00
 depends_on:
 - 01M5SKBV27GED43EB3T8MCSVWE
 - 01M5SKBCEWG4D25SZZNGG7BVM7
@@ -87,3 +120,20 @@ title: 'MTP: draft more than one token per round by chaining the Qwen MTP head'
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38 #perf
+
+## Review Findings (2026-10-28 18:34)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 20 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWKB8C14RB75S80HCFZYEM.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWKB8C14RB75S80HCFZYEM.md` — no validator matches this file
+> - `.kanban/tasks/01M62C57EC6FHXX6CBWHBQ0F3N.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M62C57EC6FHXX6CBWHBQ0F3N.md` — no validator matches this file
+
+- [x] `Libraries/BenchmarkHelpers/MTPBlockSweep.swift:113` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/Qwen35ChainedMTPCachingTests.swift:63` `reuse/reuse` — The expression `KVCacheStorage(cache, plan: .disabled).processedTokenCount` that counts the tokens a cache holds is written out again in the draft suite. The two copies can drift if the way a held count is read changes. Add a small shared helper, such as `heldTokenCount(of cache: [KVCache]) -> Int`, in the test support file and use it in both suites.
+- [x] `Tests/MLXLMTests/Qwen35ChainedMTPCachingTests.swift:133` `reuse/reuse` — The `while let token = second.next()` loop that collects every token of the restored iterator repeats the drain loop `drain(_:)` already implements in the draft suite. Each suite keeps its own copy, so the token-collection logic exists in two places. Move the drain helper into shared test support, next to `collectChatTurn` in Qwen35ScriptedMTPSupport.swift, and call it from both suites. Replace the inline loop at this line with that helper.
+- [x] `Tests/MLXLMTests/Qwen35ChainedMTPDraftTests.swift:78` `reuse/reuse` — The private `iterator(_:blockSize:minimumDraftProbability:cache:parameters:)` builds a greedy `MTPSpeculativeTokenIterator` over the fixture. The caching suite builds the same iterator through its own private `iterator(_:input:cache:continuation:blockSize:maxTokens:)`, with the same initializer and greedy parameters. The two construction paths can drift apart. Put one shared greedy-iterator builder in the test support file and have both suites call it. The caching suite needs a continuation parameter, so the shared builder should take an optional `mtpContinuation`.
+- [x] `Tests/MLXLMTests/Qwen35ChainedMTPDraftTests.swift:131` `reuse/reuse` — The inline `while let token = plain.next()` loop collects the plain `TokenIterator`'s tokens by hand. The same accumulation is already written as `drain(_:)` in this suite, but that helper is typed for `MTPSpeculativeTokenIterator`, so the loop is duplicated instead of shared. Make the shared drain helper generic over any iterator whose `next()` returns `Int?`, and use it for both the plain and the speculative iterators in this test.
+- [x] `Tests/MLXLMTests/Qwen35ChainedMTPDraftTests.swift:309` `reuse/reuse` — `chainedDecodeLeavesThePrefillContinuation` builds its reference prefill continuation inline, constructing an `MTPSpeculativeTokenIterator` over the held tokens and reading `.promptBoundaryContinuation`. That is the same construction `prefillContinuation` already performs in the sibling caching suite. Two copies of the reference-building logic can drift apart. Move the prefill-continuation helper into shared test support, next to `collectChatTurn` in Qwen35ScriptedMTPSupport.swift, and call it from both suites. Alternatively, have this test call the caching suite's helper if it is made internal.

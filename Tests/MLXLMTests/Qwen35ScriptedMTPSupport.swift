@@ -41,6 +41,88 @@ extension Qwen35MTPFixture {
                 sourceLocation: sourceLocation)
         }
     }
+
+    /// An MTP iterator of the fixture's drafter over `input`.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt tokens.
+    ///   - blockSize: The tokens of each round: the drafts and the bonus token.
+    ///   - parameters: The generation parameters.
+    ///   - minimumDraftProbability: The drafter top-1 probability below which a chain stops.
+    ///   - cache: The main cache, or `nil` for a new one.
+    ///   - mtpContinuation: The drafter continuation the main cache was left with, or `nil`.
+    /// - Returns: The iterator.
+    /// - Throws: The error of the iterator's validation or prefill.
+    func mtpIterator(
+        over input: [Int], blockSize: Int, parameters: GenerateParameters,
+        minimumDraftProbability: Float = 0, cache: [KVCache]? = nil,
+        mtpContinuation: MTPDrafterContinuation? = nil
+    ) throws -> MTPSpeculativeTokenIterator {
+        try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: MLXArray(input.map(Int32.init))), mainModel: target,
+            drafter: drafter, mainCache: cache, mtpContinuation: mtpContinuation,
+            parameters: parameters, blockSize: blockSize,
+            minimumDraftProbability: minimumDraftProbability)
+    }
+
+    /// A greedy MTP iterator of the fixture's drafter over `input`.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt tokens.
+    ///   - blockSize: The tokens of each round: the drafts and the bonus token.
+    ///   - maxTokens: The tokens the iterator generates at most.
+    ///   - minimumDraftProbability: The drafter top-1 probability below which a chain stops.
+    ///   - cache: The main cache, or `nil` for a new one.
+    ///   - mtpContinuation: The drafter continuation the main cache was left with, or `nil`.
+    /// - Returns: The iterator.
+    /// - Throws: The error of the iterator's validation or prefill.
+    func greedyMTPIterator(
+        over input: [Int], blockSize: Int, maxTokens: Int, minimumDraftProbability: Float = 0,
+        cache: [KVCache]? = nil, mtpContinuation: MTPDrafterContinuation? = nil
+    ) throws -> MTPSpeculativeTokenIterator {
+        try mtpIterator(
+            over: input, blockSize: blockSize,
+            parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0),
+            minimumDraftProbability: minimumDraftProbability, cache: cache,
+            mtpContinuation: mtpContinuation)
+    }
+
+    /// The drafter continuation a greedy prefill of `tokens` holds at their end: the reference
+    /// a decode that leaves the main cache holding `tokens` must match.
+    ///
+    /// - Parameters:
+    ///   - tokens: The tokens of the prefill.
+    ///   - blockSize: The tokens of each round of the prefilled iterator.
+    /// - Returns: The continuation, or `nil` when the prefill leaves none.
+    /// - Throws: The error of the iterator's validation or prefill.
+    func prefillContinuation(of tokens: [Int], blockSize: Int) throws -> MTPDrafterContinuation? {
+        try greedyMTPIterator(over: tokens, blockSize: blockSize, maxTokens: 1)
+            .promptBoundaryContinuation
+    }
+}
+
+/// The tokens `cache` holds.
+///
+/// - Parameter cache: The layers of a main cache.
+/// - Returns: The processed token count of the cache.
+func heldTokenCount(of cache: [KVCache]) -> Int {
+    KVCacheStorage(cache, plan: .disabled).processedTokenCount
+}
+
+/// Reads the tokens of `iterator` until it ends or `limit` tokens are read.
+///
+/// - Parameters:
+///   - iterator: A token iterator: a plain or a speculative one.
+///   - limit: The tokens to read at most; every token when omitted.
+/// - Returns: The tokens read, in order.
+func drain<Tokens: IteratorProtocol>(
+    _ iterator: inout Tokens, limit: Int = .max
+) -> [Int] where Tokens.Element == Int {
+    var tokens: [Int] = []
+    while tokens.count < limit, let token = iterator.next() {
+        tokens.append(token)
+    }
+    return tokens
 }
 
 /// The text and the completion information of one chat turn.

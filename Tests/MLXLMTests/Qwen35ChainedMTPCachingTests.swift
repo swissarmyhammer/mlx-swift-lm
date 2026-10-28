@@ -34,48 +34,23 @@ struct Qwen35ChainedMTPCachingTests {
         let passthroughReason: String?
     }
 
-    /// A greedy MTP iterator of the fixture's drafter over `input`.
-    private func iterator(
-        _ fixture: Qwen35MTPFixture, input: [Int], cache: [KVCache],
-        continuation: MTPDrafterContinuation? = nil, blockSize: Int, maxTokens: Int
-    ) throws -> MTPSpeculativeTokenIterator {
-        try MTPSpeculativeTokenIterator(
-            input: LMInput(tokens: MLXArray(input.map(Int32.init))), mainModel: fixture.target,
-            drafter: fixture.drafter, mainCache: cache, mtpContinuation: continuation,
-            parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0),
-            blockSize: blockSize)
-    }
-
     /// Decodes after ``prompt``, stops after `stop` tokens, and finalizes the decode.
     private func stoppedCall(
         _ fixture: Qwen35MTPFixture, blockSize: Int, stop: Int
     ) throws -> StoppedCall {
         let cache = try fixture.target.newCache(parameters: nil)
-        var decode = try iterator(
-            fixture, input: Self.prompt, cache: cache, blockSize: blockSize,
-            maxTokens: Self.generatedTokenCount)
-        var tokens: [Int] = []
-        while tokens.count < stop, let token = decode.next() {
-            tokens.append(token)
-        }
+        var decode = try fixture.greedyMTPIterator(
+            over: Self.prompt, blockSize: blockSize, maxTokens: Self.generatedTokenCount,
+            cache: cache)
+        let tokens = drain(&decode, limit: stop)
         let stoppedOnACachedToken = decode.hasCachedLastToken
         decode.finalizeGeneration()
-        let held = KVCacheStorage(cache, plan: .disabled).processedTokenCount
         return StoppedCall(
-            cache: cache, heldTokens: Array((Self.prompt + tokens).prefix(held)),
+            cache: cache,
+            heldTokens: Array((Self.prompt + tokens).prefix(heldTokenCount(of: cache))),
             continuation: decode.mtpDrafterContinuation,
             stoppedOnACachedToken: stoppedOnACachedToken,
             passthroughReason: decode.passthroughReason)
-    }
-
-    /// The continuation a prefill of `tokens` holds at their end.
-    private func prefillContinuation(
-        _ fixture: Qwen35MTPFixture, tokens: [Int], blockSize: Int
-    ) throws -> MTPDrafterContinuation? {
-        try iterator(
-            fixture, input: tokens, cache: try fixture.target.newCache(parameters: nil),
-            blockSize: blockSize, maxTokens: Self.generatedTokenCount
-        ).promptBoundaryContinuation
     }
 
     @Test(
@@ -90,7 +65,7 @@ struct Qwen35ChainedMTPCachingTests {
             let continuation = try #require(
                 call.continuation, "stop \(stop): \(call.passthroughReason ?? "")")
             let reference = try #require(
-                try prefillContinuation(fixture, tokens: call.heldTokens, blockSize: blockSize))
+                try fixture.prefillContinuation(of: call.heldTokens, blockSize: blockSize))
             if call.stoppedOnACachedToken { stopsOnCachedTokens += 1 }
 
             #expect(continuation.targetProcessedTokenCount == call.heldTokens.count, "stop \(stop)")
@@ -125,14 +100,11 @@ struct Qwen35ChainedMTPCachingTests {
             drafterContinuation: try SerializedMTPDrafterContinuation(continuation))
         let snapshot = try loadPromptCacheSnapshot(url: url)
         let restored = try #require(snapshot.drafterContinuation).restored(by: fixture.drafter)
-        var second = try iterator(
-            fixture, input: Self.followUp, cache: snapshot.cache, continuation: restored,
-            blockSize: blockSize, maxTokens: Self.continuedTokenCount)
+        var second = try fixture.greedyMTPIterator(
+            over: Self.followUp, blockSize: blockSize, maxTokens: Self.continuedTokenCount,
+            cache: snapshot.cache, mtpContinuation: restored)
         let resumedState = try #require(second.drafterState)
-        var tokens: [Int] = []
-        while let token = second.next() {
-            tokens.append(token)
-        }
+        let tokens = drain(&second)
 
         #expect(resumedState.cacheStartPosition == 0)
         #expect(tokens == plain.tokens)
