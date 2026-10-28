@@ -277,6 +277,14 @@ public protocol StatefulMTPDrafterModel: MTPDrafterModel {
 /// pairs each input token with the target hidden state of the preceding
 /// position. Such a drafter implements only ``appendDrafterState(target:tokens:targetHidden:positionDeltas:state:sampler:)``.
 public protocol ResumableMTPDrafterModel: StatefulMTPDrafterModel {
+    /// The identity a continuation of this drafter records, so that only a drafter of the same
+    /// identity resumes it. Drafters that hold the same identity build the same cache layers and
+    /// read them the same way.
+    ///
+    /// The default is the type name. A drafter type whose instances can differ in configuration
+    /// gives ``MTPDrafterID/init(drafterType:configuration:)``.
+    var drafterID: MTPDrafterID { get }
+
     /// Convert `state` to a canonical boundary after the target cache has
     /// discarded any verified-but-unemitted lookahead.
     ///
@@ -366,6 +374,11 @@ public protocol ResumableMTPDrafterModel: StatefulMTPDrafterModel {
 }
 
 extension ResumableMTPDrafterModel {
+    /// The fully qualified type name of the drafter.
+    public var drafterID: MTPDrafterID {
+        MTPDrafterID(String(reflecting: Self.self))
+    }
+
     /// Resumes a shifted drafter: the boundary hidden row pairs with the first suffix token, and
     /// each suffix hidden row pairs with the token after it, ending with `firstBonus`.
     public func resumeDrafterState(
@@ -484,33 +497,6 @@ extension ResumableMTPDrafterModel {
         else { return false }
 
         return state.nextPosition == targetProcessedTokenCount - 1
-    }
-}
-
-/// Iterator-owned MTP continuation carried atomically with a ChatSession's
-/// target cache, target model state, and transcript.
-///
-/// A caller of ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:)``
-/// receives one when the generation ends, and hands it to the next generation
-/// that continues the same main cache. The value is opaque to callers outside
-/// the package.
-///
-/// `targetProcessedTokenCount` is only an alignment witness. The authoritative
-/// position remains `KVCacheStorage.processedTokenCount`.
-// swiftlint:disable:next no_unchecked_sendable The generation evaluates every array before it hands the value over and keeps no reference to it; the value then passes to one generation at a time, which owns the drafter caches until it ends.
-public struct MTPDrafterContinuation: @unchecked Sendable {
-    package var state: MTPDrafterState
-    package let targetBoundaryHidden: MLXArray
-    package let targetProcessedTokenCount: Int
-
-    package init(
-        state: consuming MTPDrafterState,
-        targetBoundaryHidden: MLXArray,
-        targetProcessedTokenCount: Int
-    ) {
-        self.state = consume state
-        self.targetBoundaryHidden = targetBoundaryHidden
-        self.targetProcessedTokenCount = targetProcessedTokenCount
     }
 }
 

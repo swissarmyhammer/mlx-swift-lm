@@ -86,12 +86,28 @@ comments:
     - evidence: swift build --build-tests (changed files touched) — 0 new warnings; xcrun xctest MLXLMTests.xctest — 895 XCTest + 1860 Swift Testing passed, 0 failures; MLXFoundationModelsTests.xctest — 376 passed, 0 failures. Only known pre-existing output: "missing creator ... mlx-swift_Cmlx.bundle" and the env-gated benchmarkVerification() skip.
     - next: review/commit
   timestamp: 2026-10-27T23:45:12.596595+00:00
+- actor: claude-code
+  id: 01m5zw512fbzzsbbsdm3n7pfwa
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (61a64606) — 0 findings, 0 confirmed, 0 refuted; 5 files reviewed, 2 .kanban files unmatched. Both 2026-10-27 18:23 items verified fixed: (1) `LMOutput.State.feedMTPPrefillChunk(tokens:output:positionDeltas:)` in MTPDrafterModel.swift is now the single dispatch, called from `LLMModel.prepare` and MLXVLM Qwen35 `prepareContinuation`; (2) `MTPDrafterPrefillFeed.init` (now non-failable) only records `pendingRestartPosition`; `restartIfPending()` runs on the first `append`, so a prefill with no chunk leaves the shared drafter caches untouched, and a refused restart sets `isIntact = false`, which gates `appendDrafterState`. New tests `unalignedContinuationColdStartsAtCachedPosition` (warm cache) and `unalignedContinuationPrefillsFromPositionZero` (position 0) both use a sub-chunk prompt and assert no passthrough, aligned drafter, proposals > 0, tokens == plain greedy.
+    - next: task moved to done.
+  timestamp: 2026-10-27T23:46:56.719405+00:00
+- actor: claude-code
+  id: 01m5zw5jjrn7h1vzkh5p4my67n
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 5 files (feed leaves the shared drafter cache alone until the first chunk; shared feedMTPPrefillChunk)
+    - test: green — MLXLMTests 895 XCTest 0 failures + 1860 Swift Testing; FoundationModels 376
+    - commit: 61a64606
+    - review: clean — 0 findings, prior 2/2 verified; task done
+  timestamp: 2026-10-27T23:47:14.648045+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: ffe980
 title: 'MTP: chunked prompt prefill that feeds the drafter for each chunk'
 ---
 ## What

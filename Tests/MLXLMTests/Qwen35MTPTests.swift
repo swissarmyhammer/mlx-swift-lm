@@ -993,7 +993,8 @@ struct Qwen35MTPDrafterStateTests {
         return MTPDrafterContinuation(
             state: preparedState(fixture, hidden: hidden, sampler: sampler),
             targetBoundaryHidden: hidden[0..., (-1)..., 0...],
-            targetProcessedTokenCount: targetProcessedTokenCount)
+            targetProcessedTokenCount: targetProcessedTokenCount,
+            drafterID: fixture.drafter.drafterID)
     }
 
     /// Decodes greedily with MTP after the tokens of ``prompt`` that `cache` does not hold,

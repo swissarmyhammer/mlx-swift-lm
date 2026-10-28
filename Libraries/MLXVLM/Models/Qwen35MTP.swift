@@ -87,6 +87,9 @@ public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel {
     public let requiresGreedySampling = true
     private let checkpointPolicy: Qwen35CheckpointPolicy
 
+    /// The type name and a hash of ``configuration``, which decides the drafter cache layers.
+    public let drafterID: MTPDrafterID
+
     @ModuleInfo(key: "mtp") var mtp: Qwen35VLMNextNPredictor
 
     public convenience init(
@@ -106,6 +109,8 @@ public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel {
     ) {
         self.configuration = configuration
         self.checkpointPolicy = checkpointPolicy
+        self.drafterID = MTPDrafterID(
+            drafterType: Qwen35VLMNextNDraftModel.self, configuration: configuration)
         _mtp.wrappedValue = Qwen35VLMNextNPredictor(configuration)
         super.init()
     }

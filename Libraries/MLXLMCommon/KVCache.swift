@@ -2619,7 +2619,40 @@ public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
 public func loadPromptCacheSnapshot(
     url: URL, into templates: [KVCache]
 ) throws -> PromptCacheSnapshot {
-    let contents = try PromptCacheFileContents(url: url)
+    try restorePromptCacheSnapshot(PromptCacheFileContents(url: url), into: templates)
+}
+
+/// Restores the arrays and the metadata of a prompt cache, as
+/// ``preparePromptCacheSave(cache:metadata:state:)`` gives them, into the fresh caches that the
+/// model made.
+///
+/// This is ``loadPromptCacheSnapshot(url:into:)`` for values held in memory, with the same rules
+/// and the same checks.
+///
+/// - Parameters:
+///   - arrays: The flat arrays of the prompt cache.
+///   - metadata: The flat metadata of the prompt cache.
+///   - templates: The fresh caches of the model, one for each saved layer.
+/// - Returns: The snapshot. Its caches are the templates, or the new converted caches.
+/// - Throws: ``KVCacheError`` for each error of ``loadPromptCacheSnapshot(url:into:)``. After a
+///   throw the state of the templates is not defined. Discard them.
+package func restorePromptCacheSnapshot(
+    arrays: [String: MLXArray], metadata: [String: String], into templates: [KVCache]
+) throws -> PromptCacheSnapshot {
+    try restorePromptCacheSnapshot(
+        PromptCacheFileContents(arrays: arrays, metadata: metadata), into: templates)
+}
+
+/// Restores the parsed contents of a prompt cache into the fresh caches that the model made.
+///
+/// - Parameters:
+///   - contents: The parsed arrays and metadata of the prompt cache.
+///   - templates: The fresh caches of the model, one for each saved layer.
+/// - Returns: The snapshot. Its caches are the templates, or the new converted caches.
+/// - Throws: ``KVCacheError`` for each error of ``loadPromptCacheSnapshot(url:into:)``.
+private func restorePromptCacheSnapshot(
+    _ contents: PromptCacheFileContents, into templates: [KVCache]
+) throws -> PromptCacheSnapshot {
     guard contents.layers.count == templates.count else {
         throw KVCacheError(
             message:
@@ -2681,7 +2714,18 @@ private struct PromptCacheFileContents {
     /// - Parameter url: The URL of the `.safetensors` file.
     /// - Throws: ``KVCacheError`` when the metadata is not a prompt cache layout.
     init(url: URL) throws {
-        var (arrays, metadata) = try loadArraysAndMetadata(url: url)
+        let (arrays, metadata) = try loadArraysAndMetadata(url: url)
+        try self.init(arrays: arrays, metadata: metadata)
+    }
+
+    /// Parses the flat arrays and metadata of a prompt cache.
+    ///
+    /// - Parameters:
+    ///   - arrays: The flat arrays, as a prompt cache file holds them.
+    ///   - metadata: The flat metadata, as a prompt cache file holds it.
+    /// - Throws: ``KVCacheError`` when the metadata is not a prompt cache layout.
+    init(arrays: [String: MLXArray], metadata: [String: String]) throws {
+        var arrays = arrays
         fileArrays = Array(arrays.values)
 
         // Unflatten metadata using tree_unflatten compatible logic.

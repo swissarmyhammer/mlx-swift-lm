@@ -279,10 +279,15 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let standDownReason = Self.standDownReason(
             drafter: drafter, parameters: parameters, sampler: sampler)
         let speculates = standDownReason == nil
-        self.continuationToResume = speculates ? mtpContinuation : nil
+        // A continuation of another drafter holds caches this drafter cannot read.
+        let ownContinuation = mtpContinuation.flatMap { continuation in
+            (drafter as? any ResumableMTPDrafterModel)?.drafterID == continuation.drafterID
+                ? continuation : nil
+        }
+        self.continuationToResume = speculates ? ownContinuation : nil
         self.drafterState =
             speculates
-            ? mtpContinuation?.state
+            ? ownContinuation?.state
                 ?? (drafter as? any StatefulMTPDrafterModel)?.makeState(parameters: parameters)
             : nil
 
@@ -653,7 +658,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         let alignedBoundary = continuation.flatMap {
-            $0.targetProcessedTokenCount == cachePosition ? $0.targetBoundaryHidden : nil
+            $0.isAligned(withMainTokenCount: cachePosition, drafterID: resumableDrafter.drafterID)
+                ? $0.targetBoundaryHidden : nil
         }
         resumeOrColdStart(
             resumableDrafter, segmentTokens: promptTokens, segmentHidden: suffixHidden,
@@ -1394,7 +1400,8 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
         finalizedContinuation = MTPDrafterContinuation(
             state: currentDrafterState,
             targetBoundaryHidden: targetBoundaryHidden,
-            targetProcessedTokenCount: mainCacheStorage.processedTokenCount)
+            targetProcessedTokenCount: mainCacheStorage.processedTokenCount,
+            drafterID: resumableDrafter.drafterID)
     }
 }
 
