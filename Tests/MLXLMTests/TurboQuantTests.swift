@@ -1872,6 +1872,7 @@ final class TurboQuantIntegrationTests: XCTestCase {
         XCTAssertEqual(cache.offset, prefill + 1)
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
@@ -1944,6 +1945,7 @@ final class TurboQuantIntegrationTests: XCTestCase {
             "anisotropic key data should engage key calibration (5-array state)")
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
         let restored = try XCTUnwrap(loaded[0] as? TurboQuantKVCache)
@@ -2151,6 +2153,7 @@ final class TurboQuantIntegrationTests: XCTestCase {
         XCTAssertEqual(cache.state.count, 5)
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
         let restored = try XCTUnwrap(loaded[0] as? TurboQuantKVCache)
@@ -2181,6 +2184,7 @@ final class TurboQuantIntegrationTests: XCTestCase {
         XCTAssertEqual(cache.state.count, 3)
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
         let restored = try XCTUnwrap(loaded[0] as? TurboQuantKVCache)
@@ -2203,6 +2207,7 @@ final class TurboQuantIntegrationTests: XCTestCase {
         XCTAssertEqual(cache.state.count, 2)
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
         let restored = try XCTUnwrap(loaded[0] as? TurboQuantKVCache)

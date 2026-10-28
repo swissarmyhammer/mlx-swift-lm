@@ -606,6 +606,7 @@ struct PromptCacheTemplateRestoreTests {
         var state = LMOutput.State()
         state[key] = Self.tensor([Self.batchSize, Self.headCount], seed: Self.firstSeed)
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: sources, state: state)
 
         let templates = try kinds.map { try $0.makeTemplate() }

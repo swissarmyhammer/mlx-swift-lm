@@ -158,6 +158,7 @@ extension KVCacheTests {
         eval(originalKeys, originalValues)
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: ["kind": "variance-normalized"])
         let (loaded, metadata) = try loadPromptCache(url: url)
 
@@ -185,6 +186,7 @@ extension KVCacheTests {
             eval(cache.state)
 
             let url = TemporaryPromptCacheFile.makeURL()
+            defer { try? FileManager.default.removeItem(at: url) }
             try savePromptCache(url: url, cache: [cache])
             let (loaded, _) = try loadPromptCache(url: url)
             let restored = try #require(loaded[0] as? VarianceNormalizedKVCache)

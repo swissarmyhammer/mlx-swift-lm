@@ -17,6 +17,7 @@ extension KVCacheTests {
         cache[2] = b
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -40,6 +41,7 @@ extension KVCacheTests {
         cache[1] = b
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -124,6 +126,7 @@ extension KVCacheTests {
         cache[0] = MLXArray.ones([2, 4], dtype: .float32)
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -312,6 +315,7 @@ extension KVCacheTests {
         cache[1] = b
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -335,6 +339,7 @@ extension KVCacheTests {
         let cacheList = CacheList(simple, rotating)
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cacheList], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -363,6 +368,7 @@ extension KVCacheTests {
         let cacheList = CacheList(mamba, simple)
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cacheList], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
@@ -384,6 +390,7 @@ extension KVCacheTests {
         _ = cache.update(keys: keys, values: values)
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
         #expect(loaded.count == 1)
@@ -398,6 +405,7 @@ extension KVCacheTests {
         cache[1] = MLXArray.ones([2, 4], dtype: .float32) * 2.0
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 

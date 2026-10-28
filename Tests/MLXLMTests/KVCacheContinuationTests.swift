@@ -378,6 +378,7 @@ private func hybridCacheAfterAVerify(of snapshots: GatedDeltaDecodeKernel.Snapsh
 @Test func theSnapshotSlotsAreLeftOutOfASavedPromptCache() throws {
     let cache = SnapshotSlotFixture.cache(after: SnapshotSlotFixture.snapshots())
     let url = TemporaryPromptCacheFile.makeURL()
+    defer { try? FileManager.default.removeItem(at: url) }
 
     try savePromptCache(url: url, cache: [cache], metadata: [:])
     let (loaded, _) = try loadPromptCache(url: url)

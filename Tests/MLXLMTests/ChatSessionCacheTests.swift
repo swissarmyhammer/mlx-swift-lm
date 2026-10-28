@@ -53,6 +53,7 @@ final class ChatSessionCacheTests: XCTestCase, ChatSessionFixtures {
     func testSaveCacheThrowsBeforeGeneration() async throws {
         let session = ChatSession(model(), generateParameters: generationParameters)
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         do {
             try await session.saveCache(to: url)
             XCTFail("expected ChatSessionError.noCacheAvailable")
@@ -67,6 +68,7 @@ final class ChatSessionCacheTests: XCTestCase, ChatSessionFixtures {
         _ = try await initial.respond(to: "hello")
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try await initial.saveCache(to: url)
 
         let promptCache = try loadPromptCacheSnapshot(url: url)

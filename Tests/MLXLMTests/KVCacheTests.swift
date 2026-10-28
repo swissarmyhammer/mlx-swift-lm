@@ -243,6 +243,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         }
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: cache, metadata: [:])
         let (loadedCache, _) = try loadPromptCache(url: url)
@@ -551,6 +552,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         #expect(cache.bits == 4)
 
         let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [cache], metadata: [:])
         let (loaded, _) = try loadPromptCache(url: url)
 
