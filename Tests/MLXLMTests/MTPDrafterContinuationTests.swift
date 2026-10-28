@@ -305,6 +305,23 @@ struct MTPDrafterContinuationTests {
             try MTPDrafterContinuation(arrays: arrays, metadata: metadata, drafter: fixture.drafter)
         }
     }
+
+    @Test("a restore keeps a seed proposal of the boundary hidden row's batch and width")
+    func restoreKeepsAWellFormedSeedProposal() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let continuation = try await firstCall(fixture).continuation
+        var arrays = try continuation.arrays()
+        try MTPDrafterContinuationTamper.writeSeed(into: &arrays) { batch, width in
+            ([batch, 1], [batch, 1, width])
+        }
+
+        let restored = try MTPDrafterContinuation(
+            arrays: arrays, metadata: try continuation.metadata(), drafter: fixture.drafter)
+
+        typealias Key = MTPDrafterContinuation.SerializedKey
+        #expect(restored.state.seedToken?.shape == arrays[Key.seedToken]?.shape)
+        #expect(restored.state.seedHidden?.shape == arrays[Key.seedHidden]?.shape)
+    }
 }
 
 /// One change to the serialized form of a continuation that its restore must refuse.
@@ -334,10 +351,34 @@ enum MTPDrafterContinuationTamper: String, CaseIterable, CustomTestStringConvert
     /// A seed proposal whose hidden row is one column wider than the drafter makes.
     case seedHiddenWidth
 
+    /// A seed proposal whose hidden row has one more batch row than the boundary hidden row.
+    case seedHiddenBatch
+
+    /// A seed proposal whose token has one more batch row than the boundary hidden row.
+    case seedTokenBatch
+
+    /// A seed proposal of more than one token for each batch row.
+    case seedTokenCount
+
+    /// Drafter caches with one more batch row than the boundary hidden row.
+    case cacheBatch
+
     var testDescription: String { rawValue }
 
     /// The error of a tamper whose target is missing from the serialized form.
     struct MissingTarget: Error {}
+
+    /// The shapes of a seed proposal, from the batch and the width of the boundary hidden row.
+    typealias SeedShapes = (_ batch: Int, _ width: Int) -> (token: [Int], hidden: [Int])
+
+    /// The axis of the batch rows of every serialized array.
+    private static let batchAxis = 0
+
+    /// The axis of the hidden columns of a hidden row.
+    private static let hiddenAxis = -1
+
+    /// A token count for each batch row that a seed proposal never has.
+    private static let excessSeedTokenCount = 2
 
     /// Applies the change to the serialized form.
     ///
@@ -368,19 +409,54 @@ enum MTPDrafterContinuationTamper: String, CaseIterable, CustomTestStringConvert
                 throw MissingTarget()
             }
         case .boundaryHiddenWidth:
-            arrays[Key.boundaryHidden] = try widenedRow(of: arrays)
+            let row = try Self.boundaryRow(of: arrays)
+            arrays[Key.boundaryHidden] = MLXArray.zeros(
+                [row.dim(Self.batchAxis), 1, row.dim(Self.hiddenAxis) + 1], dtype: row.dtype)
         case .seedHiddenWidth:
-            let row = try widenedRow(of: arrays)
-            arrays[Key.seedToken] = MLXArray.zeros([row.dim(0)], type: Int32.self)
-            arrays[Key.seedHidden] = row
+            try Self.writeSeed(into: &arrays) { batch, width in
+                ([batch, 1], [batch, 1, width + 1])
+            }
+        case .seedHiddenBatch:
+            try Self.writeSeed(into: &arrays) { batch, width in
+                ([batch, 1], [batch + 1, 1, width])
+            }
+        case .seedTokenBatch:
+            try Self.writeSeed(into: &arrays) { batch, width in
+                ([batch + 1, 1], [batch, 1, width])
+            }
+        case .seedTokenCount:
+            try Self.writeSeed(into: &arrays) { batch, width in
+                ([batch, Self.excessSeedTokenCount], [batch, 1, width])
+            }
+        case .cacheBatch:
+            let cacheKeys = arrays.keys.filter { $0.hasPrefix(Key.cachePrefix) }
+            guard !cacheKeys.isEmpty else { throw MissingTarget() }
+            for key in cacheKeys {
+                arrays[key] = arrays[key].map { concatenated([$0, $0], axis: Self.batchAxis) }
+            }
         }
     }
 
-    /// A zero row of the boundary hidden row's batch, one column wider than that row.
-    private func widenedRow(of arrays: [String: MLXArray]) throws -> MLXArray {
+    /// Writes a zero seed proposal of the shapes `shapes` gives for the boundary hidden row.
+    ///
+    /// - Parameters:
+    ///   - arrays: The serialized arrays.
+    ///   - shapes: The shapes of the seed token and the seed hidden row.
+    /// - Throws: ``MissingTarget`` when the serialized form holds no boundary hidden row.
+    static func writeSeed(into arrays: inout [String: MLXArray], shapes: SeedShapes) throws {
         typealias Key = MTPDrafterContinuation.SerializedKey
-        guard let row = arrays[Key.boundaryHidden] else { throw MissingTarget() }
-        return MLXArray.zeros([row.dim(0), 1, row.dim(2) + 1], dtype: row.dtype)
+        let row = try boundaryRow(of: arrays)
+        let (token, hidden) = shapes(row.dim(batchAxis), row.dim(hiddenAxis))
+        arrays[Key.seedToken] = MLXArray.zeros(token, type: Int32.self)
+        arrays[Key.seedHidden] = MLXArray.zeros(hidden, dtype: row.dtype)
+    }
+
+    /// The boundary hidden row of the serialized arrays.
+    private static func boundaryRow(of arrays: [String: MLXArray]) throws -> MLXArray {
+        guard let row = arrays[MTPDrafterContinuation.SerializedKey.boundaryHidden] else {
+            throw MissingTarget()
+        }
+        return row
     }
 
     /// Adds one to the integer metadata value of `key`.

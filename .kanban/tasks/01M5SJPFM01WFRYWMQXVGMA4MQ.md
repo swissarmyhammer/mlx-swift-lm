@@ -83,6 +83,46 @@ comments:
     - evidence: touched changed .swift files; swift build --build-tests (Build complete, no new warnings; only the known "missing creator ... mlx-swift_Cmlx.bundle"); xcrun xctest MLXLMTests: 895 XCTest, 0 failures + 1873 Swift Testing passed; MLXFoundationModelsTests: 376 passed, 0 failed. Nothing committed.
     - next: review/commit
   timestamp: 2026-10-28T00:34:58.304184+00:00
+- actor: claude-code
+  id: 01m5zz0ty643f47ca6e79esega
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (9a3db931) — 2 findings, 2 confirmed, 0 refuted — Libraries/MLXLMCommon/MTPDrafterContinuationSerialization.swift:196, Tests/MLXLMTests/MTPDrafterContinuationTests.swift:383. Prior item MTPSpeculativeTokenIterator.swift:661 reuse is fixed: one `MTPDrafterContinuation.alignedBoundary(withMainTokenCount:drafterID:)` used by both the iterator and MTPDrafterPrefillFeed.init, no leftover duplicate.
+    - next: implement the 2026-10-27 19:35 findings (batch-dimension agreement check plus a seed-batch tamper test; named constants in the test), then re-review.
+  timestamp: 2026-10-28T00:37:05.094461+00:00
+- actor: claude-code
+  id: 01m5zz18bgx84ffseyd7jyva7x
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — 8 files (shared alignedBoundary; hiddenSize check on load)
+    - test: green — MLXLMTests 895 XCTest 0 failures + 1873 Swift Testing; FoundationModels 376
+    - commit: 9a3db931
+    - review: findings — Libraries/MLXLMCommon/MTPDrafterContinuationSerialization.swift:196, Tests/MLXLMTests/MTPDrafterContinuationTests.swift:383
+  timestamp: 2026-10-28T00:37:18.832482+00:00
+- actor: claude-code
+  id: 01m5zzs02p96xk37vzfexw7pzs
+  text: |-
+    Picked back up from review for the two 2026-10-27 19:35 findings.
+    - Finding 1 (invariant-propagation, batch dimension): looked at the whole load path for shape invariants between the boundary row, the seed proposal and the drafter caches. Four were unchecked: (a) seed hidden row batch vs boundary batch, (b) seed token batch vs boundary batch, (c) seed token shape, which must be `[B, 1]` (`sampleMTPSeed` -> `normalizedMTPColumn` always makes rank 2, one column; `draftBlock` returns the seed as the proposal and the iterator flattens it into draft tokens, so a wider seed token would push extra drafts), (d) batch of every drafter cache array (KVCacheSimple keys/values `[B, H, T, D]`) vs boundary batch. The prompt cache template restore checks layer count, class, fixed configuration and offsets, but no batch.
+    - Fix in MTPDrafterContinuationSerialization.swift: one `checkShape(_:named:expected: [Int?])` (nil = any size) replaces `checkHiddenRow` and the `hiddenRowRank` constant (renamed constant `batchAxis = 0`). Boundary row `[nil, 1, hiddenSize]`; new `seedProposal(in:batchSize:hiddenSize:)` checks the half-present case, seed token `[B, 1]` and seed hidden `[B, 1, hiddenSize]`; new `checkCacheBatch(_:batchSize:)` runs after the restore over `cache.flatMap(\.state)`. `drafterState` now takes the checked seed and only does positions.
+    - TDD: RED was one full bundle run — the new tamper cases `seedHiddenBatch`, `seedTokenBatch`, `seedTokenCount`, `cacheBatch` failed with "an error was expected but none was thrown"; the new control test `restoreKeepsAWellFormedSeedProposal` (a `[B,1]` token + `[B,1,H]` row restores) passed, so the new checks are not over-strict. GREEN after the fix. The `seedHiddenWidth` case now writes a `[B, 1]` seed token (it used `[B]`) so it fails only on width.
+    - Finding 2 (magic numbers): reproduced with `swiftlint lint --config` (only_rules no_magic_numbers, allowed [0,1,-1,100]); the only hit was `row.dim(2) + 1`. Named `batchAxis`, `hiddenAxis`, `excessSeedTokenCount` in the tamper enum and replaced every axis literal (`dim(0)`, `dim(2)`) in the file; the helper `widenedRow` is gone (seed tampers share `writeSeed(into:shapes:)`). swiftlint now reports 0 for both files.
+    - Not covered, noted for later: a drafter cache's KV-head count / head dim vs the drafter configuration is not checked on load (the drafter protocol does not expose them; the main prompt cache loader does not check them either).
+  timestamp: 2026-10-28T00:50:16.790986+00:00
+- actor: claude-code
+  id: 01m5zzs30a6v62g987yzj46px5
+  text: |-
+    ### implement — changed
+    - evidence: 2 files — Libraries/MLXLMCommon/MTPDrafterContinuationSerialization.swift, Tests/MLXLMTests/MTPDrafterContinuationTests.swift. `swift build --build-tests`: only the known "missing creator ... mlx-swift_Cmlx.bundle" warning. `xcrun xctest MLXLMTests.xctest`: 895 XCTest, 0 failures; Swift Testing 1874 tests in 166 suites passed (1873 + 1 new control test; the tamper test gained 4 argument cases), only the known benchmarkVerification() skip. MLXFoundationModelsTests: 376 passed. swiftlint no_magic_numbers: 0 on both files. Both 2026-10-27 19:35 findings checked. Not committed.
+    - next: /review. Left in doing.
+  timestamp: 2026-10-28T00:50:19.786587+00:00
+- actor: claude-code
+  id: 01m60016tm02zqhb3dxcz76vcp
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests (only known "missing creator ... mlx-swift_Cmlx.bundle" warning); xcrun xctest MLXLMTests — 895 XCTest, 0 failures, 1874 Swift Testing passed; MLXFoundationModelsTests — 376 passed; only skip is the env-gated benchmarkVerification() (known pre-existing)
+    - next: review/commit (nothing committed by this step)
+  timestamp: 2026-10-28T00:54:45.844869+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
@@ -130,3 +170,16 @@ Give both caches one shared value type, so that the drafter rules are written on
 > - `.kanban/tasks/01M5SJPFM01WFRYWMQXVGMA4MQ.md` — no validator matches this file
 
 - [x] `Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:661` `reuse/reuse` — The `alignedBoundary` closure repeats the continuation-alignment predicate that `MTPDrafterPrefillFeed.init` already applies to the same `(continuation, cachePosition, drafter)` triple. Two call sites now independently decide when a continuation's boundary can be reused. Any later change to the alignment rule has to be made in both places, and they can drift apart. Move the aligned-boundary selection onto `MTPDrafterContinuation`, for example `func alignedBoundary(withMainTokenCount:drafterID:) -> MLXArray?`, and call it from both `MTPDrafterPrefillFeed.init` and this site. The feed then has one source for the rule.
+
+## Review Findings (2026-10-27 19:35)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 8 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWGWNFDVP77YAW9ACHVXY1.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWGWNFDVP77YAW9ACHVXY1.md` — no validator matches this file
+> - `.kanban/tasks/01M5SJPFM01WFRYWMQXVGMA4MQ.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5SJPFM01WFRYWMQXVGMA4MQ.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/MTPDrafterContinuationSerialization.swift:196` `completeness/invariant-propagation` — The new seed-row check validates the seed hidden row's rank, dim(1) and width against `hiddenSize`, but not its batch dimension. The seed token and the boundary row are never compared to it either. A file whose seed hidden row has a different batch size from the seed token or the boundary row still loads, and the mismatch surfaces at the first drafter call. That is the failure this change is meant to move to load time. In `checkHiddenRow` or in `drafterState`, require the batch dimension of the boundary row, the seed hidden row and the seed token to agree. Add one tamper case that changes the seed batch and asserts `KVCacheError` at load.
+- [x] `Tests/MLXLMTests/MTPDrafterContinuationTests.swift:383` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
