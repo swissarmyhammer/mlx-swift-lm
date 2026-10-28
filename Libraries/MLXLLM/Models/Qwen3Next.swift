@@ -576,9 +576,8 @@ public class Qwen3NextModelInner: Module {
         self.ssmIdx = 0
         self.faIdx = args.fullAttentionInterval - 1
 
-        let schedule = CompiledDecodeSchedule(linearLayers: layers.map(\.isLinear))
-        let segments = schedule.segments
-        self.decodeSchedule = schedule
+        self.decodeSchedule = CompiledDecodeSchedule(layers: layers)
+        let segments = decodeSchedule.segments
         self.compiledSegments = CompiledDecodeSegmentCache(
             count: segments.count,
             state: { model, index in
@@ -649,25 +648,16 @@ public class Qwen3NextModelInner: Module {
     }
 
     /// Execute one eligible single-token step through the shared compiled
-    /// segment scheduler. Returns nil for masks or cache implementations that
-    /// require the general model path.
+    /// segment scheduler. Returns nil for a dtype the traces do not hold
+    /// exactly, or for masks or cache implementations that require the general
+    /// model path (``CompiledDecodeSchedule/decode(_:cache:segments:of:attention:)``).
     private func decodeStep(_ inputs: MLXArray, _ cache: [KVCache?]) -> MLXArray? {
         // MLX fusion currently changes low-order bfloat16/float32 results for
         // this model. fp16 is pinned byte-identical against the general path.
         let embedded = embedTokens(inputs)
-        guard embedded.dtype == .float16, let caches = decodeSchedule.caches(cache) else {
-            return nil
-        }
-        if createSSMMask(h: inputs, cache: cache[ssmIdx] as? MambaCache) != nil {
-            return nil
-        }
-        guard case .none = createAttentionMask(h: inputs, cache: cache[faIdx]) else {
-            return nil
-        }
-
-        return decodeSchedule.run(
-            embedded, caches: caches, verify: nil,
-            segment: { index, arguments in compiledSegments(self, at: index, arguments) },
+        guard embedded.dtype == .float16 else { return nil }
+        return decodeSchedule.decode(
+            embedded, cache: cache, segments: compiledSegments, of: self,
             attention: { attentionCacheStep($0) })
     }
 

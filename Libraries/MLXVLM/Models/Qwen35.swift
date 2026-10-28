@@ -1089,12 +1089,11 @@ public enum Qwen35Language {
             _layers.wrappedValue = layers
             _norm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
 
-            self.ssmIdx = layers.firstIndex(where: { $0.isLinear })
-            self.faIdx = layers.firstIndex(where: { !$0.isLinear })
+            self.decodeSchedule = CompiledDecodeSchedule(layers: layers)
+            self.ssmIdx = decodeSchedule.firstLinearLayer
+            self.faIdx = decodeSchedule.firstAttentionLayer
 
-            let schedule = CompiledDecodeSchedule(linearLayers: layers.map(\.isLinear))
-            let segments = schedule.segments
-            self.decodeSchedule = schedule
+            let segments = decodeSchedule.segments
             self.compiledSegments = CompiledDecodeSegmentCache(
                 count: segments.count,
                 state: { model, index in
@@ -1247,44 +1246,23 @@ public enum Qwen35Language {
 
         /// One decode step through the compiled segments, or nil when the step
         /// takes the general path: a dtype the traces do not hold exactly, a
-        /// layer that does not support compiled decode, caches the schedule
-        /// refuses (``CompiledDecodeSchedule/caches(_:)``), or a step that
-        /// needs a mask.
+        /// layer that does not support compiled decode, or a step the schedule
+        /// refuses (``CompiledDecodeSchedule/decode(_:cache:segments:of:attention:)``).
         private func decodeStep(
             _ inputs: MLXArray, _ cache: [KVCache?], positionIds: MLXArray?
         ) -> MLXArray? {
             let embedded = embedTokens(inputs)
             guard supportsExactCompiledDecode(embedded.dtype),
-                layers.allSatisfy(\.supportsCompiledDecode),
-                let caches = decodeSchedule.caches(cache),
-                needsNoMask(embedded, cache)
+                layers.allSatisfy(\.supportsCompiledDecode)
             else { return nil }
 
-            return decodeSchedule.run(
-                embedded, caches: caches, verify: nil,
-                segment: { index, arguments in compiledSegments(self, at: index, arguments) },
+            return decodeSchedule.decode(
+                embedded, cache: cache, segments: compiledSegments, of: self,
                 attention: { step in
                     layers[step.layer].attentionCacheStep(
                         queries: step.queries, keys: step.keys, values: step.values,
                         cache: step.cache, positionIds: positionIds)
                 })
-        }
-
-        /// True when a step over `embedded` needs neither an SSM mask nor an
-        /// attention mask. `cache` holds one cache for each layer.
-        private func needsNoMask(_ embedded: MLXArray, _ cache: [KVCache?]) -> Bool {
-            if let ssmIdx,
-                createSSMMask(h: embedded, cache: cache[ssmIdx] as? MambaCache) != nil
-            {
-                return false
-            }
-            guard let faIdx else { return true }
-            if case .none = createAttentionMask(
-                h: embedded, cache: cache[faIdx], returnArray: true)
-            {
-                return true
-            }
-            return false
         }
     }
 

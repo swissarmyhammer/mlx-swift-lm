@@ -1,4 +1,5 @@
 import MLX
+import MLXNN
 
 /// The compiled decode schedule of a hybrid model: its ``CompiledDecodeSegment``s, and the
 /// runner that steps the caches of the model through them.
@@ -16,6 +17,14 @@ package struct CompiledDecodeSchedule: Sendable {
     /// The segments of a step, in order.
     package let segments: [CompiledDecodeSegment]
 
+    /// The first gated delta net layer, whose cache gives the SSM mask of a step, or nil for
+    /// a model with none.
+    package let firstLinearLayer: Int?
+
+    /// The first full-attention layer, whose cache gives the attention mask of a step, or nil
+    /// for a model with none.
+    package let firstAttentionLayer: Int?
+
     /// The decoder layers the schedule runs, so the cache list of a step holds one cache
     /// for each.
     private let layerCount: Int
@@ -26,7 +35,17 @@ package struct CompiledDecodeSchedule: Sendable {
     ///   false for a full-attention layer.
     package init(linearLayers: [Bool]) {
         self.segments = CompiledDecodeSegment.schedule(linearLayers: linearLayers)
+        self.firstLinearLayer = linearLayers.firstIndex(of: true)
+        self.firstAttentionLayer = linearLayers.firstIndex(of: false)
         self.layerCount = linearLayers.count
+    }
+
+    /// The schedule of a model whose decoder layers are `layers`: a layer that holds a gated
+    /// delta net is a linear layer, any other a full-attention layer.
+    ///
+    /// - Parameter layers: The decoder layers of the model, in order.
+    package init<Layer: HybridDecodeLayer>(layers: [Layer]) {
+        self.init(linearLayers: layers.map { $0.linearAttn != nil })
     }
 }
 
@@ -50,7 +69,7 @@ extension CompiledDecodeSchedule {
     }
 
     /// The caches a step reads and writes, segment by segment, from
-    /// ``CompiledDecodeSchedule/caches(_:)``.
+    /// ``CompiledDecodeSchedule/caches(_:over:)``.
     package struct Caches {
         /// For each segment, the cache of each of its gated delta net layers.
         fileprivate let linear: [[LinearCache]]
@@ -73,23 +92,28 @@ extension CompiledDecodeSchedule {
         package let values: MLXArray
     }
 
-    /// The caches of a step, or nil when the step takes the general path: the cache list
-    /// does not hold one cache for each layer, a gated delta net layer has no state yet (a
-    /// first token, for which the general path builds the zero states), or a full-attention
-    /// layer has no cache or a cache with a route of its own.
+    /// The caches of a step over `input`, or nil when the step takes the general path: the
+    /// cache list does not hold one cache for each layer, the step needs an SSM mask, a gated
+    /// delta net layer has no state yet (a first token, for which the general path builds the
+    /// zero states), or a full-attention layer has no cache or a cache with a route of its
+    /// own.
     ///
     /// Cache kinds can change mid-generation (`maybeQuantizeKVCache` swaps array entries), so
     /// a model asks again on every step.
     ///
-    /// - Parameter cache: The cache of each decoder layer.
+    /// - Parameters:
+    ///   - cache: The cache of each decoder layer.
+    ///   - input: The first argument of the step, whose axis 1 holds its tokens.
     /// - Returns: The caches of the step, or nil.
-    package func caches(_ cache: [KVCache?]) -> Caches? {
+    package func caches(_ cache: [KVCache?], over input: MLXArray) -> Caches? {
         guard cache.count == layerCount else { return nil }
         let attentionLayersFit = segments.compactMap(\.attentionPreLayer).allSatisfy {
             cache[$0].map(usesPlainAttentionCacheRoute) ?? false
         }
         let linear = segments.compactMap { Self.linearCaches(of: $0, cache) }
-        guard attentionLayersFit, linear.count == segments.count else { return nil }
+        guard attentionLayersFit, linear.count == segments.count,
+            ssmMask(input, cache) == nil
+        else { return nil }
 
         let attention = segments.map { segment in
             segment.attentionPreLayer.flatMap { layer in
@@ -97,6 +121,58 @@ extension CompiledDecodeSchedule {
             }
         }
         return Caches(linear: linear, attention: attention)
+    }
+
+    /// The SSM mask of a step over `input`, from the cache of ``firstLinearLayer``, or nil
+    /// when the step needs none.
+    ///
+    /// - Parameters:
+    ///   - input: The first argument of the step, whose axis 1 holds its tokens.
+    ///   - cache: The cache of each decoder layer.
+    /// - Returns: The mask, or nil.
+    private func ssmMask(_ input: MLXArray, _ cache: [KVCache?]) -> MLXArray? {
+        firstLinearLayer.flatMap { createSSMMask(h: input, cache: cache[$0] as? MambaCache) }
+    }
+
+    /// The attention mask of a step over `input`, the same for each full-attention layer:
+    /// the mask the cache of ``firstAttentionLayer`` makes, or `.none` when that layer has no
+    /// cache or the model has no such layer.
+    ///
+    /// - Parameters:
+    ///   - input: The first argument of the step, whose axis 1 holds its tokens.
+    ///   - cache: The cache of each decoder layer.
+    /// - Returns: The mask mode of the step.
+    package func attentionMask(
+        _ input: MLXArray, _ cache: [KVCache?]
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        firstAttentionLayer.flatMap { cache[$0] }.map { createAttentionMask(h: input, cache: $0) }
+            ?? .none
+    }
+
+    /// One decode step through the compiled segments in `segments`, or nil when the step
+    /// takes the general path: ``caches(_:over:)`` refuses the caches, or the step needs an
+    /// attention mask.
+    ///
+    /// - Parameters:
+    ///   - input: The first argument of the first segment: the token ids for a model that
+    ///     embeds inside its trace, else the embedded tokens.
+    ///   - cache: The cache of each decoder layer.
+    ///   - segments: The compiled segment traces of a decode step.
+    ///   - owner: The model whose weights the traces read.
+    ///   - attention: Runs the attention of a full-attention layer over its cache, and gives
+    ///     back its output.
+    /// - Returns: The first output of the last segment, or nil.
+    package func decode<Owner: Module>(
+        _ input: MLXArray, cache: [KVCache?], segments: CompiledDecodeSegmentCache<Owner>,
+        of owner: Owner, attention: (AttentionStep) -> MLXArray
+    ) -> MLXArray? {
+        guard let caches = caches(cache, over: input),
+            case .none = attentionMask(input, cache)
+        else { return nil }
+        return run(
+            input, caches: caches, verify: nil,
+            segment: { index, arguments in segments(owner, at: index, arguments) },
+            attention: attention)
     }
 
     /// The caches of the gated delta net layers of `segment` with their states, or nil when
@@ -119,7 +195,7 @@ extension CompiledDecodeSchedule {
     /// - Parameters:
     ///   - input: The first argument of the first segment: the token ids for a model that
     ///     embeds inside its trace, else the embedded tokens.
-    ///   - caches: The caches of the step, from ``caches(_:)``.
+    ///   - caches: The caches of the step, from ``caches(_:over:)``.
     ///   - verify: The shape of a verify, or nil for a decode step.
     ///   - runSegment: Runs segment `index` over its flat argument list.
     ///   - attention: Runs the attention of a full-attention layer over its cache, and gives

@@ -924,12 +924,11 @@ public class Qwen35TextModelInner: Module {
 
         self.norm = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
 
-        self.ssmIdx = layers.firstIndex(where: { $0.isLinear })
-        self.faIdx = layers.firstIndex(where: { !$0.isLinear })
+        self.decodeSchedule = CompiledDecodeSchedule(layers: layers)
+        self.ssmIdx = decodeSchedule.firstLinearLayer
+        self.faIdx = decodeSchedule.firstAttentionLayer
 
-        let schedule = CompiledDecodeSchedule(linearLayers: layers.map(\.isLinear))
-        let segments = schedule.segments
-        self.decodeSchedule = schedule
+        let segments = decodeSchedule.segments
         let state: CompiledDecodeSegmentCache<Qwen35TextModelInner>.StateProvider = {
             model, index in
             // Everything `segmentBody` reads: the layers it runs (with a
@@ -1092,12 +1091,8 @@ public class Qwen35TextModelInner: Module {
     /// everything else on a decode step is static-shaped, so the segments
     /// compile concretely.
     private func decodeStep(_ inputs: MLXArray, _ cache: [KVCache?]) -> MLXArray? {
-        guard let caches = scheduleCaches(inputs, cache),
-            case .none = attentionMask(inputs, cache)
-        else { return nil }
-        return decodeSchedule.run(
-            inputs, caches: caches, verify: nil,
-            segment: { index, arguments in compiledSegments(self, at: index, arguments) },
+        decodeSchedule.decode(
+            inputs, cache: cache, segments: compiledSegments, of: self,
             attention: { attend($0, mask: .none) })
     }
 
@@ -1112,37 +1107,14 @@ public class Qwen35TextModelInner: Module {
     private func verifyStep(
         _ inputs: MLXArray, _ cache: [KVCache?], shape: CompiledVerifyShape
     ) -> MLXArray? {
-        guard let caches = scheduleCaches(inputs, cache) else { return nil }
-        let mask = attentionMask(inputs, cache)
+        guard let caches = decodeSchedule.caches(cache, over: inputs) else { return nil }
+        let mask = decodeSchedule.attentionMask(inputs, cache)
         return decodeSchedule.run(
             inputs, caches: caches, verify: shape,
             segment: { index, arguments in
                 compiledVerifySegments(self, key: shape, at: index, arguments)
             },
             attention: { attend($0, mask: mask) })
-    }
-
-    /// The caches of a compiled step, or nil when the step takes the general
-    /// path: the schedule refuses the caches
-    /// (``CompiledDecodeSchedule/caches(_:)``), or the step needs an SSM
-    /// mask.
-    private func scheduleCaches(
-        _ inputs: MLXArray, _ cache: [KVCache?]
-    ) -> CompiledDecodeSchedule.Caches? {
-        guard let caches = decodeSchedule.caches(cache) else { return nil }
-        if let ssmIdx,
-            createSSMMask(h: inputs, cache: cache[ssmIdx] as? MambaCache) != nil
-        {
-            return nil
-        }
-        return caches
-    }
-
-    /// The attention mask of a step, the same for each attention layer.
-    private func attentionMask(
-        _ inputs: MLXArray, _ cache: [KVCache?]
-    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
-        faIdx.flatMap { cache[$0] }.map { createAttentionMask(h: inputs, cache: $0) } ?? .none
     }
 
     /// The attention of a full-attention layer between two segments, through

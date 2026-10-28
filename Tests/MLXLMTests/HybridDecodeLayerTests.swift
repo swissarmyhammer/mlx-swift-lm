@@ -95,10 +95,42 @@ private final class ArithmeticHybridLayer: Module, HybridDecodeLayer {
     }
 }
 
-/// A hidden-state input of `stepTokens` tokens, distinct for each `offset`.
-private func hiddenStates(offset: Float = 0) -> MLXArray {
-    (MLXArray(0 ..< (stepTokens * hiddenWidth)).asType(.float32) + offset)
-        .reshaped([1, stepTokens, hiddenWidth])
+/// A hybrid model of ``ArithmeticHybridLayer``s, the owner of the compiled segment traces of
+/// a test: a linear layer, a full-attention layer, then a linear layer.
+private final class ArithmeticHybridModel: Module {
+    /// The decoder layers, each with the mixer of its kind.
+    let layers = [
+        ArithmeticHybridLayer(linearAttn: Identity()), ArithmeticHybridLayer(selfAttn: Identity()),
+        ArithmeticHybridLayer(linearAttn: Identity()),
+    ]
+    /// The final norm.
+    let norm = RMSNorm(dimensions: hiddenWidth)
+}
+
+/// Runs segment `index` of a decode step of `model` under `schedule`, outside any trace.
+private func decodeSegment(
+    _ index: Int, of schedule: CompiledDecodeSchedule, _ model: ArithmeticHybridModel,
+    _ arguments: [MLXArray]
+) -> [MLXArray] {
+    schedule.segments[index].body(
+        arguments[0], arguments: arguments, layers: model.layers, finalNorm: model.norm,
+        verify: nil)
+}
+
+/// A hidden-state input of `tokens` tokens, distinct for each `offset`.
+private func hiddenStates(offset: Float = 0, tokens: Int = stepTokens) -> MLXArray {
+    (MLXArray(0 ..< (tokens * hiddenWidth)).asType(.float32) + offset)
+        .reshaped([1, tokens, hiddenWidth])
+}
+
+/// True when `mask` is the mask mode `.none`.
+private func isNoMask(_ mask: MLXFast.ScaledDotProductAttentionMaskMode) -> Bool {
+    if case .none = mask { true } else { false }
+}
+
+/// True when `mask` is the mask mode `.causal`.
+private func isCausal(_ mask: MLXFast.ScaledDotProductAttentionMaskMode) -> Bool {
+    if case .causal = mask { true } else { false }
 }
 
 /// The residual feed-forward step that closes each body: `h + feedForward(postNorm(h))`.
@@ -289,28 +321,108 @@ private func expectEqual(
         step.queries + step.keys
     }
 
+    @Test func scheduleOfLayersSplitsAtTheirFullAttentionLayers() {
+        let schedule = CompiledDecodeSchedule(layers: ArithmeticHybridModel().layers)
+
+        let expected = CompiledDecodeSegment.schedule(linearLayers: [true, false, true])
+        #expect(schedule.segments == expected)
+        #expect(schedule.firstLinearLayer == 0)
+        #expect(schedule.firstAttentionLayer == 1)
+    }
+
     @Test func scheduleCachesRefuseACacheListOfAnotherLength() {
         let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+        let cache = Array(scheduleCaches().dropLast())
 
-        #expect(schedule.caches(Array(scheduleCaches().dropLast())) == nil)
+        #expect(schedule.caches(cache, over: hiddenStates()) == nil)
     }
 
     @Test func scheduleCachesRefuseALinearLayerWithNoStateYet() {
         let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+        let cache: [KVCache?] = [linearCache(of: 0), KVCacheSimple(), MambaCache()]
 
-        #expect(schedule.caches([linearCache(of: 0), KVCacheSimple(), MambaCache()]) == nil)
+        #expect(schedule.caches(cache, over: hiddenStates()) == nil)
     }
 
     @Test func scheduleCachesRefuseAnAttentionCacheWithARouteOfItsOwn() {
         let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+        let cache = scheduleCaches(attention: QuantizedKVCache())
 
-        #expect(schedule.caches(scheduleCaches(attention: QuantizedKVCache())) == nil)
+        #expect(schedule.caches(cache, over: hiddenStates()) == nil)
     }
 
     @Test func scheduleCachesRefuseAMissingAttentionCache() {
         let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
 
-        #expect(schedule.caches(scheduleCaches(attention: nil)) == nil)
+        #expect(schedule.caches(scheduleCaches(attention: nil), over: hiddenStates()) == nil)
+    }
+
+    @Test func scheduleCachesRefuseAStepThatNeedsAnSSMMask() {
+        let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+        let cache = scheduleCaches()
+        cache[0]?.prepare(lengths: [stepTokens])
+
+        #expect(schedule.caches(cache, over: hiddenStates()) == nil)
+    }
+
+    @Test func attentionMaskOfOneTokenIsNone() {
+        let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+
+        #expect(isNoMask(schedule.attentionMask(hiddenStates(tokens: 1), scheduleCaches())))
+    }
+
+    @Test func attentionMaskOfAVerifyIsCausal() {
+        let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+
+        #expect(isCausal(schedule.attentionMask(hiddenStates(), scheduleCaches())))
+    }
+
+    /// The compiled segment traces of ``ArithmeticHybridModel`` under `schedule`.
+    private func segmentCache(
+        _ schedule: CompiledDecodeSchedule
+    ) -> CompiledDecodeSegmentCache<ArithmeticHybridModel> {
+        CompiledDecodeSegmentCache(
+            count: schedule.segments.count,
+            state: { model, index in
+                schedule.segments[index].layerIndices.map { model.layers[$0] } + [model.norm]
+            },
+            body: { model, index, arguments in
+                decodeSegment(index, of: schedule, model, arguments)
+            })
+    }
+
+    @Test func decodeRefusesAStepThatNeedsAnAttentionMask() {
+        let model = ArithmeticHybridModel()
+        let schedule = CompiledDecodeSchedule(layers: model.layers)
+
+        let output = schedule.decode(
+            hiddenStates(), cache: scheduleCaches(), segments: segmentCache(schedule),
+            of: model, attention: attended)
+
+        #expect(output == nil)
+    }
+
+    @Test func decodeRunsTheCompiledSegmentsOfTheSchedule() throws {
+        let model = ArithmeticHybridModel()
+        let schedule = CompiledDecodeSchedule(layers: model.layers)
+        let x = hiddenStates(tokens: 1)
+        let expectedCache = scheduleCaches()
+        let expected = schedule.run(
+            x, caches: try #require(schedule.caches(expectedCache, over: x)), verify: nil,
+            segment: { index, arguments in decodeSegment(index, of: schedule, model, arguments) },
+            attention: attended)
+        let cache = scheduleCaches()
+
+        let output = schedule.decode(
+            x, cache: cache, segments: segmentCache(schedule), of: model, attention: attended)
+
+        expectEqual(try #require(output), expected)
+        for layer in [0, 2] {
+            let linear = try #require(cache[layer] as? MambaCache)
+            let expectedLinear = try #require(expectedCache[layer] as? MambaCache)
+            expectEqual(try #require(linear[0]), try #require(expectedLinear[0]))
+            expectEqual(try #require(linear[1]), try #require(expectedLinear[1]))
+        }
     }
 
     @Test func runOfADecodeStepCommitsTheStatesAndAttendsBetweenSegments() throws {
@@ -318,9 +430,9 @@ private func expectEqual(
         let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
         let attentionCache = KVCacheSimple()
         let cache = scheduleCaches(attention: attentionCache)
-        let caches = try #require(schedule.caches(cache))
-        let finalNorm = RMSNorm(dimensions: hiddenWidth)
         let x = hiddenStates()
+        let caches = try #require(schedule.caches(cache, over: x))
+        let finalNorm = RMSNorm(dimensions: hiddenWidth)
         var steps: [CompiledDecodeSchedule.AttentionStep] = []
 
         let output = schedule.run(
@@ -364,9 +476,9 @@ private func expectEqual(
         let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
         let verify = try #require(CompiledVerifyShape(tokens: stepTokens))
         let cache = scheduleCaches()
-        let caches = try #require(schedule.caches(cache))
-        let finalNorm = RMSNorm(dimensions: hiddenWidth)
         let x = hiddenStates()
+        let caches = try #require(schedule.caches(cache, over: x))
+        let finalNorm = RMSNorm(dimensions: hiddenWidth)
 
         let output = schedule.run(
             x, caches: caches, verify: verify,
