@@ -40,6 +40,37 @@ comments:
     - evidence: 15 files — Libraries/MLXLMCommon/MTPSampledVerification.swift (new), Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift, Libraries/MLXLMCommon/MTPDrafterModel.swift, Libraries/MLXLMCommon/QwenMTP.swift, Libraries/MLXLMCommon/MTPDrafterPrefillFeed.swift, Libraries/MLXLMCommon/Evaluate.swift, Libraries/MLXLLM/Models/Qwen35MTP.swift, Libraries/MLXVLM/Models/Qwen35MTP.swift, Libraries/BenchmarkHelpers/BenchmarkHelpers.swift, IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift, Tests/MLXLMTests/Qwen35MTPSamplingTests.swift (new), Tests/MLXLMTests/Qwen35MTPTests.swift, Tests/MLXLMTests/MTPSpeculativeTokenIteratorTests.swift, Tests/MLXLMTests/ChatSessionQwenTextMTPTests.swift; swift build --build-tests 0 compiler warnings; 5 bundles green; Release sampled math MTP 93.0 > plain 58.5 tok/s; temp-0 92.4/82.6/80.5 matches plain; system prompt cache pass, edit turn 123 tok
     - next: /review
   timestamp: 2026-10-28T20:05:26.113364+00:00
+- actor: claude-code
+  id: 01m6228cq4dkfwbcrbxdhzvw5w
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (6800fd67): 2 findings (2 confirmed, 3 refuted) — Libraries/MLXLMCommon/MTPDrafterPrefillFeed.swift:101, Libraries/MLXLMCommon/QwenMTP.swift:102
+    - next: implement the 2 open items in the 2026-10-28 15:05 Review Findings section, then re-review
+  timestamp: 2026-10-28T20:12:07.268984+00:00
+- actor: claude-code
+  id: 01m6228vxhc14t5bnwdqnfyzpf
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 15 files
+    - test: green (implementer run) — 5 bundles; Release sampled MTP 93.0/78.9/76.6 vs plain 58.5; temp 0 MTP 92.4/82.6/80.5 = plain; cache guard pass, edit turn 123 tok
+    - commit: 6800fd67
+    - review: findings — Libraries/MLXLMCommon/MTPDrafterPrefillFeed.swift:101, Libraries/MLXLMCommon/QwenMTP.swift:102
+  timestamp: 2026-10-28T20:12:22.833111+00:00
+- actor: claude-code
+  id: 01m622pmachjby18kqq9bvzf87
+  text: |-
+    Review findings (2026-10-28 15:05) resolved:
+    1. reuse: the seed-sampler policy now has one definition, `package var mtpDrafterSeedSampler: ArgMaxSampler` at the top of MTPDrafterPrefillFeed.swift, with the explanatory comment moved there. The iterator's `private static var drafterSeedSampler` is deleted and its six seed calls reference `mtpDrafterSeedSampler`. The feed no longer takes a `sampler:` init parameter or stores one (both callers always passed the argmax seed sampler), and `append` draws with `mtpDrafterSeedSampler`, so no second injection path can drift. The `ArgMaxSampler()` in the iterator's `drafterSampler` (chained-draft sampler, which switches with rejection mode) is a separate policy and stays.
+    2. magic-numbers-swift: `private static let minimumChainedMTPBlockSize = 2` on the MTPDraftBlockOutput extension in QwenMTP.swift; the precondition and its message use it. swiftlint 0.65.1 `only_rules: [no_magic_numbers]`, `allowed_numbers: [0, 1, -1, 100]` over QwenMTP.swift and MTPDrafterPrefillFeed.swift: 1 violation before (QwenMTP.swift:102:35), 0 after. swift-format lint clean on the three edited files.
+    No behaviour change (same ArgMaxSampler everywhere), so the Release benchmarks were not rerun.
+  timestamp: 2026-10-28T20:19:53.804795+00:00
+- actor: claude-code
+  id: 01m622pqkgj6ad2kxj4t2x99fr
+  text: |-
+    ### implement — changed
+    - evidence: 3 files — Libraries/MLXLMCommon/MTPDrafterPrefillFeed.swift, Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift, Libraries/MLXLMCommon/QwenMTP.swift; swiftlint no_magic_numbers (review config) 0 on both flagged files; swift build --build-tests 0 compiler warnings (only the SwiftPM "missing creator for mutated node" build-system line); xcrun xctest all 5 bundles green — MLXLMTests 897 XCTest + 1939 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 376, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 (1 pre-existing env-gated skip, MTPGreedyVerificationTests.benchmarkVerification); 2/2 review findings flipped to [x]; Release benchmarks not rerun (no behaviour change)
+    - next: /review
+  timestamp: 2026-10-28T20:19:57.168057+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
@@ -69,3 +100,18 @@ Math check: with a draft that does not depend on the target random stream (argma
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38 #sampling
+
+## Review Findings (2026-10-28 15:05)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 14 file(s) reviewed, 6 not reviewed.
+
+> 6 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWJ40KYCBZ9SW5CR9AH2BJ.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWJ40KYCBZ9SW5CR9AH2BJ.md` — no validator matches this file
+> - `.kanban/tasks/01M5QWJXZ5EEBVH7Z9D3W7JKFN.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWJXZ5EEBVH7Z9D3W7JKFN.md` — no validator matches this file
+> - `.kanban/tasks/01M5QWS53X7RKJKABDTBTFKTSY.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWS53X7RKJKABDTBTFKTSY.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/MTPDrafterPrefillFeed.swift:101` `reuse/reuse` — The feed builds its own argmax seed sampler with `ArgMaxSampler()`, although the iterator already defines the same concept as `drafterSeedSampler` ("the sampler of a stateful drafter's seed proposals: argmax"). Two definitions of the seed-sampler policy can drift apart, and a later change to one would silently leave the other behind. Have the feed take the seed sampler from its caller, or move the seed-sampler definition to a shared, non-private location (for example beside `ArgMaxSampler` or next to `MTPDrafterPrefillFeed`) and reference it from both the iterator and the feed. Keep the explanatory comment with the single definition.
+- [x] `Libraries/MLXLMCommon/QwenMTP.swift:102` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.

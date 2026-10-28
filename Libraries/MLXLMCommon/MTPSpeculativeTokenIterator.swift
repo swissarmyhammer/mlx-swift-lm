@@ -119,10 +119,6 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// sample-and-match keeps the target distribution exact.
     let draftSampler: LogitSampler
 
-    /// The sampler of a stateful drafter's seed proposals: argmax, so a seed reads no
-    /// random state, and the target's own sampler never draws for the drafter.
-    private static var drafterSeedSampler: ArgMaxSampler { ArgMaxSampler() }
-
     /// Whether a sampled stream of a stateful distribution drafter verifies its drafts by
     /// rejection sampling (``MTPSampledVerification/rejectionSampling``) rather than by
     /// sample-and-match.
@@ -685,7 +681,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             statefulDrafter.prepareDrafterState(
                 target: mainModel, promptTokens: promptTokens, targetHidden: suffixHidden,
                 firstBonus: y.tokens, positionDeltas: mainState?[mtpPositionDeltasKey],
-                state: &state, sampler: Self.drafterSeedSampler)
+                state: &state, sampler: mtpDrafterSeedSampler)
             drafterState = state
             return
         }
@@ -727,7 +723,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             resumableDrafter.resumeDrafterState(
                 target: mainModel, suffixTokens: segmentTokens, suffixTargetHidden: segmentHidden,
                 targetBoundaryHidden: boundary, firstBonus: y.tokens,
-                positionDeltas: positionDeltas, state: &state, sampler: Self.drafterSeedSampler)
+                positionDeltas: positionDeltas, state: &state, sampler: mtpDrafterSeedSampler)
         {
             drafterState = state
             return
@@ -736,7 +732,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             resumableDrafter.coldStartDrafterState(
                 target: mainModel, suffixTokens: segmentTokens, suffixTargetHidden: segmentHidden,
                 firstBonus: y.tokens, position: position, positionDeltas: positionDeltas,
-                state: &state, sampler: Self.drafterSeedSampler)
+                state: &state, sampler: mtpDrafterSeedSampler)
         else {
             switchToPassthrough(
                 reason:
@@ -757,8 +753,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let drafterState
         else { return nil }
         return MTPDrafterPrefillFeed(
-            drafter: resumableDrafter, target: mainModel, sampler: Self.drafterSeedSampler,
-            state: drafterState,
+            drafter: resumableDrafter, target: mainModel, state: drafterState,
             cachePosition: cachePosition, continuation: continuationToResume)
     }
 
@@ -944,7 +939,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 finalToken: emittedFinalToken,
                 positionDeltas: mainResult.state?[mtpPositionDeltasKey],
                 state: &currentDrafterState,
-                sampler: Self.drafterSeedSampler)
+                sampler: mtpDrafterSeedSampler)
             drafterState = currentDrafterState
         }
 
@@ -1309,7 +1304,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 finalToken: token,
                 positionDeltas: result.state?[mtpPositionDeltasKey],
                 state: &currentDrafterState,
-                sampler: Self.drafterSeedSampler)
+                sampler: mtpDrafterSeedSampler)
             drafterState = currentDrafterState
             targetBoundaryHidden = targetHidden[0..., (-1)..., 0...]
         } else if maintainingDrafterState,

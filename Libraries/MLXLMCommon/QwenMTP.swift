@@ -32,6 +32,9 @@ package func sampleMTPSeed(
 
 extension MTPDraftBlockOutput {
 
+    /// The smallest round a chain of MTP proposals serves: one proposal and the bonus.
+    private static let minimumChainedMTPBlockSize = 2
+
     /// The vocabulary logits of the last position of an MTP predictor's hidden rows, through the
     /// target's LM head, or its tied embedding when it has none.
     private static func mtpLastLogits(
@@ -99,7 +102,9 @@ extension MTPDraftBlockOutput {
             _ positionOffset: Int
         ) -> MLXArray
     ) -> MTPDraftBlockOutput {
-        precondition(blockSize >= 2, "blockSize must be >= 2")
+        precondition(
+            blockSize >= minimumChainedMTPBlockSize,
+            "blockSize must be >= \(minimumChainedMTPBlockSize)")
         precondition(!cache.isEmpty, "Qwen MTP drafter cache must not be empty")
 
         var token = lastToken.ndim == 1 ? lastToken.reshaped([lastToken.dim(0), 1]) : lastToken

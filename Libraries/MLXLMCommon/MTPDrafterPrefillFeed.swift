@@ -3,6 +3,14 @@
 import Foundation
 import MLX
 
+/// The sampler of a stateful drafter's seed proposals: argmax, so a seed reads no random state,
+/// and the target's own sampler never draws for the drafter.
+///
+/// Every call that commits, resumes or extends a stateful drafter state draws its seed with this
+/// sampler: the MTP iterator's rounds and the prompt chunks of an ``MTPDrafterPrefillFeed``, whose
+/// seeds are discarded.
+package var mtpDrafterSeedSampler: ArgMaxSampler { ArgMaxSampler() }
+
 /// Feeds a shifted MTP drafter the target hidden rows of a prompt, one prefill chunk at a time.
 ///
 /// A shifted drafter (see ``ResumableMTPDrafterModel``) pairs each token with the target hidden
@@ -21,7 +29,6 @@ package final class MTPDrafterPrefillFeed {
 
     private let drafter: any ResumableMTPDrafterModel
     private let target: any LanguageModel
-    private let sampler: any LogitSampler
 
     /// The drafter state the chunks extend.
     private(set) var state: MTPDrafterState
@@ -53,7 +60,6 @@ package final class MTPDrafterPrefillFeed {
     /// - Parameters:
     ///   - drafter: The drafter the chunks feed.
     ///   - target: The target model of the drafter.
-    ///   - sampler: The sampler of the drafter's seed proposals.
     ///   - state: The drafter state of the stream: the state of `continuation` when there is one.
     ///   - cachePosition: The target cache position before the prefill.
     ///   - continuation: The drafter continuation carried with the target cache, if any. A
@@ -61,8 +67,7 @@ package final class MTPDrafterPrefillFeed {
     ///     first chunk starts the drafter empty at `cachePosition`.
     init(
         drafter: any ResumableMTPDrafterModel, target: any LanguageModel,
-        sampler: any LogitSampler, state: MTPDrafterState, cachePosition: Int,
-        continuation: MTPDrafterContinuation?
+        state: MTPDrafterState, cachePosition: Int, continuation: MTPDrafterContinuation?
     ) {
         boundaryHidden = continuation?.alignedBoundary(
             withMainTokenCount: cachePosition, drafterID: drafter.drafterID)
@@ -71,7 +76,6 @@ package final class MTPDrafterPrefillFeed {
         }
         self.drafter = drafter
         self.target = target
-        self.sampler = sampler
         self.state = state
         self.startPosition = cachePosition
     }
@@ -97,8 +101,7 @@ package final class MTPDrafterPrefillFeed {
                 ? $0 : nil
         }
         return MTPDrafterPrefillFeed(
-            // The seeds of prompt chunks are discarded, and a seed reads no random state.
-            drafter: resumableDrafter, target: target, sampler: ArgMaxSampler(),
+            drafter: resumableDrafter, target: target,
             state: alignedContinuation?.state ?? resumableDrafter.makeState(parameters: parameters),
             cachePosition: cachePosition, continuation: alignedContinuation)
     }
@@ -146,7 +149,7 @@ package final class MTPDrafterPrefillFeed {
         if isIntact, entryTokens.dim(-1) > 0 {
             isIntact = drafter.appendDrafterState(
                 target: target, tokens: entryTokens, targetHidden: entryHidden,
-                positionDeltas: positionDeltas, state: &state, sampler: sampler)
+                positionDeltas: positionDeltas, state: &state, sampler: mtpDrafterSeedSampler)
         }
         // Only the final segment's seed starts the first round, and an unused seed would keep
         // this chunk's graph alive.
