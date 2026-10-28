@@ -1397,22 +1397,25 @@ public final class ChatSession {
                             configuration: modelConfiguration, prompt: preparedInput,
                             tokenizer: tokenizer)
 
-                        let speculativeMemoryEvaluation: SpeculativeDecodingMemoryEvaluation?
+                        // The memory policy's verdict on a deferred draft model, from its byte
+                        // estimate before it loads. The error of a fail action is kept until
+                        // the draft-model branch is taken.
+                        let draftAdmissionBeforeLoading: Result<Bool, any Error>?
                         if let speculativeDecoding,
                             let memoryPolicy = speculativeDecoding.memoryPolicy,
                             let draftModelBytes = speculativeDecoding.estimatedDraftModelBytes
                         {
-                            speculativeMemoryEvaluation = memoryPolicy.evaluate(
-                                mainModelBytes:
-                                    SpeculativeDecodingMemoryPolicy.modelWeightBytes(model),
-                                draftModelBytes: draftModelBytes)
+                            draftAdmissionBeforeLoading = Result {
+                                try memoryPolicy.admitsSpeculation(
+                                    mainModelBytes:
+                                        SpeculativeDecodingMemoryPolicy.modelWeightBytes(model),
+                                    draftModelBytes: draftModelBytes)
+                            }
                         } else {
-                            speculativeMemoryEvaluation = nil
+                            draftAdmissionBeforeLoading = nil
                         }
                         let willFallBackBeforeLoadingDraft =
-                            speculativeMemoryEvaluation.map {
-                                !$0.shouldUseSpeculativeDecoding && $0.action != .fail
-                            } ?? false
+                            (try? draftAdmissionBeforeLoading?.get()) == false
 
                         let mtpDrafter: (any MTPDrafterModel)?
                         if let speculativeDecoding,
@@ -1790,33 +1793,38 @@ public final class ChatSession {
                             + (checkpointPrefill?.tokenCount ?? 0)
                         let checkpointPrefillTime =
                             (leadingPrefill?.time ?? 0) + (checkpointPrefill?.time ?? 0)
-                        // The prefill of the generation ends at the end of the prompt, thus
-                        // the caches stand there when the iterator is made. The drafter
-                        // continuation is read only when the pass keeps checkpoints.
-                        func takePromptEndCheckpoint(
-                            state: LMOutput.State?,
-                            drafterContinuation: @autoclosure () -> MTPDrafterContinuation?
-                        ) {
-                            guard keepsCheckpoints,
-                                let representedTokens = conversation?.cachedTokens
-                            else { return }
-                            conversation?.checkpoints.append(
-                                PromptCacheCheckpoint(
-                                    caches: kvCache.cache, tokens: representedTokens,
-                                    state: state, drafterContinuation: drafterContinuation()))
+                        // Ends the prompt of a generation path and starts its generation: the
+                        // checkpoint feed time joins the prefill time of `iterator`, and the
+                        // prompt-end checkpoint is taken. The prefill of the generation ends at
+                        // the end of the prompt, thus the caches stand there when the iterator
+                        // is made. `drafterContinuation` is read only when the pass keeps
+                        // checkpoints.
+                        func finishPrompt<Iterator: PromptPrefillTimedIterator>(
+                            _ iterator: Iterator,
+                            drafterContinuation: (Iterator) -> MTPDrafterContinuation?
+                        ) -> GenerationRun {
+                            var iterator = iterator
+                            iterator.promptPrefillTime += checkpointPrefillTime
+                            if keepsCheckpoints, let representedTokens = conversation?.cachedTokens
+                            {
+                                conversation?.checkpoints.append(
+                                    PromptCacheCheckpoint(
+                                        caches: kvCache.cache, tokens: representedTokens,
+                                        state: iterator.state,
+                                        drafterContinuation: drafterContinuation(iterator)))
+                            }
+                            return startGeneration(iterator, promptTokenCount: promptTokenCount)
                         }
 
                         func defaultGeneration() throws -> GenerationRun {
                             // Seed the carried state and read back the post-prefill state so the
                             // next turn, or the next tool restart, anchors correctly.
-                            var iterator = try TokenIterator(
+                            let iterator = try TokenIterator(
                                 input: input, model: model, cacheStorage: kvCache,
                                 state: lmState,
                                 parameters: generateParameters, components: components)
                             lmState = iterator.state
-                            iterator.promptPrefillTime += checkpointPrefillTime
-                            takePromptEndCheckpoint(state: iterator.state, drafterContinuation: nil)
-                            return startGeneration(iterator, promptTokenCount: promptTokenCount)
+                            return finishPrompt(iterator, drafterContinuation: { _ in nil })
                         }
 
                         // Carried model state is safe to speculate on: the anchors position from
@@ -1860,7 +1868,7 @@ public final class ChatSession {
                             let drafter = mtpDrafter
                         {
                             do {
-                                var iterator = try MTPSpeculativeTokenIterator(
+                                let iterator = try MTPSpeculativeTokenIterator(
                                     input: input,
                                     mainModel: model,
                                     drafter: drafter,
@@ -1871,30 +1879,16 @@ public final class ChatSession {
                                     blockSize: blockSize,
                                     components: components
                                 )
-                                iterator.promptPrefillTime += checkpointPrefillTime
-                                takePromptEndCheckpoint(
-                                    state: iterator.state,
-                                    drafterContinuation: iterator.promptBoundaryContinuation)
-
-                                generation = startGeneration(
-                                    iterator, promptTokenCount: promptTokenCount)
+                                generation = finishPrompt(
+                                    iterator, drafterContinuation: \.promptBoundaryContinuation)
                             } catch MTPInitializationError.unsupportedSpeculativeCache {
                                 mtpDrafterContinuation = nil
                                 speculativeDecodingFallbackReason = .unsupportedCache
                                 generation = try defaultGeneration()
                             }
                         } else if let speculativeDecoding {
-                            var shouldFallBackBeforeLoadingDraft = false
-                            if let memoryEvaluation = speculativeMemoryEvaluation {
-                                if !memoryEvaluation.shouldUseSpeculativeDecoding {
-                                    if memoryEvaluation.action == .fail {
-                                        throw SpeculativeDecodingMemoryError(
-                                            evaluation: memoryEvaluation)
-                                    }
-
-                                    shouldFallBackBeforeLoadingDraft = true
-                                }
-                            }
+                            let shouldFallBackBeforeLoadingDraft =
+                                try draftAdmissionBeforeLoading?.get() == false
 
                             if shouldFallBackBeforeLoadingDraft {
                                 speculativeDecodingFallbackReason = .memoryBudgetExceeded
@@ -1911,18 +1905,11 @@ public final class ChatSession {
                                 let draftModel = await draftContainer.perform { context in
                                     SendableBox(context.model)
                                 }.consume()
-                                let memoryEvaluation = speculativeDecoding.memoryPolicy?.evaluate(
-                                    mainModel: model,
-                                    draftModel: draftModel)
+                                let draftModelIsAdmitted =
+                                    try speculativeDecoding.memoryPolicy?.admitsSpeculation(
+                                        mainModel: model, draftModel: draftModel) != false
 
-                                if let memoryEvaluation,
-                                    !memoryEvaluation.shouldUseSpeculativeDecoding
-                                {
-                                    if memoryEvaluation.action == .fail {
-                                        throw SpeculativeDecodingMemoryError(
-                                            evaluation: memoryEvaluation)
-                                    }
-
+                                if !draftModelIsAdmitted {
                                     speculativeDecodingFallbackReason = .memoryBudgetExceeded
                                     generation = try defaultGeneration()
                                 } else {
@@ -2424,19 +2411,23 @@ extension ChatSession {
             return .unsupportedSampling
         }
         guard let memoryPolicy else { return nil }
-        let evaluation = memoryPolicy.evaluate(
+        let drafterIsAdmitted = try memoryPolicy.admitsSpeculation(
             mainModelBytes: SpeculativeDecodingMemoryPolicy.modelWeightBytes(model),
             draftModelBytes: SpeculativeDecodingMemoryPolicy.modelWeightBytes(drafter)
                 + (continuation?.byteCount ?? 0))
-        guard evaluation.shouldUseSpeculativeDecoding else {
-            if evaluation.action == .fail {
-                throw SpeculativeDecodingMemoryError(evaluation: evaluation)
-            }
-            return .memoryBudgetExceeded
-        }
-        return nil
+        return drafterIsAdmitted ? nil : .memoryBudgetExceeded
     }
 }
+
+/// A token iterator whose prompt prefill time ``ChatSession`` extends with the checkpoint
+/// prefill it ran before the iterator was made.
+private protocol PromptPrefillTimedIterator: TokenIteratorProtocol {
+    /// Wall-clock time spent priming the cache with the prompt before the first generated token.
+    var promptPrefillTime: TimeInterval { get set }
+}
+
+extension TokenIterator: PromptPrefillTimedIterator {}
+extension MTPSpeculativeTokenIterator: PromptPrefillTimedIterator {}
 
 /// Errors thrown by ``ChatSession``.
 public enum ChatSessionError: LocalizedError {

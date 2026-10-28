@@ -110,7 +110,61 @@ struct SpeculativeDecodingConfigTests {
         }
         #expect(bytes == 0)
     }
+
+    @Test("A memory policy admits speculation that fits its budget")
+    func memoryPolicyAdmitsWithinBudget() throws {
+        let policy = SpeculativeDecodingMemoryPolicy(
+            limitBytes: memoryPolicyLimitBytes, action: .fail)
+
+        #expect(
+            try policy.admitsSpeculation(
+                mainModelBytes: mainModelBytes, draftModelBytes: fittingDraftBytes))
+    }
+
+    @Test(
+        "A memory policy over its budget admits or falls back by its action",
+        arguments: [
+            (SpeculativeDecodingMemoryAction.allow, true),
+            (SpeculativeDecodingMemoryAction.fallbackToDefault, false),
+        ]
+    )
+    func memoryPolicyOverBudgetFollowsAction(
+        action: SpeculativeDecodingMemoryAction, admits: Bool
+    ) throws {
+        let policy = SpeculativeDecodingMemoryPolicy(
+            limitBytes: memoryPolicyLimitBytes, action: action)
+
+        #expect(
+            try policy.admitsSpeculation(
+                mainModelBytes: mainModelBytes, draftModelBytes: oversizedDraftBytes)
+                == admits)
+    }
+
+    @Test("A failing memory policy over its budget throws its evaluation")
+    func memoryPolicyOverBudgetFails() {
+        let policy = SpeculativeDecodingMemoryPolicy(
+            limitBytes: memoryPolicyLimitBytes, action: .fail)
+
+        let error = #expect(throws: SpeculativeDecodingMemoryError.self) {
+            try policy.admitsSpeculation(
+                mainModelBytes: mainModelBytes, draftModelBytes: oversizedDraftBytes)
+        }
+
+        #expect(
+            error?.evaluation
+                == policy.evaluate(
+                    mainModelBytes: mainModelBytes, draftModelBytes: oversizedDraftBytes))
+    }
 }
+
+/// The budget of the memory policies in the admission tests.
+private let memoryPolicyLimitBytes = 1_024
+/// The main-model bytes of the admission tests.
+private let mainModelBytes = 512
+/// Draft bytes that, with `mainModelBytes`, fit `memoryPolicyLimitBytes`.
+private let fittingDraftBytes = 256
+/// Draft bytes that, with `mainModelBytes`, exceed `memoryPolicyLimitBytes`.
+private let oversizedDraftBytes = 1_024
 
 private func makeMTPDrafterContainer() -> MTPDrafterContainer {
     MTPDrafterContainer(

@@ -67,6 +67,43 @@ comments:
     - note: Release build shows 6 pre-existing #UnnecessaryEffectMarker warnings in untouched files TokenizerVocabExtractorTests.swift (1) and HardReserveStressTests.swift (5); not from this task.
     - next: ready for review/commit
   timestamp: 2026-10-28T01:47:15.276346+00:00
+- actor: claude-code
+  id: 01m603cptvzr0j1a73kxzjgdb9
+  text: |-
+    ### review — findings
+    - evidence: `review sha HEAD~1..HEAD` (a33c6877): 2 findings (2 confirmed, 2 refuted, 14 attempted, 0 failed) — Libraries/MLXLMCommon/ChatSession.swift:1874 (duplication/duplication), Libraries/MLXLMCommon/ChatSession.swift:2431 (reuse/reuse).
+    - requested checks (no defect found):
+      1. Alignment: `PromptCacheCheckpoint.init` stores the continuation only when `isAligned(withMainTokenCount: tokens.count)`, and only when the caches stand at `tokens.count`. The feed starts at `kvCache.processedTokenCount` (= prefillStart), restarts the drafter at that absolute position when the carried continuation is not aligned, and reports `startPosition + fedTokenCount`. A mid-prefill checkpoint therefore stores the drafter state at that boundary. The prompt-end checkpoint drops the first-bonus entry and checks alignment again.
+      2. Sharing: a checkpoint stores `compacted()` (`copy()` + `contiguous`), never the live value. The feed extends only the session-local carried continuation in place, and a fork deep-copies that (`RealizedCache.copy`). No production code reads `checkpoint.drafterContinuation` yet (`.rebuild` + restore sets `mtpDrafterContinuation = nil`), so no turn can mutate a stored one. ^ahnb0j9 must hand out `copy()` when it adds the restore, as its hand-off note says.
+      3. Memory policy: `mtpFallbackReason` runs before any cache decision or trim. It counts drafter parameters plus the carried continuation's byteCount once. The drafter reaches the target embedding/head through the call, so they are not double counted. On fallback, `drafterFeed` is nil and `defaultGeneration` runs; the carried continuation is then replaced by the plain generation's nil, so the session stays usable and the next turn can cold-start.
+      4. Incompatible drafter: `isCompatible` is checked first and makes `speculationIsEligible` false. That leaves `drafterFeed` nil and goes to `defaultGeneration`, so no MTP state is created.
+      5. `keepsCheckpoints`: needs `usesMTP && mtpSpeculativeStateIsReady` (not stateful, or resumable), so a stateful non-resumable drafter keeps checkpoints off.
+    - next: fix the 2 findings, then re-run `/review 01M5QWGWNFDVP77YAW9ACHVXY1 <sha>`.
+  timestamp: 2026-10-28T01:53:28.411079+00:00
+- actor: claude-code
+  id: 01m603dafqs4cn0fxy7grq80kt
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 10 files (checkpoints with MTP on, compacted drafter continuation per checkpoint, incompatible-drafter fallback, MTP memory policy)
+    - test: green — MLXLMTests 895 XCTest 0 failures + 1883 Swift Testing; FoundationModels 376; Release SystemPromptCache passed, edit turn 2169/123 with MTP on
+    - commit: a33c6877
+    - review: findings — Libraries/MLXLMCommon/ChatSession.swift:1874, Libraries/MLXLMCommon/ChatSession.swift:2431
+  timestamp: 2026-10-28T01:53:48.535867+00:00
+- actor: claude-code
+  id: 01m6040p7tzcydmgbvs6ch0xax
+  text: |-
+    Review fixes (both pure refactors):
+    - duplication (ChatSession.swift:1874): `takePromptEndCheckpoint` is replaced by a local `finishPrompt(_:drafterContinuation:) -> GenerationRun`. It adds `checkpointPrefillTime`, takes the prompt-end checkpoint, and calls `startGeneration`. The plain path passes `{ _ in nil }`; the MTP path passes `\.promptBoundaryContinuation`. The continuation is still read only when the pass keeps checkpoints. The suggested `inout I` + `@autoclosure` shape does not compile: the autoclosure `iterator.promptBoundaryContinuation` overlaps the inout access to `iterator`. So the helper takes the iterator by value plus an `(Iterator) -> MTPDrafterContinuation?` reader. `TokenIteratorProtocol.promptPrefillTime` is get-only, so a file-private `PromptPrefillTimedIterator` (get set) refines it; `TokenIterator` and `MTPSpeculativeTokenIterator` conform to it in ChatSession.swift.
+    - reuse (ChatSession.swift:2431): new `SpeculativeDecodingMemoryPolicy.admitsSpeculation(mainModelBytes:draftModelBytes:) throws -> Bool`, plus a `(mainModel:draftModel:)` overload. It returns true when admitted and false on fallback, and throws `SpeculativeDecodingMemoryError(evaluation:)` on a refused `.fail`. `mtpFallbackReason`, the pre-load deferred-draft check and the post-load draft check all call it. The package `evaluate(mainModel:draftModel:)` lost its only caller and is deleted. The pre-load verdict is kept as a `Result<Bool, any Error>?`, so the `.fail` throw still happens only when the draft-model branch is taken, as before. A turn that falls back for media or a missing continuation still does not throw, and `willFallBackBeforeLoadingDraft` keeps its old meaning (`(try? result.get()) == false`).
+    - Tests: 3 new Swift Testing tests in SpeculativeDecodingConfigTests (within budget admits; over budget with allow/fallback follows the action; over budget with fail throws the policy's evaluation). Watched 2 of them fail against a `true` stub.
+  timestamp: 2026-10-28T02:04:23.162216+00:00
+- actor: claude-code
+  id: 01m6040t98c32traddrhbhs82m
+  text: |-
+    ### implement — changed
+    - evidence: 3 files — Libraries/MLXLMCommon/ChatSession.swift, Libraries/MLXLMCommon/SpeculativeDecoding.swift, Tests/MLXLMTests/SpeculativeDecodingConfigTests.swift. `swift build --build-tests`: only the known Cmlx.bundle "missing creator" warning. `xcrun xctest MLXLMTests.xctest`: 895 XCTest, 0 failures; 1886 Swift Testing passed (1883 + 3 new; benchmarkVerification env-gated skip, known). MLXFoundationModelsTests: 376 passed. swift-format lint is clean. Release qwen38FourBitMTPSystemPromptCache(): TEST SUCCEEDED, no known issues. Edit turn 2 with MTP: 2169 cached / 123 prefilled in 170.4 ms, drafter prefilled 123, 88.4 tok/s, exact match with plain. The only Release compile warnings are the 6 pre-existing ones in HardReserveStressTests.swift and TokenizerVocabExtractorTests.swift. Both review findings are checked.
+    - next: /review (task left in doing; not committed)
+  timestamp: 2026-10-28T02:04:27.304441+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
@@ -97,3 +134,18 @@ What remains in Libraries/MLXLMCommon/ChatSession.swift:
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38 #chat-session
+
+## Review Findings (2026-10-27 20:47)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 10 file(s) reviewed, 6 not reviewed.
+
+> 6 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWGWNFDVP77YAW9ACHVXY1.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWGWNFDVP77YAW9ACHVXY1.md` — no validator matches this file
+> - `.kanban/tasks/01M5QWHA34WP7DQMWQ4AHNB0J9.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWHA34WP7DQMWQ4AHNB0J9.md` — no validator matches this file
+> - `.kanban/tasks/01M5SJPFM01WFRYWMQXVGMA4MQ.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5SJPFM01WFRYWMQXVGMA4MQ.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/ChatSession.swift:1874` `duplication/duplication` — The two generation branches repeat the same prompt-end sequence: add `checkpointPrefillTime` to the iterator, take the prompt-end checkpoint from `iterator.state`, then call `startGeneration`. They differ only in the drafter-continuation argument, so the sequence can drift between the MTP and plain paths. Move the shared three steps into one local helper that takes the iterator and the drafter continuation, for example `func finishPrompt<I: TokenIteratorProtocol>(_ iterator: inout I, drafterContinuation: @autoclosure () -> MTPDrafterContinuation?) -> GenerationRun`. Call it from both branches so each passes only its own continuation value.
+- [x] `Libraries/MLXLMCommon/ChatSession.swift:2431` `reuse/reuse` — `mtpFallbackReason` rebuilds the memory-policy outcome handling that the draft-model path already implements. It evaluates the policy, throws `SpeculativeDecodingMemoryError` on `.fail`, and otherwise maps a refusal to a fallback. The existing draft-model branch does the same thing with `speculativeMemoryEvaluation`. Two copies of that decision can drift, for example if the `.fail` rule or the error payload changes in one place only. Move the fail-or-refuse decision into one helper on `SpeculativeDecodingMemoryPolicy` (for example a method that returns the evaluation and throws on `.fail`) and call it from both `mtpFallbackReason` and the draft-model branch. Each caller then maps the refusal to its own fallback reason. Alternatively, extend the existing `evaluate` path so the MTP check reuses it instead of re-deriving the outcome.

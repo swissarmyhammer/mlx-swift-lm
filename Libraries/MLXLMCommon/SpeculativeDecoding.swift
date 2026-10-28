@@ -206,14 +206,42 @@ public struct SpeculativeDecodingMemoryPolicy: Sendable, Hashable {
         )
     }
 
-    package func evaluate(
-        mainModel: any LanguageModel,
-        draftModel: any LanguageModel
-    ) -> SpeculativeDecodingMemoryEvaluation {
-        evaluate(
+    /// Whether speculation runs under this policy for the given byte estimates.
+    ///
+    /// - Parameters:
+    ///   - mainModelBytes: The estimated bytes of the main model.
+    ///   - draftModelBytes: The estimated bytes of the draft model or MTP drafter, with any
+    ///     drafter state the caller carries.
+    /// - Returns: `true` when the policy admits speculation, `false` when it falls back to
+    ///   decoding without speculation.
+    /// - Throws: ``SpeculativeDecodingMemoryError`` when the policy does not admit speculation
+    ///   and its action is ``SpeculativeDecodingMemoryAction/fail``.
+    package func admitsSpeculation(mainModelBytes: Int, draftModelBytes: Int) throws -> Bool {
+        let evaluation = evaluate(mainModelBytes: mainModelBytes, draftModelBytes: draftModelBytes)
+        guard evaluation.shouldUseSpeculativeDecoding else {
+            if evaluation.action == .fail {
+                throw SpeculativeDecodingMemoryError(evaluation: evaluation)
+            }
+            return false
+        }
+        return true
+    }
+
+    /// Whether speculation with `draftModel` for `mainModel` runs under this policy.
+    ///
+    /// - Parameters:
+    ///   - mainModel: The main model.
+    ///   - draftModel: The loaded draft model.
+    /// - Returns: `true` when the policy admits speculation, `false` when it falls back to
+    ///   decoding without speculation.
+    /// - Throws: ``SpeculativeDecodingMemoryError`` when the policy does not admit speculation
+    ///   and its action is ``SpeculativeDecodingMemoryAction/fail``.
+    package func admitsSpeculation(
+        mainModel: any LanguageModel, draftModel: any LanguageModel
+    ) throws -> Bool {
+        try admitsSpeculation(
             mainModelBytes: Self.modelWeightBytes(mainModel),
-            draftModelBytes: Self.modelWeightBytes(draftModel)
-        )
+            draftModelBytes: Self.modelWeightBytes(draftModel))
     }
 
     /// The bytes of the parameters of `model`.
