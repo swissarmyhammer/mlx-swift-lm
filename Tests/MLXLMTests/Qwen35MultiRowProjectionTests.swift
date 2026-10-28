@@ -41,17 +41,14 @@ final class Qwen35MultiRowProjectionTests: XCTestCase {
     ) throws -> Qwen35TextModel {
         let configuration = try JSONDecoder().decode(
             Qwen35TextConfiguration.self, from: Data(Fixture.textConfigurationJSON.utf8))
-        let model = withRandomState(MLXRandom.RandomState(seed: Self.weightSeed)) {
-            Qwen35TextModel(configuration)
-        }
-        model.update(parameters: model.parameters().mapValues { $0.asType(.bfloat16) })
-        Fixture.quantize(model, matvecOfMLX: matvecOfMLX)
-        if prepared {
-            try model.prepare()
-        }
-        model.train(false)
-        eval(model)
-        return model
+        return try Fixture.seededQuantized(
+            seed: Self.weightSeed, matvecOfMLX: matvecOfMLX,
+            prepare: { model in
+                if prepared {
+                    try model.prepare()
+                }
+            },
+            { Qwen35TextModel(configuration) })
     }
 
     /// The seeded tokens of a call, shape `[1, count]`.

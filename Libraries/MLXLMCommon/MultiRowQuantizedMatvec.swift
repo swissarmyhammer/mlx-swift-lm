@@ -57,13 +57,36 @@ public enum MultiRowQuantizedMatvec {
     /// The bits of one packed word of the weights.
     private static let packBits = 32
 
-    /// The affine bit widths and group sizes the kernel reads.
-    private static let affineBits: Set<Int> = [4, 8]
-    private static let affineGroupSizes: Set<Int> = [32, 64, 128]
+    /// The narrow affine bit width: `qdot` reads four weights from each
+    /// 16-bit half of a packed word.
+    private static let narrowAffineBits = 4
+
+    /// The wide affine bit width: `qdot` reads one weight from each byte.
+    private static let wideAffineBits = 8
+
+    /// The affine bit widths the kernel reads.
+    private static let affineBits: Set<Int> = [narrowAffineBits, wideAffineBits]
+
+    /// The smallest affine group size the kernel reads.
+    private static let smallAffineGroupSize = 32
+
+    /// The default affine group size of MLX.
+    private static let defaultAffineGroupSize = 64
+
+    /// The largest affine group size the kernel reads.
+    private static let largeAffineGroupSize = 128
+
+    /// The affine group sizes the kernel reads.
+    private static let affineGroupSizes: Set<Int> = [
+        smallAffineGroupSize, defaultAffineGroupSize, largeAffineGroupSize,
+    ]
 
     /// The bit width and the group size of mxfp4.
     private static let mxfp4Bits = 4
     private static let mxfp4GroupSize = 32
+
+    /// The axes of the packed weights: `(N, K * BITS / 32)`.
+    private static let weightAxes = 2
 
     /// The input dtypes the kernel reads.
     private static let inputTypes: Set<DType> = [.bfloat16, .float16]
@@ -480,7 +503,7 @@ public enum MultiRowQuantizedMatvec {
         let tileRows = simdGroups * resultsPerSimdGroup
         let groups = width / layer.groupSize
         let scaleType: DType = layer.mode == .affine ? inputType : .uint8
-        return layer.weight.ndim == 2 && layer.weight.dtype == .uint32
+        return layer.weight.ndim == weightAxes && layer.weight.dtype == .uint32
             && layer.weight.dim(1) * packBits == width * layer.bits
             && layer.scales.shape == [outputs, groups] && layer.scales.dtype == scaleType
             && (layer.biases.map { $0.shape == [outputs, groups] && $0.dtype == inputType }

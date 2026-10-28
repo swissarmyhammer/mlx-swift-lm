@@ -36,16 +36,6 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
             from: Data(Fixture.textConfigurationJSON.utf8))
     }
 
-    /// `module` on seeded weights in bfloat16, every projection quantized.
-    private func quantized<M: Module>(_ make: () throws -> M) rethrows -> M {
-        let module = try withRandomState(MLXRandom.RandomState(seed: Self.weightSeed), body: make)
-        module.update(parameters: module.parameters().mapValues { $0.asType(.bfloat16) })
-        Fixture.quantize(module, matvecOfMLX: false)
-        module.train(false)
-        eval(module)
-        return module
-    }
-
     /// A vision-language target on seeded weights in bfloat16, its language
     /// model quantized.
     ///
@@ -59,19 +49,15 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
             from: Data(
                 Qwen35FixtureJSON.visionLanguage(textConfigJSON: Fixture.textConfigurationJSON)
                     .utf8))
-        let target = withRandomState(MLXRandom.RandomState(seed: Self.weightSeed)) {
-            Qwen35(configuration)
-        }
-        target.update(parameters: target.parameters().mapValues { $0.asType(.bfloat16) })
-        Fixture.quantize(target, matvecOfMLX: matvecOfMLX) { path, _ in
-            path.hasPrefix("language_model")
-        }
-        if prepared {
-            try target.prepare()
-        }
-        target.train(false)
-        eval(target)
-        return target
+        return try Fixture.seededQuantized(
+            seed: Self.weightSeed, matvecOfMLX: matvecOfMLX,
+            filter: { path, _ in path.hasPrefix("language_model") },
+            prepare: { target in
+                if prepared {
+                    try target.prepare()
+                }
+            },
+            { Qwen35(configuration) })
     }
 
     /// The seeded tokens of a call, shape `[1, count]`.
@@ -100,7 +86,7 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
     }
 
     func testMLPRowsOfAVerifyMatchSingleRowDecode() throws {
-        let mlp = quantized {
+        let mlp = try Fixture.seededQuantized(seed: Self.weightSeed) {
             Qwen35Language.MLP(dimensions: Fixture.hiddenSize, hiddenDimensions: 1024)
         }
         Fixture.assertVerifyRowsMatchSingleRows(width: Fixture.hiddenSize, "mlp") { [mlp($0)] }
@@ -108,7 +94,9 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
 
     func testGatedDeltaInputProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
         let configuration = try textConfiguration()
-        let gdn = quantized { Qwen35Language.GatedDeltaNet(configuration) }
+        let gdn = try Fixture.seededQuantized(seed: Self.weightSeed) {
+            Qwen35Language.GatedDeltaNet(configuration)
+        }
         XCTAssertTrue(try gdn.prepareFusedInputProjection())
         Fixture.assertVerifyRowsMatchSingleRows(
             width: Fixture.hiddenSize, "gdn input projection"
@@ -120,7 +108,9 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
 
     func testGatedDeltaOutputProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
         let configuration = try textConfiguration()
-        let gdn = quantized { Qwen35Language.GatedDeltaNet(configuration) }
+        let gdn = try Fixture.seededQuantized(seed: Self.weightSeed) {
+            Qwen35Language.GatedDeltaNet(configuration)
+        }
         Fixture.assertVerifyRowsMatchSingleRows(width: gdn.valueDim, "gdn out_proj") {
             [gdn.projectOutput($0)]
         }
@@ -128,7 +118,9 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
 
     func testAttentionProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
         let configuration = try textConfiguration()
-        let attention = quantized { Qwen35Language.Attention(configuration) }
+        let attention = try Fixture.seededQuantized(seed: Self.weightSeed) {
+            Qwen35Language.Attention(configuration)
+        }
         Fixture.assertVerifyRowsMatchSingleRows(
             width: Fixture.hiddenSize, axis: Fixture.headTokenAxis, "attention q/k/v"
         ) { x in

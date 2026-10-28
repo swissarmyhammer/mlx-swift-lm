@@ -12,7 +12,8 @@ import XCTest
 
 /// The configuration, the quantization and the row check shared by the
 /// multi-row projection tests of the Qwen3.5 text model and of the Qwen3.5
-/// vision-language model.
+/// vision-language model. The seeded, quantized build serves the Qwen3-Next
+/// MLP test as well.
 enum MultiRowProjectionFixture {
 
     /// A tiny dense Qwen3.5 text configuration whose projections fit the
@@ -96,6 +97,33 @@ enum MultiRowProjectionFixture {
         } else {
             MLXNN.quantize(model: model, groupSize: groupSize, bits: bits, filter: filter)
         }
+    }
+
+    /// The module `make` builds on weights seeded with `seed`, cast to
+    /// bfloat16, quantized, prepared, in inference mode and evaluated.
+    ///
+    /// - Parameters:
+    ///   - seed: The seed of the weights.
+    ///   - matvecOfMLX: True to give every projection the matvec of MLX.
+    ///   - filter: Tells, from its path and the module, if a layer is
+    ///     quantized.
+    ///   - prepare: Runs on the quantized module before it is evaluated, as
+    ///     the model loader prepares a model.
+    ///   - make: Builds the module.
+    /// - Returns: The quantized module, ready to run.
+    static func seededQuantized<M: Module>(
+        seed: UInt64, matvecOfMLX: Bool = false,
+        filter: (String, Module) -> Bool = { _, _ in true },
+        prepare: (M) throws -> Void = { _ in },
+        _ make: () throws -> M
+    ) throws -> M {
+        let module = try withRandomState(MLXRandom.RandomState(seed: seed), body: make)
+        module.update(parameters: module.parameters().mapValues { $0.asType(.bfloat16) })
+        quantize(module, matvecOfMLX: matvecOfMLX, filter: filter)
+        try prepare(module)
+        module.train(false)
+        eval(module)
+        return module
     }
 
     /// Runs `project` inside a speculative verify over ``rows`` seeded rows

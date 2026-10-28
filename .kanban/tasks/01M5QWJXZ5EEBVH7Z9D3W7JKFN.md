@@ -92,6 +92,41 @@ comments:
     - not met (recorded as measured): microbenchmark targets M=4 <= 1.3x (1.69x) and M=6 <= 1.6x (2.58x).
     - next: /review
   timestamp: 2026-10-28T21:10:41.168623+00:00
+- actor: claude-code
+  id: 01m62615yyjna07v4tzn3bymap
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (85e37abe), 14 findings (34 confirmed, 6 refuted) — IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift:21,22,23,24,25,26,27,28,40,41; Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift:61,62,483; Tests/MLXLMTests/Qwen35VLMMultiRowProjectionTests.swift:40
+    - next: implement the 14 open items in the 2026-10-28 16:11 Review Findings section, then re-review
+  timestamp: 2026-10-28T21:18:05.278950+00:00
+- actor: claude-code
+  id: 01m6261mze5j3e2qa2yhdvmczd
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — verify-only wiring per user decision (a), 11 files
+    - test: green (implementer run) — 5 bundles (MLXLMTests 920 + 1939); Release MTP 90.5/81.4/80.7 = plain; cache guard pass incl. thinking chat, edit turn 123 tok
+    - commit: 85e37abe
+    - review: findings — MultiRowQuantizedMatvecBenchmarkTests.swift:21-28,40,41; MultiRowQuantizedMatvec.swift:61,62,483; Qwen35VLMMultiRowProjectionTests.swift:40
+  timestamp: 2026-10-28T21:18:20.654416+00:00
+- actor: claude-code
+  id: 01m626sq6nsjf0m0q15v4dj03f
+  text: |-
+    Review findings (2026-10-28 16:11) worked, all 14 flipped to [x].
+    - magic numbers: MultiRowQuantizedMatvecBenchmarkTests now names the Qwen3.8-27B widths and layer counts in a private `Qwen38` enum (values checked against the cached mlx-community/Qwen3.8-27B-4bit config: hidden 5120, 48 GDN + 16 attention layers, 24x256 q heads with output gate, 4 kv heads, 48x128 values, vocab 248320) plus `checkpointBits`/`affineGroupSize`/`mxfp4GroupSize`. MultiRowQuantizedMatvec.swift: `narrowAffineBits`/`wideAffineBits`, `small/default/largeAffineGroupSize`, `weightAxes`. Metal header/source strings untouched (git diff hunks only in the Swift constants and fitsTiles), so the generated kernel is identical and the Release model guards were not rerun.
+    - swiftlint 0.65 no_magic_numbers with only_rules + allowed_numbers [0, 1, -1, 100] (child config in scratchpad, no project .swiftlint.yml exists) over the 8 files of 85e37abe: 34 violations before (only the two flagged files), 0 after.
+    - reuse: new `MultiRowProjectionFixture.seededQuantized(seed:matvecOfMLX:filter:prepare:_:)` (seed -> bf16 -> quantize -> prepare -> train(false) -> eval). Used by Qwen35MultiRowProjectionTests.makeModel, Qwen35VLMMultiRowProjectionTests.makeTarget and the per-module builds (VLM `quantized` helper deleted), and Qwen3NextMultiRowMLPTests.makeModel (third copy of the same setup; its private groupSize/bits and quantize closure removed, reference uses matvecOfMLX: true).
+    - gotcha: the helper must be `throws`, not `rethrows` - a defaulted throwing closure parameter (`prepare`) makes every rethrows call need `try` anyway (compile error "call is to 'rethrows' function, but a defaulted argument function can throw").
+    - gotcha: the files `edit file` op with replace_all replaced only 1 of 3 occurrences twice; edit each occurrence with unique context.
+    - gotcha: Release build-for-testing of IntegrationTesting needs ENABLE_TESTABILITY=YES (GoldenReplayTests uses @testable imports); without it the build fails with "Unable to resolve Swift module dependency".
+  timestamp: 2026-10-28T21:31:29.365920+00:00
+- actor: claude-code
+  id: 01m626sw894zvgp1saz5ygk7vh
+  text: |-
+    ### implement — changed
+    - evidence: 6 files — IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift, Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift, Tests/MLXLMTests/MultiRowProjectionFixture.swift, Tests/MLXLMTests/Qwen35MultiRowProjectionTests.swift, Tests/MLXLMTests/Qwen35VLMMultiRowProjectionTests.swift, Tests/MLXLMTests/Qwen3NextMultiRowMLPTests.swift (+ card). swiftlint no_magic_numbers over the 8 files of 85e37abe: 34 -> 0. swift-format lint clean. swift build --build-tests: 0 compiler warnings (only the known build-system "missing creator ... mlx-swift_Cmlx.bundle"). xcrun xctest: MLXLMTests XCTest 920/0 failures + Swift Testing 1939 tests/172 suites passed (only skip: pre-existing env-gated benchmarkVerification, ^smn05mj); MLXGuidedGenerationTests 70 passed; MLXFoundationModelsTests 376 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 5/0. Totals: 3317 tests, 0 failures. Release xcodebuild build-for-testing IntegrationTesting (ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES): TEST BUILD SUCCEEDED, 0 warnings. Kernel source unchanged -> Release model guards not rerun.
+    - findings: 14/14 checked.
+    - next: /review
+  timestamp: 2026-10-28T21:31:34.537782+00:00
 depends_on:
 - 01M5SKBCEWG4D25SZZNGG7BVM7
 - 01M5SWXS9E09Y97PV3BV51TPYA
@@ -129,3 +164,26 @@ The kernel runs ONLY inside the speculative verify, for 3–8 rows. Prefill (the
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38 #perf
+
+## Review Findings (2026-10-28 16:11)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 11 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWJXZ5EEBVH7Z9D3W7JKFN.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWJXZ5EEBVH7Z9D3W7JKFN.md` — no validator matches this file
+
+- [x] `IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift:21` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift:22` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift:23` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift:24` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift:25` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift:26` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift:27` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift:28` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift:40` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift:41` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift:61` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift:62` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift:483` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/Qwen35VLMMultiRowProjectionTests.swift:40` `reuse/reuse` — The `quantized` helper repeats the seeded-weights, bfloat16-cast, quantize, eval setup that `Qwen35MultiRowProjectionTests.makeModel` already performs (Qwen35MultiRowProjectionTests.swift:39-55). Two copies of the same setup will drift apart, for example when the quantization or seeding changes in one file only. Move the seeded, bfloat16, quantized, eval-ready build into `MultiRowProjectionFixture` as one generic helper that takes the `make` closure and the quantize filter, and call it from both the text and VLM test classes.

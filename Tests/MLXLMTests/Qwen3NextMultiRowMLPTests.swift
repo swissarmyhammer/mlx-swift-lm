@@ -46,31 +46,23 @@ final class Qwen3NextMultiRowMLPTests: XCTestCase {
     /// The decoder layers of ``configurationJSON``, each with a dense MLP.
     private static let hiddenLayers = 4
 
-    private static let groupSize = 64
-    private static let bits = 4
     private static let decodeTokens: [Int32] = [3, 8, 1, 5, 2]
 
     /// The rows of a verify: the fewest the kernel runs.
     private static let verifyRows = MultiRowQuantizedMatvec.fewestRows
 
-    /// A model on seeded weights, quantized by `quantize`.
+    /// A model on seeded weights in bfloat16, quantized.
     ///
-    /// - Parameter quantize: Quantizes the model in groups of ``groupSize``
-    ///   with ``bits`` bits.
-    private func makeModel(
-        quantize: (Module, Int, Int) -> Void = {
-            MLXNN.quantize(model: $0, groupSize: $1, bits: $2)
-        }
-    ) throws -> Qwen3NextModel {
+    /// - Parameter matvecOfMLX: True to give every projection the matvec of
+    ///   MLX.
+    private func makeModel(matvecOfMLX: Bool = false) throws -> Qwen3NextModel {
         let configuration = try JSONDecoder().decode(
             Qwen3NextConfiguration.self, from: Data(Self.configurationJSON.utf8))
-        let model = withRandomState(MLXRandom.RandomState(seed: Self.weightSeed)) {
+        return try MultiRowProjectionFixture.seededQuantized(
+            seed: Self.weightSeed, matvecOfMLX: matvecOfMLX
+        ) {
             Qwen3NextModel(configuration)
         }
-        model.update(parameters: model.parameters().mapValues { $0.asType(.bfloat16) })
-        quantize(model, Self.groupSize, Self.bits)
-        eval(model)
-        return model
     }
 
     private func mlps(of model: Qwen3NextModel) -> [Qwen3NextMLP] {
@@ -88,9 +80,7 @@ final class Qwen3NextMultiRowMLPTests: XCTestCase {
 
     func testPlainDecodeLogitsKeepTheirBits() throws {
         let model = try makeModel()
-        let reference = try makeModel {
-            MLXMatvecQuantizedLinear.quantize($0, groupSize: $1, bits: $2)
-        }
+        let reference = try makeModel(matvecOfMLX: true)
         XCTAssertEqual(mlps(of: model).count, Self.hiddenLayers)
 
         let got = try decodeLogits(model)

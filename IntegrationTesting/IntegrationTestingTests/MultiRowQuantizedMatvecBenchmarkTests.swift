@@ -14,18 +14,75 @@ private struct StepProjection {
     let count: Int
 }
 
+/// The widths and the layer counts of Qwen3.8-27B.
+private enum Qwen38 {
+    /// The width of the hidden state.
+    static let hiddenSize = 5120
+
+    /// The fused input projection of a gated delta net: queries, keys,
+    /// values, the output gate, and the beta and alpha of each value head.
+    static let gatedDeltaInputWidth = 16480
+
+    /// The value width of a gated delta net, the input of its `out_proj`.
+    static let gatedDeltaValueWidth = 6144
+
+    /// The queries of a full-attention layer with their output gate.
+    static let attentionQueryWidth = 12288
+
+    /// The keys, or the values, of a full-attention layer.
+    static let attentionKeyValueWidth = 1024
+
+    /// The heads of a full-attention layer, the input of its `o_proj`.
+    static let attentionOutputWidth = 6144
+
+    /// The hidden width of each MLP.
+    static let intermediateSize = 17408
+
+    /// The tokens of the vocabulary, the outputs of the LM head.
+    static let vocabularySize = 248_320
+
+    /// The gated delta net layers.
+    static let gatedDeltaLayers = 48
+
+    /// The full-attention layers.
+    static let attentionLayers = 16
+
+    /// Every decoder layer, each with one MLP.
+    static let layers = gatedDeltaLayers + attentionLayers
+
+    /// The key and the value projection of each full-attention layer.
+    static let keyValueProjectionsPerLayer = 2
+
+    /// The gate and the up projection of each MLP.
+    static let gateUpProjectionsPerMLP = 2
+}
+
 /// The quantized projections of one Qwen3.8-27B step: the fused input and the
-/// output projection of 48 gated delta net layers, the four projections of 16
-/// full-attention layers, the three projections of 64 MLPs, and the LM head.
+/// output projection of each gated delta net layer, the four projections of
+/// each full-attention layer, the three projections of each MLP, and the LM
+/// head.
 private let qwen38StepProjections = [
-    StepProjection(inputs: 5120, outputs: 16480, count: 48),
-    StepProjection(inputs: 6144, outputs: 5120, count: 48),
-    StepProjection(inputs: 5120, outputs: 12288, count: 16),
-    StepProjection(inputs: 5120, outputs: 1024, count: 32),
-    StepProjection(inputs: 6144, outputs: 5120, count: 16),
-    StepProjection(inputs: 5120, outputs: 17408, count: 128),
-    StepProjection(inputs: 17408, outputs: 5120, count: 64),
-    StepProjection(inputs: 5120, outputs: 248_320, count: 1),
+    StepProjection(
+        inputs: Qwen38.hiddenSize, outputs: Qwen38.gatedDeltaInputWidth,
+        count: Qwen38.gatedDeltaLayers),
+    StepProjection(
+        inputs: Qwen38.gatedDeltaValueWidth, outputs: Qwen38.hiddenSize,
+        count: Qwen38.gatedDeltaLayers),
+    StepProjection(
+        inputs: Qwen38.hiddenSize, outputs: Qwen38.attentionQueryWidth,
+        count: Qwen38.attentionLayers),
+    StepProjection(
+        inputs: Qwen38.hiddenSize, outputs: Qwen38.attentionKeyValueWidth,
+        count: Qwen38.attentionLayers * Qwen38.keyValueProjectionsPerLayer),
+    StepProjection(
+        inputs: Qwen38.attentionOutputWidth, outputs: Qwen38.hiddenSize,
+        count: Qwen38.attentionLayers),
+    StepProjection(
+        inputs: Qwen38.hiddenSize, outputs: Qwen38.intermediateSize,
+        count: Qwen38.layers * Qwen38.gateUpProjectionsPerMLP),
+    StepProjection(
+        inputs: Qwen38.intermediateSize, outputs: Qwen38.hiddenSize, count: Qwen38.layers),
+    StepProjection(inputs: Qwen38.hiddenSize, outputs: Qwen38.vocabularySize, count: 1),
 ]
 
 /// A quantization format of the Qwen3.8-27B checkpoints.
@@ -36,9 +93,21 @@ private struct QuantizationFormat {
     let mode: QuantizationMode
 }
 
+/// The bits of each weight of both Qwen3.8-27B checkpoints.
+private let checkpointBits = 4
+
+/// The group size of the affine checkpoint.
+private let affineGroupSize = 64
+
+/// The group size of mxfp4, fixed by the format.
+private let mxfp4GroupSize = 32
+
 private let qwen38Formats = [
-    QuantizationFormat(name: "4-bit affine g64", groupSize: 64, bits: 4, mode: .affine),
-    QuantizationFormat(name: "mxfp4", groupSize: 32, bits: 4, mode: .mxfp4),
+    QuantizationFormat(
+        name: "4-bit affine g64", groupSize: affineGroupSize, bits: checkpointBits,
+        mode: .affine),
+    QuantizationFormat(
+        name: "mxfp4", groupSize: mxfp4GroupSize, bits: checkpointBits, mode: .mxfp4),
 ]
 
 /// The verify rows a speculative step runs: one plain decode row up to eight.
