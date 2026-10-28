@@ -82,14 +82,30 @@ comments:
     - evidence: 4 files — Libraries/BenchmarkHelpers/MTPBlockSweep.swift, Tests/MLXLMTests/Qwen35ScriptedMTPSupport.swift, Tests/MLXLMTests/Qwen35ChainedMTPCachingTests.swift, Tests/MLXLMTests/Qwen35ChainedMTPDraftTests.swift. `swift build --build-tests`: 0 compiler warnings (only the existing build-system "missing creator" note). `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 1966 Swift Testing tests in 177 suites passed and 920 XCTest tests with 0 failures; Qwen35ChainedMTPDraftTests, Qwen35ChainedMTPCachingTests and ChatSessionQwenChainedMTPTests passed. All 6 findings checked.
     - next: /review
   timestamp: 2026-10-28T23:50:03.607426+00:00
+- actor: claude-code
+  id: 01m62etwaqjt5brj1yhgdqh0kq
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (c9ef346f) — 0 findings (0 confirmed, 3 refuted, 7 attempted); all 6 items of `## Review Findings (2026-10-28 18:34)` checked and verified in the diff (named pMin constant `reportedFastestMinimumDraftProbability`; shared `heldTokenCount(of:)`, generic `drain(_:limit:)`, `mtpIterator`/`greedyMTPIterator` with optional `mtpContinuation`, and `prefillContinuation(of:blockSize:)` in Qwen35ScriptedMTPSupport.swift, used by both chained suites)
+    - next: task moved to done
+  timestamp: 2026-10-28T23:51:55.991301+00:00
+- actor: claude-code
+  id: 01m62evagnng5g3ksb2d1fsmnx
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 4 files (shared test helpers, named sweep constant)
+    - test: green — swift build --build-tests 0 warnings; MLXLMTests 1966 Swift Testing + 920 XCTest pass
+    - commit: c9ef346f
+    - review: clean — task moved to done
+  timestamp: 2026-10-28T23:52:10.517002+00:00
 depends_on:
 - 01M5SKBV27GED43EB3T8MCSVWE
 - 01M5SKBCEWG4D25SZZNGG7BVM7
 - 01M5QWJXZ5EEBVH7Z9D3W7JKFN
 - 01M5QWJ40KYCBZ9SW5CR9AH2BJ
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: fff580
 title: 'MTP: draft more than one token per round by chaining the Qwen MTP head'
 ---
 ## What
