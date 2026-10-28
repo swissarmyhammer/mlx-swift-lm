@@ -619,6 +619,21 @@ public final class MTPDrafterContainer: Sendable {
             try await action($0)
         }
     }
+
+    /// Checks that the drafter can draft for the model of `target`.
+    ///
+    /// A ``ChatSession`` with an incompatible drafter does not throw: it decodes without
+    /// speculation and reports ``SpeculativeDecodingFallbackReason/incompatibleDrafter``. Call
+    /// this to learn why, or to refuse the pairing up front.
+    ///
+    /// - Parameter target: The container of the model the drafter speculates for.
+    /// - Throws: The ``MTPDrafterCompatibilityError`` of
+    ///   ``MTPDrafterModel/validateCompatibility(with:)`` when the drafter cannot draft for it.
+    public func validateCompatibility(with target: ModelContainer) async throws {
+        let targetModel = await target.perform { SendableBox($0.model) }.consume()
+        let drafter = await perform { SendableBox($0.model) }.consume()
+        try drafter.validateCompatibility(with: targetModel)
+    }
 }
 
 // MARK: - Cross-model state keys
@@ -712,6 +727,35 @@ extension LMOutput.State {
             let hiddenStates = output.state?[mtpLastHiddenStatesKey]
         else { return }
         handler(tokens, hiddenStates, positionDeltas ?? output.state?[mtpPositionDeltasKey])
+    }
+
+    /// This state without the transient values the MTP iterator and its target exchange, or
+    /// `nil` when nothing else is left. Model-owned continuation state, such as the M-RoPE
+    /// anchors of a Qwen VLM, stays.
+    package var withoutMTPExchange: LMOutput.State? {
+        var state = self
+        state[mtpEmitFlagKey] = nil
+        state[mtpPrefillChunkHandlerKey] = nil
+        state[mtpCacheCheckpointIndexKey] = nil
+        state[mtpLastHiddenStatesKey] = nil
+        state[mtpSharedKVStatesKey] = nil
+        state[mtpSharedKVSourceIndicesKey] = nil
+        state[mtpSharedKVOffsetsKey] = nil
+        state[mtpPositionDeltasKey] = nil
+        return state.isEmpty ? nil : state
+    }
+
+    /// This state, asking a target's forward for MTP drafter state and handing its hidden rows to
+    /// `drafterFeed`, or this state unchanged when there is no feed.
+    ///
+    /// - Parameter drafterFeed: The handler that takes the hidden rows of each forward, or nil.
+    /// - Returns: The state to pass to the forward.
+    package func feeding(_ drafterFeed: MTPPrefillChunkHandler?) -> LMOutput.State {
+        guard let drafterFeed else { return self }
+        var state = self
+        state[mtpEmitFlagKey] = true
+        state[mtpPrefillChunkHandlerKey] = drafterFeed
+        return state
     }
 }
 

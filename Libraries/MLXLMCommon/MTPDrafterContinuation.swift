@@ -115,6 +115,52 @@ public struct MTPDrafterContinuation: @unchecked Sendable {
         return copied
     }
 
+    /// A copy that holds each array in a buffer of its own, sized to the array, so that its
+    /// ``byteCount`` is what it keeps alive. A prompt cache checkpoint stores this form.
+    ///
+    /// A ``copy()`` of a `KVCacheSimple` layer views the rows the live layer holds, so it keeps
+    /// the whole live buffer (up to 255 rows more) alive once the live layer grows into a new
+    /// buffer, and the boundary row of a prefill feed views the hidden rows of its whole chunk.
+    /// Both undercount, and while the live continuation shares the arrays both count them. This
+    /// copy copies each such view into a buffer of its own. MLX keeps a view shared when its
+    /// buffer is at most 16 KiB larger than the view, thus the count is exact up to that slack
+    /// for each array. A drafter cache layer of another type is copied as
+    /// ``KVCache/copy()`` copies it.
+    ///
+    /// - Returns: The copy, with each array evaluated.
+    package func compacted() -> MTPDrafterContinuation {
+        var compactedState = state
+        compactedState.cache = state.cache.map(Self.compactedCopy(of:))
+        compactedState.seedToken = state.seedToken.map { contiguous($0) }
+        compactedState.seedHidden = state.seedHidden.map { contiguous($0) }
+        let compacted = MTPDrafterContinuation(
+            state: compactedState, targetBoundaryHidden: contiguous(targetBoundaryHidden),
+            targetProcessedTokenCount: targetProcessedTokenCount, drafterID: drafterID)
+        eval(compacted.heldArrays)
+        return compacted
+    }
+
+    /// A copy of a drafter cache layer whose arrays hold only the rows the layer holds.
+    ///
+    /// - Parameter cache: A drafter cache layer.
+    /// - Returns: The compacted copy of a `KVCacheSimple`, or ``KVCache/copy()`` of any other
+    ///   layer, whose state arrays need not name the rows the layer holds.
+    private static func compactedCopy(of cache: KVCache) -> KVCache {
+        let copied = cache.copy()
+        guard let simple = copied as? KVCacheSimple, type(of: simple) == KVCacheSimple.self,
+            !simple.state.isEmpty
+        else { return copied }
+        simple.state = simple.state.map { contiguous($0) }
+        return simple
+    }
+
+    /// Every array this continuation holds: the drafter cache arrays, the boundary hidden row,
+    /// and the seed proposal.
+    private var heldArrays: [MLXArray] {
+        state.cache.flatMap(\.state) + [targetBoundaryHidden]
+            + [state.seedToken, state.seedHidden].compactMap { $0 }
+    }
+
     /// The bytes this continuation holds in memory: the buffers of the drafter caches (see
     /// ``KVCache/residentByteCount``), the boundary hidden row, and the seed proposal.
     ///

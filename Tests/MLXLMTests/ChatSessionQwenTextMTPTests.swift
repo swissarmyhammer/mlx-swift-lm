@@ -604,6 +604,319 @@ struct ChatSessionQwenTextMTPTests {
                 + restartInfo.generationTokenCount - (resumable ? 1 : 0))
     }
 
+    // MARK: - Checkpoints with MTP
+
+    @Test(
+        "a two-turn MTP chat takes checkpoints, writes the plain text, and starts the drafter at the restored checkpoint"
+    )
+    func mtpChatTakesCheckpointsAndFeedsTheDrafterOnlyTheSuffix() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let speculative = checkpointSession(
+            fixture, speculativeDecoding: try fixture.makeSpeculativeDecodingConfig())
+        let plain = checkpointSession(fixture, speculativeDecoding: nil)
+
+        var lastTurn: GenerateCompletionInfo?
+        for prompt in checkpointPrompts {
+            let result = try await collect(speculative.streamDetails(to: prompt))
+            let expected = try await collect(plain.streamDetails(to: prompt))
+
+            #expect(result.text == expected.text)
+            #expect(result.info.cachedPromptTokenCount == expected.info.cachedPromptTokenCount)
+            #expect(result.info.promptTokenCount == expected.info.promptTokenCount)
+            #expect((result.info.proposedDraftTokens ?? 0) > 0)
+            #expect(result.info.passthroughReason == nil)
+            #expect(result.info.speculativeDecodingFallbackReason == nil)
+            lastTurn = result.info
+        }
+
+        // The second render closes the think block the first prompt opened, so the second turn
+        // goes back to the checkpoint at the end of the first user message. The drafter starts
+        // there, thus it took only the prompt past that checkpoint.
+        let second = try #require(lastTurn)
+        #expect(second.cachedPromptTokenCount > 0)
+        let continuation = try #require(await speculative.drafterContinuation())
+        #expect(continuation.state.cacheStartPosition == second.cachedPromptTokenCount)
+    }
+
+    @Test("each checkpoint of an MTP turn keeps a drafter continuation aligned at its position")
+    func mtpCheckpointsKeepAlignedDrafterContinuations() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let session = checkpointSession(
+            fixture, speculativeDecoding: try fixture.makeSpeculativeDecodingConfig())
+
+        _ = try await collect(session.streamDetails(to: checkpointPrompts[0]))
+        let checkpoints = await session.checkpointSummaries()
+
+        // The end of the instructions, the end of the user message, and the end of the prompt.
+        #expect(checkpoints.count == checkpointsOfAFirstTurn)
+        for checkpoint in checkpoints {
+            let continuation = try #require(checkpoint.drafterContinuation)
+            #expect(
+                continuation.isAligned(
+                    withMainTokenCount: checkpoint.tokenCount, drafterID: fixture.drafter.drafterID)
+            )
+            #expect(checkpoint.byteCount > continuation.byteCount)
+        }
+    }
+
+    @Test("a checkpoint keeps a compact copy of the drafter continuation and counts its bytes")
+    func checkpointKeepsACompactDrafterContinuation() throws {
+        let live = makeLiveDrafterContinuation(aheadBy: 0)
+        let withoutDrafter = try #require(
+            PromptCacheCheckpoint(caches: [live.mainCache], tokens: live.tokens, state: nil))
+        let checkpoint = try #require(
+            PromptCacheCheckpoint(
+                caches: [live.mainCache], tokens: live.tokens, state: nil,
+                drafterContinuation: live.continuation))
+        let stored = try #require(checkpoint.drafterContinuation)
+
+        #expect(checkpoint.byteCount == withoutDrafter.byteCount + stored.byteCount)
+        #expect(stored.byteCount == live.heldByteCount)
+        let storedArrays = stored.state.cache.flatMap(\.state) + [stored.targetBoundaryHidden]
+        let liveArrays =
+            live.continuation.state.cache.flatMap(\.state) + [
+                live.continuation.targetBoundaryHidden
+            ]
+        #expect(storedArrays.count == liveArrays.count)
+        for (storedArray, liveArray) in zip(storedArrays, liveArrays) {
+            #expect(bufferAddress(of: storedArray) != bufferAddress(of: liveArray))
+        }
+    }
+
+    @Test("a checkpoint keeps no drafter continuation that ends at another position")
+    func checkpointDropsAMisalignedDrafterContinuation() throws {
+        let live = makeLiveDrafterContinuation(aheadBy: 1)
+        let withoutDrafter = try #require(
+            PromptCacheCheckpoint(caches: [live.mainCache], tokens: live.tokens, state: nil))
+        let checkpoint = try #require(
+            PromptCacheCheckpoint(
+                caches: [live.mainCache], tokens: live.tokens, state: nil,
+                drafterContinuation: live.continuation))
+
+        #expect(checkpoint.drafterContinuation == nil)
+        #expect(checkpoint.byteCount == withoutDrafter.byteCount)
+    }
+
+    // MARK: - Incompatible drafter and memory policy
+
+    @Test("an incompatible MTP drafter decodes plainly with a fallback reason instead of throwing")
+    func incompatibleDrafterFallsBackToPlainDecode() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let parameters = GenerateParameters(maxTokens: fixtureTurnTokenCount, temperature: 0)
+        let session = ChatSession(
+            fixture.makeModelContext(),
+            speculativeDecoding: try makeMTPConfiguration(model: try makeNarrowDrafter()),
+            generateParameters: parameters)
+        let plain = ChatSession(fixture.makeModelContext(), generateParameters: parameters)
+        let prompt = fixture.text(for: fixturePrompt)
+
+        let result = try await collect(session.streamDetails(to: prompt))
+        let expected = try await collect(plain.streamDetails(to: prompt))
+
+        #expect(result.text == expected.text)
+        #expect(result.info.speculativeDecodingFallbackReason == .incompatibleDrafter)
+        #expect(result.info.proposedDraftTokens == nil)
+        #expect(result.info.speculativeDecodingTelemetry == nil)
+    }
+
+    @Test("validating an incompatible MTP drafter against its target throws")
+    func incompatibleDrafterValidationThrows() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let target = fixture.makeModelContainer()
+        let narrow = MTPDrafterContainer(
+            context: MTPDrafterContext(
+                configuration: fixture.modelConfiguration, model: try makeNarrowDrafter()))
+        let matching = MTPDrafterContainer(
+            context: MTPDrafterContext(
+                configuration: fixture.modelConfiguration, model: fixture.drafter))
+
+        await #expect(throws: MTPDrafterCompatibilityError.self) {
+            try await narrow.validateCompatibility(with: target)
+        }
+        try await matching.validateCompatibility(with: target)
+    }
+
+    @Test("a memory policy that does not admit the MTP drafter falls back to plain decode")
+    func memoryPolicyFallbackDecodesPlainly() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let parameters = GenerateParameters(maxTokens: fixtureTurnTokenCount, temperature: 0)
+        let session = ChatSession(
+            fixture.makeModelContext(),
+            speculativeDecoding: try fixture.makeSpeculativeDecodingConfig(
+                memoryPolicy: .init(limitBytes: rejectingMemoryLimit)),
+            generateParameters: parameters)
+        let plain = ChatSession(fixture.makeModelContext(), generateParameters: parameters)
+        let prompt = fixture.text(for: fixturePrompt)
+
+        let result = try await collect(session.streamDetails(to: prompt))
+        let expected = try await collect(plain.streamDetails(to: prompt))
+
+        #expect(result.text == expected.text)
+        #expect(result.info.speculativeDecodingFallbackReason == .memoryBudgetExceeded)
+        #expect(result.info.proposedDraftTokens == nil)
+    }
+
+    @Test("a failing memory policy throws with the target and drafter weight bytes")
+    func memoryPolicyFailureThrows() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let session = ChatSession(
+            fixture.makeModelContext(),
+            speculativeDecoding: try fixture.makeSpeculativeDecodingConfig(
+                memoryPolicy: .init(limitBytes: rejectingMemoryLimit, action: .fail)),
+            generateParameters: GenerateParameters(
+                maxTokens: fixtureTurnTokenCount, temperature: 0))
+
+        let error = await #expect(throws: SpeculativeDecodingMemoryError.self) {
+            _ = try await collect(session.streamDetails(to: fixture.text(for: fixturePrompt)))
+        }
+
+        #expect(
+            error?.evaluation.mainModelBytes
+                == SpeculativeDecodingMemoryPolicy.modelWeightBytes(fixture.target))
+        #expect(
+            error?.evaluation.draftModelBytes
+                == SpeculativeDecodingMemoryPolicy.modelWeightBytes(fixture.drafter))
+    }
+
+    @Test("the memory policy counts the drafter continuation the session carries")
+    func memoryPolicyCountsTheCarriedContinuation() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let weightBytes =
+            SpeculativeDecodingMemoryPolicy.modelWeightBytes(fixture.target)
+            + SpeculativeDecodingMemoryPolicy.modelWeightBytes(fixture.drafter)
+        let session = ChatSession(
+            fixture.makeModelContext(),
+            speculativeDecoding: try fixture.makeSpeculativeDecodingConfig(
+                memoryPolicy: .init(limitBytes: weightBytes)),
+            generateParameters: GenerateParameters(
+                maxTokens: fixtureTurnTokenCount, temperature: 0))
+
+        let first = try await collect(session.streamDetails(to: fixture.text(for: fixturePrompt)))
+        let second = try await collect(
+            session.streamDetails(to: fixture.text(for: fixtureFollowUpPrompt)))
+
+        #expect(first.info.speculativeDecodingFallbackReason == nil)
+        #expect((first.info.proposedDraftTokens ?? 0) > 0)
+        #expect(second.info.speculativeDecodingFallbackReason == .memoryBudgetExceeded)
+        #expect(second.info.proposedDraftTokens == nil)
+    }
+
+    /// Tokens each turn of a Qwen fixture chat generates.
+    private let fixtureTurnTokenCount = 6
+
+    /// The prompt tokens of a one-turn Qwen fixture chat.
+    private let fixturePrompt = [3, 9, 14]
+
+    /// The prompt tokens of the second turn of a Qwen fixture chat.
+    private let fixtureFollowUpPrompt = [11, 2]
+
+    /// A memory budget no model fits in.
+    private let rejectingMemoryLimit = 1
+
+    /// The instructions of a Qwen fixture chat that takes checkpoints.
+    private let checkpointInstructions = "answer briefly"
+
+    /// The user turns of a Qwen fixture chat that takes checkpoints.
+    private let checkpointPrompts = ["first", "second"]
+
+    /// The checkpoints a first turn with instructions takes: at the end of the instructions, at
+    /// the end of the user message, and at the end of the prompt.
+    private let checkpointsOfAFirstTurn = 3
+
+    /// A greedy session over the Qwen fixture target with ``checkpointInstructions``, whose
+    /// template writes a Qwen-like transcript: the generation prompt opens a think block that the
+    /// next render closes, so the next turn goes back to a checkpoint.
+    private func checkpointSession(
+        _ fixture: Qwen35MTPFixture, speculativeDecoding: SpeculativeDecodingConfig?
+    ) -> ChatSession {
+        let tokenizer = ChatSessionRecurrentCheckpointTests.CheckpointTemplateTokenizer(
+            historyShape: .closesTheThinkBlock)
+        let context = ModelContext(
+            configuration: fixture.modelConfiguration, model: fixture.target,
+            processor: TestInputProcessor(
+                tokenizer: tokenizer, configuration: fixture.modelConfiguration,
+                messageGenerator: DefaultMessageGenerator()),
+            tokenizer: tokenizer)
+        return ChatSession(
+            context, instructions: checkpointInstructions,
+            speculativeDecoding: speculativeDecoding,
+            generateParameters: GenerateParameters(
+                maxTokens: fixtureTurnTokenCount, temperature: 0))
+    }
+
+    /// A Qwen MTP drafter whose hidden state is narrower than the fixture target's, thus it
+    /// cannot draft for that target.
+    private func makeNarrowDrafter() throws -> Qwen35MTPDraftModel {
+        let configuration = try JSONDecoder().decode(
+            Qwen35TextConfiguration.self,
+            from: Data(
+                Qwen35FixtureJSON.text(
+                    mtpLayers: Qwen35MTPFixture.mtpLayers,
+                    hiddenSize: Qwen35FixtureJSON.defaultHiddenSize,
+                    vocabularySize: Qwen35MTPFixture.vocabularySize
+                ).utf8))
+        return Qwen35MTPDraftModel(configuration)
+    }
+
+    /// Drafter cache rows of ``makeLiveDrafterContinuation(aheadBy:)``: far fewer than the
+    /// 256-row buffer `KVCacheSimple` allocates, so a view of them holds a much larger buffer.
+    private let liveDrafterRows = 3
+
+    /// Heads of the live drafter cache. With ``liveDrafterHeadWidth`` the buffer outgrows the
+    /// view by more than the 16 KiB `contiguous` leaves shared.
+    private let liveDrafterHeads = 4
+
+    /// The width of each head of the live drafter cache.
+    private let liveDrafterHeadWidth = 64
+
+    /// Target hidden rows of the prefill chunk whose last row is the live boundary row.
+    private let liveChunkRows = 32
+
+    /// The width of the live target hidden rows.
+    private let liveHiddenWidth = 1024
+
+    /// A live drafter continuation as a prefill chunk leaves it, beside a main cache that holds
+    /// the tokens of a checkpoint.
+    ///
+    /// The drafter cache holds its rows in the front of a larger buffer, and the boundary row is
+    /// a slice of the whole chunk, as in a real feed.
+    ///
+    /// - Parameter offset: How many positions past the checkpoint the continuation ends; zero
+    ///   aligns it with the checkpoint.
+    /// - Returns: The main cache, the tokens it holds, the continuation, and the bytes of the
+    ///   rows the continuation holds: the drafter keys and values and the boundary row.
+    private func makeLiveDrafterContinuation(aheadBy offset: Int) -> (
+        mainCache: KVCache, tokens: [Int], continuation: MTPDrafterContinuation,
+        heldByteCount: Int
+    ) {
+        let tokens = Array(0 ... liveDrafterRows)
+        let mainCache = RotatingKVCache(maxSize: tokens.count)
+        let mainRows = MLXRandom.normal([1, 1, tokens.count, liveDrafterHeadWidth])
+        _ = mainCache.update(keys: mainRows, values: mainRows)
+        let drafterCache = KVCacheSimple()
+        let drafterRows = MLXRandom.normal(
+            [1, liveDrafterHeads, liveDrafterRows, liveDrafterHeadWidth])
+        _ = drafterCache.update(keys: drafterRows, values: drafterRows)
+        let chunkHidden = MLXRandom.normal([1, liveChunkRows, liveHiddenWidth])
+        eval(mainCache.state + drafterCache.state + [chunkHidden])
+        let continuation = MTPDrafterContinuation(
+            state: MTPDrafterState(cache: [drafterCache], nextPosition: liveDrafterRows + offset),
+            targetBoundaryHidden: chunkHidden[0..., (liveChunkRows - 1)..., 0...],
+            targetProcessedTokenCount: tokens.count + offset,
+            drafterID: MTPDrafterID("checkpoint-compaction-test"))
+        let keysAndValues = 2
+        let heldByteCount =
+            keysAndValues * drafterRows.nbytes + chunkHidden.nbytes / liveChunkRows
+        return (mainCache, tokens, continuation, heldByteCount)
+    }
+
+    /// The address of the first byte of `array`, to tell whether two arrays share a buffer.
+    private func bufferAddress(of array: MLXArray) -> Int? {
+        array.asData(access: .noCopy).data.withUnsafeBytes { bytes in
+            bytes.baseAddress.map { Int(bitPattern: $0) }
+        }
+    }
+
     private func makeModelContext(probe: MTPStagingProbe? = nil) -> ModelContext {
         let tokenizer = DeterministicMTPTokenizer()
         let processor = DeterministicMTPInputProcessor(tokenizer: tokenizer)

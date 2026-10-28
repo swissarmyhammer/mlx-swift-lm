@@ -103,23 +103,10 @@ private struct MTPChatGap: Hashable {
     let check: MTPChatCheck
 }
 
-/// An edit with MTP on rebuilds the whole chat: the session keeps no hybrid
-/// checkpoints when speculation is on, and Qwen3.8's GDN layers cannot trim.
-private let mtpCheckpointGap =
-    "^achvxy1 keeps no checkpoints with MTP on, then ^ahnb0j9 restores the drafter with them"
-
 /// The checks the current code fails, each with the task that closes the gap.
 /// A fix makes its known issue unrecorded, which fails the benchmark until the
 /// row is removed.
-private let mtpChatKnownGaps: [MTPChatGap: String] = {
-    let edit = MTPChatScenario.editAndRegenerate
-    let editTurn = edit.prompts.count
-    return [
-        MTPChatGap(scenario: edit.name, turn: editTurn, check: .mtpReusesCache): mtpCheckpointGap,
-        MTPChatGap(scenario: edit.name, turn: editTurn, check: .drafterPrefillsOnlyTheSuffix):
-            mtpCheckpointGap,
-    ]
-}()
+private let mtpChatKnownGaps: [MTPChatGap: String] = [:]
 
 @Suite(.serialized, .timeLimit(.minutes(60)))
 struct GenerationBenchmarkTests {

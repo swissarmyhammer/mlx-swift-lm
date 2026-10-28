@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m602m2n40kep9vz08j03sz47
+  text: 'Hand-off from ^achvxy1 (implemented, in review): checkpoint creation now stores the drafter continuation. `PromptCacheCheckpoint.drafterContinuation` holds a compacted copy (`MTPDrafterContinuation.compacted()`), and only when it is aligned at `tokens.count`. `byteCount` counts it. All three checkpoints carry one: leading and last-message (fed through `MTPDrafterPrefillFeed` in `prefillToCheckpoint`) and prompt end (`MTPSpeculativeTokenIterator.promptBoundaryContinuation`). That first bullet of this card is therefore done. What is left here is the restore and the policy. On restore, hand out `checkpoint.drafterContinuation?.copy()`, never the stored value itself, because forks share checkpoint values and the iterator mutates drafter caches in place. Check `isAligned(withMainTokenCount: restored position, drafterID:)` and fall back to the cold start. Today `.rebuild` + restore sets `mtpDrafterContinuation = nil`, so the turn cold-starts. The remaining `.unavailableContinuation` producer for a resumable drafter is `.trimToCommonPrefixMainOnly` (a trimmable-target rewind), which this card''s policy change removes.'
+  timestamp: 2026-10-28T01:40:01.316334+00:00
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 - 01M5SWXS9E09Y97PV3BV51TPYA

@@ -128,14 +128,23 @@ public struct SpeculativeDecodingConfig: Sendable {
 
     /// Initialize speculative decoding with an MTP drafter.
     ///
+    /// A drafter that cannot draft for the session's model does not stop the session: each
+    /// turn decodes without speculation and reports
+    /// ``SpeculativeDecodingFallbackReason/incompatibleDrafter``. Call
+    /// ``MTPDrafterContainer/validateCompatibility(with:)`` first to learn why.
+    ///
     /// - Parameters:
     ///   - mtpDrafter: drafter that proposes `blockSize - 1` tokens per verification cycle
     ///   - blockSize: total number of tokens in each verification block
+    ///   - memoryPolicy: optional memory policy that each turn checks before it speculates.
+    ///     The drafter bytes it weighs are the drafter's parameters and the drafter state the
+    ///     session carries from the previous turn.
     /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)``
     ///   when `blockSize` is smaller than 2.
     public init(
         mtpDrafter: MTPDrafterContainer,
-        blockSize: Int = 2
+        blockSize: Int = 2,
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) throws {
         guard blockSize >= 2 else {
             throw SpeculativeDecodingConfigurationError.invalidMTPBlockSize(blockSize)
@@ -143,7 +152,7 @@ public struct SpeculativeDecodingConfig: Sendable {
 
         self.strategy = .mtp(mtpDrafter, blockSize: blockSize)
         self.numDraftTokens = blockSize - 1
-        self.memoryPolicy = nil
+        self.memoryPolicy = memoryPolicy
     }
 
     package var estimatedDraftModelBytes: Int? {
@@ -1416,17 +1425,15 @@ public final class ChatSession {
                             mtpDrafter = nil
                         }
                         let usesMTP = mtpDrafter != nil
-                        let speculationIsEligibleForParameters: Bool
-                        if let mtpDrafter {
-                            speculationIsEligibleForParameters =
-                                !mtpDrafter.requiresGreedySampling
-                                || generateParameters.temperature == 0
-                        } else {
-                            speculationIsEligibleForParameters = speculativeDecoding != nil
+                        // Why an MTP turn decodes plainly, decided before any cache work.
+                        let mtpFallbackReason = try mtpDrafter.flatMap {
+                            try Self.mtpFallbackReason(
+                                drafter: $0, model: model, parameters: generateParameters,
+                                memoryPolicy: speculativeDecoding?.memoryPolicy,
+                                continuation: mtpDrafterContinuation)
                         }
-                        if let mtpDrafter, speculationIsEligibleForParameters {
-                            try mtpDrafter.validateCompatibility(with: model)
-                        }
+                        let speculationIsEligible =
+                            usesMTP ? mtpFallbackReason == nil : speculativeDecoding != nil
 
                         let mtpIsStateful = mtpDrafter is any StatefulMTPDrafterModel
                         // A resumable drafter continues an aligned continuation, and otherwise
@@ -1452,10 +1459,15 @@ public final class ChatSession {
                             || preparedInput.audio != nil
                         // A hybrid or sliding-window model keeps checkpoints of the caches
                         // that can lose their rewind, for a text prompt that it generates
-                        // from without a draft model.
+                        // from without a draft model, or with an MTP drafter that can start
+                        // at the warm position a checkpoint feed leaves.
                         let keepsCheckpoints =
-                            speculativeDecoding == nil && !carriesPreparedMedia
+                            (speculativeDecoding == nil || (usesMTP && mtpSpeculativeStateIsReady))
+                            && !carriesPreparedMedia
                             && !containsNewMedia && preparedInput.text.mask == nil
+                            // No checkpoint keeps caches that cannot lose their rewind, so
+                            // only such caches are asked about the positions of this pass.
+                            && PromptCacheCheckpoint.applies(to: kvCache.cache)
                             && PromptCacheCheckpoint.applies(
                                 to: kvCache.cache,
                                 adding: preparedInput.text.tokens.size
@@ -1518,7 +1530,7 @@ public final class ChatSession {
                                 previousGenerationUncommittedTokens:
                                     currentConversation.uncommittedTokens,
                                 structuredToolCallCount: structuredToolCallCount,
-                                usesSpeculativeDecoding: speculationIsEligibleForParameters,
+                                usesSpeculativeDecoding: speculationIsEligible,
                                 canSplitPreparedMedia: model is PreparedInputSplitting)
                             let cacheState = PromptCacheState(
                                 cachedTokens: cachedTokenIds,
@@ -1662,7 +1674,7 @@ public final class ChatSession {
 
                             reusedMainCacheWithoutDraft =
                                 !usesMTP && decision.reusesCachedPrefix
-                                && speculationIsEligibleForParameters
+                                && speculationIsEligible
                                 && !willFallBackBeforeLoadingDraft
                                 && draftKVCache == nil
 
@@ -1691,6 +1703,18 @@ public final class ChatSession {
                             currentConversation.checkpoints.removeAllButLeading(
                                 servingPrompt: promptTokenIds)
                             var prefillStart = cachedPromptTokenCount
+                            // A turn that speculates feeds its MTP drafter what it feeds
+                            // to a checkpoint, so the drafter continuation stands at each
+                            // checkpoint and the generation resumes it there.
+                            let drafterFeed =
+                                keepsCheckpoints && speculationIsEligible
+                                    && !requiresMainOnlyContinuation
+                                ? mtpDrafter.flatMap {
+                                    MTPDrafterPrefillFeed.starting(
+                                        drafter: $0, target: model, parameters: generateParameters,
+                                        cachePosition: kvCache.processedTokenCount,
+                                        continuation: mtpDrafterContinuation)
+                                } : nil
                             if keepsCheckpoints, currentConversation.checkpoints.leading == nil,
                                 let leadingBoundary = await PromptCacheCheckpoint.leadingSystemEnd(
                                     of: promptTokenIds, messages: templateMessages, render: render),
@@ -1699,10 +1723,14 @@ public final class ChatSession {
                                     at: leadingBoundary, of: promptTokenIds,
                                     representing: currentConversation.cachedTokens,
                                     from: prefillStart, into: kvCache, state: lmState,
-                                    model: model, parameters: generateParameters)
+                                    model: model, parameters: generateParameters,
+                                    drafterFeed: drafterFeed)
                             {
                                 currentConversation.checkpoints.setLeading(prefill.checkpoint)
                                 lmState = prefill.state
+                                // The fed tokens moved the main cache past the continuation
+                                // the session carried.
+                                mtpDrafterContinuation = prefill.drafterContinuation
                                 input = prefill.remainingInput
                                 leadingPrefill = prefill
                                 prefillStart = leadingBoundary
@@ -1712,10 +1740,12 @@ public final class ChatSession {
                                     at: checkpointBoundary, of: promptTokenIds,
                                     representing: currentConversation.cachedTokens,
                                     from: prefillStart, into: kvCache, state: lmState,
-                                    model: model, parameters: generateParameters)
+                                    model: model, parameters: generateParameters,
+                                    drafterFeed: drafterFeed)
                             {
                                 currentConversation.checkpoints.append(prefill.checkpoint)
                                 lmState = prefill.state
+                                mtpDrafterContinuation = prefill.drafterContinuation
                                 input = prefill.remainingInput
                                 checkpointPrefill = prefill
                             }
@@ -1753,6 +1783,29 @@ public final class ChatSession {
                                 handler: transformer.makeHandler(wrapping: base))
                         }
 
+                        // The tokens fed to take the checkpoints before the generation, and
+                        // the time the feed took, are part of the prefill of this pass.
+                        let promptTokenCount =
+                            input.text.tokens.size + (leadingPrefill?.tokenCount ?? 0)
+                            + (checkpointPrefill?.tokenCount ?? 0)
+                        let checkpointPrefillTime =
+                            (leadingPrefill?.time ?? 0) + (checkpointPrefill?.time ?? 0)
+                        // The prefill of the generation ends at the end of the prompt, thus
+                        // the caches stand there when the iterator is made. The drafter
+                        // continuation is read only when the pass keeps checkpoints.
+                        func takePromptEndCheckpoint(
+                            state: LMOutput.State?,
+                            drafterContinuation: @autoclosure () -> MTPDrafterContinuation?
+                        ) {
+                            guard keepsCheckpoints,
+                                let representedTokens = conversation?.cachedTokens
+                            else { return }
+                            conversation?.checkpoints.append(
+                                PromptCacheCheckpoint(
+                                    caches: kvCache.cache, tokens: representedTokens,
+                                    state: state, drafterContinuation: drafterContinuation()))
+                        }
+
                         func defaultGeneration() throws -> GenerationRun {
                             // Seed the carried state and read back the post-prefill state so the
                             // next turn, or the next tool restart, anchors correctly.
@@ -1761,26 +1814,9 @@ public final class ChatSession {
                                 state: lmState,
                                 parameters: generateParameters, components: components)
                             lmState = iterator.state
-                            // The tokens fed to take the checkpoint at the end of the
-                            // last message are part of the prefill of this pass.
-                            iterator.promptPrefillTime +=
-                                (leadingPrefill?.time ?? 0) + (checkpointPrefill?.time ?? 0)
-                            if keepsCheckpoints,
-                                let representedTokens = conversation?.cachedTokens
-                            {
-                                // The prefill ends here, thus the caches stand at the
-                                // end of the prompt.
-                                conversation?.checkpoints.append(
-                                    PromptCacheCheckpoint(
-                                        caches: kvCache.cache, tokens: representedTokens,
-                                        state: iterator.state))
-                            }
-
-                            return startGeneration(
-                                iterator,
-                                promptTokenCount: input.text.tokens.size
-                                    + (leadingPrefill?.tokenCount ?? 0)
-                                    + (checkpointPrefill?.tokenCount ?? 0))
+                            iterator.promptPrefillTime += checkpointPrefillTime
+                            takePromptEndCheckpoint(state: iterator.state, drafterContinuation: nil)
+                            return startGeneration(iterator, promptTokenCount: promptTokenCount)
                         }
 
                         // Carried model state is safe to speculate on: the anchors position from
@@ -1807,10 +1843,11 @@ public final class ChatSession {
                             requiresMainOnlyContinuation = true
                         }
 
-                        if !speculationIsEligibleForParameters || requiresMainOnlyContinuation {
+                        if !speculationIsEligible || requiresMainOnlyContinuation {
                             if speculativeDecoding != nil {
-                                if !speculationIsEligibleForParameters {
-                                    speculativeDecodingFallbackReason = .unsupportedSampling
+                                if !speculationIsEligible {
+                                    speculativeDecodingFallbackReason =
+                                        mtpFallbackReason ?? .unsupportedSampling
                                 } else if carriesPreparedMedia {
                                     speculativeDecodingFallbackReason = .unsupportedMedia
                                 } else {
@@ -1823,7 +1860,7 @@ public final class ChatSession {
                             let drafter = mtpDrafter
                         {
                             do {
-                                let iterator = try MTPSpeculativeTokenIterator(
+                                var iterator = try MTPSpeculativeTokenIterator(
                                     input: input,
                                     mainModel: model,
                                     drafter: drafter,
@@ -1834,8 +1871,13 @@ public final class ChatSession {
                                     blockSize: blockSize,
                                     components: components
                                 )
+                                iterator.promptPrefillTime += checkpointPrefillTime
+                                takePromptEndCheckpoint(
+                                    state: iterator.state,
+                                    drafterContinuation: iterator.promptBoundaryContinuation)
 
-                                generation = startGeneration(iterator)
+                                generation = startGeneration(
+                                    iterator, promptTokenCount: promptTokenCount)
                             } catch MTPInitializationError.unsupportedSpeculativeCache {
                                 mtpDrafterContinuation = nil
                                 speculativeDecodingFallbackReason = .unsupportedCache
@@ -2194,6 +2236,39 @@ public final class ChatSession {
         }
     }
 
+    /// One checkpoint the session keeps, as test support reads it.
+    struct CheckpointSummary: Sendable {
+        /// The tokens the caches represented at the checkpoint.
+        let tokenCount: Int
+
+        /// The bytes the checkpoint holds in memory.
+        let byteCount: Int
+
+        /// The MTP drafter continuation the checkpoint keeps, or nil.
+        let drafterContinuation: MTPDrafterContinuation?
+    }
+
+    /// Return the checkpoints of the retained transcript for test support.
+    func checkpointSummaries() async -> [CheckpointSummary] {
+        await cache.read { cache in
+            guard case .kvcache(let stored) = cache, let conversation = stored.conversation
+            else { return [] }
+            return conversation.checkpoints.all.map {
+                CheckpointSummary(
+                    tokenCount: $0.tokens.count, byteCount: $0.byteCount,
+                    drafterContinuation: $0.drafterContinuation)
+            }
+        }
+    }
+
+    /// Return the MTP drafter continuation the session carries for test support.
+    func drafterContinuation() async -> MTPDrafterContinuation? {
+        await cache.read { cache in
+            guard case .kvcache(let stored) = cache else { return nil }
+            return stored.mtpDrafterContinuation
+        }
+    }
+
     /// Saves the current KV cache to disk.
     ///
     /// Use ``loadPromptCacheSnapshot(url:)`` and an initializer that accepts a
@@ -2236,6 +2311,10 @@ extension ChatSession {
         /// The checkpoint at the end of the fed tokens, or nil when the caches
         /// did not stand there.
         let checkpoint: PromptCacheCheckpoint?
+
+        /// The live MTP drafter continuation at the end of the fed tokens, or
+        /// nil when no drafter took them.
+        let drafterContinuation: MTPDrafterContinuation?
 
         /// The number of prompt tokens fed.
         let tokenCount: Int
@@ -2285,6 +2364,8 @@ extension ChatSession {
     ///   - model: the model that feeds the caches.
     ///   - parameters: the generation parameters, whose prefill parameters cut
     ///     the tokens into forward passes.
+    ///   - drafterFeed: the feed of the MTP drafter of this pass, which stands
+    ///     at `start`, or nil when the pass does not speculate.
     /// - Returns: the feed, or nil when `boundary` is not after `start` or not
     ///   before the end of the prompt: the caches hold that position already,
     ///   or only the prefill of the generation reaches it.
@@ -2293,13 +2374,15 @@ extension ChatSession {
     private static func prefillToCheckpoint(
         at boundary: Int, of promptTokens: [Int], representing representedTokens: [Int],
         from start: Int, into storage: KVCacheStorage, state: LMOutput.State?,
-        model: any LanguageModel, parameters: GenerateParameters
+        model: any LanguageModel, parameters: GenerateParameters,
+        drafterFeed: MTPDrafterPrefillFeed?
     ) throws -> CheckpointPrefill? {
         let begin = Date.timeIntervalSinceReferenceDate
         guard
             let feed = try PromptCacheCheckpoint.prefillToCheckpoint(
                 at: boundary, of: promptTokens, representing: representedTokens, from: start,
-                into: storage.cache, state: state, model: model, prefill: parameters.prefill)
+                into: storage.cache, state: state, model: model, prefill: parameters.prefill,
+                drafterFeed: drafterFeed)
         else {
             return nil
         }
@@ -2308,8 +2391,50 @@ extension ChatSession {
             remainingInput: LMInput(tokens: MLXArray(Array(promptTokens[boundary...]))),
             state: feed.state,
             checkpoint: feed.checkpoint,
+            drafterContinuation: feed.drafterContinuation,
             tokenCount: boundary - start,
             time: Date.timeIntervalSinceReferenceDate - begin)
+    }
+
+    /// Why a turn with the MTP drafter `drafter` decodes without speculation,
+    /// as the session knows before it touches the caches, or nil when nothing
+    /// stops it yet.
+    ///
+    /// An incompatible drafter comes first, then a sampling the drafter cannot
+    /// draft for, then the memory policy. The policy weighs the parameters of
+    /// `model` against the parameters of `drafter` plus the drafter state the
+    /// session carries.
+    ///
+    /// - Parameters:
+    ///   - drafter: the MTP drafter of the session.
+    ///   - model: the model the drafter speculates for.
+    ///   - parameters: the generation parameters of the turn.
+    ///   - memoryPolicy: the memory policy of the session, or nil.
+    ///   - continuation: the drafter continuation the session carries, or nil.
+    /// - Returns: the fallback reason, or nil.
+    /// - Throws: ``SpeculativeDecodingMemoryError`` when the policy does not
+    ///   admit the drafter and its action is
+    ///   ``SpeculativeDecodingMemoryAction/fail``.
+    private static func mtpFallbackReason(
+        drafter: any MTPDrafterModel, model: any LanguageModel, parameters: GenerateParameters,
+        memoryPolicy: SpeculativeDecodingMemoryPolicy?, continuation: MTPDrafterContinuation?
+    ) throws -> SpeculativeDecodingFallbackReason? {
+        guard drafter.isCompatible(with: model) else { return .incompatibleDrafter }
+        guard !drafter.requiresGreedySampling || parameters.temperature == 0 else {
+            return .unsupportedSampling
+        }
+        guard let memoryPolicy else { return nil }
+        let evaluation = memoryPolicy.evaluate(
+            mainModelBytes: SpeculativeDecodingMemoryPolicy.modelWeightBytes(model),
+            draftModelBytes: SpeculativeDecodingMemoryPolicy.modelWeightBytes(drafter)
+                + (continuation?.byteCount ?? 0))
+        guard evaluation.shouldUseSpeculativeDecoding else {
+            if evaluation.action == .fail {
+                throw SpeculativeDecodingMemoryError(evaluation: evaluation)
+            }
+            return .memoryBudgetExceeded
+        }
+        return nil
     }
 }
 

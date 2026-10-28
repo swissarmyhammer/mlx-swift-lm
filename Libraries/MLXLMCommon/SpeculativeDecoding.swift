@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXNN
 
 /// Why a configured ``ChatSession`` selected ordinary generation instead of speculation.
 public enum SpeculativeDecodingFallbackReason: Sendable, Equatable {
@@ -19,6 +20,10 @@ public enum SpeculativeDecodingFallbackReason: Sendable, Equatable {
 
     /// The draft-model memory policy selected ordinary generation.
     case memoryBudgetExceeded
+
+    /// The MTP drafter cannot draft for the session's model. Call
+    /// ``MTPDrafterContainer/validateCompatibility(with:)`` to learn why.
+    case incompatibleDrafter
 }
 
 private func defaultSpeculativeDecodingMemoryLimit() -> Int? {
@@ -211,7 +216,11 @@ public struct SpeculativeDecodingMemoryPolicy: Sendable, Hashable {
         )
     }
 
-    package static func modelWeightBytes(_ model: any LanguageModel) -> Int {
+    /// The bytes of the parameters of `model`.
+    ///
+    /// - Parameter model: A target, draft or MTP drafter model.
+    /// - Returns: The sum of the bytes of its parameters.
+    package static func modelWeightBytes(_ model: Module) -> Int {
         model.parameters().flattened().reduce(0) { $0 + $1.1.nbytes }
     }
 }

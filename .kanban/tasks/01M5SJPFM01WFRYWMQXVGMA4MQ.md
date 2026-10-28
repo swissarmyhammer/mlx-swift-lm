@@ -155,12 +155,28 @@ comments:
     - evidence: 1 file — Tests/MLXLMTests/MTPDrafterContinuationTests.swift. `swift build --build-tests`: only the known "missing creator ... mlx-swift_Cmlx.bundle" warning. `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: 895 XCTest, 0 failures; Swift Testing 1874 tests in 166 suites passed (tamper test 12 cases), only the known benchmarkVerification() skip. 2026-10-27 19:55 finding checked. Not committed.
     - next: /review. Left in doing.
   timestamp: 2026-10-28T01:02:28.530295+00:00
+- actor: claude-code
+  id: 01m600gvdzkg2p8yd95z798vw0
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (a2004e42) — 0 findings, 0 confirmed, 0 refuted (7 attempted, 0 failed); 1 file reviewed. The prior item (Tests/MLXLMTests/MTPDrafterContinuationTests.swift:375 reuse/reuse, batchAxis) is checked, and the commit replaces it with the library constant. Every prior Review Findings item is checked.
+    - next: task moved to done.
+  timestamp: 2026-10-28T01:03:18.463529+00:00
+- actor: claude-code
+  id: 01m600h5d723n4t4efzpstwygm
+  text: |-
+    ### finish iteration 4 — clean
+    - implement: changed — 1 file (tamper tests read batchAxis and cache class names from the library)
+    - test: green — implementer's run: MLXLMTests 895 XCTest 0 failures + 1874 Swift Testing (test-only change)
+    - commit: a2004e42
+    - review: clean — 0 findings, prior item verified; task done
+  timestamp: 2026-10-28T01:03:28.679547+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: ffea80
 title: 'MTP: make the drafter state a portable cache value (copy, byte count, serialize, cold start)'
 ---
 ## What

@@ -191,13 +191,16 @@ public struct Qwen35MTPFixture {
 
     /// The MTP configuration of a `ChatSession`: the drafter, with rounds of ``blockSize``.
     ///
+    /// - Parameter memoryPolicy: The policy that admits the drafter, or `nil` for none.
     /// - Returns: The configuration.
     /// - Throws: The error of the configuration when the drafter refuses the block size.
-    public func makeSpeculativeDecodingConfig() throws -> SpeculativeDecodingConfig {
+    public func makeSpeculativeDecodingConfig(
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
+    ) throws -> SpeculativeDecodingConfig {
         try SpeculativeDecodingConfig(
             mtpDrafter: MTPDrafterContainer(
                 context: MTPDrafterContext(configuration: modelConfiguration, model: drafter)),
-            blockSize: Self.blockSize)
+            blockSize: Self.blockSize, memoryPolicy: memoryPolicy)
     }
 
     /// A greedy chat session over the target, with MTP or without it.

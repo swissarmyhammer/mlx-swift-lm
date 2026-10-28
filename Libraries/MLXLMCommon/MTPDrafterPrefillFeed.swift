@@ -11,9 +11,13 @@ import MLX
 /// the row of the last one: the form of a finalized ``MTPDrafterContinuation`` at `p`. The final
 /// prompt segment and the first bonus token then resume the drafter from that boundary.
 ///
+/// The MTP iterator feeds the prompt it prefills this way, and `ChatSession` feeds the prompt it
+/// prefills to a prompt cache checkpoint, so the drafter continuation stands at the checkpoint
+/// (see ``continuation``).
+///
 /// A class, because the target's prefill reaches it through the ``MTPPrefillChunkHandler`` it
 /// captures, and the iterator reads what the chunks left once the prefill returns.
-final class MTPDrafterPrefillFeed {
+package final class MTPDrafterPrefillFeed {
 
     private let drafter: any ResumableMTPDrafterModel
     private let target: any LanguageModel
@@ -25,6 +29,9 @@ final class MTPDrafterPrefillFeed {
     /// The target hidden row of the last fed position, whose entry waits for the token after it.
     /// `nil` before the first chunk of a drafter that starts without a boundary.
     private(set) var boundaryHidden: MLXArray?
+
+    /// The target cache position of the first prompt token the chunks feed.
+    private let startPosition: Int
 
     /// The prompt tokens the chunks fed.
     private(set) var fedTokenCount = 0
@@ -66,13 +73,55 @@ final class MTPDrafterPrefillFeed {
         self.target = target
         self.sampler = sampler
         self.state = state
+        self.startPosition = cachePosition
+    }
+
+    /// A feed of `drafter` at `cachePosition` that extends `continuation` when it is aligned
+    /// there, and else starts a new drafter state there.
+    ///
+    /// - Parameters:
+    ///   - drafter: The drafter of the stream.
+    ///   - target: The target model of the drafter.
+    ///   - parameters: The generation parameters, which give the sampler and the new drafter
+    ///     state.
+    ///   - cachePosition: The target cache position before the prefill.
+    ///   - continuation: The drafter continuation carried with the target cache, if any. The
+    ///     feed extends its drafter caches in place.
+    /// - Returns: The feed, or `nil` when `drafter` cannot take a prompt chunk by chunk.
+    package static func starting(
+        drafter: any MTPDrafterModel, target: any LanguageModel, parameters: GenerateParameters,
+        cachePosition: Int, continuation: MTPDrafterContinuation?
+    ) -> MTPDrafterPrefillFeed? {
+        guard let resumableDrafter = drafter as? any ResumableMTPDrafterModel else { return nil }
+        let alignedContinuation = continuation.flatMap {
+            $0.isAligned(withMainTokenCount: cachePosition, drafterID: resumableDrafter.drafterID)
+                ? $0 : nil
+        }
+        return MTPDrafterPrefillFeed(
+            drafter: resumableDrafter, target: target, sampler: parameters.sampler(),
+            state: alignedContinuation?.state ?? resumableDrafter.makeState(parameters: parameters),
+            cachePosition: cachePosition, continuation: alignedContinuation)
     }
 
     /// The handler a target's chunked prefill calls with each chunk.
-    var chunkHandler: MTPPrefillChunkHandler {
+    package var chunkHandler: MTPPrefillChunkHandler {
         { [self] tokens, hiddenStates, positionDeltas in
             append(tokens: tokens, hiddenStates: hiddenStates, positionDeltas: positionDeltas)
         }
+    }
+
+    /// The drafter continuation at the position after the fed tokens, or `nil` when no chunk
+    /// came or a chunk did not reach the drafter state.
+    ///
+    /// The continuation shares the drafter caches of the feed: a later chunk extends both.
+    package var continuation: MTPDrafterContinuation? {
+        guard isIntact, let boundaryHidden else { return nil }
+        let position = startPosition + fedTokenCount
+        let continuation = MTPDrafterContinuation(
+            state: state, targetBoundaryHidden: boundaryHidden,
+            targetProcessedTokenCount: position, drafterID: drafter.drafterID)
+        return continuation.isAligned(withMainTokenCount: position, drafterID: drafter.drafterID)
+            ? continuation : nil
     }
 
     /// Appends the entries one prefill chunk completes, and keeps the chunk's last hidden row as

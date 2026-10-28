@@ -186,6 +186,33 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         persistentTargetState(from: mainState)
     }
 
+    /// A copy of the drafter continuation at the end of the prompt, which a prompt cache
+    /// checkpoint there keeps, or `nil`.
+    ///
+    /// Right after the prefill the main cache stands at the end of the prompt and the drafter
+    /// holds one entry more: the entry of the first bonus token, which the main cache does not
+    /// hold yet. The copy drops that entry, which leaves the form of a finalized continuation at
+    /// the end of the prompt. `nil` once the first token is read, when the stream does not
+    /// speculate or its drafter is not resumable, and when the prefill left the main cache past
+    /// the prompt.
+    package var promptBoundaryContinuation: MTPDrafterContinuation? {
+        guard !passthrough, pendingIndex == 0, pendingTokens.count == 1,
+            committedPendingTokenCount == 0,
+            let resumableDrafter = drafter as? any ResumableMTPDrafterModel,
+            let drafterState, let targetBoundaryHidden
+        else { return nil }
+        let promptEnd = mainCacheStorage.processedTokenCount
+        var continuation = MTPDrafterContinuation(
+            state: drafterState, targetBoundaryHidden: targetBoundaryHidden,
+            targetProcessedTokenCount: promptEnd, drafterID: resumableDrafter.drafterID
+        ).copy()
+        guard continuation.state.removeLastEntries(1),
+            continuation.isAligned(
+                withMainTokenCount: promptEnd, drafterID: resumableDrafter.drafterID)
+        else { return nil }
+        return continuation
+    }
+
     public mutating func discardGeneratedToken() {
         telemetry.discardGeneratedToken()
     }
@@ -1469,16 +1496,7 @@ extension MTPSpeculativeTokenIterator {
 /// Remove MTP's transient target↔drafter exchange values while retaining
 /// model-owned continuation state such as Qwen VLM M-RoPE anchors.
 private func persistentTargetState(from state: LMOutput.State?) -> LMOutput.State? {
-    guard var state else { return nil }
-    state[mtpEmitFlagKey] = nil
-    state[mtpPrefillChunkHandlerKey] = nil
-    state[mtpCacheCheckpointIndexKey] = nil
-    state[mtpLastHiddenStatesKey] = nil
-    state[mtpSharedKVStatesKey] = nil
-    state[mtpSharedKVSourceIndicesKey] = nil
-    state[mtpSharedKVOffsetsKey] = nil
-    state[mtpPositionDeltasKey] = nil
-    return state.isEmpty ? nil : state
+    state?.withoutMTPExchange
 }
 
 /// Bring the emitted MTP shared-K/V snapshot into line with what the cache actually kept.
