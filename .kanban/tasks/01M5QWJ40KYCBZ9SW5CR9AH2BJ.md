@@ -71,14 +71,30 @@ comments:
     - evidence: 3 files — Libraries/MLXLMCommon/MTPDrafterPrefillFeed.swift, Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift, Libraries/MLXLMCommon/QwenMTP.swift; swiftlint no_magic_numbers (review config) 0 on both flagged files; swift build --build-tests 0 compiler warnings (only the SwiftPM "missing creator for mutated node" build-system line); xcrun xctest all 5 bundles green — MLXLMTests 897 XCTest + 1939 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 376, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 (1 pre-existing env-gated skip, MTPGreedyVerificationTests.benchmarkVerification); 2/2 review findings flipped to [x]; Release benchmarks not rerun (no behaviour change)
     - next: /review
   timestamp: 2026-10-28T20:19:57.168057+00:00
+- actor: claude-code
+  id: 01m622rmm06pgk43e13gq712qn
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (3eb266df) — 0 findings, 0 confirmed, 0 refuted (7 attempted, 0 failed); both 2026-10-28 15:05 items checked (MTPDrafterPrefillFeed.swift reuse/reuse, QwenMTP.swift magic-numbers-swift)
+    - next: none — task moved to done
+  timestamp: 2026-10-28T20:20:59.648763+00:00
+- actor: claude-code
+  id: 01m622s80dp65k0tgq796eat4d
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 3 files (shared seed sampler, named constant)
+    - test: green (implementer run) — 5 bundles, MLXLMTests 897 + 1939
+    - commit: 3eb266df
+    - review: clean — task in done
+  timestamp: 2026-10-28T20:21:19.501989+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
 - 01M5QWGEWP4506CZYXCPV3C64M
 - 01M5SJPFM01WFRYWMQXVGMA4MQ
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8280'
+position_column: done
+position_ordinal: fff180
 title: 'MTP: Qwen MTP at temperature > 0 (sample-and-match with argmax drafts; rejection math is done by PR 459)'
 ---
 ## What
