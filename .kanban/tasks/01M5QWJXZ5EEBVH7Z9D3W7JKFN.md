@@ -127,11 +127,27 @@ comments:
     - findings: 14/14 checked.
     - next: /review
   timestamp: 2026-10-28T21:31:34.537782+00:00
+- actor: claude-code
+  id: 01m626vxknn2fcmyfmh0b4gqn2
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (9aaf7b2c) — 0 findings (0 confirmed, 0 refuted, 7 attempted, 0 failed); all 14 items of the 2026-10-28 16:11 findings are checked
+    - next: none — task moved to done
+  timestamp: 2026-10-28T21:32:41.461969+00:00
+- actor: claude-code
+  id: 01m626w978snn1mszm9rb3ase9
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — 6 files (named constants, shared seeded quantized build)
+    - test: green (implementer run) — 5 bundles, 3317 tests; IntegrationTesting Release build 0 warnings
+    - commit: 9aaf7b2c
+    - review: clean — task in done
+  timestamp: 2026-10-28T21:32:53.352764+00:00
 depends_on:
 - 01M5SKBCEWG4D25SZZNGG7BVM7
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: fff380
 title: 'MTP: multi-row quantized matvec that reads the weights one time for 2–8 verify rows'
 ---
 ## What
