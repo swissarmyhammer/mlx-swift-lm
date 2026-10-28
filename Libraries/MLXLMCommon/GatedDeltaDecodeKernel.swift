@@ -50,7 +50,7 @@ package enum GatedDeltaDecodeKernel {
     package static let mostTokens = 6
 
     /// The tokens of one decode step.
-    static let decodeTokens = 1
+    package static let decodeTokens = 1
 
     /// The weights of one gated delta net layer that the kernel reads.
     package struct Weights {

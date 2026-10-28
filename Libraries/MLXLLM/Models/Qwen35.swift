@@ -754,7 +754,7 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
 
 // MARK: - Decoder Layer
 
-final class Qwen35DecoderLayer: Module {
+final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
     let isLinear: Bool
 
     @ModuleInfo(key: "self_attn") var selfAttn: Qwen35Attention?
@@ -763,7 +763,7 @@ final class Qwen35DecoderLayer: Module {
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
-    @ModuleInfo(key: "mlp") var mlp: Module
+    @ModuleInfo(key: "mlp") var mlp: Module & UnaryLayer
 
     init(_ args: Qwen35TextConfiguration, layerIdx: Int, forceFullAttention: Bool = false) {
         self.isLinear =
@@ -819,17 +819,33 @@ final class Qwen35DecoderLayer: Module {
 
         let r: MLXArray
         if isLinear {
-            r = linearAttn!(
+            r = gatedDeltaNet(
                 inputLayerNorm(x), mask: ssmMask, cache: cache as? MambaCache,
                 checkpointAfter: checkpointAfter)
         } else {
-            r = selfAttn!(
+            r = fullAttention(
                 inputLayerNorm(x), mask: attentionMask, cache: cache,
                 positionOffset: positionOffset)
         }
 
         let h = x + r
-        return h + (mlp as! UnaryLayer)(postAttentionLayerNorm(h))
+        return h + mlp(postAttentionLayerNorm(h))
+    }
+
+    /// The gated delta net of a linear layer.
+    private var gatedDeltaNet: Qwen35GatedDeltaNet {
+        guard let linearAttn else {
+            preconditionFailure("only a linear layer has a gated delta net")
+        }
+        return linearAttn
+    }
+
+    /// The attention of a full-attention layer.
+    private var fullAttention: Qwen35Attention {
+        guard let selfAttn else {
+            preconditionFailure("only a full-attention layer has an attention")
+        }
+        return selfAttn
     }
 
     // MARK: - Compiled decode blocks
@@ -859,7 +875,7 @@ final class Qwen35DecoderLayer: Module {
     /// GDN decode layer as one traced function. A compiled function must be
     /// pure, so conv/recurrent state crosses the boundary explicitly.
     private func decodeLinearLayer(_ x: MLXArray, cache: MambaCache) -> MLXArray {
-        let zero = linearAttn!.zeroStates(batch: x.dim(0), dtype: x.dtype)
+        let zero = gatedDeltaNet.zeroStates(batch: x.dim(0), dtype: x.dtype)
         let convState = cache[0] ?? zero.conv
         let recState = cache[1] ?? zero.rec
 
@@ -889,7 +905,7 @@ final class Qwen35DecoderLayer: Module {
         queries: MLXArray, keys: MLXArray, values: MLXArray,
         cache: KVCache, mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
-        let attn = selfAttn!
+        let attn = fullAttention
         let offset = cache.ropeOffset
         return attn.attend(
             queries: applyRotaryPosition(attn.rope, to: queries, offset: offset),
@@ -900,47 +916,39 @@ final class Qwen35DecoderLayer: Module {
         )
     }
 
-    // MARK: - Layer bodies
+    // MARK: - Layer blocks
 
-    /// The GDN layer with its states passed in and out, for a traced step.
-    ///
-    /// - Parameters:
-    ///   - x: The layer input, shape `(batch, tokens, hiddenSize)`.
-    ///   - convState: The conv state before the first token.
-    ///   - recState: The recurrent state before the first token.
-    ///   - checkpointAfter: For a verify, the token after which the layer
-    ///     keeps its states for a rollback; nil for a decode step.
-    /// - Returns: The layer output, the states after the last token, and the
-    ///   states a verify keeps.
-    func linearLayerBody(
-        x: MLXArray, convState: MLXArray, recState: MLXArray, checkpointAfter: Int? = nil
-    ) -> (
-        output: MLXArray, convState: MLXArray, recurrentState: MLXArray,
-        speculative: GatedDeltaSpeculativeStates?
-    ) {
-        let (r, newConvState, newRecState, speculative) = linearAttn!.forward(
-            inputLayerNorm(x), convState: convState, recState: recState, mask: nil,
+    /// The gated delta net with its states passed in and out; the shared
+    /// ``HybridDecodeLayer/linearLayerBody(x:convState:recState:checkpointAfter:)``
+    /// wraps it in the layer's norms and residuals.
+    func gatedDeltaMixer(
+        _ x: MLXArray, convState: MLXArray, recState: MLXArray, checkpointAfter: Int?
+    ) -> GatedDeltaLayerStep {
+        let step = gatedDeltaNet.forward(
+            x, convState: convState, recState: recState, mask: nil,
             checkpointAfter: checkpointAfter)
-        let h = x + r
-        return (h + mlpForward(postAttentionLayerNorm(h)), newConvState, newRecState, speculative)
+        return GatedDeltaLayerStep(
+            output: step.output, convState: step.convState, recurrentState: step.recurrentState,
+            speculative: step.speculative)
     }
 
-    func attentionPreBody(x: MLXArray) -> (MLXArray, MLXArray, MLXArray, MLXArray) {
-        selfAttn!.projectPreRope(inputLayerNorm(x))
+    func projectAttention(_ x: MLXArray) -> (
+        queries: MLXArray, gate: MLXArray, keys: MLXArray, values: MLXArray
+    ) {
+        fullAttention.projectPreRope(x)
     }
 
-    /// `x` is the layer input — the residual branch around the attention block.
-    func attentionPostBody(x: MLXArray, attention: MLXArray, gate: MLXArray) -> MLXArray {
-        let r = selfAttn!.mergeHeadsAndProject(attention: attention, gate: gate)
-        let h = x + r
-        return h + mlpForward(postAttentionLayerNorm(h))
+    func mergeAttention(_ attention: MLXArray, gate: MLXArray) -> MLXArray {
+        fullAttention.mergeHeadsAndProject(attention: attention, gate: gate)
     }
 
-    private func mlpForward(_ x: MLXArray) -> MLXArray {
+    /// The MLP, or the MoE block in its form without its own compiled trace,
+    /// so it can live inside a decode trace.
+    func feedForward(_ x: MLXArray) -> MLXArray {
         if let moe = mlp as? Qwen35SparseMoeBlock {
             return moe.forward(x)
         }
-        return (mlp as! UnaryLayer)(x)
+        return mlp(x)
     }
 }
 
@@ -1090,17 +1098,8 @@ public class Qwen35TextModelInner: Module {
     var compiledVerifySegmentCount: Int { compiledVerifySegments.compiledCount }
 
     /// The places of the outputs of an attention head among the outputs of a
-    /// segment, from ``CompiledDecodeSegment/attentionOutputOffset(outputsPerLinearLayer:)``.
-    private enum AttentionOutput {
-        /// The queries before rope.
-        static let queries = 0
-        /// The output gate.
-        static let gate = 1
-        /// The keys before rope.
-        static let keys = 2
-        /// The values.
-        static let values = 3
-    }
+    /// segment.
+    private typealias AttentionOutput = CompiledDecodeSegment.AttentionOutput
 
     /// The caches a compiled step reads and writes, segment by segment.
     private struct ScheduleCaches {
@@ -1114,62 +1113,20 @@ public class Qwen35TextModelInner: Module {
         let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode
     }
 
-    /// Flat argument/result lists because `compile` takes `[MLXArray]`.
-    /// In: `[x]` (token ids for segment 0), then `[attention, gate]` when
-    /// opening with a full-attention tail, then `[convState, recState]` per
-    /// GDN layer. Out: `[x]`, then `[newConvState, newRecState]` per GDN
-    /// layer (followed, for a verify, by the speculative states of
-    /// ``GatedDeltaSpeculativeStates/traceArrays``), then
-    /// `[queries, gate, keys, values]` when closing with a head.
+    /// Runs segment `index` through the shared
+    /// ``CompiledDecodeSegment/body(_:arguments:layers:finalNorm:verify:)``.
+    /// Segment 0 takes the token ids as its first argument and embeds them
+    /// inside the trace.
     ///
     /// A decode step ends with the final norm. A verify leaves it to
     /// ``forward(_:cache:applyFinalNorm:checkpointAfter:useCompiledDecode:)``,
     /// whose MTP caller emits the rows before the norm.
     private func segmentBody(
-        at index: Int, _ args: [MLXArray], verify: CompiledVerifyShape?
+        at index: Int, _ arguments: [MLXArray], verify: CompiledVerifyShape?
     ) -> [MLXArray] {
-        let segment = decodeSegments[index]
-        var hiddenStates = index == 0 ? embedTokens(args[0]) : args[0]
-
-        if let post = segment.attentionPostLayer {
-            hiddenStates = layers[post].attentionPostBody(
-                x: hiddenStates, attention: args[1], gate: args[2])
-        }
-
-        var states: [MLXArray] = []
-        for (i, layerIndex) in segment.linearLayers.enumerated() {
-            let slot = segment.stateInputOffset + CompiledDecodeSegment.statesPerLinearLayer * i
-            let step = layers[layerIndex].linearLayerBody(
-                x: hiddenStates, convState: args[slot], recState: args[slot + 1],
-                checkpointAfter: verify?.checkpointAfter)
-            hiddenStates = step.output
-            states +=
-                [step.convState, step.recurrentState]
-                + Self.speculativeOutputs(step.speculative, verify: verify)
-        }
-
-        if let pre = segment.attentionPreLayer {
-            let (queries, gate, keys, values) = layers[pre].attentionPreBody(x: hiddenStates)
-            // The next segment needs the attention layer's input for its residual.
-            return [hiddenStates] + states + [queries, gate, keys, values]
-        }
-
-        if verify == nil, index == decodeSegments.count - 1 {
-            hiddenStates = norm(hiddenStates)
-        }
-        return [hiddenStates] + states
-    }
-
-    /// The speculative states a GDN layer of a verify segment gives back, as
-    /// trace outputs; none for a decode step.
-    private static func speculativeOutputs(
-        _ speculative: GatedDeltaSpeculativeStates?, verify: CompiledVerifyShape?
-    ) -> [MLXArray] {
-        guard verify != nil else { return [] }
-        guard let speculative else {
-            preconditionFailure("a verify with a checkpoint inside its tokens keeps its states")
-        }
-        return speculative.traceArrays
+        decodeSegments[index].body(
+            index == 0 ? embedTokens(arguments[0]) : arguments[0], arguments: arguments,
+            layers: layers, finalNorm: norm, verify: verify)
     }
 
     /// The compile state of a trace that runs `indices`: each layer and, for
@@ -1303,7 +1260,7 @@ public class Qwen35TextModelInner: Module {
                 let first = 1 + outputsPerLinearLayer * position
                 commit(
                     Array(outputs[first ..< first + outputsPerLinearLayer]), to: entry.cache,
-                    tokens: inputs.dim(1), verify: verify)
+                    verify: verify)
             }
 
             pendingAttention = []
@@ -1324,9 +1281,11 @@ public class Qwen35TextModelInner: Module {
 
     /// Writes what a compiled GDN layer gave back into its cache: its conv
     /// and recurrent states, then, for a verify, the states it keeps for a
-    /// rollback, as the general path of the layer does.
+    /// rollback, as the general path of the layer does. The cache advances
+    /// by the tokens of the step: one for a decode step, the tokens of the
+    /// shape for a verify.
     private func commit(
-        _ outputs: [MLXArray], to cache: MambaCache, tokens: Int, verify: CompiledVerifyShape?
+        _ outputs: [MLXArray], to cache: MambaCache, verify: CompiledVerifyShape?
     ) {
         cache[0] = outputs[0]
         cache[1] = outputs[1]
@@ -1337,7 +1296,7 @@ public class Qwen35TextModelInner: Module {
                         outputs.dropFirst(CompiledDecodeSegment.statesPerLinearLayer))),
                 checkpointAfter: verify.checkpointAfter)
         }
-        cache.advance(tokens)
+        cache.advance(verify?.tokens ?? GatedDeltaDecodeKernel.decodeTokens)
     }
 }
 

@@ -62,6 +62,40 @@ comments:
     - User (2026-10-28): "relax the 8% line -- just add up optimizations". Acceptance now: improves on the same-session baseline with output equal to plain. Measured +1.8 to +2.6% on math, so the criterion is met.
     - next: review commit 9cf705de after ^btfktsy finishes (sequential tree).
   timestamp: 2026-10-28T12:28:10.924678+00:00
+- actor: claude-code
+  id: 01m61fx18ys0m7htmvqmxtw52w
+  text: |-
+    ### review — findings
+    - evidence: review sha 9cf705de~1..9cf705de — 5 findings (5 confirmed, 3 refuted) — Libraries/MLXLLM/Models/Qwen35.swift:915, Libraries/MLXLLM/Models/Qwen35.swift:921, Libraries/MLXLLM/Models/Qwen35.swift:1128, Libraries/MLXLMCommon/CompiledDecodeSegments.swift:133, Tests/MLXLMTests/Qwen35MTPTests.swift:2040
+    - next: implement the Review Findings (2026-10-28 09:47) checklist, then re-review
+  timestamp: 2026-10-28T14:51:20.734452+00:00
+- actor: claude-code
+  id: 01m61fxhp15rh7rbxawax4mabr
+  text: |-
+    ### finish iteration 2 — findings
+    - (perf acceptance relaxed by the user; code from iteration 1, commit 9cf705de)
+    - review: findings — Libraries/MLXLLM/Models/Qwen35.swift:915, Qwen35.swift:921, Qwen35.swift:1128, Libraries/MLXLMCommon/CompiledDecodeSegments.swift:133, Tests/MLXLMTests/Qwen35MTPTests.swift:2040
+  timestamp: 2026-10-28T14:51:37.537543+00:00
+- actor: claude-code
+  id: 01m61gtj1g8m8edmkkjv44kj94
+  text: |-
+    Review findings (2026-10-28 09:47) worked, all 5 checked:
+    1. GDN layer body duplication: new Libraries/MLXLMCommon/HybridDecodeLayer.swift — `HybridDecodeLayer` protocol (layer gives inputLayerNorm, postAttentionLayerNorm, gatedDeltaMixer, projectAttention, mergeAttention, feedForward) and `GatedDeltaLayerStep`; the extension holds the one shared `linearLayerBody(x:convState:recState:checkpointAfter:)` (returns the speculative states), plus `attentionPreBody(x:)` / `attentionPostBody(x:attention:gate:)` sharing one residual+feed-forward step (the same cause inside Qwen35: three copies of `h + mlp(postNorm(h))`). Qwen35DecoderLayer conforms; its own body copies and `mlpForward` are gone.
+    2. Force unwraps: removed every `linearAttn!` / `selfAttn!` in Qwen35.swift via private `gatedDeltaNet` / `fullAttention` accessors (guard + preconditionFailure naming the invariant); the two `mlp as! UnaryLayer` force casts went too (`mlp` is now `Module & UnaryLayer`, the BailingMoe pattern). swiftlint force_unwrapping/force_cast/force_try: 0 in Qwen35.swift and the MLXLMCommon files.
+    3. Segment body duplication: `CompiledDecodeSegment.body(_:arguments:layers:finalNorm:verify:)` in CompiledDecodeSegments.swift, generic over `HybridDecodeLayer`; the attention-head output layout moved with it as `CompiledDecodeSegment.AttentionOutput`. Qwen35 `segmentBody` now only embeds segment 0 and calls it. The final norm is applied by the segment with no attention head (always the last one `schedule` builds) on a decode step only — same as the old `index == count - 1` check.
+    4. Assign-only `CompiledVerifyShape.tokens`: now the read source of how far each GDN cache advances in `commit` (`verify?.tokens ?? GatedDeltaDecodeKernel.decodeTokens`, the latter made `package`), replacing the parallel `inputs.dim(1)` parameter. Kept in the key: the token count fixes the trace shapes.
+    5. Seeded tokens: one file-scope `seededTokens(_:vocabularySize:seed:)` in Qwen35MTPTests.swift; `prompt(length:)` and `tokens(_:of:seed:)` both call it; `verify` adds the batch axis at its call sites.
+    TDD: new Tests/MLXLMTests/HybridDecodeLayerTests.swift (6 tests on an arithmetic fake layer: GDN body with/without kept states, attention pre/post bodies, segment body head layout, decode final norm, verify leaves the norm and gives back kept states). RED = compile failure on the missing API; GREEN in the full run.
+    Qwen3Next and VLM copies NOT edited (per finding); follow-up task ^5fq4w2k moves them onto the shared functions.
+    Not new: SwiftPM prints `warning: missing creator for mutated node: (.../mlx-swift_Cmlx.bundle/Contents/MacOS)` on every `swift build` in this repo (present in all earlier builds in the shell history); it is a build-system message about the Cmlx resource bundle, not a compiler warning. No compiler warnings in swift build or the Release xcodebuild.
+  timestamp: 2026-10-28T15:07:28.176373+00:00
+- actor: claude-code
+  id: 01m61gtpjvm2j6wdqrp418q4h1
+  text: |-
+    ### implement — changed
+    - evidence: 6 files — Libraries/MLXLMCommon/HybridDecodeLayer.swift (new), Libraries/MLXLMCommon/CompiledDecodeSegments.swift, Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift, Libraries/MLXLLM/Models/Qwen35.swift, Tests/MLXLMTests/HybridDecodeLayerTests.swift (new), Tests/MLXLMTests/Qwen35MTPTests.swift. `swift build --build-tests` 0 compiler warnings; MLXLMTests 895 XCTest 0 failures + 1913 Swift Testing passed (HybridDecodeLayerTests, Qwen35CompiledVerifyTests green); MLXGuidedGenerationTests 70, MLXFoundationModelsTests 376, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 passed. Release qwen38FourBitMTPGeneration (load avg 11.2 before / 7.1 after, other projects' test runs active): plain 59.2 / 59.2 / 59.3, MTP 90.7 / 81.6 / 79.4 tok/s math/code/prose, acceptance 93.9% / 73.6% / 69.0%, matches plain: true x3, TEST SUCCEEDED.
+    - next: /review (all 5 findings of 2026-10-28 09:47 checked); follow-up ^5fq4w2k for Qwen3Next/VLM.
+  timestamp: 2026-10-28T15:07:32.827866+00:00
 depends_on:
 - 01M5QWJGM1679S6CWHFCST7WAN
 - 01M5SWXS9E09Y97PV3BV51TPYA
@@ -88,3 +122,17 @@ A verify pass has `x.dim(1) >= 2`. The guards in `Qwen35DecoderLayer.callAsFunct
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38 #perf
+
+## Review Findings (2026-10-28 09:47)
+
+> Scope: `review sha 9cf705de~1..9cf705de` — reviewed the diffs only — lines this change added or modified. 5 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5SKBCEWG4D25SZZNGG7BVM7.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5SKBCEWG4D25SZZNGG7BVM7.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/Models/Qwen35.swift:915` `duplication/duplication` — The changed `linearLayerBody` is a near-copy of the GDN layer body in two other models. The change added `checkpointAfter` and the speculative-state return to this copy only, so the three layer bodies have drifted apart. Move the shared GDN layer body into one function that takes the optional checkpoint and returns the speculative states, and call it from the Qwen35 layer. Leave the Qwen3Next and VLM copies to a separate task that moves them onto the same function.
+- [x] `Libraries/MLXLLM/Models/Qwen35.swift:921` `code-hygiene/disallowed-constructs-swift` — force_unwrapping: Force unwrapping should be avoided.
+- [x] `Libraries/MLXLLM/Models/Qwen35.swift:1128` `duplication/duplication` — The changed `segmentBody(at:_:verify:)` is a near-verbatim copy of the segment body in two other models. The change added the verify path (checkpoint states, speculative outputs, and the final-norm guard) to this MLXLLM copy only, so the copies now diverge. Any fix to one side has to be re-applied by hand to the others. Extract one shared segment-body function, parameterized by the verify shape and by the layer and norm modules, and have Qwen35 call it. Qwen3Next and the VLM copy are outside this change, so either route them through the same shared function in a separate task or record the divergence as a known follow-up. Do not edit the counterparts inside this change.
+- [x] `Libraries/MLXLMCommon/CompiledDecodeSegments.swift:133` `code-hygiene/dead-code-swift` — var.instance `tokens` is assignOnlyProperty.
+- [x] `Tests/MLXLMTests/Qwen35MTPTests.swift:2040` `reuse/reuse` — The new `tokens(_:of:seed:)` helper reimplements the seeded-token generator that already exists as `prompt(length:)`. Both call `MLXRandom.randInt` over a vocabulary range with a seeded key and differ only in the vocabulary source, the seed, and the `[1, count]` shape. Keeping two copies means the token-generation logic can drift between the MTP and compiled-verify suites. Generalize the existing helper instead of adding a parallel one. Move the seeded-token generator to file scope (or a shared fixture) with parameters for vocabulary size, count, and seed, then have `prompt(length:)` and `tokens(_:of:seed:)` both call it. If the shapes must differ, keep the `[1, count]` reshape at the call site in `verify`.

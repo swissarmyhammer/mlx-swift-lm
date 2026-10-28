@@ -237,6 +237,12 @@ private let gdnStateTolerance = MatmulPrecision.tolerance(
 /// runs go through matmuls of the same shapes, so full float32 precision holds on every machine.
 private let gdnCheckpointOutputTolerance = ieeeFloat32Tolerance
 
+/// `count` token ids below `vocabularySize`, shape `[count]`, drawn from `seed`: the same
+/// tokens for the same seed on every run.
+private func seededTokens(_ count: Int, vocabularySize: Int, seed: UInt64) -> MLXArray {
+    MLXRandom.randInt(Int32(0) ..< Int32(vocabularySize), [count], key: MLXRandom.key(seed))
+}
+
 @Suite(.serialized)
 struct Qwen35MTPMetalTests {
     @Test
@@ -1129,9 +1135,7 @@ struct Qwen35MTPChunkedPrefillTests {
 
     /// `length` prompt tokens of the fixture vocabulary, from ``promptSeed``.
     private func prompt(length: Int) -> MLXArray {
-        MLXRandom.randInt(
-            Int32(0) ..< Int32(Qwen35MTPFixture.vocabularySize), [length],
-            key: MLXRandom.key(promptSeed))
+        seededTokens(length, vocabularySize: Qwen35MTPFixture.vocabularySize, seed: promptSeed)
     }
 
     /// Generation parameters of a greedy decode with `prefill`.
@@ -2036,10 +2040,9 @@ struct Qwen35CompiledVerifyTests {
         return model
     }
 
-    /// `count` seeded tokens of the vocabulary of `model`, as one sequence.
+    /// `count` seeded tokens of the vocabulary of `model`, shape `[count]`.
     private func tokens(_ count: Int, of model: Qwen35TextModel, seed: UInt64) -> MLXArray {
-        MLXRandom.randInt(
-            Int32(0) ..< Int32(model.vocabularySize), [1, count], key: MLXRandom.key(seed))
+        seededTokens(count, vocabularySize: model.vocabularySize, seed: seed)
     }
 
     /// Prefills the prompt, runs one verify of `tokenCount` tokens on the compiled or the
@@ -2049,13 +2052,13 @@ struct Qwen35CompiledVerifyTests {
     ) throws -> Verify {
         let cache = try model.newCache(parameters: nil)
         let prompt = tokens(Self.promptLength, of: model, seed: Self.promptSeed)
-        eval(model(LMInput.Text(tokens: prompt), cache: cache, state: nil).logits)
+        eval(model(LMInput.Text(tokens: prompt[.newAxis]), cache: cache, state: nil).logits)
 
         var state = LMOutput.State()
         state[mtpEmitFlagKey] = true
         state[mtpCacheCheckpointIndexKey] = Self.checkpointAfter
         let output = model.forward(
-            LMInput.Text(tokens: tokens(tokenCount, of: model, seed: Self.verifySeed)),
+            LMInput.Text(tokens: tokens(tokenCount, of: model, seed: Self.verifySeed)[.newAxis]),
             cache: cache, state: state, lastTokenOnly: false, useCompiledDecode: compiled)
         let hidden = try #require(output.state?[mtpLastHiddenStatesKey])
         let slotCounts = cache.compactMap { ($0 as? MambaCache)?.speculativeSlotCount }

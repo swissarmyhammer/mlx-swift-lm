@@ -71,6 +71,103 @@ package struct CompiledDecodeSegment: Sendable, Equatable {
     }
 }
 
+extension CompiledDecodeSegment {
+    /// The places of the outputs of an attention head among the outputs of a
+    /// segment, from ``attentionOutputOffset(outputsPerLinearLayer:)``.
+    package enum AttentionOutput {
+        /// The queries before rope.
+        package static let queries = 0
+        /// The output gate.
+        package static let gate = 1
+        /// The keys before rope.
+        package static let keys = 2
+        /// The values.
+        package static let values = 3
+        /// The outputs of an attention head.
+        package static let count = 4
+    }
+
+    /// The places of the inputs of an attention tail among the arguments of
+    /// a segment that opens with one.
+    private enum AttentionInput {
+        /// The output of the attention over the cache.
+        static let attention = 1
+        /// The output gate.
+        static let gate = 2
+    }
+
+    /// Runs this segment of a decode step or of a speculative verify, as the
+    /// body of its trace.
+    ///
+    /// Flat argument/result lists because `compile` takes `[MLXArray]`.
+    /// In: `[x]`, then `[attention, gate]` when opening with a full-attention
+    /// tail, then `[convState, recState]` per GDN layer. Out: `[x]`, then
+    /// `[newConvState, newRecState]` per GDN layer (followed, for a verify,
+    /// by the speculative states of
+    /// ``GatedDeltaSpeculativeStates/traceArrays``), then the
+    /// ``AttentionOutput`` arrays when closing with a head.
+    ///
+    /// The segment that closes the schedule, the one with no attention head,
+    /// ends a decode step with the final norm. A verify leaves the norm to
+    /// its caller, which emits the rows before it.
+    ///
+    /// - Parameters:
+    ///   - input: The hidden states the segment starts from: the first
+    ///     argument, or for a model that embeds inside the trace, its
+    ///     embedding.
+    ///   - arguments: The flat argument list of the segment.
+    ///   - layers: Every decoder layer of the model.
+    ///   - finalNorm: The final norm of the model.
+    ///   - verify: The shape of a verify, or nil for a decode step.
+    /// - Returns: The flat result list of the segment.
+    package func body<Layer: HybridDecodeLayer>(
+        _ input: MLXArray, arguments: [MLXArray], layers: [Layer], finalNorm: RMSNorm,
+        verify: CompiledVerifyShape?
+    ) -> [MLXArray] {
+        var hiddenStates = input
+        if let post = attentionPostLayer {
+            hiddenStates = layers[post].attentionPostBody(
+                x: hiddenStates, attention: arguments[AttentionInput.attention],
+                gate: arguments[AttentionInput.gate])
+        }
+
+        var states: [MLXArray] = []
+        for (position, layerIndex) in linearLayers.enumerated() {
+            let slot = stateInputOffset + Self.statesPerLinearLayer * position
+            let step = layers[layerIndex].linearLayerBody(
+                x: hiddenStates, convState: arguments[slot], recState: arguments[slot + 1],
+                checkpointAfter: verify?.checkpointAfter)
+            hiddenStates = step.output
+            states +=
+                [step.convState, step.recurrentState]
+                + Self.speculativeOutputs(step.speculative, verify: verify)
+        }
+
+        if let pre = attentionPreLayer {
+            let head = layers[pre].attentionPreBody(x: hiddenStates)
+            // The next segment needs the attention layer's input for its residual.
+            return [hiddenStates] + states + [head.queries, head.gate, head.keys, head.values]
+        }
+
+        if verify == nil {
+            hiddenStates = finalNorm(hiddenStates)
+        }
+        return [hiddenStates] + states
+    }
+
+    /// The speculative states a GDN layer of a verify segment gives back, as
+    /// trace outputs; none for a decode step.
+    private static func speculativeOutputs(
+        _ speculative: GatedDeltaSpeculativeStates?, verify: CompiledVerifyShape?
+    ) -> [MLXArray] {
+        guard verify != nil else { return [] }
+        guard let speculative else {
+            preconditionFailure("a verify with a checkpoint inside its tokens keeps its states")
+        }
+        return speculative.traceArrays
+    }
+}
+
 /// Lazily compiles and retains one `CompiledTrace` per decode segment.
 ///
 /// Models create this with their schedule; compilation stays lazy because
