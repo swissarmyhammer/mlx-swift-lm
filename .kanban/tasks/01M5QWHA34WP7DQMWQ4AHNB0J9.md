@@ -40,11 +40,27 @@ comments:
     - evidence: 5 files — Libraries/MLXLMCommon/ChatSession.swift, Libraries/MLXLMCommon/PromptCacheCheckpoint.swift, Libraries/MLXLMCommon/PromptCacheReusePolicy.swift, Tests/MLXLMTests/ChatSessionQwenTextMTPTests.swift, Tests/MLXLMTests/PromptCacheReusePolicyTests.swift. MLXLMTests 895 XCTest + 1892 Swift Testing, 0 failures; MLXFoundationModelsTests 376, 0 failures; swift-format lint clean; no new warnings. Release qwen38FourBitMTPSystemPromptCache passed (edit turn 2169 cached / 123 prefilled in 171 ms, MTP, acceptance 97.1%, exact match); qwen38FourBitMTPGeneration 91.0/81.5/79.4 and 91.0/79.1/78.2 tok/s.
     - next: /review (task left in doing; not committed)
   timestamp: 2026-10-28T02:28:25.932896+00:00
+- actor: claude-code
+  id: 01m605j3b35bn5gemfc7cxy68x
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (b03059a4) — 0 findings, 0 confirmed, 1 refuted; 5 source files reviewed, 4 .kanban files skipped (no validator). Caller checks verified: (1) restore hands out only PromptCacheCheckpoint.drafterContinuation(resumableBy:), which returns copy() after isAligned(withMainTokenCount: tokens.count, drafterID:), and the restored main cache stands at checkpoint.tokens.count; a non-resumable drafter gets nil. (2) .trimToCommonPrefix sets mtpDrafterContinuation = nil; a failed trim downgrades to .rebuild, which goes through the restore or the fresh-cache path. (3) .restartsOnRewind is assigned only when usesMTP && stateful && resumable; a stateful drafter that cannot resume still gets .mainOnlyFallback; the ordinary draft-model and non-speculative capabilities did not change; canContinueWithoutRebuild has the same truth table (CommittedTurnSplice, HarmonyToolRestartRule, OnyxToolRestartRule are not affected). (4) Forks share checkpoints but each restore gets its own copy(); the edit-and-regenerate test checks that the source checkpoints stay aligned after the fork resumes.
+    - next: none
+  timestamp: 2026-10-28T02:31:22.211519+00:00
+- actor: claude-code
+  id: 01m605jq7f1es9q5a5kty8j1wd
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 5 files (restore a copy of the checkpoint's drafter continuation; .restartsOnRewind keeps speculation through rewinds)
+    - test: green — implementer's run on the final code: MLXLMTests 895 XCTest 0 failures + 1892 Swift Testing; FoundationModels 376; Release SystemPromptCache passed with no known issues (all 9 turns MTP), MTPGeneration 91.0/81.5/79.4 and 91.0/79.1/78.2
+    - commit: b03059a4
+    - review: clean — 0 findings; task done
+  timestamp: 2026-10-28T02:31:42.575642+00:00
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: ffec80
 title: 'MTP: drafter continuation through hybrid checkpoint restore and rewind in ChatSession (fork is done by PR 581)'
 ---
 ## What
