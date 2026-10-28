@@ -703,6 +703,54 @@ package enum GatedDeltaSpeculativeStates {
     case checkpoint(conv: MLXArray, recurrent: MLXArray)
     /// The states after each token of the pass.
     case snapshots(GatedDeltaDecodeKernel.Snapshots)
+
+    /// The places of the states in ``traceArrays``.
+    private enum TraceArray {
+        /// The recurrent state, or the recurrent snapshot slots.
+        static let recurrent = 0
+        /// The conv state, or the conv input window.
+        static let conv = 1
+        /// The number of arrays.
+        static let count = 2
+    }
+
+    /// The rank of the recurrent snapshot slots: one slot axis before the
+    /// axes of a recurrent state.
+    private static let snapshotRank = HeadRowsAxis.count + 1
+
+    /// The number of arrays of ``traceArrays``.
+    package static let traceArrayCount = TraceArray.count
+
+    /// The arrays of the states, as a compiled trace gives them back: the
+    /// recurrent array, then the conv array.
+    package var traceArrays: [MLXArray] {
+        switch self {
+        case .checkpoint(let conv, let recurrent):
+            return [recurrent, conv]
+        case .snapshots(let snapshots):
+            return [snapshots.recurrent, snapshots.convWindow]
+        }
+    }
+
+    /// The states from the arrays of ``traceArrays``. The recurrent snapshot
+    /// slots hold one axis more than the recurrent state of a checkpoint,
+    /// which tells the two kinds apart: a trace returns arrays only, and which
+    /// kind a layer kept depends on the route the trace took.
+    ///
+    /// - Parameter traceArrays: The arrays of ``traceArrays``.
+    package init(traceArrays: [MLXArray]) {
+        precondition(
+            traceArrays.count == TraceArray.count,
+            "speculative states take \(TraceArray.count) arrays, not \(traceArrays.count)")
+        let recurrent = traceArrays[TraceArray.recurrent]
+        let conv = traceArrays[TraceArray.conv]
+        if recurrent.ndim == Self.snapshotRank {
+            self = .snapshots(
+                GatedDeltaDecodeKernel.Snapshots(recurrent: recurrent, convWindow: conv))
+        } else {
+            self = .checkpoint(conv: conv, recurrent: recurrent)
+        }
+    }
 }
 
 /// The gated RMSNorm of the output of a gated delta net layer, as

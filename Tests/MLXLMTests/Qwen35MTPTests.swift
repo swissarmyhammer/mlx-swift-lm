@@ -1022,7 +1022,8 @@ struct Qwen35MTPDrafterStateTests {
             passthroughReason: iterator.passthroughReason, proposedCount: iterator.proposedCount)
     }
 
-    @Test("an unaligned continuation on a warm cache cold-starts the drafter at the cached position")
+    @Test(
+        "an unaligned continuation on a warm cache cold-starts the drafter at the cached position")
     func unalignedContinuationColdStartsAtCachedPosition() async throws {
         let fixture = try Qwen35MTPFixture()
         let plain = try await fixture.decodeGreedily(
@@ -1196,7 +1197,9 @@ struct Qwen35MTPChunkedPrefillTests {
         }
     }
 
-    @Test("the target prepare calls the chunk handler once for each chunk", arguments: Target.allCases)
+    @Test(
+        "the target prepare calls the chunk handler once for each chunk", arguments: Target.allCases
+    )
     func prepareCallsChunkHandlerForEachChunk(target: Target) throws {
         let models = try target.models()
         let prompt = prompt(length: promptLength)
@@ -1228,7 +1231,8 @@ struct Qwen35MTPChunkedPrefillTests {
         var plainIterator = try TokenIterator(
             input: LMInput(tokens: suffix), model: fixture.target, cache: plainStart.cache,
             state: plainStart.state,
-            parameters: parameters(prefill: .init(stepSize: stepSize), maxTokens: generatedTokenCount))
+            parameters: parameters(
+                prefill: .init(stepSize: stepSize), maxTokens: generatedTokenCount))
         var plainTokens: [Int] = []
         while let token = plainIterator.next() {
             plainTokens.append(token)
@@ -1249,7 +1253,8 @@ struct Qwen35MTPChunkedPrefillTests {
         let fixture = try Qwen35MTPFixture()
         let prompt = prompt(length: longPromptLength)
 
-        let unchunked = try peakPrefillMemory(fixture, prompt: prompt, prefill: .init(chunking: .unchunked))
+        let unchunked = try peakPrefillMemory(
+            fixture, prompt: prompt, prefill: .init(chunking: .unchunked))
         let chunked = try peakPrefillMemory(
             fixture, prompt: prompt, prefill: .init(stepSize: longPromptStepSize))
 
@@ -1964,5 +1969,270 @@ struct Qwen35MTPGenerateLoopContractTests {
                 abs(reported.chosen.logProbability - reference.chosen.logProbability)
                     <= logProbabilityTolerance)
         }
+    }
+}
+
+/// The compiled verify schedule of the Qwen 3.5 text target: a verify of two to
+/// ``GatedDeltaDecodeKernel/mostTokens`` tokens runs as traced segments, as a decode step does,
+/// and gives what the general path gives.
+@Suite(.serialized)
+struct Qwen35CompiledVerifyTests {
+
+    /// The verify lengths of the compiled schedule: the bonus token and one draft, up to the most
+    /// tokens the GDN kernel holds.
+    static let verifyTokenCounts = Array(2 ... GatedDeltaDecodeKernel.mostTokens)
+
+    /// The decoder layers of the test model: GDN, attention, GDN, attention. The schedule then
+    /// holds each kind of segment: one that opens the step, one between two attention layers,
+    /// and one that closes it.
+    private static let hiddenLayers = 4
+
+    /// The dtype of the test model: one the GDN kernel reads, so the verify takes snapshots.
+    private static let dtype = DType.bfloat16
+
+    /// The seed of the weights of the test model.
+    private static let weightSeed: UInt64 = 20_261_028
+
+    /// The seed of the prompt tokens.
+    private static let promptSeed: UInt64 = 20_261_029
+
+    /// The seed of the verify tokens.
+    private static let verifySeed: UInt64 = 20_261_030
+
+    /// The prompt tokens the cache holds before the verify. More than
+    /// ``GatedDeltaDecodeKernel/mostTokens``, so the prefill itself takes the general path.
+    private static let promptLength = 8
+
+    /// The token after which a verify keeps its checkpoint, as the MTP iterator sets it.
+    private static let checkpointAfter = 1
+
+    /// The prompt of each greedy decode of these tests.
+    private static let prompt = [3, 14, 15, 9, 2, 6, 5, 35]
+
+    /// The tokens each greedy decode of these tests generates.
+    private static let generatedTokenCount = 48
+
+    /// What one verify leaves: its logits and hidden rows, the cache after its rollback, and
+    /// the snapshot slots each GDN cache kept before the rollback.
+    private struct Verify {
+        let logits: MLXArray
+        let hidden: MLXArray
+        let states: [MLXArray]
+        let offsets: [Int]
+        let slotCounts: [Int]
+    }
+
+    /// A text target whose GDN layers the kernel runs, on seeded weights, in ``dtype``.
+    private func kernelModel() throws -> Qwen35TextModel {
+        let configuration = try GDNDecodeKernelFixture.configuration(
+            Qwen35TextConfiguration.self, GDNDecodeKernelFixture.smallHeadCase,
+            hiddenLayers: Self.hiddenLayers)
+        let model = withRandomState(MLXRandom.RandomState(seed: Self.weightSeed)) {
+            Qwen35TextModel(configuration)
+        }
+        model.update(parameters: model.parameters().mapValues { $0.asType(Self.dtype) })
+        model.train(false)
+        eval(model)
+        return model
+    }
+
+    /// `count` seeded tokens of the vocabulary of `model`, as one sequence.
+    private func tokens(_ count: Int, of model: Qwen35TextModel, seed: UInt64) -> MLXArray {
+        MLXRandom.randInt(
+            Int32(0) ..< Int32(model.vocabularySize), [1, count], key: MLXRandom.key(seed))
+    }
+
+    /// Prefills the prompt, runs one verify of `tokenCount` tokens on the compiled or the
+    /// general path, then rolls the verify back by `rollback` tokens as a rejected round does.
+    private func verify(
+        _ model: Qwen35TextModel, tokenCount: Int, rollingBack rollback: Int, compiled: Bool
+    ) throws -> Verify {
+        let cache = try model.newCache(parameters: nil)
+        let prompt = tokens(Self.promptLength, of: model, seed: Self.promptSeed)
+        eval(model(LMInput.Text(tokens: prompt), cache: cache, state: nil).logits)
+
+        var state = LMOutput.State()
+        state[mtpEmitFlagKey] = true
+        state[mtpCacheCheckpointIndexKey] = Self.checkpointAfter
+        let output = model.forward(
+            LMInput.Text(tokens: tokens(tokenCount, of: model, seed: Self.verifySeed)),
+            cache: cache, state: state, lastTokenOnly: false, useCompiledDecode: compiled)
+        let hidden = try #require(output.state?[mtpLastHiddenStatesKey])
+        let slotCounts = cache.compactMap { ($0 as? MambaCache)?.speculativeSlotCount }
+
+        if rollback > 0 {
+            for entry in cache {
+                if let mamba = entry as? MambaCache {
+                    #expect(mamba.selectSpeculativeSlot(rollingBack: rollback))
+                } else {
+                    #expect(entry.trim(rollback) == rollback)
+                }
+            }
+        }
+        let states = cache.flatMap(\.state)
+        eval(output.logits, hidden, states)
+        return Verify(
+            logits: output.logits, hidden: hidden, states: states, offsets: cache.map(\.offset),
+            slotCounts: slotCounts)
+    }
+
+    /// Checks that `got` stays within `tolerance` of `expected`.
+    private func expectWithin(
+        _ got: MLXArray, _ expected: MLXArray, _ tolerance: Float, _ what: String,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        #expect(got.shape == expected.shape, "\(what)", sourceLocation: sourceLocation)
+        let gap = AttentionKernelTolerance.worstGap(got, expected)
+        #expect(gap <= tolerance, "\(what): worst gap \(gap)", sourceLocation: sourceLocation)
+    }
+
+    @Test(
+        "a compiled verify stays within tolerance of the general path, for each rollback",
+        arguments: verifyTokenCounts)
+    func compiledVerifyMatchesGeneralPath(tokenCount: Int) throws {
+        let model = try kernelModel()
+        let tolerance = try #require(AttentionKernelTolerance.of(Self.dtype))
+
+        for rollback in 0 ..< tokenCount {
+            let general = try verify(
+                model, tokenCount: tokenCount, rollingBack: rollback, compiled: false)
+            let compiled = try verify(
+                model, tokenCount: tokenCount, rollingBack: rollback, compiled: true)
+            let round = "\(tokenCount) tokens, rollback \(rollback)"
+
+            #expect(compiled.slotCounts.allSatisfy { $0 == tokenCount }, "\(round)")
+            #expect(compiled.slotCounts == general.slotCounts, "\(round)")
+            #expect(compiled.offsets == general.offsets, "\(round)")
+            expectWithin(compiled.logits, general.logits, tolerance, "\(round) logits")
+            expectWithin(compiled.hidden, general.hidden, tolerance, "\(round) hidden rows")
+            try #require(compiled.states.count == general.states.count)
+            for (index, (got, expected)) in zip(compiled.states, general.states).enumerated() {
+                expectWithin(got, expected, tolerance, "\(round) cache state \(index)")
+            }
+        }
+        #expect(model.model.compiledVerifySegmentCount > 0)
+    }
+
+    @Test("a verify on the general path compiles no verify segment")
+    func generalPathCompilesNoVerifySegment() throws {
+        let model = try kernelModel()
+        _ = try verify(
+            model, tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: 0, compiled: false)
+        #expect(model.model.compiledVerifySegmentCount == 0)
+    }
+
+    @Test("invalidating the compiled traces of the model drops its verify segments")
+    func invalidationDropsVerifySegments() throws {
+        let model = try kernelModel()
+        _ = try verify(
+            model, tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: 0, compiled: true)
+        #expect(model.model.compiledVerifySegmentCount > 0)
+
+        model.invalidateCompiledTraces()
+
+        #expect(model.model.compiledVerifySegmentCount == 0)
+    }
+
+    @Test("a verify shape holds two to the most kernel tokens and a checkpoint inside them")
+    func verifyShapeBounds() {
+        let most = GatedDeltaDecodeKernel.mostTokens
+        #expect(
+            CompiledVerifyShape(tokens: CompiledVerifyShape.fewestTokens, checkpointAfter: 1) != nil
+        )
+        #expect(CompiledVerifyShape(tokens: most, checkpointAfter: most - 1) != nil)
+        #expect(CompiledVerifyShape(tokens: 1, checkpointAfter: 1) == nil)
+        #expect(CompiledVerifyShape(tokens: most + 1, checkpointAfter: 1) == nil)
+        #expect(CompiledVerifyShape(tokens: most, checkpointAfter: nil) == nil)
+        #expect(CompiledVerifyShape(tokens: most, checkpointAfter: 0) == nil)
+        #expect(CompiledVerifyShape(tokens: most, checkpointAfter: most) == nil)
+    }
+
+    @Test("speculative states keep their kind and their arrays through the trace arrays")
+    func speculativeStatesRoundTripThroughTraceArrays() throws {
+        let headCase = GDNDecodeKernelFixture.smallHeadCase
+        let recurrent = MLXRandom.normal(
+            [headCase.batch, headCase.valueHeads, headCase.valueHeadDim, headCase.keyHeadDim])
+        let conv = MLXRandom.normal([headCase.batch, GDNDecodeKernelFixture.convTaps - 1, 1])
+        let slots = stacked([recurrent, recurrent + 1])
+        let window = concatenated([conv, conv], axis: 1)
+
+        let checkpoint = try #require(
+            checkpointArrays(
+                of: GatedDeltaSpeculativeStates(
+                    traceArrays: GatedDeltaSpeculativeStates.checkpoint(
+                        conv: conv, recurrent: recurrent
+                    ).traceArrays)))
+        let snapshots = try #require(
+            snapshotArrays(
+                of: GatedDeltaSpeculativeStates(
+                    traceArrays: GatedDeltaSpeculativeStates.snapshots(
+                        GatedDeltaDecodeKernel.Snapshots(recurrent: slots, convWindow: window)
+                    ).traceArrays)))
+
+        #expect(arrayEqual(checkpoint.conv, conv).item(Bool.self))
+        #expect(arrayEqual(checkpoint.recurrent, recurrent).item(Bool.self))
+        #expect(arrayEqual(snapshots.recurrent, slots).item(Bool.self))
+        #expect(arrayEqual(snapshots.convWindow, window).item(Bool.self))
+    }
+
+    /// The arrays of a checkpoint, or nil for snapshots.
+    private func checkpointArrays(of states: GatedDeltaSpeculativeStates) -> (
+        conv: MLXArray, recurrent: MLXArray
+    )? {
+        if case .checkpoint(let conv, let recurrent) = states {
+            return (conv, recurrent)
+        }
+        return nil
+    }
+
+    /// The snapshots, or nil for a checkpoint.
+    private func snapshotArrays(of states: GatedDeltaSpeculativeStates)
+        -> GatedDeltaDecodeKernel.Snapshots?
+    {
+        if case .snapshots(let snapshots) = states {
+            return snapshots
+        }
+        return nil
+    }
+
+    @Test(
+        "greedy MTP decode of the text target equals plain decode through the compiled verify",
+        arguments: Qwen35MTPFixture.DrafterMode.allCases)
+    func textTargetMTPEqualsPlainDecode(mode: Qwen35MTPFixture.DrafterMode) async throws {
+        let fixture = try Qwen35MTPFixture(drafter: mode)
+
+        let plain = try await fixture.decodeGreedily(
+            prompt: Self.prompt, maxTokens: Self.generatedTokenCount, speculative: false)
+        let speculative = try await fixture.decodeGreedily(
+            prompt: Self.prompt, maxTokens: Self.generatedTokenCount, speculative: true)
+
+        #expect(speculative.tokens == plain.tokens)
+        #expect((speculative.info.proposedDraftTokens ?? 0) > 0)
+        #expect(fixture.target.model.compiledVerifySegmentCount > 0)
+    }
+
+    @Test("greedy MTP decode of the VLM target equals plain decode")
+    func visionLanguageTargetMTPEqualsPlainDecode() throws {
+        let fixture = try Qwen35VLMMTPFixture()
+        let input = LMInput(tokens: MLXArray(Self.prompt.map(Int32.init)))
+        let parameters = GenerateParameters(maxTokens: Self.generatedTokenCount, temperature: 0)
+
+        var plain = try TokenIterator(input: input, model: fixture.target, parameters: parameters)
+        var speculative = try MTPSpeculativeTokenIterator(
+            input: input, mainModel: fixture.target, drafter: fixture.drafter,
+            parameters: parameters, blockSize: Qwen35MTPFixture.blockSize)
+        var plainTokens: [Int] = []
+        while let token = plain.next() {
+            plainTokens.append(token)
+        }
+        var speculativeTokens: [Int] = []
+        while let token = speculative.next() {
+            speculativeTokens.append(token)
+        }
+
+        #expect(plainTokens.count == Self.generatedTokenCount)
+        #expect(speculativeTokens == plainTokens)
+        #expect(speculative.passthroughReason == nil)
+        #expect(speculative.proposedCount > 0)
     }
 }
