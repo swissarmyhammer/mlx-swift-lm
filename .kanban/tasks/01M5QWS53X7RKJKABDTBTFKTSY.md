@@ -148,12 +148,28 @@ comments:
     - evidence: 7 files, 21 added lines — Tests/MLXLMTests/{TurboQuantTests (5), KVCacheArraysCacheTests (8), KVCacheQuantizationTests (2), KVCacheTests (2), KVCacheContinuationTests (1), ChatSessionCacheTests (2), PromptCacheTemplateRestoreTests (1)}.swift, plus the task card (4 items in the 15:22 findings checked: 3 waived, 1 fixed). swift build --build-tests: exit 0, 0 compiler warnings (only the known build-system "missing creator ... mlx-swift_Cmlx.bundle"). xcrun xctest: MLXLMTests 897 XCTest with 0 failures, and 1939 Swift Testing in 172 suites passed (the only skip is the env-gated benchmarkVerification). MLXFoundationModelsTests 376, MLXGuidedGenerationTests 70, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5: all pass. Totals: 2,497 tests, 0 failures. Findings: 0 open of 88.
     - next: /review
   timestamp: 2026-10-28T20:44:00.345299+00:00
+- actor: claude-code
+  id: 01m6247egwqmajzy37naffp2ks
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (3e9e4619) — 0 findings, 0 confirmed, 15 refuted; 7 files reviewed, 2 .kanban files skipped (no validator). Prior 2026-10-28 15:22 finding (TurboQuantTests.swift temp-file cleanup) resolved by the added `defer` removals; all prior items checked.
+    - next: none — task moved to done
+  timestamp: 2026-10-28T20:46:33.500468+00:00
+- actor: claude-code
+  id: 01m62483n98q17ee9jnbhbt6jm
+  text: |-
+    ### finish iteration 4 — clean
+    - implement: changed — 7 test files (temp-file cleanup); prompt-cap items waived per user decision
+    - test: green (implementer run) — 5 bundles, 2494 passed
+    - commit: 3e9e4619
+    - review: clean — task in done
+  timestamp: 2026-10-28T20:46:55.145892+00:00
 depends_on:
 - 01M5QWHA34WP7DQMWQ4AHNB0J9
 - 01M5SJPFM01WFRYWMQXVGMA4MQ
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8280'
+position_column: done
+position_ordinal: fff280
 title: 'MTP: save and load the drafter state with PromptCacheSnapshot'
 ---
 ## What
