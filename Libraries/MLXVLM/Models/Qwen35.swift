@@ -344,7 +344,7 @@ public enum Qwen35Language {
         }
     }
 
-    final class Attention: Module {
+    package final class Attention: Module {
         let numKeyValueHeads: Int
         let numAttentionHeads: Int
         let headDim: Int
@@ -906,8 +906,10 @@ public enum Qwen35Language {
         let isLinear: Bool
         let allowsCompiledDecode: Bool
 
-        @ModuleInfo(key: "self_attn") var selfAttn: Attention?
-        @ModuleInfo(key: "linear_attn") var linearAttn: GatedDeltaNet?
+        /// The attention; non-nil exactly for a full-attention layer.
+        @ModuleInfo(key: "self_attn") package var selfAttn: Attention?
+        /// The gated delta net; non-nil exactly for a linear layer.
+        @ModuleInfo(key: "linear_attn") package var linearAttn: GatedDeltaNet?
 
         /// The RMSNorm before the gated delta net or the attention.
         @ModuleInfo(key: "input_layernorm") package var inputLayerNorm: RMSNorm
@@ -1056,22 +1058,6 @@ public enum Qwen35Language {
                 mask: nil,
                 cache: cache,
                 positionIds: positionIds)
-        }
-
-        /// The gated delta net of a linear layer.
-        private var gatedDeltaNet: GatedDeltaNet {
-            guard let linearAttn else {
-                preconditionFailure("only a linear layer has a gated delta net")
-            }
-            return linearAttn
-        }
-
-        /// The attention of a full-attention layer.
-        private var fullAttention: Attention {
-            guard let selfAttn else {
-                preconditionFailure("only a full-attention layer has an attention")
-            }
-            return selfAttn
         }
 
         // MARK: - Layer blocks

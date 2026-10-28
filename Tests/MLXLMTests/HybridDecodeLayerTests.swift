@@ -31,12 +31,20 @@ private func headOffset(_ place: Int) -> Float {
 }
 
 /// A hybrid decoder layer whose blocks are plain arithmetic, so each output of a shared body
-/// shows which blocks made it. Its norms are real `RMSNorm`s with their initial weights.
+/// shows which blocks made it. Its norms are real `RMSNorm`s with their initial weights; its
+/// mixer modules are only there to be found by the shared accessors.
 private final class ArithmeticHybridLayer: Module, HybridDecodeLayer {
+    @ModuleInfo(key: "linear_attn") var linearAttn: Identity?
+    @ModuleInfo(key: "self_attn") var selfAttn: Identity?
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
-    override init() {
+    /// - Parameters:
+    ///   - linearAttn: The gated delta net module of a linear layer, or nil.
+    ///   - selfAttn: The attention module of a full-attention layer, or nil.
+    init(linearAttn: Identity? = nil, selfAttn: Identity? = nil) {
+        _linearAttn.wrappedValue = linearAttn
+        _selfAttn.wrappedValue = selfAttn
         _inputLayerNorm.wrappedValue = RMSNorm(dimensions: hiddenWidth)
         _postAttentionLayerNorm.wrappedValue = RMSNorm(dimensions: hiddenWidth)
         super.init()
@@ -96,6 +104,20 @@ private func expectEqual(
 }
 
 @Suite struct HybridDecodeLayerTests {
+
+    @Test func gatedDeltaNetIsTheMixerOfALinearLayer() {
+        let mixer = Identity()
+        let layer = ArithmeticHybridLayer(linearAttn: mixer)
+
+        #expect(layer.gatedDeltaNet === mixer)
+    }
+
+    @Test func fullAttentionIsTheAttentionOfAFullAttentionLayer() {
+        let attention = Identity()
+        let layer = ArithmeticHybridLayer(selfAttn: attention)
+
+        #expect(layer.fullAttention === attention)
+    }
 
     @Test func linearLayerBodyClosesTheMixerWithTheResidualFeedForward() {
         let layer = ArithmeticHybridLayer()

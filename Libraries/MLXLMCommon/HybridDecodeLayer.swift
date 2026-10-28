@@ -34,11 +34,24 @@ package struct GatedDeltaLayerStep {
 /// full-attention layers — whose bodies a compiled decode schedule
 /// (``CompiledDecodeSegment``) traces.
 ///
-/// Each layer gives its norms and its blocks. The bodies around them — the
-/// residual and the feed-forward block that close every layer, the gated
-/// delta body with its states passed in and out, and the two halves of a
-/// full-attention layer around its KV write — are shared by this extension.
+/// Each layer gives its norms, its blocks, and its two optional mixer modules
+/// (a linear layer holds the gated delta net, a full-attention layer the
+/// attention). The bodies around them — the residual and the feed-forward
+/// block that close every layer, the gated delta body with its states passed
+/// in and out, and the two halves of a full-attention layer around its KV
+/// write — and the accessors that unwrap the mixer a layer kind must hold are
+/// shared by this extension.
 package protocol HybridDecodeLayer: Module {
+    /// The module type of the gated delta net of a linear layer.
+    associatedtype LinearMixer: Module
+    /// The module type of the attention of a full-attention layer.
+    associatedtype AttentionMixer: Module
+
+    /// The gated delta net; non-nil exactly for a linear layer.
+    var linearAttn: LinearMixer? { get }
+    /// The attention; non-nil exactly for a full-attention layer.
+    var selfAttn: AttentionMixer? { get }
+
     /// The RMSNorm before the mixer, the gated delta net or the attention.
     var inputLayerNorm: RMSNorm { get }
     /// The RMSNorm before the feed-forward block.
@@ -81,6 +94,23 @@ package protocol HybridDecodeLayer: Module {
 }
 
 extension HybridDecodeLayer {
+    /// The gated delta net of a linear layer; only a linear layer may ask.
+    package var gatedDeltaNet: LinearMixer {
+        guard let linearAttn else {
+            preconditionFailure("only a linear layer has a gated delta net")
+        }
+        return linearAttn
+    }
+
+    /// The attention of a full-attention layer; only a full-attention layer
+    /// may ask.
+    package var fullAttention: AttentionMixer {
+        guard let selfAttn else {
+            preconditionFailure("only a full-attention layer has an attention")
+        }
+        return selfAttn
+    }
+
     /// The gated delta net layer with its states passed in and out, for a
     /// traced step.
     ///

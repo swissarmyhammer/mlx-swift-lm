@@ -509,22 +509,6 @@ final class Qwen3NextDecoderLayer: Module, HybridDecodeLayer {
         return r + mlp(postAttentionLayerNorm(r))
     }
 
-    /// The gated delta net of a linear layer.
-    private var gatedDeltaNet: Qwen3NextGatedDeltaNet {
-        guard let linearAttn else {
-            preconditionFailure("only a linear layer has a gated delta net")
-        }
-        return linearAttn
-    }
-
-    /// The attention of a full-attention layer.
-    fileprivate var fullAttention: Qwen3NextAttention {
-        guard let selfAttn else {
-            preconditionFailure("only a full-attention layer has an attention")
-        }
-        return selfAttn
-    }
-
     // MARK: - Layer blocks
 
     /// The gated delta net with its states passed in and out; the shared

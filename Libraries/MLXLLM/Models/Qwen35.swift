@@ -832,22 +832,6 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
         return h + mlp(postAttentionLayerNorm(h))
     }
 
-    /// The gated delta net of a linear layer.
-    private var gatedDeltaNet: Qwen35GatedDeltaNet {
-        guard let linearAttn else {
-            preconditionFailure("only a linear layer has a gated delta net")
-        }
-        return linearAttn
-    }
-
-    /// The attention of a full-attention layer.
-    private var fullAttention: Qwen35Attention {
-        guard let selfAttn else {
-            preconditionFailure("only a full-attention layer has an attention")
-        }
-        return selfAttn
-    }
-
     // MARK: - Compiled decode blocks
 
     // Every body stays inside this layer, so each trace's default state (the
