@@ -203,7 +203,8 @@ private func expectEqual(
 
         let hidden = linearOutput(x, of: layers[0])
         let normed = layers[1].inputLayerNorm(hidden)
-        let head = segments[0].attentionOutputOffset
+        let head = segments[0].attentionOutputOffset(
+            outputsPerLinearLayer: CompiledDecodeSegment.statesPerLinearLayer)
         #expect(outputs.count == head + Head.count)
         expectEqual(outputs[0], hidden)
         expectEqual(outputs[1], convState + stateStep)
@@ -253,6 +254,142 @@ private func expectEqual(
             layers[2].inputLayerNorm(attended), convState: convState, recState: recState)
         for (got, slots) in zip(outputs[kept...], expected.traceArrays) {
             expectEqual(got, slots)
+        }
+    }
+
+    // MARK: - Schedule runner
+
+    /// The conv state the GDN cache of layer `layer` holds before a step.
+    private func convState(of layer: Int) -> MLXArray {
+        hiddenStates(offset: 10 + Float(layer))
+    }
+
+    /// The recurrent state the GDN cache of layer `layer` holds before a step.
+    private func recState(of layer: Int) -> MLXArray {
+        hiddenStates(offset: 20 + Float(layer))
+    }
+
+    /// A GDN cache holding ``convState(of:)`` and ``recState(of:)`` of `layer`.
+    private func linearCache(of layer: Int) -> MambaCache {
+        let cache = MambaCache()
+        cache[0] = convState(of: layer)
+        cache[1] = recState(of: layer)
+        return cache
+    }
+
+    /// The caches of ``schedule()``: a GDN cache with its states, `attention`, a GDN cache
+    /// with its states.
+    private func scheduleCaches(attention: KVCache? = KVCacheSimple()) -> [KVCache?] {
+        [linearCache(of: 0), attention, linearCache(of: 2)]
+    }
+
+    /// What the attention step of these tests gives back for `step`: the queries plus the
+    /// keys, so the result shows which head outputs the runner handed over.
+    private func attended(_ step: CompiledDecodeSchedule.AttentionStep) -> MLXArray {
+        step.queries + step.keys
+    }
+
+    @Test func scheduleCachesRefuseACacheListOfAnotherLength() {
+        let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+
+        #expect(schedule.caches(Array(scheduleCaches().dropLast())) == nil)
+    }
+
+    @Test func scheduleCachesRefuseALinearLayerWithNoStateYet() {
+        let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+
+        #expect(schedule.caches([linearCache(of: 0), KVCacheSimple(), MambaCache()]) == nil)
+    }
+
+    @Test func scheduleCachesRefuseAnAttentionCacheWithARouteOfItsOwn() {
+        let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+
+        #expect(schedule.caches(scheduleCaches(attention: QuantizedKVCache())) == nil)
+    }
+
+    @Test func scheduleCachesRefuseAMissingAttentionCache() {
+        let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+
+        #expect(schedule.caches(scheduleCaches(attention: nil)) == nil)
+    }
+
+    @Test func runOfADecodeStepCommitsTheStatesAndAttendsBetweenSegments() throws {
+        let (segments, layers) = schedule()
+        let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+        let attentionCache = KVCacheSimple()
+        let cache = scheduleCaches(attention: attentionCache)
+        let caches = try #require(schedule.caches(cache))
+        let finalNorm = RMSNorm(dimensions: hiddenWidth)
+        let x = hiddenStates()
+        var steps: [CompiledDecodeSchedule.AttentionStep] = []
+
+        let output = schedule.run(
+            x, caches: caches, verify: nil,
+            segment: { index, arguments in
+                segments[index].body(
+                    arguments[0], arguments: arguments, layers: layers, finalNorm: finalNorm,
+                    verify: nil)
+            },
+            attention: { step in
+                steps.append(step)
+                return attended(step)
+            })
+
+        let hidden = linearOutput(x, of: layers[0])
+        let normed = layers[1].inputLayerNorm(hidden)
+        let step = try #require(steps.first)
+        #expect(steps.count == 1)
+        #expect(step.layer == 1)
+        #expect((step.cache as? KVCacheSimple) === attentionCache)
+        expectEqual(step.queries, normed + headOffset(Head.queries))
+        expectEqual(step.keys, normed + headOffset(Head.keys))
+        expectEqual(step.values, normed + headOffset(Head.values))
+        let attention = attended(step)
+        let gate = normed + headOffset(Head.gate)
+        expectEqual(
+            output,
+            finalNorm(linearOutput(closed(hidden + attention * gate, by: layers[1]), of: layers[2]))
+        )
+        for layer in [0, 2] {
+            let linear = try #require(cache[layer] as? MambaCache)
+            expectEqual(try #require(linear[0]), convState(of: layer) + stateStep)
+            expectEqual(try #require(linear[1]), recState(of: layer) + stateStep)
+            #expect(linear.offset == GatedDeltaDecodeKernel.decodeTokens)
+            #expect(linear.speculativeSlotCount == 0)
+        }
+    }
+
+    @Test func runOfAVerifyKeepsTheSnapshotSlotsAndAdvancesByItsTokens() throws {
+        let (segments, layers) = schedule()
+        let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+        let verify = try #require(CompiledVerifyShape(tokens: stepTokens))
+        let cache = scheduleCaches()
+        let caches = try #require(schedule.caches(cache))
+        let finalNorm = RMSNorm(dimensions: hiddenWidth)
+        let x = hiddenStates()
+
+        let output = schedule.run(
+            x, caches: caches, verify: verify,
+            segment: { index, arguments in
+                segments[index].body(
+                    arguments[0], arguments: arguments, layers: layers, finalNorm: finalNorm,
+                    verify: verify)
+            },
+            attention: attended)
+
+        let hidden = linearOutput(x, of: layers[0])
+        let normed = layers[1].inputLayerNorm(hidden)
+        let attention =
+            (normed + headOffset(Head.queries)) + (normed + headOffset(Head.keys))
+        let gate = normed + headOffset(Head.gate)
+        expectEqual(
+            output, linearOutput(closed(hidden + attention * gate, by: layers[1]), of: layers[2]))
+        for layer in [0, 2] {
+            let linear = try #require(cache[layer] as? MambaCache)
+            expectEqual(try #require(linear[0]), convState(of: layer) + stateStep)
+            expectEqual(try #require(linear[1]), recState(of: layer) + stateStep)
+            #expect(linear.offset == stepTokens)
+            #expect(linear.speculativeSlotCount == stepTokens)
         }
     }
 }

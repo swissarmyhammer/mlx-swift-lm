@@ -552,7 +552,8 @@ public class Qwen3NextModelInner: Module {
     let ssmIdx: Int
     let faIdx: Int
 
-    private let decodeSegments: [CompiledDecodeSegment]
+    /// The traced pieces of a decode step and the runner over them.
+    private let decodeSchedule: CompiledDecodeSchedule
     private let compiledSegments: CompiledDecodeSegmentCache<Qwen3NextModelInner>
 
     var compiledDecodeSegmentCount: Int { compiledSegments.compiledCount }
@@ -575,9 +576,9 @@ public class Qwen3NextModelInner: Module {
         self.ssmIdx = 0
         self.faIdx = args.fullAttentionInterval - 1
 
-        let segments = CompiledDecodeSegment.schedule(
-            linearLayers: layers.map(\.isLinear))
-        self.decodeSegments = segments
+        let schedule = CompiledDecodeSchedule(linearLayers: layers.map(\.isLinear))
+        let segments = schedule.segments
+        self.decodeSchedule = schedule
         self.compiledSegments = CompiledDecodeSegmentCache(
             count: segments.count,
             state: { model, index in
@@ -643,7 +644,7 @@ public class Qwen3NextModelInner: Module {
     /// The embedding runs outside the trace, so every segment starts from its
     /// first argument.
     private func segmentBody(at index: Int, _ arguments: [MLXArray]) -> [MLXArray] {
-        decodeSegments[index].body(
+        decodeSchedule.segments[index].body(
             arguments[0], arguments: arguments, layers: layers, finalNorm: norm, verify: nil)
     }
 
@@ -654,82 +655,32 @@ public class Qwen3NextModelInner: Module {
         // MLX fusion currently changes low-order bfloat16/float32 results for
         // this model. fp16 is pinned byte-identical against the general path.
         let embedded = embedTokens(inputs)
-        guard embedded.dtype == .float16 else { return nil }
-        guard cache.count == layers.count else { return nil }
+        guard embedded.dtype == .float16, let caches = decodeSchedule.caches(cache) else {
+            return nil
+        }
         if createSSMMask(h: inputs, cache: cache[ssmIdx] as? MambaCache) != nil {
             return nil
         }
-        guard let attentionCache = cache[faIdx],
-            case .none = createAttentionMask(h: inputs, cache: attentionCache)
-        else { return nil }
-
-        var mambaCaches = [MambaCache?](repeating: nil, count: layers.count)
-        for (index, layer) in layers.enumerated() {
-            if layer.isLinear {
-                guard let mambaCache = cache[index] as? MambaCache,
-                    mambaCache[0] != nil, mambaCache[1] != nil
-                else { return nil }
-                mambaCaches[index] = mambaCache
-            } else {
-                guard let kvCache = cache[index], usesPlainAttentionCacheRoute(kvCache) else {
-                    return nil
-                }
-            }
+        guard case .none = createAttentionMask(h: inputs, cache: cache[faIdx]) else {
+            return nil
         }
 
-        var carry = embedded
-        var pendingAttention: [MLXArray] = []
-
-        for (segmentIndex, segment) in decodeSegments.enumerated() {
-            var arguments = [carry] + pendingAttention
-            for layerIndex in segment.linearLayers {
-                let mambaCache = mambaCaches[layerIndex]!
-                arguments.append(mambaCache[0]!)
-                arguments.append(mambaCache[1]!)
-            }
-
-            let outputs = compiledSegments(self, at: segmentIndex, arguments)
-
-            carry = outputs[0]
-            for (stateIndex, layerIndex) in segment.linearLayers.enumerated() {
-                let mambaCache = mambaCaches[layerIndex]!
-                mambaCache[0] = outputs[1 + 2 * stateIndex]
-                mambaCache[1] = outputs[2 + 2 * stateIndex]
-                mambaCache.advance(1)
-            }
-
-            pendingAttention = []
-            if let pre = segment.attentionPreLayer {
-                let outputIndex = segment.attentionOutputOffset
-                let attention = attentionCacheStep(
-                    layer: pre,
-                    queries: outputs[outputIndex],
-                    keys: outputs[outputIndex + 2],
-                    values: outputs[outputIndex + 3],
-                    cache: cache[pre]!)
-                pendingAttention = [attention, outputs[outputIndex + 1]]
-            }
-        }
-
-        return carry
+        return decodeSchedule.run(
+            embedded, caches: caches, verify: nil,
+            segment: { index, arguments in compiledSegments(self, at: index, arguments) },
+            attention: { attentionCacheStep($0) })
     }
 
     /// RoPE, KV growth, and SDPA are the dynamic boundary between two static
     /// compiled segments.
-    private func attentionCacheStep(
-        layer index: Int,
-        queries: MLXArray,
-        keys: MLXArray,
-        values: MLXArray,
-        cache: KVCache
-    ) -> MLXArray {
-        let attention = layers[index].fullAttention
-        let offset = cache.ropeOffset
+    private func attentionCacheStep(_ step: CompiledDecodeSchedule.AttentionStep) -> MLXArray {
+        let attention = layers[step.layer].fullAttention
+        let offset = step.cache.ropeOffset
         return attentionWithCacheUpdate(
-            queries: applyRotaryPosition(attention.rope, to: queries, offset: offset),
-            keys: applyRotaryPosition(attention.rope, to: keys, offset: offset),
-            values: values,
-            cache: cache,
+            queries: applyRotaryPosition(attention.rope, to: step.queries, offset: offset),
+            keys: applyRotaryPosition(attention.rope, to: step.keys, offset: offset),
+            values: step.values,
+            cache: step.cache,
             scale: attention.scale,
             mask: .none)
     }

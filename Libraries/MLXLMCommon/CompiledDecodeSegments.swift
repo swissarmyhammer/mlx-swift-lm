@@ -31,12 +31,6 @@ package struct CompiledDecodeSegment: Sendable, Equatable {
     package var stateInputOffset: Int { attentionPostLayer == nil ? 1 : 3 }
 
     /// First `[queries, gate, keys, values]` output after the hidden state and
-    /// two updated state tensors per linear layer.
-    package var attentionOutputOffset: Int {
-        attentionOutputOffset(outputsPerLinearLayer: Self.statesPerLinearLayer)
-    }
-
-    /// First `[queries, gate, keys, values]` output after the hidden state and
     /// the outputs of each linear layer.
     ///
     /// - Parameter outputsPerLinearLayer: The tensors each linear layer gives

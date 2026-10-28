@@ -944,9 +944,10 @@ public enum Qwen35Language {
                 && supportsCompiledDecode
 
             if canCompile, isLinear, let mambaCache = cache as? MambaCache,
-                mambaCache[0] != nil, mambaCache[1] != nil
+                let convState = mambaCache[0], let recState = mambaCache[1]
             {
-                return decodeLinearLayer(x, cache: mambaCache)
+                return decodeLinearLayer(
+                    x, convState: convState, recState: recState, cache: mambaCache)
             }
 
             let r: MLXArray
@@ -996,8 +997,12 @@ public enum Qwen35Language {
             return mlp is MLP
         }
 
-        private func decodeLinearLayer(_ x: MLXArray, cache: MambaCache) -> MLXArray {
-            let outputs = compiledLinearLayer(self, [x, cache[0]!, cache[1]!])
+        /// GDN decode layer as one traced function, from the states the cache
+        /// holds; it writes the states it gives back into the cache.
+        private func decodeLinearLayer(
+            _ x: MLXArray, convState: MLXArray, recState: MLXArray, cache: MambaCache
+        ) -> MLXArray {
+            let outputs = compiledLinearLayer(self, [x, convState, recState])
             cache[0] = outputs[1]
             cache[1] = outputs[2]
             cache.advance(1)
@@ -1070,7 +1075,8 @@ public enum Qwen35Language {
         let ssmIdx: Int?
         let faIdx: Int?
 
-        private let decodeSegments: [CompiledDecodeSegment]
+        /// The traced pieces of a decode step and the runner over them.
+        private let decodeSchedule: CompiledDecodeSchedule
         private let compiledSegments: CompiledDecodeSegmentCache<Model>
 
         public init(_ args: Qwen35Configuration.TextConfiguration) {
@@ -1086,9 +1092,9 @@ public enum Qwen35Language {
             self.ssmIdx = layers.firstIndex(where: { $0.isLinear })
             self.faIdx = layers.firstIndex(where: { !$0.isLinear })
 
-            let segments = CompiledDecodeSegment.schedule(
-                linearLayers: layers.map(\.isLinear))
-            self.decodeSegments = segments
+            let schedule = CompiledDecodeSchedule(linearLayers: layers.map(\.isLinear))
+            let segments = schedule.segments
+            self.decodeSchedule = schedule
             self.compiledSegments = CompiledDecodeSegmentCache(
                 count: segments.count,
                 state: { model, index in
@@ -1235,78 +1241,50 @@ public enum Qwen35Language {
         /// The embedding runs outside the trace, so every segment starts from
         /// its first argument.
         private func segmentBody(at index: Int, _ arguments: [MLXArray]) -> [MLXArray] {
-            decodeSegments[index].body(
+            decodeSchedule.segments[index].body(
                 arguments[0], arguments: arguments, layers: layers, finalNorm: norm, verify: nil)
         }
 
+        /// One decode step through the compiled segments, or nil when the step
+        /// takes the general path: a dtype the traces do not hold exactly, a
+        /// layer that does not support compiled decode, caches the schedule
+        /// refuses (``CompiledDecodeSchedule/caches(_:)``), or a step that
+        /// needs a mask.
         private func decodeStep(
             _ inputs: MLXArray, _ cache: [KVCache?], positionIds: MLXArray?
         ) -> MLXArray? {
             let embedded = embedTokens(inputs)
-            guard supportsExactCompiledDecode(embedded.dtype) else { return nil }
-            guard cache.count == layers.count else { return nil }
+            guard supportsExactCompiledDecode(embedded.dtype),
+                layers.allSatisfy(\.supportsCompiledDecode),
+                let caches = decodeSchedule.caches(cache),
+                needsNoMask(embedded, cache)
+            else { return nil }
+
+            return decodeSchedule.run(
+                embedded, caches: caches, verify: nil,
+                segment: { index, arguments in compiledSegments(self, at: index, arguments) },
+                attention: { step in
+                    layers[step.layer].attentionCacheStep(
+                        queries: step.queries, keys: step.keys, values: step.values,
+                        cache: step.cache, positionIds: positionIds)
+                })
+        }
+
+        /// True when a step over `embedded` needs neither an SSM mask nor an
+        /// attention mask. `cache` holds one cache for each layer.
+        private func needsNoMask(_ embedded: MLXArray, _ cache: [KVCache?]) -> Bool {
             if let ssmIdx,
                 createSSMMask(h: embedded, cache: cache[ssmIdx] as? MambaCache) != nil
             {
-                return nil
+                return false
             }
-            if let faIdx {
-                guard let faCache = cache[faIdx],
-                    case .none = createAttentionMask(
-                        h: embedded, cache: faCache, returnArray: true)
-                else { return nil }
+            guard let faIdx else { return true }
+            if case .none = createAttentionMask(
+                h: embedded, cache: cache[faIdx], returnArray: true)
+            {
+                return true
             }
-
-            var mambaCaches = [MambaCache?](repeating: nil, count: layers.count)
-            for (index, layer) in layers.enumerated() {
-                guard layer.supportsCompiledDecode else { return nil }
-                if layer.isLinear {
-                    guard let mambaCache = cache[index] as? MambaCache,
-                        mambaCache[0] != nil, mambaCache[1] != nil
-                    else { return nil }
-                    mambaCaches[index] = mambaCache
-                } else {
-                    guard let kvCache = cache[index], usesPlainAttentionCacheRoute(kvCache) else {
-                        return nil
-                    }
-                }
-            }
-
-            var carry = embedded
-            var pendingAttention: [MLXArray] = []
-
-            for (segmentIndex, segment) in decodeSegments.enumerated() {
-                var args = [carry] + pendingAttention
-                for layerIndex in segment.linearLayers {
-                    let mambaCache = mambaCaches[layerIndex]!
-                    args.append(mambaCache[0]!)
-                    args.append(mambaCache[1]!)
-                }
-
-                let outputs = compiledSegments(self, at: segmentIndex, args)
-                carry = outputs[0]
-
-                for (stateIndex, layerIndex) in segment.linearLayers.enumerated() {
-                    let mambaCache = mambaCaches[layerIndex]!
-                    mambaCache[0] = outputs[1 + 2 * stateIndex]
-                    mambaCache[1] = outputs[2 + 2 * stateIndex]
-                    mambaCache.advance(1)
-                }
-
-                pendingAttention = []
-                if let pre = segment.attentionPreLayer {
-                    let head = segment.attentionOutputOffset
-                    let attention = layers[pre].attentionCacheStep(
-                        queries: outputs[head],
-                        keys: outputs[head + 2],
-                        values: outputs[head + 3],
-                        cache: cache[pre]!,
-                        positionIds: positionIds)
-                    pendingAttention = [attention, outputs[head + 1]]
-                }
-            }
-
-            return carry
+            return false
         }
     }
 

@@ -927,9 +927,9 @@ public class Qwen35TextModelInner: Module {
         self.ssmIdx = layers.firstIndex(where: { $0.isLinear })
         self.faIdx = layers.firstIndex(where: { !$0.isLinear })
 
-        let segments = CompiledDecodeSegment.schedule(
-            linearLayers: layers.map(\.isLinear))
-        self.decodeSegments = segments
+        let schedule = CompiledDecodeSchedule(linearLayers: layers.map(\.isLinear))
+        let segments = schedule.segments
+        self.decodeSchedule = schedule
         let state: CompiledDecodeSegmentCache<Qwen35TextModelInner>.StateProvider = {
             model, index in
             // Everything `segmentBody` reads: the layers it runs (with a
@@ -1025,10 +1025,11 @@ public class Qwen35TextModelInner: Module {
 
     // MARK: - Whole-step decode schedule
 
-    /// One traced piece of a decode step: the tail of the previous
-    /// full-attention layer, a run of GDN layers, then the head of the next
-    /// one (whose SDPA runs between this segment and the next).
-    private let decodeSegments: [CompiledDecodeSegment]
+    /// The traced pieces of a decode step and the runner over them: each
+    /// segment is the tail of the previous full-attention layer, a run of GDN
+    /// layers, then the head of the next one (whose SDPA runs between this
+    /// segment and the next).
+    private let decodeSchedule: CompiledDecodeSchedule
     private let compiledSegments: CompiledDecodeSegmentCache<Qwen35TextModelInner>
 
     /// The same segments for a speculative verify, one schedule for each
@@ -1042,22 +1043,6 @@ public class Qwen35TextModelInner: Module {
     /// The compiled segment traces of every verify shape a step has run.
     var compiledVerifySegmentCount: Int { compiledVerifySegments.compiledCount }
 
-    /// The places of the outputs of an attention head among the outputs of a
-    /// segment.
-    private typealias AttentionOutput = CompiledDecodeSegment.AttentionOutput
-
-    /// The caches a compiled step reads and writes, segment by segment.
-    private struct ScheduleCaches {
-        /// For each segment, the cache of each of its GDN layers, with the
-        /// conv and recurrent states the layer reads.
-        let linear: [[(cache: MambaCache, states: [MLXArray])]]
-        /// For each segment, the attention layer it closes with and the cache
-        /// of that layer, or nil for the last segment.
-        let attention: [(layer: Int, cache: KVCache)?]
-        /// The attention mask of the step, the same for each attention layer.
-        let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode
-    }
-
     /// Runs segment `index` through the shared
     /// ``CompiledDecodeSegment/body(_:arguments:layers:finalNorm:verify:)``.
     /// Segment 0 takes the token ids as its first argument and embeds them
@@ -1069,7 +1054,7 @@ public class Qwen35TextModelInner: Module {
     private func segmentBody(
         at index: Int, _ arguments: [MLXArray], verify: CompiledVerifyShape?
     ) -> [MLXArray] {
-        decodeSegments[index].body(
+        decodeSchedule.segments[index].body(
             index == 0 ? embedTokens(arguments[0]) : arguments[0], arguments: arguments,
             layers: layers, finalNorm: norm, verify: verify)
     }
@@ -1107,11 +1092,13 @@ public class Qwen35TextModelInner: Module {
     /// everything else on a decode step is static-shaped, so the segments
     /// compile concretely.
     private func decodeStep(_ inputs: MLXArray, _ cache: [KVCache?]) -> MLXArray? {
-        guard let caches = scheduleCaches(inputs, cache), case .none = caches.attentionMask
+        guard let caches = scheduleCaches(inputs, cache),
+            case .none = attentionMask(inputs, cache)
         else { return nil }
-        return runSchedule(inputs, caches, verify: nil) { index, arguments in
-            compiledSegments(self, at: index, arguments)
-        }
+        return decodeSchedule.run(
+            inputs, caches: caches, verify: nil,
+            segment: { index, arguments in compiledSegments(self, at: index, arguments) },
+            attention: { attend($0, mask: .none) })
     }
 
     /// One speculative verify through the compiled segments of its shape, or
@@ -1126,121 +1113,47 @@ public class Qwen35TextModelInner: Module {
         _ inputs: MLXArray, _ cache: [KVCache?], shape: CompiledVerifyShape
     ) -> MLXArray? {
         guard let caches = scheduleCaches(inputs, cache) else { return nil }
-        return runSchedule(inputs, caches, verify: shape) { index, arguments in
-            compiledVerifySegments(self, key: shape, at: index, arguments)
-        }
+        let mask = attentionMask(inputs, cache)
+        return decodeSchedule.run(
+            inputs, caches: caches, verify: shape,
+            segment: { index, arguments in
+                compiledVerifySegments(self, key: shape, at: index, arguments)
+            },
+            attention: { attend($0, mask: mask) })
     }
 
     /// The caches of a compiled step, or nil when the step takes the general
-    /// path: the cache list does not match the layers, the step needs an SSM
-    /// mask, a GDN layer has no state yet, or an attention cache has a route
-    /// of its own. Cache kinds can change mid-generation
-    /// (`maybeQuantizeKVCache` swaps array entries), so eligibility is
-    /// re-checked every step.
-    private func scheduleCaches(_ inputs: MLXArray, _ cache: [KVCache?]) -> ScheduleCaches? {
-        guard cache.count == layers.count else { return nil }
+    /// path: the schedule refuses the caches
+    /// (``CompiledDecodeSchedule/caches(_:)``), or the step needs an SSM
+    /// mask.
+    private func scheduleCaches(
+        _ inputs: MLXArray, _ cache: [KVCache?]
+    ) -> CompiledDecodeSchedule.Caches? {
+        guard let caches = decodeSchedule.caches(cache) else { return nil }
         if let ssmIdx,
             createSSMMask(h: inputs, cache: cache[ssmIdx] as? MambaCache) != nil
         {
             return nil
         }
-        let attentionLayersFit = layers.indices.filter { !layers[$0].isLinear }.allSatisfy {
-            cache[$0].map(usesPlainAttentionCacheRoute) ?? false
-        }
-        let linear = decodeSegments.compactMap { linearCaches(of: $0, cache) }
-        guard attentionLayersFit, linear.count == decodeSegments.count else { return nil }
-
-        let attention = decodeSegments.map { segment in
-            segment.attentionPreLayer.flatMap { layer in
-                cache[layer].map { (layer: layer, cache: $0) }
-            }
-        }
-        let attentionMask =
-            faIdx.flatMap { cache[$0] }.map { createAttentionMask(h: inputs, cache: $0) }
-            ?? .none
-        return ScheduleCaches(linear: linear, attention: attention, attentionMask: attentionMask)
+        return caches
     }
 
-    /// The caches of the GDN layers of `segment` with their states, or nil
-    /// when one of them has no state yet: a single-token prompt, for which
-    /// the general path builds the zero states.
-    private func linearCaches(of segment: CompiledDecodeSegment, _ cache: [KVCache?]) -> [(
-        cache: MambaCache, states: [MLXArray]
-    )]? {
-        let caches = segment.linearLayers.compactMap {
-            index -> (cache: MambaCache, states: [MLXArray])? in
-            guard let mambaCache = cache[index] as? MambaCache,
-                let convState = mambaCache[0], let recurrentState = mambaCache[1]
-            else { return nil }
-            return (mambaCache, [convState, recurrentState])
-        }
-        return caches.count == segment.linearLayers.count ? caches : nil
+    /// The attention mask of a step, the same for each attention layer.
+    private func attentionMask(
+        _ inputs: MLXArray, _ cache: [KVCache?]
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        faIdx.flatMap { cache[$0] }.map { createAttentionMask(h: inputs, cache: $0) } ?? .none
     }
 
-    /// Runs the segments of a schedule in order: each GDN layer writes its
-    /// states into its cache, and each attention head runs its KV write and
-    /// its attention between two segments.
-    ///
-    /// - Parameters:
-    ///   - inputs: The token ids of the step.
-    ///   - caches: The caches of the step.
-    ///   - verify: The shape of a verify, or nil for a decode step.
-    ///   - run: Runs one segment over its flat argument list.
-    /// - Returns: The output of the last segment.
-    private func runSchedule(
-        _ inputs: MLXArray, _ caches: ScheduleCaches, verify: CompiledVerifyShape?,
-        segment run: (Int, [MLXArray]) -> [MLXArray]
+    /// The attention of a full-attention layer between two segments, through
+    /// ``Qwen35DecoderLayer/attentionCacheStep(queries:keys:values:cache:mask:)``.
+    private func attend(
+        _ step: CompiledDecodeSchedule.AttentionStep,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
-        let outputsPerLinearLayer =
-            CompiledDecodeSegment.statesPerLinearLayer
-            + (verify == nil ? 0 : GatedDeltaDecodeKernel.Snapshots.traceArrayCount)
-        var carry = inputs
-        var pendingAttention: [MLXArray] = []
-
-        for (index, segment) in decodeSegments.enumerated() {
-            let linear = caches.linear[index]
-            let outputs = run(index, [carry] + pendingAttention + linear.flatMap(\.states))
-            carry = outputs[0]
-            for (position, entry) in linear.enumerated() {
-                let first = 1 + outputsPerLinearLayer * position
-                commit(
-                    Array(outputs[first ..< first + outputsPerLinearLayer]), to: entry.cache,
-                    verify: verify)
-            }
-
-            pendingAttention = []
-            if let attention = caches.attention[index] {
-                let head = segment.attentionOutputOffset(
-                    outputsPerLinearLayer: outputsPerLinearLayer)
-                let output = layers[attention.layer].attentionCacheStep(
-                    queries: outputs[head + AttentionOutput.queries],
-                    keys: outputs[head + AttentionOutput.keys],
-                    values: outputs[head + AttentionOutput.values], cache: attention.cache,
-                    mask: caches.attentionMask)
-                pendingAttention = [output, outputs[head + AttentionOutput.gate]]
-            }
-        }
-
-        return carry
-    }
-
-    /// Writes what a compiled GDN layer gave back into its cache: its conv
-    /// and recurrent states, then, for a verify, the states it keeps for a
-    /// rollback, as the general path of the layer does. The cache advances
-    /// by the tokens of the step: one for a decode step, the tokens of the
-    /// shape for a verify.
-    private func commit(
-        _ outputs: [MLXArray], to cache: MambaCache, verify: CompiledVerifyShape?
-    ) {
-        cache[0] = outputs[0]
-        cache[1] = outputs[1]
-        if verify != nil {
-            cache.saveSpeculativeSnapshots(
-                GatedDeltaDecodeKernel.Snapshots(
-                    traceArrays: Array(
-                        outputs.dropFirst(CompiledDecodeSegment.statesPerLinearLayer))))
-        }
-        cache.advance(verify?.tokens ?? GatedDeltaDecodeKernel.decodeTokens)
+        layers[step.layer].attentionCacheStep(
+            queries: step.queries, keys: step.keys, values: step.values, cache: step.cache,
+            mask: mask)
     }
 }
 
