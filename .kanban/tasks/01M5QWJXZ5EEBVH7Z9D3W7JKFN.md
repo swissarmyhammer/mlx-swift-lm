@@ -52,6 +52,15 @@ comments:
     - gaps: microbenchmark targets M=4<=1.3x (got 1.69x) and M=6<=1.6x (got 2.58x) not met; cache guard red.
     - next: human picks (a) kernel only in the compiled verify, (b) keep for all 3-8 row calls and re-baseline the cache test, or (c) land the kernel without model wiring.
   timestamp: 2026-10-28T17:07:17.067498+00:00
+- actor: claude-code
+  id: 01m61qq47nfx9sp45vkq95aqm4
+  text: |-
+    ### finish iteration 1 — stuck
+    - implement: stuck — kernel bit-identical, M=4 1.69x / M=6 2.58x (targets 1.3x / 1.6x); M=2 via kernel slowed MTP, so M=2 stays on MLX; qwen38FourBitMTPGeneration pass 92.1/81.3/79.2; qwen38FourBitMTPSystemPromptCache FAIL (thinking chat turn 2 gap 1.375) because 3-8 row calls outside the verify (likely prefill tail or drafter) now take the kernel.
+    - commit: f1a91bfa on branch `mtp-multirow-wip` (parked off `mtp` so mtp stays green)
+    - review: not run
+    - decision needed: (a) wire the kernel only into the compiled speculative verify (no effect until drafts deepen), (b) keep it for all 3-8 row calls and update the cache test, (c) land the kernel and tests without model wiring. Implementer recommends (a).
+  timestamp: 2026-10-28T17:07:55.765492+00:00
 depends_on:
 - 01M5SKBCEWG4D25SZZNGG7BVM7
 - 01M5SWXS9E09Y97PV3BV51TPYA

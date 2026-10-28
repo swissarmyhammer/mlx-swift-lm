@@ -399,7 +399,7 @@ public final class Qwen3NextGatedDeltaNet: Module, GatedDeltaDecodeLayer {
     }
 }
 
-final class Qwen3NextSparseMoeBlock: Module {
+final class Qwen3NextSparseMoeBlock: Module, UnaryLayer {
     let normTopkProb: Bool
     let numExperts: Int
     let topK: Int
@@ -451,7 +451,7 @@ final class Qwen3NextSparseMoeBlock: Module {
     }
 }
 
-final class Qwen3NextDecoderLayer: Module {
+final class Qwen3NextDecoderLayer: Module, HybridDecodeLayer {
     let isLinear: Bool
 
     @ModuleInfo(key: "self_attn") var selfAttn: Qwen3NextAttention?
@@ -460,7 +460,7 @@ final class Qwen3NextDecoderLayer: Module {
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
 
-    @ModuleInfo(key: "mlp") var mlp: Module
+    @ModuleInfo(key: "mlp") var mlp: Module & UnaryLayer
 
     init(_ args: Qwen3NextConfiguration, layerIdx: Int) {
         self.isLinear = (layerIdx + 1) % args.fullAttentionInterval != 0
@@ -500,51 +500,62 @@ final class Qwen3NextDecoderLayer: Module {
     ) -> MLXArray {
         let h: MLXArray
         if isLinear {
-            h = linearAttn!(inputLayerNorm(x), mask: ssmMask, cache: cache as? MambaCache)
+            h = gatedDeltaNet(inputLayerNorm(x), mask: ssmMask, cache: cache as? MambaCache)
         } else {
-            h = selfAttn!(inputLayerNorm(x), mask: attentionMask, cache: cache)
+            h = fullAttention(inputLayerNorm(x), mask: attentionMask, cache: cache)
         }
 
         let r = x + h
-        let normed = postAttentionLayerNorm(r)
-        if let moe = mlp as? Qwen3NextSparseMoeBlock {
-            return r + moe(normed)
-        }
-        return r + (mlp as! Qwen3NextMLP)(normed)
+        return r + mlp(postAttentionLayerNorm(r))
     }
 
-    // MARK: - Compiled decode bodies
+    /// The gated delta net of a linear layer.
+    private var gatedDeltaNet: Qwen3NextGatedDeltaNet {
+        guard let linearAttn else {
+            preconditionFailure("only a linear layer has a gated delta net")
+        }
+        return linearAttn
+    }
 
-    func linearLayerBody(x: MLXArray, convState: MLXArray, recState: MLXArray) -> (
-        MLXArray, MLXArray, MLXArray
+    /// The attention of a full-attention layer.
+    fileprivate var fullAttention: Qwen3NextAttention {
+        guard let selfAttn else {
+            preconditionFailure("only a full-attention layer has an attention")
+        }
+        return selfAttn
+    }
+
+    // MARK: - Layer blocks
+
+    /// The gated delta net with its states passed in and out; the shared
+    /// ``HybridDecodeLayer/linearLayerBody(x:convState:recState:checkpointAfter:)``
+    /// wraps it in the layer's norms and residuals.
+    ///
+    /// Qwen3-Next runs no speculative verify, so its gated delta net keeps no
+    /// checkpoint: a decode step is the only caller.
+    func gatedDeltaMixer(
+        _ x: MLXArray, convState: MLXArray, recState: MLXArray, checkpointAfter: Int?
+    ) -> GatedDeltaLayerStep {
+        precondition(checkpointAfter == nil, "a Qwen3-Next gated delta net keeps no checkpoint")
+        let step = gatedDeltaNet.forward(x, convState: convState, recState: recState, mask: nil)
+        return GatedDeltaLayerStep(
+            output: step.output, convState: step.convState, recurrentState: step.recurrentState)
+    }
+
+    func projectAttention(_ x: MLXArray) -> (
+        queries: MLXArray, gate: MLXArray, keys: MLXArray, values: MLXArray
     ) {
-        let (attention, newConvState, newRecState) = linearAttn!.forward(
-            inputLayerNorm(x), convState: convState, recState: recState, mask: nil)
-        let hiddenStates = x + attention
-        return (
-            hiddenStates + mlpForward(postAttentionLayerNorm(hiddenStates)),
-            newConvState,
-            newRecState
-        )
+        fullAttention.projectPreRope(x)
     }
 
-    func attentionPreBody(_ x: MLXArray) -> (MLXArray, MLXArray, MLXArray, MLXArray) {
-        selfAttn!.projectPreRope(inputLayerNorm(x))
+    func mergeAttention(_ attention: MLXArray, gate: MLXArray) -> MLXArray {
+        fullAttention.mergeHeadsAndProject(attention: attention, gate: gate)
     }
 
-    func attentionPostBody(
-        x: MLXArray, attention: MLXArray, gate: MLXArray
-    ) -> MLXArray {
-        let projected = selfAttn!.mergeHeadsAndProject(attention: attention, gate: gate)
-        let hiddenStates = x + projected
-        return hiddenStates + mlpForward(postAttentionLayerNorm(hiddenStates))
-    }
-
-    private func mlpForward(_ x: MLXArray) -> MLXArray {
-        if let moe = mlp as? Qwen3NextSparseMoeBlock {
-            return moe(x)
-        }
-        return (mlp as! Qwen3NextMLP)(x)
+    /// The MLP or the MoE block; neither holds a compiled trace of its own, so
+    /// either can live inside a decode trace.
+    func feedForward(_ x: MLXArray) -> MLXArray {
+        mlp(x)
     }
 }
 
@@ -641,38 +652,15 @@ public class Qwen3NextModelInner: Module {
 
     // MARK: - Compiled decode segments
 
+    /// Runs segment `index` of a decode step through the shared
+    /// ``CompiledDecodeSegment/body(_:arguments:layers:finalNorm:verify:)``.
     /// Flat segment arguments keep mutable cache state outside MLX's compiled
     /// graphs while allowing the static work between cache writes to fuse.
+    /// The embedding runs outside the trace, so every segment starts from its
+    /// first argument.
     private func segmentBody(at index: Int, _ arguments: [MLXArray]) -> [MLXArray] {
-        let segment = decodeSegments[index]
-        var hiddenStates = arguments[0]
-
-        if let post = segment.attentionPostLayer {
-            hiddenStates = layers[post].attentionPostBody(
-                x: hiddenStates, attention: arguments[1], gate: arguments[2])
-        }
-
-        var states: [MLXArray] = []
-        for (stateIndex, layerIndex) in segment.linearLayers.enumerated() {
-            let inputIndex = segment.stateInputOffset + 2 * stateIndex
-            let (output, convState, recState) = layers[layerIndex].linearLayerBody(
-                x: hiddenStates,
-                convState: arguments[inputIndex],
-                recState: arguments[inputIndex + 1])
-            hiddenStates = output
-            states.append(convState)
-            states.append(recState)
-        }
-
-        if let pre = segment.attentionPreLayer {
-            let (queries, gate, keys, values) = layers[pre].attentionPreBody(hiddenStates)
-            return [hiddenStates] + states + [queries, gate, keys, values]
-        }
-
-        if index == decodeSegments.count - 1 {
-            hiddenStates = norm(hiddenStates)
-        }
-        return [hiddenStates] + states
+        decodeSegments[index].body(
+            arguments[0], arguments: arguments, layers: layers, finalNorm: norm, verify: nil)
     }
 
     /// Execute one eligible single-token step through the shared compiled
@@ -751,7 +739,7 @@ public class Qwen3NextModelInner: Module {
         values: MLXArray,
         cache: KVCache
     ) -> MLXArray {
-        let attention = layers[index].selfAttn!
+        let attention = layers[index].fullAttention
         let offset = cache.ropeOffset
         return attentionWithCacheUpdate(
             queries: applyRotaryPosition(attention.rope, to: queries, offset: offset),

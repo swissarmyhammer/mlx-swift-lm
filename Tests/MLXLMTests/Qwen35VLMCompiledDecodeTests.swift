@@ -206,6 +206,38 @@ final class Qwen35VLMCompiledDecodeTests: XCTestCase {
         XCTAssertGreaterThan(model.compiledDecodeSegmentCount, 0)
     }
 
+    func testLinearLayerSharedHybridBodyMatchesEagerLayerExactly() throws {
+        let configuration = try configuration(numExperts: 4)
+        let layer = withRandomState(MLXRandom.RandomState(seed: 103)) {
+            let layer = Qwen35Language.DecoderLayer(configuration, layerIdx: 0)
+            layer.update(parameters: layer.parameters().mapValues { $0.asType(.float16) })
+            layer.train(false)
+            return layer
+        }
+        let gatedDeltaNet = try XCTUnwrap(layer.linearAttn)
+        let zero = gatedDeltaNet.zeroStates(batch: 1, dtype: .float16)
+        let (x, convState, recState) = withRandomState(MLXRandom.RandomState(seed: 107)) {
+            (
+                MLXRandom.normal([1, 1, configuration.hiddenSize]).asType(.float16),
+                MLXRandom.normal(zero.conv.shape).asType(.float16),
+                MLXRandom.normal(zero.rec.shape)
+            )
+        }
+        let cache = MambaCache()
+        cache[0] = convState
+        cache[1] = recState
+
+        let eager = layer.forward(
+            x, attentionMask: nil, ssmMask: nil, cache: cache, positionIds: nil,
+            checkpointAfter: nil, allowCompiledDecode: false)
+        let step = layer.linearLayerBody(x: x, convState: convState, recState: recState)
+
+        XCTAssertEqual(Snapshot(step.output), Snapshot(eager))
+        XCTAssertEqual(Snapshot(step.convState), Snapshot(try XCTUnwrap(cache[0])))
+        XCTAssertEqual(Snapshot(step.recurrentState), Snapshot(try XCTUnwrap(cache[1])))
+        XCTAssertNil(step.speculative)
+    }
+
     func testFirstEmptyCacheTokenStaysEager() throws {
         let model = try makeModel(numExperts: 0, seed: 41)
         let cache = plainCache()

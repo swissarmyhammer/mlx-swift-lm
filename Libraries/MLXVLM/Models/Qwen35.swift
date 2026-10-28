@@ -902,17 +902,19 @@ public enum Qwen35Language {
         }
     }
 
-    open class DecoderLayer: Module {
+    open class DecoderLayer: Module, HybridDecodeLayer {
         let isLinear: Bool
         let allowsCompiledDecode: Bool
 
         @ModuleInfo(key: "self_attn") var selfAttn: Attention?
         @ModuleInfo(key: "linear_attn") var linearAttn: GatedDeltaNet?
 
-        @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
-        @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
+        /// The RMSNorm before the gated delta net or the attention.
+        @ModuleInfo(key: "input_layernorm") package var inputLayerNorm: RMSNorm
+        /// The RMSNorm before the feed-forward block.
+        @ModuleInfo(key: "post_attention_layernorm") package var postAttentionLayerNorm: RMSNorm
 
-        @ModuleInfo(key: "mlp") var mlp: Module
+        @ModuleInfo(key: "mlp") var mlp: Module & UnaryLayer
 
         public init(
             _ args: Qwen35Configuration.TextConfiguration, layerIdx: Int,
@@ -987,11 +989,11 @@ public enum Qwen35Language {
 
             let r: MLXArray
             if isLinear {
-                r = linearAttn!(
+                r = gatedDeltaNet(
                     inputLayerNorm(x), mask: ssmMask, cache: cache as? MambaCache,
                     checkpointAfter: checkpointAfter)
             } else {
-                r = selfAttn!(
+                r = fullAttention(
                     inputLayerNorm(x), mask: attentionMask, cache: cache, positionIds: positionIds)
             }
 
@@ -1040,25 +1042,6 @@ public enum Qwen35Language {
             return outputs[0]
         }
 
-        func linearLayerBody(
-            x: MLXArray, convState: MLXArray, recState: MLXArray
-        ) -> (output: MLXArray, convState: MLXArray, recurrentState: MLXArray) {
-            let result = linearAttn!.forward(
-                inputLayerNorm(x), convState: convState, recState: recState, mask: nil)
-            let h = x + result.output
-            return (
-                h + mlpForward(postAttentionLayerNorm(h), allowCompiledDecode: false),
-                result.convState,
-                result.recurrentState
-            )
-        }
-
-        func attentionPreBody(
-            x: MLXArray
-        ) -> (MLXArray, MLXArray, MLXArray, MLXArray) {
-            selfAttn!.projectPreRope(inputLayerNorm(x))
-        }
-
         func attentionCacheStep(
             queries: MLXArray,
             keys: MLXArray,
@@ -1066,7 +1049,7 @@ public enum Qwen35Language {
             cache: KVCache,
             positionIds: MLXArray?
         ) -> MLXArray {
-            selfAttn!.attend(
+            fullAttention.attend(
                 queries: queries,
                 keys: keys,
                 values: values,
@@ -1075,19 +1058,61 @@ public enum Qwen35Language {
                 positionIds: positionIds)
         }
 
-        func attentionPostBody(
-            x: MLXArray, attention: MLXArray, gate: MLXArray
-        ) -> MLXArray {
-            let r = selfAttn!.mergeHeadsAndProject(attention: attention, gate: gate)
-            let h = x + r
-            return h + mlpForward(postAttentionLayerNorm(h), allowCompiledDecode: false)
+        /// The gated delta net of a linear layer.
+        private var gatedDeltaNet: GatedDeltaNet {
+            guard let linearAttn else {
+                preconditionFailure("only a linear layer has a gated delta net")
+            }
+            return linearAttn
         }
 
+        /// The attention of a full-attention layer.
+        private var fullAttention: Attention {
+            guard let selfAttn else {
+                preconditionFailure("only a full-attention layer has an attention")
+            }
+            return selfAttn
+        }
+
+        // MARK: - Layer blocks
+
+        /// The gated delta net with its states passed in and out; the shared
+        /// ``HybridDecodeLayer/linearLayerBody(x:convState:recState:checkpointAfter:)``
+        /// wraps it in the layer's norms and residuals.
+        package func gatedDeltaMixer(
+            _ x: MLXArray, convState: MLXArray, recState: MLXArray, checkpointAfter: Int?
+        ) -> GatedDeltaLayerStep {
+            let step = gatedDeltaNet.forward(
+                x, convState: convState, recState: recState, mask: nil,
+                checkpointAfter: checkpointAfter)
+            return GatedDeltaLayerStep(
+                output: step.output, convState: step.convState,
+                recurrentState: step.recurrentState, speculative: step.speculative)
+        }
+
+        package func projectAttention(_ x: MLXArray) -> (
+            queries: MLXArray, gate: MLXArray, keys: MLXArray, values: MLXArray
+        ) {
+            fullAttention.projectPreRope(x)
+        }
+
+        package func mergeAttention(_ attention: MLXArray, gate: MLXArray) -> MLXArray {
+            fullAttention.mergeHeadsAndProject(attention: attention, gate: gate)
+        }
+
+        /// The MLP, or the MoE block in its form without its own compiled
+        /// trace, so it can live inside a decode trace.
+        package func feedForward(_ x: MLXArray) -> MLXArray {
+            mlpForward(x, allowCompiledDecode: false)
+        }
+
+        /// The feed-forward block; a MoE block of the exact base type runs
+        /// its own compiled trace when `allowCompiledDecode` is true.
         private func mlpForward(_ x: MLXArray, allowCompiledDecode: Bool) -> MLXArray {
             if let moe = mlp as? SparseMoeBlock, type(of: moe) == SparseMoeBlock.self {
                 return allowCompiledDecode ? moe(x) : moe.forward(x)
             }
-            return (mlp as! UnaryLayer)(x)
+            return mlp(x)
         }
     }
 
@@ -1259,35 +1284,13 @@ public enum Qwen35Language {
             }
         }
 
-        private func segmentBody(at index: Int, _ args: [MLXArray]) -> [MLXArray] {
-            let segment = decodeSegments[index]
-            var hiddenStates = args[0]
-
-            if let post = segment.attentionPostLayer {
-                hiddenStates = layers[post].attentionPostBody(
-                    x: hiddenStates, attention: args[1], gate: args[2])
-            }
-
-            var states: [MLXArray] = []
-            for (stateIndex, layerIndex) in segment.linearLayers.enumerated() {
-                let slot = segment.stateInputOffset + 2 * stateIndex
-                let result = layers[layerIndex].linearLayerBody(
-                    x: hiddenStates, convState: args[slot], recState: args[slot + 1])
-                hiddenStates = result.output
-                states.append(result.convState)
-                states.append(result.recurrentState)
-            }
-
-            if let pre = segment.attentionPreLayer {
-                let (queries, gate, keys, values) = layers[pre].attentionPreBody(
-                    x: hiddenStates)
-                return [hiddenStates] + states + [queries, gate, keys, values]
-            }
-
-            if index == decodeSegments.count - 1 {
-                hiddenStates = norm(hiddenStates)
-            }
-            return [hiddenStates] + states
+        /// Runs segment `index` of a decode step through the shared
+        /// ``CompiledDecodeSegment/body(_:arguments:layers:finalNorm:verify:)``.
+        /// The embedding runs outside the trace, so every segment starts from
+        /// its first argument.
+        private func segmentBody(at index: Int, _ arguments: [MLXArray]) -> [MLXArray] {
+            decodeSegments[index].body(
+                arguments[0], arguments: arguments, layers: layers, finalNorm: norm, verify: nil)
         }
 
         private func decodeStep(
