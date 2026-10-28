@@ -195,6 +195,25 @@ struct MTPDrafterContinuationTests {
         #expect(!first.continuation.isAligned(withMainTokenCount: count - 1, drafterID: drafterID))
     }
 
+    @Test("the aligned boundary is the boundary hidden row only at the main token count")
+    func alignedBoundaryOnlyAtItsMainTokenCount() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let first = try await firstCall(fixture)
+        let count = first.cachedTokens.count
+        let drafterID = fixture.drafter.drafterID
+        let continuation = first.continuation
+
+        let boundary = try #require(
+            continuation.alignedBoundary(withMainTokenCount: count, drafterID: drafterID))
+        #expect(boundary === continuation.targetBoundaryHidden)
+        #expect(
+            continuation.alignedBoundary(withMainTokenCount: count + 1, drafterID: drafterID)
+                == nil)
+        #expect(
+            continuation.alignedBoundary(withMainTokenCount: count, drafterID: foreignDrafterID)
+                == nil)
+    }
+
     @Test("a continuation is not aligned for another drafter")
     func notAlignedForAnotherDrafter() async throws {
         let fixture = try Qwen35MTPFixture()
@@ -309,6 +328,12 @@ enum MTPDrafterContinuationTamper: String, CaseIterable, CustomTestStringConvert
     /// No boundary hidden row.
     case boundaryHidden
 
+    /// A boundary hidden row one column wider than the drafter reads.
+    case boundaryHiddenWidth
+
+    /// A seed proposal whose hidden row is one column wider than the drafter makes.
+    case seedHiddenWidth
+
     var testDescription: String { rawValue }
 
     /// The error of a tamper whose target is missing from the serialized form.
@@ -342,7 +367,20 @@ enum MTPDrafterContinuationTamper: String, CaseIterable, CustomTestStringConvert
             guard arrays.removeValue(forKey: Key.boundaryHidden) != nil else {
                 throw MissingTarget()
             }
+        case .boundaryHiddenWidth:
+            arrays[Key.boundaryHidden] = try widenedRow(of: arrays)
+        case .seedHiddenWidth:
+            let row = try widenedRow(of: arrays)
+            arrays[Key.seedToken] = MLXArray.zeros([row.dim(0)], type: Int32.self)
+            arrays[Key.seedHidden] = row
         }
+    }
+
+    /// A zero row of the boundary hidden row's batch, one column wider than that row.
+    private func widenedRow(of arrays: [String: MLXArray]) throws -> MLXArray {
+        typealias Key = MTPDrafterContinuation.SerializedKey
+        guard let row = arrays[Key.boundaryHidden] else { throw MissingTarget() }
+        return MLXArray.zeros([row.dim(0), 1, row.dim(2) + 1], dtype: row.dtype)
     }
 
     /// Adds one to the integer metadata value of `key`.

@@ -17,8 +17,8 @@ extension MTPDrafterContinuation {
     /// ``init(arrays:metadata:drafter:)`` reads.
     static let serializationFormatVersion = "1"
 
-    /// The rank of the boundary hidden row: `[B, 1, hidden]`.
-    static let boundaryHiddenRank = 3
+    /// The rank of the boundary and the seed hidden rows: `[B, 1, hidden]`.
+    static let hiddenRowRank = 3
 
     /// The keys of the serialized form.
     enum SerializedKey {
@@ -90,8 +90,9 @@ extension MTPDrafterContinuation {
     /// Restores a continuation from its ``arrays()`` and ``metadata()``.
     ///
     /// The drafter caches restore into the fresh caches of `drafter`, which checks the number of
-    /// layers, the class of each cache and its configuration. The restored continuation resumes
-    /// a stream the way the original one does.
+    /// layers, the class of each cache and its configuration. The boundary and the seed hidden
+    /// rows must have the width of ``ResumableMTPDrafterModel/hiddenSize`` when the drafter
+    /// states one. The restored continuation resumes a stream the way the original one does.
     ///
     /// - Parameters:
     ///   - arrays: The arrays of the continuation. Keys without ``reservedKeyPrefix`` are ignored.
@@ -100,8 +101,8 @@ extension MTPDrafterContinuation {
     ///   - drafter: The drafter that resumes the continuation.
     /// - Throws: ``KVCacheError`` for an unknown format version, a continuation of another
     ///   drafter identity, drafter caches that do not fit the caches of `drafter`, positions that
-    ///   do not match each other or the entries of the drafter caches, or a missing or malformed
-    ///   boundary hidden row.
+    ///   do not match each other or the entries of the drafter caches, a missing boundary hidden
+    ///   row, or a boundary or seed hidden row of another shape or width.
     public init(
         arrays: [String: MLXArray], metadata: [String: String],
         drafter: any ResumableMTPDrafterModel
@@ -116,11 +117,14 @@ extension MTPDrafterContinuation {
                     "The MTP drafter continuation belongs to \(metadata[SerializedKey.drafterID] ?? "no drafter"), not \(drafterID)"
             )
         }
-        let targetBoundaryHidden = try Self.boundaryHidden(in: arrays)
+        let targetBoundaryHidden = try Self.boundaryHidden(
+            in: arrays, hiddenSize: drafter.hiddenSize)
         let snapshot = try restorePromptCacheSnapshot(
             arrays: Self.cacheEntries(of: arrays), metadata: Self.cacheEntries(of: metadata),
             into: drafter.makeState(parameters: nil).cache)
-        let state = try Self.drafterState(cache: snapshot.cache, arrays: arrays, metadata: metadata)
+        let state = try Self.drafterState(
+            cache: snapshot.cache, arrays: arrays, metadata: metadata,
+            hiddenSize: drafter.hiddenSize)
         eval([targetBoundaryHidden] + [state.seedToken, state.seedHidden].compactMap { $0 })
         self.init(
             state: state, targetBoundaryHidden: targetBoundaryHidden,
@@ -131,16 +135,39 @@ extension MTPDrafterContinuation {
 
     /// The serialized boundary hidden row.
     ///
-    /// - Parameter arrays: The serialized arrays.
+    /// - Parameters:
+    ///   - arrays: The serialized arrays.
+    ///   - hiddenSize: The width the drafter reads, or `nil` when it does not state one.
     /// - Returns: The row, shape `[B, 1, hidden]`.
-    /// - Throws: ``KVCacheError`` when the row is missing or has another shape.
-    private static func boundaryHidden(in arrays: [String: MLXArray]) throws -> MLXArray {
-        guard let row = arrays[SerializedKey.boundaryHidden], row.ndim == boundaryHiddenRank,
-            row.dim(1) == 1
-        else {
+    /// - Throws: ``KVCacheError`` when the row is missing or has another shape or width.
+    private static func boundaryHidden(
+        in arrays: [String: MLXArray], hiddenSize: Int?
+    ) throws -> MLXArray {
+        guard let row = arrays[SerializedKey.boundaryHidden] else {
             throw KVCacheError(message: "The MTP drafter continuation has no boundary hidden row")
         }
+        try checkHiddenRow(row, named: "boundary", hiddenSize: hiddenSize)
         return row
+    }
+
+    /// Checks that a serialized hidden row has the shape `[B, 1, hiddenSize]`.
+    ///
+    /// - Parameters:
+    ///   - row: The serialized row.
+    ///   - name: The name of the row in the error message.
+    ///   - hiddenSize: The width the drafter reads, or `nil` when it does not state one.
+    /// - Throws: ``KVCacheError`` when the row has another shape or width.
+    private static func checkHiddenRow(
+        _ row: MLXArray, named name: String, hiddenSize: Int?
+    ) throws {
+        guard row.ndim == hiddenRowRank, row.dim(1) == 1,
+            hiddenSize.map({ row.dim(-1) == $0 }) ?? true
+        else {
+            throw KVCacheError(
+                message:
+                    "The MTP drafter continuation's \(name) hidden row has shape \(row.shape), not [B, 1, \(hiddenSize.map(String.init) ?? "hidden")]"
+            )
+        }
     }
 
     /// The drafter state the serialized positions and seed proposal describe over the restored
@@ -150,16 +177,23 @@ extension MTPDrafterContinuation {
     ///   - cache: The restored drafter caches.
     ///   - arrays: The serialized arrays.
     ///   - metadata: The serialized metadata.
+    ///   - hiddenSize: The width of the drafter's seed hidden row, or `nil` when the drafter does
+    ///     not state one.
     /// - Returns: The state.
     /// - Throws: ``KVCacheError`` when the positions do not match each other or the entries of
-    ///   the caches, or the seed proposal is only half present.
+    ///   the caches, the seed proposal is only half present, or its hidden row has another shape
+    ///   or width.
     private static func drafterState(
-        cache: [KVCache], arrays: [String: MLXArray], metadata: [String: String]
+        cache: [KVCache], arrays: [String: MLXArray], metadata: [String: String],
+        hiddenSize: Int?
     ) throws -> MTPDrafterState {
         let seedToken = arrays[SerializedKey.seedToken]
         let seedHidden = arrays[SerializedKey.seedHidden]
         guard (seedToken == nil) == (seedHidden == nil) else {
             throw KVCacheError(message: "The MTP drafter continuation has half a seed proposal")
+        }
+        if let seedHidden {
+            try checkHiddenRow(seedHidden, named: "seed", hiddenSize: hiddenSize)
         }
         let state = MTPDrafterState(
             cache: cache,

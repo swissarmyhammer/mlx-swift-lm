@@ -657,13 +657,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return
         }
 
-        let alignedBoundary = continuation.flatMap {
-            $0.isAligned(withMainTokenCount: cachePosition, drafterID: resumableDrafter.drafterID)
-                ? $0.targetBoundaryHidden : nil
-        }
         resumeOrColdStart(
             resumableDrafter, segmentTokens: promptTokens, segmentHidden: suffixHidden,
-            boundary: alignedBoundary, position: cachePosition, state: state)
+            boundary: continuation?.alignedBoundary(
+                withMainTokenCount: cachePosition, drafterID: resumableDrafter.drafterID),
+            position: cachePosition, state: state)
     }
 
     /// Primes a resumable drafter over a prompt segment the target just prefilled.

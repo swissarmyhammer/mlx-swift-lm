@@ -285,6 +285,13 @@ public protocol ResumableMTPDrafterModel: StatefulMTPDrafterModel {
     /// gives ``MTPDrafterID/init(drafterType:configuration:)``.
     var drafterID: MTPDrafterID { get }
 
+    /// The width of the target hidden rows the drafter reads and of the seed hidden row it
+    /// keeps, which a restored ``MTPDrafterContinuation`` must match.
+    ///
+    /// The default is `nil`: the drafter does not state the width, and a restore checks only the
+    /// shape of the rows.
+    var hiddenSize: Int? { get }
+
     /// Convert `state` to a canonical boundary after the target cache has
     /// discarded any verified-but-unemitted lookahead.
     ///
@@ -378,6 +385,9 @@ extension ResumableMTPDrafterModel {
     public var drafterID: MTPDrafterID {
         MTPDrafterID(String(reflecting: Self.self))
     }
+
+    /// `nil`: the drafter does not state the width of its hidden rows.
+    public var hiddenSize: Int? { nil }
 
     /// Resumes a shifted drafter: the boundary hidden row pairs with the first suffix token, and
     /// each suffix hidden row pairs with the token after it, ending with `firstBonus`.

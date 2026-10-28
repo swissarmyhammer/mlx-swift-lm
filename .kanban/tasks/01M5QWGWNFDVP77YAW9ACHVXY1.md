@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m5zxy5h66kbwhkp785nwcwr4
+  text: 'Note from the ^vgma4mq review (2026-10-27), for checkpoint byte accounting: `MTPDrafterContinuation.byteCount` counts like the main caches, and inherits two inaccuracies of `KVCacheSimple.copy()` / `residentByteCount`. (1) Undercount: a copied drafter cache counts only its filled rows (offset); once the live cache grows into a new buffer, the old one is kept alive by the copy at full size (up to 255 extra rows per layer; the Qwen35 drafter has 1 layer). (2) Double count: while a copy and its source both live, each counts the shared boundary hidden row and seed. Decide whether the checkpoint policy needs exact numbers (e.g. compact the copy with a contiguous slice when it is stored) and test it.'
+  timestamp: 2026-10-28T00:18:09.062099+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY

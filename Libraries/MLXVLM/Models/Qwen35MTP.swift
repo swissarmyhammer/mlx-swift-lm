@@ -90,6 +90,10 @@ public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel {
     /// The type name and a hash of ``configuration``, which decides the drafter cache layers.
     public let drafterID: MTPDrafterID
 
+    /// The hidden size of ``configuration``: the width of the target hidden rows and of the
+    /// predictor's seed hidden row.
+    public var hiddenSize: Int? { configuration.hiddenSize }
+
     @ModuleInfo(key: "mtp") var mtp: Qwen35VLMNextNPredictor
 
     public convenience init(

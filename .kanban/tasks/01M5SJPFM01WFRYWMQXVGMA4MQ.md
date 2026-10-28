@@ -44,6 +44,45 @@ comments:
     - evidence: swift build --build-tests (touched changed files; only warning is the known "missing creator ... mlx-swift_Cmlx.bundle"); xcrun xctest MLXLMTests.xctest — 895 XCTest, 0 failures; Swift Testing — 1872 tests in 166 suites passed (only skip is the known env-gated benchmarkVerification()); MLXFoundationModelsTests — 376 passed. No code changed.
     - next: review/commit
   timestamp: 2026-10-28T00:11:03.104436+00:00
+- actor: claude-code
+  id: 01m5zxxbaffy64ksk7d1hr0mnp
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (1d4b0d24): 1 finding (1 confirmed, 4 refuted, 21 attempted) — Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:661 reuse/reuse. Requested checks: (1) copy() independence holds — each drafter KVCache is a new object, the shared arrays are immutable MLX values, and MLX does not donate a buffer another array still holds; (2) byteCount follows the residentByteCount contract the main-cache checkpoints use (a copied KVCacheSimple counts its offset rows, not the source's step-rounded buffer; boundary/seed rows are counted by both a copy and its source while both live) — same accounting as main caches, no finding; (3) config-hash identity accepted: spill files are already keyed by modelID, and in-memory continuations stay with their session's drafter, so a weights-only mismatch needs the same modelID and config; (4) init(arrays:metadata:drafter:) throws on format version and drafter identity before touching arrays, then checks layers/class via the prompt cache restore and the positions against cache offsets.
+    - next: implementer resolves the open item; re-review.
+  timestamp: 2026-10-28T00:17:42.223370+00:00
+- actor: claude-code
+  id: 01m5zxy1vmq83c03f4xzq2jzp6
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 11 files (continuation copy, byteCount, MTPDrafterID, serialization)
+    - test: green — MLXLMTests 895 XCTest 0 failures + 1872 Swift Testing; FoundationModels 376
+    - commit: 1d4b0d24
+    - review: findings — Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:661
+  timestamp: 2026-10-28T00:18:05.300081+00:00
+- actor: claude-code
+  id: 01m5zymbxgdd5bhnqjxavnfc32
+  text: |-
+    Picked back up from review to resolve the open finding plus the user's extra robustness item.
+    - Finding (reuse, MTPSpeculativeTokenIterator.swift `primeDrafterState`): added `MTPDrafterContinuation.alignedBoundary(withMainTokenCount:drafterID:) -> MLXArray?` (the boundary row when `isAligned`, else nil). `MTPDrafterPrefillFeed.init` and `primeDrafterState` both call it; the closure is gone. The iterator init's identity-only filter (adopt the continuation's drafter state only when `drafterID` matches) is a different rule and stays.
+    - Extra item: no drafter stated its hidden width, so added `ResumableMTPDrafterModel.hiddenSize: Int?` (default `nil`, same default-extension pattern as `drafterID`; the test fakes keep nil). Qwen LLM and VLM drafters return `configuration.hiddenSize` (the seed hidden row is the predictor output, also `hiddenSize` wide). `init(arrays:metadata:drafter:)` now runs one `checkHiddenRow` (rank 3, dim 1 == 1, last dim == hiddenSize when stated) on the boundary row and on the seed hidden row, throwing `KVCacheError`. `boundaryHiddenRank` renamed `hiddenRowRank` since it now covers both rows.
+    - TDD: RED 1 was the compile failure of the new `alignedBoundary` test; RED 2 (one full bundle run) showed the new `boundaryHiddenWidth` and `seedHiddenWidth` tamper cases failing with "an error was expected but none was thrown". GREEN after the check.
+    - Note for the next agent: `xcrun xctest -XCTest <Suite>` does not filter Swift Testing tests (it ran 0), and `swift test --filter` dies on the metallib (see CLAUDE.md), so a single Swift Testing test cannot be run alone here; one full MLXLMTests run is about 3.5 minutes.
+  timestamp: 2026-10-28T00:30:16.496085+00:00
+- actor: claude-code
+  id: 01m5zymfm1r4etqs8cqs896ybh
+  text: |-
+    ### implement — changed
+    - evidence: 8 files — Libraries/MLXLMCommon/{MTPDrafterContinuation,MTPDrafterContinuationSerialization,MTPDrafterModel,MTPDrafterPrefillFeed,MTPSpeculativeTokenIterator}.swift, Libraries/MLXLLM/Models/Qwen35MTP.swift, Libraries/MLXVLM/Models/Qwen35MTP.swift, Tests/MLXLMTests/MTPDrafterContinuationTests.swift. `swift build --build-tests`: only the known "missing creator ... mlx-swift_Cmlx.bundle" warning. `xcrun xctest MLXLMTests.xctest`: 895 XCTest 0 failures; Swift Testing 1873 tests in 166 suites passed (1872 + 1 new; the tamper test gained 2 argument cases), only the known benchmarkVerification() skip. MLXFoundationModelsTests: 376 passed. Finding checked; extra width-validation item recorded as a checked subtask. Not committed.
+    - next: /review. Left in doing.
+  timestamp: 2026-10-28T00:30:20.289245+00:00
+- actor: claude-code
+  id: 01m5zywz4066bptny9eeqtdap3
+  text: |-
+    ### test — green
+    - evidence: touched changed .swift files; swift build --build-tests (Build complete, no new warnings; only the known "missing creator ... mlx-swift_Cmlx.bundle"); xcrun xctest MLXLMTests: 895 XCTest, 0 failures + 1873 Swift Testing passed; MLXFoundationModelsTests: 376 passed, 0 failed. Nothing committed.
+    - next: review/commit
+  timestamp: 2026-10-28T00:34:58.304184+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
@@ -66,6 +105,7 @@ Give both caches one shared value type, so that the drafter rules are written on
 
 - [x] Add `MTPDrafterCacheState` (new file Libraries/MLXLMCommon/MTPDrafterCacheState.swift) that wraps `MTPDrafterState` with: `copy()` (deep enough for fork), `byteCount`, a drafter identity (model ID / config hash), and `isAligned(withMainTokenCount:drafterID:)` (true only when drafter == main − 1, `pendingHidden` is present, and the identity matches). — done on `MTPDrafterContinuation` in Libraries/MLXLMCommon/MTPDrafterContinuation.swift; identity is `MTPDrafterID` / `ResumableMTPDrafterModel.drafterID`.
 - [x] Add `arrays() -> [String: MLXArray]` and `metadata() -> [String: String]` with reserved key prefixes (for example `__mlx_lm_mtp_drafter_`), that also record the cache kind (simple or rotating, with window), and a throwing `init(arrays:metadata:drafter:)` that checks the format version, the drafter identity, the cache kind, and the offsets. — Libraries/MLXLMCommon/MTPDrafterContinuationSerialization.swift; `arrays()`/`metadata()` are `throws` (a drafter cache class without a serialized name cannot be saved).
+- [x] (Added 2026-10-27 by the user, from the review: caching must be robust.) `init(arrays:metadata:drafter:)` checks the width of the boundary and seed hidden rows against the drafter, so a damaged file with a valid identity throws a typed error (`KVCacheError`) on load instead of failing at the first drafter call. — `ResumableMTPDrafterModel.hiddenSize` (default `nil`; the Qwen LLM/VLM drafters give `configuration.hiddenSize`); tested by the `boundaryHiddenWidth` and `seedHiddenWidth` tamper cases.
 
 ## Acceptance Criteria
 - [x] A round trip through `arrays()` / `init(arrays:...)` gives a drafter state that continues a stream with the same greedy tokens as the original.
@@ -78,3 +118,15 @@ Give both caches one shared value type, so that the drafter rules are written on
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38 #kv-cache
+
+## Review Findings (2026-10-27 19:11)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 11 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWGEWP4506CZYXCPV3C64M.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWGEWP4506CZYXCPV3C64M.md` — no validator matches this file
+> - `.kanban/tasks/01M5SJPFM01WFRYWMQXVGMA4MQ.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5SJPFM01WFRYWMQXVGMA4MQ.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:661` `reuse/reuse` — The `alignedBoundary` closure repeats the continuation-alignment predicate that `MTPDrafterPrefillFeed.init` already applies to the same `(continuation, cachePosition, drafter)` triple. Two call sites now independently decide when a continuation's boundary can be reused. Any later change to the alignment rule has to be made in both places, and they can drift apart. Move the aligned-boundary selection onto `MTPDrafterContinuation`, for example `func alignedBoundary(withMainTokenCount:drafterID:) -> MLXArray?`, and call it from both `MTPDrafterPrefillFeed.init` and this site. The feed then has one source for the rule.

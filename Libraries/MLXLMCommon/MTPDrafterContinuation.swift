@@ -141,4 +141,20 @@ public struct MTPDrafterContinuation: @unchecked Sendable {
             && state.nextPosition == mainTokenCount - 1 && state.proposalAppended == 0
             && targetBoundaryHidden.dim(1) == 1 && state.isAligned
     }
+
+    /// The boundary hidden row a generation that continues a main cache of `mainTokenCount`
+    /// tokens with the drafter `drafterID` resumes from, or `nil` when the continuation is not
+    /// aligned with that cache (see ``isAligned(withMainTokenCount:drafterID:)``) and the
+    /// drafter must cold-start.
+    ///
+    /// - Parameters:
+    ///   - mainTokenCount: The tokens the main cache holds.
+    ///   - drafterID: The identity of the drafter of the generation.
+    /// - Returns: The boundary hidden row, shape `[B, 1, hidden]`, of an aligned continuation.
+    public func alignedBoundary(
+        withMainTokenCount mainTokenCount: Int, drafterID: MTPDrafterID
+    ) -> MLXArray? {
+        isAligned(withMainTokenCount: mainTokenCount, drafterID: drafterID)
+            ? targetBoundaryHidden : nil
+    }
 }

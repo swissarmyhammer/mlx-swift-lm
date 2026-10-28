@@ -57,11 +57,9 @@ final class MTPDrafterPrefillFeed {
         sampler: any LogitSampler, state: MTPDrafterState, cachePosition: Int,
         continuation: MTPDrafterContinuation?
     ) {
-        if let continuation,
-            continuation.isAligned(withMainTokenCount: cachePosition, drafterID: drafter.drafterID)
-        {
-            boundaryHidden = continuation.targetBoundaryHidden
-        } else {
+        boundaryHidden = continuation?.alignedBoundary(
+            withMainTokenCount: cachePosition, drafterID: drafter.drafterID)
+        if boundaryHidden == nil {
             pendingRestartPosition = cachePosition
         }
         self.drafter = drafter
