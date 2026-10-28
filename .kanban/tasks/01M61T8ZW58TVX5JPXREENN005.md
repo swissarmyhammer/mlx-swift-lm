@@ -49,10 +49,26 @@ comments:
     - evidence: 4 files — Tests/MLXLMTests/Qwen35GDNDecodeKernelTests.swift, Tests/MLXLMTests/KVCacheContinuationTests.swift, Tests/MLXLMTests/Qwen35PartialRoundFinalizeTests.swift, Tests/MLXLMTests/Qwen35ScriptedMTPSupport.swift. `swift build --build-tests`: 0 compiler warnings (only the preexisting swiftbuild "missing creator" note). xcrun xctest: MLXLMTests 1945 Swift Testing + 920 XCTest passed, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 376, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 — 0 failures, 0 issues. Findings 3/3 checked.
     - next: /review
   timestamp: 2026-10-28T22:06:47.420673+00:00
+- actor: claude-code
+  id: 01m628w3frj7afex92krcatx0d
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (ddd3d106) — 0 findings (0 confirmed, 0 refuted; 7 validator runs attempted, 0 failed); 4 files reviewed, 2 .kanban files not matched by any validator. All 3 findings from 2026-10-28 16:56 are checked.
+    - next: none — task moved to done
+  timestamp: 2026-10-28T22:07:44.632031+00:00
+- actor: claude-code
+  id: 01m628wg92b0bpxm2s44447xj4
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 4 test files
+    - test: green (implementer run) — 5 bundles (MLXLMTests 920 + 1945)
+    - commit: ddd3d106
+    - review: clean — task in done
+  timestamp: 2026-10-28T22:07:57.730220+00:00
 depends_on:
 - 01M5SKBV27GED43EB3T8MCSVWE
-position_column: review
-position_ordinal: '80'
+position_column: done
+position_ordinal: fff480
 title: 'MTP: finalizeGeneration cannot rewind the committed lookahead of a partially accepted hybrid round'
 ---
 ## What
