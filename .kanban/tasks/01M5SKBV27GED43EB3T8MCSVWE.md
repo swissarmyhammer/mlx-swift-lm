@@ -69,13 +69,30 @@ comments:
     - evidence: 8 files, test-only — Tests/MLXLMTestSupport/ZeroFilledKVCache.swift (new), Tests/MLXLMTests/{KVCacheContinuationTests, Qwen35MTPTests, CacheConfigurationTests, ChatSessionQwenTextMTPTests, KVCacheConfigurationTests, MiniMaxM3Tests, ScriptedLM/TranscriptKVCacheTests}.swift. `swift build --build-tests`: Build complete, 0 compiler warnings/errors (one SwiftPM build-system note: "missing creator for mutated node ... mlx-swift_Cmlx.bundle/Contents/MacOS", not a compiler warning). xcrun xctest Debug: MLXLMTests 897 XCTest 0 failures + Swift Testing 1917 tests in 169 suites passed (1 pre-existing skipped: benchmarkVerification()); CXGrammarTests 7 passed; MLXFoundationModelsTests 376 passed; MLXGuidedGenerationTests 70 passed; MLXHuggingFaceMacrosTests 5 XCTest 0 failures. Review finding 2026-10-28 13:29 flipped to [x].
     - next: /review
   timestamp: 2026-10-28T18:42:29.367320+00:00
+- actor: claude-code
+  id: 01m61x7qm8vhx9dds7zqvxv7hw
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (db906f04), counts: findings 2, confirmed 2, refuted 1, attempted 7, failed 0. Prior finding (2026-10-28 13:29, `Tests/MLXLMTests/KVCacheContinuationTests.swift:281` reuse/reuse) is resolved: `Tests/MLXLMTestSupport/ZeroFilledKVCache.swift` adds `ZeroFilledKVCache.make(tokens:heads:headDimension:)`, used by `hybridCacheAfterAVerify` and the Qwen35MTPTests rewind test; item is checked.
+    - dropped under the review skill's written rule (drop findings that ask to refactor tests that already existed): both confirmed findings land on `Tests/MLXLMTests/MiniMaxM3Tests.swift:898` (`duplication/duplication` and `reuse/reuse`). They ask to generalize the helper into `ZeroFilledKVCache.fill(_ cache: KVCache, tokens:heads:headDimension:)` and replace the `MiniMaxM3KVCache` sparse-cache zero fill with it. That sparse-cache `update(keys:values:)` fill existed before this commit (HEAD~1 MiniMaxM3Tests.swift, `sparseCache.update(`) in a pre-existing test; this commit only rewrote its literals to the shared `tokens`/`heads`/`headDimension` constants.
+    - next: none; task moved to done. If the drop is not wanted, reopen and apply the `fill(_:tokens:heads:headDimension:)` generalization.
+  timestamp: 2026-10-28T18:44:22.792637+00:00
+- actor: claude-code
+  id: 01m61x8c50x0hnw04nvd0gabbc
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 8 test files (shared ZeroFilledKVCache helper)
+    - test: green (implementer run) — 5 bundles, MLXLMTests 897 + 1917
+    - commit: db906f04
+    - review: clean — 2 MiniMaxM3Tests.swift:898 findings dropped by the reviewer under the review skill's pre-existing-test rule (the sparse-cache fill predates this commit; only its literals changed). Task in done.
+  timestamp: 2026-10-28T18:44:43.808110+00:00
 depends_on:
 - 01M5QWJGM1679S6CWHFCST7WAN
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8280'
+position_column: done
+position_ordinal: ffef80
 title: 'MTP: rewind the hybrid main cache by more than one token after a verify'
 ---
 ## What
