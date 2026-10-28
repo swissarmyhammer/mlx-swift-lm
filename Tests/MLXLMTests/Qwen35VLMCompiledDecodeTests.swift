@@ -229,13 +229,13 @@ final class Qwen35VLMCompiledDecodeTests: XCTestCase {
 
         let eager = layer.forward(
             x, attentionMask: nil, ssmMask: nil, cache: cache, positionIds: nil,
-            checkpointAfter: nil, allowCompiledDecode: false)
+            keepsSnapshots: false, allowCompiledDecode: false)
         let step = layer.linearLayerBody(x: x, convState: convState, recState: recState)
 
         XCTAssertEqual(Snapshot(step.output), Snapshot(eager))
         XCTAssertEqual(Snapshot(step.convState), Snapshot(try XCTUnwrap(cache[0])))
         XCTAssertEqual(Snapshot(step.recurrentState), Snapshot(try XCTUnwrap(cache[1])))
-        XCTAssertNil(step.speculative)
+        XCTAssertNil(step.snapshots)
     }
 
     func testFirstEmptyCacheTokenStaysEager() throws {

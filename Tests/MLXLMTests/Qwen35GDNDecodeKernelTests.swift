@@ -306,7 +306,7 @@ struct Qwen35GDNDecodeKernelTests {
                 let cache = MambaCache()
                 cache[0] = run.convState
                 cache[1] = run.recurrentState
-                cache.saveSpeculativeSnapshots(try #require(run.snapshots), checkpointAfter: 1)
+                cache.saveSpeculativeSnapshots(try #require(run.snapshots))
                 cache.advance(tokens)
 
                 #expect(cache.selectSpeculativeSlot(rollingBack: rollback))
@@ -339,13 +339,14 @@ struct Qwen35GDNDecodeKernelTests {
     // MARK: - A verify through the layer
 
     /// A verify pass through the layer of each model keeps one snapshot slot
-    /// for each token in the cache, and the checkpoint restores the slot
-    /// after the first token.
+    /// for each token in the cache, and a rollback to the first token selects
+    /// the slot after it.
     @Test(arguments: [Fixture.mlxLLMQwen35, Fixture.mlxVLMQwen35])
     func aVerifyThroughTheLayerKeepsOneSlotForEachToken(kind: Fixture.LayerKind) throws {
         let headCase = Fixture.smallHeadCase
         let dtype = DType.bfloat16
         let tokens = GatedDeltaDecodeKernel.mostTokens
+        let acceptedTokens = 1
         let layer = try #require(
             Fixture.layer(kind, headCase, dtype: dtype) as? any SpeculativeGDNTestLayer)
         let inputs = MLXRandom.normal(
@@ -356,9 +357,12 @@ struct Qwen35GDNDecodeKernelTests {
         let plainCache = MambaCache.holding(states)
         let firstTokenCache = MambaCache.holding(states)
 
-        eval(layer(inputs, mask: nil, cache: verifyCache, checkpointAfter: 1))
-        eval(layer(inputs, mask: nil, cache: plainCache, checkpointAfter: nil))
-        eval(layer(inputs[0..., ..<1], mask: nil, cache: firstTokenCache, checkpointAfter: nil))
+        eval(layer(inputs, mask: nil, cache: verifyCache, keepsSnapshots: true))
+        eval(layer(inputs, mask: nil, cache: plainCache, keepsSnapshots: false))
+        eval(
+            layer(
+                inputs[0..., ..<acceptedTokens], mask: nil, cache: firstTokenCache,
+                keepsSnapshots: false))
 
         #expect(verifyCache.speculativeSlotCount == tokens)
         #expect(plainCache.speculativeSlotCount == 0)
@@ -370,8 +374,8 @@ struct Qwen35GDNDecodeKernelTests {
         let stateGap = Fixture.worstGap(verifiedState, plainState)
         #expect(stateGap <= Fixture.tolerance(dtype), "worst state gap \(stateGap)")
 
-        #expect(verifyCache.restoreSpeculativeCheckpoint())
-        #expect(verifyCache.offset == 1)
+        #expect(verifyCache.selectSpeculativeSlot(rollingBack: tokens - acceptedTokens))
+        #expect(verifyCache.offset == acceptedTokens)
         #expect(verifyCache.speculativeSlotCount == 0)
         for (restored, expected) in zip(verifyCache.state, firstTokenCache.state) {
             let gap = Fixture.worstGap(restored, expected)
@@ -388,11 +392,11 @@ protocol SpeculativeGDNTestLayer: GDNDecodeKernelTestLayer {
     ///   - inputs: The hidden states, shape `(batch, sequence, hiddenSize)`.
     ///   - mask: The token mask, or nil.
     ///   - cache: The cache of the layer.
-    ///   - checkpointAfter: The token after which a verify keeps a
-    ///     checkpoint, or nil when the pass is not a verify.
+    ///   - keepsSnapshots: True when the pass is a verify that keeps the
+    ///     snapshot slot after each token.
     /// - Returns: The output of the layer.
     func callAsFunction(
-        _ inputs: MLXArray, mask: MLXArray?, cache: MambaCache?, checkpointAfter: Int?
+        _ inputs: MLXArray, mask: MLXArray?, cache: MambaCache?, keepsSnapshots: Bool
     ) -> MLXArray
 }
 

@@ -820,7 +820,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         // Attention-only targets verify through a staged round. Qwen's hybrid target instead
-        // checkpoints its recurrent entries and rewinds them in place; the typed capability and
+        // keeps the snapshot slots of its recurrent entries and rewinds them in place by the
+        // rejected drafts; the typed capability and
         // cache topology keep that exception fail-closed.
         let nativeRewindDepth =
             (mainModel as? any SpeculativeCacheRewindModel)?
@@ -941,7 +942,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let verifyTokens = concatenated([bonusToken, flatDraftTokens])
         let verifyInput = LMInput.Text(tokens: verifyTokens)
         let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
-        verifyState[mtpCacheCheckpointIndexKey] = nativeHybridRewind ? 1 : nil
+        verifyState[mtpVerifyKeepsSnapshotsKey] = nativeHybridRewind ? true : nil
         let verifyCache = nativeHybridRewind ? mainCache : round!.caches
         let mainResult = mainModel(
             verifyInput[text: .newAxis], cache: verifyCache, state: verifyState)
@@ -1040,9 +1041,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                     rewound == rejected,
                     "Target advertised native speculative rewind depth \(nativeRewindDepth), but rewound \(rewound) of \(rejected) positions"
                 )
-                // Qwen MTP-1: attention KV trims one token while every GDN
-                // cache restores the state captured after the committed bonus.
-                // The target's 9B weights are not replayed on rejection.
+                // Qwen MTP: attention KV trims the rejected drafts while every
+                // GDN cache selects the snapshot slot of its last accepted
+                // token. The target's weights are not replayed on rejection.
                 mainCacheStorage.commitProcessedTokens(accepted + 1)
             }
             snapshotPlaced = reconcileSharedKVState(
@@ -1215,7 +1216,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         passthrough = true
         discardSpeculativePromptCacheCheckpoints(mainCache)
         mainState?[mtpEmitFlagKey] = false
-        mainState?[mtpCacheCheckpointIndexKey] = nil
+        mainState?[mtpVerifyKeepsSnapshotsKey] = nil
         mainState?[mtpLastHiddenStatesKey] = nil
         mainState?[mtpSharedKVStatesKey] = nil
         mainState?[mtpSharedKVSourceIndicesKey] = nil

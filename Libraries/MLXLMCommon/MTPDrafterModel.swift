@@ -123,9 +123,10 @@ extension MTPDrafterModel {
 /// Target-side capability for rewinding an in-place speculative verify pass.
 ///
 /// Rollback belongs to the target/cache implementation, not to the drafter.
-/// The depth is explicit so a future multi-token drafter cannot accidentally
-/// select an in-place path whose recurrent checkpoint is too shallow.
+/// The depth is explicit so a multi-token drafter cannot select an in-place
+/// path whose recurrent snapshot slots are too few for its drafts.
 public protocol SpeculativeCacheRewindModel {
+    /// The most drafts of one round the target rewinds in place.
     var maximumNativeTargetCacheRewind: Int { get }
 }
 
@@ -736,7 +737,7 @@ extension LMOutput.State {
         var state = self
         state[mtpEmitFlagKey] = nil
         state[mtpPrefillChunkHandlerKey] = nil
-        state[mtpCacheCheckpointIndexKey] = nil
+        state[mtpVerifyKeepsSnapshotsKey] = nil
         state[mtpLastHiddenStatesKey] = nil
         state[mtpSharedKVStatesKey] = nil
         state[mtpSharedKVSourceIndicesKey] = nil
@@ -759,11 +760,12 @@ extension LMOutput.State {
     }
 }
 
-/// Requests a recurrent-cache checkpoint after this many verification input
-/// tokens. Hybrid Qwen models use `1` for MTP-1 so a rejected draft restores
-/// state after the always-committed bonus token without replaying the model.
-public let mtpCacheCheckpointIndexKey =
-    LMOutput.Key<Int>("mtp.cacheCheckpointIndex")
+/// Asks the recurrent layers of a hybrid target to keep the state after each
+/// token of a verify pass, its snapshot slots. A round that rejects `r`
+/// drafts then rewinds the main cache in place by `r` tokens, to the slot
+/// after its last accepted token, without replaying the model.
+public let mtpVerifyKeepsSnapshotsKey =
+    LMOutput.Key<Bool>("mtp.verifyKeepsSnapshots")
 
 /// Which cache entry each ``mtpSharedKVStatesKey`` tuple was read from, keyed the same way.
 ///

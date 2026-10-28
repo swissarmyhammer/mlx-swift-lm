@@ -239,7 +239,7 @@ private let gdnCheckpointOutputTolerance = ieeeFloat32Tolerance
 
 /// `count` token ids below `vocabularySize`, shape `[count]`, drawn from `seed`: the same
 /// tokens for the same seed on every run.
-private func seededTokens(_ count: Int, vocabularySize: Int, seed: UInt64) -> MLXArray {
+func seededTokens(_ count: Int, vocabularySize: Int, seed: UInt64) -> MLXArray {
     MLXRandom.randInt(Int32(0) ..< Int32(vocabularySize), [count], key: MLXRandom.key(seed))
 }
 
@@ -654,7 +654,7 @@ struct Qwen35MTPMetalTests {
         let prefixCache = MambaCache()
 
         let full = layer(input, cache: fullCache)
-        let speculative = layer(input, cache: speculativeCache, checkpointAfter: 1)
+        let speculative = layer(input, cache: speculativeCache, keepsSnapshots: true)
         _ = layer(input[0..., ..<1, 0...], cache: prefixCache)
         eval(full, speculative)
 
@@ -663,8 +663,8 @@ struct Qwen35MTPMetalTests {
                 speculative, full, rtol: gdnCheckpointOutputTolerance,
                 atol: gdnCheckpointOutputTolerance
             ).item(Bool.self))
-        #expect(speculativeCache.hasSpeculativeCheckpoint)
-        #expect(speculativeCache.restoreSpeculativeCheckpoint())
+        #expect(speculativeCache.speculativeSlotCount == input.dim(1))
+        #expect(speculativeCache.selectSpeculativeSlot(rollingBack: input.dim(1) - 1))
 
         let restored = speculativeCache.state
         let expected = prefixCache.state
@@ -692,7 +692,7 @@ struct Qwen35MTPMetalTests {
         let prefixCache = MambaCache()
 
         let full = layer(input, cache: fullCache)
-        let speculative = layer(input, cache: speculativeCache, checkpointAfter: 1)
+        let speculative = layer(input, cache: speculativeCache, keepsSnapshots: true)
         _ = layer(input[0..., ..<1, 0...], cache: prefixCache)
         eval(full, speculative)
 
@@ -701,7 +701,7 @@ struct Qwen35MTPMetalTests {
                 speculative, full, rtol: gdnCheckpointOutputTolerance,
                 atol: gdnCheckpointOutputTolerance
             ).item(Bool.self))
-        #expect(speculativeCache.restoreSpeculativeCheckpoint())
+        #expect(speculativeCache.selectSpeculativeSlot(rollingBack: input.dim(1) - 1))
         for (actual, reference) in zip(speculativeCache.state, prefixCache.state) {
             eval(actual, reference)
             #expect(
@@ -719,15 +719,20 @@ struct Qwen35MTPMetalTests {
         let recurrent = MambaCache()
         let checkpointConv = MLXArray.ones([1, 1, 4])
         let checkpointState = MLXArray.ones([1, 2, 2, 2])
-        recurrent.saveSpeculativeCheckpoint(
-            convState: checkpointConv, recurrentState: checkpointState, advancedBy: 1)
+        // The slots of a two-token verify: the states after its first token are the checkpoint.
+        recurrent.saveSpeculativeSnapshots(
+            GatedDeltaDecodeKernel.Snapshots(
+                recurrent: stacked([checkpointState, zeros(like: checkpointState)]),
+                convWindow: concatenated(
+                    [zeros(like: checkpointConv), checkpointConv, zeros(like: checkpointConv)],
+                    axis: 1)))
         recurrent[0] = MLXArray.zeros([1, 1, 4])
         recurrent[1] = MLXArray.zeros([1, 2, 2, 2])
 
         let rewound = rewindSpeculativePromptCache([attention, recurrent], numTokens: 1)
         #expect(rewound == 1)
         #expect(attention.offset == 2)
-        #expect(!recurrent.hasSpeculativeCheckpoint)
+        #expect(recurrent.speculativeSlotCount == 0)
 
         let restored = recurrent.state
         #expect(restored.count == 2)
@@ -1992,7 +1997,7 @@ struct Qwen35CompiledVerifyTests {
     private static let hiddenLayers = 4
 
     /// The dtype of the test model: one the GDN kernel reads, so the verify takes snapshots.
-    private static let dtype = DType.bfloat16
+    static let dtype = DType.bfloat16
 
     /// The seed of the weights of the test model.
     private static let weightSeed: UInt64 = 20_261_028
@@ -2006,9 +2011,6 @@ struct Qwen35CompiledVerifyTests {
     /// The prompt tokens the cache holds before the verify. More than
     /// ``GatedDeltaDecodeKernel/mostTokens``, so the prefill itself takes the general path.
     private static let promptLength = 8
-
-    /// The token after which a verify keeps its checkpoint, as the MTP iterator sets it.
-    private static let checkpointAfter = 1
 
     /// The prompt of each greedy decode of these tests.
     private static let prompt = [3, 14, 15, 9, 2, 6, 5, 35]
@@ -2027,7 +2029,7 @@ struct Qwen35CompiledVerifyTests {
     }
 
     /// A text target whose GDN layers the kernel runs, on seeded weights, in ``dtype``.
-    private func kernelModel() throws -> Qwen35TextModel {
+    static func kernelModel() throws -> Qwen35TextModel {
         let configuration = try GDNDecodeKernelFixture.configuration(
             Qwen35TextConfiguration.self, GDNDecodeKernelFixture.smallHeadCase,
             hiddenLayers: Self.hiddenLayers)
@@ -2056,7 +2058,7 @@ struct Qwen35CompiledVerifyTests {
 
         var state = LMOutput.State()
         state[mtpEmitFlagKey] = true
-        state[mtpCacheCheckpointIndexKey] = Self.checkpointAfter
+        state[mtpVerifyKeepsSnapshotsKey] = true
         let output = model.forward(
             LMInput.Text(tokens: tokens(tokenCount, of: model, seed: Self.verifySeed)[.newAxis]),
             cache: cache, state: state, lastTokenOnly: false, useCompiledDecode: compiled)
@@ -2093,7 +2095,7 @@ struct Qwen35CompiledVerifyTests {
         "a compiled verify stays within tolerance of the general path, for each rollback",
         arguments: verifyTokenCounts)
     func compiledVerifyMatchesGeneralPath(tokenCount: Int) throws {
-        let model = try kernelModel()
+        let model = try Self.kernelModel()
         let tolerance = try #require(AttentionKernelTolerance.of(Self.dtype))
 
         for rollback in 0 ..< tokenCount {
@@ -2118,7 +2120,7 @@ struct Qwen35CompiledVerifyTests {
 
     @Test("a verify on the general path compiles no verify segment")
     func generalPathCompilesNoVerifySegment() throws {
-        let model = try kernelModel()
+        let model = try Self.kernelModel()
         _ = try verify(
             model, tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: 0, compiled: false)
         #expect(model.model.compiledVerifySegmentCount == 0)
@@ -2126,7 +2128,7 @@ struct Qwen35CompiledVerifyTests {
 
     @Test("invalidating the compiled traces of the model drops its verify segments")
     func invalidationDropsVerifySegments() throws {
-        let model = try kernelModel()
+        let model = try Self.kernelModel()
         _ = try verify(
             model, tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: 0, compiled: true)
         #expect(model.model.compiledVerifySegmentCount > 0)
@@ -2136,21 +2138,16 @@ struct Qwen35CompiledVerifyTests {
         #expect(model.model.compiledVerifySegmentCount == 0)
     }
 
-    @Test("a verify shape holds two to the most kernel tokens and a checkpoint inside them")
+    @Test("a verify shape holds two to the most kernel tokens")
     func verifyShapeBounds() {
         let most = GatedDeltaDecodeKernel.mostTokens
-        #expect(
-            CompiledVerifyShape(tokens: CompiledVerifyShape.fewestTokens, checkpointAfter: 1) != nil
-        )
-        #expect(CompiledVerifyShape(tokens: most, checkpointAfter: most - 1) != nil)
-        #expect(CompiledVerifyShape(tokens: 1, checkpointAfter: 1) == nil)
-        #expect(CompiledVerifyShape(tokens: most + 1, checkpointAfter: 1) == nil)
-        #expect(CompiledVerifyShape(tokens: most, checkpointAfter: nil) == nil)
-        #expect(CompiledVerifyShape(tokens: most, checkpointAfter: 0) == nil)
-        #expect(CompiledVerifyShape(tokens: most, checkpointAfter: most) == nil)
+        #expect(CompiledVerifyShape(tokens: CompiledVerifyShape.fewestTokens) != nil)
+        #expect(CompiledVerifyShape(tokens: most) != nil)
+        #expect(CompiledVerifyShape(tokens: GatedDeltaDecodeKernel.decodeTokens) == nil)
+        #expect(CompiledVerifyShape(tokens: most + 1) == nil)
     }
 
-    @Test("speculative states keep their kind and their arrays through the trace arrays")
+    @Test("snapshot slots keep their arrays through the trace arrays")
     func speculativeStatesRoundTripThroughTraceArrays() throws {
         let headCase = GDNDecodeKernelFixture.smallHeadCase
         let recurrent = MLXRandom.normal(
@@ -2159,43 +2156,12 @@ struct Qwen35CompiledVerifyTests {
         let slots = stacked([recurrent, recurrent + 1])
         let window = concatenated([conv, conv], axis: 1)
 
-        let checkpoint = try #require(
-            checkpointArrays(
-                of: GatedDeltaSpeculativeStates(
-                    traceArrays: GatedDeltaSpeculativeStates.checkpoint(
-                        conv: conv, recurrent: recurrent
-                    ).traceArrays)))
-        let snapshots = try #require(
-            snapshotArrays(
-                of: GatedDeltaSpeculativeStates(
-                    traceArrays: GatedDeltaSpeculativeStates.snapshots(
-                        GatedDeltaDecodeKernel.Snapshots(recurrent: slots, convWindow: window)
-                    ).traceArrays)))
+        let snapshots = GatedDeltaDecodeKernel.Snapshots(
+            traceArrays: GatedDeltaDecodeKernel.Snapshots(recurrent: slots, convWindow: window)
+                .traceArrays)
 
-        #expect(arrayEqual(checkpoint.conv, conv).item(Bool.self))
-        #expect(arrayEqual(checkpoint.recurrent, recurrent).item(Bool.self))
         #expect(arrayEqual(snapshots.recurrent, slots).item(Bool.self))
         #expect(arrayEqual(snapshots.convWindow, window).item(Bool.self))
-    }
-
-    /// The arrays of a checkpoint, or nil for snapshots.
-    private func checkpointArrays(of states: GatedDeltaSpeculativeStates) -> (
-        conv: MLXArray, recurrent: MLXArray
-    )? {
-        if case .checkpoint(let conv, let recurrent) = states {
-            return (conv, recurrent)
-        }
-        return nil
-    }
-
-    /// The snapshots, or nil for a checkpoint.
-    private func snapshotArrays(of states: GatedDeltaSpeculativeStates)
-        -> GatedDeltaDecodeKernel.Snapshots?
-    {
-        if case .snapshots(let snapshots) = states {
-            return snapshots
-        }
-        return nil
     }
 
     @Test(

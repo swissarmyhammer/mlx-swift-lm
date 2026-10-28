@@ -103,8 +103,8 @@ extension CompiledDecodeSegment {
     /// In: `[x]`, then `[attention, gate]` when opening with a full-attention
     /// tail, then `[convState, recState]` per GDN layer. Out: `[x]`, then
     /// `[newConvState, newRecState]` per GDN layer (followed, for a verify,
-    /// by the speculative states of
-    /// ``GatedDeltaSpeculativeStates/traceArrays``), then the
+    /// by the snapshot slots of
+    /// ``GatedDeltaDecodeKernel/Snapshots/traceArrays``), then the
     /// ``AttentionOutput`` arrays when closing with a head.
     ///
     /// The segment that closes the schedule, the one with no attention head,
@@ -136,11 +136,11 @@ extension CompiledDecodeSegment {
             let slot = stateInputOffset + Self.statesPerLinearLayer * position
             let step = layers[layerIndex].linearLayerBody(
                 x: hiddenStates, convState: arguments[slot], recState: arguments[slot + 1],
-                checkpointAfter: verify?.checkpointAfter)
+                keepsSnapshots: verify != nil)
             hiddenStates = step.output
             states +=
                 [step.convState, step.recurrentState]
-                + Self.speculativeOutputs(step.speculative, verify: verify)
+                + Self.snapshotOutputs(step.snapshots, verify: verify)
         }
 
         if let pre = attentionPreLayer {
@@ -155,16 +155,16 @@ extension CompiledDecodeSegment {
         return [hiddenStates] + states
     }
 
-    /// The speculative states a GDN layer of a verify segment gives back, as
+    /// The snapshot slots a GDN layer of a verify segment gives back, as
     /// trace outputs; none for a decode step.
-    private static func speculativeOutputs(
-        _ speculative: GatedDeltaSpeculativeStates?, verify: CompiledVerifyShape?
+    private static func snapshotOutputs(
+        _ snapshots: GatedDeltaDecodeKernel.Snapshots?, verify: CompiledVerifyShape?
     ) -> [MLXArray] {
         guard verify != nil else { return [] }
-        guard let speculative else {
-            preconditionFailure("a verify with a checkpoint inside its tokens keeps its states")
+        guard let snapshots else {
+            preconditionFailure("a verify of two tokens or more keeps its snapshot slots")
         }
-        return speculative.traceArrays
+        return snapshots.traceArrays
     }
 }
 
@@ -211,12 +211,11 @@ package final class CompiledDecodeSegmentCache<Owner: Module>: CompiledTraceInva
     }
 }
 
-/// The static shape of a speculative verify step: its tokens, and the token
-/// after which its gated delta net layers keep a checkpoint for a rollback.
+/// The static shape of a speculative verify step, whose gated delta net
+/// layers keep the snapshot slots of its tokens for a rollback: its tokens.
 ///
 /// Each shape traces a decode schedule of its own. The tokens fix the shapes
-/// of the trace, and a GDN layer that falls back to the op path splits its
-/// tokens at the checkpoint, so the checkpoint is part of the graph as well.
+/// of the trace, and of the snapshot slots each GDN layer gives back.
 package struct CompiledVerifyShape: Hashable, Sendable {
 
     /// The fewest tokens of a verify: the bonus token and one draft.
@@ -229,24 +228,13 @@ package struct CompiledVerifyShape: Hashable, Sendable {
     /// The tokens of the verify.
     package let tokens: Int
 
-    /// The token after which the verify keeps its checkpoint, from 1 to
-    /// ``tokens`` less one.
-    package let checkpointAfter: Int
-
-    /// The shape of a verify, or nil when the step is not one a compiled
-    /// schedule runs: its tokens are outside ``tokenRange``, or it keeps no
-    /// checkpoint inside its tokens.
+    /// The shape of a verify, or nil when its tokens are outside
+    /// ``tokenRange``, which a compiled schedule does not run.
     ///
-    /// - Parameters:
-    ///   - tokens: The tokens of the step.
-    ///   - checkpointAfter: The token after which the step keeps its
-    ///     checkpoint, or nil for a step that keeps none.
-    package init?(tokens: Int, checkpointAfter: Int?) {
-        guard Self.tokenRange.contains(tokens), let checkpointAfter,
-            (1 ..< tokens).contains(checkpointAfter)
-        else { return nil }
+    /// - Parameter tokens: The tokens of the verify.
+    package init?(tokens: Int) {
+        guard Self.tokenRange.contains(tokens) else { return nil }
         self.tokens = tokens
-        self.checkpointAfter = checkpointAfter
     }
 }
 

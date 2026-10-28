@@ -348,18 +348,18 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
         _ inputs: MLXArray,
         mask: MLXArray? = nil,
         cache: MambaCache? = nil,
-        checkpointAfter: Int? = nil
+        keepsSnapshots: Bool = false
     ) -> MLXArray {
         let convState =
             cache?[0] ?? zeroStates(batch: inputs.dim(0), dtype: inputs.dtype).conv
-        let (out, newConvState, newRecState, speculative) = forward(
+        let (out, newConvState, newRecState, snapshots) = forward(
             inputs, convState: convState, recState: cache?[1], mask: mask,
-            checkpointAfter: checkpointAfter)
+            keepsSnapshots: keepsSnapshots)
         if let cache {
             cache[0] = newConvState
             cache[1] = newRecState
-            if let speculative, let checkpointAfter {
-                cache.saveSpeculativeStates(speculative, checkpointAfter: checkpointAfter)
+            if let snapshots {
+                cache.saveSpeculativeSnapshots(snapshots)
             }
             cache.advance(inputs.dim(1))
         }
@@ -379,27 +379,27 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
     /// The GDN body with state passed explicitly in and out so it can be
     /// traced.
     ///
-    /// A verify pass (`checkpointAfter` inside the tokens) of two to
-    /// ``GatedDeltaDecodeKernel/mostTokens`` tokens runs in one kernel that
-    /// keeps the states after each token; any other verify pass keeps the
-    /// states after token `checkpointAfter` from the op path.
+    /// A verify pass (`keepsSnapshots` over two tokens or more) keeps the
+    /// states after each token: one kernel runs a verify of up to
+    /// ``GatedDeltaDecodeKernel/mostTokens`` tokens, and the op path runs any
+    /// other verify one token at a time.
     func forward(
         _ x: MLXArray,
         convState: MLXArray,
         recState: MLXArray?,
         mask: MLXArray?,
-        checkpointAfter: Int? = nil
+        keepsSnapshots: Bool = false
     ) -> (
         output: MLXArray,
         convState: MLXArray,
         recurrentState: MLXArray,
-        speculative: GatedDeltaSpeculativeStates?
+        snapshots: GatedDeltaDecodeKernel.Snapshots?
     ) {
         let B = x.dim(0)
         let S = x.dim(1)
 
         var (qkv, z, b, a) = projectInputs(x, batch: B, sequence: S)
-        let checkpointAfter = checkpointAfter.flatMap { (1 ..< S).contains($0) ? $0 : nil }
+        let keepsSnapshots = keepsSnapshots && S > GatedDeltaDecodeKernel.decodeTokens
 
         if let mask {
             qkv = MLX.where(mask[.ellipsis, .newAxis], qkv, 0)
@@ -407,23 +407,18 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
             qkv: qkv, z: z, b: b, a: a, convState: convState, recState: recState)
         {
             return (outProj(step.output), step.convState, step.recurrentState, nil)
-        } else if checkpointAfter != nil,
+        } else if keepsSnapshots,
             let step = speculativeKernelStep(
                 qkv: qkv, z: z, b: b, a: a, convState: convState, recState: recState),
             let snapshots = step.snapshots
         {
-            return (
-                outProj(step.output), step.convState, step.recurrentState, .snapshots(snapshots)
-            )
+            return (outProj(step.output), step.convState, step.recurrentState, snapshots)
         }
 
         let body = recurrentBody(
             qkv: qkv, z: z, b: b, a: a, convState: convState, recState: recState, mask: mask,
-            checkpointAfter: checkpointAfter)
-        return (
-            outProj(body.output), body.convState, body.recurrentState,
-            body.checkpoint.map { .checkpoint(conv: $0.conv, recurrent: $0.recurrent) }
-        )
+            keepsSnapshots: keepsSnapshots)
+        return (outProj(body.output), body.convState, body.recurrentState, body.snapshots)
     }
 
     /// The op path of the body, for any number of tokens: the conv, the q
@@ -432,12 +427,12 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
     /// projection.
     func recurrentBody(
         qkv: MLXArray, z: MLXArray, b: MLXArray, a: MLXArray, convState: MLXArray,
-        recState: MLXArray?, mask: MLXArray?, checkpointAfter: Int? = nil
+        recState: MLXArray?, mask: MLXArray?, keepsSnapshots: Bool = false
     ) -> (
         output: MLXArray,
         convState: MLXArray,
         recurrentState: MLXArray,
-        checkpoint: (conv: MLXArray, recurrent: MLXArray)?
+        snapshots: GatedDeltaDecodeKernel.Snapshots?
     ) {
         let B = qkv.dim(0)
         let S = qkv.dim(1)
@@ -460,45 +455,12 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
 
         let out: MLXArray
         let newRecState: MLXArray
-        let checkpoint: (conv: MLXArray, recurrent: MLXArray)?
-        if let split = checkpointAfter, split > 0, split < S {
-            let prefixMask = mask.map { $0[0..., ..<split] }
-            let suffixMask = mask.map { $0[0..., split...] }
-            let (prefixOut, prefixState) = gatedDeltaUpdate(
-                q: qNormed[0..., ..<split, 0..., 0...],
-                k: kNormed[0..., ..<split, 0..., 0...],
-                v: v[0..., ..<split, 0..., 0...],
-                a: a[0..., ..<split, 0...],
-                b: b[0..., ..<split, 0...],
-                aLog: aLog,
-                dtBias: dtBias,
-                state: recState,
-                mask: prefixMask,
-                useKernel: !training)
-            let (suffixOut, suffixState) = gatedDeltaUpdate(
-                q: qNormed[0..., split..., 0..., 0...],
-                k: kNormed[0..., split..., 0..., 0...],
-                v: v[0..., split..., 0..., 0...],
-                a: a[0..., split..., 0...],
-                b: b[0..., split..., 0...],
-                aLog: aLog,
-                dtBias: dtBias,
-                state: prefixState,
-                mask: suffixMask,
-                useKernel: !training)
-            out = concatenated([prefixOut, suffixOut], axis: 1)
-            newRecState = suffixState
-
-            let checkpointConv: MLXArray
-            if convKernelSize > 1 {
-                let convInput = concatenated([convState, qkv], axis: 1)
-                checkpointConv = contiguous(
-                    convInput[
-                        0..., split ..< (split + convKernelSize - 1), 0...])
-            } else {
-                checkpointConv = MLXArray.zeros([B, 0, convDim], dtype: qkv.dtype)
-            }
-            checkpoint = (checkpointConv, prefixState)
+        let snapshots: GatedDeltaDecodeKernel.Snapshots?
+        if keepsSnapshots {
+            (out, newRecState, snapshots) = GatedDeltaDecodeKernel.Snapshots.gatedDeltaUpdate(
+                q: qNormed, k: kNormed, v: v, a: a, b: b, aLog: aLog, dtBias: dtBias,
+                state: recState, mask: mask, useKernel: !training,
+                convWindow: concatenated([convState, qkv], axis: 1))
         } else {
             (out, newRecState) = gatedDeltaUpdate(
                 q: qNormed,
@@ -511,11 +473,11 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
                 state: recState,
                 mask: mask,
                 useKernel: !training)
-            checkpoint = nil
+            snapshots = nil
         }
 
         let gated = norm(out, gate: z)
-        return (gated.reshaped(B, S, -1), newConvState, newRecState, checkpoint)
+        return (gated.reshaped(B, S, -1), newConvState, newRecState, snapshots)
     }
 
     /// The S == 1 depthwise conv as elementwise multiply-adds, so `compile`
@@ -803,7 +765,7 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
         ssmMask: MLXArray?,
         cache: KVCache?,
         positionOffset: Int? = nil,
-        checkpointAfter: Int? = nil
+        keepsSnapshots: Bool = false
     ) -> MLXArray {
         // Single-token unmasked decode runs the layer as one traced function
         // (two for full attention, split at the KV write). Everything else
@@ -821,7 +783,7 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
         if isLinear {
             r = gatedDeltaNet(
                 inputLayerNorm(x), mask: ssmMask, cache: cache as? MambaCache,
-                checkpointAfter: checkpointAfter)
+                keepsSnapshots: keepsSnapshots)
         } else {
             r = fullAttention(
                 inputLayerNorm(x), mask: attentionMask, cache: cache,
@@ -903,17 +865,17 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
     // MARK: - Layer blocks
 
     /// The gated delta net with its states passed in and out; the shared
-    /// ``HybridDecodeLayer/linearLayerBody(x:convState:recState:checkpointAfter:)``
+    /// ``HybridDecodeLayer/linearLayerBody(x:convState:recState:keepsSnapshots:)``
     /// wraps it in the layer's norms and residuals.
     func gatedDeltaMixer(
-        _ x: MLXArray, convState: MLXArray, recState: MLXArray, checkpointAfter: Int?
+        _ x: MLXArray, convState: MLXArray, recState: MLXArray, keepsSnapshots: Bool
     ) -> GatedDeltaLayerStep {
         let step = gatedDeltaNet.forward(
             x, convState: convState, recState: recState, mask: nil,
-            checkpointAfter: checkpointAfter)
+            keepsSnapshots: keepsSnapshots)
         return GatedDeltaLayerStep(
             output: step.output, convState: step.convState, recurrentState: step.recurrentState,
-            speculative: step.speculative)
+            snapshots: step.snapshots)
     }
 
     func projectAttention(_ x: MLXArray) -> (
@@ -1007,16 +969,15 @@ public class Qwen35TextModelInner: Module {
     /// post-final-norm hidden representation used by the target LM head.
     ///
     /// A decode step with the final norm, and a speculative verify of
-    /// ``CompiledVerifyShape/tokenRange`` tokens with a checkpoint inside them,
-    /// run through the compiled schedule; every other call takes the general
-    /// path.
+    /// ``CompiledVerifyShape/tokenRange`` tokens that keeps its snapshots, run
+    /// through the compiled schedule; every other call takes the general path.
     ///
     /// - Parameters:
     ///   - inputs: The token ids, shape `(batch, tokens)`.
     ///   - cache: The cache of each layer, or nil.
     ///   - applyFinalNorm: True to apply the final norm to the hidden states.
-    ///   - checkpointAfter: For a verify, the token after which the GDN layers
-    ///     keep their states for a rollback.
+    ///   - keepsSnapshots: For a verify, true to have the GDN layers keep the
+    ///     states after each token for a rollback.
     ///   - useCompiledDecode: False to take the general path for every call,
     ///     as a test of the compiled schedule compares the two.
     /// - Returns: The hidden states, shape `(batch, tokens, hiddenSize)`.
@@ -1024,12 +985,12 @@ public class Qwen35TextModelInner: Module {
         _ inputs: MLXArray,
         cache: [KVCache?]? = nil,
         applyFinalNorm: Bool,
-        checkpointAfter: Int? = nil,
+        keepsSnapshots: Bool = false,
         useCompiledDecode: Bool = true
     ) -> MLXArray {
         if useCompiledDecode, let caches = cache,
             let hiddenStates = compiledStep(
-                inputs, caches, applyFinalNorm: applyFinalNorm, checkpointAfter: checkpointAfter)
+                inputs, caches, applyFinalNorm: applyFinalNorm, keepsSnapshots: keepsSnapshots)
         {
             return hiddenStates
         }
@@ -1056,7 +1017,7 @@ public class Qwen35TextModelInner: Module {
                 ? MLXFast.ScaledDotProductAttentionMaskMode.none : faMask
             hiddenStates = layer(
                 hiddenStates, attentionMask: attnMask, ssmMask: mask, cache: cacheArray?[i],
-                checkpointAfter: checkpointAfter)
+                keepsSnapshots: keepsSnapshots)
         }
 
         return applyFinalNorm ? norm(hiddenStates) : hiddenStates
@@ -1103,7 +1064,7 @@ public class Qwen35TextModelInner: Module {
     /// inside the trace.
     ///
     /// A decode step ends with the final norm. A verify leaves it to
-    /// ``forward(_:cache:applyFinalNorm:checkpointAfter:useCompiledDecode:)``,
+    /// ``forward(_:cache:applyFinalNorm:keepsSnapshots:useCompiledDecode:)``,
     /// whose MTP caller emits the rows before the norm.
     private func segmentBody(
         at index: Int, _ arguments: [MLXArray], verify: CompiledVerifyShape?
@@ -1124,16 +1085,16 @@ public class Qwen35TextModelInner: Module {
 
     /// One step through a compiled schedule, or nil when the step takes the
     /// general path: a decode step with the final norm, or a speculative
-    /// verify of ``CompiledVerifyShape/tokenRange`` tokens.
+    /// verify of ``CompiledVerifyShape/tokenRange`` tokens that keeps its
+    /// snapshots.
     private func compiledStep(
-        _ inputs: MLXArray, _ cache: [KVCache?], applyFinalNorm: Bool, checkpointAfter: Int?
+        _ inputs: MLXArray, _ cache: [KVCache?], applyFinalNorm: Bool, keepsSnapshots: Bool
     ) -> MLXArray? {
         if inputs.dim(1) == 1 {
             return applyFinalNorm ? decodeStep(inputs, cache) : nil
         }
-        guard
-            let shape = CompiledVerifyShape(
-                tokens: inputs.dim(1), checkpointAfter: checkpointAfter),
+        guard keepsSnapshots,
+            let shape = CompiledVerifyShape(tokens: inputs.dim(1)),
             let hiddenStates = verifyStep(inputs, cache, shape: shape)
         else { return nil }
         return applyFinalNorm ? norm(hiddenStates) : hiddenStates
@@ -1232,7 +1193,7 @@ public class Qwen35TextModelInner: Module {
     ) -> MLXArray {
         let outputsPerLinearLayer =
             CompiledDecodeSegment.statesPerLinearLayer
-            + (verify == nil ? 0 : GatedDeltaSpeculativeStates.traceArrayCount)
+            + (verify == nil ? 0 : GatedDeltaDecodeKernel.Snapshots.traceArrayCount)
         var carry = inputs
         var pendingAttention: [MLXArray] = []
 
@@ -1273,12 +1234,11 @@ public class Qwen35TextModelInner: Module {
     ) {
         cache[0] = outputs[0]
         cache[1] = outputs[1]
-        if let verify {
-            cache.saveSpeculativeStates(
-                GatedDeltaSpeculativeStates(
+        if verify != nil {
+            cache.saveSpeculativeSnapshots(
+                GatedDeltaDecodeKernel.Snapshots(
                     traceArrays: Array(
-                        outputs.dropFirst(CompiledDecodeSegment.statesPerLinearLayer))),
-                checkpointAfter: verify.checkpointAfter)
+                        outputs.dropFirst(CompiledDecodeSegment.statesPerLinearLayer))))
         }
         cache.advance(verify?.tokens ?? GatedDeltaDecodeKernel.decodeTokens)
     }
@@ -1333,7 +1293,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     ///   - input: The tokens, shape `(batch, tokens)`.
     ///   - cache: The cache of each layer, or nil.
     ///   - state: The model state of the call; its MTP keys ask for the
-    ///     drafter state and for the checkpoint of a verify.
+    ///     drafter state and for the snapshot slots of a verify.
     ///   - lastTokenOnly: True to project the last token only, when the call
     ///     emits no drafter state.
     ///   - useCompiledDecode: False to take the general path, as a test of the
@@ -1348,7 +1308,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
         if emitDrafterState {
             let hidden = model.forward(
                 input.tokens, cache: cache, applyFinalNorm: false,
-                checkpointAfter: state?[mtpCacheCheckpointIndexKey],
+                keepsSnapshots: state?[mtpVerifyKeepsSnapshotsKey] ?? false,
                 useCompiledDecode: useCompiledDecode)
             hiddenStates = model.norm(hidden)
         } else {
@@ -1485,7 +1445,8 @@ extension Qwen35TextModel: LoRAModel {
 }
 
 extension Qwen35TextModel: SpeculativeCacheRewindModel {
-    public var maximumNativeTargetCacheRewind: Int { 1 }
+    /// The drafts of the longest verify whose snapshot slots a GDN layer keeps.
+    public var maximumNativeTargetCacheRewind: Int { GatedDeltaDecodeKernel.mostRewoundTokens }
 }
 
 // MARK: - Top-level Model
@@ -1551,7 +1512,8 @@ extension Qwen35Model: LoRAModel {
 }
 
 extension Qwen35Model: SpeculativeCacheRewindModel {
-    public var maximumNativeTargetCacheRewind: Int { 1 }
+    /// The drafts of the longest verify whose snapshot slots a GDN layer keeps.
+    public var maximumNativeTargetCacheRewind: Int { GatedDeltaDecodeKernel.mostRewoundTokens }
 }
 
 // MARK: - Chat conventions

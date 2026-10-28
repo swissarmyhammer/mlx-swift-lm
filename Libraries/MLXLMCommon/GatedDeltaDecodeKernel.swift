@@ -52,6 +52,10 @@ package enum GatedDeltaDecodeKernel {
     /// The tokens of one decode step.
     package static let decodeTokens = 1
 
+    /// The most tokens a rollback of a verify the kernel holds rewinds: its
+    /// drafts. A round always keeps the bonus token before them.
+    package static let mostRewoundTokens = mostTokens - decodeTokens
+
     /// The weights of one gated delta net layer that the kernel reads.
     package struct Weights {
         /// The depthwise conv weight, shape `(convChannels, taps, 1)`.
@@ -693,63 +697,86 @@ package enum GatedDeltaDecodeKernel {
     }
 }
 
-/// What a speculative verify pass of a gated delta net layer keeps so that a
-/// rollback can restore the layer: the states after the checkpoint token from
-/// the op path, or the states after each token from
-/// ``GatedDeltaDecodeKernel``. ``MambaCache`` keeps either one as transient
-/// speculative data.
-package enum GatedDeltaSpeculativeStates {
-    /// The conv state and the recurrent state after the checkpoint token.
-    case checkpoint(conv: MLXArray, recurrent: MLXArray)
-    /// The states after each token of the pass.
-    case snapshots(GatedDeltaDecodeKernel.Snapshots)
+/// The snapshot slots as a compiled trace gives them back. A speculative
+/// verify pass of a gated delta net layer keeps them so that a rollback can
+/// restore the layer, from the kernel or from the op path, and
+/// ``MambaCache`` keeps them as transient speculative data.
+extension GatedDeltaDecodeKernel.Snapshots {
 
-    /// The places of the states in ``traceArrays``.
+    /// The places of the slots in ``traceArrays``.
     private enum TraceArray {
-        /// The recurrent state, or the recurrent snapshot slots.
+        /// The recurrent snapshot slots.
         static let recurrent = 0
-        /// The conv state, or the conv input window.
+        /// The conv input window.
         static let conv = 1
         /// The number of arrays.
         static let count = 2
     }
 
-    /// The rank of the recurrent snapshot slots: one slot axis before the
-    /// axes of a recurrent state.
-    private static let snapshotRank = HeadRowsAxis.count + 1
-
     /// The number of arrays of ``traceArrays``.
     package static let traceArrayCount = TraceArray.count
 
-    /// The arrays of the states, as a compiled trace gives them back: the
-    /// recurrent array, then the conv array.
+    /// The arrays of the slots, as a compiled trace gives them back: the
+    /// recurrent slots, then the conv input window.
     package var traceArrays: [MLXArray] {
-        switch self {
-        case .checkpoint(let conv, let recurrent):
-            return [recurrent, conv]
-        case .snapshots(let snapshots):
-            return [snapshots.recurrent, snapshots.convWindow]
-        }
+        [recurrent, convWindow]
     }
 
-    /// The states from the arrays of ``traceArrays``. The recurrent snapshot
-    /// slots hold one axis more than the recurrent state of a checkpoint,
-    /// which tells the two kinds apart: a trace returns arrays only, and which
-    /// kind a layer kept depends on the route the trace took.
+    /// The slots from the arrays of ``traceArrays``.
     ///
     /// - Parameter traceArrays: The arrays of ``traceArrays``.
     package init(traceArrays: [MLXArray]) {
         precondition(
             traceArrays.count == TraceArray.count,
-            "speculative states take \(TraceArray.count) arrays, not \(traceArrays.count)")
-        let recurrent = traceArrays[TraceArray.recurrent]
-        let conv = traceArrays[TraceArray.conv]
-        if recurrent.ndim == Self.snapshotRank {
-            self = .snapshots(
-                GatedDeltaDecodeKernel.Snapshots(recurrent: recurrent, convWindow: conv))
-        } else {
-            self = .checkpoint(conv: conv, recurrent: recurrent)
+            "snapshot slots take \(TraceArray.count) arrays, not \(traceArrays.count)")
+        self.init(
+            recurrent: traceArrays[TraceArray.recurrent], convWindow: traceArrays[TraceArray.conv])
+    }
+
+    /// The gated delta rule of the op path over the tokens of a speculative
+    /// verify, one token at a time, with the snapshot slots the kernel would
+    /// keep: each token runs ``gatedDeltaUpdate(q:k:v:a:b:aLog:dtBias:state:mask:useKernel:)``
+    /// from the state after the token before it, and its state is its slot.
+    /// A verify of two tokens thus runs the two one-token updates that a
+    /// split after its first token runs.
+    ///
+    /// - Parameters:
+    ///   - q: The normed queries, shape `(batch, tokens, keyHeads, keyHeadDim)`.
+    ///   - k: The normed keys, shape `(batch, tokens, keyHeads, keyHeadDim)`.
+    ///   - v: The values, shape `(batch, tokens, valueHeads, valueHeadDim)`.
+    ///   - a: The decay input, shape `(batch, tokens, valueHeads)`.
+    ///   - b: The beta input, shape `(batch, tokens, valueHeads)`.
+    ///   - aLog: The log of the decay rate of each value head.
+    ///   - dtBias: The bias of the decay step of each value head.
+    ///   - state: The recurrent state before the first token, or nil.
+    ///   - mask: The mask of the tokens, shape `(batch, tokens)`, or nil.
+    ///   - useKernel: False when the layer trains.
+    ///   - convWindow: The conv input window of the tokens: the conv state
+    ///     before the first token, then the conv input of each token.
+    /// - Returns: The output of the tokens, the recurrent state after the
+    ///   last token, and the slots.
+    package static func gatedDeltaUpdate(
+        q: MLXArray, k: MLXArray, v: MLXArray, a: MLXArray, b: MLXArray, aLog: MLXArray,
+        dtBias: MLXArray, state: MLXArray?, mask: MLXArray?, useKernel: Bool,
+        convWindow: MLXArray
+    ) -> (output: MLXArray, state: MLXArray, snapshots: Self) {
+        var current = state
+        let steps = (0 ..< q.dim(GatedDeltaAxis.step)).map { token in
+            let tokens = token ..< token + GatedDeltaDecodeKernel.decodeTokens
+            let step = MLXLMCommon.gatedDeltaUpdate(
+                q: q[0..., tokens], k: k[0..., tokens], v: v[0..., tokens], a: a[0..., tokens],
+                b: b[0..., tokens], aLog: aLog, dtBias: dtBias, state: current,
+                mask: mask.map { $0[0..., tokens] }, useKernel: useKernel)
+            current = step.1
+            return step
         }
+        guard let last = steps.last else {
+            preconditionFailure("a speculative verify holds at least one token")
+        }
+        return (
+            concatenated(steps.map(\.0), axis: GatedDeltaAxis.step), last.1,
+            Self(recurrent: stacked(steps.map(\.1)), convWindow: convWindow)
+        )
     }
 }
 

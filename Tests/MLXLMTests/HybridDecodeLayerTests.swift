@@ -30,6 +30,23 @@ private func headOffset(_ place: Int) -> Float {
     Float(place + 1)
 }
 
+/// The snapshot slots ``ArithmeticHybridLayer`` keeps for a verify over `x`: the slot after
+/// token `t` holds the recurrent state plus `t` state steps, and the conv window holds the
+/// conv state, then the mixer input of each token.
+///
+/// - Parameters:
+///   - x: The mixer input, shape `(batch, tokens, hiddenWidth)`.
+///   - convState: The conv state before the first token.
+///   - recState: The recurrent state before the first token.
+/// - Returns: The slots, recurrent shape `(tokens,)` plus the recurrent state shape.
+private func arithmeticSnapshots(
+    _ x: MLXArray, convState: MLXArray, recState: MLXArray
+) -> GatedDeltaDecodeKernel.Snapshots {
+    let slots = (1 ... x.dim(1)).map { recState + stateStep * Float($0) }
+    return GatedDeltaDecodeKernel.Snapshots(
+        recurrent: stacked(slots), convWindow: concatenated([convState, x], axis: 1))
+}
+
 /// A hybrid decoder layer whose blocks are plain arithmetic, so each output of a shared body
 /// shows which blocks made it. Its norms are real `RMSNorm`s with their initial weights; its
 /// mixer modules are only there to be found by the shared accessors.
@@ -51,14 +68,13 @@ private final class ArithmeticHybridLayer: Module, HybridDecodeLayer {
     }
 
     func gatedDeltaMixer(
-        _ x: MLXArray, convState: MLXArray, recState: MLXArray, checkpointAfter: Int?
+        _ x: MLXArray, convState: MLXArray, recState: MLXArray, keepsSnapshots: Bool
     ) -> GatedDeltaLayerStep {
         GatedDeltaLayerStep(
             output: x * mixerScale, convState: convState + stateStep,
             recurrentState: recState + stateStep,
-            speculative: checkpointAfter.map { _ in
-                .checkpoint(conv: convState, recurrent: recState)
-            })
+            snapshots: keepsSnapshots
+                ? arithmeticSnapshots(x, convState: convState, recState: recState) : nil)
     }
 
     func projectAttention(_ x: MLXArray) -> (
@@ -130,20 +146,23 @@ private func expectEqual(
         expectEqual(step.output, linearOutput(x, of: layer))
         expectEqual(step.convState, convState + stateStep)
         expectEqual(step.recurrentState, recState + stateStep)
-        #expect(step.speculative == nil)
+        #expect(step.snapshots == nil)
     }
 
     @Test func linearLayerBodyGivesBackTheStatesAVerifyKeeps() throws {
         let layer = ArithmeticHybridLayer()
+        let x = hiddenStates()
         let convState = hiddenStates(offset: 10)
         let recState = hiddenStates(offset: 20)
 
         let step = layer.linearLayerBody(
-            x: hiddenStates(), convState: convState, recState: recState, checkpointAfter: 1)
+            x: x, convState: convState, recState: recState, keepsSnapshots: true)
 
-        let kept = try #require(step.speculative).traceArrays
-        expectEqual(kept[0], recState)
-        expectEqual(kept[1], convState)
+        let kept = try #require(step.snapshots)
+        let expected = arithmeticSnapshots(
+            layer.inputLayerNorm(x), convState: convState, recState: recState)
+        expectEqual(kept.recurrent, expected.recurrent)
+        expectEqual(kept.convWindow, expected.convWindow)
     }
 
     @Test func attentionBodiesProjectAndMergeAroundTheResidual() {
@@ -211,7 +230,7 @@ private func expectEqual(
 
     @Test func segmentBodyOfAVerifyLeavesTheNormAndGivesBackTheKeptStates() throws {
         let (segments, layers) = schedule()
-        let verify = try #require(CompiledVerifyShape(tokens: stepTokens, checkpointAfter: 1))
+        let verify = try #require(CompiledVerifyShape(tokens: stepTokens))
         let x = hiddenStates()
         let attention = hiddenStates(offset: 5)
         let gate = hiddenStates(offset: 7)
@@ -222,14 +241,18 @@ private func expectEqual(
             x, arguments: [x, attention, gate, convState, recState], layers: layers,
             finalNorm: RMSNorm(dimensions: hiddenWidth), verify: verify)
 
-        let hidden = linearOutput(closed(x + attention * gate, by: layers[1]), of: layers[2])
+        let attended = closed(x + attention * gate, by: layers[1])
+        let hidden = linearOutput(attended, of: layers[2])
         #expect(
             outputs.count
                 == 1 + CompiledDecodeSegment.statesPerLinearLayer
-                + GatedDeltaSpeculativeStates.traceArrayCount)
+                + GatedDeltaDecodeKernel.Snapshots.traceArrayCount)
         expectEqual(outputs[0], hidden)
         let kept = 1 + CompiledDecodeSegment.statesPerLinearLayer
-        expectEqual(outputs[kept], recState)
-        expectEqual(outputs[kept + 1], convState)
+        let expected = arithmeticSnapshots(
+            layers[2].inputLayerNorm(attended), convState: convState, recState: recState)
+        for (got, slots) in zip(outputs[kept...], expected.traceArrays) {
+            expectEqual(got, slots)
+        }
     }
 }

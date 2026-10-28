@@ -512,15 +512,15 @@ final class Qwen3NextDecoderLayer: Module, HybridDecodeLayer {
     // MARK: - Layer blocks
 
     /// The gated delta net with its states passed in and out; the shared
-    /// ``HybridDecodeLayer/linearLayerBody(x:convState:recState:checkpointAfter:)``
+    /// ``HybridDecodeLayer/linearLayerBody(x:convState:recState:keepsSnapshots:)``
     /// wraps it in the layer's norms and residuals.
     ///
     /// Qwen3-Next runs no speculative verify, so its gated delta net keeps no
-    /// checkpoint: a decode step is the only caller.
+    /// snapshot slots: a decode step is the only caller.
     func gatedDeltaMixer(
-        _ x: MLXArray, convState: MLXArray, recState: MLXArray, checkpointAfter: Int?
+        _ x: MLXArray, convState: MLXArray, recState: MLXArray, keepsSnapshots: Bool
     ) -> GatedDeltaLayerStep {
-        precondition(checkpointAfter == nil, "a Qwen3-Next gated delta net keeps no checkpoint")
+        precondition(!keepsSnapshots, "a Qwen3-Next gated delta net keeps no snapshot slots")
         let step = gatedDeltaNet.forward(x, convState: convState, recState: recState, mask: nil)
         return GatedDeltaLayerStep(
             output: step.output, convState: step.convState, recurrentState: step.recurrentState)

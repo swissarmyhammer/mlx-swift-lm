@@ -167,7 +167,7 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
         XCTAssertEqual(Snapshot(step.output), Snapshot(general))
         XCTAssertEqual(Snapshot(step.convState), Snapshot(try XCTUnwrap(cache[0])))
         XCTAssertEqual(Snapshot(step.recurrentState), Snapshot(try XCTUnwrap(cache[1])))
-        XCTAssertNil(step.speculative)
+        XCTAssertNil(step.snapshots)
     }
 
     func testQuantizedCacheKeepsExactGeneralFallback() throws {

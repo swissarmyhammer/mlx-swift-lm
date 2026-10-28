@@ -11,22 +11,22 @@ package struct GatedDeltaLayerStep {
     package var convState: MLXArray
     /// The recurrent state after the last token.
     package var recurrentState: MLXArray
-    /// The states a verify keeps for a rollback; nil for a decode step.
-    package var speculative: GatedDeltaSpeculativeStates?
+    /// The snapshot slots a verify keeps for a rollback; nil for a decode step.
+    package var snapshots: GatedDeltaDecodeKernel.Snapshots?
 
     /// - Parameters:
     ///   - output: The output, shape `(batch, tokens, hiddenSize)`.
     ///   - convState: The conv state after the last token.
     ///   - recurrentState: The recurrent state after the last token.
-    ///   - speculative: The states a verify keeps for a rollback, or nil.
+    ///   - snapshots: The snapshot slots a verify keeps for a rollback, or nil.
     package init(
         output: MLXArray, convState: MLXArray, recurrentState: MLXArray,
-        speculative: GatedDeltaSpeculativeStates? = nil
+        snapshots: GatedDeltaDecodeKernel.Snapshots? = nil
     ) {
         self.output = output
         self.convState = convState
         self.recurrentState = recurrentState
-        self.speculative = speculative
+        self.snapshots = snapshots
     }
 }
 
@@ -64,11 +64,11 @@ package protocol HybridDecodeLayer: Module {
     ///   - x: The normed layer input, shape `(batch, tokens, hiddenSize)`.
     ///   - convState: The conv state before the first token.
     ///   - recState: The recurrent state before the first token.
-    ///   - checkpointAfter: For a verify, the token after which the layer
-    ///     keeps its states for a rollback; nil for a decode step.
+    ///   - keepsSnapshots: True for a verify, whose layer keeps the states
+    ///     after each token for a rollback; false for a decode step.
     /// - Returns: The mixer output and the states.
     func gatedDeltaMixer(
-        _ x: MLXArray, convState: MLXArray, recState: MLXArray, checkpointAfter: Int?
+        _ x: MLXArray, convState: MLXArray, recState: MLXArray, keepsSnapshots: Bool
     ) -> GatedDeltaLayerStep
 
     /// The projections of a full-attention layer before rope and the KV
@@ -118,16 +118,16 @@ extension HybridDecodeLayer {
     ///   - x: The layer input, shape `(batch, tokens, hiddenSize)`.
     ///   - convState: The conv state before the first token.
     ///   - recState: The recurrent state before the first token.
-    ///   - checkpointAfter: For a verify, the token after which the layer
-    ///     keeps its states for a rollback; nil for a decode step.
+    ///   - keepsSnapshots: True for a verify, whose layer keeps the states
+    ///     after each token for a rollback; false for a decode step.
     /// - Returns: The layer output, the states after the last token, and the
-    ///   states a verify keeps.
+    ///   snapshot slots a verify keeps.
     package func linearLayerBody(
-        x: MLXArray, convState: MLXArray, recState: MLXArray, checkpointAfter: Int? = nil
+        x: MLXArray, convState: MLXArray, recState: MLXArray, keepsSnapshots: Bool = false
     ) -> GatedDeltaLayerStep {
         var step = gatedDeltaMixer(
             inputLayerNorm(x), convState: convState, recState: recState,
-            checkpointAfter: checkpointAfter)
+            keepsSnapshots: keepsSnapshots)
         step.output = residualFeedForward(x + step.output)
         return step
     }

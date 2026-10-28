@@ -669,11 +669,19 @@ public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
     return cache.first?.trim(count) ?? 0
 }
 
-/// Rewind a one-token speculative tail in a hybrid attention/recurrent cache.
-/// Attention entries trim normally; Mamba entries restore the checkpoint the
-/// model captured after the round's committed bonus token, or select its
-/// snapshot slot. The restored recurrent states are evaluated together, so
-/// that the snapshot buffers of the verify pass go without a wait.
+/// Rewind the rejected tail of a speculative verify in a hybrid
+/// attention/recurrent cache by `numTokens` tokens. Attention entries trim
+/// normally; Mamba entries select the snapshot slot the verify kept after its
+/// last accepted token. A verify of `T` tokens keeps `T` slots and rewinds
+/// one to `T - 1` tokens: the bonus token at its head is always committed.
+/// The restored recurrent states are evaluated together, so that the
+/// snapshot buffers of the verify pass go without a wait.
+///
+/// - Parameters:
+///   - cache: The cache of each layer.
+///   - numTokens: The rejected tokens.
+/// - Returns: `numTokens`, or 0 when an entry cannot rewind that many tokens;
+///   the cache is then left as it was.
 @discardableResult
 package func rewindSpeculativePromptCache(
     _ cache: [KVCache], numTokens: Int
@@ -690,12 +698,12 @@ package func rewindSpeculativePromptCache(
 private func rewindSpeculativeEntries(
     _ cache: [KVCache], numTokens: Int
 ) -> Int {
-    guard numTokens == 1,
+    guard numTokens > 0,
         cache.allSatisfy({ entry in
             if entry.isTrimmable {
                 return entry.offset >= numTokens
             }
-            return (entry as? MambaCache)?.hasSpeculativeCheckpoint == true
+            return ((entry as? MambaCache)?.speculativeSlotCount ?? 0) > numTokens
         })
     else { return 0 }
 
@@ -705,8 +713,9 @@ private func rewindSpeculativeEntries(
                 preconditionFailure("Speculative cache validation and rewind diverged")
             }
         } else {
-            guard (entry as? MambaCache)?.restoreSpeculativeCheckpoint() == true else {
-                preconditionFailure("Missing recurrent speculative checkpoint")
+            guard (entry as? MambaCache)?.selectSpeculativeSlot(rollingBack: numTokens) == true
+            else {
+                preconditionFailure("Missing recurrent speculative snapshot slot")
             }
         }
     }

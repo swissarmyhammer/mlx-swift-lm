@@ -210,18 +210,14 @@ private enum SnapshotSlotFixture {
     /// A cache after a verify, the way a layer leaves it: the states after the
     /// last token, the slots saved, then one `advance`.
     ///
-    /// - Parameters:
-    ///   - snapshots: The slots of the verify.
-    ///   - checkpointAfter: The token after which the checkpoint stands.
+    /// - Parameter snapshots: The slots of the verify.
     /// - Returns: The cache.
-    static func cache(
-        after snapshots: GatedDeltaDecodeKernel.Snapshots, checkpointAfter: Int = 1
-    ) -> MambaCache {
+    static func cache(after snapshots: GatedDeltaDecodeKernel.Snapshots) -> MambaCache {
         let cache = MambaCache(leftPadding: leftPadding)
         cache.offset = startOffset
         cache[0] = snapshots.convState(afterToken: snapshots.tokenCount)
         cache[1] = snapshots.recurrentState(afterToken: snapshots.tokenCount)
-        cache.saveSpeculativeSnapshots(snapshots, checkpointAfter: checkpointAfter)
+        cache.saveSpeculativeSnapshots(snapshots)
         cache.advance(snapshots.tokenCount)
         return cache
     }
@@ -262,7 +258,6 @@ private enum SnapshotSlotFixture {
         let accepted = SnapshotSlotFixture.tokenCount - rollback
         #expect(SnapshotSlotFixture.holdsTheSlot(cache, of: snapshots, accepted: accepted))
         #expect(cache.speculativeSlotCount == 0)
-        #expect(!cache.hasSpeculativeCheckpoint)
     }
 }
 
@@ -278,35 +273,46 @@ private enum SnapshotSlotFixture {
     #expect(!MambaCache().selectSpeculativeSlot(rollingBack: 1))
 }
 
-@Test func restoringTheSpeculativeCheckpointSelectsTheSlotAfterTheCheckpointToken() throws {
-    for checkpointAfter in 1 ..< SnapshotSlotFixture.tokenCount {
+/// An attention cache that holds the tokens of a verify, and a recurrent cache that holds its
+/// snapshot slots, the way a verify leaves the two kinds of a hybrid cache.
+private func hybridCacheAfterAVerify(of snapshots: GatedDeltaDecodeKernel.Snapshots) -> (
+    attention: KVCacheSimple, recurrent: MambaCache
+) {
+    let attention = KVCacheSimple()
+    let keys = MLXArray.zeros([1, 1, snapshots.tokenCount, SnapshotSlotFixture.channels])
+    _ = attention.update(keys: keys, values: keys)
+    return (attention, SnapshotSlotFixture.cache(after: snapshots))
+}
+
+@Test func rewindingAHybridCacheByEachDraftCountSelectsItsSlotAndTrimsTheAttention() throws {
+    for rollback in 1 ..< SnapshotSlotFixture.tokenCount {
         let snapshots = SnapshotSlotFixture.snapshots()
-        let cache = SnapshotSlotFixture.cache(after: snapshots, checkpointAfter: checkpointAfter)
-        #expect(cache.hasSpeculativeCheckpoint)
+        let (attention, recurrent) = hybridCacheAfterAVerify(of: snapshots)
 
-        #expect(cache.restoreSpeculativeCheckpoint())
+        let rewound = rewindSpeculativePromptCache([attention, recurrent], numTokens: rollback)
 
-        #expect(SnapshotSlotFixture.holdsTheSlot(cache, of: snapshots, accepted: checkpointAfter))
-        #expect(cache.speculativeSlotCount == 0)
-        #expect(!cache.hasSpeculativeCheckpoint)
+        #expect(rewound == rollback)
+
+        let accepted = SnapshotSlotFixture.tokenCount - rollback
+        #expect(attention.offset == accepted)
+        #expect(SnapshotSlotFixture.holdsTheSlot(recurrent, of: snapshots, accepted: accepted))
+        #expect(recurrent.speculativeSlotCount == 0)
     }
 }
 
-@Test func rewindingAHybridCacheByOneTokenSelectsTheSlotBeforeTheLastToken() throws {
-    let attention = KVCacheSimple()
-    let keys = MLXArray.zeros([1, 1, SnapshotSlotFixture.tokenCount, 2])
-    _ = attention.update(keys: keys, values: keys)
-    let snapshots = SnapshotSlotFixture.snapshots()
-    let recurrent = SnapshotSlotFixture.cache(
-        after: snapshots, checkpointAfter: SnapshotSlotFixture.tokenCount - 1)
+@Test func aHybridRewindItHoldsNoSlotForLeavesTheCacheAsItWas() throws {
+    for rollback in [0, SnapshotSlotFixture.tokenCount] {
+        let snapshots = SnapshotSlotFixture.snapshots()
+        let (attention, recurrent) = hybridCacheAfterAVerify(of: snapshots)
 
-    #expect(rewindSpeculativePromptCache([attention, recurrent], numTokens: 1) == 1)
+        #expect(rewindSpeculativePromptCache([attention, recurrent], numTokens: rollback) == 0)
 
-    #expect(attention.offset == SnapshotSlotFixture.tokenCount - 1)
-    #expect(
-        SnapshotSlotFixture.holdsTheSlot(
-            recurrent, of: snapshots, accepted: SnapshotSlotFixture.tokenCount - 1))
-    #expect(recurrent.speculativeSlotCount == 0)
+        #expect(attention.offset == SnapshotSlotFixture.tokenCount)
+        #expect(recurrent.speculativeSlotCount == SnapshotSlotFixture.tokenCount)
+        #expect(
+            SnapshotSlotFixture.holdsTheSlot(
+                recurrent, of: snapshots, accepted: SnapshotSlotFixture.tokenCount))
+    }
 }
 
 @Test func discardingTheSpeculativeCheckpointsReleasesTheSlots() throws {
@@ -317,25 +323,24 @@ private enum SnapshotSlotFixture {
     discardSpeculativePromptCacheCheckpoints([cache])
 
     #expect(cache.speculativeSlotCount == 0)
-    #expect(!cache.hasSpeculativeCheckpoint)
-    #expect(!cache.restoreSpeculativeCheckpoint())
+    #expect(!cache.selectSpeculativeSlot(rollingBack: 1))
     #expect(cache.offset == offset)
     #expect(
         SnapshotSlotFixture.holdsTheSlot(
             cache, of: snapshots, accepted: SnapshotSlotFixture.tokenCount))
 }
 
-@Test func aSavedCheckpointReplacesTheSlotsOfAnEarlierVerify() throws {
-    let snapshots = SnapshotSlotFixture.snapshots()
-    let cache = SnapshotSlotFixture.cache(after: snapshots)
-    let conv = MLXArray.ones([SnapshotSlotFixture.batch, SnapshotSlotFixture.stateRows, 1])
-    let state = MLXArray.ones(SnapshotSlotFixture.stateShape)
+@Test func theSlotsOfANewerVerifyReplaceTheSlotsOfAnEarlierVerify() throws {
+    let cache = SnapshotSlotFixture.cache(after: SnapshotSlotFixture.snapshots())
+    let newer = SnapshotSlotFixture.snapshots(tokens: SnapshotSlotFixture.fewestTokens)
 
-    cache.saveSpeculativeCheckpoint(convState: conv, recurrentState: state, advancedBy: 1)
+    cache.saveSpeculativeSnapshots(newer)
 
-    #expect(cache.speculativeSlotCount == 0)
-    #expect(cache.restoreSpeculativeCheckpoint())
-    #expect(arrayEqual(try #require(cache[1]), state).item(Bool.self))
+    #expect(cache.speculativeSlotCount == SnapshotSlotFixture.fewestTokens)
+    #expect(cache.selectSpeculativeSlot(rollingBack: 1))
+    let accepted = SnapshotSlotFixture.fewestTokens - 1
+    #expect(
+        arrayEqual(try #require(cache[1]), newer.recurrent[accepted - 1]).item(Bool.self))
 }
 
 @Test func theSnapshotSlotsAreLeftOutOfACopy() throws {
@@ -344,7 +349,6 @@ private enum SnapshotSlotFixture {
     let copied = try #require(cache.copy() as? MambaCache)
 
     #expect(copied.speculativeSlotCount == 0)
-    #expect(!copied.hasSpeculativeCheckpoint)
     #expect(copied.offset == cache.offset)
     assertArraysClose(copied.state, cache.state)
 }
