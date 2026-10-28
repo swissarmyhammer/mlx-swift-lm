@@ -921,6 +921,151 @@ struct ChatSessionQwenTextMTPTests {
         #expect(second.info.proposedDraftTokens == nil)
     }
 
+    // MARK: - Prompt cache files with MTP
+
+    @Test(
+        "a session restored from a saved prompt cache resumes the saved drafter continuation and writes the text of the source"
+    )
+    func restoredPromptCacheResumesTheSavedDrafterContinuation() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let source = try await savedRawCacheSession(fixture)
+        defer { try? FileManager.default.removeItem(at: source.url) }
+        let saved = try #require(await source.session.drafterContinuation())
+        let restored = try restoredMTPSession(
+            fixture, promptCache: try loadPromptCacheSnapshot(url: source.url))
+
+        let cachedPosition = try await expectFollowUpTurn(
+            of: restored, writesTheTextOf: source.session, fixture)
+
+        // A resume keeps the entries the source drafter began at the prefilled prefix. A cold
+        // start begins them at the position this turn found cached.
+        let continuation = try #require(await restored.drafterContinuation())
+        #expect(continuation.state.cacheStartPosition == saved.state.cacheStartPosition)
+        #expect(continuation.state.cacheStartPosition < cachedPosition)
+    }
+
+    @Test(
+        "a session restored from a prompt cache file saved without a drafter continuation cold-starts the drafter and writes the text of the source"
+    )
+    func restoredPromptCacheWithoutADrafterContinuationColdStarts() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let source = try await savedRawCacheSession(fixture)
+        defer { try? FileManager.default.removeItem(at: source.url) }
+        // The file a save wrote before drafter continuations: the main caches and model state.
+        let saved = try loadPromptCacheSnapshot(url: source.url)
+        let legacyURL = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: legacyURL) }
+        try savePromptCache(url: legacyURL, cache: saved.cache, state: saved.state)
+        let restored = try restoredMTPSession(
+            fixture, promptCache: try loadPromptCacheSnapshot(url: legacyURL))
+
+        let cachedPosition = try await expectFollowUpTurn(
+            of: restored, writesTheTextOf: source.session, fixture)
+
+        try await expectColdStart(of: restored, at: cachedPosition)
+    }
+
+    @Test(
+        "a session restored with a damaged or foreign drafter continuation cold-starts the drafter and writes the text of the source",
+        arguments: [
+            MTPDrafterContinuationTamper.drafterID, .formatVersion, .boundaryHidden, .cacheBatch,
+        ])
+    func restoredPromptCacheWithADamagedDrafterContinuationColdStarts(
+        tamper: MTPDrafterContinuationTamper
+    ) async throws {
+        let fixture = try Qwen35MTPFixture()
+        let source = try await savedRawCacheSession(fixture)
+        defer { try? FileManager.default.removeItem(at: source.url) }
+        let saved = try loadPromptCacheSnapshot(url: source.url)
+        let serialized = try #require(saved.drafterContinuation)
+        var arrays = serialized.arrays
+        var metadata = serialized.metadata
+        try tamper.apply(arrays: &arrays, metadata: &metadata)
+        let restored = try restoredMTPSession(
+            fixture,
+            promptCache: PromptCacheSnapshot(
+                cache: saved.cache, metadata: saved.metadata, state: saved.state,
+                drafterContinuation: SerializedMTPDrafterContinuation(
+                    arrays: arrays, metadata: metadata)))
+
+        let cachedPosition = try await expectFollowUpTurn(
+            of: restored, writesTheTextOf: source.session, fixture)
+
+        try await expectColdStart(of: restored, at: cachedPosition)
+    }
+
+    /// A greedy MTP session over ``prefilledQwenCache(_:)`` that wrote one turn of
+    /// ``fixturePrompt``, and the prompt cache file it saved after that turn.
+    ///
+    /// - Parameter fixture: The Qwen fixture.
+    /// - Returns: The session and the file. The caller removes the file.
+    private func savedRawCacheSession(_ fixture: Qwen35MTPFixture) async throws -> (
+        session: ChatSession, url: URL
+    ) {
+        let session = ChatSession(
+            fixture.makeModelContext(), cache: try prefilledQwenCache(fixture),
+            speculativeDecoding: try fixture.makeSpeculativeDecodingConfig(),
+            generateParameters: GenerateParameters(
+                maxTokens: fixtureTurnTokenCount, temperature: 0))
+        _ = try await collect(session.streamDetails(to: fixture.text(for: fixturePrompt)))
+        let url = TemporaryPromptCacheFile.makeURL()
+        try await session.saveCache(to: url)
+        return (session, url)
+    }
+
+    /// A greedy MTP session over the Qwen fixture that starts from `promptCache`.
+    ///
+    /// - Parameters:
+    ///   - fixture: The Qwen fixture.
+    ///   - promptCache: The snapshot the session starts from.
+    /// - Returns: The session.
+    private func restoredMTPSession(
+        _ fixture: Qwen35MTPFixture, promptCache: PromptCacheSnapshot
+    ) throws -> ChatSession {
+        ChatSession(
+            fixture.makeModelContext(), promptCache: promptCache,
+            speculativeDecoding: try fixture.makeSpeculativeDecodingConfig(),
+            generateParameters: GenerateParameters(
+                maxTokens: fixtureTurnTokenCount, temperature: 0))
+    }
+
+    /// Writes the turn of ``fixtureFollowUpPrompt`` in `restored` and in `source`, and checks
+    /// that the turn of `restored` speculated throughout and wrote the text of `source`.
+    ///
+    /// - Parameters:
+    ///   - restored: The session restored from a prompt cache of `source`.
+    ///   - source: The session that was never saved and restored, at the same cached position.
+    ///   - fixture: The Qwen fixture.
+    /// - Returns: The tokens the caches of `restored` held before the turn.
+    private func expectFollowUpTurn(
+        of restored: ChatSession, writesTheTextOf source: ChatSession,
+        _ fixture: Qwen35MTPFixture
+    ) async throws -> Int {
+        let cachedPosition = try #require(try await restored.cacheStatus().processedTokenCount)
+        #expect(cachedPosition == (try await source.cacheStatus().processedTokenCount))
+        let followUp = fixture.text(for: fixtureFollowUpPrompt)
+
+        let expected = try await collect(source.streamDetails(to: followUp))
+        let result = try await collect(restored.streamDetails(to: followUp))
+
+        #expect(result.text == expected.text)
+        #expect(result.info.promptTokenCount == expected.info.promptTokenCount)
+        #expect((result.info.proposedDraftTokens ?? 0) > 0)
+        #expect(result.info.passthroughReason == nil)
+        #expect(result.info.speculativeDecodingFallbackReason == nil)
+        return cachedPosition
+    }
+
+    /// Checks that the drafter of the last turn of `session` cold-started at `position`.
+    ///
+    /// - Parameters:
+    ///   - session: The session whose last turn speculated.
+    ///   - position: The cached position the turn started at.
+    private func expectColdStart(of session: ChatSession, at position: Int) async throws {
+        let continuation = try #require(await session.drafterContinuation())
+        #expect(continuation.state.cacheStartPosition == position)
+    }
+
     /// Tokens each turn of a Qwen fixture chat generates.
     private let fixtureTurnTokenCount = 6
 

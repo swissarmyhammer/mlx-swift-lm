@@ -2383,10 +2383,17 @@ public protocol PromptCacheRestorable: KVCache {
 ///
 /// The cache instances are mutable reference types. Transfer a snapshot to one session or copy the
 /// caches before constructing multiple sessions from it.
+///
+/// A snapshot of an MTP session also carries the drafter continuation that stands where the main
+/// cache ends, so a session restored from it resumes the drafter rather than cold-starting it.
 public struct PromptCacheSnapshot {
     public let cache: [KVCache]
     public let metadata: [String: String]
     public let state: LMOutput.State?
+
+    /// The MTP drafter continuation saved with the cache, or `nil` when the save had none. A file
+    /// written before drafter continuations were saved loads with `nil`.
+    public let drafterContinuation: SerializedMTPDrafterContinuation?
 
     /// Pair a cache with the model state that belongs with it.
     ///
@@ -2397,10 +2404,16 @@ public struct PromptCacheSnapshot {
     ///   - cache: the KV cache
     ///   - metadata: optional caller metadata to carry alongside it
     ///   - state: the model state captured with the cache, if the model produced any
-    public init(cache: [KVCache], metadata: [String: String] = [:], state: LMOutput.State? = nil) {
+    ///   - drafterContinuation: the MTP drafter continuation that stands where `cache` ends, if
+    ///     an MTP generation left one
+    public init(
+        cache: [KVCache], metadata: [String: String] = [:], state: LMOutput.State? = nil,
+        drafterContinuation: SerializedMTPDrafterContinuation? = nil
+    ) {
         self.cache = cache
         self.metadata = metadata
         self.state = state
+        self.drafterContinuation = drafterContinuation
     }
 }
 
@@ -2410,7 +2423,7 @@ public struct PromptCacheSnapshot {
 /// classes (for example `MambaCache`) does not hold it. The load functions apply the record and
 /// do not give it back in the user metadata.
 ///
-/// This is ``preparePromptCacheSave(cache:metadata:state:)`` and then
+/// This is ``preparePromptCacheSave(cache:metadata:state:drafterContinuation:)`` and then
 /// ``writePromptCache(_:url:)``. A caller that must give the caches to another task before the
 /// file write ends calls the two steps itself.
 ///
@@ -2419,21 +2432,27 @@ public struct PromptCacheSnapshot {
 ///   - cache: The model cache state
 ///   - metadata: Optional metadata to save along with cache state
 ///   - state: Optional model state associated with the cache
+///   - drafterContinuation: Optional MTP drafter continuation that stands where `cache` ends
 /// - Throws: ``KVCacheError`` when a key of `metadata` uses a reserved prefix
-///   (`__mlx_lm_state_` or `__mlx_lm_offset_`), or when `state` has values and `cache` is empty.
+///   (`__mlx_lm_state_` or `__mlx_lm_offset_`), or when `state` has values or
+///   `drafterContinuation` is given and `cache` is empty.
 public func savePromptCache(
     url: URL,
     cache: [KVCache],
     metadata: [String: String] = [:],
-    state: LMOutput.State? = nil
+    state: LMOutput.State? = nil,
+    drafterContinuation: SerializedMTPDrafterContinuation? = nil
 ) throws {
     try writePromptCache(
-        preparePromptCacheSave(cache: cache, metadata: metadata, state: state), url: url)
+        preparePromptCacheSave(
+            cache: cache, metadata: metadata, state: state,
+            drafterContinuation: drafterContinuation),
+        url: url)
 }
 
 /// The arrays and the metadata of one prompt cache file, read from the caches and ready to write.
 ///
-/// ``preparePromptCacheSave(cache:metadata:state:)`` makes it, and
+/// ``preparePromptCacheSave(cache:metadata:state:drafterContinuation:)`` makes it, and
 /// ``writePromptCache(_:url:)`` writes it. Each array is a new `MLXArray` handle, and the input
 /// holds no reference to a cache. Thus a cache can take more tokens after the prepare step, and
 /// the file still holds the values that the cache held at that step.
@@ -2457,22 +2476,32 @@ public struct PromptCacheSaveInput: @unchecked Sendable {
 /// The function reads `state` and `metaState` of each cache at once, thus the caller runs it
 /// while it owns the caches. It does not evaluate the arrays and it does not write a file.
 ///
+/// The drafter continuation goes in the top level of the arrays and the metadata, under
+/// ``MTPDrafterContinuation/reservedKeyPrefix``, which no key of the main caches starts with.
+///
 /// - Parameters:
 ///   - cache: The model cache state.
 ///   - metadata: Optional metadata to save along with cache state.
 ///   - state: Optional model state associated with the cache.
+///   - drafterContinuation: Optional MTP drafter continuation that stands where `cache` ends.
 /// - Returns: The input, which holds new array handles and no reference to a cache.
 /// - Throws: ``KVCacheError`` when a key of `metadata` uses a reserved prefix
-///   (`__mlx_lm_state_` or `__mlx_lm_offset_`), or when `state` has values and `cache` is empty.
+///   (`__mlx_lm_state_` or `__mlx_lm_offset_`), or when `state` has values or
+///   `drafterContinuation` is given and `cache` is empty.
 public func preparePromptCacheSave(
     cache: [KVCache],
     metadata: [String: String] = [:],
-    state: LMOutput.State? = nil
+    state: LMOutput.State? = nil,
+    drafterContinuation: SerializedMTPDrafterContinuation? = nil
 ) throws -> PromptCacheSaveInput {
     try PromptCacheOffsetRecord.validateUserMetadata(metadata)
     let stateArrays = try promptCacheStateArrays(state, userMetadata: metadata)
     guard stateArrays.isEmpty || !cache.isEmpty else {
         throw KVCacheError(message: "Model state requires at least one prompt cache")
+    }
+    guard drafterContinuation == nil || !cache.isEmpty else {
+        throw KVCacheError(
+            message: "An MTP drafter continuation requires at least one prompt cache")
     }
 
     let cacheClasses = try cache.map {
@@ -2517,6 +2546,10 @@ public func preparePromptCacheSave(
 
     addPromptCacheState(
         stateArrays, flattenedData: &flattenedData, flattenedMetadata: &flattenedMetadata)
+    if let drafterContinuation {
+        flattenedData.merge(drafterContinuation.arrays) { main, _ in main }
+        flattenedMetadata.merge(drafterContinuation.metadata) { main, _ in main }
+    }
 
     // A cache can write into the array object that its `state` gave back (a full
     // `RotatingKVCache` does), thus the input takes a new handle of each array.
@@ -2525,7 +2558,8 @@ public func preparePromptCacheSave(
         classNames: cacheClasses)
 }
 
-/// Writes a prompt cache file that ``preparePromptCacheSave(cache:metadata:state:)`` prepared.
+/// Writes a prompt cache file that
+/// ``preparePromptCacheSave(cache:metadata:state:drafterContinuation:)`` prepared.
 ///
 /// The function reads no cache, thus it can run on another task after the caches have
 /// taken more tokens.
@@ -2582,8 +2616,7 @@ public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
             className: $0.className, state: $0.state, metaState: $0.metaState)
     }
     try PromptCacheOffsetRecord.apply(contents.offsets, to: caches)
-    return PromptCacheSnapshot(
-        cache: caches, metadata: contents.userMetadata, state: contents.state)
+    return contents.snapshot(of: caches)
 }
 
 /// Load a prompt cache and its model state from a file into the fresh caches that the model
@@ -2623,7 +2656,8 @@ public func loadPromptCacheSnapshot(
 }
 
 /// Restores the arrays and the metadata of a prompt cache, as
-/// ``preparePromptCacheSave(cache:metadata:state:)`` gives them, into the fresh caches that the
+/// ``preparePromptCacheSave(cache:metadata:state:drafterContinuation:)`` gives them, into the
+/// fresh caches that the
 /// model made.
 ///
 /// This is ``loadPromptCacheSnapshot(url:into:)`` for values held in memory, with the same rules
@@ -2665,8 +2699,7 @@ private func restorePromptCacheSnapshot(
     let caches = restoreSteps.map { $0() }
     try PromptCacheOffsetRecord.apply(contents.offsets, to: caches)
     eval(contents.fileArrays)
-    return PromptCacheSnapshot(
-        cache: caches, metadata: contents.userMetadata, state: contents.state)
+    return contents.snapshot(of: caches)
 }
 
 /// The saved values of one layer of a prompt cache file.
@@ -2704,7 +2737,11 @@ private struct PromptCacheFileContents {
     /// The model state, when the file holds one.
     let state: LMOutput.State?
 
-    /// Every array that the file holds: the cache arrays and the model-state arrays.
+    /// The MTP drafter continuation, when the file holds one.
+    let drafterContinuation: SerializedMTPDrafterContinuation?
+
+    /// Every array that the file holds: the cache arrays, the model-state arrays and the arrays
+    /// of the drafter continuation.
     let fileArrays: [MLXArray]
 
     /// Reads a prompt cache file.
@@ -2727,6 +2764,10 @@ private struct PromptCacheFileContents {
     init(arrays: [String: MLXArray], metadata: [String: String]) throws {
         var arrays = arrays
         fileArrays = Array(arrays.values)
+        // The drafter continuation stands beside the three metadata parts, which ignore its
+        // keys, and beside the cache arrays, which must not count it as a layer.
+        drafterContinuation = SerializedMTPDrafterContinuation.removed(
+            from: &arrays, metadata: metadata)
 
         // Unflatten metadata using tree_unflatten compatible logic.
         // Structure: [cache_info, user_metadata, cache_classes]. `unflattenMetadata` always
@@ -2755,6 +2796,17 @@ private struct PromptCacheFileContents {
             SavedPromptCacheLayer(
                 className: cacheClasses[$0], state: cacheData[$0], metaState: cacheInfo[$0])
         }
+    }
+
+    /// The snapshot of the restored caches, with the user metadata, the model state and the
+    /// drafter continuation of the file.
+    ///
+    /// - Parameter caches: The caches restored from ``layers``.
+    /// - Returns: The snapshot.
+    func snapshot(of caches: [KVCache]) -> PromptCacheSnapshot {
+        PromptCacheSnapshot(
+            cache: caches, metadata: userMetadata, state: state,
+            drafterContinuation: drafterContinuation)
     }
 }
 

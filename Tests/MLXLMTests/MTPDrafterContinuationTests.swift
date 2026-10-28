@@ -163,6 +163,81 @@ struct MTPDrafterContinuationTests {
         #expect(second.tokens == plain)
     }
 
+    @Test(
+        "a prompt cache file keeps the continuation, and its restore resumes with the plain tokens")
+    func promptCacheFileRoundTripResumesWithTheSameTokens() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let first = try await firstCall(fixture)
+        let plain = try await plainSecondCallTokens(fixture, after: first)
+        let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try savePromptCache(
+            url: url, cache: first.cache,
+            drafterContinuation: try SerializedMTPDrafterContinuation(first.continuation))
+        let snapshot = try loadPromptCacheSnapshot(url: url)
+        let restored = try #require(snapshot.drafterContinuation).restored(by: fixture.drafter)
+        let loaded = FirstCall(
+            cache: snapshot.cache, cachedTokens: first.cachedTokens, continuation: restored)
+        let second = try secondCall(fixture, after: loaded, carrying: restored)
+
+        #expect(snapshot.cache.count == first.cache.count)
+        #expect(second.resumed)
+        #expect(second.passthroughReason == nil)
+        #expect(second.tokens == plain)
+    }
+
+    @Test("a template restore of a prompt cache file keeps the drafter continuation")
+    func promptCacheTemplateRestoreKeepsTheContinuation() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let first = try await firstCall(fixture)
+        let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try savePromptCache(
+            url: url, cache: first.cache,
+            drafterContinuation: try SerializedMTPDrafterContinuation(first.continuation))
+        let snapshot = try loadPromptCacheSnapshot(
+            url: url, into: try fixture.target.newCache(parameters: nil))
+        let restored = try #require(snapshot.drafterContinuation).restored(by: fixture.drafter)
+
+        #expect(
+            restored.isAligned(
+                withMainTokenCount: first.cachedTokens.count, drafterID: fixture.drafter.drafterID))
+    }
+
+    @Test("a prompt cache file written without a continuation loads with none")
+    func promptCacheFileWithoutAContinuationLoadsWithNone() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let first = try await firstCall(fixture)
+        let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try savePromptCache(url: url, cache: first.cache)
+        let snapshot = try loadPromptCacheSnapshot(url: url)
+
+        #expect(snapshot.cache.count == first.cache.count)
+        #expect(snapshot.drafterContinuation == nil)
+    }
+
+    @Test("a serialized continuation keeps only the entries under the reserved prefix")
+    func serializedContinuationKeepsOnlyReservedEntries() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let continuation = try await firstCall(fixture).continuation
+        let foreignKey = "0.0"
+
+        let serialized = SerializedMTPDrafterContinuation(
+            arrays: try continuation.arrays().merging([foreignKey: MLXArray(0)]) { kept, _ in kept
+            },
+            metadata: try continuation.metadata().merging([foreignKey: "value"]) { kept, _ in kept }
+        )
+
+        #expect(serialized.arrays[foreignKey] == nil)
+        #expect(serialized.metadata[foreignKey] == nil)
+        #expect(Set(serialized.arrays.keys) == Set(try continuation.arrays().keys))
+        #expect(serialized.metadata == (try continuation.metadata()))
+    }
+
     @Test("every key of the arrays and the metadata carries the reserved prefix")
     func serializedKeysCarryTheReservedPrefix() async throws {
         let fixture = try Qwen35MTPFixture()

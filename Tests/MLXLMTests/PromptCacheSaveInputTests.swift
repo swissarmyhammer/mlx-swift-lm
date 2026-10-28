@@ -7,8 +7,9 @@ import Testing
 
 @testable import MLXLMCommon
 
-/// Tests for the two-step save of a prompt cache: `preparePromptCacheSave(cache:metadata:state:)`
-/// reads the caches, and `writePromptCache(_:url:)` writes the file.
+/// Tests for the two-step save of a prompt cache:
+/// `preparePromptCacheSave(cache:metadata:state:drafterContinuation:)` reads the caches, and
+/// `writePromptCache(_:url:)` writes the file.
 struct PromptCacheSaveInputTests {
 
     // MARK: - Fixture sizes
@@ -245,5 +246,20 @@ struct PromptCacheSaveInputTests {
             try preparePromptCacheSave(cache: [], state: state)
         }
         #expect(error?.message == "Model state requires at least one prompt cache")
+    }
+
+    @Test("prepare refuses an MTP drafter continuation with no cache")
+    func prepareRefusesADrafterContinuationWithNoCache() throws {
+        let drafterContinuation = SerializedMTPDrafterContinuation(
+            arrays: [
+                MTPDrafterContinuation.SerializedKey.boundaryHidden: Self.ramp(
+                    Self.recurrentSlotShape, start: Self.start(of: .simpleKeys))
+            ],
+            metadata: [:])
+
+        let error = #expect(throws: KVCacheError.self) {
+            try preparePromptCacheSave(cache: [], drafterContinuation: drafterContinuation)
+        }
+        #expect(error?.message == "An MTP drafter continuation requires at least one prompt cache")
     }
 }

@@ -200,6 +200,22 @@ let (loadedCache, metadata) = try loadPromptCache(url: fileURL)
 
 Cache files are `.safetensors` format with metadata.
 
+An MTP generation leaves an `MTPDrafterContinuation` that stands where the main
+cache ends. Save it beside the cache so a restored session resumes the drafter
+instead of cold-starting it. `ChatSession.saveCache(to:)` does this for you, and
+the `promptCache:` initializers pick it up:
+
+```swift
+try savePromptCache(
+    url: fileURL, cache: cache, state: state,
+    drafterContinuation: try SerializedMTPDrafterContinuation(continuation))
+
+let snapshot = try loadPromptCacheSnapshot(url: fileURL)
+// nil for a file saved without one. The restore throws for another drafter or
+// damaged values; the drafter then cold-starts at the cached position.
+let resumed = try snapshot.drafterContinuation?.restored(by: drafter)
+```
+
 ## Attention Masks
 
 Caches create appropriate attention masks:

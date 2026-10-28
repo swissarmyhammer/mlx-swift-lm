@@ -46,6 +46,22 @@ comments:
     - gap: the >= 8% math speedup is not reached; the verify is weight-bandwidth bound and the remaining round time is in the drafter step and per-round host sync, outside the verify graph.
     - next: a person decides — accept the ~2% (keep the compiled verify, drop/relax the 8% line) or open a task on drafter/verify overlap; the code is ready for /review either way.
   timestamp: 2026-10-28T12:02:05.985543+00:00
+- actor: claude-code
+  id: 01m6168h711wjh96r2dek0z7q2
+  text: |-
+    ### finish iteration 1 — stuck
+    - implement: stuck — code and tests done; perf acceptance (math >= +8%) not met: 88.0 -> 90.3/89.6 tok/s (+~2%). A plain step is already at ~880 GB/s, near the memory bandwidth limit; remaining round cost is the drafter step and the CPU waiting on each round's result.
+    - test: green (implementer run) — MLXLMTests 895 XCTest + 1899 Swift Testing; qwen38FourBitMTPSystemPromptCache pass, edit turn 123 tok
+    - commit: 9cf705de
+    - review: not run — waiting on a human decision about the 8% acceptance line (relax it, or open a task to overlap the drafter with the verify)
+  timestamp: 2026-10-28T12:02:51.745856+00:00
+- actor: claude-code
+  id: 01m617pwsc0r3cgng7wy37r9qc
+  text: |-
+    ### decision — user relaxed the 8% line
+    - User (2026-10-28): "relax the 8% line -- just add up optimizations". Acceptance now: improves on the same-session baseline with output equal to plain. Measured +1.8 to +2.6% on math, so the criterion is met.
+    - next: review commit 9cf705de after ^btfktsy finishes (sequential tree).
+  timestamp: 2026-10-28T12:28:10.924678+00:00
 depends_on:
 - 01M5QWJGM1679S6CWHFCST7WAN
 - 01M5SWXS9E09Y97PV3BV51TPYA
@@ -63,7 +79,7 @@ A verify pass has `x.dim(1) >= 2`. The guards in `Qwen35DecoderLayer.callAsFunct
 ## Acceptance Criteria
 - [x] The verify output (logits, hidden rows, caches, and snapshot slots) of the compiled path is within the existing `AttentionKernelTolerance` against the general path, for S = 2..6.
 - [x] Greedy MTP output equals plain decode on the shared fixture, for the LLM and VLM targets.
-- [ ] Release benchmark on the M5 Ultra (`qwen38FourBitMTPGeneration`, `#expect`): MTP tok/s on the math category improves by ≥ 8% against the M5 Ultra baseline (MTP ~91 / 80 / 79 tok/s math/code/prose, plain ~59, after ^cst7wan), and the output still matches plain decode. (Updated 2026-10-28: the machine is an M5 Ultra, the earlier 52.3 tok/s M5 Max baseline is stale.) — NOT MET (2026-10-28): same-session HEAD 88.0 / 79.3 / 75.7, with the change 90.3 / 80.1 / 77.2 and 89.6 / 79.9 / 76.6 tok/s (math +1.8 to +2.6%); output matches plain on all three. See comments.
+- [x] Release benchmark on the M5 Ultra (`qwen38FourBitMTPGeneration`, `#expect`): MTP tok/s improves against the same-session baseline and the output still matches plain decode. (Relaxed 2026-10-28 by the user from "math ≥ +8%": incremental optimizations add up.) Measured: HEAD 88.0 / 79.3 / 75.7, with the change 90.3 / 80.1 / 77.2 and 89.6 / 79.9 / 76.6 tok/s (math +1.8 to +2.6%); output matches plain on all three.
 - [x] Regression guard: Release `qwen38FourBitMTPSystemPromptCache()` still passes with no known issues (edit turn ~123 tokens recomputed with MTP on; token match exact or near-tie per `MTPChatTokenMatch`), and no MTP category drops more than 3% below the baseline.
 
 ## Tests

@@ -279,3 +279,85 @@ extension MTPDrafterContinuation {
             })
     }
 }
+
+/// An ``MTPDrafterContinuation`` in its serialized form: its ``MTPDrafterContinuation/arrays()``
+/// and ``MTPDrafterContinuation/metadata()``, as a prompt cache file keeps them beside its main
+/// caches.
+///
+/// Only a drafter can check and restore a continuation, and a prompt cache load has none. A
+/// ``PromptCacheSnapshot`` thus carries the serialized form, and the generation that has the
+/// drafter restores it with ``restored(by:)``. A restore that throws (a continuation of another
+/// drafter, or damaged values) leaves the drafter to cold-start at the cached position.
+// swiftlint:disable:next no_unchecked_sendable The value is immutable, and each MLXArray in it is a handle that no cache writes: the arrays of a live continuation come from MTPDrafterContinuation.arrays(), which gives new handles, and a prompt cache load evaluates the arrays it reads before it returns.
+public struct SerializedMTPDrafterContinuation: @unchecked Sendable {
+
+    /// The arrays of the continuation. Each key starts with
+    /// ``MTPDrafterContinuation/reservedKeyPrefix``.
+    public let arrays: [String: MLXArray]
+
+    /// The metadata of the continuation. Each key starts with
+    /// ``MTPDrafterContinuation/reservedKeyPrefix``.
+    public let metadata: [String: String]
+
+    /// Serializes a continuation.
+    ///
+    /// - Parameter continuation: The continuation.
+    /// - Throws: ``KVCacheError`` when a drafter cache class cannot be saved to a prompt cache.
+    public init(_ continuation: MTPDrafterContinuation) throws {
+        self.init(arrays: try continuation.arrays(), metadata: try continuation.metadata())
+    }
+
+    /// Takes the serialized form of a continuation from arrays and metadata that can hold other
+    /// entries too.
+    ///
+    /// - Parameters:
+    ///   - arrays: The arrays. Only the entries whose key starts with
+    ///     ``MTPDrafterContinuation/reservedKeyPrefix`` are kept.
+    ///   - metadata: The metadata. Only the entries whose key starts with
+    ///     ``MTPDrafterContinuation/reservedKeyPrefix`` are kept.
+    public init(arrays: [String: MLXArray], metadata: [String: String]) {
+        self.arrays = Self.reservedEntries(of: arrays)
+        self.metadata = Self.reservedEntries(of: metadata)
+    }
+
+    /// Restores the continuation for `drafter`, with every check of
+    /// ``MTPDrafterContinuation/init(arrays:metadata:drafter:)``.
+    ///
+    /// - Parameter drafter: The drafter that resumes the continuation.
+    /// - Returns: The continuation, with each array evaluated.
+    /// - Throws: ``KVCacheError`` for each error of
+    ///   ``MTPDrafterContinuation/init(arrays:metadata:drafter:)``.
+    public func restored(by drafter: any ResumableMTPDrafterModel) throws
+        -> MTPDrafterContinuation
+    {
+        try MTPDrafterContinuation(arrays: arrays, metadata: metadata, drafter: drafter)
+    }
+
+    /// Removes the serialized continuation from the flat arrays of a prompt cache file and reads
+    /// it with the flat metadata of that file.
+    ///
+    /// - Parameters:
+    ///   - fileArrays: The flat arrays of the file. The entries of the continuation are removed,
+    ///     so the rest is the arrays of the main caches and the model state.
+    ///   - fileMetadata: The flat metadata of the file.
+    /// - Returns: The continuation, or `nil` when the file holds no entry of one.
+    static func removed(
+        from fileArrays: inout [String: MLXArray], metadata fileMetadata: [String: String]
+    ) -> SerializedMTPDrafterContinuation? {
+        let serialized = SerializedMTPDrafterContinuation(
+            arrays: fileArrays, metadata: fileMetadata)
+        guard !serialized.arrays.isEmpty || !serialized.metadata.isEmpty else { return nil }
+        fileArrays = fileArrays.filter { !isReserved($0.key) }
+        return serialized
+    }
+
+    /// Whether `key` names an entry of a serialized continuation.
+    private static func isReserved(_ key: String) -> Bool {
+        key.hasPrefix(MTPDrafterContinuation.reservedKeyPrefix)
+    }
+
+    /// The entries of `values` whose key names an entry of a serialized continuation.
+    private static func reservedEntries<Value>(of values: [String: Value]) -> [String: Value] {
+        values.filter { isReserved($0.key) }
+    }
+}

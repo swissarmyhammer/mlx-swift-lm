@@ -422,6 +422,9 @@ public final class ChatSession {
         var draft: KVCacheStorage?
         var state: LMOutput.State?
         var mtpDrafterContinuation: MTPDrafterContinuation?
+        /// The MTP drafter continuation a prompt cache file saved beside `main`, which the
+        /// drafter of the next turn restores. A turn that stores the caches back drops it.
+        let savedDrafterContinuation: SerializedMTPDrafterContinuation?
         var conversation: Conversation?
 
         init(
@@ -429,14 +432,15 @@ public final class ChatSession {
             draft: consuming [KVCache]? = nil,
             state: LMOutput.State? = nil,
             mtpDrafterContinuation: MTPDrafterContinuation? = nil,
+            savedDrafterContinuation: SerializedMTPDrafterContinuation? = nil,
             conversation: Conversation? = nil,
             plan: KVCachePlan
         ) {
-            self.main = KVCacheStorage(cache, plan: plan)
-            self.draft = draft.map { KVCacheStorage($0, plan: plan) }
-            self.state = state
-            self.mtpDrafterContinuation = mtpDrafterContinuation
-            self.conversation = conversation
+            self.init(
+                main: KVCacheStorage(cache, plan: plan),
+                draft: draft.map { KVCacheStorage($0, plan: plan) }, state: state,
+                mtpDrafterContinuation: mtpDrafterContinuation,
+                savedDrafterContinuation: savedDrafterContinuation, conversation: conversation)
         }
 
         init(
@@ -444,12 +448,14 @@ public final class ChatSession {
             draft: KVCacheStorage? = nil,
             state: LMOutput.State? = nil,
             mtpDrafterContinuation: MTPDrafterContinuation? = nil,
+            savedDrafterContinuation: SerializedMTPDrafterContinuation? = nil,
             conversation: Conversation? = nil
         ) {
             self.main = main
             self.draft = draft
             self.state = state
             self.mtpDrafterContinuation = mtpDrafterContinuation
+            self.savedDrafterContinuation = savedDrafterContinuation
             self.conversation = conversation
         }
 
@@ -467,7 +473,8 @@ public final class ChatSession {
         func copy() -> RealizedCache {
             RealizedCache(
                 main: main.copy(), draft: draft?.copy(), state: state,
-                mtpDrafterContinuation: mtpDrafterContinuation?.copy(), conversation: conversation)
+                mtpDrafterContinuation: mtpDrafterContinuation?.copy(),
+                savedDrafterContinuation: savedDrafterContinuation, conversation: conversation)
         }
     }
 
@@ -779,7 +786,7 @@ public final class ChatSession {
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
-    public init(
+    public convenience init(
         _ model: ModelContainer,
         instructions: String? = nil,
         cache: consuming [KVCache],
@@ -792,6 +799,38 @@ public final class ChatSession {
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
+        self.init(
+            model,
+            instructions: instructions,
+            cache: cache,
+            state: state,
+            savedDrafterContinuation: nil,
+            speculativeDecoding: speculativeDecoding,
+            generateParameters: generateParameters,
+            components: components,
+            processing: processing,
+            additionalContext: additionalContext,
+            tools: tools,
+            toolDispatch: toolDispatch)
+    }
+
+    /// A session that starts from a raw cache, its model state, and the MTP drafter continuation
+    /// a prompt cache file saved beside it. The drafter of the first turn restores the
+    /// continuation, and cold-starts when it cannot.
+    private init(
+        _ model: ModelContainer,
+        instructions: String?,
+        cache: consuming [KVCache],
+        state: LMOutput.State?,
+        savedDrafterContinuation: SerializedMTPDrafterContinuation?,
+        speculativeDecoding: SpeculativeDecodingConfig?,
+        generateParameters: GenerateParameters,
+        components: GenerationComponents,
+        processing: UserInput.Processing,
+        additionalContext: [String: any Sendable]?,
+        tools: [ToolSpec]?,
+        toolDispatch: (@Sendable (ToolCall) async throws -> String)?
+    ) {
         self.model = model
         self.instructions = instructions
         // Each response uses the cache on another thread, and a fork shares its arrays.
@@ -801,6 +840,7 @@ public final class ChatSession {
                 .init(
                     cache: cache,
                     state: state,
+                    savedDrafterContinuation: savedDrafterContinuation,
                     plan: (try? generateParameters.kvCachePlan()) ?? .disabled)))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
         self.processing = processing
@@ -848,7 +888,7 @@ public final class ChatSession {
     ///   - tools: optional tool specifications
     ///   - toolDispatch: optional tool dispatch -- required for toolcalls if streaming strings rather than details
     ///   - additionalContext: optional model-specific context
-    public init(
+    public convenience init(
         _ model: ModelContext,
         instructions: String? = nil,
         cache: consuming [KVCache],
@@ -861,24 +901,18 @@ public final class ChatSession {
         tools: [ToolSpec]? = nil,
         toolDispatch: (@Sendable (ToolCall) async throws -> String)? = nil
     ) {
-        self.model = ModelContainer(context: model)
-        self.instructions = instructions
-        // Each response uses the cache on another thread, and a fork shares its arrays.
-        eval(cache)
-        self.cache = .init(
-            .kvcache(
-                .init(
-                    cache: cache,
-                    state: state,
-                    plan: (try? generateParameters.kvCachePlan()) ?? .disabled)))
-        self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
-        self.processing = processing
-        self.generateParameters = generateParameters
-        self.components = components
-        self.tools = tools
-        self.toolDispatch = toolDispatch
-        self.additionalContext = additionalContext
-        self.speculativeDecoding = speculativeDecoding
+        self.init(
+            ModelContainer(context: model),
+            instructions: instructions,
+            cache: cache,
+            state: state,
+            speculativeDecoding: speculativeDecoding,
+            generateParameters: generateParameters,
+            components: components,
+            processing: processing,
+            additionalContext: additionalContext,
+            tools: tools,
+            toolDispatch: toolDispatch)
     }
 
     /// Initialize the `ChatSession` with a prompt cache and the model state that belongs with it.
@@ -886,9 +920,14 @@ public final class ChatSession {
     /// This is the preferred way to start a session from a saved cache: the snapshot keeps the KV
     /// arrays and the model state together, so neither can be dropped. Read one from disk with
     /// ``loadPromptCacheSnapshot(url:)``, or build one in process with
-    /// ``PromptCacheSnapshot/init(cache:metadata:state:)``.
+    /// ``PromptCacheSnapshot/init(cache:metadata:state:drafterContinuation:)``.
     ///
     /// Models that do not carry model state simply ignore it, so this works for any model.
+    ///
+    /// With an MTP `speculativeDecoding` configuration, the drafter of the first turn resumes the
+    /// drafter continuation the snapshot carries, without a feed over the cached prefix. A
+    /// snapshot without one, or with one the drafter cannot restore (another drafter, or damaged
+    /// values), makes the drafter cold-start at the cached position instead.
     ///
     /// > Important: A snapshot carries the cache and model state, not the structured chat
     /// > transcript, so this initializer uses fragment-based continuation. A later
@@ -914,6 +953,7 @@ public final class ChatSession {
             instructions: instructions,
             cache: promptCache.cache,
             state: promptCache.state,
+            savedDrafterContinuation: promptCache.drafterContinuation,
             speculativeDecoding: speculativeDecoding,
             generateParameters: generateParameters,
             components: components,
@@ -1291,6 +1331,9 @@ public final class ChatSession {
                     // prefill and stored back at the end of the turn.
                     var lmState: LMOutput.State?
                     var mtpDrafterContinuation: MTPDrafterContinuation?
+                    // The drafter continuation a prompt cache file saved, which the first pass
+                    // restores with its drafter.
+                    var savedDrafterContinuation: SerializedMTPDrafterContinuation?
                     var conversation: Conversation?
                     switch cache {
                     case .empty:
@@ -1337,6 +1380,7 @@ public final class ChatSession {
                             draftKVCache = stored.draft
                             lmState = stored.state
                             mtpDrafterContinuation = stored.mtpDrafterContinuation
+                            savedDrafterContinuation = stored.savedDrafterContinuation
                             conversation = stored.conversation
                         }
 
@@ -1428,6 +1472,11 @@ public final class ChatSession {
                             mtpDrafter = nil
                         }
                         let usesMTP = mtpDrafter != nil
+                        if let saved = savedDrafterContinuation {
+                            mtpDrafterContinuation = Self.restoredDrafterContinuation(
+                                saved, drafter: mtpDrafter, model: model)
+                            savedDrafterContinuation = nil
+                        }
                         // Why an MTP turn decodes plainly, decided before any cache work.
                         let mtpFallbackReason = try mtpDrafter.flatMap {
                             try Self.mtpFallbackReason(
@@ -2275,6 +2324,9 @@ public final class ChatSession {
     /// Use ``loadPromptCacheSnapshot(url:)`` and an initializer that accepts a
     /// `promptCache` to restore the saved cache and model state in a future session.
     ///
+    /// The file also keeps the MTP drafter continuation the session carries, so a session
+    /// restored from it with the same drafter resumes the drafter rather than cold-starting it.
+    ///
     /// > Important: This saves raw KV state only. It does not save the structured
     /// > transcript retained by `ChatSession`. A restored raw cache therefore uses
     /// > fragment-based continuation and is not suitable for conversation-aware
@@ -2288,7 +2340,14 @@ public final class ChatSession {
         try await cache.read { cache in
             switch cache {
             case .kvcache(let stored):
-                try savePromptCache(url: url, cache: stored.main.cache, state: stored.state)
+                // A continuation a prompt cache file gave that no turn restored yet still
+                // stands where the main caches end.
+                let drafterContinuation =
+                    try stored.mtpDrafterContinuation.map(SerializedMTPDrafterContinuation.init)
+                    ?? stored.savedDrafterContinuation
+                try savePromptCache(
+                    url: url, cache: stored.main.cache, state: stored.state,
+                    drafterContinuation: drafterContinuation)
             default:
                 throw ChatSessionError.noCacheAvailable
             }
@@ -2430,6 +2489,28 @@ extension ChatSession {
             draftModelBytes: SpeculativeDecodingMemoryPolicy.modelWeightBytes(drafter)
                 + (continuation?.byteCount ?? 0))
         return drafterIsAdmitted ? nil : .memoryBudgetExceeded
+    }
+
+    /// The drafter continuation a session restored from a prompt cache file gives its first
+    /// pass, or nil when the drafter cold-starts at the cached position instead.
+    ///
+    /// The drafter cold-starts when the pass has no drafter that resumes continuations, when the
+    /// drafter cannot draft for `model`, and when it refuses the saved values: a continuation of
+    /// another drafter, or values a damaged file holds.
+    ///
+    /// - Parameters:
+    ///   - saved: the continuation the file saved.
+    ///   - drafter: the MTP drafter of the pass, or nil.
+    ///   - model: the model the drafter speculates for.
+    /// - Returns: the restored continuation, or nil.
+    private static func restoredDrafterContinuation(
+        _ saved: SerializedMTPDrafterContinuation, drafter: (any MTPDrafterModel)?,
+        model: any LanguageModel
+    ) -> MTPDrafterContinuation? {
+        guard let drafter = drafter as? any ResumableMTPDrafterModel,
+            drafter.isCompatible(with: model)
+        else { return nil }
+        return try? saved.restored(by: drafter)
     }
 }
 
