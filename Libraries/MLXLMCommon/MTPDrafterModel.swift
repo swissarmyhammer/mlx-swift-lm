@@ -56,9 +56,8 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// its first proposal. Qwen's private decoder cache requires this.
     var requiresPromptPrefill: Bool { get }
 
-    /// Whether this drafter is currently supported only for greedy decoding.
-    /// This keeps stochastic generation on the ordinary target path until a
-    /// probability-ratio acceptance sampler is available.
+    /// Whether this drafter supports greedy decoding only. A sampled stream of
+    /// such a drafter decodes without speculation.
     var requiresGreedySampling: Bool { get }
 
     /// Validate that `target` provides the architecture-specific state and
@@ -576,6 +575,58 @@ public protocol MTPDistributionDrafterModel: MTPDrafterModel {
         processor: (any LogitProcessor)?,
         sampler: any LogitSampler
     ) -> MTPDraftBlockOutput
+}
+
+/// A stateful drafter that also reports the distribution of each proposal, so a sampled stream
+/// can verify its drafts by rejection sampling (``MTPSampledVerification/rejectionSampling``).
+///
+/// The iterator calls the stateful method with the stream's drafter state. The stateless
+/// requirement of ``MTPDistributionDrafterModel`` drafts from a fresh state, as the stateless
+/// ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:sampler:)``
+/// of a stateful drafter does.
+public protocol StatefulMTPDistributionDrafterModel: StatefulMTPDrafterModel,
+    MTPDistributionDrafterModel
+{
+    /// Stateful variant of
+    /// ``MTPDistributionDrafterModel/draftBlockWithLogits(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:processor:sampler:)``.
+    ///
+    /// Each proposal is drawn with `sampler` from the logits `processor` shaped, and the output
+    /// carries those processed logits. The state changes as the token-only stateful
+    /// `draftBlock` changes it, so ``StatefulMTPDrafterModel/commitDrafterState(target:targetHidden:draftTokens:acceptedCount:finalToken:positionDeltas:state:sampler:)``
+    /// reconciles it the same way.
+    func draftBlockWithLogits(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state: inout MTPDrafterState,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput
+}
+
+extension StatefulMTPDistributionDrafterModel {
+    /// Drafts from a fresh drafter state.
+    public func draftBlockWithLogits(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
+        var state = makeState(parameters: nil)
+        return draftBlockWithLogits(
+            target: target, lastToken: lastToken, lastHidden: lastHidden, sharedKV: sharedKV,
+            positionDeltas: positionDeltas, queryOffset: queryOffset, blockSize: blockSize,
+            state: &state, processor: processor, sampler: sampler)
+    }
 }
 
 /// Lightweight context for an MTP drafter — simpler than `ModelContext`

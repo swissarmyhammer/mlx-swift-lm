@@ -809,23 +809,38 @@ public struct MTPGenerationResult: Sendable {
     public let acceptanceRate: Double
     /// Tokens emitted per target verify pass, from the last MTP run. 1 is plain decoding.
     public let acceptanceLength: Double
-    /// Whether the MTP tokens equal the plain greedy tokens.
+    /// Whether the MTP tokens equal the plain tokens. Greedy decodes match; sampled decodes
+    /// draw their random values in another order, and need not.
     public let matchesBaseline: Bool
 
     public var speedup: Double { mtpTokensPerSecond / baselineTokensPerSecond }
 }
 
-/// Benchmark MTP speculative decoding against plain greedy decoding of the same
-/// model. Each prompt runs once to warm up, then `runs` timed times each way.
+/// Benchmark MTP speculative decoding against plain decoding of the same model,
+/// greedy unless `sampling` samples. Each prompt runs once to warm up, then `runs`
+/// timed times each way.
+///
+/// - Parameters:
+///   - context: The model.
+///   - drafter: The MTP drafter of the model.
+///   - prompts: The prompts, each a result.
+///   - maxTokens: The tokens each decode generates at most.
+///   - blockSize: The tokens of each MTP round.
+///   - runs: The timed runs of each decode.
+///   - sampling: The sampling of both decodes; its `maxTokens` is replaced by `maxTokens`.
+///     A seed makes each run of a decode sample the same tokens.
+/// - Returns: One result for each prompt.
 public func benchmarkMTPGeneration(
     context: ModelContext,
     drafter: any MTPDrafterModel,
     prompts: [MTPBenchmarkPrompt] = MTPBenchmarkPrompt.defaults,
     maxTokens: Int = 192,
     blockSize: Int = 2,
-    runs: Int = 3
+    runs: Int = 3,
+    sampling: GenerateParameters = GenerateParameters(temperature: 0)
 ) async throws -> [MTPGenerationResult] {
-    let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+    var parameters = sampling
+    parameters.maxTokens = maxTokens
 
     func collect(_ stream: AsyncStream<TokenGeneration>) async throws -> (
         tokens: [Int], info: GenerateCompletionInfo

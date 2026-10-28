@@ -61,6 +61,13 @@ comments:
     - review: not run
     - decision needed: (a) wire the kernel only into the compiled speculative verify (no effect until drafts deepen), (b) keep it for all 3-8 row calls and update the cache test, (c) land the kernel and tests without model wiring. Implementer recommends (a).
   timestamp: 2026-10-28T17:07:55.765492+00:00
+- actor: claude-code
+  id: 01m621fbw4vjza1serxfwmcm3r
+  text: |-
+    ### decision — user chose (a), 2026-10-28
+    - Use the multi-row kernel only inside the speculative verify (3–8 rows); prefill, plain decode, the drafter and other 3–8-row calls stay on MLX. No effect at today's block size 2; ready for deeper drafts.
+    - next: bring the kernel from branch mtp-multirow-wip (f1a91bfa) onto mtp with verify-only wiring; both Release guards must stay green (edit turn 123 tok, thinking chat passes).
+  timestamp: 2026-10-28T19:58:27.204418+00:00
 depends_on:
 - 01M5SKBCEWG4D25SZZNGG7BVM7
 - 01M5SWXS9E09Y97PV3BV51TPYA

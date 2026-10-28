@@ -47,8 +47,11 @@ private struct BenchmarkCheckpoint: Sendable {
 private let qwen38 = BenchmarkCheckpoint(
     id: "mlx-community/Qwen3.8-27B-mxfp4", factory: LLMModelFactory.shared)
 
+/// The id of Qwen3.8-27B-4bit, which naming loads nothing.
+private let qwen38FourBitID = "mlx-community/Qwen3.8-27B-4bit"
+
 private let qwen38FourBit = BenchmarkCheckpoint(
-    id: "mlx-community/Qwen3.8-27B-4bit", factory: LLMModelFactory.shared)
+    id: qwen38FourBitID, factory: LLMModelFactory.shared)
 
 private let museGlimmer = BenchmarkCheckpoint(
     id: "mlx-community/Muse-Glimmer-30B-4bit", factory: VLMModelFactory.shared)
@@ -59,6 +62,13 @@ private let qwen38FourBitMTPDrafterID = "mlx-community/Qwen3.8-27B-MTP-4bit"
 /// Whether the target and the drafter of the MTP benchmarks are local.
 private let qwen38FourBitMTPIsLocal =
     qwen38FourBit.load != nil && hfSnapshotDir(modelId: qwen38FourBitMTPDrafterID) != nil
+
+/// Whether the files of the target and the drafter of the MTP benchmarks are local. Unlike
+/// ``qwen38FourBitMTPIsLocal`` it starts no load of the shared ``qwen38FourBit`` container,
+/// which the generation benchmarks that load their own model context do not use.
+private let qwen38FourBitMTPFilesAreLocal =
+    hfSnapshotDir(modelId: qwen38FourBitID) != nil
+    && hfSnapshotDir(modelId: qwen38FourBitMTPDrafterID) != nil
 
 /// One expectation that the MTP chat benchmark holds each turn to.
 private enum MTPChatCheck: String, CaseIterable {
@@ -181,26 +191,70 @@ struct GenerationBenchmarkTests {
             testName: "museGlimmerSystemPromptCacheWithRewindReserve")
     }
 
-    /// Plain against MTP decoding of Qwen3.8-27B-4bit with its 4-bit MTP head.
-    @Test
-    func qwen38FourBitMTPGeneration() async throws {
-        let targetID = "mlx-community/Qwen3.8-27B-4bit"
-        let drafterID = "mlx-community/Qwen3.8-27B-MTP-4bit"
-        guard hfSnapshotDir(modelId: targetID) != nil, hfSnapshotDir(modelId: drafterID) != nil
-        else {
-            print(
-                "Skipping qwen38FourBitMTPGeneration: no local copy of \(targetID) or \(drafterID)")
-            return
-        }
+    /// The temperature of ``qwen38FourBitMTPSampledGeneration()``.
+    private static let mtpSampledTemperature: Float = 0.7
+
+    /// The top-p of ``qwen38FourBitMTPSampledGeneration()``.
+    private static let mtpSampledTopP: Float = 0.95
+
+    /// The seed of ``qwen38FourBitMTPSampledGeneration()``, so each run samples the same tokens.
+    private static let mtpSampledSeed: UInt64 = 38
+
+    /// The prompt whose throughput the sampled MTP benchmark holds above plain decoding.
+    private static let mtpSampledCheckedPrompt = "math"
+
+    /// The model context of Qwen3.8-27B-4bit and its 4-bit MTP head, loaded fresh.
+    private func loadQwen38FourBitMTP() async throws -> (
+        context: ModelContext, drafter: any MTPDrafterModel
+    ) {
         let context = try await LLMModelFactory.shared.load(
             from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-            configuration: ModelConfiguration(id: targetID))
+            configuration: ModelConfiguration(id: qwen38FourBitID))
         await Qwen35TextMTPRegistration.register()
         let drafter = try await MTPDrafterModelFactory.shared.load(
             from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-            configuration: ModelConfiguration(id: drafterID))
-        let results = try await benchmarkMTPGeneration(context: context, drafter: drafter.model)
+            configuration: ModelConfiguration(id: qwen38FourBitMTPDrafterID))
+        return (context, drafter.model)
+    }
+
+    /// Plain against MTP decoding of Qwen3.8-27B-4bit with its 4-bit MTP head.
+    @Test(.enabled(if: qwen38FourBitMTPFilesAreLocal))
+    func qwen38FourBitMTPGeneration() async throws {
+        let (context, drafter) = try await loadQwen38FourBitMTP()
+        let results = try await benchmarkMTPGeneration(context: context, drafter: drafter)
         #expect(results.allSatisfy { $0.acceptanceRate > 0 })
+    }
+
+    /// Plain against MTP decoding of Qwen3.8-27B-4bit at temperature 0.7 and top-p 0.95, in
+    /// each ``MTPSampledVerification`` mode, the default mode first.
+    ///
+    /// The default mode decodes the math prompt faster than plain decoding.
+    @Test(.enabled(if: qwen38FourBitMTPFilesAreLocal))
+    func qwen38FourBitMTPSampledGeneration() async throws {
+        let (context, drafter) = try await loadQwen38FourBitMTP()
+        let defaultVerification = GenerateParameters().mtpSampledVerification
+        let modes =
+            [defaultVerification]
+            + MTPSampledVerification.allCases.filter { $0 != defaultVerification }
+        for verification in modes {
+            var sampling = GenerateParameters(
+                temperature: Self.mtpSampledTemperature, topP: Self.mtpSampledTopP,
+                seed: Self.mtpSampledSeed)
+            sampling.mtpSampledVerification = verification
+            let results = try await benchmarkMTPGeneration(
+                context: context, drafter: drafter, sampling: sampling)
+            #expect(results.allSatisfy { $0.acceptanceRate > 0 }, "\(verification)")
+            let checked = try #require(
+                results.first { $0.prompt == Self.mtpSampledCheckedPrompt })
+            if verification == defaultVerification {
+                #expect(
+                    checked.mtpTokensPerSecond > checked.baselineTokensPerSecond,
+                    """
+                    \(verification) \(checked.prompt): MTP \(checked.mtpTokensPerSecond) tok/s, \
+                    plain \(checked.baselineTokensPerSecond) tok/s
+                    """)
+            }
+        }
     }
 
     /// MTP against plain decoding of Qwen3.8-27B-4bit in multi-turn chat sessions

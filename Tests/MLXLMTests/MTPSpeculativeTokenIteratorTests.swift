@@ -442,9 +442,7 @@ func testQwenStyleMTPRequiresGreedySampling() throws {
     #expect(iter.next() == 5)
     #expect(iter.next() == 6)
     #expect(drafter.draftBlockCallCount == 0)
-    #expect(
-        iter.passthroughReason
-            == "Qwen MTP currently requires temperature == 0; generating without speculation")
+    #expect(iter.passthroughReason == MTPSpeculativeTokenIterator.greedySamplingReason)
 }
 
 /// The temperature of the sampled stream that a greedy-only drafter cannot speculate on.
@@ -1366,7 +1364,7 @@ func testDiscardingAGeneratedTokenDoesNotMoveTheTimeline() throws {
     // temperature > 0 would silently change the output distribution. The
     // iterator must generate without speculation instead.
     let main = MockMainModel(nextLogitTokens: Array(repeating: Int32(5), count: 16))
-    let drafter = StatefulMockDrafter(draftedTokenValue: 5)
+    let drafter = StatelessMTPDrafter()
     let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
 
     var iter = try MTPSpeculativeTokenIterator(

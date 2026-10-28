@@ -1326,7 +1326,7 @@ struct Qwen35MTPRegistrationTests {
         #expect(standalone.maximumBlockSize == 2)
         #expect(standalone.requiresPromptPrefill)
         #expect(!standalone.requiresSharedTargetKV)
-        #expect(standalone.requiresGreedySampling)
+        #expect(!standalone.requiresGreedySampling)
 
         let standaloneVLM = try await MTPDrafterTypeRegistry.visionLanguage.createModel(
             configuration: Data(Qwen35FixtureJSON.standaloneMTP().utf8),

@@ -82,8 +82,7 @@ package final class MTPDrafterPrefillFeed {
     /// - Parameters:
     ///   - drafter: The drafter of the stream.
     ///   - target: The target model of the drafter.
-    ///   - parameters: The generation parameters, which give the sampler and the new drafter
-    ///     state.
+    ///   - parameters: The generation parameters, which give the new drafter state.
     ///   - cachePosition: The target cache position before the prefill.
     ///   - continuation: The drafter continuation carried with the target cache, if any. The
     ///     feed extends its drafter caches in place.
@@ -98,7 +97,8 @@ package final class MTPDrafterPrefillFeed {
                 ? $0 : nil
         }
         return MTPDrafterPrefillFeed(
-            drafter: resumableDrafter, target: target, sampler: parameters.sampler(),
+            // The seeds of prompt chunks are discarded, and a seed reads no random state.
+            drafter: resumableDrafter, target: target, sampler: ArgMaxSampler(),
             state: alignedContinuation?.state ?? resumableDrafter.makeState(parameters: parameters),
             cachePosition: cachePosition, continuation: alignedContinuation)
     }

@@ -17,20 +17,9 @@ enum MTPInitializationError: Error, LocalizedError {
 
 func batchedGreedyMTPVerification(
     logits: MLXArray, draftTokens: MLXArray
-) -> (tokens: [Int], accepted: Int, finalToken: MLXArray) {
-    let targetTokens = argMax(logits, axis: -1)
-    // Materialize drafts and target samples together with one GPU readback.
-    let tokens = concatenated([draftTokens.asType(targetTokens.dtype), targetTokens])
-        .asArray(Int.self)
-    let numDraft = draftTokens.size
-    var accepted = 0
-    while accepted < numDraft, tokens[accepted] == tokens[numDraft + accepted] {
-        accepted += 1
-    }
-    return (
-        Array(tokens[numDraft ..< (numDraft + accepted + 1)]), accepted,
-        targetTokens[accepted].reshaped([1])
-    )
+) -> BatchedMTPVerification.Result {
+    BatchedMTPVerification.matching(
+        targetTokens: argMax(logits, axis: -1), draftTokens: draftTokens)
 }
 
 /// Generator of tokens using MTP (Multi-Token Prediction) speculative
@@ -124,7 +113,20 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// Distribution-capable drafters receive a copy of the full target
     /// processor as well, so their proposal distribution matches the target's
     /// (penalties included).
+    ///
+    /// A stateful drafter drafts argmax tokens unless the stream verifies by
+    /// rejection sampling: an argmax draft reads no random state, so the verifier's
+    /// sample-and-match keeps the target distribution exact.
     let draftSampler: LogitSampler
+
+    /// The sampler of a stateful drafter's seed proposals: argmax, so a seed reads no
+    /// random state, and the target's own sampler never draws for the drafter.
+    private static var drafterSeedSampler: ArgMaxSampler { ArgMaxSampler() }
+
+    /// Whether a sampled stream of a stateful distribution drafter verifies its drafts by
+    /// rejection sampling (``MTPSampledVerification/rejectionSampling``) rather than by
+    /// sample-and-match.
+    let verifiesStatefulDraftsByRejection: Bool
 
     /// Sampler for older greedy-only drafters whose API cannot receive a
     /// processor.
@@ -328,9 +330,16 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             } ?? MLXRandom.RandomState()
         self.processor = components.logitProcessor(parameters: parameters, model: mainModel)
 
+        let verifiesStatefulDraftsByRejection =
+            sampler is any DistributionLogitSampler
+            && drafter is any StatefulMTPDistributionDrafterModel
+            && parameters.mtpSampledVerification == .rejectionSampling
+        self.verifiesStatefulDraftsByRejection = verifiesStatefulDraftsByRejection
         var draftParameters = parameters
         draftParameters.seed = parameters.seed.map { $0 &+ 0xD1B5_4A32_D192_ED03 }
-        var drafterSampler = draftParameters.sampler()
+        var drafterSampler: LogitSampler =
+            drafter is any StatefulMTPDrafterModel && !verifiesStatefulDraftsByRejection
+            ? ArgMaxSampler() : draftParameters.sampler()
         // Draft proposals bypass the iterator's processor chain, so suppressed
         // ids have to be masked at the drafter's own sampler.
         if let suppressor = makeSuppressTokensProcessor(model: mainModel) {
@@ -409,11 +418,15 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return greedySamplingReason
         }
         // Speculative sampling can only preserve the target distribution when
-        // the drafter reports the distribution its proposals were drawn from.
-        // A token-only drafter under a sampling configuration would silently
-        // bias the output, so fail safe to target-only generation.
+        // the drafter reports the distribution its proposals were drawn from, or
+        // when its proposals read no random state. A stateful drafter drafts with
+        // the argmax samplers this iterator hands it, and its drafts are verified
+        // by sample-and-match. Any other token-only drafter under a sampling
+        // configuration would silently bias the output, so fail safe to
+        // target-only generation.
         if sampler is any DistributionLogitSampler,
-            !(drafter is any MTPDistributionDrafterModel)
+            !(drafter is any MTPDistributionDrafterModel),
+            !(drafter is any StatefulMTPDrafterModel)
         {
             return samplingWithoutDraftLogitsReason
         }
@@ -425,7 +438,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
     /// The passthrough reason of a sampled stream whose drafter drafts greedily only.
     static let greedySamplingReason =
-        "Qwen MTP currently requires temperature == 0; generating without speculation"
+        "MTP drafter requires temperature == 0; generating without speculation"
 
     static let samplingWithoutDraftLogitsReason =
         "MTP drafter does not expose the draft distribution required for sampling; "
@@ -672,7 +685,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             statefulDrafter.prepareDrafterState(
                 target: mainModel, promptTokens: promptTokens, targetHidden: suffixHidden,
                 firstBonus: y.tokens, positionDeltas: mainState?[mtpPositionDeltasKey],
-                state: &state, sampler: sampler)
+                state: &state, sampler: Self.drafterSeedSampler)
             drafterState = state
             return
         }
@@ -714,7 +727,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             resumableDrafter.resumeDrafterState(
                 target: mainModel, suffixTokens: segmentTokens, suffixTargetHidden: segmentHidden,
                 targetBoundaryHidden: boundary, firstBonus: y.tokens,
-                positionDeltas: positionDeltas, state: &state, sampler: sampler)
+                positionDeltas: positionDeltas, state: &state, sampler: Self.drafterSeedSampler)
         {
             drafterState = state
             return
@@ -723,7 +736,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             resumableDrafter.coldStartDrafterState(
                 target: mainModel, suffixTokens: segmentTokens, suffixTargetHidden: segmentHidden,
                 firstBonus: y.tokens, position: position, positionDeltas: positionDeltas,
-                state: &state, sampler: sampler)
+                state: &state, sampler: Self.drafterSeedSampler)
         else {
             switchToPassthrough(
                 reason:
@@ -744,7 +757,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let drafterState
         else { return nil }
         return MTPDrafterPrefillFeed(
-            drafter: resumableDrafter, target: mainModel, sampler: sampler, state: drafterState,
+            drafter: resumableDrafter, target: mainModel, sampler: Self.drafterSeedSampler,
+            state: drafterState,
             cachePosition: cachePosition, continuation: continuationToResume)
     }
 
@@ -875,63 +889,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         )
 
         let bonusToken = y.tokens
-        let draftOutput: MTPDraftBlockOutput?
-        let draftTokens: MLXArray
-        if let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
-            var currentDrafterState = drafterState
-        {
-            // Stateful drafters own a private cache the iterator must trim
-            // in step with acceptance, so that path wins over the
-            // distribution one. They propose tokens only; init already sent
-            // sampling runs to passthrough.
-            draftOutput = nil
-            draftTokens = statefulDrafter.draftBlock(
-                target: mainModel,
-                lastToken: bonusToken,
-                lastHidden: bonusSlotHidden,
-                sharedKV: sharedKV,
-                positionDeltas: state[mtpPositionDeltasKey],
-                queryOffset: queryOffset,
-                blockSize: numDraft + 1,  // total round size: bonus + numDraft
-                state: &currentDrafterState,
-                sampler: draftSampler
-            )
-            drafterState = currentDrafterState
-        } else if let distributionDrafter = drafter as? any MTPDistributionDrafterModel {
-            let output = distributionDrafter.draftBlockWithLogits(
-                target: mainModel,
-                lastToken: bonusToken,
-                lastHidden: bonusSlotHidden,
-                sharedKV: sharedKV,
-                positionDeltas: state[mtpPositionDeltasKey],
-                queryOffset: queryOffset,
-                blockSize: numDraft + 1,  // total round size: bonus + numDraft
-                // A copy, discarded with the round: the drafter's processor
-                // starts from the canonical state but must not record the
-                // proposals it draws -- only emitted tokens advance
-                // `processor`.
-                processor: processor?.copy(),
-                sampler: draftSampler
-            )
-            draftOutput = output
-            draftTokens = output.tokens
-        } else {
-            // Greedy matching needs tokens only and remains compatible with
-            // the original protocol; init already sent sampling runs to
-            // passthrough, since without `q` nothing here can preserve the
-            // target distribution.
-            draftOutput = nil
-            draftTokens = drafter.draftBlock(
-                target: mainModel,
-                lastToken: bonusToken,
-                lastHidden: bonusSlotHidden,
-                sharedKV: sharedKV,
-                positionDeltas: state[mtpPositionDeltasKey],
-                queryOffset: queryOffset,
-                blockSize: numDraft + 1,  // total round size: bonus + numDraft
-                sampler: legacyDraftSampler
-            )
-        }
+        let (draftTokens, draftOutput) = proposeDrafts(
+            bonusToken: bonusToken, bonusSlotHidden: bonusSlotHidden, sharedKV: sharedKV,
+            positionDeltas: state[mtpPositionDeltasKey], queryOffset: queryOffset,
+            numDraft: numDraft)
         // draftTokens shape [B, numDraft] -> flatten to [numDraft].
         let flatDraftTokens = draftTokens.flattened()
 
@@ -946,53 +907,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let verifyCache = nativeHybridRewind ? mainCache : round!.caches
         let mainResult = mainModel(
             verifyInput[text: .newAxis], cache: verifyCache, state: verifyState)
-        let mainLogits = mainResult.logits
         mainState = mainResult.state
 
-        let accepted: Int
-        let emittedFinalToken: MLXArray
-        let usesDistributionVerification = distributionSampler != nil && draftOutput != nil
-        // Other processors can depend on didSample updates between rows.
-        if !usesDistributionVerification, sampler is ArgMaxSampler,
-            processor == nil || processor is SuppressTokensProcessor
-        {
-            var logits = mainLogits[0, verifyStart ..< (verifyStart + numDraft + 1), 0...]
-            logits = processor?.process(logits: logits) ?? logits
-            let result = batchedGreedyMTPVerification(
-                logits: logits, draftTokens: flatDraftTokens)
-            pendingTokens.append(contentsOf: result.tokens)
-            accepted = result.accepted
-            emittedFinalToken = result.finalToken
-        } else {
-            let selection: (accepted: Int, emitted: [MLXArray])
-            if let distributionSampler, let draftOutput {
-                selection = selectDistributionPreservingTokens(
-                    targetLogits: mainLogits,
-                    targetStart: verifyStart,
-                    draftTokens: flatDraftTokens,
-                    draftProcessedLogits: draftOutput.processedLogits,
-                    numDraft: numDraft,
-                    sampler: distributionSampler
-                )
-            } else {
-                selection = selectGreedyTokens(
-                    targetLogits: mainLogits,
-                    targetStart: verifyStart,
-                    draftTokens: flatDraftTokens,
-                    numDraft: numDraft
-                )
-            }
-
-            let emittedTokens = concatenated(selection.emitted)
-            eval(emittedTokens, flatDraftTokens)
-            let emittedTokenList = emittedTokens.asArray(Int.self)
-            // `didSample` already ran inside the selection walk, for emitted
-            // tokens only.
-            pendingTokens.append(contentsOf: emittedTokenList)
-
-            accepted = selection.accepted
-            emittedFinalToken = selection.emitted.last!
-        }
+        let (accepted, emittedFinalToken) = verifyDrafts(
+            targetLogits: mainResult.logits, targetStart: verifyStart,
+            draftTokens: flatDraftTokens, draftOutput: draftOutput, numDraft: numDraft)
         // Lookahead bookkeeping for early finalization: the accepted drafts
         // are the pending tokens whose K/V is already committed.
         committedPendingTokenCount = accepted
@@ -1025,7 +944,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 finalToken: emittedFinalToken,
                 positionDeltas: mainResult.state?[mtpPositionDeltasKey],
                 state: &currentDrafterState,
-                sampler: sampler)
+                sampler: Self.drafterSeedSampler)
             drafterState = currentDrafterState
         }
 
@@ -1070,6 +989,136 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         kvCachePlan.apply(to: mainCacheStorage)
 
         y = .init(tokens: emittedFinalToken)
+    }
+
+    /// Proposes the drafts of one round.
+    ///
+    /// A stateful drafter extends its own state: with the distribution of each draft when the
+    /// stream verifies by rejection sampling, and else with argmax drafts. A stateless
+    /// distribution drafter drafts with its distribution, and any other drafter with tokens only.
+    ///
+    /// - Parameters:
+    ///   - bonusToken: The token the round starts from, shape `[B]`.
+    ///   - bonusSlotHidden: The target hidden row that predicted `bonusToken`.
+    ///   - sharedKV: The target K/V the drafter attends over.
+    ///   - positionDeltas: The target position deltas, or `nil`.
+    ///   - queryOffset: The absolute position of `bonusToken`.
+    ///   - numDraft: The drafts of the round.
+    /// - Returns: The drafts, shape `[B, numDraft]`, and their distribution when the drafter
+    ///   reports it.
+    private mutating func proposeDrafts(
+        bonusToken: MLXArray, bonusSlotHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)], positionDeltas: MLXArray?, queryOffset: Int,
+        numDraft: Int
+    ) -> (tokens: MLXArray, output: MTPDraftBlockOutput?) {
+        if let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
+            var currentDrafterState = drafterState
+        {
+            // Stateful drafters own a private cache the iterator must trim in step with
+            // acceptance; `commitDrafterState` reconciles it whichever way they drafted.
+            defer { drafterState = currentDrafterState }
+            if verifiesStatefulDraftsByRejection,
+                let distributionDrafter = drafter as? any StatefulMTPDistributionDrafterModel
+            {
+                let output = distributionDrafter.draftBlockWithLogits(
+                    target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
+                    sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
+                    blockSize: numDraft + 1, state: &currentDrafterState,
+                    // A copy, discarded with the round: only emitted tokens advance `processor`.
+                    processor: processor?.copy(), sampler: draftSampler)
+                return (output.tokens, output)
+            }
+            let tokens = statefulDrafter.draftBlock(
+                target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
+                sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
+                blockSize: numDraft + 1, state: &currentDrafterState, sampler: draftSampler)
+            return (tokens, nil)
+        }
+        if let distributionDrafter = drafter as? any MTPDistributionDrafterModel {
+            let output = distributionDrafter.draftBlockWithLogits(
+                target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
+                sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
+                blockSize: numDraft + 1,
+                // A copy, discarded with the round: the drafter's processor starts from the
+                // canonical state but must not record the proposals it draws -- only emitted
+                // tokens advance `processor`.
+                processor: processor?.copy(), sampler: draftSampler)
+            return (output.tokens, output)
+        }
+        // Greedy matching needs tokens only and remains compatible with the original
+        // protocol; init already sent sampling runs to passthrough, since without `q`
+        // nothing here can preserve the target distribution.
+        let tokens = drafter.draftBlock(
+            target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
+            sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
+            blockSize: numDraft + 1, sampler: legacyDraftSampler)
+        return (tokens, nil)
+    }
+
+    /// Verifies the drafts of one round against the target logits of its verify pass, and
+    /// appends the emitted tokens to the pending buffer.
+    ///
+    /// Drafts with a reported distribution are verified by rejection sampling. Other drafts are
+    /// verified by sample-and-match: in one batched readback when the stream's processor keeps
+    /// no state between rows -- argmax rows at temperature 0, sampled rows above it -- and
+    /// else row by row.
+    ///
+    /// - Parameters:
+    ///   - targetLogits: The logits of the verify pass, shape `[B, positions, vocabulary]`.
+    ///   - targetStart: The position of the bonus token in `targetLogits`.
+    ///   - draftTokens: The drafts, shape `[numDraft]`.
+    ///   - draftOutput: The drafts with their distribution, or `nil`.
+    ///   - numDraft: The drafts of the round.
+    /// - Returns: The accepted drafts and the final token of the round, shape `[1]`.
+    private mutating func verifyDrafts(
+        targetLogits: MLXArray, targetStart: Int, draftTokens: MLXArray,
+        draftOutput: MTPDraftBlockOutput?, numDraft: Int
+    ) -> (accepted: Int, finalToken: MLXArray) {
+        // Other processors can depend on didSample updates between rows.
+        let processorIsStateless = processor == nil || processor is SuppressTokensProcessor
+        if let distributionSampler, let draftOutput {
+            return appendSelection(
+                selectDistributionPreservingTokens(
+                    targetLogits: targetLogits, targetStart: targetStart,
+                    draftTokens: draftTokens, draftProcessedLogits: draftOutput.processedLogits,
+                    numDraft: numDraft, sampler: distributionSampler),
+                draftTokens: draftTokens)
+        }
+        guard processorIsStateless,
+            sampler is ArgMaxSampler || sampler is any DistributionLogitSampler
+        else {
+            return appendSelection(
+                selectGreedyTokens(
+                    targetLogits: targetLogits, targetStart: targetStart,
+                    draftTokens: draftTokens, numDraft: numDraft),
+                draftTokens: draftTokens)
+        }
+        var logits = targetLogits[0, targetStart ..< (targetStart + numDraft + 1), 0...]
+        logits = processor?.process(logits: logits) ?? logits
+        let result =
+            sampler is ArgMaxSampler
+            ? batchedGreedyMTPVerification(logits: logits, draftTokens: draftTokens)
+            : BatchedMTPVerification.sampled(
+                logits: logits, draftTokens: draftTokens, sampler: sampler)
+        pendingTokens.append(contentsOf: result.tokens)
+        return (result.accepted, result.finalToken)
+    }
+
+    /// Appends the tokens a row-by-row verifier walk emitted to the pending buffer.
+    ///
+    /// - Parameters:
+    ///   - selection: The accepted drafts and the tokens the walk emitted, the last of them the
+    ///     final token of the round.
+    ///   - draftTokens: The drafts the walk verified, evaluated with the emitted tokens.
+    /// - Returns: The accepted drafts and the final token of the round.
+    private mutating func appendSelection(
+        _ selection: (accepted: Int, emitted: [MLXArray]), draftTokens: MLXArray
+    ) -> (accepted: Int, finalToken: MLXArray) {
+        let emittedTokens = concatenated(selection.emitted)
+        eval(emittedTokens, draftTokens)
+        // `didSample` already ran inside the selection walk, for emitted tokens only.
+        pendingTokens.append(contentsOf: emittedTokens.asArray(Int.self))
+        return (selection.accepted, emittedTokens[(selection.emitted.count - 1)...])
     }
 
     /// Greedy verifier walk. The target is evaluated once for the whole
@@ -1260,7 +1309,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 finalToken: token,
                 positionDeltas: result.state?[mtpPositionDeltasKey],
                 state: &currentDrafterState,
-                sampler: sampler)
+                sampler: Self.drafterSeedSampler)
             drafterState = currentDrafterState
             targetBoundaryHidden = targetHidden[0..., (-1)..., 0...]
         } else if maintainingDrafterState,

@@ -683,12 +683,15 @@ struct ChatSessionQwenTextMTPTests {
             fixture, speculativeDecoding: try fixture.makeSpeculativeDecodingConfig())
 
         _ = try await collect(session.streamDetails(to: checkpointPrompts[0]))
-        session.generateParameters.temperature = targetOnlyTemperature
+        session.generateParameters.logProbabilities = targetOnlyLogProbabilities
         let targetOnly = try await collect(session.streamDetails(to: checkpointPrompts[1]))
-        session.generateParameters.temperature = 0
+        session.generateParameters.logProbabilities = nil
         let recovered = try await collect(session.streamDetails(to: checkpointFollowUpPrompt))
 
-        #expect(targetOnly.info.speculativeDecodingFallbackReason == .unsupportedSampling)
+        #expect(
+            targetOnly.info.passthroughReason
+                == MTPSpeculativeTokenIterator.logProbabilitiesReason)
+        #expect(targetOnly.info.proposedDraftTokens == 0)
         #expect(recovered.info.cachedPromptTokenCount > 0)
         #expect((recovered.info.proposedDraftTokens ?? 0) > 0)
         #expect(recovered.info.passthroughReason == nil)
@@ -1094,9 +1097,9 @@ struct ChatSessionQwenTextMTPTests {
     /// The messages one turn adds to a history: the user message and the reply.
     private let messagesOfOneTurn = 2
 
-    /// A sampling temperature the MTP drafter cannot draft for, thus a turn with it runs
-    /// target-only.
-    private let targetOnlyTemperature: Float = 0.6
+    /// A log-probability request, which an MTP stream decodes without speculation, thus a turn
+    /// with it runs target-only and leaves no drafter continuation.
+    private let targetOnlyLogProbabilities = 0
 
     /// A greedy session over the Qwen fixture target with ``checkpointInstructions``, whose
     /// template writes a Qwen-like transcript: the generation prompt opens a think block that the

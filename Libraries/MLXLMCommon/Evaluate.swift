@@ -236,6 +236,10 @@ public struct GenerateParameters: Sendable {
     /// default). Inert at `temperature == 0` (argmax has no RNG).
     public var seed: UInt64?
 
+    /// How an MTP stream with a stateful drafter (Qwen MTP) verifies its drafts when it
+    /// samples. Inert at `temperature == 0`, where the drafts and the verifier are argmax.
+    public var mtpSampledVerification: MTPSampledVerification = .sampleAndMatch
+
     /// Penalty factor for repeating tokens
     public var repetitionPenalty: Float?
 

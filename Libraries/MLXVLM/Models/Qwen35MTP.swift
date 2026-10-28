@@ -79,12 +79,14 @@ final class Qwen35VLMNextNPredictor: Module {
     }
 }
 
-public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel {
+public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel,
+    StatefulMTPDistributionDrafterModel
+{
     public let configuration: Qwen35Configuration.TextConfiguration
     public let maximumBlockSize: Int? = 2
     public let requiresSharedTargetKV = false
     public let requiresPromptPrefill = true
-    public let requiresGreedySampling = true
+    public let requiresGreedySampling = false
     private let checkpointPolicy: Qwen35CheckpointPolicy
 
     /// The type name and a hash of ``configuration``, which decides the drafter cache layers.
@@ -223,43 +225,61 @@ public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel {
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) -> MLXArray {
+        if let seed = state.takeSeed() {
+            return seed.token
+        }
+        return draftBlockWithLogits(
+            target: target, lastToken: lastToken, lastHidden: lastHidden, sharedKV: [:],
+            positionDeltas: positionDeltas, queryOffset: queryOffset, blockSize: blockSize,
+            state: &state, processor: nil, sampler: sampler
+        ).tokens
+    }
+
+    /// Draws the next proposal with its processed logits: the seed the last commit left, drawn
+    /// again from its hidden row, or else a chain from `lastToken`.
+    public func draftBlockWithLogits(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV _: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state: inout MTPDrafterState,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
         guard let target = target as? Qwen35 else {
             fatalError(
                 "Qwen35VLMNextNDraftModel requires a Qwen35 VLM target, got \(type(of: target))")
         }
 
         let targetEmbedTokens = target.languageModel.model.embedTokens
-        let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
         let lmHead = target.languageModel.lmHead
-
-        if let seed = state.seedToken {
-            state.seedToken = nil
-            state.seedHidden = nil
-            state.proposalAppended = 0
-            return seed
+        if let seed = state.takeSeed() {
+            guard let seedHidden = seed.hidden else {
+                preconditionFailure("A Qwen MTP seed proposal carries the hidden row it came from")
+            }
+            return .seededMTPDraft(
+                seedHidden: seedHidden, targetEmbedTokens: targetEmbedTokens, lmHead: lmHead,
+                processor: processor, sampler: sampler)
         }
-
-        state.proposalAppended = blockSize - 1
-        let proposed = draftMTPTokenBlock(
-            targetEmbedTokens: targetEmbedTokens,
-            lmHead: lmHead,
-            inputEmbedding: inputEmbedding,
-            lastToken: lastToken,
-            lastHidden: lastHidden,
-            queryOffset: queryOffset,
-            blockSize: blockSize,
-            sampler: sampler,
-            cache: state.cache
-        ) { inputsEmbeds, hiddenStates, cache, positionOffset in
-            mtp(
-                inputsEmbeds: inputsEmbeds,
-                hiddenStates: hiddenStates,
-                cache: cache,
-                positionOffset: positionOffset,
-                positionDeltas: positionDeltas)
+        let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
+        return state.appendingTentativeProposal(blockSize: blockSize) { cache in
+            MTPDraftBlockOutput.chainedMTPDrafts(
+                targetEmbedTokens: targetEmbedTokens, lmHead: lmHead,
+                inputEmbedding: inputEmbedding, lastToken: lastToken, lastHidden: lastHidden,
+                queryOffset: queryOffset, blockSize: blockSize, processor: processor,
+                sampler: sampler, cache: cache
+            ) { inputsEmbeds, hiddenStates, cache, positionOffset in
+                mtp(
+                    inputsEmbeds: inputsEmbeds,
+                    hiddenStates: hiddenStates,
+                    cache: cache,
+                    positionOffset: positionOffset,
+                    positionDeltas: positionDeltas)
+            }
         }
-        state.nextPosition += state.proposalAppended
-        return proposed
     }
 
     public var excludedCheckpointNamespaces: [String] {

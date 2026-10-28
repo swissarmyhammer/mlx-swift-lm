@@ -116,6 +116,14 @@ comments:
     - review: findings — 61 new; Libraries/MLXLMCommon/KVCache.swift:1 review-engine/prompt-cap is now in 3 ledger entries → guardrail.
     - why stuck: KVCache.swift is now 26 KB raw, but its rendered review size is 282067 bytes because the commit's ~2400 deleted lines are rendered too; further splitting cannot fix it within a single commit. ChatSessionTests.swift:1 has the same cause. The 61 other findings are mostly on code that the split moved (moved lines count as added), a cascade of the prompt-cap finding. A human must decide: accept the prompt-cap findings as an engine artifact of a split commit, and whether moved pre-existing code is in scope for this task.
   timestamp: 2026-10-28T14:47:09.811811+00:00
+- actor: claude-code
+  id: 01m621f9tkasdmc128j026fc6c
+  text: |-
+    ### decision — user chose (a), 2026-10-28
+    - The `review-engine/prompt-cap` findings on KVCache.swift:1 and ChatSessionTests.swift:1 are waived: a side effect of the split commit counting its ~2400 deleted lines.
+    - The 2026-10-28 09:06 findings on code the split only moved (pre-existing cache classes and test fixtures) are out of scope for this task.
+    - next: mark those items waived on the card, then a fresh review of the drafter-state change itself (5b199438 + e135aea1) to close the task.
+  timestamp: 2026-10-28T19:58:25.107128+00:00
 depends_on:
 - 01M5QWHA34WP7DQMWQ4AHNB0J9
 - 01M5SJPFM01WFRYWMQXVGMA4MQ
