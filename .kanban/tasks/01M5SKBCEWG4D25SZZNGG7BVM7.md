@@ -128,11 +128,33 @@ comments:
     - evidence: 1 file — Tests/MLXLMTests/HybridDecodeLayerTests.swift. swiftlint no_magic_numbers (review config): 0 violations in the file, down from 3. `swift build --build-tests` has 0 compiler warnings (only the SwiftPM "missing creator for mutated node" message about the Cmlx bundle, which was already there). xcrun xctest: MLXLMTests 895 XCTest with 0 failures + 1913 Swift Testing tests in 168 suites passed (HybridDecodeLayerTests passed; benchmarkVerification skipped, gated on MTP_GREEDY_BENCHMARK=1); MLXFoundationModelsTests 376 passed; MLXGuidedGenerationTests 70 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 5 XCTest with 0 failures.
     - next: /review (finding of 2026-10-28 10:18 checked)
   timestamp: 2026-10-28T15:28:59.244743+00:00
+- actor: claude-code
+  id: 01m61j2j42z7hcrpf4q5etx4a2
+  text: |-
+    ### finish iteration 4 — changed (paused before review)
+    - implement: changed — Tests/MLXLMTests/HybridDecodeLayerTests.swift (magic numbers 3 -> 0)
+    - test: green — 5 bundles, MLXLMTests 895 + 1913 (implementer run)
+    - commit: 016febe5
+    - review: not run — session hit its usage limit. next: `/review ^gg7bvm7 HEAD~1..HEAD` (016febe5).
+  timestamp: 2026-10-28T15:29:18.978223+00:00
+- actor: claude-code
+  id: 01m61mftw8gy9gbds6922hfjcz
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (016febe5): findings 0, confirmed 0, refuted 0 (7 attempted, 0 failed). The 2026-10-28 10:18 magic-numbers finding at Tests/MLXLMTests/HybridDecodeLayerTests.swift was not raised again. All earlier review items are checked.
+    - next: task moved to done.
+  timestamp: 2026-10-28T16:11:31.080405+00:00
+- actor: claude-code
+  id: 01m61mg6j0a1r66yxys5kkz9d0
+  text: |-
+    ### finish iteration 5 — clean
+    - review: clean — 016febe5, 0 findings; task in done
+  timestamp: 2026-10-28T16:11:43.040351+00:00
 depends_on:
 - 01M5QWJGM1679S6CWHFCST7WAN
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: ffed80
 title: 'MTP: compiled multi-token verify schedule for Qwen35 (LLM and VLM targets)'
 ---
 ## What
