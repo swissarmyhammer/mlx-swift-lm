@@ -64,8 +64,24 @@ comments:
     - evidence: 5 files — Libraries/MLXLMCommon/CompiledDecodeSchedule.swift, Libraries/MLXLLM/Models/Qwen35.swift, Libraries/MLXLLM/Models/Qwen3Next.swift, Libraries/MLXVLM/Models/Qwen35.swift, Tests/MLXLMTests/HybridDecodeLayerTests.swift. All 6 findings of ## Review Findings (2026-10-28 14:08) flipped to [x]. `swift build --build-tests`: 0 compiler warnings (only the pre-existing swiftbuild "missing creator for mutated node" notice). `xcrun xctest`: MLXLMTests 897 XCTest + 1929 Swift Testing pass (1 pre-existing env-gated skip, benchmarkVerification, ^smn05mj), MLXGuidedGenerationTests 70, MLXFoundationModelsTests 376, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5 — 0 failures. Release qwen38FourBitMTPGeneration(): plain 59.6/59.6/59.5, MTP 93.0/83.2/80.8 tok/s math/code/prose (target ~92/83/81, within 3%), matches plain: true on all three. Release qwen38FourBitMTPSystemPromptCache(): passed, 0 known issues, edit turn prefilled 123 tok with MTP on (cached 2169).
     - next: /review
   timestamp: 2026-10-28T19:27:22.104089+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m61zv07q10ysjy2ka7wqhmc3
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (40daff66) — 0 findings, 0 confirmed, 1 refuted, 14 pairs attempted, 0 failed; all 6 prior items from 2026-10-28 14:08 are checked
+    - next: task moved to done
+  timestamp: 2026-10-28T19:29:51.351073+00:00
+- actor: claude-code
+  id: 01m61zvdeq7v06nej8azjdmwh6
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 5 files
+    - test: green (implementer run) — 5 bundles (MLXLMTests 897 + 1929); Release MTP 93.0/83.2/80.8 = plain; cache guard pass, edit turn 123 tok
+    - commit: 40daff66
+    - review: clean — task in done
+  timestamp: 2026-10-28T19:30:04.887361+00:00
+position_column: done
+position_ordinal: fff080
 title: Route Qwen3Next and VLM Qwen35 decodeStep through a shared schedule runner, drop their cache force unwraps
 ---
 ## What
