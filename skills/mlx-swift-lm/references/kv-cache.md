@@ -14,7 +14,11 @@ The KV (Key-Value) cache stores attention key and value tensors from previous to
 | `ChunkedKVCache` | Large prompt processing | Controlled | Chunked |
 | `MambaCache` | Mamba/SSM models | Fixed state | N/A |
 
-**File:** `Libraries/MLXLMCommon/KVCache.swift`
+**Files:** `Libraries/MLXLMCommon/KVCache.swift` holds the `KVCache` protocol, `BaseKVCache`,
+the mask helpers and the prompt cache utilities. Each cache class has its own file:
+`KVCacheSimple.swift` (`KVCacheSimple`, `ChunkedKVCache`), `RotatingKVCache.swift`,
+`QuantizedKVCache.swift` (with the quantized attention helpers), `ArraysCache.swift`
+(`ArraysCache`, `MambaCache`) and `CacheList.swift`.
 
 ## Cache Types
 

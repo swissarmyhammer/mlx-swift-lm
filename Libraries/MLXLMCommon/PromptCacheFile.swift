@@ -51,8 +51,11 @@ public protocol PromptCacheRestorable: KVCache {
 /// A snapshot of an MTP session also carries the drafter continuation that stands where the main
 /// cache ends, so a session restored from it resumes the drafter rather than cold-starting it.
 public struct PromptCacheSnapshot {
+    /// The cache, one entry for each layer.
     public let cache: [KVCache]
+    /// The caller metadata saved with the cache.
     public let metadata: [String: String]
+    /// The model state saved with the cache, or `nil` when the model produced none.
     public let state: LMOutput.State?
 
     /// The MTP drafter continuation saved with the cache, or `nil` when the save had none. A file
@@ -190,7 +193,7 @@ public func preparePromptCacheSave(
     // Flatten cache_info as "0.i.j" (first element of cache_metadata)
     for (i, info) in cacheInfo.enumerated() {
         for (j, metaValue) in info.enumerated() {
-            flattenedMetadata["0.\(i).\(j)"] = metaValue
+            flattenedMetadata["\(FlatMetadataSection.cacheInfo).\(i).\(j)"] = metaValue
         }
     }
 
@@ -200,12 +203,12 @@ public func preparePromptCacheSave(
         user, _ in user
     }
     for (key, value) in recordedMetadata {
-        flattenedMetadata["1.\(key)"] = value
+        flattenedMetadata["\(FlatMetadataSection.userMetadata).\(key)"] = value
     }
 
     // Flatten cache_classes as "2.i" (third element of cache_metadata)
     for (i, className) in cacheClasses.enumerated() {
-        flattenedMetadata["2.\(i)"] = className
+        flattenedMetadata["\(FlatMetadataSection.cacheClasses).\(i)"] = className
     }
 
     addPromptCacheState(
@@ -636,11 +639,12 @@ private func addPromptCacheState(
 ) {
     guard !stateArrays.isEmpty else { return }
 
-    flattenedMetadata["1.\(promptCacheStateVersionKey)"] = promptCacheStateFormatVersion
-    flattenedMetadata["1.\(promptCacheStateCountKey)"] = String(stateArrays.count)
+    let section = FlatMetadataSection.userMetadata
+    flattenedMetadata["\(section).\(promptCacheStateVersionKey)"] = promptCacheStateFormatVersion
+    flattenedMetadata["\(section).\(promptCacheStateCountKey)"] = String(stateArrays.count)
     for (index, entry) in stateArrays.enumerated() {
         flattenedData[promptCacheStateTensorKey(index)] = entry.value
-        flattenedMetadata["1.\(promptCacheStateEntryKey(index))"] = entry.key
+        flattenedMetadata["\(section).\(promptCacheStateEntryKey(index))"] = entry.key
     }
 }
 
@@ -676,7 +680,7 @@ private func loadPromptCacheState(
     // The loop proved every expected entry is present; counting rejects the leftovers — a
     // reserved-namespace key this reader does not know about means the file was written by
     // something else, so refuse it rather than silently dropping part of the state.
-    guard stateMetadata.count == count + 2 else {
+    guard stateMetadata.count == count + promptCacheStateHeaderCount else {
         throw KVCacheError(message: "Unexpected prompt cache state metadata")
     }
     guard stateTensorKeys.count == count else {
@@ -728,9 +732,31 @@ private let promptCacheStateMetadataPrefix = "__mlx_lm_state_"
 private let promptCacheStateVersionKey = "__mlx_lm_state_version"
 private let promptCacheStateCountKey = "__mlx_lm_state_count"
 private let promptCacheStateTensorPrefix = "__mlx_lm_state_tensor_"
+/// The state metadata entries besides the key of each array: the format version and the count.
+private let promptCacheStateHeaderCount = 2
 // Derived so the format version lives in exactly one place.
 private let promptCacheStateClassPrefix =
     "__mlx_lm_state_v\(promptCacheStateFormatVersion)__:"
+
+/// The components of a flattened array key `i.j`: the cache index and the array index.
+private let flatArrayKeyLength = 2
+
+/// The sections of the flattened prompt cache metadata, as `tree_flatten` numbers the three
+/// elements of `[cache_info, user_metadata, cache_classes]`.
+private enum FlatMetadataSection {
+    /// The meta state of each cache, keyed `0.i.j`.
+    static let cacheInfo = "0"
+    /// The caller metadata, keyed `1.key`.
+    static let userMetadata = "1"
+    /// The class name of each cache, keyed `2.i`.
+    static let cacheClasses = "2"
+    /// The components of a cache info key: the section, the cache index and the entry index.
+    static let cacheInfoKeyLength = 3
+    /// The position of the entry index in a cache info key.
+    static let entryIndexPosition = 2
+    /// The fewest components of a caller metadata or cache class key: the section and the key.
+    static let keyedKeyLength = 2
+}
 
 /// Unflatten arrays from tree_flatten format (e.g., "0.1", "1.0") to nested structure
 private func unflattenArrays(
@@ -742,7 +768,7 @@ private func unflattenArrays(
     // Parse all keys and organize by indices
     for (key, array) in flatArrays {
         let components = key.split(separator: ".")
-        guard components.count == 2,
+        guard components.count == flatArrayKeyLength,
             let i = Int(components[0]),
             let j = Int(components[1]),
             (0 ..< cacheCount).contains(i),
@@ -780,9 +806,13 @@ private func unflattenMetadata(_ flatMetadata: [String: String]) -> [Any] {
     for (key, value) in flatMetadata {
         let components = key.split(separator: ".")
 
-        if components.count >= 3 && components[0] == "0" {
+        if components.count >= FlatMetadataSection.cacheInfoKeyLength
+            && components[0] == FlatMetadataSection.cacheInfo
+        {
             // Cache info: "0.i.j" format
-            if let i = Int(components[1]), let j = Int(components[2]) {
+            if let i = Int(components[1]),
+                let j = Int(components[FlatMetadataSection.entryIndexPosition])
+            {
                 // Ensure cacheInfo is large enough
                 while cacheInfo.count <= i {
                     cacheInfo.append([])
@@ -793,11 +823,15 @@ private func unflattenMetadata(_ flatMetadata: [String: String]) -> [Any] {
                 }
                 cacheInfo[i][j] = value
             }
-        } else if components.count >= 2 && components[0] == "1" {
+        } else if components.count >= FlatMetadataSection.keyedKeyLength
+            && components[0] == FlatMetadataSection.userMetadata
+        {
             // User metadata: "1.key" format
             let metaKey = components.dropFirst().joined(separator: ".")
             userMetadata[metaKey] = value
-        } else if components.count >= 2 && components[0] == "2" {
+        } else if components.count >= FlatMetadataSection.keyedKeyLength
+            && components[0] == FlatMetadataSection.cacheClasses
+        {
             // Cache classes: "2.i" format
             if let i = Int(components[1]) {
                 // Ensure cacheClasses is large enough

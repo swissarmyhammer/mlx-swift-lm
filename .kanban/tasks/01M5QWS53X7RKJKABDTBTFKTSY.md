@@ -63,6 +63,42 @@ comments:
     - evidence: 22 files — Libraries/MLXLMCommon/{ChatSession.swift, KVCache.swift, PromptCacheFile.swift (new), PromptCacheRestore.swift (new)}, Tests/MLXLMTests/{ChatSessionTests, GlmOcrContinuationTests, HybridRecurrentCacheOffsetTests, KVCacheConfigurationTests, KVCacheTests, KVCacheTypeRegistryTests, MiniMaxM3Tests, PromptCacheSaveInputTests, PromptCacheTemplateRestoreTests, Qwen35ContinuationTests, Qwen3NextPromptCacheRestoreTests, Qwen3VLContinuationTests, RotatingKVCacheRewindTests, ScriptedLM/TranscriptKVCacheTests, TurboQuantTests}.swift, skills/mlx-swift-lm/references/kv-cache.md, plus the task card. swift build --build-tests: exit 0, no compiler warnings. xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest: 895 XCTest, 0 failures; 1907 Swift Testing in 167 suites passed (only skip: env-gated benchmarkVerification, as before). swift format lint on the changed files: no new warnings (only existing ones on untouched lines). All 3 review findings checked.
     - next: /review
   timestamp: 2026-10-28T12:49:04.905330+00:00
+- actor: claude-code
+  id: 01m619me5w7367kvb400qxvye6
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (e135aea1) — 12 findings (12 confirmed, 1 refuted). Prior 07:35 items: ChatSession.swift:2511 reuse and TemporaryPromptCacheFile.swift:14 reuse not re-raised; KVCache.swift prompt-cap still open (263792 bytes, was 283604, cap 262144). New: Libraries/MLXLMCommon/KVCache.swift:1, Libraries/MLXLMCommon/PromptCacheFile.swift:54, :55, :56, :679, :745, :783, :785, :796, :800, Tests/MLXLMTests/ChatSessionTests.swift:1, Tests/MLXLMTests/KVCacheTests.swift:1
+    - next: implement the 2026-10-28 07:55 Review Findings checklist, then re-review
+  timestamp: 2026-10-28T13:01:47.580886+00:00
+- actor: claude-code
+  id: 01m619n76s5729gzbf2qqv19ck
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — 22 files (KVCache split, one compat check, one temp-file helper)
+    - test: green — all 5 bundles; MLXLMTests 895 XCTest + 1907 Swift Testing
+    - commit: e135aea1
+    - review: findings — Libraries/MLXLMCommon/KVCache.swift:1 (prompt-cap, 2nd time: 263792 > 262144), PromptCacheFile.swift:54,:55,:56 (missing-docs), :679,:745,:783,:785,:796,:800 (magic-numbers), Tests/MLXLMTests/ChatSessionTests.swift:1, Tests/MLXLMTests/KVCacheTests.swift:1 (prompt-cap)
+  timestamp: 2026-10-28T13:02:13.209800+00:00
+- actor: claude-code
+  id: 01m61b0fkm72k0q5vkh81fb3mk
+  text: |-
+    Review findings 07:55 worked (not committed):
+    - Prompt cap: the 1.6x rendered/raw guess was wrong. The review engine (swissarmyhammer-validators review/fleet/render.rs, rendered_file_block_bytes) renders each line numbered with a blame sha (~20 extra bytes per line) plus the semantic diff and probe evidence, so KVCache.swift at 104 KB raw rendered 263792 (~2.5x). So I kept every resulting file at or under 40 KB raw.
+    - KVCache.swift split by cache class (line-range moves): KVCache.swift (protocol, BaseKVCache, masks, KVCacheError, prompt cache utils), KVCacheSimple.swift (KVCacheSimple + ChunkedKVCache), RotatingKVCache.swift, QuantizedKVCache.swift (+ quantized attention, dynamic quantization, attention helpers), ArraysCache.swift (ArraysCache + MambaCache), CacheList.swift.
+    - KVCacheTests.swift split into extensions of the `KVCacheTests` suite: KVCacheArraysCacheTests, KVCacheQuantizationTests (+ variance-normalized), RotatingKVCacheTests (logicalView + wrap-aware trim), and KVCacheContinuationTests (the free @Test functions). Suite and test names are the same.
+    - ChatSessionTests.swift: swiftlint no_magic_numbers (the magic-numbers-swift tool rule) skips only a class that DIRECTLY inherits XCTestCase. It does not skip an extension, or a subclass of a subclass (I checked this with a probe). So test extensions would have brought ~120 new literal findings. Instead each topic is its own `final class X: XCTestCase, ChatSessionFixtures` (ChatSessionCacheReuseTests, ChatSessionToolCallTests, ChatSessionSpeculativeDecodingTests, ChatSessionCacheTests). The shared fixtures moved once into ChatSessionTestFixtures.swift: top-level fixture types, plus a `ChatSessionFixtures` protocol extension for makeModel / model(...) / collectGeneration / rejectionSession / generationParameters / targetLength. The test bodies did not change. 895 XCTest, the same count as before.
+    - Magic numbers, everywhere in the split files (swiftlint with the rule's own config, 0 left): the [B,H,L,D] axes use the existing `HeadRowsAxis`. The meta-state/state indices and counts reuse `SavedMetaStateIndex` / `SavedValueCounts` from PromptCacheRestore.swift (made internal; I added rotatingStep/Offset/Index, quantizedOffset, arraysLeftPadding/Lengths). PromptCacheFile got `FlatMetadataSection`, `flatArrayKeyLength` and `promptCacheStateHeaderCount`. QuantizedKVCache got named group sizes, rowAxisFromEnd and groupedQueryRepeatAxis. I named the test literals too (fixture tokenizer markers, cacheCreators, deterministicTensor).
+    - Duplication I removed while there (no behaviour change): KVCacheSimple and ChunkedKVCache now share `growBuffers(toFit:values:after:)`. The causal branch of quantizedScaledDotProductAttention now calls `applyAttentionMask`.
+    - Missing docs (swiftlint missing_docs with the rule's config, 0 left): PromptCacheSnapshot cache/metadata/state, RoPEOffset cases, the KVCache protocol-extension defaults, withPreparedCache, createCausalMask, the deprecated createAttentionMask, createSSMMask, and quantizedScaledDotProductAttention.
+    - I did the mechanical moves with exact-match python scripts. Each one asserts its match counts, and a sorted-line diff showed that no source line was lost. I ran swift format on the touched files.
+  timestamp: 2026-10-28T13:25:50.836595+00:00
+- actor: claude-code
+  id: 01m61b0nxgxzfh2mwn80j0mz3c
+  text: |-
+    ### implement — changed
+    - evidence: 26 files — Libraries/MLXLMCommon/{KVCache, KVCacheSimple (new), RotatingKVCache (new), QuantizedKVCache (new), ArraysCache (new), CacheList (new), PromptCacheFile, PromptCacheRestore}.swift; Tests/MLXLMTests/{KVCacheTests, KVCacheArraysCacheTests (new), KVCacheQuantizationTests (new), RotatingKVCacheTests (new), KVCacheContinuationTests (new), ChatSessionTests, ChatSessionTestFixtures (new), ChatSessionCacheReuseTests (new), ChatSessionToolCallTests (new), ChatSessionSpeculativeDecodingTests (new), ChatSessionCacheTests (new)}.swift; skills/mlx-swift-lm/{SKILL.md, references/kv-cache.md}; and the task card. wc -c: KVCache 26117, KVCacheSimple 9967, RotatingKVCache 21347, QuantizedKVCache 28193, ArraysCache 15785, CacheList 10913, PromptCacheFile 39742, PromptCacheRestore 36665, KVCacheTests 33747, KVCacheArraysCacheTests 15273, KVCacheQuantizationTests 31804, RotatingKVCacheTests 31464, KVCacheContinuationTests 15765, ChatSessionTests 25924, ChatSessionTestFixtures 24845, ChatSessionCacheReuseTests 22589, ChatSessionToolCallTests 12198, ChatSessionSpeculativeDecodingTests 23876, ChatSessionCacheTests 25594. swift build --build-tests: exit 0, no compiler warnings (only the known build-system "missing creator ... mlx-swift_Cmlx.bundle"). xcrun xctest MLXLMTests.xctest: 895 XCTest, 0 failures; 1907 Swift Testing in 167 suites passed (the only skip is the env-gated benchmarkVerification, as before). swiftlint no_magic_numbers + missing_docs (the rule configs) over all 19 split files: 0. swift format lint: clean on the new lines. All 12 items of the 07:55 findings are checked.
+    - next: /review
+  timestamp: 2026-10-28T13:25:57.296457+00:00
 depends_on:
 - 01M5QWHA34WP7DQMWQ4AHNB0J9
 - 01M5SJPFM01WFRYWMQXVGMA4MQ
@@ -109,3 +145,30 @@ The portable drafter state is `MTPDrafterContinuation` (MTPDrafterContinuation.s
 - [x] `Libraries/MLXLMCommon/ChatSession.swift:2511` `reuse/reuse` — `restoredDrafterContinuation` repeats the `drafter.isCompatible(with: model)` check that `mtpFallbackReason` already performs for the same drafter and model in the same turn, so the compatibility rule now lives in two places. Pass the already-computed compatibility result into `restoredDrafterContinuation`, or call the shared check from one helper, so a future change to compatibility rules updates one place.
 - [x] `Libraries/MLXLMCommon/KVCache.swift:1` `review-engine/prompt-cap` — This file exceeds the review prompt cap — 283604 rendered bytes against the 262144-byte per-file cap — so these validators could not review it: duplication. Split the file into smaller modules that fit the review prompt cap.
 - [x] `Tests/MLXLMTestSupport/TemporaryPromptCacheFile.swift:14` `reuse/reuse` — `TemporaryPromptCacheFile.makeURL()` reimplements the temporary-file-URL helper that the test suite already has in several places. The new shared helper sits beside private copies that build the same thing, so there are now two canonical versions of one capability, and only the new one is shared. Use the existing `temporaryURL` helper in `PromptCacheSaveInputTests`, or move one shared helper into `MLXLMTestSupport` and have the existing private helpers call it. Do not keep a third copy beside them.
+
+## Review Findings (2026-10-28 07:55)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 19 file(s) reviewed, 6 not reviewed.
+
+> ⚠️ 3 file(s) not reviewed — the rendered prompt would exceed the agent's prompt cap:
+> - `Libraries/MLXLMCommon/KVCache.swift` — 263792 rendered bytes, over the 262144-byte per-file cap; not reviewed by: duplication (split the file)
+> - `Tests/MLXLMTests/ChatSessionTests.swift` — 268888 rendered bytes, over the 262144-byte per-file cap; not reviewed by: duplication (split the file)
+> - `Tests/MLXLMTests/KVCacheTests.swift` — 292173 rendered bytes, over the 262144-byte per-file cap; not reviewed by: duplication (split the file)
+
+> 3 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWS53X7RKJKABDTBTFKTSY.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWS53X7RKJKABDTBTFKTSY.md` — no validator matches this file
+> - `skills/mlx-swift-lm/references/kv-cache.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/KVCache.swift:1` `review-engine/prompt-cap` — This file exceeds the review prompt cap — 263792 rendered bytes against the 262144-byte per-file cap — so these validators could not review it: duplication. Split the file into smaller modules that fit the review prompt cap.
+- [x] `Libraries/MLXLMCommon/PromptCacheFile.swift:54` `code-hygiene/missing-docs-swift` — public declarations should be documented.
+- [x] `Libraries/MLXLMCommon/PromptCacheFile.swift:55` `code-hygiene/missing-docs-swift` — public declarations should be documented.
+- [x] `Libraries/MLXLMCommon/PromptCacheFile.swift:56` `code-hygiene/missing-docs-swift` — public declarations should be documented.
+- [x] `Libraries/MLXLMCommon/PromptCacheFile.swift:679` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLMCommon/PromptCacheFile.swift:745` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLMCommon/PromptCacheFile.swift:783` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLMCommon/PromptCacheFile.swift:785` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLMCommon/PromptCacheFile.swift:796` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLMCommon/PromptCacheFile.swift:800` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/ChatSessionTests.swift:1` `review-engine/prompt-cap` — This file exceeds the review prompt cap — 268888 rendered bytes against the 262144-byte per-file cap — so these validators could not review it: duplication. Split the file into smaller modules that fit the review prompt cap.
+- [x] `Tests/MLXLMTests/KVCacheTests.swift:1` `review-engine/prompt-cap` — This file exceeds the review prompt cap — 292173 rendered bytes against the 262144-byte per-file cap — so these validators could not review it: duplication. Split the file into smaller modules that fit the review prompt cap.

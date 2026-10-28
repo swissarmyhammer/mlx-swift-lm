@@ -251,11 +251,17 @@ private let builtInLeafClassNames: Set<String> = [
 ]
 
 /// The places of the values in the saved meta state of the built-in classes.
-private enum SavedMetaStateIndex {
+enum SavedMetaStateIndex {
     /// The number of leading tokens that a `RotatingKVCache` keeps in its window.
     static let rotatingKeep = 0
     /// The window size of a `RotatingKVCache`.
     static let rotatingMaxSize = 1
+    /// The growth step of a `RotatingKVCache`.
+    static let rotatingStep = 2
+    /// The offset of a `RotatingKVCache`.
+    static let rotatingOffset = 3
+    /// The write index of a `RotatingKVCache`.
+    static let rotatingIndex = 4
     /// The number of integer values at the start of a `RotatingKVCache` meta state.
     static let rotatingIntegerCount = 5
     /// The capacity origin of a `RotatingKVCache`, when the meta state holds one.
@@ -264,6 +270,8 @@ private enum SavedMetaStateIndex {
     static let rotatingWrapped = 6
     /// The rewind capacity of a `RotatingKVCache`, when the meta state holds one.
     static let rotatingRewindCapacity = 7
+    /// The offset of a `QuantizedKVCache`.
+    static let quantizedOffset = 1
     /// The group size of a `QuantizedKVCache`.
     static let quantizedGroupSize = 2
     /// The bit width of a `QuantizedKVCache`.
@@ -284,26 +292,30 @@ private enum SavedMetaStateIndex {
     static let arraysSlotCount = 0
     /// The present slots of an `ArraysCache`.
     static let arraysPresentSlots = 1
+    /// The left padding of an `ArraysCache`, when the meta state holds it.
+    static let arraysLeftPadding = 2
+    /// The lengths of an `ArraysCache`, when the meta state holds them.
+    static let arraysLengths = 3
 }
 
 /// The array counts and meta-state counts that the built-in classes save.
-private enum SavedValueCounts {
+enum SavedValueCounts {
     /// The array count of a cache that holds no value yet.
     private static let noArrays = 0
     /// The array count of the keys and the values.
-    private static let keysAndValues = 2
+    static let keysAndValues = 2
     /// The array count of quantized keys and values without biases: the packed values and
     /// the scales of each.
-    private static let quantizedWithoutBiases = 4
+    static let quantizedWithoutBiases = 4
     /// The array count of quantized keys and values with biases.
-    private static let quantizedWithBiases = 6
+    static let quantizedWithBiases = 6
     /// The meta-state count of a `QuantizedKVCache`: the step, the offset, the group size and
     /// the bit width.
-    private static let quantizedMetaStateCount = 4
+    static let quantizedMetaStateCount = 4
     /// The meta-state count of a `ChunkedKVCache`: the chunk size and the start position.
-    private static let chunkedMetaStateCount = 2
+    static let chunkedMetaStateCount = 2
     /// The smallest meta-state count of an `ArraysCache`: the slot count and the present slots.
-    private static let arraysMinimumMetaStateCount = 2
+    static let arraysMinimumMetaStateCount = 2
     /// The largest meta-state count of an `ArraysCache`: the left padding and the lengths
     /// follow.
     private static let arraysMaximumMetaStateCount = 4
