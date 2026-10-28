@@ -73,7 +73,11 @@ public final class Qwen35MTPDraftModel: Module, ResumableMTPDrafterModel,
     StatefulMTPDistributionDrafterModel
 {
     public let configuration: Qwen35TextConfiguration
-    public let maximumBlockSize: Int? = 2
+
+    /// The longest verify the hybrid target rewinds in place: the most tokens its gated delta
+    /// net kernel and its compiled verify schedule hold. A longer round would verify through a
+    /// staged round, which runs neither.
+    public let maximumBlockSize: Int? = GatedDeltaDecodeKernel.mostTokens
     public let requiresSharedTargetKV = false
     public let requiresPromptPrefill = true
     public let requiresGreedySampling = false
@@ -207,6 +211,8 @@ public final class Qwen35MTPDraftModel: Module, ResumableMTPDrafterModel,
             sampler: sampler)
     }
 
+    /// Drafts the seed the last commit left, then chains the predictor on its own hidden rows for
+    /// the rest of the round; with no seed, chains every draft from `lastToken`.
     public func draftBlock(
         target: any LanguageModel,
         lastToken: MLXArray,
@@ -218,18 +224,14 @@ public final class Qwen35MTPDraftModel: Module, ResumableMTPDrafterModel,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) -> MLXArray {
-        if let seed = state.takeSeed() {
-            return seed.token
-        }
-        return draftBlockWithLogits(
-            target: target, lastToken: lastToken, lastHidden: lastHidden, sharedKV: [:],
-            positionDeltas: nil, queryOffset: queryOffset, blockSize: blockSize, state: &state,
-            processor: nil, sampler: sampler
-        ).tokens
+        shiftedDrafter(target).draftTokens(
+            lastToken: lastToken, lastHidden: lastHidden, queryOffset: queryOffset,
+            blockSize: blockSize, sampler: sampler, state: &state)
     }
 
-    /// Draws the next proposal with its processed logits: the seed the last commit left, drawn
-    /// again from its hidden row, or else a chain from `lastToken`.
+    /// Draws the drafts of a round with their processed logits: the seed the last commit left,
+    /// drawn again from its hidden row, then the drafts chained after it, or else a chain from
+    /// `lastToken`.
     public func draftBlockWithLogits(
         target: any LanguageModel,
         lastToken: MLXArray,
@@ -242,29 +244,21 @@ public final class Qwen35MTPDraftModel: Module, ResumableMTPDrafterModel,
         processor: (any LogitProcessor)?,
         sampler: any LogitSampler
     ) -> MTPDraftBlockOutput {
+        shiftedDrafter(target).draftsWithLogits(
+            lastToken: lastToken, lastHidden: lastHidden, queryOffset: queryOffset,
+            blockSize: blockSize, processor: processor, sampler: sampler, state: &state)
+    }
+
+    /// The predictor of this drafter over the embedding and the LM head of `target`.
+    private func shiftedDrafter(_ target: any LanguageModel) -> ShiftedMTPDrafter {
         let (targetEmbedTokens, lmHead) = targetEmbeddingAndHead(target)
-        if let seed = state.takeSeed() {
-            guard let seedHidden = seed.hidden else {
-                preconditionFailure("A Qwen MTP seed proposal carries the hidden row it came from")
-            }
-            return .seededMTPDraft(
-                seedHidden: seedHidden, targetEmbedTokens: targetEmbedTokens, lmHead: lmHead,
-                processor: processor, sampler: sampler)
-        }
-        let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
-        return state.appendingTentativeProposal(blockSize: blockSize) { cache in
-            MTPDraftBlockOutput.chainedMTPDrafts(
-                targetEmbedTokens: targetEmbedTokens, lmHead: lmHead,
-                inputEmbedding: inputEmbedding, lastToken: lastToken, lastHidden: lastHidden,
-                queryOffset: queryOffset, blockSize: blockSize, processor: processor,
-                sampler: sampler, cache: cache
-            ) { inputsEmbeds, hiddenStates, cache, positionOffset in
-                mtp(
-                    inputsEmbeds: inputsEmbeds,
-                    hiddenStates: hiddenStates,
-                    cache: cache,
-                    positionOffset: positionOffset)
-            }
+        return ShiftedMTPDrafter(
+            targetEmbedTokens: targetEmbedTokens, lmHead: lmHead,
+            inputEmbedding: mtp.embedTokens ?? targetEmbedTokens
+        ) { [mtp] inputsEmbeds, hiddenStates, cache, positionOffset in
+            mtp(
+                inputsEmbeds: inputsEmbeds, hiddenStates: hiddenStates, cache: cache,
+                positionOffset: positionOffset)
         }
     }
 

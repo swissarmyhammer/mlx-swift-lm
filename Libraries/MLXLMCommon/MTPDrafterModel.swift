@@ -155,13 +155,21 @@ public struct MTPDrafterState {
     /// Number of tentative cache entries appended by the current proposal.
     public var proposalAppended: Int
 
+    /// The drafter top-1 probability below which a chained proposal stops before its next
+    /// draft, as llama.cpp's `--spec-draft-p-min`. Zero drafts every step of the round.
+    ///
+    /// The iterator sets it from its own setting, so a restored continuation drafts with the
+    /// floor of the stream that resumes it.
+    public var minimumDraftProbability: Float
+
     public init(
         cache: [KVCache],
         cacheStartPosition: Int = 0,
         nextPosition: Int = 0,
         seedToken: MLXArray? = nil,
         seedHidden: MLXArray? = nil,
-        proposalAppended: Int = 0
+        proposalAppended: Int = 0,
+        minimumDraftProbability: Float = 0
     ) {
         self.cache = cache
         self.cacheStartPosition = cacheStartPosition
@@ -169,6 +177,7 @@ public struct MTPDrafterState {
         self.seedToken = seedToken
         self.seedHidden = seedHidden
         self.proposalAppended = proposalAppended
+        self.minimumDraftProbability = minimumDraftProbability
     }
 
     /// Entries the cache holds: committed entries, then the tentative entries of the current
@@ -235,6 +244,10 @@ public protocol StatefulMTPDrafterModel: MTPDrafterModel {
     )
 
     /// Stateful variant of ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:sampler:)``.
+    ///
+    /// A drafter whose state sets a ``MTPDrafterState/minimumDraftProbability`` may stop its
+    /// chain early and return fewer than `blockSize - 1` drafts, but at least one; the iterator
+    /// verifies the drafts it returns.
     func draftBlock(
         target: any LanguageModel,
         lastToken: MLXArray,
@@ -456,9 +469,14 @@ extension ResumableMTPDrafterModel {
             sampler: sampler)
     }
 
-    /// Commits a verified round to a shifted drafter: removes the rejected tentative entries,
-    /// then appends the accepted drafts that have no entry yet and `finalToken`, each paired
-    /// with the verifier hidden row of the position before it.
+    /// Commits a verified round to a shifted drafter: removes every tentative entry of the
+    /// proposal, then appends the accepted drafts and `finalToken`, each paired with the
+    /// verifier hidden row of the position before it.
+    ///
+    /// A chained draft's tentative entry pairs it with the drafter's own hidden row, which a
+    /// prefill over the accepted tokens would not hold, so even the entries of accepted drafts
+    /// are written again from the verifier rows. The drafter then holds one entry for each token
+    /// the main cache holds, as a cold prefill over them builds it.
     public func commitDrafterState(
         target: any LanguageModel,
         targetHidden: MLXArray,
@@ -469,19 +487,18 @@ extension ResumableMTPDrafterModel {
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) {
-        let keptTentative = Swift.min(acceptedCount, state.proposalAppended)
-        _ = state.removeLastEntries(state.proposalAppended - keptTentative)
-        state.proposalAppended = 0
+        _ = state.removeLastEntries(state.proposalAppended)
 
         let finalColumn = normalizedMTPColumn(finalToken)
         let tokens =
-            acceptedCount > keptTentative
+            acceptedCount > 0
             ? concatenated(
-                [draftTokens[0..., keptTentative ..< acceptedCount], finalColumn], axis: 1)
+                [normalizedMTPTokenBatch(draftTokens)[0..., ..<acceptedCount], finalColumn],
+                axis: 1)
             : finalColumn
         _ = appendDrafterState(
             target: target, tokens: tokens,
-            targetHidden: targetHidden[0..., keptTentative ..< (acceptedCount + 1), 0...],
+            targetHidden: targetHidden[0..., ..<(acceptedCount + 1), 0...],
             positionDeltas: positionDeltas, state: &state, sampler: sampler)
     }
 

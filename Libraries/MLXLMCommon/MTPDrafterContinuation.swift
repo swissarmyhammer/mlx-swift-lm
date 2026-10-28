@@ -66,7 +66,7 @@ private enum FNV1aHash {
 /// Iterator-owned MTP continuation carried atomically with a ChatSession's
 /// target cache, target model state, and transcript.
 ///
-/// A caller of ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:)``
+/// A caller of ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:)``
 /// receives one when the generation ends, and hands it to the next generation
 /// that continues the same main cache. Its drafter state is opaque to callers outside
 /// the package. A prompt cache keeps a continuation beside its main caches: ``copy()`` forks it,

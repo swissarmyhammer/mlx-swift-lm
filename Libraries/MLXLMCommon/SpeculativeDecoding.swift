@@ -56,6 +56,14 @@ public struct SpeculativeDecodingTelemetry: Sendable, Equatable {
     /// Number of tokens emitted from speculative rounds, including correction and bonus tokens.
     public private(set) var emittedTokenCount: Int
 
+    /// The rounds that drafted a token at each depth: element `k` counts the rounds that drafted
+    /// more than `k` tokens, so it describes depth `k + 1`.
+    public private(set) var draftedRoundCountsByDepth: [Int] = []
+
+    /// The rounds that accepted the draft at each depth: element `k` counts the rounds that
+    /// accepted more than `k` drafts, so it describes depth `k + 1`.
+    public private(set) var acceptedRoundCountsByDepth: [Int] = []
+
     public init(
         roundCount: Int = 0,
         draftTokenCount: Int = 0,
@@ -97,6 +105,19 @@ public struct SpeculativeDecodingTelemetry: Sendable, Equatable {
         return Double(emittedTokenCount) / Double(targetModelCallCount)
     }
 
+    /// The share of the rounds that drafted a token at `depth` whose draft there the target
+    /// accepted, or `nil` when no round drafted that deep.
+    ///
+    /// - Parameter depth: The position of the draft in its round: 1 is the first draft after the
+    ///   bonus token.
+    /// - Returns: The acceptance rate at `depth`, from 0 to 1.
+    public func acceptanceRate(atDepth depth: Int) -> Double? {
+        let index = depth - 1
+        guard draftedRoundCountsByDepth.indices.contains(index) else { return nil }
+        return Double(acceptedRoundCountsByDepth[index])
+            / Double(draftedRoundCountsByDepth[index])
+    }
+
     package mutating func recordRound(
         drafted: Int,
         accepted: Int,
@@ -109,6 +130,22 @@ public struct SpeculativeDecodingTelemetry: Sendable, Equatable {
         targetModelCallCount += 1
         draftModelCallCount += draftModelCalls ?? drafted
         targetVerifiedTokenCount += targetVerified
+        Self.countRound(
+            throughDepth: drafted, in: &draftedRoundCountsByDepth, depthCount: drafted)
+        Self.countRound(
+            throughDepth: accepted, in: &acceptedRoundCountsByDepth,
+            depthCount: draftedRoundCountsByDepth.count)
+    }
+
+    /// Counts one round at each depth from 1 to `depth`, after growing `counts` with zeros to
+    /// `depthCount` depths.
+    private static func countRound(
+        throughDepth depth: Int, in counts: inout [Int], depthCount: Int
+    ) {
+        counts.append(contentsOf: repeatElement(0, count: Swift.max(0, depthCount - counts.count)))
+        for index in 0 ..< Swift.max(0, depth) {
+            counts[index] += 1
+        }
     }
 
     package mutating func recordGeneratedToken() {

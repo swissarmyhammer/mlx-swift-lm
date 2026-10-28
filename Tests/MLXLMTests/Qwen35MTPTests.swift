@@ -1323,7 +1323,7 @@ struct Qwen35MTPRegistrationTests {
             configuration: Data(Qwen35FixtureJSON.standaloneMTP().utf8),
             modelType: "qwen3_5_mtp")
         #expect(standalone is MLXLLM.Qwen35MTPDraftModel)
-        #expect(standalone.maximumBlockSize == 2)
+        #expect(standalone.maximumBlockSize == GatedDeltaDecodeKernel.mostTokens)
         #expect(standalone.requiresPromptPrefill)
         #expect(!standalone.requiresSharedTargetKV)
         #expect(!standalone.requiresGreedySampling)

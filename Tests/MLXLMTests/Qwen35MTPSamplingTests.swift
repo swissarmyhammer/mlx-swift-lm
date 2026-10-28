@@ -208,13 +208,13 @@ private func collectSampledChat(
 struct QwenMTPDistributionDraftTests {
 
     /// A prompt for the drafter state of the tests.
-    private static let promptTokens: [Int32] = [3, 17, 42, 5]
+    static let promptTokens: [Int32] = [3, 17, 42, 5]
 
     /// The bonus token the target sampled after ``promptTokens``.
-    private static let firstBonus: Int32 = 9
+    static let firstBonus: Int32 = 9
 
     /// A drafter state prefilled over ``promptTokens`` from random target hidden rows.
-    private static func preparedState(_ fixture: Qwen35MTPFixture) -> MTPDrafterState {
+    static func preparedState(_ fixture: Qwen35MTPFixture) -> MTPDrafterState {
         var state = fixture.drafter.makeState(parameters: nil)
         let targetHidden = MLXRandom.normal(
             [1, promptTokens.count, Qwen35MTPFixture.hiddenSize],

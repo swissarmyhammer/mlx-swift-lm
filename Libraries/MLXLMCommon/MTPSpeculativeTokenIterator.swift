@@ -238,10 +238,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     ///   - mtpContinuation: The drafter continuation the generation that left `mainCache`
     ///     gave back, or `nil` to start the drafter at the cached position.
     ///   - parameters: The generation parameters.
-    ///   - blockSize: The tokens of each round: `blockSize - 1` drafts and the bonus.
+    ///   - blockSize: The tokens of each round: up to `blockSize - 1` drafts and the bonus.
+    ///   - minimumDraftProbability: The drafter top-1 probability below which a chaining
+    ///     drafter stops a round's chain, from 0 (draft every step) to 1.
     ///   - components: Optional behavioral components, e.g. a custom ``LogitProcessor``.
     /// - Throws: An ``MTPDrafterCompatibilityError`` when `drafter` cannot draft for
-    ///   `mainModel`, or the error of the prefill.
+    ///   `mainModel`, a ``SpeculativeDecodingConfigurationError`` for a floor outside 0 to 1, or
+    ///   the error of the prefill.
     public init(
         input: LMInput,
         mainModel: any LanguageModel,
@@ -251,6 +254,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         mtpContinuation: MTPDrafterContinuation? = nil,
         parameters: GenerateParameters,
         blockSize: Int,
+        minimumDraftProbability: Float = 0,
         components: GenerationComponents = .init()
     ) throws {
         try drafter.validateCompatibility(with: mainModel)
@@ -266,6 +270,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             mtpContinuation: mtpContinuation,
             parameters: parameters,
             blockSize: blockSize,
+            minimumDraftProbability: minimumDraftProbability,
             components: components)
     }
 
@@ -278,6 +283,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         mtpContinuation: MTPDrafterContinuation? = nil,
         parameters: GenerateParameters,
         blockSize: Int,
+        minimumDraftProbability: Float = 0,
         components: GenerationComponents = .init()
     ) throws {
         try drafter.validateCompatibility(with: mainModel)
@@ -288,6 +294,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                     "MTPSpeculativeTokenIterator requires blockSize >= 2 (1 bonus + K-1 drafted)"
             )
         }
+        try SpeculativeDecodingConfig.validate(minimumDraftProbability: minimumDraftProbability)
         let kvCachePlan = mainCacheStorage.plan
         let mainCacheStorage = try kvCachePlan.validated(mainCacheStorage)
         let mainCache = mainCacheStorage.cache
@@ -315,6 +322,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             ? ownContinuation?.state
                 ?? (drafter as? any StatefulMTPDrafterModel)?.makeState(parameters: parameters)
             : nil
+        // Every later drafter state is this one or a copy of it, so the floor holds for the stream.
+        self.drafterState?.minimumDraftProbability = minimumDraftProbability
 
         self.sampler = sampler
         try components.validate(parameters: parameters)
@@ -796,10 +805,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // pending output is drained, so early finalization can rewind its accepted drafts.
         discardSpeculativePromptCacheCheckpoints(mainCache)
 
-        // A speculative round can emit up to `numDraft + 1` tokens: the
+        // A speculative round can emit up to `maximumDrafts + 1` tokens: the
         // accepted draft prefix plus the verifier's correction/bonus token.
         // Keep the whole pending buffer within the remaining output budget.
-        let numDraft: Int
+        let maximumDrafts: Int
         if let maxTokens {
             let remaining = maxTokens - tokenCount
             guard remaining > 0 else { return }
@@ -811,9 +820,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 }
                 return
             }
-            numDraft = draftBudget
+            maximumDrafts = draftBudget
         } else {
-            numDraft = blockSize - 1
+            maximumDrafts = blockSize - 1
         }
 
         guard let state = mainState,
@@ -836,12 +845,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             (mainModel as? any SpeculativeCacheRewindModel)?
             .maximumNativeTargetCacheRewind ?? 0
         let nativeHybridRewind =
-            nativeRewindDepth >= numDraft
+            nativeRewindDepth >= maximumDrafts
             && mainCache.contains { $0 is MambaCache }
             && mainCache.allSatisfy { $0.isTrimmable || $0 is MambaCache }
         let round =
             nativeHybridRewind
-            ? nil : mainCacheStorage.beginRound(maximumPositions: numDraft + 1)
+            ? nil : mainCacheStorage.beginRound(maximumPositions: maximumDrafts + 1)
         guard nativeHybridRewind || round != nil else {
             switchToPassthrough(
                 reason: "main KV cache cannot stage a speculative round; continuing without "
@@ -887,7 +896,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let (draftTokens, draftOutput) = proposeDrafts(
             bonusToken: bonusToken, bonusSlotHidden: bonusSlotHidden, sharedKV: sharedKV,
             positionDeltas: state[mtpPositionDeltasKey], queryOffset: queryOffset,
-            numDraft: numDraft)
+            maximumDrafts: maximumDrafts)
+        // A drafter's confidence floor can stop a chain before `maximumDrafts`.
+        let numDraft = draftTokens.dim(-1)
         // draftTokens shape [B, numDraft] -> flatten to [numDraft].
         let flatDraftTokens = draftTokens.flattened()
 
@@ -1000,13 +1011,14 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     ///   - sharedKV: The target K/V the drafter attends over.
     ///   - positionDeltas: The target position deltas, or `nil`.
     ///   - queryOffset: The absolute position of `bonusToken`.
-    ///   - numDraft: The drafts of the round.
-    /// - Returns: The drafts, shape `[B, numDraft]`, and their distribution when the drafter
-    ///   reports it.
+    ///   - maximumDrafts: The most drafts of the round. A drafter whose confidence floor stops
+    ///     its chain drafts fewer.
+    /// - Returns: The drafts, shape `[B, n]` with `n` up to `maximumDrafts`, and their
+    ///   distribution when the drafter reports it.
     private mutating func proposeDrafts(
         bonusToken: MLXArray, bonusSlotHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)], positionDeltas: MLXArray?, queryOffset: Int,
-        numDraft: Int
+        maximumDrafts: Int
     ) -> (tokens: MLXArray, output: MTPDraftBlockOutput?) {
         if let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
             var currentDrafterState = drafterState
@@ -1020,7 +1032,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 let output = distributionDrafter.draftBlockWithLogits(
                     target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
                     sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
-                    blockSize: numDraft + 1, state: &currentDrafterState,
+                    blockSize: maximumDrafts + 1, state: &currentDrafterState,
                     // A copy, discarded with the round: only emitted tokens advance `processor`.
                     processor: processor?.copy(), sampler: draftSampler)
                 return (output.tokens, output)
@@ -1028,14 +1040,14 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let tokens = statefulDrafter.draftBlock(
                 target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
                 sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
-                blockSize: numDraft + 1, state: &currentDrafterState, sampler: draftSampler)
+                blockSize: maximumDrafts + 1, state: &currentDrafterState, sampler: draftSampler)
             return (tokens, nil)
         }
         if let distributionDrafter = drafter as? any MTPDistributionDrafterModel {
             let output = distributionDrafter.draftBlockWithLogits(
                 target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
                 sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
-                blockSize: numDraft + 1,
+                blockSize: maximumDrafts + 1,
                 // A copy, discarded with the round: the drafter's processor starts from the
                 // canonical state but must not record the proposals it draws -- only emitted
                 // tokens advance `processor`.
@@ -1048,7 +1060,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let tokens = drafter.draftBlock(
             target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
             sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
-            blockSize: numDraft + 1, sampler: legacyDraftSampler)
+            blockSize: maximumDrafts + 1, sampler: legacyDraftSampler)
         return (tokens, nil)
     }
 

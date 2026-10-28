@@ -2437,7 +2437,7 @@ public func generate(
 
 /// Builds the text/tool-call `AsyncStream<Generation>` shared by
 /// ``generate(input:cache:state:parameters:context:draftModel:draftCache:numDraftTokens:components:wiredMemoryTicket:tools:)``
-/// and ``generateTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:tools:)`` -- both
+/// and ``generateTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)`` -- both
 /// construct their own speculative-decoding iterator (drafter differs) and then delegate here for
 /// identical `generateLoopTask`/handler wiring.
 ///
@@ -2736,7 +2736,7 @@ public func generateTokens(
 
 /// Builds the raw-token `AsyncStream<TokenGeneration>` shared by
 /// ``generateTokens(input:cache:state:parameters:context:draftModel:draftCache:numDraftTokens:components:wiredMemoryTicket:)``
-/// and ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:)`` -- both
+/// and ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:)`` -- both
 /// construct their own speculative-decoding iterator (drafter differs) and then delegate here for
 /// identical `generateLoopTask`/handler wiring.
 ///
@@ -2769,7 +2769,7 @@ private func generateSpeculativeTokenStream<Collector: GeneratedTokenCollector>(
 /// tokenizer (via `context.tokenizer`).
 ///
 /// To continue `cache` in a later call with the drafter state of this one, call
-/// ``generateTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:tools:)``,
+/// ``generateTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)``,
 /// whose task gives back the ``MTPDrafterContinuation``.
 ///
 /// - Parameters:
@@ -2794,9 +2794,13 @@ private func generateSpeculativeTokenStream<Collector: GeneratedTokenCollector>(
 ///     with ordinary single-token generation.
 ///   - mtpContinuation: the drafter continuation that the generation which left
 ///     `cache` gave back, or `nil` to start the drafter at the cached position.
-///   - blockSize: total tokens per round (`blockSize - 1` drafted plus the
+///   - blockSize: total tokens per round (up to `blockSize - 1` drafted plus the
 ///     bonus from the previous verify). Mirrors mlx-vlm's
-///     `draft_block_size`. Default 4 matches mlx-vlm's example configs.
+///     `draft_block_size`. Default 4 matches mlx-vlm's example configs. A drafter
+///     caps it at its ``MTPDrafterModel/maximumBlockSize``.
+///   - minimumDraftProbability: the drafter top-1 probability below which a
+///     chaining drafter (Qwen MTP) stops a round's chain early, as llama.cpp's
+///     `--spec-draft-p-min`; 0 drafts the whole block every round.
 ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
 ///   - wiredMemoryTicket: optional wired memory ticket.
 ///   - tools: Optional tool schemas used to parse arguments and authorize function names.
@@ -2811,6 +2815,7 @@ public func generate(
     mtpDrafter: any MTPDrafterModel,
     mtpContinuation: MTPDrafterContinuation? = nil,
     blockSize: Int = 4,
+    minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
@@ -2818,7 +2823,8 @@ public func generate(
     try generateTask(
         input: input, cache: cache, state: state, parameters: parameters, context: context,
         mtpDrafter: mtpDrafter, mtpContinuation: mtpContinuation, blockSize: blockSize,
-        components: components, wiredMemoryTicket: wiredMemoryTicket, tools: tools
+        minimumDraftProbability: minimumDraftProbability, components: components,
+        wiredMemoryTicket: wiredMemoryTicket, tools: tools
     ).0
 }
 
@@ -2826,7 +2832,7 @@ public func generate(
 /// stream plus the `Task` that generates it.
 ///
 /// The same generation as
-/// ``generate(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:tools:)``.
+/// ``generate(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)``.
 /// The value of the task is the ``MTPDrafterContinuation`` the drafter left at
 /// the end of the generation, aligned with what `cache` then holds. Hand it to
 /// the next call that continues `cache`, so that call resumes the drafter
@@ -2835,7 +2841,7 @@ public func generate(
 /// speculating.
 ///
 /// - Parameters: the parameters of
-///   ``generate(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:tools:)``.
+///   ``generate(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)``.
 /// - Returns: the stream of text and tool calls, and the task that generates it.
 /// - Throws: an error if the iterator initialization fails.
 public func generateTask(
@@ -2847,6 +2853,7 @@ public func generateTask(
     mtpDrafter: any MTPDrafterModel,
     mtpContinuation: MTPDrafterContinuation? = nil,
     blockSize: Int = 4,
+    minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
@@ -2860,6 +2867,7 @@ public func generateTask(
         mtpContinuation: mtpContinuation,
         parameters: parameters,
         blockSize: blockSize,
+        minimumDraftProbability: minimumDraftProbability,
         components: components
     )
     return generateSpeculativeStream(
@@ -2884,11 +2892,11 @@ public func generateTask(
 /// and finishes the stream with ordinary single-token generation.
 ///
 /// To continue `cache` in a later call with the drafter state of this one, call
-/// ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:)``,
+/// ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:)``,
 /// whose task gives back the ``MTPDrafterContinuation``.
 ///
 /// - Parameters: the parameters of
-///   ``generate(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:tools:)``,
+///   ``generate(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)``,
 ///   without the tool schemas.
 /// - Returns: an `AsyncStream<TokenGeneration>` yielding token IDs and a final `.info`.
 /// - Throws: an error if the iterator initialization fails.
@@ -2901,13 +2909,15 @@ public func generateTokens(
     mtpDrafter: any MTPDrafterModel,
     mtpContinuation: MTPDrafterContinuation? = nil,
     blockSize: Int = 4,
+    minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
     try generateTokensTask(
         input: input, cache: cache, state: state, parameters: parameters, context: context,
         mtpDrafter: mtpDrafter, mtpContinuation: mtpContinuation, blockSize: blockSize,
-        components: components, wiredMemoryTicket: wiredMemoryTicket
+        minimumDraftProbability: minimumDraftProbability, components: components,
+        wiredMemoryTicket: wiredMemoryTicket
     ).0
 }
 
@@ -2915,14 +2925,14 @@ public func generateTokens(
 /// stream plus the `Task` that generates it.
 ///
 /// The same generation as
-/// ``generateTokens(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:)``.
+/// ``generateTokens(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:)``.
 /// The value of the task is the ``MTPDrafterContinuation`` the drafter left at
 /// the end of the generation, as
-/// ``generateTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:tools:)``
+/// ``generateTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)``
 /// describes it.
 ///
 /// - Parameters: the parameters of
-///   ``generateTokens(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:components:wiredMemoryTicket:)``.
+///   ``generateTokens(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:)``.
 /// - Returns: the stream of token IDs, and the task that generates it.
 /// - Throws: an error if the iterator initialization fails.
 public func generateTokensTask(
@@ -2934,6 +2944,7 @@ public func generateTokensTask(
     mtpDrafter: any MTPDrafterModel,
     mtpContinuation: MTPDrafterContinuation? = nil,
     blockSize: Int = 4,
+    minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> (AsyncStream<TokenGeneration>, Task<MTPDrafterContinuation?, Never>) {
@@ -2946,6 +2957,7 @@ public func generateTokensTask(
         mtpContinuation: mtpContinuation,
         parameters: parameters,
         blockSize: blockSize,
+        minimumDraftProbability: minimumDraftProbability,
         components: components
     )
     return generateSpeculativeTokenStream(

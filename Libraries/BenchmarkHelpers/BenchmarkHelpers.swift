@@ -812,6 +812,12 @@ public struct MTPGenerationResult: Sendable {
     /// Whether the MTP tokens equal the plain tokens. Greedy decodes match; sampled decodes
     /// draw their random values in another order, and need not.
     public let matchesBaseline: Bool
+    /// How the greedy MTP tokens compare with the plain tokens, near-ties of plain's two best
+    /// tokens allowed (``MTPChatTokenMatch``), or `nil` for a sampled decode.
+    public let tokenMatch: MTPChatTokenMatch?
+    /// The acceptance of each draft depth in the last MTP run: element `k` is the share of the
+    /// rounds that drafted a token at depth `k + 1` whose draft there the target accepted.
+    public let depthAcceptanceRates: [Double]
 
     public var speedup: Double { mtpTokensPerSecond / baselineTokensPerSecond }
 }
@@ -826,6 +832,8 @@ public struct MTPGenerationResult: Sendable {
 ///   - prompts: The prompts, each a result.
 ///   - maxTokens: The tokens each decode generates at most.
 ///   - blockSize: The tokens of each MTP round.
+///   - minimumDraftProbability: The drafter top-1 probability below which a chained round
+///     stops drafting.
 ///   - runs: The timed runs of each decode.
 ///   - sampling: The sampling of both decodes; its `maxTokens` is replaced by `maxTokens`.
 ///     A seed makes each run of a decode sample the same tokens.
@@ -835,7 +843,8 @@ public func benchmarkMTPGeneration(
     drafter: any MTPDrafterModel,
     prompts: [MTPBenchmarkPrompt] = MTPBenchmarkPrompt.defaults,
     maxTokens: Int = 192,
-    blockSize: Int = 2,
+    blockSize: Int = SpeculativeDecodingConfig.defaultMTPBlockSize,
+    minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
     runs: Int = 3,
     sampling: GenerateParameters = GenerateParameters(temperature: 0)
 ) async throws -> [MTPGenerationResult] {
@@ -869,7 +878,8 @@ public func benchmarkMTPGeneration(
             try await collect(
                 generateTokens(
                     input: input, parameters: parameters, context: context,
-                    mtpDrafter: drafter, blockSize: blockSize))
+                    mtpDrafter: drafter, blockSize: blockSize,
+                    minimumDraftProbability: minimumDraftProbability))
         }
 
         _ = try await plain()
@@ -891,7 +901,16 @@ public func benchmarkMTPGeneration(
 
         let proposed = last.info.proposedDraftTokens ?? 0
         let accepted = last.info.acceptedDraftTokens ?? 0
-        let rounds = last.info.speculativeDecodingTelemetry?.roundCount ?? 0
+        let telemetry = last.info.speculativeDecodingTelemetry
+        let rounds = telemetry?.roundCount ?? 0
+        let tokenMatch =
+            parameters.temperature == 0
+            ? MTPChatTokenMatch(
+                mtp: last.tokens.map { MTPChatToken(token: $0) },
+                plain: try plainTokensWithCandidates(
+                    input: input, context: context, parameters: parameters,
+                    count: baseline.count))
+            : nil
         let result = MTPGenerationResult(
             prompt: prompt.name,
             generatedTokenCount: last.info.generationTokenCount,
@@ -900,18 +919,12 @@ public func benchmarkMTPGeneration(
             acceptanceRate: proposed > 0 ? Double(accepted) / Double(proposed) : 0,
             acceptanceLength: rounds > 0
                 ? Double(last.info.generationTokenCount) / Double(rounds) : 1,
-            matchesBaseline: last.tokens == baseline)
+            matchesBaseline: last.tokens == baseline,
+            tokenMatch: tokenMatch,
+            depthAcceptanceRates: telemetry?.depthAcceptanceRates ?? [])
         results.append(result)
-        print(
-            "MTP \(prompt.name): \(result.generatedTokenCount) tok, "
-                + "plain \(String(format: "%.1f", result.baselineTokensPerSecond)) tok/s, "
-                + "MTP \(String(format: "%.1f", result.mtpTokensPerSecond)) tok/s "
-                + "(\(String(format: "%.2f", result.speedup))x), "
-                + "acceptance \(String(format: "%.1f", result.acceptanceRate * 100))%, "
-                + "\(String(format: "%.2f", result.acceptanceLength)) tok/verify, "
-                + "matches plain: \(result.matchesBaseline)"
-                + (last.info.passthroughReason.map { ", passthrough: \($0)" } ?? "")
-        )
+        BenchmarkLog.line(
+            result.summaryLine(passthroughReason: last.info.passthroughReason))
     }
     return results
 }
@@ -1246,7 +1259,7 @@ public func benchmarkMTPSystemPromptCache(
     scenarios: [MTPChatScenario] = MTPChatScenario.defaults,
     systemPrompt: String? = nil,
     systemPromptCharacterCount: Int = 8_000,
-    blockSize: Int = 2
+    blockSize: Int = SpeculativeDecodingConfig.defaultMTPBlockSize
 ) async throws -> [MTPChatScenarioResult] {
     let instructions = try await BenchmarkSystemPrompt.load(
         systemPrompt, preamble: BenchmarkSystemPrompt.mathTutorPreamble,

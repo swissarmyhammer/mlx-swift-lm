@@ -8,22 +8,50 @@ import Testing
 
 @Suite("Speculative decoding configuration")
 struct SpeculativeDecodingConfigTests {
-    @Test("MTP configuration uses a two-token verification block by default")
+    @Test("MTP configuration uses the default verification block and confidence floor")
     func mtpDefaults() throws {
         let drafter = makeMTPDrafterContainer()
 
         let configuration = try SpeculativeDecodingConfig(mtpDrafter: drafter)
 
         #expect(configuration.draftModel == nil)
-        #expect(configuration.numDraftTokens == 1)
+        #expect(configuration.numDraftTokens == SpeculativeDecodingConfig.defaultMTPBlockSize - 1)
         #expect(configuration.memoryPolicy == nil)
 
         switch configuration.strategy {
-        case .mtp(let configuredDrafter, let blockSize):
+        case .mtp(let configuredDrafter, let blockSize, let minimumDraftProbability):
             #expect(configuredDrafter === drafter)
-            #expect(blockSize == 2)
+            #expect(blockSize == SpeculativeDecodingConfig.defaultMTPBlockSize)
+            #expect(
+                minimumDraftProbability
+                    == SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability)
         case .draftModel:
             Issue.record("Expected the MTP speculative-decoding strategy")
+        }
+    }
+
+    @Test("MTP configuration keeps its explicit confidence floor")
+    func mtpExplicitMinimumDraftProbability() throws {
+        let floor: Float = 0.75
+
+        let configuration = try SpeculativeDecodingConfig(
+            mtpDrafter: makeMTPDrafterContainer(), minimumDraftProbability: floor)
+
+        guard case .mtp(_, _, let minimumDraftProbability) = configuration.strategy else {
+            Issue.record("Expected the MTP speculative-decoding strategy")
+            return
+        }
+        #expect(minimumDraftProbability == floor)
+    }
+
+    @Test(
+        "MTP configuration rejects a confidence floor outside zero to one",
+        arguments: [Float(-0.25), 1.25, .nan]
+    )
+    func mtpRejectsInvalidMinimumDraftProbability(floor: Float) {
+        #expect(throws: SpeculativeDecodingConfigurationError.self) {
+            try SpeculativeDecodingConfig(
+                mtpDrafter: makeMTPDrafterContainer(), minimumDraftProbability: floor)
         }
     }
 
@@ -51,7 +79,7 @@ struct SpeculativeDecodingConfigTests {
         )
 
         #expect(configuration.numDraftTokens == 3)
-        guard case .mtp(let configuredDrafter, let blockSize) = configuration.strategy else {
+        guard case .mtp(let configuredDrafter, let blockSize, _) = configuration.strategy else {
             Issue.record("Expected the MTP speculative-decoding strategy")
             return
         }

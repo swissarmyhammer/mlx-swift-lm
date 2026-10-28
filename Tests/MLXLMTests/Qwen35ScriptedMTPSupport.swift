@@ -43,6 +43,23 @@ extension Qwen35MTPFixture {
     }
 }
 
+/// The text and the completion information of one chat turn.
+///
+/// - Parameter stream: The events of the turn.
+/// - Returns: The text the turn wrote and its completion information.
+/// - Throws: The error of the turn, or a missing completion information.
+func collectChatTurn(
+    _ stream: AsyncThrowingStream<Generation, Error>
+) async throws -> (text: String, info: GenerateCompletionInfo) {
+    var text = ""
+    var info: GenerateCompletionInfo?
+    for try await event in stream {
+        text += event.chunk ?? ""
+        info = event.info ?? info
+    }
+    return (text, try #require(info))
+}
+
 /// The drafts of a script: the prompt and the plain greedy decode of the target after it. Each
 /// round spoils its drafts at one depth, so that the target rejects every draft from that depth
 /// on. The depths of the rounds cycle through each count of accepted drafts, the last of which

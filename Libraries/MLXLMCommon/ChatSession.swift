@@ -11,10 +11,15 @@ import CoreGraphics
 public enum SpeculativeDecodingConfigurationError: Error, Sendable, Equatable, LocalizedError {
     case invalidMTPBlockSize(Int)
 
+    /// The MTP confidence floor is not a probability from 0 to 1.
+    case invalidMTPMinimumDraftProbability(Float)
+
     public var errorDescription: String? {
         switch self {
         case .invalidMTPBlockSize(let value):
             "MTP verification block size must be at least 2; received \(value)."
+        case .invalidMTPMinimumDraftProbability(let value):
+            "MTP minimum draft probability must be from 0 to 1; received \(value)."
         }
     }
 }
@@ -61,7 +66,30 @@ public struct SpeculativeDecodingConfig: Sendable {
 
     package enum Strategy: Sendable {
         case draftModel(DraftModelSource)
-        case mtp(MTPDrafterContainer, blockSize: Int)
+        case mtp(MTPDrafterContainer, blockSize: Int, minimumDraftProbability: Float)
+    }
+
+    /// The default block size of an MTP configuration: the tokens of each round, its drafts and
+    /// the bonus token.
+    public static let defaultMTPBlockSize = 2
+
+    /// The default confidence floor of an MTP configuration: zero, every round drafts its whole
+    /// block.
+    public static let defaultMTPMinimumDraftProbability: Float = 0
+
+    /// The probabilities a confidence floor can take.
+    private static let minimumDraftProbabilityRange: ClosedRange<Float> = 0 ... 1
+
+    /// Checks that `minimumDraftProbability` is a probability from 0 to 1.
+    ///
+    /// - Parameter minimumDraftProbability: The confidence floor of a chaining MTP drafter.
+    /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPMinimumDraftProbability(_:)``
+    ///   when it is not.
+    package static func validate(minimumDraftProbability: Float) throws {
+        guard minimumDraftProbabilityRange.contains(minimumDraftProbability) else {
+            throw SpeculativeDecodingConfigurationError.invalidMTPMinimumDraftProbability(
+                minimumDraftProbability)
+        }
     }
 
     package let strategy: Strategy
@@ -134,23 +162,32 @@ public struct SpeculativeDecodingConfig: Sendable {
     /// ``MTPDrafterContainer/validateCompatibility(with:)`` first to learn why.
     ///
     /// - Parameters:
-    ///   - mtpDrafter: drafter that proposes `blockSize - 1` tokens per verification cycle
-    ///   - blockSize: total number of tokens in each verification block
+    ///   - mtpDrafter: drafter that proposes up to `blockSize - 1` tokens per verification cycle
+    ///   - blockSize: total number of tokens in each verification block. A drafter caps it at its
+    ///     ``MTPDrafterModel/maximumBlockSize``.
+    ///   - minimumDraftProbability: the drafter top-1 probability below which a chaining drafter
+    ///     (Qwen MTP) stops a round's chain early, as llama.cpp's `--spec-draft-p-min`; 0 drafts
+    ///     the whole block every round.
     ///   - memoryPolicy: optional memory policy that each turn checks before it speculates.
     ///     The drafter bytes it weighs are the drafter's parameters and the drafter state the
     ///     session carries from the previous turn.
     /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)``
-    ///   when `blockSize` is smaller than 2.
+    ///   when `blockSize` is smaller than 2, and
+    ///   ``SpeculativeDecodingConfigurationError/invalidMTPMinimumDraftProbability(_:)`` when
+    ///   `minimumDraftProbability` is not from 0 to 1.
     public init(
         mtpDrafter: MTPDrafterContainer,
-        blockSize: Int = 2,
+        blockSize: Int = defaultMTPBlockSize,
+        minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) throws {
         guard blockSize >= 2 else {
             throw SpeculativeDecodingConfigurationError.invalidMTPBlockSize(blockSize)
         }
+        try Self.validate(minimumDraftProbability: minimumDraftProbability)
 
-        self.strategy = .mtp(mtpDrafter, blockSize: blockSize)
+        self.strategy = .mtp(
+            mtpDrafter, blockSize: blockSize, minimumDraftProbability: minimumDraftProbability)
         self.numDraftTokens = blockSize - 1
         self.memoryPolicy = memoryPolicy
     }
@@ -1463,7 +1500,7 @@ public final class ChatSession {
 
                         let mtpDrafter: (any MTPDrafterModel)?
                         if let speculativeDecoding,
-                            case .mtp(let drafterContainer, _) = speculativeDecoding.strategy
+                            case .mtp(let drafterContainer, _, _) = speculativeDecoding.strategy
                         {
                             mtpDrafter = await drafterContainer.perform { context in
                                 SendableBox(context.model)
@@ -1932,7 +1969,8 @@ public final class ChatSession {
                             }
                             generation = try defaultGeneration()
                         } else if let speculativeDecoding,
-                            case .mtp(_, let blockSize) = speculativeDecoding.strategy,
+                            case .mtp(_, let blockSize, let minimumDraftProbability) =
+                                speculativeDecoding.strategy,
                             let drafter = mtpDrafter
                         {
                             do {
@@ -1945,6 +1983,7 @@ public final class ChatSession {
                                     mtpContinuation: mtpDrafterContinuation,
                                     parameters: generateParameters,
                                     blockSize: blockSize,
+                                    minimumDraftProbability: minimumDraftProbability,
                                     components: components
                                 )
                                 generation = finishPrompt(

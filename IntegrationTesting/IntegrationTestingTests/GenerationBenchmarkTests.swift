@@ -217,12 +217,34 @@ struct GenerationBenchmarkTests {
         return (context, drafter.model)
     }
 
-    /// Plain against MTP decoding of Qwen3.8-27B-4bit with its 4-bit MTP head.
+    /// Plain against MTP decoding of Qwen3.8-27B-4bit with its 4-bit MTP head, at each block
+    /// size and confidence floor of ``MTPBlockSetting/sweep``.
+    ///
+    /// The shipped default (``MTPBlockSetting/shipped``) writes the plain tokens up to a
+    /// near-tie of plain's two best tokens, and is the fastest setting over the math, code and
+    /// prose prompts combined among the settings that decode no prompt slower than one draft for
+    /// each round (``MTPBlockSetting/singleDraft``), each within the noise the sweep measured.
     @Test(.enabled(if: qwen38FourBitMTPFilesAreLocal))
     func qwen38FourBitMTPGeneration() async throws {
         let (context, drafter) = try await loadQwen38FourBitMTP()
-        let results = try await benchmarkMTPGeneration(context: context, drafter: drafter)
-        #expect(results.allSatisfy { $0.acceptanceRate > 0 })
+        let sweep = try await benchmarkMTPBlockSweep(context: context, drafter: drafter)
+        let shipped = try #require(sweep.row(for: .shipped))
+        let fastest = try #require(sweep.fastestNoSlowerThanSingleDraft)
+
+        #expect(sweep.rows.allSatisfy { $0.results.allSatisfy { $0.acceptanceRate > 0 } })
+        #expect(sweep.isNoSlowerThanSingleDraft(shipped), "shipped \(shipped.setting)")
+        #expect(
+            shipped.meanMTPTokensPerSecond
+                >= fastest.meanMTPTokensPerSecond * (1 - sweep.noiseFraction),
+            """
+            shipped \(shipped.setting) \(shipped.meanMTPTokensPerSecond) tok/s, fastest \
+            \(fastest.setting) \(fastest.meanMTPTokensPerSecond) tok/s
+            """)
+        for result in shipped.results {
+            #expect(
+                result.tokenMatch?.holds == true,
+                "\(result.prompt): \(result.tokenMatch?.summary ?? "no plain candidates")")
+        }
     }
 
     /// Plain against MTP decoding of Qwen3.8-27B-4bit at temperature 0.7 and top-p 0.95, in

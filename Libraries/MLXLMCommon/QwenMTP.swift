@@ -33,7 +33,7 @@ package func sampleMTPSeed(
 extension MTPDraftBlockOutput {
 
     /// The smallest round a chain of MTP proposals serves: one proposal and the bonus.
-    private static let minimumChainedMTPBlockSize = 2
+    package static let minimumChainedMTPBlockSize = 2
 
     /// The vocabulary logits of the last position of an MTP predictor's hidden rows, through the
     /// target's LM head, or its tied embedding when it has none.
@@ -66,11 +66,24 @@ extension MTPDraftBlockOutput {
             processedLogits: logits.expandedDimensions(axis: 1))
     }
 
-    /// Chains `blockSize - 1` proposals of a shifted MTP predictor from `lastToken`: each step
-    /// feeds the token the step before drew and appends one tentative entry to `cache`.
+    /// The probability the softmax of `logits` gives its most likely token, the lowest over the
+    /// batch: `exp(max - logSumExp)`, without the softmax over the vocabulary.
+    ///
+    /// Reading it waits for the logits, so only a chain with a confidence floor asks for it.
+    private static func topProbability(of logits: MLXArray) -> Float {
+        MLX.exp(MLX.min(logits.max(axis: -1) - MLX.logSumExp(logits, axis: -1)))
+            .item(Float.self)
+    }
+
+    /// Chains up to `blockSize - 1` proposals of a shifted MTP predictor from `lastToken`: each
+    /// step feeds the token the step before drew and appends one tentative entry to `cache`.
     ///
     /// Each proposal is drawn with `sampler` from the logits `processor` shaped. The processor
     /// learns of each proposal it shaped the next step for; pass a copy the round discards.
+    ///
+    /// A step whose processed logits give their most likely token a probability below
+    /// `minimumDraftProbability` ends the chain without a proposal, as llama.cpp's
+    /// `--spec-draft-p-min` does; the entry that step appended stays tentative with the others.
     ///
     /// - Parameters:
     ///   - targetEmbedTokens: The target's token embedding, the LM head when `lmHead` is `nil`.
@@ -79,13 +92,16 @@ extension MTPDraftBlockOutput {
     ///   - lastToken: The token the chain starts from, shape `[B]` or `[B, 1]`.
     ///   - lastHidden: The target hidden row of the position before `lastToken`.
     ///   - queryOffset: The absolute position of `lastToken`.
-    ///   - blockSize: The tokens of the round: `blockSize - 1` proposals and the bonus.
+    ///   - blockSize: The tokens of the round: up to `blockSize - 1` proposals and the bonus.
+    ///   - minimumDraftProbability: The top-1 probability below which the chain stops; zero
+    ///     drafts every step.
     ///   - processor: The processor that shapes each step's logits, or `nil`.
     ///   - sampler: The sampler that draws each proposal.
     ///   - cache: The predictor's cache.
     ///   - forward: One predictor forward over the embedded input and the previous hidden rows.
-    /// - Returns: The proposals, shape `[B, blockSize - 1]`, and their processed logits, shape
-    ///   `[B, blockSize - 1, vocabulary]`.
+    /// - Returns: The proposals, shape `[B, n]`, and their processed logits, shape
+    ///   `[B, n, vocabulary]`, with `n` up to `blockSize - 1`, or `nil` when the floor stopped
+    ///   the chain before its first proposal.
     package static func chainedMTPDrafts(
         targetEmbedTokens: Embedding,
         lmHead: Linear?,
@@ -94,14 +110,12 @@ extension MTPDraftBlockOutput {
         lastHidden: MLXArray,
         queryOffset: Int,
         blockSize: Int,
+        minimumDraftProbability: Float,
         processor: (any LogitProcessor)?,
         sampler: any LogitSampler,
         cache: [KVCache],
-        forward: (
-            _ inputsEmbeds: MLXArray, _ hiddenStates: MLXArray, _ cache: [KVCache],
-            _ positionOffset: Int
-        ) -> MLXArray
-    ) -> MTPDraftBlockOutput {
+        forward: ShiftedMTPDrafter.Forward
+    ) -> MTPDraftBlockOutput? {
         precondition(
             blockSize >= minimumChainedMTPBlockSize,
             "blockSize must be >= \(minimumChainedMTPBlockSize)")
@@ -120,6 +134,11 @@ extension MTPDraftBlockOutput {
             var logits = mtpLastLogits(
                 hidden: hidden, targetEmbedTokens: targetEmbedTokens, lmHead: lmHead)
             logits = processor?.process(logits: logits) ?? logits
+            if minimumDraftProbability > 0,
+                topProbability(of: logits) < minimumDraftProbability
+            {
+                break
+            }
             let next = sampler.sample(logits: logits)
             processor?.didSample(token: next)
             token = next.ndim == 1 ? next.reshaped([next.dim(0), 1]) : next
@@ -127,9 +146,187 @@ extension MTPDraftBlockOutput {
             processedLogits.append(logits.expandedDimensions(axis: 1))
         }
 
+        guard !tokens.isEmpty else { return nil }
         return MTPDraftBlockOutput(
             tokens: concatenated(tokens, axis: 1),
             processedLogits: concatenated(processedLogits, axis: 1))
+    }
+}
+
+/// The parts of a shifted MTP predictor (Qwen NextN) that one round of drafts reads: the
+/// target's embedding and LM head, the embedding of the tokens the predictor reads, and one
+/// predictor forward.
+///
+/// A round after a commit starts from the seed proposal the commit left, and chains the
+/// predictor on its own hidden rows for the drafts after the seed, as llama.cpp chains its MTP
+/// drafts. A round with no seed chains every draft from the round's bonus token.
+package struct ShiftedMTPDrafter {
+
+    /// One predictor forward over the embedded input and the previous hidden rows, which appends
+    /// one entry to the cache for each input token.
+    package typealias Forward = (
+        _ inputsEmbeds: MLXArray, _ hiddenStates: MLXArray, _ cache: [KVCache],
+        _ positionOffset: Int
+    ) -> MLXArray
+
+    /// The target's token embedding, the LM head when ``lmHead`` is `nil`.
+    private let targetEmbedTokens: Embedding
+
+    /// The target's LM head, or `nil` for tied embeddings.
+    private let lmHead: Linear?
+
+    /// The embedding of the tokens the predictor reads.
+    private let inputEmbedding: Embedding
+
+    /// One predictor forward.
+    private let forward: Forward
+
+    /// - Parameters:
+    ///   - targetEmbedTokens: The target's token embedding.
+    ///   - lmHead: The target's LM head, or `nil` for tied embeddings.
+    ///   - inputEmbedding: The embedding of the tokens the predictor reads.
+    ///   - forward: One predictor forward.
+    package init(
+        targetEmbedTokens: Embedding, lmHead: Linear?, inputEmbedding: Embedding,
+        forward: @escaping Forward
+    ) {
+        self.targetEmbedTokens = targetEmbedTokens
+        self.lmHead = lmHead
+        self.inputEmbedding = inputEmbedding
+        self.forward = forward
+    }
+
+    /// The drafts of one round as tokens: the seed the last commit left, then the drafts chained
+    /// after it until the state's ``MTPDrafterState/minimumDraftProbability`` stops the chain,
+    /// or a chain from `lastToken` when there is no seed.
+    ///
+    /// - Parameters:
+    ///   - lastToken: The bonus token of the round, shape `[B]` or `[B, 1]`.
+    ///   - lastHidden: The target hidden row that predicted `lastToken`.
+    ///   - queryOffset: The absolute position of `lastToken`.
+    ///   - blockSize: The tokens of the round: up to `blockSize - 1` drafts and the bonus.
+    ///   - sampler: The sampler of each chained draft.
+    ///   - state: The drafter state; it holds one tentative entry for each chained step.
+    /// - Returns: The drafts, shape `[B, n]` with `n` from 1 to `blockSize - 1`.
+    package func draftTokens(
+        lastToken: MLXArray, lastHidden: MLXArray, queryOffset: Int, blockSize: Int,
+        sampler: any LogitSampler, state: inout MTPDrafterState
+    ) -> MLXArray {
+        guard let seed = state.takeSeed() else {
+            return unseededChain(
+                from: lastToken, hidden: lastHidden, queryOffset: queryOffset,
+                blockSize: blockSize, processor: nil, sampler: sampler, state: &state
+            ).tokens
+        }
+        guard
+            let chained = chainAfterSeed(
+                seed.token, seedHidden: Self.hidden(of: seed), blockSize: blockSize,
+                processor: nil, sampler: sampler, state: &state)
+        else { return seed.token }
+        return concatenated([seed.token, chained.tokens], axis: 1)
+    }
+
+    /// The drafts of one round with the processed logits each was drawn from: the seed drawn
+    /// again from its hidden row, then the drafts chained after it until the state's
+    /// ``MTPDrafterState/minimumDraftProbability`` stops the chain, or a chain from `lastToken`
+    /// when there is no seed.
+    ///
+    /// - Parameters:
+    ///   - lastToken: The bonus token of the round, shape `[B]` or `[B, 1]`.
+    ///   - lastHidden: The target hidden row that predicted `lastToken`.
+    ///   - queryOffset: The absolute position of `lastToken`.
+    ///   - blockSize: The tokens of the round: up to `blockSize - 1` drafts and the bonus.
+    ///   - processor: The processor that shapes each draft's logits, or `nil`. It learns of each
+    ///     draft it shaped the next draft for; pass a copy the round discards.
+    ///   - sampler: The sampler of each draft.
+    ///   - state: The drafter state; it holds one tentative entry for each chained step.
+    /// - Returns: The drafts, shape `[B, n]`, and their processed logits, shape
+    ///   `[B, n, vocabulary]`, with `n` from 1 to `blockSize - 1`.
+    package func draftsWithLogits(
+        lastToken: MLXArray, lastHidden: MLXArray, queryOffset: Int, blockSize: Int,
+        processor: (any LogitProcessor)?, sampler: any LogitSampler, state: inout MTPDrafterState
+    ) -> MTPDraftBlockOutput {
+        guard let seed = state.takeSeed() else {
+            return unseededChain(
+                from: lastToken, hidden: lastHidden, queryOffset: queryOffset,
+                blockSize: blockSize, processor: processor, sampler: sampler, state: &state)
+        }
+        let seedHidden = Self.hidden(of: seed)
+        let first = MTPDraftBlockOutput.seededMTPDraft(
+            seedHidden: seedHidden, targetEmbedTokens: targetEmbedTokens, lmHead: lmHead,
+            processor: processor, sampler: sampler)
+        var processor = processor
+        processor?.didSample(token: first.tokens[0..., 0])
+        guard
+            let chained = chainAfterSeed(
+                first.tokens, seedHidden: seedHidden, blockSize: blockSize,
+                processor: processor, sampler: sampler, state: &state)
+        else { return first }
+        return MTPDraftBlockOutput(
+            tokens: concatenated([first.tokens, chained.tokens], axis: 1),
+            processedLogits: concatenated(
+                [first.processedLogits, chained.processedLogits], axis: 1))
+    }
+
+    /// The predictor's hidden row a seed proposal was drawn from.
+    private static func hidden(of seed: (token: MLXArray, hidden: MLXArray?)) -> MLXArray {
+        guard let hidden = seed.hidden else {
+            preconditionFailure("A Qwen MTP seed proposal carries the hidden row it came from")
+        }
+        return hidden
+    }
+
+    /// The drafts chained after the seed of a round of `blockSize` tokens, or `nil` when the
+    /// round holds the seed only or the floor stopped the chain at its first step.
+    ///
+    /// The chain is a round of its own that starts from the seed: its first step feeds the seed
+    /// with the hidden row the seed was drawn from, at the position of the seed's entry.
+    private func chainAfterSeed(
+        _ seedToken: MLXArray, seedHidden: MLXArray, blockSize: Int,
+        processor: (any LogitProcessor)?, sampler: any LogitSampler,
+        state: inout MTPDrafterState
+    ) -> MTPDraftBlockOutput? {
+        let chainBlockSize = blockSize - 1
+        guard chainBlockSize >= MTPDraftBlockOutput.minimumChainedMTPBlockSize else { return nil }
+        return chain(
+            from: seedToken, hidden: seedHidden, queryOffset: state.nextPosition,
+            blockSize: chainBlockSize, minimumDraftProbability: state.minimumDraftProbability,
+            processor: processor, sampler: sampler, state: &state)
+    }
+
+    /// Chains every draft of a round from its bonus token, for a state without a seed. The
+    /// floor does not apply: the round has no other draft.
+    private func unseededChain(
+        from token: MLXArray, hidden: MLXArray, queryOffset: Int, blockSize: Int,
+        processor: (any LogitProcessor)?, sampler: any LogitSampler,
+        state: inout MTPDrafterState
+    ) -> MTPDraftBlockOutput {
+        guard
+            let drafts = chain(
+                from: token, hidden: hidden, queryOffset: queryOffset, blockSize: blockSize,
+                minimumDraftProbability: 0, processor: processor, sampler: sampler,
+                state: &state)
+        else {
+            preconditionFailure("A chain without a confidence floor drafts every step")
+        }
+        return drafts
+    }
+
+    /// Chains up to `blockSize - 1` drafts from `token` and records the tentative entries its
+    /// steps appended.
+    private func chain(
+        from token: MLXArray, hidden: MLXArray, queryOffset: Int, blockSize: Int,
+        minimumDraftProbability: Float, processor: (any LogitProcessor)?,
+        sampler: any LogitSampler, state: inout MTPDrafterState
+    ) -> MTPDraftBlockOutput? {
+        state.appendingTentativeProposal { cache in
+            MTPDraftBlockOutput.chainedMTPDrafts(
+                targetEmbedTokens: targetEmbedTokens, lmHead: lmHead,
+                inputEmbedding: inputEmbedding, lastToken: token, lastHidden: hidden,
+                queryOffset: queryOffset, blockSize: blockSize,
+                minimumDraftProbability: minimumDraftProbability, processor: processor,
+                sampler: sampler, cache: cache, forward: forward)
+        }
     }
 }
 
@@ -150,18 +347,20 @@ extension MTPDrafterState {
         return seed
     }
 
-    /// Runs `propose`, which appends `blockSize - 1` tentative entries to ``cache``, and
-    /// records them as the entries of the current proposal.
+    /// Runs `propose`, which appends tentative entries to ``cache``, and records the entries it
+    /// appended as the entries of the current proposal.
     ///
-    /// - Parameters:
-    ///   - blockSize: The tokens of the round: `blockSize - 1` proposals and the bonus.
-    ///   - propose: The chained proposal over ``cache``.
+    /// A chain that a confidence floor stops appends fewer entries than its round has tokens,
+    /// so the count is read from the cache rather than from the round.
+    ///
+    /// - Parameter propose: The chained proposal over ``cache``, which must not be empty.
     /// - Returns: The value of `propose`.
     package mutating func appendingTentativeProposal<Proposal>(
-        blockSize: Int, _ propose: ([KVCache]) -> Proposal
+        _ propose: ([KVCache]) -> Proposal
     ) -> Proposal {
-        proposalAppended = blockSize - 1
+        let entriesBefore = cache.first?.offset ?? 0
         let proposal = propose(cache)
+        proposalAppended = (cache.first?.offset ?? 0) - entriesBefore
         nextPosition += proposalAppended
         return proposal
     }
