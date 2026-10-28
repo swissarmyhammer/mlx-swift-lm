@@ -159,8 +159,14 @@ final class Qwen3NextMLP: Module, UnaryLayer {
         _upProj.wrappedValue = Linear(dimensions, hiddenDimensions, bias: false)
     }
 
+    /// The MLP of `x`. Each projection runs through
+    /// ``MultiRowQuantizedMatvec/projection(_:by:)``, so inside the
+    /// speculative verify of a Qwen3.5 model each token row keeps the bits of
+    /// a decode step.
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(compiledSiluProduct(gateProj(x), upProj(x)))
+        let gate = MultiRowQuantizedMatvec.projection(x, by: gateProj)
+        let up = MultiRowQuantizedMatvec.projection(x, by: upProj)
+        return MultiRowQuantizedMatvec.projection(compiledSiluProduct(gate, up), by: downProj)
     }
 }
 
@@ -546,7 +552,7 @@ final class Qwen3NextDecoderLayer: Module, HybridDecodeLayer {
 public class Qwen3NextModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
-    fileprivate let layers: [Qwen3NextDecoderLayer]
+    let layers: [Qwen3NextDecoderLayer]
     let norm: RMSNorm
 
     let ssmIdx: Int

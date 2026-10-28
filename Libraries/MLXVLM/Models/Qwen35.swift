@@ -409,13 +409,13 @@ public enum Qwen35Language {
             let B = x.dim(0)
             let L = x.dim(1)
 
-            let qProjOutput = qProj(x)
+            let qProjOutput = MultiRowQuantizedMatvec.projection(x, by: qProj)
             let qSplit = qProjOutput.reshaped(B, L, numAttentionHeads, -1).split(parts: 2, axis: -1)
             var queries = qSplit[0]
             let gate = qSplit[1].reshaped(B, L, -1)
 
-            var keys = kProj(x)
-            var values = vProj(x)
+            var keys = MultiRowQuantizedMatvec.projection(x, by: kProj)
+            var values = MultiRowQuantizedMatvec.projection(x, by: vProj)
 
             queries = qNorm(queries).transposed(0, 2, 1, 3)
             keys = kNorm(keys.reshaped(B, L, numKeyValueHeads, -1)).transposed(0, 2, 1, 3)
@@ -478,7 +478,7 @@ public enum Qwen35Language {
                 attention
                 .transposed(0, 2, 1, 3)
                 .reshaped(attention.dim(0), attention.dim(2), -1)
-            return oProj(output * sigmoid(gate))
+            return MultiRowQuantizedMatvec.projection(output * sigmoid(gate), by: oProj)
         }
     }
 
@@ -494,8 +494,13 @@ public enum Qwen35Language {
             super.init()
         }
 
+        /// The MLP of `x`. Each projection runs through
+        /// ``MultiRowQuantizedMatvec/projection(_:by:)``, so inside a
+        /// speculative verify each token row keeps the bits of a decode step.
         func callAsFunction(_ x: MLXArray) -> MLXArray {
-            downProj(silu(gateProj(x)) * upProj(x))
+            let gate = MultiRowQuantizedMatvec.projection(x, by: gateProj)
+            let up = MultiRowQuantizedMatvec.projection(x, by: upProj)
+            return MultiRowQuantizedMatvec.projection(silu(gate) * up, by: downProj)
         }
     }
 
@@ -658,14 +663,15 @@ public enum Qwen35Language {
         ) {
             guard fusedInputProjectionEnabled, let fusedInProj = fusedInputProjection.fused else {
                 return (
-                    inProjQKV(inputs),
-                    inProjZ(inputs).reshaped(batch, sequence, numVHeads, headVDim),
-                    inProjB(inputs),
-                    inProjA(inputs)
+                    MultiRowQuantizedMatvec.projection(inputs, by: inProjQKV),
+                    MultiRowQuantizedMatvec.projection(inputs, by: inProjZ).reshaped(
+                        batch, sequence, numVHeads, headVDim),
+                    MultiRowQuantizedMatvec.projection(inputs, by: inProjB),
+                    MultiRowQuantizedMatvec.projection(inputs, by: inProjA)
                 )
             }
 
-            let projected = fusedInProj(inputs)
+            let projected = MultiRowQuantizedMatvec.projection(inputs, by: fusedInProj)
             let qkvEnd = keyDim * 2 + valueDim
             let zEnd = qkvEnd + valueDim
             let bEnd = zEnd + numVHeads
@@ -740,13 +746,15 @@ public enum Qwen35Language {
             } else if let step = decodeKernelStep(
                 qkv: mixedQKV, z: z, b: b, a: a, convState: convState, recState: recState)
             {
-                return (outProj(step.output), step.convState, step.recurrentState, nil)
+                return (projectOutput(step.output), step.convState, step.recurrentState, nil)
             } else if keepsSnapshots,
                 let step = speculativeKernelStep(
                     qkv: mixedQKV, z: z, b: b, a: a, convState: convState, recState: recState),
                 let snapshots = step.snapshots
             {
-                return (outProj(step.output), step.convState, step.recurrentState, snapshots)
+                return (
+                    projectOutput(step.output), step.convState, step.recurrentState, snapshots
+                )
             }
 
             let convInput = concatenated([convState, mixedQKV], axis: 1)
@@ -790,7 +798,17 @@ public enum Qwen35Language {
             }
 
             let gated = norm(out, gate: z)
-            return (outProj(gated.reshaped(B, S, -1)), newConvState, newRecState, snapshots)
+            return (projectOutput(gated.reshaped(B, S, -1)), newConvState, newRecState, snapshots)
+        }
+
+        /// The output projection of the gated delta net, through
+        /// ``MultiRowQuantizedMatvec/projection(_:by:)``: inside a
+        /// speculative verify each token row keeps the bits of a decode step.
+        ///
+        /// - Parameter x: The gated output, shape `(batch, tokens, valueDim)`.
+        /// - Returns: The layer output, shape `(batch, tokens, hiddenSize)`.
+        func projectOutput(_ x: MLXArray) -> MLXArray {
+            MultiRowQuantizedMatvec.projection(x, by: outProj)
         }
     }
 
@@ -1386,25 +1404,26 @@ public enum Qwen35Language {
             }
 
             let emitDrafterState = state[mtpEmitFlagKey] ?? false
-            let preNormHidden = model(
-                inputs,
-                inputsEmbeds: inputsEmbeds,
-                cache: cache,
-                positionIds: positionIds,
-                applyFinalNorm: !emitDrafterState,
-                keepsSnapshots: state[mtpVerifyKeepsSnapshotsKey] ?? false
-            )
-            let hiddenStates = emitDrafterState ? model.norm(preNormHidden) : preNormHidden
-
-            let projection: Module = lmHead ?? model.embedTokens
-            var out =
-                lastTokenOnly && !emitDrafterState
-                ? quantizedVocabularyProjectionInput(hiddenStates, projection: projection)
-                : hiddenStates
-            if let lmHead {
-                out = lmHead(out)
-            } else {
-                out = model.embedTokens.asLinear(out)
+            let keepsSnapshots = state[mtpVerifyKeepsSnapshotsKey] ?? false
+            let (out, hiddenStates) = MultiRowQuantizedMatvec.run(
+                asSpeculativeVerify: keepsSnapshots
+            ) {
+                let preNormHidden = model(
+                    inputs,
+                    inputsEmbeds: inputsEmbeds,
+                    cache: cache,
+                    positionIds: positionIds,
+                    applyFinalNorm: !emitDrafterState,
+                    keepsSnapshots: keepsSnapshots
+                )
+                let hiddenStates =
+                    emitDrafterState ? model.norm(preNormHidden) : preNormHidden
+                let projectionInput =
+                    lastTokenOnly && !emitDrafterState
+                    ? quantizedVocabularyProjectionInput(
+                        hiddenStates, projection: lmHead ?? model.embedTokens)
+                    : hiddenStates
+                return (projectVocabulary(projectionInput), hiddenStates)
             }
 
             if emitDrafterState {
@@ -1421,6 +1440,17 @@ public enum Qwen35Language {
             }
 
             return LMOutput(logits: out, state: state)
+        }
+
+        /// The vocabulary projection: the LM head, through
+        /// ``MultiRowQuantizedMatvec/projection(_:by:)``, or the tied
+        /// embedding.
+        ///
+        /// - Parameter hidden: The normed hidden states.
+        /// - Returns: The logits.
+        private func projectVocabulary(_ hidden: MLXArray) -> MLXArray {
+            guard let lmHead else { return model.embedTokens.asLinear(hidden) }
+            return MultiRowQuantizedMatvec.projection(hidden, by: lmHead)
         }
 
         func makeCache(parameters: GenerateParameters?) throws -> [KVCache] {

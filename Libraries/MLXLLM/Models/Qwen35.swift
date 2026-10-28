@@ -323,14 +323,15 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
     ) {
         guard fusedInputProjectionEnabled, let fusedInProj = fusedInputProjection.fused else {
             return (
-                inProjQKV(inputs),
-                inProjZ(inputs).reshaped(batch, sequence, numVHeads, headVDim),
-                inProjB(inputs),
-                inProjA(inputs)
+                MultiRowQuantizedMatvec.projection(inputs, by: inProjQKV),
+                MultiRowQuantizedMatvec.projection(inputs, by: inProjZ).reshaped(
+                    batch, sequence, numVHeads, headVDim),
+                MultiRowQuantizedMatvec.projection(inputs, by: inProjB),
+                MultiRowQuantizedMatvec.projection(inputs, by: inProjA)
             )
         }
 
-        let projected = fusedInProj(inputs)
+        let projected = MultiRowQuantizedMatvec.projection(inputs, by: fusedInProj)
         let qkvEnd = keyDim * 2 + valueDim
         let zEnd = qkvEnd + valueDim
         let bEnd = zEnd + numVHeads
@@ -406,19 +407,29 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
         } else if let step = decodeKernelStep(
             qkv: qkv, z: z, b: b, a: a, convState: convState, recState: recState)
         {
-            return (outProj(step.output), step.convState, step.recurrentState, nil)
+            return (projectOutput(step.output), step.convState, step.recurrentState, nil)
         } else if keepsSnapshots,
             let step = speculativeKernelStep(
                 qkv: qkv, z: z, b: b, a: a, convState: convState, recState: recState),
             let snapshots = step.snapshots
         {
-            return (outProj(step.output), step.convState, step.recurrentState, snapshots)
+            return (projectOutput(step.output), step.convState, step.recurrentState, snapshots)
         }
 
         let body = recurrentBody(
             qkv: qkv, z: z, b: b, a: a, convState: convState, recState: recState, mask: mask,
             keepsSnapshots: keepsSnapshots)
-        return (outProj(body.output), body.convState, body.recurrentState, body.snapshots)
+        return (projectOutput(body.output), body.convState, body.recurrentState, body.snapshots)
+    }
+
+    /// The output projection of the gated delta net, through
+    /// ``MultiRowQuantizedMatvec/projection(_:by:)``: inside a speculative
+    /// verify each token row keeps the bits of a decode step.
+    ///
+    /// - Parameter x: The gated output, shape `(batch, tokens, valueDim)`.
+    /// - Returns: The layer output, shape `(batch, tokens, hiddenSize)`.
+    func projectOutput(_ x: MLXArray) -> MLXArray {
+        MultiRowQuantizedMatvec.projection(x, by: outProj)
     }
 
     /// The op path of the body, for any number of tokens: the conv, the q
@@ -617,13 +628,13 @@ final class Qwen35Attention: Module {
         let B = x.dim(0)
         let L = x.dim(1)
 
-        let qProjOutput = qProj(x)
+        let qProjOutput = MultiRowQuantizedMatvec.projection(x, by: qProj)
         let qSplit = qProjOutput.reshaped(B, L, attentionHeads, -1).split(parts: 2, axis: -1)
         var queries = qSplit[0]
         let gate = qSplit[1].reshaped(B, L, -1)
 
-        var keys = kProj(x)
-        var values = vProj(x)
+        var keys = MultiRowQuantizedMatvec.projection(x, by: kProj)
+        var values = MultiRowQuantizedMatvec.projection(x, by: vProj)
 
         queries = qNorm(queries).transposed(0, 2, 1, 3)
         keys = kNorm(keys.reshaped(B, L, kvHeads, -1)).transposed(0, 2, 1, 3)
@@ -638,7 +649,8 @@ final class Qwen35Attention: Module {
             attention
             .transposed(0, 2, 1, 3)
             .reshaped(attention.dim(0), attention.dim(2), -1)
-        return oProj(Qwen3NextElementwise.sigmoidMultiply(merged, gate))
+        return MultiRowQuantizedMatvec.projection(
+            Qwen3NextElementwise.sigmoidMultiply(merged, gate), by: oProj)
     }
 }
 
@@ -1150,13 +1162,17 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        var out = model(inputs, cache: cache)
-        if let lmHead {
-            out = lmHead(out)
-        } else {
-            out = model.embedTokens.asLinear(out)
-        }
-        return out
+        projectVocabulary(model(inputs, cache: cache))
+    }
+
+    /// The vocabulary projection: the LM head, through
+    /// ``MultiRowQuantizedMatvec/projection(_:by:)``, or the tied embedding.
+    ///
+    /// - Parameter hidden: The normed hidden states.
+    /// - Returns: The logits.
+    private func projectVocabulary(_ hidden: MLXArray) -> MLXArray {
+        guard let lmHead else { return model.embedTokens.asLinear(hidden) }
+        return MultiRowQuantizedMatvec.projection(hidden, by: lmHead)
     }
 
     public func callAsFunction(
@@ -1189,29 +1205,12 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
         useCompiledDecode: Bool = true
     ) -> LMOutput {
         let emitDrafterState = state?[mtpEmitFlagKey] ?? false
-        let hiddenStates: MLXArray
-        if emitDrafterState {
-            let hidden = model.forward(
-                input.tokens, cache: cache, applyFinalNorm: false,
-                keepsSnapshots: state?[mtpVerifyKeepsSnapshotsKey] ?? false,
+        let isVerify = emitDrafterState && (state?[mtpVerifyKeepsSnapshotsKey] ?? false)
+        let (logits, hiddenStates) = MultiRowQuantizedMatvec.run(asSpeculativeVerify: isVerify) {
+            logitsAndHiddenStates(
+                input, cache: cache, emitDrafterState: emitDrafterState,
+                keepsSnapshots: isVerify, lastTokenOnly: lastTokenOnly,
                 useCompiledDecode: useCompiledDecode)
-            hiddenStates = model.norm(hidden)
-        } else {
-            hiddenStates = model.forward(
-                input.tokens, cache: cache, applyFinalNorm: true,
-                useCompiledDecode: useCompiledDecode)
-        }
-
-        let projection: Module = lmHead ?? model.embedTokens
-        let projectionInput =
-            lastTokenOnly && !emitDrafterState
-            ? quantizedVocabularyProjectionInput(hiddenStates, projection: projection)
-            : hiddenStates
-        let logits: MLXArray
-        if let lmHead {
-            logits = lmHead(projectionInput)
-        } else {
-            logits = model.embedTokens.asLinear(projectionInput)
         }
 
         guard emitDrafterState else {
@@ -1229,6 +1228,43 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
                 ["full_attention": $0]
             } ?? [:]
         return LMOutput(logits: logits, state: outState)
+    }
+
+    /// The logits of the tokens and the normed hidden states they project.
+    ///
+    /// - Parameters:
+    ///   - input: The tokens, shape `(batch, tokens)`.
+    ///   - cache: The cache of each layer, or nil.
+    ///   - emitDrafterState: True when the call emits the drafter state, so
+    ///     the final norm runs after the backbone and every token projects.
+    ///   - keepsSnapshots: True for a speculative verify, whose GDN layers
+    ///     keep the states after each token for a rollback.
+    ///   - lastTokenOnly: True to project the last token only, when the call
+    ///     emits no drafter state.
+    ///   - useCompiledDecode: False to take the general path.
+    /// - Returns: The logits and the normed hidden states.
+    private func logitsAndHiddenStates(
+        _ input: LMInput.Text, cache: [KVCache]?, emitDrafterState: Bool, keepsSnapshots: Bool,
+        lastTokenOnly: Bool, useCompiledDecode: Bool
+    ) -> (logits: MLXArray, hiddenStates: MLXArray) {
+        let hiddenStates: MLXArray
+        if emitDrafterState {
+            let hidden = model.forward(
+                input.tokens, cache: cache, applyFinalNorm: false,
+                keepsSnapshots: keepsSnapshots, useCompiledDecode: useCompiledDecode)
+            hiddenStates = model.norm(hidden)
+        } else {
+            hiddenStates = model.forward(
+                input.tokens, cache: cache, applyFinalNorm: true,
+                useCompiledDecode: useCompiledDecode)
+        }
+
+        let projection: Module = lmHead ?? model.embedTokens
+        let projectionInput =
+            lastTokenOnly && !emitDrafterState
+            ? quantizedVocabularyProjectionInput(hiddenStates, projection: projection)
+            : hiddenStates
+        return (projectVocabulary(projectionInput), hiddenStates)
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {

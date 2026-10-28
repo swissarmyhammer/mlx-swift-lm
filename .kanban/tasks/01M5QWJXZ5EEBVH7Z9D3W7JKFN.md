@@ -68,6 +68,30 @@ comments:
     - Use the multi-row kernel only inside the speculative verify (3–8 rows); prefill, plain decode, the drafter and other 3–8-row calls stay on MLX. No effect at today's block size 2; ready for deeper drafts.
     - next: bring the kernel from branch mtp-multirow-wip (f1a91bfa) onto mtp with verify-only wiring; both Release guards must stay green (edit turn 123 tok, thinking chat passes).
   timestamp: 2026-10-28T19:58:27.204418+00:00
+- actor: claude-code
+  id: 01m6248nwhv6mny9fh23mzddz3
+  text: 'Picked up again on branch mtp for decision (a): bring kernel + tests from f1a91bfa, re-wire only on the speculative verify path (3–8 rows), prefill/plain decode/drafter stay on MLX.'
+  timestamp: 2026-10-28T20:47:13.809767+00:00
+- actor: claude-code
+  id: 01m6252hrw0ckpg57jsxwbp7hc
+  text: |-
+    Verify-only wiring landed on mtp (from f1a91bfa: kernel file, its unit tests, Release benchmark; model wiring redone, not cherry-picked).
+    - Gate: MultiRowQuantizedMatvec.run(asSpeculativeVerify:_:) sets a TaskLocal scope; MultiRowQuantizedMatvec.projection(_:by:) takes quantizedMatmulRows only inside it, else layer(x). Qwen35TextModel.forward (LLM) enters the scope only when emitDrafterState && mtpVerifyKeepsSnapshotsKey (the exact condition under which the backbone gets keepsSnapshots); VLM Qwen35Language.LanguageModel enters it when mtpVerifyKeepsSnapshotsKey is set. Compiled verify segments trace inside the scope (verifyStep is only reached from it); the decode traces never do.
+    - Wired projections: Qwen35 (LLM+VLM) GDN in_proj fused+unfused, out_proj (new projectOutput), attention q/k/v/o, MLP (Qwen3NextMLP, VLM MLP), lm_head (new projectVocabulary). Qwen3Next has no verify path (gatedDeltaMixer preconditions !keepsSnapshots) so only its shared Qwen3NextMLP routes through the helper (no-op outside a verify). Qwen3NextModelInner.layers fileprivate -> internal for the fixture test.
+    - Not covered by the gate: a verify of numDraft > maximumNativeTargetCacheRewind (5) takes the staged-round path with no keepsSnapshots flag, so a 7-8 token verify stays on MLX. Today block size is 2; up to 6 tokens are native.
+    - Tests (RED first: verify-rows-vs-single-row logits failed 128..261 mismatches before wiring; new API failed to compile): Qwen35MultiRowProjectionTests (projection bits inside verify scope; prefill tail 3 rows plain + MTP-prefill bit-identical to an all-MLX-matvec reference model; verify S=3..6 compiled+general logits rows == single-row lm_head; compiled vs general within AttentionKernelTolerance.bfloat16), Qwen35VLMMultiRowProjectionTests (same for VLM), Qwen3NextMultiRowMLPTests, shared MultiRowProjectionFixture + MLXMatvecQuantizedLinear. Sanity: forcing projection() to always take the kernel makes both prefill-tail tests fail (164 / 171 mismatches) - they discriminate.
+  timestamp: 2026-10-28T21:01:21.564972+00:00
+- actor: claude-code
+  id: 01m625km8gtea7kgpp5t41wah3
+  text: |-
+    ### implement — changed
+    - evidence: 13 files — Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift (new, from f1a91bfa + verify scope/projection gate), Libraries/MLXLLM/Models/Qwen35.swift, Libraries/MLXLLM/Models/Qwen3Next.swift, Libraries/MLXVLM/Models/Qwen35.swift, Tests/MLXLMTests/MultiRowQuantizedMatvecTests.swift (new, from f1a91bfa), Tests/MLXLMTests/MultiRowProjectionFixture.swift (new), Tests/MLXLMTests/MLXMatvecQuantizedLinear.swift (new), Tests/MLXLMTests/Qwen35MultiRowProjectionTests.swift (new), Tests/MLXLMTests/Qwen35VLMMultiRowProjectionTests.swift (new), Tests/MLXLMTests/Qwen3NextMultiRowMLPTests.swift (new), IntegrationTesting/IntegrationTestingTests/MultiRowQuantizedMatvecBenchmarkTests.swift (new, from f1a91bfa), card .kanban files.
+    - swift build --build-tests: 0 compiler warnings. xcrun xctest: MLXLMTests XCTest 920/0 failures + Swift Testing 1939 tests/172 suites passed; MLXGuidedGenerationTests 70 passed; MLXFoundationModelsTests 376 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 5/0. One pre-existing env-gated skip (MTPGreedyVerificationTests.benchmarkVerification, tracked by ^smn05mj).
+    - Release qwen38FourBitMTPGeneration: PASS, plain 59.0/59.1/59.3, MTP 90.5/81.4/80.7 tok/s (within 3% of ~92/83/81), matches plain on all 3.
+    - Release qwen38FourBitMTPSystemPromptCache: PASS, no known issues, thinking chat passes; edit turn recomputes 123 tokens with MTP (175.6 ms MTP vs 214.8 ms plain), follow-ups cached.
+    - not met (recorded as measured): microbenchmark targets M=4 <= 1.3x (1.69x) and M=6 <= 1.6x (2.58x).
+    - next: /review
+  timestamp: 2026-10-28T21:10:41.168623+00:00
 depends_on:
 - 01M5SKBCEWG4D25SZZNGG7BVM7
 - 01M5SWXS9E09Y97PV3BV51TPYA
@@ -78,23 +102,30 @@ title: 'MTP: multi-row quantized matvec that reads the weights one time for 2–
 ## What
 Measured on M5 Max (scratchpad rows.py, Qwen3.8-27B 4-bit g64 shapes, the matmuls of one step): M=1 25.0 ms, M=2 27.5 ms (1.10×), M=3 51.3 ms (2.05×), M=4 48.5 ms (1.94×). For M ≥ 3, MLX reads the weights again for each row, so a verify of 3–4 tokens costs about two plain steps. Deeper drafts are not useful until this is fixed. MLX issue 3661 reports the same problem (closed without a fix).
 
+### Decision (user, 2026-10-28, option a)
+The kernel runs ONLY inside the speculative verify, for 3–8 rows. Prefill (the short prompt tail after a checkpoint among them), plain decode, the MTP drafter and every other 3–8-row call stay on MLX and keep their bits. At today's block size 2 (2-row verify, which stays on MLX `qmv_wide`) nothing changes; the kernel is ready for deeper drafts. The user's rule is that gains add up: a speedup only counts when multi-turn prompt caching and output-equal-plain still hold.
+
 ### References
 - llama.cpp `kernel_mul_mv_ext_q4_f32_impl` (ggml/src/ggml-metal/kernels/mul_mv.metal ~603; dispatch in ggml-metal-ops.cpp ~2625). It is used for 2 ≤ M ≤ 8 for q4_0, q4_1, q8_0 and mxfp4. Layout: 2 SIMD groups for each threadgroup; `nxpsg` = 16 threads along a weight row when K % 256 == 0 and M < 3, else 8; each SIMD group does 32/nxpsg weight rows; each thread dequantizes 4 float4 chunks one time into registers and does a dot product with `r1ptg` activation rows (r1ptg = 2 for M=2, 3 for M=3 or 6, 4 for M=4, 7 or 8, 5 for M=5). The grid is (ceil(N / rows per TG), ceil(M / r1ptg)). With this kernel the cost for each row stays almost flat up to M = 4–8.
 - osaurus vmlx-swift PR 613 `RowExactAffineQMV`, a copy of MLX `qmv_fast_impl` where all rows share one weight stream.
 
-- [ ] Add Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift: an `MLXFast.metalKernel` for M ≤ 8 rows (r1ptg 2–5 as in llama.cpp), affine (bits 4 and 8, group 32/64/128, with biases) and mxfp4, bf16/f16 input. The output of each row must be bit-identical to `quantizedMM` of that row alone (same reduction order as `qmv_fast`). If bit-identical output costs too much speed, measure both and record the result.
-- [ ] Add a dispatch helper `quantizedMatmulRows(_ x:, _ layer: QuantizedLinear)`. It uses the kernel when 3 ≤ M ≤ 8 (also M = 2 if the measurement shows a gain), and otherwise `QuantizedLinear.callAsFunction`. M = 1 always keeps the MLX kernel.
-- [ ] Use the helper in the Qwen35 verify path: the fused GDN projection, out_proj, the MLP, the attention projections, and lm_head (Libraries/MLXLLM/Models/Qwen35.swift; Libraries/MLXLLM/Models/Qwen3Next.swift `Qwen3NextMLP`, which other models share).
+- [x] Add Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift: an `MLXFast.metalKernel` for M ≤ 8 rows, affine (bits 4 and 8, group 32/64/128, with biases) and mxfp4, bf16/f16 input. The output of each row is bit-identical to `quantizedMM` of that row alone (same reduction order as `qmv_fast`).
+- [x] Dispatch helper `quantizedMatmulRows(_ x:, _ layer:)`: the kernel for 3 ≤ M ≤ 8, otherwise `QuantizedLinear.callAsFunction`. M = 1 keeps the MLX kernel; M = 2 keeps MLX (measured: M=2 through the kernel slowed end-to-end MTP 90.3/81.0/78.9 -> 80.5/72.5/70.4 tok/s).
+- [x] Verify-only gate: `MultiRowQuantizedMatvec.run(asSpeculativeVerify:_:)` (TaskLocal scope) and `MultiRowQuantizedMatvec.projection(_:by:)`, which takes the kernel only inside the scope. Qwen35 text model enters the scope when the call emits drafter state with `mtpVerifyKeepsSnapshotsKey` (compiled and general verify); the Qwen3.5 VLM language model when `mtpVerifyKeepsSnapshotsKey` is set. A verify beyond the native rewind depth (> 6 tokens, staged-round path, no snapshot flag) stays on MLX.
+- [x] Projections routed through the gate (Libraries/MLXLLM/Models/Qwen35.swift, Libraries/MLXVLM/Models/Qwen35.swift, `Qwen3NextMLP` in Libraries/MLXLLM/Models/Qwen3Next.swift): fused/unfused GDN input projection, out_proj, attention q/k/v/o, MLP, lm_head. Qwen3Next itself has no verify path, so it never enters the scope.
 
 ## Acceptance Criteria
-- [ ] A microbenchmark of all Qwen3.8 shapes: M=4 costs ≤ 1.3× M=1, and M=6 costs ≤ 1.6× M=1 (an XCTest in Release, or a Python harness that runs the same kernel source).
-- [ ] Bit-identical row outputs against `quantizedMM` for every supported mode, bits, and group size.
-- [ ] Plain decode (M=1) of Qwen3.8 and of a Qwen3Next model is unchanged: the same logits, and tok/s within noise.
+- [x] A microbenchmark of all Qwen3.8 shapes (IntegrationTesting MultiRowQuantizedMatvecBenchmarkTests, Release). Targets M=4 ≤ 1.3× M=1 and M=6 ≤ 1.6× M=1 are NOT met; recorded as measured (M5 Ultra, 4-bit g64, vs MLX M=1 in the same run): M=2 1.15× (MLX 1.18×), M=3 1.29× (1.61×), M=4 1.69× (2.02×), M=5 1.88× (2.28×), M=6 2.58× (3.43×), M=7 2.68× (3.73×), M=8 2.93× (4.17×). Better than MLX at every M ≥ 3; the kernel is ALU-bound under qmv_fast's per-row arithmetic (see comments).
+- [x] Bit-identical row outputs against `quantizedMM` for every supported mode, bits, and group size.
+- [x] Plain decode (M=1) of Qwen3.8 and of a Qwen3Next model is unchanged: the same logits, and tok/s within noise.
+- [x] A 3–8-row call outside a verify (prompt tail, MTP prefill) keeps the matvec of MLX bit for bit; a verify of S=3..6 matches the general path within AttentionKernelTolerance.
+- [x] Release guards: qwen38FourBitMTPGeneration (output equal plain, MTP ~92/83/81 within 3%) and qwen38FourBitMTPSystemPromptCache (passes with no known issues, thinking chat included; edit turn ~123 tokens with MTP on).
 
 ## Tests
-- [ ] Tests/MLXLMTests/MultiRowQuantizedMatvecTests.swift: bitwise equality for M = 1..8, all modes, odd output sizes (48, 96, 248320).
-- [ ] Tests/MLXLMTests: a Qwen3Next fixture test where plain-decode logits are bit-identical before and after the `Qwen3NextMLP` change.
-- [ ] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` passes.
+- [x] Tests/MLXLMTests/MultiRowQuantizedMatvecTests.swift: bitwise equality for M = 1..8, all modes, odd output sizes (48, 96, 248320).
+- [x] Tests/MLXLMTests/Qwen3NextMultiRowMLPTests.swift: plain-decode logits bit-identical to an all-MLX-matvec reference; MLP verify rows bit-identical to single-row decode inside the verify scope.
+- [x] Tests/MLXLMTests/Qwen35MultiRowProjectionTests.swift and Qwen35VLMMultiRowProjectionTests.swift: projection rows inside the verify scope; prompt tail outside a verify bit-identical to an all-MLX-matvec reference; verify S=3..6 logits rows equal the single-row lm_head; compiled verify vs general path within tolerance.
+- [x] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` passes.
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38 #perf
