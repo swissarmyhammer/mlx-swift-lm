@@ -35,8 +35,24 @@ comments:
     - evidence: review sha bf19dbde~1..bf19dbde — 1 finding (1 confirmed, 0 refuted) — Libraries/BenchmarkHelpers/BenchmarkHelpers.swift:88
     - next: implement the duplication/duplication finding (collapse BenchmarkLog.whole/decimal/hundredths onto one precision-parameterized helper), then re-review
   timestamp: 2026-10-29T14:01:42.512693+00:00
-position_column: review
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m63zhjff2tz6rjvy8hpj0qvs
+  text: |-
+    ### review — clean
+    - evidence: review sha a4692c90~1..a4692c90 — 0 findings (0 confirmed, 0 refuted, 7 attempted, 0 failed); 1 file reviewed (Libraries/BenchmarkHelpers/BenchmarkHelpers.swift), 2 .kanban files not matched by any validator. Prior 2026-10-29 08:58 duplication item is checked.
+    - next: none — task moved to done
+  timestamp: 2026-10-29T14:03:11.215963+00:00
+- actor: claude-code
+  id: 01m63zj3en3t4r29vdv9b187w0
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 1 file (one fixed(_:decimals:) helper behind whole/decimal/hundredths)
+    - test: green — swift build --build-tests clean; MTPBlockSweepTests 9/9
+    - commit: a4692c90
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T14:03:28.597220+00:00
+position_column: done
+position_ordinal: ffff8b80
 title: 'BenchmarkHelpers: move benchmarkMTPBlockSweep onto the Benchmark namespace'
 ---
 ## What
