@@ -17,7 +17,7 @@ import Testing
 struct TranscriptConverterReasoningOnlyTurnTests {
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    @Test(arguments: [[], [Transcript.Segment.text(Transcript.TextSegment(content: ""))]])
+    @Test(arguments: [[], [ReasoningOnlyTurnFixture.text("")]])
     func aReplayedReasoningOnlyTurnBecomesAnAssistantMessageWithTheReasoning(
         responseSegments: [Transcript.Segment]
     ) throws {
@@ -42,12 +42,8 @@ struct TranscriptConverterReasoningOnlyTurnTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
     func anEmptyResponseWithNoReasoningStaysOutOfTheHistory() throws {
-        let entries = ReasoningOnlyTurnFixture.reasoningOnlyTurn().filter {
-            if case .reasoning = $0 { return false }
-            return true
-        }
-
-        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
+        let messages = try TranscriptConverter.mlxMessages(
+            for: ReasoningOnlyTurnFixture.emptyTurnWithoutReasoning, reasoning: .everyTurn)
 
         #expect(messages.map(\.role) == [.user, .user])
     }

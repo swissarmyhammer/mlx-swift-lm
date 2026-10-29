@@ -36,10 +36,9 @@ struct TranscriptConverterUnclosedReasoningTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
     func aTurnThatAnsweredDropsItsReasoning() throws {
-        let answer = Transcript.Segment.text(Transcript.TextSegment(content: "4"))
-
         let messages = try TranscriptConverter.mlxMessages(
-            for: ReasoningOnlyTurnFixture.reasoningOnlyTurn(responseSegments: [answer]),
+            for: ReasoningOnlyTurnFixture.reasoningOnlyTurn(
+                responseSegments: [ReasoningOnlyTurnFixture.text("4")]),
             reasoning: .reasoningOnlyTurns)
 
         try #require(messages.map(\.role) == [.user, .assistant, .user])
@@ -70,13 +69,8 @@ struct TranscriptConverterUnclosedReasoningTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
     func anEmptyResponseWithNoReasoningStaysOutOfTheHistory() throws {
-        let entries = ReasoningOnlyTurnFixture.reasoningOnlyTurn(responseSegments: []).filter {
-            if case .reasoning = $0 { return false }
-            return true
-        }
-
         let messages = try TranscriptConverter.mlxMessages(
-            for: entries, reasoning: .reasoningOnlyTurns)
+            for: ReasoningOnlyTurnFixture.emptyTurnWithoutReasoning, reasoning: .reasoningOnlyTurns)
 
         #expect(messages.map(\.role) == [.user, .user])
     }

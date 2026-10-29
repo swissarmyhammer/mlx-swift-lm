@@ -13,19 +13,25 @@ enum ReasoningOnlyTurnFixture {
     /// The reasoning the turn writes before its token budget runs out.
     static let reasoning = "Let me add: 2 plus"
 
+    /// A text segment that holds `content`.
+    ///
+    /// - Parameter content: The text of the segment.
+    /// - Returns: The segment.
+    static func text(_ content: String) -> Transcript.Segment {
+        .text(Transcript.TextSegment(content: content))
+    }
+
     /// A prompt entry that asks `question`.
     ///
     /// - Parameter question: The text of the prompt.
     /// - Returns: The entry.
     static func prompt(_ question: String) -> Transcript.Entry {
-        .prompt(
-            Transcript.Prompt(
-                segments: [.text(Transcript.TextSegment(content: question))], responseFormat: nil))
+        .prompt(Transcript.Prompt(segments: [text(question)], responseFormat: nil))
     }
 
     /// The reasoning entry of the turn.
     static var reasoningEntry: Transcript.Entry {
-        .reasoning(Transcript.Reasoning(segments: [.text(Transcript.TextSegment(content: reasoning))]))
+        .reasoning(Transcript.Reasoning(segments: [text(reasoning)]))
     }
 
     /// The entries of the turn and the prompt after it, in the order the framework appends
@@ -44,6 +50,15 @@ enum ReasoningOnlyTurnFixture {
             reasoningEntry,
             prompt("And 3+3?"),
         ]
+    }
+
+    /// The entries of ``reasoningOnlyTurn(responseSegments:)`` with an empty response and no
+    /// reasoning entry: the shape the framework records for a turn that wrote nothing at all.
+    static var emptyTurnWithoutReasoning: [Transcript.Entry] {
+        reasoningOnlyTurn().filter {
+            if case .reasoning = $0 { return false }
+            return true
+        }
     }
 }
 
