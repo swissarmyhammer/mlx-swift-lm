@@ -246,7 +246,7 @@ public struct MTPBlockSweep: Sendable {
 }
 
 /// Benchmarks MTP speculative decoding of each setting of `settings` against plain decoding,
-/// greedy, with ``benchmarkMTPGeneration(context:drafter:prompts:maxTokens:blockSize:minimumDraftProbability:runs:sampling:)``,
+/// greedy, with ``Benchmark/mtpGeneration(context:drafter:prompts:maxTokens:blockSize:minimumDraftProbability:runs:sampling:)``,
 /// and writes the table of the sweep.
 ///
 /// - Parameters:
@@ -273,7 +273,7 @@ public func benchmarkMTPBlockSweep(
         rows.append(
             MTPBlockSweepRow(
                 setting: setting,
-                results: try await benchmarkMTPGeneration(
+                results: try await Benchmark.mtpGeneration(
                     context: context, drafter: drafter, prompts: prompts, maxTokens: maxTokens,
                     blockSize: setting.blockSize,
                     minimumDraftProbability: setting.minimumDraftProbability, runs: runs)))

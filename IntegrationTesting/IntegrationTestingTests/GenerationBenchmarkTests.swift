@@ -17,29 +17,60 @@ import MLXVLM
 import Testing
 import Tokenizers
 
-/// A checkpoint under benchmark, loaded at most once per test process.
-private struct BenchmarkCheckpoint: Sendable {
-    let id: String
-    let load: Task<ModelContainer, Error>?
+/// Why a benchmark checkpoint could not load.
+private enum BenchmarkCheckpointError: Error, CustomStringConvertible {
+    /// The Hugging Face cache holds no copy of the checkpoint, and the suite downloads nothing.
+    case notLocal(String)
 
+    var description: String {
+        switch self {
+        case .notLocal(let id):
+            return "no local copy of \(id); download it before running the benchmark"
+        }
+    }
+}
+
+/// A checkpoint under benchmark, loaded at most once per test process, on the
+/// first ``container()`` call.
+///
+/// A test that needs a checkpoint gates itself with `.enabled(if: checkpoint.isLocal)`, so
+/// Swift Testing reports it skipped when the checkpoint is missing, never passed.
+private actor BenchmarkCheckpoint {
+    /// The Hugging Face id of the checkpoint.
+    nonisolated let id: String
+    /// The factory that loads the checkpoint.
+    private let factory: any ModelFactory
+    /// The load the first ``container()`` call started.
+    private var loading: Task<ModelContainer, Error>?
+
+    /// Names the checkpoint `id`, loaded by `factory`. Loads nothing.
     init(id: String, factory: any ModelFactory) {
         self.id = id
-        self.load =
-            hfSnapshotDir(modelId: id) == nil
-            ? nil
-            : Task {
-                try await factory.loadContainer(
-                    from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-                    configuration: ModelConfiguration(id: id)
-                ) { _ in }
-            }
+        self.factory = factory
     }
 
-    func containerOrSkip(testName: String) async throws -> ModelContainer? {
-        guard let load else {
-            print("Skipping \(testName): no local copy of \(id)")
-            return nil
+    /// Whether the Hugging Face cache holds a copy of the checkpoint.
+    nonisolated var isLocal: Bool { hfSnapshotDir(modelId: id) != nil }
+
+    /// The loaded checkpoint: the first call starts the load, and every call
+    /// shares it.
+    ///
+    /// - Throws: ``BenchmarkCheckpointError/notLocal(_:)`` when the checkpoint is not
+    ///   local, or the error of the load.
+    func container() async throws -> ModelContainer {
+        guard isLocal else { throw BenchmarkCheckpointError.notLocal(id) }
+        if let loading {
+            return try await loading.value
         }
+        let factory = factory
+        let id = id
+        let load = Task {
+            try await factory.loadContainer(
+                from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+                configuration: ModelConfiguration(id: id)
+            ) { _ in }
+        }
+        loading = load
         return try await load.value
     }
 }
@@ -59,16 +90,9 @@ private let museGlimmer = BenchmarkCheckpoint(
 /// The 4-bit MTP head of Qwen3.8-27B, the drafter of ``qwen38FourBit``.
 private let qwen38FourBitMTPDrafterID = "mlx-community/Qwen3.8-27B-MTP-4bit"
 
-/// Whether the target and the drafter of the MTP benchmarks are local.
+/// Whether the target and the drafter of the MTP benchmarks are local. Asking loads nothing.
 private let qwen38FourBitMTPIsLocal =
-    qwen38FourBit.load != nil && hfSnapshotDir(modelId: qwen38FourBitMTPDrafterID) != nil
-
-/// Whether the files of the target and the drafter of the MTP benchmarks are local. Unlike
-/// ``qwen38FourBitMTPIsLocal`` it starts no load of the shared ``qwen38FourBit`` container,
-/// which the generation benchmarks that load their own model context do not use.
-private let qwen38FourBitMTPFilesAreLocal =
-    hfSnapshotDir(modelId: qwen38FourBitID) != nil
-    && hfSnapshotDir(modelId: qwen38FourBitMTPDrafterID) != nil
+    qwen38FourBit.isLocal && hfSnapshotDir(modelId: qwen38FourBitMTPDrafterID) != nil
 
 /// One expectation that the MTP chat benchmark holds each turn to.
 private enum MTPChatCheck: String, CaseIterable {
@@ -126,69 +150,74 @@ struct GenerationBenchmarkTests {
     private static let museGlimmerMaxTokens = 512
     private static let museGlimmerContext: [String: any Sendable] = ["reasoning_strength": "low"]
 
-    private func generation(_ checkpoint: BenchmarkCheckpoint, testName: String) async throws {
-        guard let container = try await checkpoint.containerOrSkip(testName: testName)
-        else { return }
-        let stats = try await benchmarkLLMGeneration(container: container)
-        stats.printSummary(label: checkpoint.id)
+    /// The rows past the sliding window that
+    /// ``museGlimmerSystemPromptCacheWithRewindReserve()`` keeps, so a fork can rewind them.
+    private static let museGlimmerRewindReserve = 512
+
+    /// Measures generation of `checkpoint` and writes its throughput.
+    private func generation(_ checkpoint: BenchmarkCheckpoint) async throws {
+        let container = try await checkpoint.container()
+        let stats = try await Benchmark.llmGeneration(container: container)
+        stats.logSummary(label: checkpoint.id)
     }
 
+    /// Measures the reuse of a cached system prompt by `checkpoint`, and expects
+    /// every fork and follow-up turn to reuse part of the cache.
     private func systemPromptCache(
         _ checkpoint: BenchmarkCheckpoint, maxTokens: Int = 16,
         kvCache: KVCacheConfiguration? = nil,
-        additionalContext: [String: any Sendable]? = nil, testName: String
+        additionalContext: [String: any Sendable]? = nil
     ) async throws {
-        guard let container = try await checkpoint.containerOrSkip(testName: testName)
-        else { return }
-        let stats = try await benchmarkSystemPromptCache(
+        let container = try await checkpoint.container()
+        let stats = try await Benchmark.systemPromptCache(
             container: container, maxTokens: maxTokens, kvCache: kvCache,
             additionalContext: additionalContext)
-        stats.printSummary(label: checkpoint.id)
+        stats.logSummary(label: checkpoint.id)
         #expect(stats.followUp.allSatisfy { $0.cachedPromptTokenCount > 0 })
         #expect(stats.fork.allSatisfy { $0.cachedPromptTokenCount > 0 })
     }
 
-    @Test
+    @Test(.enabled(if: qwen38.isLocal))
     func qwen38Generation() async throws {
-        try await generation(qwen38, testName: "qwen38Generation")
+        try await generation(qwen38)
     }
 
-    @Test
+    @Test(.enabled(if: qwen38.isLocal))
     func qwen38SystemPromptCache() async throws {
-        try await systemPromptCache(qwen38, testName: "qwen38SystemPromptCache")
+        try await systemPromptCache(qwen38)
     }
 
-    @Test
+    @Test(.enabled(if: qwen38FourBit.isLocal))
     func qwen38FourBitGeneration() async throws {
-        try await generation(qwen38FourBit, testName: "qwen38FourBitGeneration")
+        try await generation(qwen38FourBit)
     }
 
-    @Test
+    @Test(.enabled(if: qwen38FourBit.isLocal))
     func qwen38FourBitSystemPromptCache() async throws {
-        try await systemPromptCache(qwen38FourBit, testName: "qwen38FourBitSystemPromptCache")
+        try await systemPromptCache(qwen38FourBit)
     }
 
-    @Test
+    @Test(.enabled(if: museGlimmer.isLocal))
     func museGlimmerGeneration() async throws {
-        try await generation(museGlimmer, testName: "museGlimmerGeneration")
+        try await generation(museGlimmer)
     }
 
-    @Test
+    @Test(.enabled(if: museGlimmer.isLocal))
     func museGlimmerSystemPromptCache() async throws {
         try await systemPromptCache(
             museGlimmer, maxTokens: Self.museGlimmerMaxTokens,
-            additionalContext: Self.museGlimmerContext,
-            testName: "museGlimmerSystemPromptCache")
+            additionalContext: Self.museGlimmerContext)
     }
 
-    /// The sliding layers keep 512 rows past the window, so a fork can rewind them.
-    @Test
+    /// The sliding layers keep ``museGlimmerRewindReserve`` rows past the window, so a fork
+    /// can rewind them.
+    @Test(.enabled(if: museGlimmer.isLocal))
     func museGlimmerSystemPromptCacheWithRewindReserve() async throws {
         try await systemPromptCache(
             museGlimmer, maxTokens: Self.museGlimmerMaxTokens,
-            kvCache: KVCacheConfiguration(rewind: try .init(maxTokens: 512)),
-            additionalContext: Self.museGlimmerContext,
-            testName: "museGlimmerSystemPromptCacheWithRewindReserve")
+            kvCache: KVCacheConfiguration(
+                rewind: try .init(maxTokens: Self.museGlimmerRewindReserve)),
+            additionalContext: Self.museGlimmerContext)
     }
 
     /// The temperature of ``qwen38FourBitMTPSampledGeneration()``.
@@ -210,11 +239,15 @@ struct GenerationBenchmarkTests {
         let context = try await LLMModelFactory.shared.load(
             from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
             configuration: ModelConfiguration(id: qwen38FourBitID))
+        return (context, try await loadQwen38FourBitMTPDrafter().model)
+    }
+
+    /// The 4-bit MTP head of Qwen3.8-27B, loaded fresh after its drafter types register.
+    private func loadQwen38FourBitMTPDrafter() async throws -> MTPDrafterContext {
         await Qwen35TextMTPRegistration.register()
-        let drafter = try await MTPDrafterModelFactory.shared.load(
+        return try await MTPDrafterModelFactory.shared.load(
             from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
             configuration: ModelConfiguration(id: qwen38FourBitMTPDrafterID))
-        return (context, drafter.model)
     }
 
     /// Plain against MTP decoding of Qwen3.8-27B-4bit with its 4-bit MTP head, at each block
@@ -224,7 +257,7 @@ struct GenerationBenchmarkTests {
     /// near-tie of plain's two best tokens, and is the fastest setting over the math, code and
     /// prose prompts combined among the settings that decode no prompt slower than one draft for
     /// each round (``MTPBlockSetting/singleDraft``), each within the noise the sweep measured.
-    @Test(.enabled(if: qwen38FourBitMTPFilesAreLocal))
+    @Test(.enabled(if: qwen38FourBitMTPIsLocal))
     func qwen38FourBitMTPGeneration() async throws {
         let (context, drafter) = try await loadQwen38FourBitMTP()
         let sweep = try await benchmarkMTPBlockSweep(context: context, drafter: drafter)
@@ -251,7 +284,7 @@ struct GenerationBenchmarkTests {
     /// each ``MTPSampledVerification`` mode, the default mode first.
     ///
     /// The default mode decodes the math prompt faster than plain decoding.
-    @Test(.enabled(if: qwen38FourBitMTPFilesAreLocal))
+    @Test(.enabled(if: qwen38FourBitMTPIsLocal))
     func qwen38FourBitMTPSampledGeneration() async throws {
         let (context, drafter) = try await loadQwen38FourBitMTP()
         let defaultVerification = GenerateParameters().mtpSampledVerification
@@ -263,7 +296,7 @@ struct GenerationBenchmarkTests {
                 temperature: Self.mtpSampledTemperature, topP: Self.mtpSampledTopP,
                 seed: Self.mtpSampledSeed)
             sampling.mtpSampledVerification = verification
-            let results = try await benchmarkMTPGeneration(
+            let results = try await Benchmark.mtpGeneration(
                 context: context, drafter: drafter, sampling: sampling)
             #expect(results.allSatisfy { $0.acceptanceRate > 0 }, "\(verification)")
             let checked = try #require(
@@ -289,12 +322,9 @@ struct GenerationBenchmarkTests {
     /// ``mtpChatKnownGaps`` with the task that closes it.
     @Test(.enabled(if: qwen38FourBitMTPIsLocal))
     func qwen38FourBitMTPSystemPromptCache() async throws {
-        let container = try await #require(qwen38FourBit.load).value
-        await Qwen35TextMTPRegistration.register()
-        let drafter = try await MTPDrafterModelFactory.shared.loadContainer(
-            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-            configuration: ModelConfiguration(id: qwen38FourBitMTPDrafterID))
-        let results = try await benchmarkMTPSystemPromptCache(
+        let container = try await qwen38FourBit.container()
+        let drafter = MTPDrafterContainer(context: try await loadQwen38FourBitMTPDrafter())
+        let results = try await Benchmark.mtpSystemPromptCache(
             container: container, drafter: drafter)
         #expect(results.count == MTPChatScenario.defaults.count)
         for result in results {
