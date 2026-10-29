@@ -180,6 +180,7 @@ public final class QwenStyleMTPDrafter: Module, ResumableMTPDrafterModel {
         state: inout MTPDrafterState,
         sampler _: any LogitSampler
     ) -> Bool {
+        guard !(probe?.refusesColdStart ?? false) else { return false }
         probe?.coldStartPositions.append(position)
         state.cacheStartPosition = position
         state.nextPosition = position + suffixTokens.dim(-1)
@@ -268,6 +269,9 @@ public final class MTPStagingProbe {
 
     /// Whether the drafter refuses to resume a continuation.
     public var refusesResumption = false
+
+    /// Whether the drafter refuses to cold-start at a cached position.
+    public var refusesColdStart = false
 
     /// The target cache position of each drafter cold start, in order.
     public var coldStartPositions: [Int] = []

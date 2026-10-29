@@ -459,6 +459,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     static let missingPromptHiddenReason =
         "MTP drafter has no target hidden state for the prompt; continuing without speculation"
 
+    /// The passthrough reason of a stream whose resumable drafter could neither resume nor
+    /// cold-start over the prompt positions after the target's cached ones.
+    static let coldStartFailedReason =
+        "MTP drafter could not start at the cached position; continuing without speculation"
+
     static let missingSharedKVSourcesReason =
         "main model did not report which cache entries its shared K/V came from; continuing "
         + "without speculation"
@@ -639,9 +644,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let continuation = continuationToResume
         continuationToResume = nil
         if !passthrough, let feed, feed.fedTokenCount > 0 {
-            primeDrafterState(
-                after: feed, promptTokens: input.text.tokens,
-                cachePosition: cachePositionBeforePrefill)
+            primeDrafterState(after: feed, promptTokens: input.text.tokens)
         } else if !passthrough, drafter.requiresPromptPrefill || continuation != nil {
             primeDrafterState(
                 promptTokens: input.text.tokens, cachePosition: cachePositionBeforePrefill,
@@ -763,10 +766,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 firstBonus: y.tokens, position: position, positionDeltas: positionDeltas,
                 state: &state, sampler: mtpDrafterSeedSampler)
         else {
-            switchToPassthrough(
-                reason:
-                    "MTP drafter could not start at the cached position; continuing without speculation"
-            )
+            switchToPassthrough(reason: Self.coldStartFailedReason)
             return
         }
         drafterState = state
@@ -790,31 +790,32 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// did not reach.
     ///
     /// The target's final forward evaluated those positions, so its hidden rows are the rows of
-    /// the final prompt segment. The segment resumes the drafter from the boundary the chunks
-    /// left. When a chunk did not reach the drafter, or the drafter refuses the resume, the
-    /// drafter cold-starts at the segment instead.
+    /// the final prompt segment. The feed resumes the drafter over that segment from the boundary
+    /// the chunks left, or cold-starts it there (see ``MTPDrafterPrefillFeed/primedState``).
     ///
     /// - Parameters:
     ///   - feed: The feed the prefill chunks went through.
     ///   - promptTokens: The prompt tokens the target prefilled.
-    ///   - cachePosition: The target cache position before the prefill.
     private mutating func primeDrafterState(
-        after feed: MTPDrafterPrefillFeed, promptTokens: MLXArray, cachePosition: Int
+        after feed: MTPDrafterPrefillFeed, promptTokens: MLXArray
     ) {
         let segmentTokens = promptTokens[.ellipsis, feed.fedTokenCount...]
         let segmentLength = segmentTokens.dim(-1)
-        guard let resumableDrafter = drafter as? any ResumableMTPDrafterModel,
-            let targetHidden = mainState?[mtpLastHiddenStatesKey],
+        guard let targetHidden = mainState?[mtpLastHiddenStatesKey],
             segmentLength > 0, targetHidden.dim(1) >= segmentLength
         else {
             switchToPassthrough(reason: Self.missingPromptHiddenReason)
             return
         }
-        resumeOrColdStart(
-            resumableDrafter, segmentTokens: segmentTokens,
-            segmentHidden: targetHidden[0..., ..<segmentLength, 0...],
-            boundary: feed.isIntact ? feed.boundaryHidden : nil,
-            position: cachePosition + feed.fedTokenCount, state: feed.state)
+        guard
+            let state = feed.primedState(
+                finalSegment: segmentTokens, segmentHidden: targetHidden, firstBonus: y.tokens,
+                positionDeltas: mainState?[mtpPositionDeltasKey])
+        else {
+            switchToPassthrough(reason: Self.coldStartFailedReason)
+            return
+        }
+        drafterState = state
     }
 
     /// Single round: draft `blockSize - 1` tokens, verify with main, accept
