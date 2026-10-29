@@ -52,6 +52,43 @@ comments:
     - evidence: 2 files — Libraries/BenchmarkHelpers/BenchmarkHelpers.swift, IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift. Release xcodebuild `-only-testing:IntegrationTestingTests/GenerationBenchmarkTests/qwen38FourBitMTPSystemPromptCache()`: passed with 5 known issues. `swift build --build-tests`: Build complete. Not committed. New task ^chgkh4c filed.
     - next: /review
   timestamp: 2026-10-27T14:39:27.150018+00:00
+- actor: claude-code
+  id: 01m63segptfj9438byejnp9v29
+  text: |-
+    Audit at the shipped default (^hbq0f3n: blockSize 5, pMin 0.75). This supersedes the blockSize-2 table in the earlier comment.
+
+    Code audit: every item on the card is already implemented. Nothing left to build.
+    - `benchmarkMTPSystemPromptCache(container:drafter:scenarios:systemPrompt:systemPromptCharacterCount:blockSize:)` (Libraries/BenchmarkHelpers/BenchmarkHelpers.swift) builds `SpeculativeDecodingConfig(mtpDrafter:blockSize:)`. blockSize defaults to `defaultMTPBlockSize` = 5. The init's own default sets minimumDraftProbability to `defaultMTPMinimumDraftProbability` = 0.75. So the benchmark runs at the shipped default without overrides. For each turn it reports prefill ms, cached, drafter-prefilled, speculation state or fallback reason, decode tok/s, acceptance, and the plain-session line.
+    - `qwen38FourBitMTPSystemPromptCache()` (IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift) is enabled only when the target and `mlx-community/Qwen3.8-27B-MTP-4bit` are local. It runs the three chats: follow-ups, thinking, and edit. For every follow-up turn it checks mtpReusesCache, plainReusesCache, drafterPrefillsOnlyTheSuffix, matchesPlainTokens and decodesFasterThanPlain. It checks matchesPlainTokens on turn 0 too. A token match counts when the tokens are exact, or when MTP leaves plain only at a near-tie of plain's two best tokens. `mtpChatKnownGaps` is now EMPTY: the earlier known issues (^chgkh4c, ^achvxy1, ^ahnb0j9) are all closed, so every check is a hard #expect.
+    - `qwen38FourBitMTPGeneration()` is the cold single-prompt block/pMin sweep. It does not cover sessions, and this card's benchmark fills that gap.
+
+    Release run: xcodebuild in IntegrationTesting, `-destination 'platform=macOS,arch=arm64' -configuration Release ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES -only-testing:'IntegrationTestingTests/GenerationBenchmarkTests/qwen38FourBitMTPSystemPromptCache()'`. Result: TEST SUCCEEDED. The test passed after 45.8 s with 0 known issues and 0 skipped. The run held bench.lock and no other mlx-swift-lm build or test binary was running. Load average was 8.56 at start and 7.02 at end; the rest of the load came from other projects (EditorKit, Testudo, AgentViewKit tests). Log: /private/tmp/claude-501/-Users-wballard-github-swissarmyhammer-mlx-swift-lm/d4dd68db-1555-410f-b902-6376979e7c8c/scratchpad/hs9h-run.log
+
+    The system prompt is about 2170 tokens (math-tutor preamble plus 8000 characters). Temperature 0. "cached / pre" means cachedPromptTokenCount / prefilled tokens and prefill time.
+
+    | chat | turn | MTP cached / pre | drafter | MTP tok/s, accept | plain cached / pre | plain tok/s | speedup | tokens vs plain |
+    |---|---|---|---|---|---|---|---|---|
+    | follow-ups | 0 | 0 / 2212 in 1835ms | 2212 | 104.9, 95.4% | 0 / 2212 in 1820ms | 56.5 | 1.86x | exact |
+    | follow-ups | 1 | 2403 / 38 in 111ms | 38 | 99.4, 89.7% | 2404 / 37 in 125ms | 56.1 | 1.77x | exact |
+    | follow-ups | 2 | 2544 / 29 in 111ms | 29 | 102.9, 90.1% | 2544 / 29 in 124ms | 56.1 | 1.83x | near-tie at token 1 (gap 0.125) |
+    | thinking | 0 | 0 / 2191 in 1804ms | 2191 | 86.6, 81.2% | 0 / 2191 in 1793ms | 56.3 | 1.54x | exact |
+    | thinking | 1 | 2303 / 24 in 97ms | 24 | 93.5, 87.8% | 2303 / 24 in 112ms | 55.9 | 1.67x | near-tie at token 0 (gap 0.125) |
+    | thinking | 2 | 2418 / 24 in 94ms | 24 | 88.9, 77.6% | 2425 / 24 in 113ms | 55.8 | 1.59x | near-tie at token 36 (gap 0.125) |
+    | edit | 0 | 0 / 2197 in 1819ms | 2197 | 96.2, 87.5% | 0 / 2197 in 1812ms | 55.9 | 1.72x | exact |
+    | edit | 1 | 2264 / 26 in 109ms | 26 | 87.4, 88.3% | 2265 / 25 in 122ms | 55.8 | 1.57x | exact |
+    | edit | 2 (edit) | 2169 / 123 in 180ms | 123 | 85.1, 92.7% | 2169 / 123 in 187ms | 55.7 | 1.53x | exact |
+
+    Every turn ran with speculation on (state "MTP") and none fell back. Each follow-up turn reused the cache and prefilled only the new suffix, 24-38 tokens, with the drafter fed the same suffix. The edit turn now keeps the system-prompt prefix (2169 cached, 123 prefilled), the same as plain; the earlier run rebuilt all 2292 tokens. The ChatSession reference numbers (MTP 100.4/87.4/83.4 vs plain 59.5) were measured at load < 5. This run's plain rate of about 56 is lower because the machine was shared (load 7-9). MTP still beats plain on every follow-up turn of the math chats, by 1.53-1.83x.
+
+    Checkbox audit: all 4 subtasks, both acceptance items and the Tests item are already [x]. The run above confirms them at the shipped default. I made no edits.
+  timestamp: 2026-10-29T12:16:39.642475+00:00
+- actor: claude-code
+  id: 01m63setkekrhsscc0h6nkwb8z
+  text: |-
+    ### implement — no-change
+    - evidence: 0 files changed. The audit found every subtask, acceptance item and test already met by Libraries/BenchmarkHelpers/BenchmarkHelpers.swift `benchmarkMTPSystemPromptCache` and IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift `qwen38FourBitMTPSystemPromptCache()`, which run at the shipped default blockSize 5, pMin 0.75. `mtpChatKnownGaps` is empty. The Release xcodebuild `-only-testing:'IntegrationTestingTests/GenerationBenchmarkTests/qwen38FourBitMTPSystemPromptCache()'` gave TEST SUCCEEDED: 1 test passed in 45.8 s, 0 known issues, 0 skipped. Load average was 8.56 at start and 7.02 at end, under bench.lock. Follow-up turns ran at 1.53-1.83x plain. Edit turn: 2169 cached, 123 prefilled. No swift build or unit bundles were run, because there was no code change.
+    - next: /review (or close; nothing new to review)
+  timestamp: 2026-10-29T12:16:49.774116+00:00
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 - 01M5QWHA34WP7DQMWQ4AHNB0J9
