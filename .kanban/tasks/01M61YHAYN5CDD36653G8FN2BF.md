@@ -26,8 +26,24 @@ comments:
     - evidence: 3 files — Tests/MLXLMTests/GDNDecodeKernelFixture.swift, Tests/MLXLMTests/Qwen35MTPTests.swift, Tests/MLXLMTests/Qwen35KernelModelVocabularyTests.swift (new)
     - next: /review
   timestamp: 2026-10-29T06:06:14.023050+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m634aebfjx1kd7ze9bns9mqm
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (5fca3383) — counts findings 0, confirmed 0, refuted 0 (7 attempted, 0 failed); 3 files reviewed, 2 .kanban task files skipped (no validator matches)
+    - next: none — task moved to done
+  timestamp: 2026-10-29T06:07:26.063678+00:00
+- actor: claude-code
+  id: 01m634aqc7er1ph6t0xkq3tr7z
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 3 test files (fixture vocabulary 64, vocabulary suite)
+    - test: green — 5 bundles 0 failures; card input 20/20 processes one outcome
+    - commit: 5fca3383
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T06:07:35.303036+00:00
+position_column: done
+position_ordinal: fffc80
 title: LLM Qwen35 kernel fixture decode is not bitwise deterministic across processes
 ---
 ## What
