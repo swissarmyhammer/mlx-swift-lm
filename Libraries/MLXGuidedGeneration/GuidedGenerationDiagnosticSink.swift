@@ -94,12 +94,14 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     /// when no guarded generation ran.
     public private(set) var adaptiveBlockSize: Int?
 
-    /// Why the configured MTP drafter did not speculate, in words, when it cannot draft for
-    /// the target; `nil` otherwise.
+    /// Why the configured MTP drafter did not speculate, or stopped speculating, in words: it
+    /// cannot draft for the target, or a forward of the target gave no drafter state; `nil`
+    /// otherwise.
     public private(set) var speculationFallbackReason: String?
 
-    /// Why each guided generation whose configured MTP drafter cannot draft for the target
-    /// decoded plainly, one reason for each such generation, in order.
+    /// Why each guided generation whose configured MTP drafter cannot draft for the target, or
+    /// whose target stopped giving drafter state, decoded plainly, one reason for each such
+    /// generation, in order.
     public private(set) var speculationFallbacks: [SpeculativeDecodingFallbackReason] = []
 
     private let cancelAfterEmitCount: Int?
@@ -213,8 +215,8 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     /// Records why the configured MTP drafter decodes plainly.
     ///
     /// - Parameters:
-    ///   - statedReason: The drafter, the target, and why the drafter cannot draft for the
-    ///     target.
+    ///   - statedReason: The drafter or the target, and why the generation does not
+    ///     speculate.
     ///   - reason: The fallback reason the generation reports.
     public func recordSpeculationFallback(
         _ statedReason: String, reason: SpeculativeDecodingFallbackReason

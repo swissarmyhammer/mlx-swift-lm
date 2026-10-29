@@ -52,8 +52,57 @@ comments:
     - evidence: swift build --build-tests 0 compiler warnings; xctest MLXLMTests 2060, MLXGuidedGenerationTests 72, MLXFoundationModelsTests 455, CXGrammarTests 7, MLXHuggingFaceMacrosTests 7 — 0 failures, 0 skipped; IntegrationTesting xcodebuild build-for-testing Release: TEST BUILD SUCCEEDED. Commit e1bdd285.
     - next: phase 2 on go.
   timestamp: 2026-10-29T16:39:26.016244+00:00
-position_column: doing
-position_ordinal: '8380'
+- actor: claude-code
+  id: 01m64902h574pax0h29kydqqvc
+  text: |-
+    ### review — findings
+    - evidence: review sha ed863693~1..ed863693 — 9 findings (11 confirmed, 3 refuted) — Libraries/MLXGuidedGeneration/GuidedSpeculation.swift:253, Libraries/MLXLMCommon/MTPAdaptiveSpeculation.swift:416, Libraries/MLXLMCommon/MTPAdaptiveSpeculation.swift:447, Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:1518, Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:1560, Tests/MLXLMTestSupport/MTPAdaptiveTestPolicy.swift:12, :13, :15, :16
+    - next: implement the 9 findings in the 2026-10-29 11:40 section; the card's real-model subtasks (quantify, host-sync measurement, release guards) are also still open pending measurement, so the task stays in review.
+  timestamp: 2026-10-29T16:48:23.589767+00:00
+- actor: claude-code
+  id: 01m6490p09vtmxyyjwwkx3edvt
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — adaptive guard + one-step-late floor read (worktree e1bdd285, applied to mtp)
+    - test: green — 5 bundles 0 fail/0 skip, Release build-for-testing ok; real-model measurement pending GPU slot
+    - commit: ed863693
+    - review: findings — GuidedSpeculation.swift:253, MTPAdaptiveSpeculation.swift:416, :447, MTPSpeculativeTokenIterator.swift:1518, :1560, MTPAdaptiveTestPolicy.swift:12, :13, :15, :16
+  timestamp: 2026-10-29T16:48:43.529519+00:00
+- actor: claude-code
+  id: 01m649yy029zfr9t10d8a1kdn8
+  text: |-
+    Review findings (2026-10-29 11:40) worked, commit 71cc7c66 on top of mtp ed863693. No GPU work.
+
+    - GuidedSpeculation stand-down: `standDown(target:)` replaces both silent `stoodDown = true` branches (`recordPausedRow`, `commitDrafter`). It records `.unavailableContinuation` with its stated reason on the guided diagnostic sink; SpeculativeDecodingOutcome reads that sink for the `speculativeDecodingFallbackReason` metadata. `MTPDrafterFallbackLog.shared` logs it once per target. The stand-down is recorded at most once per generation. Added `package init(reason:statedReason:)` to MTPDrafterFallback.
+    - New test file: Tests/MLXFoundationModelsTests/GuidedGenerationMTPStandDownTests.swift. A Qwen35 target subclass drops the hidden state on one-token forwards. Two tests:
+      - One covers the paused path, on the schemas whose first round verifies several tokens, and asserts a probe ran.
+      - One covers all schemas: whichever forward stands down first, the output is the plain output and exactly one fallback is recorded.
+    - Shared code in MTPSpeculativeTokenIterator:
+      - `resetPendingBuffer()` is used by `next()` and `nextGuardedPlainToken()`.
+      - `forwardTarget(_:state:reconcilingSharedKV:)` runs the forward, commits, sets mainState, optionally reconciles shared KV, and samples. It is used by `passthroughStep` and `feedPlainStep`; each site keeps its own state setup, eval/item or asyncEval, drafter commit and kvCachePlan.
+    - Named constants:
+      - `MTPAdaptiveController.backoffFactor = 2` for the probe interval and pause doubling.
+      - The `losingEveryRound` test policy now names its probe length, probe interval, and pause lengths.
+      - swiftlint no_magic_numbers (allowed 0, 1, -1, 100): 0 violations in both files.
+
+    ## Step record
+    - Build: `swift build --build-tests`. 0 compiler warnings (only the "missing creator for mutated node" build-system notice).
+    - Tests, 0 failures and 0 skipped:
+
+      | Bundle | Tests |
+      |---|---|
+      | MLXLMTests | 2060 |
+      | MLXGuidedGenerationTests | 72 |
+      | MLXFoundationModelsTests | 457 (+2 new) |
+      | CXGrammarTests | 7 |
+      | MLXHuggingFaceMacrosTests | 7 |
+
+    - IntegrationTesting Release build-for-testing: TEST BUILD SUCCEEDED.
+    - Commit: 71cc7c66 (source only, no .kanban).
+    - Real-model subtasks left unchecked for the GPU slot.
+  timestamp: 2026-10-29T17:05:14.754233+00:00
+position_column: review
+position_ordinal: '80'
 title: 'MTP: stay faster than plain under CPU load (adaptive block size / plain fallback, fewer host syncs)'
 ---
 Final verification of stable 148f227e at load average 10–14 showed MTP losing to plain on some turns (ChatSession edit turn 34.6 vs 52.3 tok/s; guided JSON 11.8 vs 14.3) while other turns kept 1.4–1.7x. MTP does host syncs every round (verify readback, plus one per chained step for the pMin gate), so CPU contention costs it more than plain. The ACP SWE-bench run executes CPU-heavy work (django test runs, code-context index, other sessions' builds) next to generation, so this matters in production.
@@ -66,3 +115,21 @@ Wait for data first: the quiet-machine rerun of the two failed benchmarks, mtpsm
 - [ ] Release guards at quiet load stay ≥ current; under synthetic load MTP ≥ plain.
 
 #mtp #perf
+
+## Review Findings (2026-10-29 11:40)
+
+> Scope: `review sha ed863693~1..ed863693` — reviewed the diffs only — lines this change added or modified. 15 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M642KXE2WG006RAY4TDJ3WAA.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M642KXE2WG006RAY4TDJ3WAA.md` — no validator matches this file
+
+- [x] `Libraries/MLXGuidedGeneration/GuidedSpeculation.swift:253` `swift/preconditions` — When a paused forward returns no hidden row, the speculation ends through `stoodDown = true` with no log and no recorded reason. The end of the stream is then silent, and the `GuidedGenerationDiagnosticSink` shows nothing about why speculation stopped. Record why the speculation stopped, for example by setting a stand-down reason that the completion information reports, or by pairing the branch with `assertionFailure` and a production log, as the rule requires for an unexpected but recoverable condition.
+- [x] `Libraries/MLXLMCommon/MTPAdaptiveSpeculation.swift:416` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLMCommon/MTPAdaptiveSpeculation.swift:447` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:1518` `duplication/duplication` — `nextGuardedPlainToken` repeats the three-line buffer reset that `next()` already performs before a speculation round. A later change to how the pending buffer is cleared would have to be made in both places. Move the three resets into one private method, such as `resetPendingBuffer()`, and call it from both `next()` and `nextGuardedPlainToken()`.
+- [x] `Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:1560` `duplication/duplication` — `feedPlainStep` repeats the forward-feed sequence of `passthroughStep`: build the state with the emit flag, call `mainModel` on the one-token input, commit the processed tokens, sample from the logits, apply the KV cache plan, and start evaluation. The copies differ only in the input token shape, whether the snapshot key is cleared, and whether shared-KV reconciliation runs. Those differences are what a shared helper should take as parameters, so the two can drift apart. Extract one private helper that takes the token array, and an optional flag for the shared-KV reconciliation. Have `passthroughStep` and `feedPlainStep` both call it, and keep only the differing bookkeeping at each site.
+- [x] `Tests/MLXLMTestSupport/MTPAdaptiveTestPolicy.swift:12` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTestSupport/MTPAdaptiveTestPolicy.swift:13` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTestSupport/MTPAdaptiveTestPolicy.swift:15` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTestSupport/MTPAdaptiveTestPolicy.swift:16` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.

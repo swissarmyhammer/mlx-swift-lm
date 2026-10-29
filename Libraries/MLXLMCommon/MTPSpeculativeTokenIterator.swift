@@ -1358,10 +1358,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             stepState = stepState ?? LMOutput.State()
             stepState?[mtpEmitFlagKey] = true
         }
-        let result = mainModel(y[text: .newAxis], cache: mainCache, state: stepState)
-        mainState = result.state
-        mainCacheStorage.commitProcessedTokens(y.cacheSequenceLength)
-        let token = sampleToken(from: result.logits)
+        let (result, token) = forwardTarget(y, state: stepState)
         eval(token)
         let tokenInt = token.item(Int.self)
 
@@ -1396,6 +1393,42 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         return tokenInt
     }
 
+    /// Feeds `tokens` to the target in one forward and samples the next token from its logits.
+    ///
+    /// The forward's tokens join the main cache's processed tokens and its state becomes
+    /// ``mainState``. With `reconcilingSharedKV`, the shared-KV state the forward returned is
+    /// placed against the cache's emitted lengths; a state that cannot be placed ends
+    /// speculation for the stream and clears ``mainState``.
+    ///
+    /// - Parameters:
+    ///   - tokens: The tokens to feed.
+    ///   - stepState: The state the forward runs with.
+    ///   - reconcilingSharedKV: Whether to reconcile the shared-KV state of the forward.
+    /// - Returns: The forward's output and the token sampled from its last position, shape `[1]`.
+    private mutating func forwardTarget(
+        _ tokens: LMInput.Text, state stepState: LMOutput.State?,
+        reconcilingSharedKV: Bool = false
+    ) -> (output: LMOutput, sampled: MLXArray) {
+        let result = mainModel(tokens[text: .newAxis], cache: mainCache, state: stepState)
+        mainCacheStorage.commitProcessedTokens(tokens.cacheSequenceLength)
+        mainState = result.state
+        if reconcilingSharedKV,
+            !reconcileSharedKVState(
+                &mainState, discarding: 0, lengths: mainCacheStorage.emittedLength(forLeaf:))
+        {
+            switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
+            mainState = nil
+        }
+        return (result, sampleToken(from: result.logits))
+    }
+
+    /// Empties the pending buffer before a round or a plain step fills it.
+    private mutating func resetPendingBuffer() {
+        pendingTokens.removeAll(keepingCapacity: true)
+        pendingIndex = 0
+        committedPendingTokenCount = 0
+    }
+
     public mutating func next() -> Int? {
         if let maxTokens, tokenCount >= maxTokens {
             return nil
@@ -1421,9 +1454,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
 
         // Run a new speculation round (may transition to passthrough).
-        pendingTokens.removeAll(keepingCapacity: true)
-        pendingIndex = 0
-        committedPendingTokenCount = 0
+        resetPendingBuffer()
         autoreleasepool { speculateRound() }
         adaptiveGuard?.recordEmitted(pendingTokens.count)
 
@@ -1515,9 +1546,7 @@ extension MTPSpeculativeTokenIterator {
     /// consumer reads this one. The last step of a run, and the step before the token limit,
     /// feed nothing: the stream then stands as after a round, its last token not yet fed.
     private mutating func nextGuardedPlainToken() -> Int {
-        pendingTokens.removeAll(keepingCapacity: true)
-        pendingIndex = 0
-        committedPendingTokenCount = 0
+        resetPendingBuffer()
         lastRoundAccepted = nil
         let endsRun =
             (adaptiveGuard?.controller.plainStepsRemaining ?? 0) <= 1
@@ -1556,17 +1585,8 @@ extension MTPSpeculativeTokenIterator {
         var stepState = mainState ?? LMOutput.State()
         stepState[mtpEmitFlagKey] = true
         stepState[mtpVerifyKeepsSnapshotsKey] = nil
-        let input = LMInput.Text(tokens: token)
-        let result = mainModel(input[text: .newAxis], cache: mainCache, state: stepState)
-        mainCacheStorage.commitProcessedTokens(input.cacheSequenceLength)
-        mainState = result.state
-        if !reconcileSharedKVState(
-            &mainState, discarding: 0, lengths: mainCacheStorage.emittedLength(forLeaf:))
-        {
-            switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
-            mainState = nil
-        }
-        let sampled = sampleToken(from: result.logits)
+        let (result, sampled) = forwardTarget(
+            LMInput.Text(tokens: token), state: stepState, reconcilingSharedKV: true)
         recordPlainRow(sampled: sampled, state: result.state)
         kvCachePlan.apply(to: mainCacheStorage)
         asyncEval([sampled] + mainCache.flatMap(\.evaluationState))

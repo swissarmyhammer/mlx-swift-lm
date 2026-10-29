@@ -245,6 +245,10 @@ package struct MTPAdaptiveController: Sendable {
     /// does not probe plain decode every few tokens.
     package static let minimumStaleContextGrowth = 4096
 
+    /// The factor by which a winning probe stretches the probe interval, and a losing resume
+    /// stretches the next pause.
+    private static let backoffFactor = 2
+
     /// The policy of the controller.
     package let policy: MTPAdaptivePolicy
 
@@ -413,7 +417,9 @@ package struct MTPAdaptiveController: Sendable {
             awaitsProbeVerdict = false
             probeInterval =
                 leadsByMargin
-                ? Swift.min(2 * probeInterval, policy.maximumProbeInterval) : policy.probeInterval
+                ? Swift.min(
+                    Self.backoffFactor * probeInterval, policy.maximumProbeInterval)
+                : policy.probeInterval
         }
         guard leadsByMargin, blockSize < maximumBlockSize, growthHeldRounds == 0 else { return }
         changeBlockSize(by: 1)
@@ -444,7 +450,8 @@ package struct MTPAdaptiveController: Sendable {
     private mutating func startPause() {
         phase = .paused(remaining: nextPauseLength)
         pauseCount += 1
-        nextPauseLength = Swift.min(2 * nextPauseLength, policy.maximumPauseLength)
+        nextPauseLength = Swift.min(
+            Self.backoffFactor * nextPauseLength, policy.maximumPauseLength)
         awaitsWarmupStep = true
         resumedFromPause = true
     }

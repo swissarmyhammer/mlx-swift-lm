@@ -20,6 +20,14 @@ package struct MTPDrafterFallback: Sendable, Equatable {
     /// The fallback in words: the drafter, the target, and why the drafter cannot draft for it.
     package let statedReason: String
 
+    /// - Parameters:
+    ///   - reason: The kind of the fallback.
+    ///   - statedReason: The fallback in words.
+    package init(reason: SpeculativeDecodingFallbackReason, statedReason: String) {
+        self.reason = reason
+        self.statedReason = statedReason
+    }
+
     /// The fallback of `drafter` for `target`, logged once for each drafter and target, or `nil`
     /// when the drafter can draft for the target.
     ///

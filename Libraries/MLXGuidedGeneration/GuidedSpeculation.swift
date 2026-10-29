@@ -237,7 +237,7 @@ struct GuidedSpeculation {
             let output = target.verify([token])
             target.keepVerified(1, of: 1)
             lastLogits = output.logits
-            recordPausedRow(token: token, output: output)
+            recordPausedRow(token: token, output: output, target: target)
         }
         guard let lastLogits else {
             preconditionFailure("A guided feed holds at least one token")
@@ -249,9 +249,9 @@ struct GuidedSpeculation {
 
     /// Keeps the hidden row a paused forward of `token` gave, or ends the speculation when the
     /// forward gave none.
-    private mutating func recordPausedRow(token: Int32, output: LMOutput) {
+    private mutating func recordPausedRow(token: Int32, output: LMOutput, target: GuidedTarget) {
         guard let hidden = output.state?[mtpLastHiddenStatesKey], hidden.dim(1) > 0 else {
-            stoodDown = true
+            standDown(target: target)
             return
         }
         pausedFeed.append(token)
@@ -379,7 +379,7 @@ struct GuidedSpeculation {
         target: GuidedTarget
     ) {
         guard let hidden, let first = next.first else {
-            stoodDown = true
+            standDown(target: target)
             return
         }
         self.positionDeltas = positionDeltas ?? self.positionDeltas
@@ -389,6 +389,32 @@ struct GuidedSpeculation {
             finalToken: MLXArray([first]), positionDeltas: self.positionDeltas,
             state: &drafterState, sampler: mtpDrafterSeedSampler)
         lastKeptHidden = hidden[0..., (kept - 1) ..< kept, 0...]
+    }
+
+    /// Ends the speculation of the generation because a forward of `target` gave no drafter
+    /// state, and reports it once: the generation records the
+    /// ``SpeculativeDecodingFallbackReason/unavailableContinuation`` fallback on its diagnostic
+    /// sink, which the response metadata reads, and ``MTPDrafterFallbackLog/shared`` logs the
+    /// stated reason once for each target.
+    ///
+    /// - Parameter target: The target whose forward gave no drafter state.
+    private mutating func standDown(target: GuidedTarget) {
+        guard !stoodDown else { return }
+        stoodDown = true
+        let fallback = MTPDrafterFallback(
+            reason: .unavailableContinuation,
+            statedReason: Self.missingDrafterStateReason(of: target.model))
+        MTPDrafterFallbackLog.shared.report(fallback)
+        diagnosticSink?.recordSpeculationFallback(fallback.statedReason, reason: fallback.reason)
+    }
+
+    /// The stated reason of a stand-down: the target and the drafter state it did not give.
+    ///
+    /// - Parameter model: The target model.
+    /// - Returns: The reason in words.
+    static func missingDrafterStateReason(of model: any LanguageModel) -> String {
+        "the target \(type(of: model)) gave no drafter hidden state for a guided forward, "
+            + "so the rest of the generation decodes without speculation"
     }
 
     /// Rolls the matcher back over the drafts from `index` on.
