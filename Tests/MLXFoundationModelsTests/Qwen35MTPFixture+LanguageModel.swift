@@ -30,15 +30,18 @@ extension Qwen35MTPFixture {
     ///   - eosTokenIds: The tokens that end a generation.
     ///   - tokenizer: The tokenizer that renders the prompts and decodes the replies, or `nil`
     ///     for the fixture's own.
+    ///   - toolCallFormat: The response protocol of the target, whose cache-reuse rules the
+    ///     executor consults, or `nil` for none.
     ///   - speculativeDecoding: The MTP drafter of the model, or `nil` for plain decode.
     /// - Returns: The model.
     func makeLanguageModel(
         weights: URL, capabilities: [LanguageModelCapabilities.Capability] = [],
         resolver: any ModelConfigurationResolver = DefaultConfigurationResolver(),
         eosTokenIds: Set<Int> = [], tokenizer: (any Tokenizer)? = nil,
-        speculativeDecoding: MLXSpeculativeDecoding? = nil
+        toolCallFormat: ToolCallFormat? = nil, speculativeDecoding: MLXSpeculativeDecoding? = nil
     ) -> MLXLanguageModel {
         var context = makeModelContext(eosTokenIds: eosTokenIds)
+        context.configuration.toolCallFormat = toolCallFormat
         if let tokenizer {
             context.tokenizer = tokenizer
             context.processor = ScalarTokenizerInputProcessor(

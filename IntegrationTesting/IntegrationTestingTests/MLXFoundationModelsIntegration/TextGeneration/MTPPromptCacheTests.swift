@@ -19,6 +19,11 @@ import Testing
 /// turn and the drafter state beside it, recomputes what the same session recomputes without
 /// MTP, and writes the text that session writes, or parts from it only where it writes the best
 /// token of an uncached forward pass or a near tie.
+///
+/// Each session keeps the reasoning protocol of the target, as an app that declares `.reasoning`
+/// does, thus the render of the second turn writes the reasoning of the first turn inside its
+/// think block and reuses the whole ledger of the first turn: the second turn feeds only the
+/// close of that turn and the new prompt.
 @Suite(.serialized, .timeLimit(.minutes(30)))
 struct MTPPromptCacheTests {
 
@@ -162,8 +167,8 @@ struct MTPPromptCacheTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
     func aSecondTurnReusesThePromptCacheAndTheDrafterState() async throws {
-        let plainModel = try Qwen38FourBitMTPModel.make(speculates: false)
-        let mtpModel = try Qwen38FourBitMTPModel.make(speculates: true)
+        let plainModel = try Qwen38FourBitMTPModel.make(speculates: false, reasons: true)
+        let mtpModel = try Qwen38FourBitMTPModel.make(speculates: true, reasons: true)
 
         let plain = try await converse(plainModel)
         let mtp = try await converse(mtpModel)
@@ -190,10 +195,15 @@ struct MTPPromptCacheTests {
                 divergence.mtpWroteTheArgmax || divergence.mtpWroteANearTie,
                 "turn \(divergentTurn + 1): \(divergence)")
         }
-        // The second turn starts from the cache of the first: it feeds less than the whole chat.
-        let second = try #require(mtp.turns.last)
-        #expect(second.cachedTokenCount > 0)
-        #expect(second.recomputedTokenCount < second.promptTokenCount)
+        // The second turn of each session reuses the whole cache of the first: it feeds only
+        // the tokens past the commit that closes the first turn, never the chat again. A splice
+        // counts the reused tokens up to that commit in the render, which a turn that stopped
+        // on its token budget reaches one token past the ledger.
+        for conversation in [mtp, plain] {
+            let first = try #require(conversation.turns.first)
+            let second = try #require(conversation.turns.last)
+            #expect(second.cachedTokenCount >= first.ledger.count)
+        }
         // The drafter state began with the first turn and was resumed, not started cold.
         #expect(mtp.drafterStartPosition == 0)
         await plainModel.evict()

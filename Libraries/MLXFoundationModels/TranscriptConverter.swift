@@ -34,6 +34,15 @@ struct TranscriptConverter {
     ///     answer carries forward, the chain-of-thought does not.
     ///     `ReasoningConfig.replaysReasoningIntoHistory` decides which model
     ///     family replays.
+    ///
+    ///     A turn that stopped on its token budget inside its reasoning leaves
+    ///     a response entry with no text beside its reasoning entry. Under
+    ///     replay that turn comes back as an assistant message with an empty
+    ///     content and the reasoning, as `ChatSession` records it, thus the
+    ///     history render writes the reasoning the model wrote inside the think
+    ///     block of the turn, and the render of the next turn extends the
+    ///     tokens the prompt cache holds. A response entry with no text and no
+    ///     reasoning still gives no message.
     /// - Returns: Array of MLX Chat.Message objects
     static func mlxMessages(
         for entries: some Collection<Transcript.Entry>, replayReasoning: Bool = false
@@ -45,7 +54,8 @@ struct TranscriptConverter {
                 replay.hold(extractText(from: reasoning.segments))
                 continue
             }
-            guard var message = try convert(entry: entry) else { continue }
+            let placeholder = replayReasoning ? reasoningOnlyTurn(of: entry) : nil
+            guard var message = try placeholder ?? convert(entry: entry) else { continue }
             replay.settle(before: &message, in: &messages)
             messages.append(message)
             if message.role == .assistant {
@@ -53,7 +63,32 @@ struct TranscriptConverter {
             }
         }
         replay.settle(in: &messages)
-        return messages
+        return messages.filter { !holdsNothing($0) }
+    }
+
+    /// The assistant message that holds the place of `entry` when it is a
+    /// response entry with no text, for the reasoning of its turn to ride on.
+    ///
+    /// - Parameter entry: the entry to convert.
+    /// - Returns: an assistant message with an empty content, or `nil` when
+    ///   `entry` is not a response entry with no text.
+    private static func reasoningOnlyTurn(of entry: Transcript.Entry) -> Chat.Message? {
+        guard case .response(let response) = entry, extractText(from: response.segments) == nil
+        else {
+            return nil
+        }
+        return .assistant("")
+    }
+
+    /// Whether `message` is the place of a response entry with no text that no
+    /// reasoning took: an assistant message with no content, no reasoning and
+    /// no tool calls. No other entry converts to such a message.
+    ///
+    /// - Parameter message: a converted message.
+    /// - Returns: `true` when the history keeps nothing of `message`.
+    private static func holdsNothing(_ message: Chat.Message) -> Bool {
+        message.role == .assistant && message.content.isEmpty && message.reasoning == nil
+            && message.tool == nil
     }
 
     /// The reasoning text between two assistant messages, and the assistant

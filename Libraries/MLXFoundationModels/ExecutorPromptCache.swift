@@ -1061,7 +1061,9 @@ struct ExecutorPromptCachePlan {
     /// serve a render that agrees with the entry up to that checkpoint.
     ///
     /// The drafter state of the entry comes along only when the render
-    /// extends the ledger whole and the drafter `drafterID` made the state.
+    /// extends the ledger whole or a protocol rule splices onto it, thus the
+    /// caches stay where the ledger ends, and the drafter `drafterID` made the
+    /// state.
     /// The key of a session names no drafter, thus a session that changed its
     /// drafter finds the state of the old one and starts the new one cold. A
     /// checkpoint restore takes the drafter state of the checkpoint.
@@ -1108,10 +1110,12 @@ struct ExecutorPromptCachePlan {
                 representedTokens: reuse.representedTokens,
                 state: entry.state,
                 decision: decision(of: reuse, render: promptTokens, ledger: entry.tokens))
-            // A splice or a rewind moves the caches away from the end of the
-            // ledger, where the drafter state stands, and the drafter state
-            // cannot move with them.
-            if reuse.kind == .extend {
+            // An extension and a splice both feed the render onto the caches
+            // where the ledger ends, and the drafter state stands there too, as
+            // `ChatSession` resumes it after either. A rewind moves the caches
+            // away from the end of the ledger, and the drafter state cannot
+            // move with them.
+            if reuse.kind == .extend || reuse.kind == .splice {
                 plan.drafterState = entry.drafterState(resumableBy: drafterID)
             }
             return plan

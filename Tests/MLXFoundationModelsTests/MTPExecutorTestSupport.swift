@@ -7,6 +7,7 @@ import FoundationModels
 import MLXLMCommon
 import MLXLMTestSupport
 import Synchronization
+import Testing
 
 @testable import MLXFoundationModels
 
@@ -181,6 +182,28 @@ enum MTPExecutorTurns {
         return turn
     }
 
+    /// Runs one executor pass of `model` for `request` with `store` as its prompt cache store,
+    /// and requires that the pass and its channel succeeded.
+    ///
+    /// - Parameters:
+    ///   - request: The request of the pass.
+    ///   - model: The model of the pass.
+    ///   - store: The prompt cache store the pass binds.
+    /// - Returns: What the pass streamed.
+    /// - Throws: The error of the executor's initializer, or an issue when the pass or its
+    ///   channel failed.
+    static func respond(
+        to request: LanguageModelExecutorGenerationRequest, model: MLXLanguageModel,
+        inside store: ExecutorPromptCacheStore
+    ) async throws -> MTPTurn {
+        let turn = try await ExecutorPromptCacheStore.$current.withValue(store) {
+            try await respond(to: request, model: model)
+        }
+        try #require(turn.failure == nil, "The pass failed: \(turn.failure ?? "")")
+        try #require(turn.channelFailure == nil, "The channel failed: \(turn.channelFailure ?? "")")
+        return turn
+    }
+
     /// The error a cancelled channel consumer met, other than the `CancellationError` that
     /// stopping it gives.
     ///
@@ -212,11 +235,16 @@ struct FixtureReasoningResolver: ModelConfigurationResolver {
     ///   - start: The token that opens the reasoning.
     ///   - end: The token that closes the reasoning.
     ///   - tokenizer: The tokenizer that spells the tokens.
-    init(start: Int, end: Int, tokenizer: any Tokenizer) {
+    ///   - replaysReasoningIntoHistory: Whether the reasoning of a past turn goes back into its
+    ///     history render, as ``ReasoningConfig/replaysReasoningIntoHistory`` states.
+    init(
+        start: Int, end: Int, tokenizer: any Tokenizer, replaysReasoningIntoHistory: Bool = false
+    ) {
         reasoningConfig = ReasoningConfig(
             startDelimiter: tokenizer.decode(tokenIds: [start], skipSpecialTokens: false),
             endDelimiter: tokenizer.decode(tokenIds: [end], skipSpecialTokens: false),
-            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true))
+            promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
+            replaysReasoningIntoHistory: replaysReasoningIntoHistory)
     }
 
     func resolve(

@@ -119,15 +119,25 @@ enum Qwen38FourBitMTPModel {
     /// `LLMModelFactory` loads the target, as the MTP benchmarks do: the text MTP head drafts
     /// for the text target, and `loadModelContainer` would load the multimodal one.
     ///
-    /// - Parameter speculates: Whether the model drafts with the MTP head.
+    /// A model that reasons keeps the reasoning protocol of the target and declares `.reasoning`,
+    /// thus each turn writes its reasoning apart from its response, and a later turn renders that
+    /// reasoning inside the think block of its turn. A model that does not reason drops the
+    /// protocol: the executor renders the plain prompt, and the model writes its reasoning as its
+    /// response.
+    ///
+    /// - Parameters:
+    ///   - speculates: Whether the model drafts with the MTP head.
+    ///   - reasons: Whether the model keeps the reasoning protocol of the target.
     /// - Returns: The model.
     /// - Throws: The error of the speculative decoding configuration.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    static func make(speculates: Bool) throws -> MLXLanguageModel {
-        MLXLanguageModel(
+    static func make(speculates: Bool, reasons: Bool = false) throws -> MLXLanguageModel {
+        let resolver: any ModelConfigurationResolver =
+            reasons ? DefaultConfigurationResolver() : PlainPromptResolver()
+        return MLXLanguageModel(
             configuration: ModelConfiguration(id: targetID),
-            capabilities: [],
-            configurationResolver: PlainPromptResolver(),
+            capabilities: reasons ? [.reasoning] : [],
+            configurationResolver: resolver,
             speculativeDecoding: speculates
                 ? try MLXSpeculativeDecoding(
                     drafterConfiguration: ModelConfiguration(id: drafterID),
