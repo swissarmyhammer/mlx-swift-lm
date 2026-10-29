@@ -64,11 +64,15 @@ public struct MTPAdaptivePolicy: Sendable, Hashable {
     /// The weight of the newest sample in each moving estimate, above 0 and at most 1.
     public var smoothing: Double
 
-    /// The default policy: enabled.
-    public static let `default` = MTPAdaptivePolicy()
+    /// The guard with its tuned settings.
+    public static let enabled = MTPAdaptivePolicy()
 
     /// A policy that speculates at the configured block size for the whole stream.
     public static let disabled = MTPAdaptivePolicy(isEnabled: false)
+
+    /// The default policy: ``disabled``. Real-model runs showed the guard backing off while
+    /// unguarded rounds still beat plain decode, so a stream opts in with ``enabled``.
+    public static let `default` = disabled
 
     /// Creates a policy.
     ///

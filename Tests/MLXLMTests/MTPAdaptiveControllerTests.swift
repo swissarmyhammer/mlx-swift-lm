@@ -311,12 +311,14 @@ struct MTPAdaptiveControllerTests {
         }
     }
 
-    @Test("the default policy is enabled and valid, and the disabled one is not enabled")
-    func defaultPolicyIsValid() throws {
+    @Test("the default policy is the disabled one, and the enabled one is enabled and valid")
+    func defaultPolicyIsDisabled() throws {
+        try MTPAdaptivePolicy.enabled.validate()
         try MTPAdaptivePolicy.default.validate()
 
-        #expect(MTPAdaptivePolicy.default.isEnabled)
+        #expect(MTPAdaptivePolicy.default == .disabled)
         #expect(!MTPAdaptivePolicy.disabled.isEnabled)
+        #expect(MTPAdaptivePolicy.enabled.isEnabled)
     }
 }
 

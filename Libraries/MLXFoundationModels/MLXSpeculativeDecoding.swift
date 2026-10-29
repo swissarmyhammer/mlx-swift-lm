@@ -65,7 +65,8 @@ public struct MLXSpeculativeDecoding: Sendable {
     public let memoryPolicy: SpeculativeDecodingMemoryPolicy?
 
     /// How each generation guards against decoding slower than plain decode; see
-    /// ``MTPAdaptivePolicy``. The default is enabled.
+    /// ``MTPAdaptivePolicy``. The default is ``MTPAdaptivePolicy/disabled``; pass
+    /// ``MTPAdaptivePolicy/enabled`` to turn the guard on.
     public let adaptivePolicy: MTPAdaptivePolicy
 
     /// The loader of the drafter that drafts for a target, as the target loaded.
