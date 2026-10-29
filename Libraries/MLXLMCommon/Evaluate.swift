@@ -2543,6 +2543,36 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
 package typealias PreparedGenerationState =
     (LMOutput.State?, _ promptBoundaryContinuation: () -> MTPDrafterContinuation?) -> Void
 
+/// Builds the token iterator of one token-recording generation and hands `preparedState` what
+/// its prefill left.
+///
+/// - Parameters:
+///   - input: the input for the language model.
+///   - cache: optional ``KVCache``.
+///   - state: optional model state saved with `cache`.
+///   - parameters: the configuration options for token generation.
+///   - context: the model context, including the model and its tokenizer.
+///   - speculation: the MTP drafter the generation speculates with, or `nil` for plain decode.
+///   - mtpContinuation: the drafter continuation saved with `cache`, or `nil`.
+///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``.
+///   - preparedState: receives the model state the prefill left and the reader of the drafter
+///     continuation at the end of the prompt (see ``PreparedGenerationState``).
+/// - Returns: the iterator, after its prefill and before its first token is read.
+/// - Throws: an error when the iterator cannot be built.
+private func makePreparedIterator(
+    input: LMInput, cache: [KVCache]?, state: LMOutput.State?,
+    parameters: GenerateParameters, context: ModelContext,
+    speculation: MTPSpeculation?, mtpContinuation: MTPDrafterContinuation?,
+    components: GenerationComponents, preparedState: PreparedGenerationState
+) throws -> any TokenIteratorProtocol {
+    let iterator = try MTPSpeculation.makeTokenIterator(
+        speculation: speculation, input: input, cache: cache, state: state,
+        mtpContinuation: mtpContinuation, parameters: parameters, model: context.model,
+        components: components)
+    preparedState(iterator.state) { MTPSpeculation.promptBoundaryContinuation(of: iterator) }
+    return iterator
+}
+
 /// Package variant of
 /// ``generate(input:cache:state:parameters:context:components:wiredMemoryTicket:tools:)``
 /// that also answers the tokens the generation fed into `cache`.
@@ -2588,11 +2618,10 @@ package func generateTaskRecordingTokens(
     preparedState: PreparedGenerationState = { _, _ in },
     drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in }
 ) throws -> (AsyncStream<Generation>, Task<[Int], Never>) {
-    let iterator = try MTPSpeculation.makeTokenIterator(
-        speculation: speculation, input: input, cache: cache, state: state,
-        mtpContinuation: mtpContinuation, parameters: parameters, model: context.model,
-        components: components)
-    preparedState(iterator.state) { MTPSpeculation.promptBoundaryContinuation(of: iterator) }
+    let iterator = try makePreparedIterator(
+        input: input, cache: cache, state: state, parameters: parameters, context: context,
+        speculation: speculation, mtpContinuation: mtpContinuation, components: components,
+        preparedState: preparedState)
     return generateLoopTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
@@ -3099,11 +3128,10 @@ package func generateProtocolTokensTask(
     preparedState: PreparedGenerationState = { _, _ in },
     drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in }
 ) throws -> (AsyncStream<TokenGeneration>, Task<[Int], Never>) {
-    let iterator = try MTPSpeculation.makeTokenIterator(
-        speculation: speculation, input: input, cache: cache, state: state,
-        mtpContinuation: mtpContinuation, parameters: parameters, model: context.model,
-        components: components)
-    preparedState(iterator.state) { MTPSpeculation.promptBoundaryContinuation(of: iterator) }
+    let iterator = try makePreparedIterator(
+        input: input, cache: cache, state: state, parameters: parameters, context: context,
+        speculation: speculation, mtpContinuation: mtpContinuation, components: components,
+        preparedState: preparedState)
     return generateLoopTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,

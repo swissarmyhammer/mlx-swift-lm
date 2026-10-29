@@ -508,8 +508,16 @@ struct ExecutorPromptCacheMTPTests {
 /// as the Qwen 3.8 template writes `<think>\n`.
 private struct GenerationPromptTokenizer: Tokenizer {
 
+    /// The token that stands for `<think>` in the generation prompt. No prompt of the tests
+    /// holds it.
+    private static let thinkToken = 60
+
+    /// The token that stands for the line break after `<think>` in the generation prompt. No
+    /// prompt of the tests holds it.
+    private static let lineBreakToken = 61
+
     /// The tokens the template writes after the last message.
-    static let generationPrompt = [60, 61]
+    static let generationPrompt = [thinkToken, lineBreakToken]
 
     /// The tokenizer that encodes, decodes and renders the messages.
     private let base = ScalarTokenizer(vocabularySize: Qwen35MTPFixture.vocabularySize)

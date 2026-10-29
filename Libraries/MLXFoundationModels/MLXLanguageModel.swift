@@ -2211,7 +2211,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 stopStrings: context.configuration.effectiveStopStrings)
             var detokenizer = context.tokenizer.makeStreamingDetokenizer()
             var result = AllowedToolGenerationResult()
-            var preparedState: LMOutput.State?
+            let prefill = ExecutorPrefillRecorder(promptCache: promptCache)
             let finalDrafterState = ExecutorDrafterStateReceiver()
             let (stream, task) = try Self.startTrackedGeneration {
                 try generateProtocolTokensTask(
@@ -2223,15 +2223,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     decoder: protocolDecoder,
                     speculation: speculation,
                     mtpContinuation: plan?.drafterState,
-                    preparedState: { state, drafterState in
-                        preparedState = state
-                        promptCache.prefillDidEnd(state: state, drafterState: drafterState)
-                    },
+                    preparedState: prefill.record,
                     drafterContinuation: finalDrafterState.receive)
             }
 
             try await withPromptCacheCommit(
-                task: task, plan: plan, state: preparedState,
+                task: task, plan: plan, state: prefill.state,
                 drafterState: finalDrafterState, promptCache: promptCache
             ) {
                 generationLoop: for await generation in stream {
@@ -2503,7 +2500,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // cache behind: the ledger of that cache names the render plus the
             // tokens generation fed into it, and the text stream alone does not
             // carry those token identifiers.
-            var preparedState: LMOutput.State?
+            let prefill = ExecutorPrefillRecorder(promptCache: promptCache)
             let finalDrafterState = ExecutorDrafterStateReceiver()
             let (stream, task) = try Self.startTrackedGeneration {
                 try generateTaskRecordingTokens(
@@ -2514,15 +2511,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     context: context,
                     speculation: speculation,
                     mtpContinuation: plan?.drafterState,
-                    preparedState: { state, drafterState in
-                        preparedState = state
-                        promptCache.prefillDidEnd(state: state, drafterState: drafterState)
-                    },
+                    preparedState: prefill.record,
                     drafterContinuation: finalDrafterState.receive)
             }
 
             try await withPromptCacheCommit(
-                task: task, plan: plan, state: preparedState,
+                task: task, plan: plan, state: prefill.state,
                 drafterState: finalDrafterState, promptCache: promptCache
             ) {
                 for await generation in stream {
@@ -2650,7 +2644,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // paths: this path passes no tools, so a tool-call-shaped output is
             // never executable.
             var rejectedToolCall: RejectedToolCall?
-            var preparedState: LMOutput.State?
+            let prefill = ExecutorPrefillRecorder(promptCache: promptCache)
             let finalDrafterState = ExecutorDrafterStateReceiver()
             let (stream, task) = try Self.startTrackedGeneration {
                 try generateProtocolTokensTask(
@@ -2662,15 +2656,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     decoder: protocolDecoder,
                     speculation: speculation,
                     mtpContinuation: plan?.drafterState,
-                    preparedState: { state, drafterState in
-                        preparedState = state
-                        promptCache.prefillDidEnd(state: state, drafterState: drafterState)
-                    },
+                    preparedState: prefill.record,
                     drafterContinuation: finalDrafterState.receive)
             }
 
             try await withPromptCacheCommit(
-                task: task, plan: plan, state: preparedState,
+                task: task, plan: plan, state: prefill.state,
                 drafterState: finalDrafterState, promptCache: promptCache
             ) {
                 generationLoop: for await generation in stream {
