@@ -21,8 +21,24 @@ comments:
     - evidence: 7 files — Libraries/MLXLMCommon/RotatingKVCache.swift, Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift, Libraries/MLXGuidedGeneration/GuidedTarget.swift, skills/mlx-swift-lm/references/kv-cache.md, Tests/MLXLMTests/Qwen35MTPCacheKindTests.swift, Tests/MLXLMTests/RotatingKVCachePrefixMaskTests.swift (new, 4.8 KB); `swift build --build-tests` 0 compiler warnings; xctest 5 bundles 0 failures 0 skipped (MLXLMTests 2001+920, MLXFoundationModelsTests 404, MLXGuidedGenerationTests 70, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6); release guards pass (MTP 100.4/87.6/83.6 vs plain 59.5, edit turn 123 tokens).
     - next: /review
   timestamp: 2026-10-29T08:29:12.463721+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m63cgvmn9c41337jxb6wf9pk
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (0532c03c) — counts findings 0, confirmed 0, refuted 0, attempted 7, failed 0; 5 files reviewed, 3 not reviewed (no validator matched: .kanban/tasks/01M62JQTCPQT7MB4D288F954CV.jsonl, .kanban/tasks/01M62JQTCPQT7MB4D288F954CV.md, skills/mlx-swift-lm/references/kv-cache.md)
+    - next: task moved to done
+  timestamp: 2026-10-29T08:30:44.885058+00:00
+- actor: claude-code
+  id: 01m63cha6vap0g0sk392kcvvb6
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 6 files (prefix-keeping multi-row mask, fallback removed)
+    - test: green — 5 bundles 0 failures 0 skipped; Release 100.4/87.6/83.6 vs plain 59.5; edit turn 123 tokens
+    - commit: 0532c03c
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T08:30:59.803587+00:00
+position_column: done
+position_ordinal: ffff80
 title: 'MTP: keep speculating past the window of a maxKVSize ring that keeps a prefix'
 ---
 ## What
