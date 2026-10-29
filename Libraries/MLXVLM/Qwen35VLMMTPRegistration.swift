@@ -37,42 +37,13 @@ public enum Qwen35VLMMTPRegistration {
     }
 }
 
-extension SpeculativeDecodingConfig {
+extension MTPDrafterRegistration {
 
-    /// Initialize speculative decoding with a Qwen3.5-family multimodal MTP drafter that
-    /// `ChatSession` loads from `configuration` on the first turn that speculates, once the
-    /// memory policy admits `mtpDrafterBytes`.
-    ///
-    /// The load registers ``Qwen35VLMMTPRegistration`` and loads the drafter through
+    /// The Qwen3.5-family multimodal MTP drafters: a deferred `SpeculativeDecodingConfig` that
+    /// takes this registers ``Qwen35VLMMTPRegistration`` and loads its drafter through
     /// `MTPDrafterModelFactory.visionLanguage`, for a target that `VLMModelFactory` loaded.
-    ///
-    /// - Parameters:
-    ///   - configuration: the drafter checkpoint, as a model id or a local directory
-    ///   - mtpDrafterBytes: estimated resident parameter bytes of the drafter
-    ///   - downloader: the downloader that fetches a remote checkpoint
-    ///   - tokenizerLoader: the tokenizer loader the factory takes; the drafter borrows the
-    ///     tokenizer of its target
-    ///   - blockSize: total number of tokens in each verification block
-    ///   - minimumDraftProbability: the drafter top-1 probability below which the drafter stops
-    ///     a round's chain early; 0 drafts the whole block every round.
-    ///   - memoryPolicy: optional memory policy that each turn checks before it speculates
-    /// - Throws: ``SpeculativeDecodingConfigurationError`` when `blockSize` or
-    ///   `minimumDraftProbability` is out of range.
-    public init(
-        qwen35VLMMTPDrafter configuration: ModelConfiguration,
-        mtpDrafterBytes: Int,
-        from downloader: any Downloader,
-        using tokenizerLoader: any TokenizerLoader,
-        blockSize: Int = defaultMTPBlockSize,
-        minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
-        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
-    ) throws {
-        try self.init(
-            mtpDrafterConfiguration: configuration, mtpDrafterBytes: mtpDrafterBytes,
-            from: downloader, using: tokenizerLoader, factory: .visionLanguage,
-            registerDrafterTypes: Qwen35VLMMTPRegistration.register, blockSize: blockSize,
-            minimumDraftProbability: minimumDraftProbability, memoryPolicy: memoryPolicy)
-    }
+    public static let qwen35VLM = MTPDrafterRegistration(
+        factory: .visionLanguage, registerDrafterTypes: Qwen35VLMMTPRegistration.register)
 }
 
 private struct Qwen35MTPTextConfiguration: Decodable {

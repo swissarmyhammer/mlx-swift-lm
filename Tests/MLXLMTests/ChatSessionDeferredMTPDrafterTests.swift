@@ -160,14 +160,10 @@ struct ChatSessionDeferredMTPDrafterTests {
             vision: vision, standalone: true, family: "qwen3_8")
         defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
         let configuration = ModelConfiguration(directory: checkpoint.directory)
-        let speculativeDecoding =
-            vision
-            ? try SpeculativeDecodingConfig(
-                qwen35VLMMTPDrafter: configuration, mtpDrafterBytes: Self.drafterBytes,
-                from: UnusedDownloader(), using: UnusedTokenizerLoader())
-            : try SpeculativeDecodingConfig(
-                qwen35TextMTPDrafter: configuration, mtpDrafterBytes: Self.drafterBytes,
-                from: UnusedDownloader(), using: UnusedTokenizerLoader())
+        let speculativeDecoding = try SpeculativeDecodingConfig(
+            mtpDrafterConfiguration: configuration, mtpDrafterBytes: Self.drafterBytes,
+            from: UnusedDownloader(), using: UnusedTokenizerLoader(),
+            registration: vision ? .qwen35VLM : .qwen35Text)
         #expect(speculativeDecoding.estimatedDraftModelBytes == Self.drafterBytes)
         let source = try #require(Self.drafterSource(of: speculativeDecoding))
 

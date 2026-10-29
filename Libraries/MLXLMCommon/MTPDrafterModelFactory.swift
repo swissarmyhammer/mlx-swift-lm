@@ -127,3 +127,32 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
         .init(context: context)
     }
 }
+
+/// The factory that loads a family of MTP drafters, with the step that registers the family's
+/// drafter model types in the registry of that factory.
+///
+/// A module that implements drafters publishes its families as static members, such as
+/// `qwen35Text` of MLXLLM and `qwen35VLM` of MLXVLM, and a deferred
+/// ``SpeculativeDecodingConfig`` takes one to load its drafter.
+public struct MTPDrafterRegistration: Sendable {
+
+    /// The factory that loads the drafter.
+    public let factory: MTPDrafterModelFactory
+
+    /// Registers the drafter model types with the registry of ``factory`` before a load.
+    public let registerDrafterTypes: @Sendable () async -> Void
+
+    /// Creates the registration of a drafter family.
+    ///
+    /// - Parameters:
+    ///   - factory: the factory that loads the drafter
+    ///   - registerDrafterTypes: registers the drafter model types with the registry of
+    ///     `factory` before a load; the default registers nothing, for types already registered
+    public init(
+        factory: MTPDrafterModelFactory = .shared,
+        registerDrafterTypes: @escaping @Sendable () async -> Void = {}
+    ) {
+        self.factory = factory
+        self.registerDrafterTypes = registerDrafterTypes
+    }
+}

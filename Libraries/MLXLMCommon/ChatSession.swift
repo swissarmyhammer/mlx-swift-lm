@@ -269,14 +269,15 @@ public struct SpeculativeDecodingConfig: Sendable {
             memoryPolicy: memoryPolicy)
     }
 
-    /// Initialize speculative decoding with an MTP drafter that `factory` loads from
-    /// `configuration` on the first turn that speculates.
+    /// Initialize speculative decoding with an MTP drafter that the factory of `registration`
+    /// loads from `configuration` on the first turn that speculates.
     ///
     /// The deferred load follows
     /// ``init(mtpDrafterBytes:blockSize:minimumDraftProbability:memoryPolicy:loadMTPDrafter:)``:
     /// ``ChatSession`` loads the drafter only once the memory policy admits `mtpDrafterBytes`.
-    /// The load first runs `registerDrafterTypes`, which registers the drafter model types the
-    /// registry of `factory` needs, such as `Qwen35TextMTPRegistration.register` of MLXLLM.
+    /// The load first registers the drafter model types of `registration` with the registry of
+    /// its factory. Pass `.qwen35Text` of MLXLLM for a Qwen3.5-family text drafter, or
+    /// `.qwen35VLM` of MLXVLM for a multimodal one whose target `VLMModelFactory` loaded.
     ///
     /// - Parameters:
     ///   - configuration: the drafter checkpoint, as a model id or a local directory
@@ -284,9 +285,8 @@ public struct SpeculativeDecodingConfig: Sendable {
     ///   - downloader: the downloader that fetches a remote checkpoint
     ///   - tokenizerLoader: the tokenizer loader the factory takes; an MTP drafter borrows the
     ///     tokenizer of its target, so the load reads no tokenizer
-    ///   - factory: the factory that loads the drafter
-    ///   - registerDrafterTypes: registers the drafter model types with the registry of
-    ///     `factory` before the load
+    ///   - registration: the factory that loads the drafter, and the registration of its drafter
+    ///     model types that runs before the load
     ///   - blockSize: total number of tokens in each verification block
     ///   - minimumDraftProbability: the drafter top-1 probability below which a chaining drafter
     ///     stops a round's chain early; 0 drafts the whole block every round.
@@ -300,8 +300,7 @@ public struct SpeculativeDecodingConfig: Sendable {
         mtpDrafterBytes: Int,
         from downloader: any Downloader,
         using tokenizerLoader: any TokenizerLoader,
-        factory: MTPDrafterModelFactory = .shared,
-        registerDrafterTypes: @escaping @Sendable () async -> Void = {},
+        registration: MTPDrafterRegistration = MTPDrafterRegistration(),
         blockSize: Int = defaultMTPBlockSize,
         minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
@@ -310,8 +309,8 @@ public struct SpeculativeDecodingConfig: Sendable {
             mtpDrafterBytes: mtpDrafterBytes, blockSize: blockSize,
             minimumDraftProbability: minimumDraftProbability, memoryPolicy: memoryPolicy
         ) {
-            await registerDrafterTypes()
-            return try await factory.loadContainer(
+            await registration.registerDrafterTypes()
+            return try await registration.factory.loadContainer(
                 from: downloader, using: tokenizerLoader, configuration: configuration)
         }
     }

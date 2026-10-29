@@ -23,6 +23,40 @@ comments:
     - evidence: 6 files — Libraries/MLXLMCommon/ChatSession.swift, Libraries/MLXLLM/Qwen35TextMTPRegistration.swift, Libraries/MLXVLM/Qwen35VLMMTPRegistration.swift, Tests/MLXLMTests/ChatSessionDeferredMTPDrafterTests.swift (new, 8.9 KB, 9 test cases), Tests/MLXLMTests/SpeculativeDecodingConfigTests.swift (pattern update). RED: new suite failed to compile on the missing API; GREEN: suite 6 tests / 9 cases pass. `swift build --build-tests`: 0 compiler warnings (only the build-system "missing creator for mutated node" note). xctest all 5 bundles pass: MLXLMTests 920 XCTest + 1972 Swift Testing (pre-existing benchmarkVerification skip), MLXFoundationModelsTests 376, MLXGuidedGenerationTests 70, CXGrammarTests 7, MLXHuggingFaceMacrosTests 5. Release xcodebuild (load ~5, Activity Monitor at 1 core as usual): qwen38FourBitMTPGeneration default blockSize 2 MTP 92.5/81.8/79.8 tok/s, plain ~59.3 (baseline 91/80/79); qwen38FourBitMTPSampledGeneration passed; qwen38FourBitMTPSystemPromptCache passed with no known issues, edit turn cached 2169 / prefilled 123 tok in 175 ms with MTP on, follow-ups prefill 25–38 tok.
     - next: /review
   timestamp: 2026-10-29T00:25:26.527958+00:00
+- actor: claude-code
+  id: 01m62gx8k1dpb5g0h0bqeyvqxe
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (c855ea1a) — 2 findings (2 confirmed, 1 refuted): Libraries/MLXLLM/Qwen35TextMTPRegistration.swift:69, Libraries/MLXVLM/Qwen35VLMMTPRegistration.swift:61 (duplication/duplication)
+    - next: implement the 2 findings in the 2026-10-28 19:26 Review Findings section, then re-review
+  timestamp: 2026-10-29T00:28:11.233351+00:00
+- actor: claude-code
+  id: 01m62gxn4dwr307h00rsbwyeja
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 5 files (deferred MTP drafter in ChatSession, Qwen text/VLM shortcuts)
+    - test: green — 5 xctest bundles; Release MTP 92.5/81.8/79.8 vs plain 59.3; edit turn 123 tokens
+    - commit: c855ea1a
+    - review: findings — Libraries/MLXLLM/Qwen35TextMTPRegistration.swift:69, Libraries/MLXVLM/Qwen35VLMMTPRegistration.swift:61
+  timestamp: 2026-10-29T00:28:24.077271+00:00
+- actor: claude-code
+  id: 01m62hczmzypgh5n9wf1708x3j
+  text: |-
+    Review-finding fix (duplication on the two Qwen MTP shortcuts):
+    - Discovery: both shortcuts already forwarded to the shared MLXLMCommon init `init(mtpDrafterConfiguration:mtpDrafterBytes:from:using:factory:registerDrafterTypes:...)`. So "add a shared helper that takes the factory and the register function, and have both call it" was already the state. What repeated was the whole parameter list and its defaults (blockSize, minimumDraftProbability, memoryPolicy) in each shortcut. Another forwarding helper would still restate that list in both shortcuts.
+    - Fix: new `public struct MTPDrafterRegistration: Sendable` in MLXLMCommon/MTPDrafterModelFactory.swift bundles `factory` + `registerDrafterTypes`. Its init defaults to `.shared` / `{}`. The Common init now takes `registration: MTPDrafterRegistration = MTPDrafterRegistration()` in place of the separate `factory:` / `registerDrafterTypes:` params. The parameter list now exists once.
+    - MLXLLM now has `MTPDrafterRegistration.qwen35Text` (factory `.shared`, `Qwen35TextMTPRegistration.register`). MLXVLM now has `.qwen35VLM` (factory `.visionLanguage`, `Qwen35VLMMTPRegistration.register`). The `init(qwen35TextMTPDrafter:...)` and `init(qwen35VLMMTPDrafter:...)` shortcuts are deleted.
+    - Call site: `SpeculativeDecodingConfig(mtpDrafterConfiguration: c, mtpDrafterBytes: n, from: d, using: t, registration: .qwen35Text)`.
+    - Public API change: the two shortcut initializers are gone, and the Common init's `factory:` / `registerDrafterTypes:` labels became `registration:`. The only caller outside the library was ChatSessionDeferredMTPDrafterTests, which is updated.
+    - TDD: updated the factory test to the new call first. RED was a compile error (`extra argument 'registration'`). GREEN after the change.
+  timestamp: 2026-10-29T00:36:46.367875+00:00
+- actor: claude-code
+  id: 01m62hd3c6nzj9n6hw11dv8ngy
+  text: |-
+    ### implement — changed
+    - evidence: 5 files — Libraries/MLXLMCommon/MTPDrafterModelFactory.swift, Libraries/MLXLMCommon/ChatSession.swift, Libraries/MLXLLM/Qwen35TextMTPRegistration.swift, Libraries/MLXVLM/Qwen35VLMMTPRegistration.swift, Tests/MLXLMTests/ChatSessionDeferredMTPDrafterTests.swift. `swift build --build-tests`: 0 compiler warnings (only the existing build-system "missing creator for mutated node" note). xctest results: ChatSessionDeferredMTPDrafterTests 6 tests pass; "Speculative decoding configuration" (SpeculativeDecodingConfigTests) 10 tests pass. Full bundles: MLXLMTests 920 XCTest + 1972 Swift Testing pass (the benchmarkVerification skip was already there). MLXFoundationModelsTests 376, MLXGuidedGenerationTests 70, CXGrammarTests 7 and MLXHuggingFaceMacrosTests 5 all pass. Both review findings are flipped to [x]. No decode-path change, so no Release benchmark.
+    - next: /review
+  timestamp: 2026-10-29T00:36:50.182714+00:00
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 - 01M5SWXS9E09Y97PV3BV51TPYA
@@ -47,3 +81,14 @@ After the ChatSession MTP task, a caller must load the MTP drafter itself (`MTPD
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38 #chat-session
+
+## Review Findings (2026-10-28 19:26)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 5 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWTV4YK1C727JYYVGKDY9Y.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWTV4YK1C727JYYVGKDY9Y.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/Qwen35TextMTPRegistration.swift:69` `duplication/duplication` — The text `SpeculativeDecodingConfig.init(qwen35TextMTPDrafter:...)` shortcut repeats the same argument-forwarding body as the VLM shortcut in Qwen35VLMMTPRegistration.swift. The two differ only by the factory, the registration function, and the label, so the logic that could drift (the argument list and the parameter defaults) exists twice. Fold the two shortcuts into one shared initializer that takes the factory and the registration function as parameters, as described for the VLM copy. Keep the text and VLM initializers as one-line forwards to it, or move the shared helper into a single file both registrations import.
+- [x] `Libraries/MLXVLM/Qwen35VLMMTPRegistration.swift:61` `duplication/duplication` — The VLM `SpeculativeDecodingConfig.init(qwen35VLMMTPDrafter:...)` shortcut is a near-verbatim copy of the text shortcut `init(qwen35TextMTPDrafter:...)` in Qwen35TextMTPRegistration.swift. The two bodies differ only in the label, the factory (`.visionLanguage` vs `.shared`), and the registration function (`Qwen35VLMMTPRegistration.register` vs `Qwen35TextMTPRegistration.register`). Both copies are new in this change, so they will drift out of sync as the MTP initializer signature changes. Extract one internal helper that takes the factory and the registration function as parameters, for example `static func qwen35MTPDrafter(_ configuration:, mtpDrafterBytes:, from:, using:, factory:, register:, blockSize:, minimumDraftProbability:, memoryPolicy:)`. Have both public shortcuts call it with their own factory and register function. Alternatively, keep the public shortcuts as thin one-line forwards to a single shared initializer. Delete the duplicated bodies.
