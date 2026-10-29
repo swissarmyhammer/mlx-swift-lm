@@ -69,12 +69,28 @@ comments:
     - evidence: 5 files — Libraries/MLXFoundationModels/ExecutorPromptCache.swift, Libraries/MLXFoundationModels/MLXLanguageModel.swift, Libraries/MLXLMCommon/Evaluate.swift, Tests/MLXFoundationModelsTests/ExecutorPromptCacheMTPTests.swift, .kanban/tasks/01M5SJQVM279KQXCD77JYQWE0C.md (6/6 findings checked). `swift build --build-tests`: 0 compiler warnings (only the SwiftPM build-system note "missing creator for mutated node ... mlx-swift_Cmlx.bundle"). xcrun xctest: MLXFoundationModelsTests 396 pass; MLXLMTests 920 XCTest + 1988 Swift Testing pass; MLXGuidedGenerationTests 70; CXGrammarTests 7; MLXHuggingFaceMacrosTests 6. Release xcodebuild (load ~3.5-3.7): qwen38FourBitMTPGeneration pass, default blockSize 2 math/code/prose 90.2/81.0/79.0 tok/s (plain ~59.3; vs 91/80/79 baseline, within 3%); qwen38FourBitMTPSystemPromptCache pass, edit turn prefilled 123 tokens, no known issues.
     - next: /review
   timestamp: 2026-10-29T04:06:16.814479+00:00
+- actor: claude-code
+  id: 01m62xfrxffgkstxqphr48wcvk
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (ca29cf96) — 0 findings, 0 confirmed, 1 refuted, 14 attempted; all 6 items in Review Findings (2026-10-28 22:35) checked
+    - next: task moved to done
+  timestamp: 2026-10-29T04:08:00.687076+00:00
+- actor: claude-code
+  id: 01m62xg5apsrz45tg69vp08v0s
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 4 files (ExecutorPrefillRecorder, makePreparedIterator, named constants)
+    - test: green — 5 bundles; Release 90.2/81.0/79.0; edit turn 123 tokens
+    - commit: ca29cf96
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T04:08:13.398851+00:00
 depends_on:
 - 01M5SJQ62SPB7ZA9CC9H91TTB2
 - 01M5SJPFM01WFRYWMQXVGMA4MQ
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: fff980
 title: 'MTP: FoundationModels — keep the drafter state in ExecutorPromptCache (reuse, checkpoint, spill, restore, evict)'
 ---
 ## What
