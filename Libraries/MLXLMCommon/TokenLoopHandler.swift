@@ -120,7 +120,9 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
         var info = info.withToolCallCounts(
             rejected: decoder.rejectedToolCallCount,
             recovered: decoder.recoveredToolCallCount)
-        info.speculativeDecodingFallbackReason = speculativeDecodingFallbackReason
+        // The session's reason wins; else the reason the generation loop read off the iterator.
+        info.speculativeDecodingFallbackReason =
+            speculativeDecodingFallbackReason ?? info.speculativeDecodingFallbackReason
         return Generation.info(info).attributingCachedPromptTokens(cachedPromptTokenCount)
     }
 

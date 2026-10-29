@@ -59,11 +59,17 @@ public enum SpeculativeDecodingConfigurationError: Error, Sendable, Equatable, L
 /// ```
 public struct SpeculativeDecodingConfig: Sendable {
 
+    /// Loads a drafter.
+    package typealias DrafterLoader<Drafter> = @Sendable () async throws -> Drafter
+
     /// Where a drafter comes from: given loaded, or loaded by a closure when a turn first
-    /// speculates, after the memory policy admits the byte estimate.
+    /// speculates, after the memory policy admits the byte estimate. A drafter that matches the
+    /// target takes the loader that the session's model picks.
     package enum DrafterSource<Drafter: Sendable>: Sendable {
         case loaded(Drafter)
-        case deferred(bytes: Int, @Sendable () async throws -> Drafter)
+        case deferred(bytes: Int, DrafterLoader<Drafter>)
+        case deferredMatchingTarget(
+            bytes: Int, @Sendable (any LanguageModel) -> DrafterLoader<Drafter>)
 
         /// The drafter, when it was given loaded.
         package var loadedDrafter: Drafter? {
@@ -74,20 +80,27 @@ public struct SpeculativeDecodingConfig: Sendable {
         /// The byte estimate of a deferred drafter, which the memory policy weighs before the
         /// drafter loads, or nil when the drafter was given loaded.
         package var estimatedBytes: Int? {
-            guard case .deferred(let bytes, _) = self else { return nil }
-            return bytes
+            switch self {
+            case .loaded:
+                return nil
+            case .deferred(let bytes, _), .deferredMatchingTarget(let bytes, _):
+                return bytes
+            }
         }
 
-        /// The drafter: the loaded one, or a new one from the loader.
+        /// The loader of the drafter that drafts for `target`: one that hands out the loaded
+        /// drafter, the deferred loader, or the loader `target` picks.
         ///
-        /// - Returns: The drafter.
-        /// - Throws: The error of the loader.
-        package func load() async throws -> Drafter {
+        /// - Parameter target: The model the drafter speculates for.
+        /// - Returns: The loader.
+        package func loader(for target: any LanguageModel) -> DrafterLoader<Drafter> {
             switch self {
             case .loaded(let drafter):
-                return drafter
+                return { drafter }
             case .deferred(_, let load):
-                return try await load()
+                return load
+            case .deferredMatchingTarget(_, let pick):
+                return pick(target)
             }
         }
     }
@@ -293,8 +306,11 @@ public struct SpeculativeDecodingConfig: Sendable {
     /// ``init(mtpDrafterBytes:blockSize:minimumDraftProbability:memoryPolicy:loadMTPDrafter:)``:
     /// ``ChatSession`` loads the drafter only once the memory policy admits `mtpDrafterBytes`.
     /// The load first registers the drafter model types of `registration` with the registry of
-    /// its factory. Pass `.qwen35Text` of MLXLLM for a Qwen3.5-family text drafter, or
-    /// `.qwen35VLM` of MLXVLM for a multimodal one whose target `VLMModelFactory` loaded.
+    /// its factory. Pass `.qwen35Text` of MLXLLM for a Qwen3.5-family text drafter,
+    /// `.qwen35VLM` of MLXVLM for a multimodal one whose target `VLMModelFactory` loaded, or
+    /// `.matchingTarget(.qwen35Text, .qwen35VLM)` to load the one that drafts for the session's
+    /// model however it loaded: `loadModelContainer` loads a Qwen3.5-family target as a
+    /// vision-language model whenever MLXVLM is linked.
     ///
     /// - Parameters:
     ///   - configuration: the drafter checkpoint, as a model id or a local directory
@@ -323,12 +339,15 @@ public struct SpeculativeDecodingConfig: Sendable {
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) throws {
         try self.init(
-            mtpDrafterBytes: mtpDrafterBytes, blockSize: blockSize,
-            minimumDraftProbability: minimumDraftProbability, memoryPolicy: memoryPolicy
-        ) {
-            try await registration.loadContainer(
-                from: downloader, using: tokenizerLoader, configuration: configuration)
-        }
+            mtpDrafterSource: .deferredMatchingTarget(bytes: max(0, mtpDrafterBytes)) { target in
+                let registration = registration.registration(for: target)
+                return {
+                    try await registration.loadContainer(
+                        from: downloader, using: tokenizerLoader, configuration: configuration)
+                }
+            },
+            blockSize: blockSize, minimumDraftProbability: minimumDraftProbability,
+            memoryPolicy: memoryPolicy)
     }
 
     /// Initialize speculative decoding with the MTP drafter of `source`, after checking the
@@ -357,11 +376,17 @@ public struct SpeculativeDecodingConfig: Sendable {
         }
     }
 
-    package func loadDraftModel() async throws -> ModelContainer {
+    /// The loader of the draft model that drafts for `target`.
+    ///
+    /// - Parameter target: The model the draft model speculates for.
+    /// - Returns: The loader.
+    package func draftModelLoader(
+        for target: any LanguageModel
+    ) -> DrafterLoader<ModelContainer> {
         guard case .draftModel(let source) = strategy else {
             preconditionFailure("MTP speculation does not use a draft ModelContainer")
         }
-        return try await source.load()
+        return source.loader(for: target)
     }
 }
 
@@ -1668,13 +1693,18 @@ public final class ChatSession {
                             try draftAdmissionBeforeLoading?.get() != false
                         {
                             mtpDrafter = try await Self.mtpDrafterModel(
-                                of: source, sharedThrough: loadedMTPDrafter)
+                                loading: source.loader(for: model),
+                                sharedThrough: loadedMTPDrafter)
                         } else {
                             mtpDrafter = nil
                         }
                         // Whether the MTP drafter can draft for `model`, decided once for
-                        // both the continuation restore and the fallback reason.
-                        let mtpDrafterIsCompatible = mtpDrafter?.isCompatible(with: model) == true
+                        // the continuation restore, the fallback reason, and the stated reason
+                        // the plain iterator reports.
+                        let mtpIncompatibility = mtpDrafter.flatMap {
+                            MTPDrafterFallback.incompatibility(of: $0, with: model)
+                        }
+                        let mtpDrafterIsCompatible = mtpDrafter != nil && mtpIncompatibility == nil
                         if let saved = savedDrafterContinuation {
                             mtpDrafterContinuation = Self.restoredDrafterContinuation(
                                 saved, drafter: mtpDrafter,
@@ -2089,10 +2119,11 @@ public final class ChatSession {
                         func defaultGeneration() throws -> GenerationRun {
                             // Seed the carried state and read back the post-prefill state so the
                             // next turn, or the next tool restart, anchors correctly.
-                            let iterator = try TokenIterator(
+                            var iterator = try TokenIterator(
                                 input: input, model: model, cacheStorage: kvCache,
                                 state: lmState,
                                 parameters: generateParameters, components: components)
+                            iterator.speculationFallback = mtpIncompatibility
                             lmState = iterator.state
                             return finishPrompt(iterator, drafterContinuation: { _ in nil })
                         }
@@ -2171,7 +2202,9 @@ public final class ChatSession {
                                 if let cachedDraftContainer {
                                     draftContainer = cachedDraftContainer
                                 } else {
-                                    draftContainer = try await speculativeDecoding.loadDraftModel()
+                                    let loadDraftModel = speculativeDecoding.draftModelLoader(
+                                        for: model)
+                                    draftContainer = try await loadDraftModel()
                                 }
 
                                 let draftModel = await draftContainer.perform { context in
@@ -2665,24 +2698,24 @@ extension ChatSession {
             time: Date.timeIntervalSinceReferenceDate - begin)
     }
 
-    /// The MTP drafter model of `source`, from the drafter that `slot` holds.
+    /// The MTP drafter model that `load` loads, from the drafter that `slot` holds.
     ///
-    /// The first call with an empty `slot` loads the drafter of `source` and stores it in `slot`,
+    /// The first call with an empty `slot` calls `load` and stores its drafter in `slot`,
     /// which the session shares with its forks; `slot` stays locked during the load, so the
     /// session and its forks load a deferred drafter once.
     ///
     /// - Parameters:
-    ///   - source: the MTP drafter of the configuration.
+    ///   - load: the loader of the MTP drafter of the configuration for the session's model.
     ///   - slot: the drafter the session and its forks share.
     /// - Returns: the drafter model.
     /// - Throws: the error of the loader of a deferred drafter.
     private static func mtpDrafterModel(
-        of source: SpeculativeDecodingConfig.MTPDrafterSource,
+        loading load: @escaping SpeculativeDecodingConfig.DrafterLoader<MTPDrafterContainer>,
         sharedThrough slot: SerialAccessContainer<MTPDrafterContainer?>
     ) async throws -> any MTPDrafterModel {
         let container = try await slot.update { stored in
             if let stored { return stored }
-            let loaded = try await source.load()
+            let loaded = try await load()
             stored = loaded
             return loaded
         }

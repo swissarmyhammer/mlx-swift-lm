@@ -49,7 +49,10 @@ extension MTPDrafterRegistration {
 
     /// The Qwen3.5-family text MTP drafters: a deferred `SpeculativeDecodingConfig` that takes
     /// this registers ``Qwen35TextMTPRegistration`` and loads its drafter through
-    /// `MTPDrafterModelFactory.shared`.
+    /// `MTPDrafterModelFactory.shared`. They draft for the Qwen3.5-family targets that
+    /// `LLMModelFactory` loads; `matchingTarget(_:_:)` with `qwen35VLM` of MLXVLM covers a target
+    /// that loaded as a vision-language model too.
     public static let qwen35Text = MTPDrafterRegistration(
-        factory: .shared, registerDrafterTypes: Qwen35TextMTPRegistration.register)
+        factory: .shared, registerDrafterTypes: Qwen35TextMTPRegistration.register,
+        draftsForTarget: { $0 is Qwen35Model || $0 is Qwen35TextModel })
 }

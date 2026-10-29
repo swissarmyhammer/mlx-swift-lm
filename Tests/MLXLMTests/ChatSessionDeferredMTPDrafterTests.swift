@@ -166,33 +166,13 @@ struct ChatSessionDeferredMTPDrafterTests {
             registration: vision ? .qwen35VLM : .qwen35Text)
         #expect(speculativeDecoding.estimatedDraftModelBytes == Self.drafterBytes)
         let source = try #require(Self.drafterSource(of: speculativeDecoding))
+        let target: any LanguageModel =
+            vision ? try Qwen35VLMMTPFixture().target : try Qwen35MTPFixture().target
 
-        let drafter = try await source.load()
+        let drafter = try await source.loader(for: target)()
         let model = await drafter.perform { SendableBox($0.model) }.consume()
         #expect(
             vision
                 ? model is MLXVLM.Qwen35VLMNextNDraftModel : model is MLXLLM.Qwen35MTPDraftModel)
-    }
-}
-
-/// A downloader that refuses to download: a configuration that names a local directory needs
-/// none.
-private struct UnusedDownloader: Downloader {
-
-    /// Refuses to download.
-    ///
-    /// - Parameters:
-    ///   - id: The repository of the request.
-    ///   - revision: The revision of the request.
-    ///   - patterns: The file patterns of the request.
-    ///   - useLatest: Whether the request asks for the latest revision.
-    ///   - progressHandler: The progress callback of the request.
-    /// - Returns: Never.
-    /// - Throws: `ModelFactoryError.invalidConfiguration`, always.
-    func download(
-        id: String, revision: String?, matching patterns: [String], useLatest: Bool,
-        progressHandler: @Sendable @escaping (Progress) -> Void
-    ) async throws -> URL {
-        throw ModelFactoryError.invalidConfiguration("A local MTP checkpoint downloads nothing.")
     }
 }

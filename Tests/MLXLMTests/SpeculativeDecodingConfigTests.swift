@@ -25,7 +25,7 @@ struct SpeculativeDecodingConfigTests {
             #expect(
                 minimumDraftProbability
                     == SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability)
-        case .mtp(.deferred, _, _), .draftModel:
+        case .mtp(.deferred, _, _), .mtp(.deferredMatchingTarget, _, _), .draftModel:
             Issue.record("Expected the eager MTP speculative-decoding strategy")
         }
     }

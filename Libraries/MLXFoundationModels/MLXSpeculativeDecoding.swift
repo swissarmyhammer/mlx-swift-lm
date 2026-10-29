@@ -48,8 +48,8 @@ public struct MLXSpeculativeDecoding: Sendable {
     /// chain early; 0 drafts the whole block every round.
     public let minimumDraftProbability: Float
 
-    /// Loads the drafter.
-    let loadDrafter: DrafterLoader
+    /// The loader of the drafter that drafts for a target, as the target loaded.
+    private let pickDrafterLoader: @Sendable (any LanguageModel) -> DrafterLoader
 
     /// The identity of the drafter in the model cache, beside the identity of the model.
     var drafterID: String {
@@ -74,20 +74,23 @@ public struct MLXSpeculativeDecoding: Sendable {
             SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
         loadDrafter: @escaping DrafterLoader
     ) throws {
-        try SpeculativeDecodingConfig.validate(mtpBlockSize: blockSize)
-        try SpeculativeDecodingConfig.validate(minimumDraftProbability: minimumDraftProbability)
-        self.drafterConfiguration = drafterConfiguration
-        self.blockSize = blockSize
-        self.minimumDraftProbability = minimumDraftProbability
-        self.loadDrafter = loadDrafter
+        try self.init(
+            drafterConfiguration: drafterConfiguration, blockSize: blockSize,
+            minimumDraftProbability: minimumDraftProbability,
+            pickDrafterLoader: { _ in loadDrafter })
     }
 
     /// Creates MTP speculative decoding with a drafter that the factory of `registration`
     /// loads from `drafterConfiguration`.
     ///
     /// The load first registers the drafter model types of `registration` with the registry
-    /// of its factory. Pass `.qwen35Text` of MLXLLM for a Qwen3.5-family text target, or
-    /// `.qwen35VLM` of MLXVLM for a target that `VLMModelFactory` loaded.
+    /// of its factory. Pass `.qwen35Text` of MLXLLM for a Qwen3.5-family text target,
+    /// `.qwen35VLM` of MLXVLM for a target that `VLMModelFactory` loaded, or
+    /// `.matchingTarget(.qwen35Text, .qwen35VLM)` to load the drafter of the loaded target
+    /// however it loaded: `loadModelContainer` loads a Qwen3.5-family target as a
+    /// vision-language model whenever MLXVLM is linked. A drafter that cannot draft for the
+    /// loaded target leaves each turn to plain decode, and the completion information and the
+    /// log state why.
     ///
     /// - Parameters:
     ///   - drafterConfiguration: the drafter checkpoint, as a model id or a local directory.
@@ -111,11 +114,36 @@ public struct MLXSpeculativeDecoding: Sendable {
     ) throws {
         try self.init(
             drafterConfiguration: drafterConfiguration, blockSize: blockSize,
-            minimumDraftProbability: minimumDraftProbability
-        ) { configuration in
-            try await registration.loadContainer(
-                from: downloader, using: tokenizerLoader, configuration: configuration)
-        }
+            minimumDraftProbability: minimumDraftProbability,
+            pickDrafterLoader: { target in
+                let registration = registration.registration(for: target)
+                return { configuration in
+                    try await registration.loadContainer(
+                        from: downloader, using: tokenizerLoader, configuration: configuration)
+                }
+            })
+    }
+
+    /// Creates MTP speculative decoding whose target picks the loader of its drafter, after
+    /// checking the block size and the confidence floor.
+    private init(
+        drafterConfiguration: ModelConfiguration, blockSize: Int, minimumDraftProbability: Float,
+        pickDrafterLoader: @escaping @Sendable (any LanguageModel) -> DrafterLoader
+    ) throws {
+        try SpeculativeDecodingConfig.validate(mtpBlockSize: blockSize)
+        try SpeculativeDecodingConfig.validate(minimumDraftProbability: minimumDraftProbability)
+        self.drafterConfiguration = drafterConfiguration
+        self.blockSize = blockSize
+        self.minimumDraftProbability = minimumDraftProbability
+        self.pickDrafterLoader = pickDrafterLoader
+    }
+
+    /// The loader of the drafter that drafts for `target`, as `target` loaded.
+    ///
+    /// - Parameter target: the loaded model the drafter speculates for.
+    /// - Returns: the loader.
+    func drafterLoader(for target: any LanguageModel) -> DrafterLoader {
+        pickDrafterLoader(target)
     }
 
     /// The speculation of a generation with the drafter of `container`.

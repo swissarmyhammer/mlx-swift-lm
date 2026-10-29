@@ -1014,6 +1014,11 @@ public struct TokenIterator: TokenIteratorProtocol {
     /// Wall-clock time spent priming the cache with the prompt before the first generated token.
     public var promptPrefillTime: TimeInterval = 0.0
 
+    /// Why the MTP drafter the generation was configured with does not speculate in this
+    /// iterator, or `nil` when the generation named no drafter that falls back. The generation
+    /// loop reports it on the completion information.
+    package var speculationFallback: MTPDrafterFallback?
+
     /// Initialize a `TokenIterator` with the given tokens. Note: this has been
     /// replaced with ``init(input:model:cache:state:parameters:components:)``.
     ///
@@ -3470,6 +3475,7 @@ private func generateLoopTask<
             let generateTime = now - start
 
             let mtpStats = iterator as? MTPStatsCollecting
+            let speculationFallback = (iterator as? TokenIterator)?.speculationFallback
             let reasoningTokenCount = iterator.reasoningTokenCount.map {
                 Swift.min(Swift.max($0, 0), tokenCount)
             }
@@ -3486,8 +3492,9 @@ private func generateLoopTask<
                 discardedStopToken: discardedStopToken,
                 proposedDraftTokens: mtpStats?.proposedDraftTokens,
                 acceptedDraftTokens: mtpStats?.acceptedDraftTokens,
-                passthroughReason: mtpStats?.passthroughReason,
-                speculativeDecodingTelemetry: iterator.speculativeDecodingTelemetry
+                passthroughReason: mtpStats?.passthroughReason ?? speculationFallback?.statedReason,
+                speculativeDecodingTelemetry: iterator.speculativeDecodingTelemetry,
+                speculativeDecodingFallbackReason: speculationFallback?.reason
             )
             _ = continuation.yield(handler.infoEvent(info))
 
@@ -3628,18 +3635,23 @@ public struct GenerateCompletionInfo: Sendable {
     public let acceptedDraftTokens: Int?
 
     /// Non-nil when the MTP iterator transitioned into sticky passthrough or
-    /// could not export a resumable stateful boundary. Carries the first
-    /// failure reason. Nil when speculation completed with a resumable
-    /// boundary, or for non-MTP streams.
+    /// could not export a resumable stateful boundary, or when the configured
+    /// MTP drafter cannot draft for the model and the generation decoded
+    /// without speculation. Carries the first failure reason, in words. Nil
+    /// when speculation completed with a resumable boundary, or for streams
+    /// configured with no MTP drafter.
     public let passthroughReason: String?
 
     /// Speculative decoding telemetry, when generation used speculative decoding.
     public let speculativeDecodingTelemetry: SpeculativeDecodingTelemetry?
 
-    /// Why ``ChatSession`` selected ordinary generation despite configured speculation.
+    /// Why the generation selected ordinary generation despite configured speculation.
     ///
-    /// Nil means no session fallback was recorded; it does not prove speculative rounds occurred.
-    /// Lower-level generation APIs leave this nil; MTP iterator diagnostics use ``passthroughReason``.
+    /// Nil means no fallback was recorded; it does not prove speculative rounds occurred.
+    /// ``ChatSession`` records each of its fallbacks. The MTP generation paths the
+    /// FoundationModels adapter runs record
+    /// ``SpeculativeDecodingFallbackReason/incompatibleDrafter``, with its stated reason in
+    /// ``passthroughReason``; other MTP iterator diagnostics use ``passthroughReason`` alone.
     public internal(set) var speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
 
     /// Number of tool-call-shaped outputs rejected during this generation.

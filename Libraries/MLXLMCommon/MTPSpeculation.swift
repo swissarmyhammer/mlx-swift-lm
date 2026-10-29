@@ -76,7 +76,9 @@ package struct MTPSpeculation {
     ///
     /// The MTP iterator decides before the prefill whether the stream speculates, thus an
     /// incompatible drafter or a cache that cannot stage a round leaves the cache untouched for
-    /// the plain iterator.
+    /// the plain iterator. The plain iterator of an incompatible drafter carries its
+    /// ``MTPDrafterFallback``, which the completion information reports and the process log
+    /// states once.
     ///
     /// - Parameters:
     ///   - speculation: the speculation of the generation, or `nil` for plain decode.
@@ -97,7 +99,10 @@ package struct MTPSpeculation {
         parameters: GenerateParameters, model: any LanguageModel,
         components: GenerationComponents
     ) throws -> any TokenIteratorProtocol {
-        if let speculation, speculation.drafter.isCompatible(with: model) {
+        let fallback = speculation.flatMap {
+            MTPDrafterFallback.incompatibility(of: $0.drafter, with: model)
+        }
+        if let speculation, fallback == nil {
             do {
                 return try MTPSpeculativeTokenIterator(
                     input: input, mainModel: model, drafter: speculation.drafter,
@@ -110,8 +115,10 @@ package struct MTPSpeculation {
                 // from the same cache.
             }
         }
-        return try TokenIterator(
+        var iterator = try TokenIterator(
             input: input, model: model, cache: cache, state: state, parameters: parameters,
             components: components)
+        iterator.speculationFallback = fallback
+        return iterator
     }
 }

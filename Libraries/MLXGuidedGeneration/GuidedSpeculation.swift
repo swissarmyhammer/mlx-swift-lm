@@ -68,6 +68,9 @@ struct GuidedSpeculation {
 
     /// The drafter of `speculation`, when guided generation can speculate with it on `target`.
     ///
+    /// A drafter that cannot draft for the target is logged once and recorded on the
+    /// diagnostic sink with its stated reason.
+    ///
     /// - Parameters:
     ///   - speculation: The speculation of the generation, or `nil`.
     ///   - target: The target and its new cache.
@@ -75,8 +78,16 @@ struct GuidedSpeculation {
     static func drafter(
         of speculation: MTPSpeculation?, for target: GuidedTarget
     ) -> (any GuidedMTPDrafter)? {
-        guard let drafter = speculation?.drafter as? any GuidedMTPDrafter,
-            !drafter.requiresSharedTargetKV, drafter.isCompatible(with: target.model),
+        guard let speculation else { return nil }
+        if let fallback = MTPDrafterFallback.incompatibility(
+            of: speculation.drafter, with: target.model)
+        {
+            GuidedGenerationDiagnosticSink.current?.recordSpeculationFallback(
+                fallback.statedReason)
+            return nil
+        }
+        guard let drafter = speculation.drafter as? any GuidedMTPDrafter,
+            !drafter.requiresSharedTargetKV,
             target.verifiesInPlace(tokens: MTPDraftBlockOutput.minimumChainedMTPBlockSize)
         else { return nil }
         return drafter

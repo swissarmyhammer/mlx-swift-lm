@@ -69,6 +69,10 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     /// Each rollback of the grammar matcher after a rejected draft, in order.
     public private(set) var rollbacks: [GuidedRollbackRecord] = []
 
+    /// Why the configured MTP drafter did not speculate, in words, when it cannot draft for
+    /// the target; `nil` otherwise.
+    public private(set) var speculationFallbackReason: String?
+
     private let cancelAfterEmitCount: Int?
     private let cancelOnToolReasoningClose: Bool
 
@@ -153,6 +157,14 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     /// - Parameter rollback: The drafts and the matcher acceptances the rollback undid.
     public func recordRollback(_ rollback: GuidedRollbackRecord) {
         rollbacks.append(rollback)
+    }
+
+    /// Records why the configured MTP drafter decodes plainly.
+    ///
+    /// - Parameter statedReason: The drafter, the target, and why the drafter cannot draft for
+    ///   the target.
+    public func recordSpeculationFallback(_ statedReason: String) {
+        speculationFallbackReason = statedReason
     }
 }
 

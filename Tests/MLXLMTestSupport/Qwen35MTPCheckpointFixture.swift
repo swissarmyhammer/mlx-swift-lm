@@ -194,6 +194,31 @@ public struct Qwen35MTPCheckpointFixture {
     }
 }
 
+/// A downloader that refuses to download: a configuration that names a local directory needs
+/// none.
+public struct UnusedDownloader: Downloader {
+
+    /// Makes the downloader.
+    public init() {}
+
+    /// Refuses to download.
+    ///
+    /// - Parameters:
+    ///   - id: The repository of the request.
+    ///   - revision: The revision of the request.
+    ///   - patterns: The file patterns of the request.
+    ///   - useLatest: Whether the request asks for the latest revision.
+    ///   - progressHandler: The progress callback of the request.
+    /// - Returns: Never.
+    /// - Throws: `ModelFactoryError.invalidConfiguration`, always.
+    public func download(
+        id: String, revision: String?, matching patterns: [String], useLatest: Bool,
+        progressHandler: @Sendable @escaping (Progress) -> Void
+    ) async throws -> URL {
+        throw ModelFactoryError.invalidConfiguration("A local MTP checkpoint downloads nothing.")
+    }
+}
+
 /// A tokenizer loader that refuses to load: an MTP drafter checkpoint borrows the tokenizer of
 /// its target, thus a drafter load that asks for one is a mistake.
 public struct UnusedTokenizerLoader: TokenizerLoader {

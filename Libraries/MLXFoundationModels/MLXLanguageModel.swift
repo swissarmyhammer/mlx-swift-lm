@@ -160,16 +160,22 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// this model, or `nil` when the model has none.
     ///
     /// The drafter model leaves its container here, before the response enters the
-    /// target's `ModelContainer.perform`, thus no generation nests a second lock.
+    /// target's `ModelContainer.perform`, thus no generation nests a second lock. The
+    /// loaded target picks the drafter loader, so a registration that matches the target
+    /// loads the drafter family of the target as it loaded.
     ///
+    /// - Parameter container: the loaded target, from ``loadContainer()``.
     /// - Returns: the speculation, or `nil`.
     /// - Throws: the error of the drafter load.
-    func loadMTPSpeculation() async throws -> MTPSpeculation? {
+    func loadMTPSpeculation(for container: ModelContainer) async throws -> MTPSpeculation? {
         guard let speculativeDecoding else { return nil }
+        let loadDrafter = await container.perform { context in
+            speculativeDecoding.drafterLoader(for: context.model)
+        }
         let drafter = try await Self.cache.loadDrafter(
             ModelCache.DrafterKey(modelID: modelID, drafterID: speculativeDecoding.drafterID)
         ) {
-            try await speculativeDecoding.loadDrafter(speculativeDecoding.drafterConfiguration)
+            try await loadDrafter(speculativeDecoding.drafterConfiguration)
         }
         return await speculativeDecoding.speculation(with: drafter)
     }
@@ -512,7 +518,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
         // The MTP drafter loads here too, once, into the same model cache a
         // later `respond` reads.
-        let speculation = try await loadMTPSpeculation()
+        let speculation = try await loadMTPSpeculation(for: container)
 
         // Force Metal shader JIT with a minimal 1-token generate, run inside
         // `perform` so the forward pass + synchronize serialize against any
@@ -1092,7 +1098,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let container = try await model.loadContainer()
             // The MTP drafter of the model, taken out of its own container here,
             // before the target's `perform` below, thus no lock nests.
-            let speculation = try await model.loadMTPSpeculation()
+            let speculation = try await model.loadMTPSpeculation(for: container)
 
             // Encode schema to JSON if present
             let schemaJSON: String?

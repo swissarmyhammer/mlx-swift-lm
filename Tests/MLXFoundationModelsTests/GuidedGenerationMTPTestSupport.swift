@@ -200,17 +200,20 @@ struct GuidedFixtureRun {
     ///   - prompt: The prompt tokens.
     ///   - fixture: The fixture whose target decodes, and whose drafter drafts.
     ///   - blockSize: The tokens of each MTP round, or `nil` to decode plainly.
+    ///   - drafter: The drafter of the MTP rounds, or `nil` for the fixture's own.
     /// - Returns: What the generation wrote.
     /// - Throws: An error of the generation other than running out of budget.
     static func generate(
-        schema: String, prompt: [Int], fixture: Qwen35MTPFixture, blockSize: Int?
+        schema: String, prompt: [Int], fixture: Qwen35MTPFixture, blockSize: Int?,
+        drafter: (any MTPDrafterModel)? = nil
     ) throws -> GuidedFixtureRun {
         let tokenizer = ToolCallAlphabetTokenizer()
         var context = fixture.makeModelContext()
         context.tokenizer = tokenizer
         let grammar = try Grammar(schema: schema, tokenizer: tokenizer)
         let speculation = blockSize.map {
-            MTPSpeculation(drafter: fixture.drafter, blockSize: $0, minimumDraftProbability: 0)
+            MTPSpeculation(
+                drafter: drafter ?? fixture.drafter, blockSize: $0, minimumDraftProbability: 0)
         }
         let sink = GuidedGenerationDiagnosticSink()
         var text = ""
