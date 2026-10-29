@@ -11,8 +11,12 @@ import Testing
 /// The prompt tokens the target's prefill hands the drafter as one chunk.
 private let prefillChunkLength = 4
 
-/// A prompt longer than one prefill chunk, so the target's final forward evaluates the rest.
-private let chunkedPrompt: [Int32] = [1, 2, 3, 4, 5, 6]
+/// The prompt tokens past the prefill chunk, which the target's final forward evaluates.
+private let finalSegmentLength = 2
+
+/// A prompt longer than one prefill chunk, so the target's final forward evaluates the rest: the
+/// token ids `1` through ``prefillChunkLength`` + ``finalSegmentLength``.
+private let chunkedPrompt = Array(1 ... Int32(prefillChunkLength + finalSegmentLength))
 
 /// The tokens each stream generates: enough for the first speculative round to draft.
 private let generatedTokenCount = 4
