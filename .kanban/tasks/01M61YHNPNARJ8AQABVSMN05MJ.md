@@ -72,8 +72,24 @@ comments:
     - evidence: 1 file — IntegrationTesting/IntegrationTestingTests/MTPGreedyVerificationBenchmarkTests.swift. swiftlint no_magic_numbers 0 findings (was 4). No stdout writes left. `swift build --build-tests` 0 compiler warnings. Release xcodebuild MTPGreedyVerificationBenchmarkTests TEST SUCCEEDED (1 test, 5.32 s). All 3 findings checked.
     - next: /review
   timestamp: 2026-10-29T06:22:53.927405+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m6358e4ygmxqmctefbrgw9p4
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (dc132d4a) — 0 findings, 0 confirmed, 0 refuted (7 attempted); all 3 items in ## Review Findings (2026-10-29 01:19) checked
+    - next: task moved to done
+  timestamp: 2026-10-29T06:23:48.894915+00:00
+- actor: claude-code
+  id: 01m6358t128q6kq5c7k85w3nar
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 1 file (named constants, os Logger)
+    - test: green — build 0 warnings; Release MTPGreedyVerificationBenchmarkTests passed
+    - commit: dc132d4a
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T06:24:01.058503+00:00
+position_column: done
+position_ordinal: fffd80
 title: Move MTPGreedyVerificationTests.benchmarkVerification off its MTP_GREEDY_BENCHMARK switch
 ---
 ## What
