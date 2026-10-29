@@ -23,7 +23,7 @@ import Foundation
 /// M3 carries no tool schema through this format (unlike M2's
 /// `<parameter name="k">`, whose type comes from the tool definition), so
 /// every leaf value is JSON-sniffed the same way the reference parser does
-/// (see ``coerceScalar(_:)``), and malformed argument XML surfaces an
+/// (see `coerceScalar(_:)`), and malformed argument XML surfaces an
 /// explicit `__parse_error__` argument rather than silently degrading to an
 /// empty `{}` -- a phantom-success failure mode the reference parser calls
 /// out explicitly.
@@ -64,7 +64,7 @@ public struct MiniMaxM3ToolCallParser: ToolCallParser, Sendable {
     ///   - content: The text content to parse (may include tags).
     ///   - tools: Unused -- M3 carries no tool schema through this format,
     ///     so every leaf value is JSON-sniffed rather than typed from a
-    ///     schema (see ``coerceScalar(_:)``).
+    ///     schema (see `coerceScalar(_:)`).
     /// - Returns: The first parsed ``ToolCall``, or `nil` if `content`
     ///   contains no `<invoke>` block.
     public func parse(content: String, tools: [[String: any Sendable]]?) -> ToolCall? {

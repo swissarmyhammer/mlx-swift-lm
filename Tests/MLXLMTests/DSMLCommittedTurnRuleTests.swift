@@ -87,8 +87,8 @@ struct DSMLCommittedTurnRuleTests {
             previousRenderTokens: previousRender,
             processedTokenCount: processedTokenCount,
             mainCacheIsAligned: processedTokenCount == cached.count,
-            hasDraftCache: hasDraft,
-            draftCacheIsAligned: draftAligned,
+            speculativeReuseCapability: hasDraft
+                ? (draftAligned ? .reusable : .unavailable) : .unavailable,
             maxTrimCount: processedTokenCount)
     }
 
@@ -223,18 +223,9 @@ struct DSMLCommittedTurnRuleTests {
                 == nil)
     }
 
-    @Test func `declines an uncommitted lookahead the render cannot explain`() {
-        // The parser saw tokens the cache does not hold, and they are not the
-        // commit. The render of the turn holds them somewhere inside its own
-        // body, thus no boundary can be proven.
-        #expect(
-            rule.reuse(
-                turn: turn(
-                    prompt: [10, 11, Self.renderedOnly, Self.commit, 20],
-                    uncommittedTokens: [Self.renderedOnly]),
-                cache: alignedCache(
-                    [10, 11, Self.generatedOnly], previousRender: [10, 11])) == nil)
-    }
+    // The splice after a turn whose last generated tokens never reached the
+    // caches (card `^g2t7caa`) is in `CommittedTurnUncommittedTokenTests`,
+    // which runs against this rule and against `QwenCommittedTurnRule`.
 
     @Test func `declines when message text adds a second commit`() {
         // A tool result that quotes the end-of-sentence marker must not move the

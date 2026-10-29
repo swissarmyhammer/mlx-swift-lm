@@ -4,10 +4,68 @@
 
 import Testing
 import Foundation
+import HuggingFace
+import IntegrationTestHelpers
+import MLXHuggingFace
+import MLXLLM
 import MLXLMCommon
 import FoundationModels
+import Synchronization
+import Tokenizers
 @testable import MLXFoundationModels
 @testable import MLXGuidedGeneration
+
+/// Qwen3.8-27B-4bit, the target of the MTP benchmark.
+private let mtpBenchmarkTargetID = "mlx-community/Qwen3.8-27B-4bit"
+
+/// The 4-bit MTP head of ``mtpBenchmarkTargetID``.
+private let mtpBenchmarkDrafterID = "mlx-community/Qwen3.8-27B-MTP-4bit"
+
+/// Whether the files of the target and of the MTP head are local: the MTP benchmark downloads
+/// nothing.
+private let mtpBenchmarkFilesAreLocal =
+    hfSnapshotDir(modelId: mtpBenchmarkTargetID) != nil
+    && hfSnapshotDir(modelId: mtpBenchmarkDrafterID) != nil
+
+/// The days of the plan of ``MTPBenchmarkTrip``, which fix the length of its array.
+private let mtpBenchmarkTripDayCount = 3
+
+/// The trip the MTP benchmark asks for: free text, a number and a fixed-length array, so the
+/// grammar alternates forced and free tokens.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+private struct MTPBenchmarkTrip {
+    @Guide(description: "The city of the trip.")
+    let city: String
+
+    @Guide(description: "The nights the trip lasts.")
+    let nights: Int
+
+    @Guide(
+        description: "One short plan for each day of the trip.", .count(mtpBenchmarkTripDayCount))
+    let days: [String]
+}
+
+/// The tokens the executor reported as generated, summed over its usage events.
+///
+/// The executor reports on the task of the response and the test reads on its own task, thus a
+/// `Mutex` holds the count.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+private final class GeneratedTokenCount: Sendable {
+    private let total = Mutex(0)
+
+    /// The generated tokens so far.
+    var count: Int { total.withLock { $0 } }
+
+    /// The observer that adds the generated tokens of each usage event.
+    var observer: @Sendable (MLXLanguageModel.Executor.GenerationEvent) -> Void {
+        { event in
+            if case .updateUsage(_, let output, _) = event {
+                self.total.withLock { $0 += output.totalTokenCount }
+            }
+        }
+    }
+}
 
 /// Performance benchmarks for guided generation.
 ///
@@ -322,7 +380,7 @@ struct GuidedGenerationBenchmarkTests {
         let container = try await loadTestModelContainer(id: TestFixtures.defaultModelID)
 
         let modelID = TestFixtures.defaultModelID
-        let (grammarTokenizer, hostTokenizer): (GrammarTokenizer, any Tokenizer) =
+        let (grammarTokenizer, hostTokenizer): (GrammarTokenizer, any MLXLMCommon.Tokenizer) =
             try await container.perform { context in
                 let tokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                     modelID: modelID,
@@ -379,6 +437,130 @@ struct GuidedGenerationBenchmarkTests {
             medianMs < 1500.0,
             "Grammar compilation took \(fmt(medianMs)) ms, expected < 1500ms"
         )
+    }
+
+    // MARK: - MTP Speculation
+
+    /// The prompt of the MTP benchmark.
+    private static let mtpPrompt = "Plan a three-day trip to Kyoto in autumn."
+
+    /// The token budget of each MTP benchmark run, which the trip closes well within.
+    private static let mtpMaxTokens = 512
+
+    /// The widest gap between the two best constrained logits of plain decoding at which the
+    /// MTP output may first part from the plain output.
+    private static let mtpNearTieLogitGap: Float = 1e-3
+
+    /// Guided JSON output of Qwen3.8-27B-4bit with its 4-bit MTP head against the same target
+    /// without it, through `MLXLanguageModel`: the MTP output is the plain output, or first
+    /// parts from it where plain's two best constrained logits lie within
+    /// ``mtpNearTieLogitGap``, and MTP generates more tokens per second.
+    ///
+    /// The timed responses record nothing but their usage; one more response of each model
+    /// records its decisions for the comparison.
+    @Test(.enabled(if: mtpBenchmarkFilesAreLocal))
+    func qwen38GuidedJSONWithMTP() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        let plain = makeMTPBenchmarkModel(speculativeDecoding: nil)
+        let speculative = makeMTPBenchmarkModel(
+            speculativeDecoding: try MLXSpeculativeDecoding(
+                drafterConfiguration: ModelConfiguration(id: mtpBenchmarkDrafterID),
+                from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+                registration: .qwen35Text))
+
+        // The traced response of each model also loads the weights, the drafter and the grammar.
+        let plainTrace = try await traceTrip(model: plain)
+        let mtpTrace = try await traceTrip(model: speculative)
+        var plainRates: [Double] = []
+        var mtpRates: [Double] = []
+        for _ in 0 ..< Self.iterations {
+            plainRates.append(try await tokensPerSecond(model: plain))
+            mtpRates.append(try await tokensPerSecond(model: speculative))
+        }
+
+        let plainRate = median(plainRates)
+        let mtpRate = median(mtpRates)
+        let divergence = firstDivergence(of: mtpTrace, from: plainTrace)
+        // swiftlint:disable:next no_direct_standard_out_logs  the benchmark's result line
+        print(
+            "[MTP guided] plain=\(fmt(plainRate)) tok/s mtp=\(fmt(mtpRate)) tok/s "
+                + "tokens=\(plainTrace.generatedTokenCount) "
+                + "accepted=\(mtpTrace.acceptedDraftTokenCount)/\(mtpTrace.draftedTokenCount) "
+                + "divergence=\(divergence.map { "\($0.index) margin \($0.margin ?? .infinity)" } ?? "none")"
+        )
+
+        #expect(mtpTrace.draftedTokenCount > 0)
+        #expect(
+            divergence.map { ($0.margin ?? .infinity) < Self.mtpNearTieLogitGap } ?? true,
+            "MTP parted from plain away from a near-tie: \(String(describing: divergence))")
+        #expect(mtpRate > plainRate)
+    }
+
+    /// The model of the MTP benchmark, with `speculativeDecoding` or plain. Both share the
+    /// target's weights in the process-wide model cache.
+    ///
+    /// The target loads as the text model its MTP head drafts for, as the MTP generation
+    /// benchmarks load it: the default factory order would load the vision-language model.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func makeMTPBenchmarkModel(
+        speculativeDecoding: MLXSpeculativeDecoding?
+    ) -> MLXLanguageModel {
+        MLXLanguageModel(
+            configuration: ModelConfiguration(id: mtpBenchmarkTargetID),
+            capabilities: [.guidedGeneration], speculativeDecoding: speculativeDecoding,
+            weightsLocation: testWeightsLocation(modelID:)
+        ) { configuration, progress in
+            try await LLMModelFactory.shared.loadContainer(
+                from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+                configuration: configuration, progressHandler: progress)
+        }
+    }
+
+    /// One greedy trip response of `model` in a new session.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func respondWithTrip(model: MLXLanguageModel) async throws {
+        _ = try await LanguageModelSession(model: model).respond(
+            to: Self.mtpPrompt, generating: MTPBenchmarkTrip.self,
+            options: GenerationOptions(
+                samplingMode: .greedy, maximumResponseTokens: Self.mtpMaxTokens))
+    }
+
+    /// One trip response of `model` that records its decisions.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func traceTrip(model: MLXLanguageModel) async throws -> GuidedGenerationDiagnosticSink {
+        let sink = GuidedGenerationDiagnosticSink()
+        try await GuidedGenerationDiagnosticSink.$current.withValue(sink) {
+            try await respondWithTrip(model: model)
+        }
+        return sink
+    }
+
+    /// The generated tokens per second of one trip response of `model`, from the usage the
+    /// executor reports.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func tokensPerSecond(model: MLXLanguageModel) async throws -> Double {
+        let generated = GeneratedTokenCount()
+        let start = ContinuousClock.now
+        try await MLXLanguageModel.Executor.$generationObserver.withValue(generated.observer) {
+            try await respondWithTrip(model: model)
+        }
+        return Double(generated.count) / (ContinuousClock.now - start).seconds
+    }
+
+    /// Where the decisions of `run` first part from the decisions of `plain`, with plain's
+    /// margin there, or `nil` when they write the same tokens.
+    private func firstDivergence(
+        of run: GuidedGenerationDiagnosticSink, from plain: GuidedGenerationDiagnosticSink
+    ) -> (index: Int, margin: Float?)? {
+        let tokens = run.sampledTokenIDs
+        let plainTokens = plain.sampledTokenIDs
+        let common = min(tokens.count, plainTokens.count)
+        guard
+            let index = (0 ..< common).first(where: { tokens[$0] != plainTokens[$0] })
+                ?? (tokens.count == plainTokens.count ? nil : common)
+        else { return nil }
+        let margins = plain.decisionMargins
+        return (index, margins.indices.contains(index) ? margins[index] : nil)
     }
 
     // MARK: - Helpers
@@ -619,9 +801,12 @@ struct GuidedGenerationBenchmarkTests {
 // MARK: - Duration convenience
 
 extension Duration {
+    /// The attoseconds in one second.
+    fileprivate static let attosecondsPerSecond = 1e18
+
     /// Total seconds as a Double, combining the seconds and attoseconds components.
     fileprivate var seconds: Double {
-        Double(components.seconds) + Double(components.attoseconds) / 1e18
+        Double(components.seconds) + Double(components.attoseconds) / Self.attosecondsPerSecond
     }
 }
 

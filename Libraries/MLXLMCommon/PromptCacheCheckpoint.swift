@@ -39,7 +39,13 @@ package struct PromptCacheCheckpoint {
     /// The model state the prefill left at the checkpoint, or nil.
     package let state: LMOutput.State?
 
-    /// The bytes the copies and `state` hold in memory.
+    /// A compacted copy of the MTP drafter continuation at the checkpoint (see
+    /// ``MTPDrafterContinuation/compacted()``), or nil when the caller gave
+    /// none or gave one that does not end at the checkpoint.
+    package let drafterContinuation: MTPDrafterContinuation?
+
+    /// The bytes the copies, `state` and the drafter continuation hold in
+    /// memory.
     package let byteCount: Int
 
     /// Takes a checkpoint of `caches`, which represent `tokens`.
@@ -48,20 +54,57 @@ package struct PromptCacheCheckpoint {
     ///   - caches: the live caches, one for each layer of the model.
     ///   - tokens: the tokens `caches` represents.
     ///   - state: the model state the prefill left at this position, or nil.
+    ///   - drafterContinuation: the live MTP drafter continuation at this
+    ///     position, or nil. The checkpoint keeps a compacted copy of it, so
+    ///     the live one can move on, and only when it is aligned with
+    ///     `tokens`: a restore must never hand a drafter a state of another
+    ///     position.
     /// - Returns: nil when no cache can lose its rewind, because then a rewind
     ///   serves every later render and a checkpoint adds nothing, or when a
     ///   cache does not stand at the end of `tokens`.
-    package init?(caches: [KVCache], tokens: [Int], state: LMOutput.State?) {
+    package init?(
+        caches: [KVCache], tokens: [Int], state: LMOutput.State?,
+        drafterContinuation: MTPDrafterContinuation? = nil
+    ) {
         guard Self.applies(to: caches), caches.allSatisfy({ $0.offset == tokens.count }) else {
             return nil
         }
         let copies = caches.map { Self.canLoseRewind($0) ? $0.copy() : nil }
+        let storedContinuation = drafterContinuation.flatMap { continuation in
+            continuation.isAligned(
+                withMainTokenCount: tokens.count, drafterID: continuation.drafterID)
+                ? continuation.compacted() : nil
+        }
         self.tokens = tokens
         self.copies = copies
         self.state = state
+        self.drafterContinuation = storedContinuation
         self.byteCount =
             copies.reduce(0) { $0 + ($1?.residentByteCount ?? 0) }
-            + (state?.residentByteCount ?? 0)
+            + (state?.residentByteCount ?? 0) + (storedContinuation?.byteCount ?? 0)
+    }
+
+    /// A copy of the drafter continuation this checkpoint keeps, which a
+    /// restore hands to the generation that resumes the drafter `drafterID`
+    /// here.
+    ///
+    /// Forks share a checkpoint, and a generation writes into the drafter
+    /// caches it resumes. A restore thus hands out a copy, and the checkpoint
+    /// keeps its own continuation for the next restore.
+    ///
+    /// - Parameter drafterID: the identity of the drafter of the generation.
+    /// - Returns: the copy, or nil when the checkpoint keeps no continuation or
+    ///   keeps one that the drafter `drafterID` cannot resume at this
+    ///   checkpoint. The drafter then cold-starts here.
+    package func drafterContinuation(resumableBy drafterID: MTPDrafterID)
+        -> MTPDrafterContinuation?
+    {
+        guard let drafterContinuation,
+            drafterContinuation.isAligned(withMainTokenCount: tokens.count, drafterID: drafterID)
+        else {
+            return nil
+        }
+        return drafterContinuation.copy()
     }
 
     /// Whether a model has a layer that cannot rewind, thus whether a
@@ -149,17 +192,24 @@ package struct PromptCacheCheckpoint {
     ///   - state: the model state to seed the first pass with, or nil.
     ///   - model: the model that feeds the caches.
     ///   - prefill: cuts the tokens into forward passes.
+    ///   - drafterFeed: takes the target hidden rows of each forward pass into
+    ///     an MTP drafter, or nil. The returned state then holds none of the
+    ///     values the model emits for the drafter.
     /// - Returns: the model state the last pass left.
     /// - Throws: `CancellationError` when the task is cancelled between two
     ///   forward passes.
     package static func prefill(
         _ tokens: [Int], into caches: [KVCache], state: LMOutput.State?,
-        model: any LanguageModel, prefill: PrefillParameters
+        model: any LanguageModel, prefill: PrefillParameters,
+        drafterFeed: MTPPrefillChunkHandler? = nil
     ) throws -> LMOutput.State? {
         var state = state
         let forward = { (range: Range<Int>) in
             let chunk = MLXArray(Array(tokens[range])).expandedDimensions(axis: 0)
-            state = model(LMInput.Text(tokens: chunk), cache: caches, state: state).state
+            let chunkState = drafterFeed.map { (state ?? LMOutput.State()).feeding($0) } ?? state
+            let output = model(LMInput.Text(tokens: chunk), cache: caches, state: chunkState)
+            chunkState?.feedMTPPrefillChunk(tokens: chunk, output: output)
+            state = drafterFeed == nil ? output.state : output.state?.withoutMTPExchange
             asyncEval(caches.flatMap(\.state))
         }
         let chunked = try prefill.forEachChunk(total: tokens.count, reserving: 0, forward)
@@ -170,8 +220,8 @@ package struct PromptCacheCheckpoint {
         return state
     }
 
-    /// Feeds the prompt from `start` up to `boundary` into `caches`, and takes
-    /// a checkpoint there.
+    /// Feeds `uncommittedTokens` and then the prompt from `start` up to
+    /// `boundary` into `caches`, and takes a checkpoint there.
     ///
     /// - Parameters:
     ///   - boundary: the index of the prompt where the checkpoint goes.
@@ -180,31 +230,45 @@ package struct PromptCacheCheckpoint {
     ///     fed the whole prompt. A protocol rule can keep generated tokens here
     ///     that the render does not hold.
     ///   - start: the leading prompt tokens the caches already hold.
+    ///   - uncommittedTokens: the tokens the previous generation returned and
+    ///     the caches miss, which a splice feeds ahead of the prompt (see
+    ///     ``PromptCacheReuse/uncommittedTokens``). They go in the same forward
+    ///     passes as the prompt tokens.
     ///   - caches: the live caches, one for each layer of the model.
     ///   - state: the model state to seed the first forward pass with, or nil.
     ///   - model: the model that feeds the caches.
     ///   - prefill: cuts the tokens into forward passes.
-    /// - Returns: the model state the fed tokens left and the checkpoint at
-    ///   `boundary`, which is nil when a cache did not stand there. Nil when
-    ///   `boundary` is not after `start` or not before the end of the prompt:
-    ///   the caches hold that position already, or only the prefill of the
-    ///   generation reaches it.
+    ///   - drafterFeed: the feed of an MTP drafter that stands at `start`, or
+    ///     nil. The fed tokens go into the drafter too, so the drafter
+    ///     continuation stands at `boundary` and the checkpoint keeps it.
+    /// - Returns: the model state the fed tokens left, the checkpoint at
+    ///   `boundary`, which is nil when a cache did not stand there, and the live
+    ///   drafter continuation at `boundary`, which is nil without a feed or
+    ///   when a chunk did not reach the drafter. Nil when `boundary` is not
+    ///   after `start` or not before the end of the prompt: the caches hold
+    ///   that position already, or only the prefill of the generation reaches
+    ///   it.
     /// - Throws: `CancellationError` when the task is cancelled between two
     ///   forward passes.
     package static func prefillToCheckpoint(
         at boundary: Int, of promptTokens: [Int], representing representedTokens: [Int],
-        from start: Int, into caches: [KVCache], state: LMOutput.State?,
-        model: any LanguageModel, prefill: PrefillParameters
-    ) throws -> (state: LMOutput.State?, checkpoint: PromptCacheCheckpoint?)? {
+        from start: Int, after uncommittedTokens: [Int] = [], into caches: [KVCache],
+        state: LMOutput.State?, model: any LanguageModel, prefill: PrefillParameters,
+        drafterFeed: MTPDrafterPrefillFeed? = nil
+    ) throws -> (
+        state: LMOutput.State?, checkpoint: PromptCacheCheckpoint?,
+        drafterContinuation: MTPDrafterContinuation?
+    )? {
         guard boundary > start, boundary < promptTokens.count else { return nil }
         let fedState = try Self.prefill(
-            Array(promptTokens[start ..< boundary]), into: caches, state: state, model: model,
-            prefill: prefill)
+            uncommittedTokens + promptTokens[start ..< boundary], into: caches, state: state,
+            model: model, prefill: prefill, drafterFeed: drafterFeed?.chunkHandler)
+        let drafterContinuation = drafterFeed?.continuation
         let checkpoint = PromptCacheCheckpoint(
             caches: caches,
             tokens: Array(representedTokens.dropLast(promptTokens.count - boundary)),
-            state: fedState)
-        return (fedState, checkpoint)
+            state: fedState, drafterContinuation: drafterContinuation)
+        return (fedState, checkpoint, drafterContinuation)
     }
 
     /// The index of `prompt` where its last message ends: the start of the
@@ -368,6 +432,12 @@ package struct PromptCacheCheckpoints {
         }
     }
 
+    /// Every checkpoint: the others in the order the session took them, then
+    /// the leading one.
+    package var all: [PromptCacheCheckpoint] {
+        checkpoints + [leading].compactMap { $0 }
+    }
+
     /// Forgets every checkpoint.
     package mutating func removeAll() {
         checkpoints.removeAll()
@@ -380,7 +450,7 @@ package struct PromptCacheCheckpoints {
     /// - Parameter promptTokens: the whole rendered prompt.
     /// - Returns: the checkpoint, or nil when none serves the prompt.
     package func longest(serving promptTokens: [Int]) -> PromptCacheCheckpoint? {
-        (checkpoints + [leading].compactMap { $0 })
+        all
             .filter { $0.serves(promptTokens) }
             .max { $0.tokens.count < $1.tokens.count }
     }

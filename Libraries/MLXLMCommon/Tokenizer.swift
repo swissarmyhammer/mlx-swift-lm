@@ -290,8 +290,8 @@ public struct DeepSeekV4EncodingTokenizer: Tokenizer {
 
     /// The reasoning protocol of DeepSeek-V4.
     ///
-    /// The prompt strategy is the ``thinkingKey`` template flag, with the
-    /// default of ``thinksByDefault``. Thus the thinking switch of
+    /// The prompt strategy is the `thinkingKey` template flag, with the
+    /// default of `thinksByDefault`. Thus the thinking switch of
     /// ``ChatSession`` and of the `MLXFoundationModels` executor selects the
     /// generation mode of this tokenizer. The delimiters are the reasoning
     /// markers of ``DeepSeekV4ChatEncoder``.
@@ -436,7 +436,7 @@ public enum TokenizerError: LocalizedError {
 }
 
 /// An incremental detokenizer for one generated sequence: tokens are appended
-/// one at a time and ``IteratorProtocol/next()`` yields the newly decoded text,
+/// one at a time and `IteratorProtocol/next()` yields the newly decoded text,
 /// or `nil` until more tokens arrive. Preserve special tokens for downstream
 /// protocol parsing. Custom implementations should emit stable text, holding
 /// incomplete bytes or context-dependent suffixes as needed.

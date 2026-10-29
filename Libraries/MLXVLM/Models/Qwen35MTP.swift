@@ -39,8 +39,17 @@ final class Qwen35VLMNextNPredictor: Module {
         super.init()
     }
 
-    func newCache() -> [KVCache] {
-        layers.map { _ in KVCacheSimple() }
+    /// The cache of each predictor layer in a stream of `parameters`, as
+    /// ``ShiftedMTPDrafter/makeCache(layerCount:parameters:maximumBlockSize:)`` builds it: a
+    /// ring of the main window with a rewind reserve when the main caches rotate, and else a
+    /// full-precision cache, a quantized main cache included.
+    ///
+    /// - Parameter parameters: The generation parameters of the stream, or `nil` for none.
+    /// - Returns: One cache for each predictor layer.
+    func newCache(parameters: GenerateParameters? = nil) -> [KVCache] {
+        ShiftedMTPDrafter.makeCache(
+            layerCount: layers.count, parameters: parameters,
+            maximumBlockSize: GatedDeltaDecodeKernel.mostTokens)
     }
 
     func callAsFunction(
@@ -79,13 +88,26 @@ final class Qwen35VLMNextNPredictor: Module {
     }
 }
 
-public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
+public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel,
+    StatefulMTPDistributionDrafterModel
+{
     public let configuration: Qwen35Configuration.TextConfiguration
-    public let maximumBlockSize: Int? = 2
+
+    /// The longest verify the hybrid target rewinds in place: the most tokens its gated delta
+    /// net kernel and its compiled verify schedule hold. A longer round would verify through a
+    /// staged round, which runs neither.
+    public let maximumBlockSize: Int? = GatedDeltaDecodeKernel.mostTokens
     public let requiresSharedTargetKV = false
     public let requiresPromptPrefill = true
-    public let requiresGreedySampling = true
+    public let requiresGreedySampling = false
     private let checkpointPolicy: Qwen35CheckpointPolicy
+
+    /// The type name and a hash of ``configuration``, which decides the drafter cache layers.
+    public let drafterID: MTPDrafterID
+
+    /// The hidden size of ``configuration``: the width of the target hidden rows and of the
+    /// predictor's seed hidden row.
+    public var hiddenSize: Int? { configuration.hiddenSize }
 
     @ModuleInfo(key: "mtp") var mtp: Qwen35VLMNextNPredictor
 
@@ -106,6 +128,8 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
     ) {
         self.configuration = configuration
         self.checkpointPolicy = checkpointPolicy
+        self.drafterID = MTPDrafterID(
+            drafterType: Qwen35VLMNextNDraftModel.self, configuration: configuration)
         _mtp.wrappedValue = Qwen35VLMNextNPredictor(configuration)
         super.init()
     }
@@ -121,44 +145,63 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
                 preconvertedNorms: preconvertedNorms))
     }
 
+    public func validateCompatibility(with target: any LanguageModel) throws {
+        guard let target = target as? Qwen35 else {
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: "Qwen35VLMNextNDraftModel",
+                expected: "a Qwen3.5 VLM target",
+                actual: String(describing: type(of: target))
+            )
+        }
+
+        let targetConfiguration = target.config.textConfiguration
+        guard
+            targetConfiguration.hiddenSize == configuration.hiddenSize,
+            targetConfiguration.vocabularySize == configuration.vocabularySize
+        else {
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: "Qwen35VLMNextNDraftModel",
+                expected: "a Qwen3.5 VLM target with hidden size \(configuration.hiddenSize) "
+                    + "and vocabulary size \(configuration.vocabularySize)",
+                actual: "\(type(of: target)) with hidden size \(targetConfiguration.hiddenSize) "
+                    + "and vocabulary size \(targetConfiguration.vocabularySize)"
+            )
+        }
+    }
+
+    /// A drafter state whose cache follows the main caches of `parameters`: see
+    /// `Qwen35VLMNextNPredictor/newCache(parameters:)`.
     public func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
-        MTPDrafterState(cache: mtp.newCache())
+        MTPDrafterState(cache: mtp.newCache(parameters: parameters))
     }
 
-    public func isCompatible(with target: any LanguageModel) -> Bool {
-        target is Qwen35
-    }
-
-    public func prepareDrafterState(
+    public func appendDrafterState(
         target: any LanguageModel,
-        promptTokens: MLXArray,
+        tokens: MLXArray,
         targetHidden: MLXArray,
-        firstBonus: MLXArray,
-        positionDeltas _: MLXArray?,
+        positionDeltas: MLXArray?,
         state: inout MTPDrafterState,
         sampler: any LogitSampler
-    ) {
-        guard let target = target as? Qwen35 else {
-            fatalError("Qwen35VLMNextNDraftModel requires a Qwen35 VLM target")
-        }
+    ) -> Bool {
+        let tokens = normalizedMTPTokenBatch(tokens)
+        let count = tokens.dim(-1)
+        guard let target = target as? Qwen35, count > 0, targetHidden.dim(1) >= count,
+            state.proposalAppended == 0, state.isAligned
+        else { return false }
+
         let targetEmbedTokens = target.languageModel.model.embedTokens
         let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
-        let prompt = normalizedMTPTokenBatch(promptTokens)
-        let bonus = normalizedMTPColumn(firstBonus)
-        guard prompt.dim(-1) > 0 else { return }
-
-        let shifted = concatenated([prompt[0..., 1...], bonus], axis: 1)
-        let hidden = targetHidden[0..., ..<shifted.dim(1), 0...]
-        state.nextPosition = 0
         let mtpHidden = mtp(
-            inputsEmbeds: inputEmbedding(shifted), hiddenStates: hidden,
-            cache: state.cache, positionOffset: 0, positionDeltas: nil)
-        state.nextPosition = shifted.dim(1)
-        state.seedHidden = mtpHidden[0..., (-1)..., 0...]
-        state.seedToken = sampleMTPSeed(
-            hidden: state.seedHidden!, targetEmbedTokens: targetEmbedTokens,
+            inputsEmbeds: inputEmbedding(tokens),
+            hiddenStates: targetHidden.dim(1) == count
+                ? targetHidden : targetHidden[0..., ..<count, 0...],
+            cache: state.cache, positionOffset: state.nextPosition,
+            positionDeltas: positionDeltas)
+        state.nextPosition += count
+        state.drawSeed(
+            hidden: mtpHidden[0..., (-1)..., 0...], targetEmbedTokens: targetEmbedTokens,
             lmHead: target.languageModel.lmHead, sampler: sampler)
-        state.proposalAppended = 0
+        return state.isAligned
     }
 
     public func draftBlock(
@@ -184,6 +227,8 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
             sampler: sampler)
     }
 
+    /// Drafts the seed the last commit left, then chains the predictor on its own hidden rows for
+    /// the rest of the round; with no seed, chains every draft from `lastToken`.
     public func draftBlock(
         target: any LanguageModel,
         lastToken: MLXArray,
@@ -195,88 +240,49 @@ public final class Qwen35VLMNextNDraftModel: Module, StatefulMTPDrafterModel {
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) -> MLXArray {
+        shiftedDrafter(target, positionDeltas: positionDeltas).draftTokens(
+            lastToken: lastToken, lastHidden: lastHidden, queryOffset: queryOffset,
+            blockSize: blockSize, sampler: sampler, state: &state)
+    }
+
+    /// Draws the drafts of a round with their processed logits: the seed the last commit left,
+    /// drawn again from its hidden row, then the drafts chained after it, or else a chain from
+    /// `lastToken`.
+    public func draftBlockWithLogits(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV _: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state: inout MTPDrafterState,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
+        shiftedDrafter(target, positionDeltas: positionDeltas).draftsWithLogits(
+            lastToken: lastToken, lastHidden: lastHidden, queryOffset: queryOffset,
+            blockSize: blockSize, processor: processor, sampler: sampler, state: &state)
+    }
+
+    /// The predictor of this drafter over the embedding and the LM head of `target`, placed with
+    /// `positionDeltas`.
+    private func shiftedDrafter(
+        _ target: any LanguageModel, positionDeltas: MLXArray?
+    ) -> ShiftedMTPDrafter {
         guard let target = target as? Qwen35 else {
             fatalError(
                 "Qwen35VLMNextNDraftModel requires a Qwen35 VLM target, got \(type(of: target))")
         }
-
         let targetEmbedTokens = target.languageModel.model.embedTokens
-        let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
-        let lmHead = target.languageModel.lmHead
-
-        if let seed = state.seedToken {
-            state.seedToken = nil
-            state.seedHidden = nil
-            state.proposalAppended = 0
-            return seed
-        }
-
-        state.proposalAppended = blockSize - 1
-        let proposed = draftMTPTokenBlock(
-            targetEmbedTokens: targetEmbedTokens,
-            lmHead: lmHead,
-            inputEmbedding: inputEmbedding,
-            lastToken: lastToken,
-            lastHidden: lastHidden,
-            queryOffset: queryOffset,
-            blockSize: blockSize,
-            sampler: sampler,
-            cache: state.cache
-        ) { inputsEmbeds, hiddenStates, cache, positionOffset in
+        return ShiftedMTPDrafter(
+            targetEmbedTokens: targetEmbedTokens, lmHead: target.languageModel.lmHead,
+            inputEmbedding: mtp.embedTokens ?? targetEmbedTokens
+        ) { [mtp] inputsEmbeds, hiddenStates, cache, positionOffset in
             mtp(
-                inputsEmbeds: inputsEmbeds,
-                hiddenStates: hiddenStates,
-                cache: cache,
-                positionOffset: positionOffset,
-                positionDeltas: positionDeltas)
+                inputsEmbeds: inputsEmbeds, hiddenStates: hiddenStates, cache: cache,
+                positionOffset: positionOffset, positionDeltas: positionDeltas)
         }
-        state.nextPosition += state.proposalAppended
-        return proposed
-    }
-
-    public func commitDrafterState(
-        target: any LanguageModel,
-        targetHidden: MLXArray,
-        draftTokens: MLXArray,
-        acceptedCount: Int,
-        finalToken: MLXArray,
-        positionDeltas: MLXArray?,
-        state: inout MTPDrafterState,
-        sampler: any LogitSampler
-    ) {
-        guard let target = target as? Qwen35 else {
-            fatalError("Qwen35VLMNextNDraftModel requires a Qwen35 VLM target")
-        }
-        let keepAppended = Swift.min(acceptedCount, state.proposalAppended)
-        let trim = state.proposalAppended - keepAppended
-        if trim > 0 {
-            trimPromptCache(state.cache, numTokens: trim)
-            state.nextPosition -= trim
-        }
-
-        var tokens = [MLXArray]()
-        var hiddens = [MLXArray]()
-        for index in keepAppended ..< acceptedCount {
-            tokens.append(draftTokens[0..., index ..< (index + 1)])
-            hiddens.append(targetHidden[0..., index ..< (index + 1), 0...])
-        }
-        tokens.append(normalizedMTPColumn(finalToken))
-        hiddens.append(targetHidden[0..., acceptedCount ..< (acceptedCount + 1), 0...])
-
-        let targetEmbedTokens = target.languageModel.model.embedTokens
-        let inputEmbedding = mtp.embedTokens ?? targetEmbedTokens
-        let committedTokens = concatenated(tokens, axis: 1)
-        let committedHidden = concatenated(hiddens, axis: 1)
-        let mtpHidden = mtp(
-            inputsEmbeds: inputEmbedding(committedTokens), hiddenStates: committedHidden,
-            cache: state.cache, positionOffset: state.nextPosition,
-            positionDeltas: positionDeltas)
-        state.nextPosition += committedTokens.dim(1)
-        state.seedHidden = mtpHidden[0..., (-1)..., 0...]
-        state.seedToken = sampleMTPSeed(
-            hidden: state.seedHidden!, targetEmbedTokens: targetEmbedTokens,
-            lmHead: target.languageModel.lmHead, sampler: sampler)
-        state.proposalAppended = 0
     }
 
     public var excludedCheckpointNamespaces: [String] {

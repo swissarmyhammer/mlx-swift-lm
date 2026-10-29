@@ -2,6 +2,29 @@
 
 import Foundation
 import MLX
+import MLXNN
+
+/// Why a configured ``ChatSession`` selected ordinary generation instead of speculation.
+public enum SpeculativeDecodingFallbackReason: Sendable, Equatable {
+    /// The drafter requires greedy sampling, but the temperature is nonzero.
+    case unsupportedSampling
+
+    /// The prepared input contains image, video, or audio tensors.
+    case unsupportedMedia
+
+    /// The initial MTP cache-staging probe refused speculation.
+    case unsupportedCache
+
+    /// Required speculative state is missing, misaligned, or cannot follow the cache operation.
+    case unavailableContinuation
+
+    /// The draft-model memory policy selected ordinary generation.
+    case memoryBudgetExceeded
+
+    /// The MTP drafter cannot draft for the session's model. Call
+    /// ``MTPDrafterContainer/validateCompatibility(with:)`` to learn why.
+    case incompatibleDrafter
+}
 
 private func defaultSpeculativeDecodingMemoryLimit() -> Int? {
     guard let bytes = GPU.maxRecommendedWorkingSetBytes(), bytes > 0 else {
@@ -32,6 +55,14 @@ public struct SpeculativeDecodingTelemetry: Sendable, Equatable {
 
     /// Number of tokens emitted from speculative rounds, including correction and bonus tokens.
     public private(set) var emittedTokenCount: Int
+
+    /// The rounds that drafted a token at each depth: element `k` counts the rounds that drafted
+    /// more than `k` tokens, so it describes depth `k + 1`.
+    public private(set) var draftedRoundCountsByDepth: [Int] = []
+
+    /// The rounds that accepted the draft at each depth: element `k` counts the rounds that
+    /// accepted more than `k` drafts, so it describes depth `k + 1`.
+    public private(set) var acceptedRoundCountsByDepth: [Int] = []
 
     public init(
         roundCount: Int = 0,
@@ -74,6 +105,19 @@ public struct SpeculativeDecodingTelemetry: Sendable, Equatable {
         return Double(emittedTokenCount) / Double(targetModelCallCount)
     }
 
+    /// The share of the rounds that drafted a token at `depth` whose draft there the target
+    /// accepted, or `nil` when no round drafted that deep.
+    ///
+    /// - Parameter depth: The position of the draft in its round: 1 is the first draft after the
+    ///   bonus token.
+    /// - Returns: The acceptance rate at `depth`, from 0 to 1.
+    public func acceptanceRate(atDepth depth: Int) -> Double? {
+        let index = depth - 1
+        guard draftedRoundCountsByDepth.indices.contains(index) else { return nil }
+        return Double(acceptedRoundCountsByDepth[index])
+            / Double(draftedRoundCountsByDepth[index])
+    }
+
     package mutating func recordRound(
         drafted: Int,
         accepted: Int,
@@ -86,6 +130,22 @@ public struct SpeculativeDecodingTelemetry: Sendable, Equatable {
         targetModelCallCount += 1
         draftModelCallCount += draftModelCalls ?? drafted
         targetVerifiedTokenCount += targetVerified
+        Self.countRound(
+            throughDepth: drafted, in: &draftedRoundCountsByDepth, depthCount: drafted)
+        Self.countRound(
+            throughDepth: accepted, in: &acceptedRoundCountsByDepth,
+            depthCount: draftedRoundCountsByDepth.count)
+    }
+
+    /// Counts one round at each depth from 1 to `depth`, after growing `counts` with zeros to
+    /// `depthCount` depths.
+    private static func countRound(
+        throughDepth depth: Int, in counts: inout [Int], depthCount: Int
+    ) {
+        counts.append(contentsOf: repeatElement(0, count: Swift.max(0, depthCount - counts.count)))
+        for index in 0 ..< Swift.max(0, depth) {
+            counts[index] += 1
+        }
     }
 
     package mutating func recordGeneratedToken() {
@@ -183,17 +243,49 @@ public struct SpeculativeDecodingMemoryPolicy: Sendable, Hashable {
         )
     }
 
-    package func evaluate(
-        mainModel: any LanguageModel,
-        draftModel: any LanguageModel
-    ) -> SpeculativeDecodingMemoryEvaluation {
-        evaluate(
-            mainModelBytes: Self.modelWeightBytes(mainModel),
-            draftModelBytes: Self.modelWeightBytes(draftModel)
-        )
+    /// Whether speculation runs under this policy for the given byte estimates.
+    ///
+    /// - Parameters:
+    ///   - mainModelBytes: The estimated bytes of the main model.
+    ///   - draftModelBytes: The estimated bytes of the draft model or MTP drafter, with any
+    ///     drafter state the caller carries.
+    /// - Returns: `true` when the policy admits speculation, `false` when it falls back to
+    ///   decoding without speculation.
+    /// - Throws: ``SpeculativeDecodingMemoryError`` when the policy does not admit speculation
+    ///   and its action is ``SpeculativeDecodingMemoryAction/fail``.
+    package func admitsSpeculation(mainModelBytes: Int, draftModelBytes: Int) throws -> Bool {
+        let evaluation = evaluate(mainModelBytes: mainModelBytes, draftModelBytes: draftModelBytes)
+        guard evaluation.shouldUseSpeculativeDecoding else {
+            if evaluation.action == .fail {
+                throw SpeculativeDecodingMemoryError(evaluation: evaluation)
+            }
+            return false
+        }
+        return true
     }
 
-    package static func modelWeightBytes(_ model: any LanguageModel) -> Int {
+    /// Whether speculation with `draftModel` for `mainModel` runs under this policy.
+    ///
+    /// - Parameters:
+    ///   - mainModel: The main model.
+    ///   - draftModel: The loaded draft model.
+    /// - Returns: `true` when the policy admits speculation, `false` when it falls back to
+    ///   decoding without speculation.
+    /// - Throws: ``SpeculativeDecodingMemoryError`` when the policy does not admit speculation
+    ///   and its action is ``SpeculativeDecodingMemoryAction/fail``.
+    package func admitsSpeculation(
+        mainModel: any LanguageModel, draftModel: any LanguageModel
+    ) throws -> Bool {
+        try admitsSpeculation(
+            mainModelBytes: Self.modelWeightBytes(mainModel),
+            draftModelBytes: Self.modelWeightBytes(draftModel))
+    }
+
+    /// The bytes of the parameters of `model`.
+    ///
+    /// - Parameter model: A target, draft or MTP drafter model.
+    /// - Returns: The sum of the bytes of its parameters.
+    package static func modelWeightBytes(_ model: Module) -> Int {
         model.parameters().flattened().reduce(0) { $0 + $1.1.nbytes }
     }
 }

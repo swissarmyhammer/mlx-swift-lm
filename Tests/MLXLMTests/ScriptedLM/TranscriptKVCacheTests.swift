@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXLMTestSupport
 import MLXScriptedLM
 import Testing
 
@@ -14,11 +15,14 @@ private final class PlainCustomCache: BaseKVCache {
 
 struct TranscriptKVCacheTests {
 
+    /// The heads of an attention entry, and the width of each head: wide enough for the
+    /// quantization group of `maybeQuantizeKVCache`.
+    static let heads = 2
+    static let headDimension = 64
+
+    /// An attention entry that holds `count` positions.
     static func attention(_ count: Int) -> KVCacheSimple {
-        let cache = KVCacheSimple()
-        let entry = MLXArray.zeros([1, 2, count, 64])
-        _ = cache.update(keys: entry, values: entry)
-        return cache
+        ZeroFilledKVCache.make(tokens: count, heads: heads, headDimension: headDimension)
     }
 
     @Test func `tokens follow append, trim, and copy`() throws {
@@ -95,7 +99,7 @@ struct TranscriptKVCacheTests {
         #expect(presented === transcript)
 
         // The verify pass writes 4 positions to every entry; 2 are accepted.
-        let entry = MLXArray.zeros([1, 2, 4, 64])
+        let entry = MLXArray.zeros([1, Self.heads, 4, Self.headDimension])
         _ = round.caches[0].update(keys: entry, values: entry)
         presented.append([4, 5, 6, 7])
         let commit = storage.commit(round, retaining: 2)
@@ -107,8 +111,7 @@ struct TranscriptKVCacheTests {
     }
 
     @Test func `a transcript round-trips through a prompt cache file`() throws {
-        let url = FileManager.default.temporaryDirectory
-            .appending(component: "transcript-\(UUID().uuidString).safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(
@@ -121,8 +124,7 @@ struct TranscriptKVCacheTests {
     }
 
     @Test func `an empty transcript round-trips`() throws {
-        let url = FileManager.default.temporaryDirectory
-            .appending(component: "transcript-\(UUID().uuidString).safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [KVCacheSimple(), TranscriptKVCache()])

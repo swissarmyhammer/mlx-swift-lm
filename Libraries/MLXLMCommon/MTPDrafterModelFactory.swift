@@ -127,3 +127,142 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
         .init(context: context)
     }
 }
+
+/// The factory that loads a family of MTP drafters, with the step that registers the family's
+/// drafter model types in the registry of that factory.
+///
+/// A module that implements drafters publishes its families as static members, such as
+/// `qwen35Text` of MLXLLM and `qwen35VLM` of MLXVLM, and a deferred
+/// ``SpeculativeDecodingConfig`` takes one to load its drafter.
+///
+/// One checkpoint can serve several families, as a Qwen3.5-family MTP checkpoint serves the text
+/// target and the vision-language target. ``matchingTarget(_:_:)`` combines such families, and a
+/// configuration that takes the combination loads the family that drafts for the target it
+/// speculates for, however that target loaded.
+public struct MTPDrafterRegistration: Sendable {
+
+    /// The factory that loads the drafter.
+    public let factory: MTPDrafterModelFactory
+
+    /// Registers the drafter model types with the registry of ``factory`` before a load.
+    public let registerDrafterTypes: @Sendable () async -> Void
+
+    /// Whether the drafters of this family draft for a target.
+    private let draftsForTarget: @Sendable (any LanguageModel) -> Bool
+
+    /// The families a combination chooses from, in order, or empty for one family.
+    private let candidates: [MTPDrafterRegistration]
+
+    /// Creates the registration of a drafter family.
+    ///
+    /// - Parameters:
+    ///   - factory: the factory that loads the drafter
+    ///   - registerDrafterTypes: registers the drafter model types with the registry of
+    ///     `factory` before a load; the default registers nothing, for types already registered
+    ///   - draftsForTarget: whether the drafters of the family draft for a target, as the target
+    ///     loaded; the default takes every target
+    public init(
+        factory: MTPDrafterModelFactory = .shared,
+        registerDrafterTypes: @escaping @Sendable () async -> Void = {},
+        draftsForTarget: @escaping @Sendable (any LanguageModel) -> Bool = { _ in true }
+    ) {
+        self.init(
+            factory: factory, registerDrafterTypes: registerDrafterTypes,
+            draftsForTarget: draftsForTarget, candidates: [])
+    }
+
+    /// The combination of drafter families that loads, for each target, the first family that
+    /// drafts for it, and the first family for a target none drafts for.
+    ///
+    /// A load that names no target loads the first family.
+    ///
+    /// - Parameters:
+    ///   - first: the first family.
+    ///   - others: the other families, in order.
+    /// - Returns: the combination.
+    public static func matchingTarget(
+        _ first: MTPDrafterRegistration, _ others: MTPDrafterRegistration...
+    ) -> MTPDrafterRegistration {
+        let candidates = ([first] + others).flatMap { $0.families }
+        return MTPDrafterRegistration(
+            factory: first.factory, registerDrafterTypes: first.registerDrafterTypes,
+            draftsForTarget: { target in candidates.contains { $0.drafts(for: target) } },
+            candidates: candidates)
+    }
+
+    /// Creates a registration that chooses among `candidates`, or a single family when
+    /// `candidates` is empty, and loads through `factory` when no target picks a family.
+    private init(
+        factory: MTPDrafterModelFactory,
+        registerDrafterTypes: @escaping @Sendable () async -> Void,
+        draftsForTarget: @escaping @Sendable (any LanguageModel) -> Bool,
+        candidates: [MTPDrafterRegistration]
+    ) {
+        self.factory = factory
+        self.registerDrafterTypes = registerDrafterTypes
+        self.draftsForTarget = draftsForTarget
+        self.candidates = candidates
+    }
+
+    /// The single families of this registration: the families of a combination, or itself.
+    private var families: [MTPDrafterRegistration] {
+        candidates.isEmpty ? [self] : candidates
+    }
+
+    /// Whether the drafters of this registration draft for `target`, as it loaded.
+    ///
+    /// - Parameter target: the model a drafter would speculate for.
+    /// - Returns: `true` when a family of the registration drafts for `target`.
+    public func drafts(for target: any LanguageModel) -> Bool {
+        draftsForTarget(target)
+    }
+
+    /// The family of this registration that loads the drafter of `target`: the first family that
+    /// drafts for it, else the first family.
+    ///
+    /// - Parameter target: the model the drafter speculates for.
+    /// - Returns: the family.
+    public func registration(for target: any LanguageModel) -> MTPDrafterRegistration {
+        families.first { $0.drafts(for: target) } ?? candidates.first ?? self
+    }
+
+    /// The loader of the drafter that drafts for `target`: it registers the drafter model types
+    /// of the family that ``registration(for:)`` picks for `target`, then loads a drafter
+    /// configuration with the factory of that family.
+    ///
+    /// - Parameters:
+    ///   - target: the model the drafter speculates for, as it loaded
+    ///   - downloader: the downloader that fetches a remote checkpoint
+    ///   - tokenizerLoader: the tokenizer loader the factory takes; an MTP drafter borrows the
+    ///     tokenizer of its target, so the load reads no tokenizer
+    /// - Returns: the loader, which takes the drafter checkpoint
+    public func drafterLoader(
+        for target: any LanguageModel, from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader
+    ) -> @Sendable (ModelConfiguration) async throws -> MTPDrafterContainer {
+        let family = registration(for: target)
+        return { configuration in
+            try await family.loadContainer(
+                from: downloader, using: tokenizerLoader, configuration: configuration)
+        }
+    }
+
+    /// Registers the drafter model types, then loads the drafter of `configuration` with
+    /// ``factory``.
+    ///
+    /// - Parameters:
+    ///   - downloader: the downloader that fetches a remote checkpoint
+    ///   - tokenizerLoader: the tokenizer loader the factory takes; an MTP drafter borrows the
+    ///     tokenizer of its target, so the load reads no tokenizer
+    ///   - configuration: the drafter checkpoint, as a model id or a local directory
+    /// - Returns: the loaded drafter
+    /// - Throws: the error of the load
+    public func loadContainer(
+        from downloader: any Downloader, using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration
+    ) async throws -> MTPDrafterContainer {
+        await registerDrafterTypes()
+        return try await factory.loadContainer(
+            from: downloader, using: tokenizerLoader, configuration: configuration)
+    }
+}

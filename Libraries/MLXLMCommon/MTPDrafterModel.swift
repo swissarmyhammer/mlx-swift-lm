@@ -4,6 +4,19 @@ import Foundation
 import MLX
 import MLXNN
 
+/// A target model cannot provide the architecture-specific state required by
+/// an MTP drafter.
+public enum MTPDrafterCompatibilityError: Error, Sendable, Equatable, LocalizedError {
+    case incompatibleTarget(drafter: String, expected: String, actual: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .incompatibleTarget(let drafter, let expected, let actual):
+            "\(drafter) requires \(expected); received \(actual)."
+        }
+    }
+}
+
 /// Protocol for Multi-Token Prediction (MTP) speculative drafter models.
 ///
 /// Mirrors `EmbeddingModel`'s relationship to `BaseLanguageModel`: this
@@ -43,10 +56,17 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// its first proposal. Qwen's private decoder cache requires this.
     var requiresPromptPrefill: Bool { get }
 
-    /// Whether this drafter is currently supported only for greedy decoding.
-    /// This keeps stochastic generation on the ordinary target path until a
-    /// probability-ratio acceptance sampler is available.
+    /// Whether this drafter supports greedy decoding only. A sampled stream of
+    /// such a drafter decodes without speculation.
     var requiresGreedySampling: Bool { get }
+
+    /// Validate that `target` provides the architecture-specific state and
+    /// model structure required by this drafter.
+    ///
+    /// Callers must invoke this before prefill or drafting. Implementations
+    /// should keep this check side-effect free and throw
+    /// ``MTPDrafterCompatibilityError`` for unsupported pairings.
+    func validateCompatibility(with target: any LanguageModel) throws
 
     /// K-step drafting from a constant position.
     ///
@@ -89,6 +109,10 @@ public protocol MTPDrafterModel: BaseLanguageModel {
 }
 
 extension MTPDrafterModel {
+    public func isCompatible(with target: any LanguageModel) -> Bool {
+        (try? validateCompatibility(with: target)) != nil
+    }
+
     public var maximumBlockSize: Int? { nil }
     public var requiresSharedTargetKV: Bool { true }
     public var requiresPromptPrefill: Bool { false }
@@ -98,9 +122,10 @@ extension MTPDrafterModel {
 /// Target-side capability for rewinding an in-place speculative verify pass.
 ///
 /// Rollback belongs to the target/cache implementation, not to the drafter.
-/// The depth is explicit so a future multi-token drafter cannot accidentally
-/// select an in-place path whose recurrent checkpoint is too shallow.
+/// The depth is explicit so a multi-token drafter cannot select an in-place
+/// path whose recurrent snapshot slots are too few for its drafts.
 public protocol SpeculativeCacheRewindModel {
+    /// The most drafts of one round the target rewinds in place.
     var maximumNativeTargetCacheRewind: Int { get }
 }
 
@@ -112,6 +137,13 @@ public protocol SpeculativeCacheRewindModel {
 public struct MTPDrafterState {
     public var cache: [KVCache]
 
+    /// Absolute position of the first entry in `cache`.
+    ///
+    /// Zero for a drafter prefilled from the start of the prompt. A cold start at a position
+    /// the target cache already holds begins its entries there, because the target hidden rows
+    /// of the earlier positions are no longer available.
+    public var cacheStartPosition: Int
+
     /// Absolute next position in a drafter-owned autoregressive cache.
     public var nextPosition: Int
 
@@ -120,21 +152,94 @@ public struct MTPDrafterState {
     public var seedToken: MLXArray?
     public var seedHidden: MLXArray?
 
+    /// The probability the logits of ``seedToken`` give their most likely token, the lowest over
+    /// the batch, as a lazy scalar; `nil` when the seed's logits are not known, as in a restored
+    /// continuation.
+    ///
+    /// A chained round whose seed falls below ``minimumDraftProbability`` drafts the seed alone,
+    /// without a chained step.
+    public var seedTopProbability: MLXArray?
+
     /// Number of tentative cache entries appended by the current proposal.
     public var proposalAppended: Int
 
+    /// The drafter top-1 probability below which a chained proposal stops before its next
+    /// draft, as llama.cpp's `--spec-draft-p-min`. Zero drafts every step of the round.
+    ///
+    /// The iterator sets it from its own setting, so a restored continuation drafts with the
+    /// floor of the stream that resumes it.
+    public var minimumDraftProbability: Float
+
     public init(
         cache: [KVCache],
+        cacheStartPosition: Int = 0,
         nextPosition: Int = 0,
         seedToken: MLXArray? = nil,
         seedHidden: MLXArray? = nil,
-        proposalAppended: Int = 0
+        seedTopProbability: MLXArray? = nil,
+        proposalAppended: Int = 0,
+        minimumDraftProbability: Float = 0
     ) {
         self.cache = cache
+        self.cacheStartPosition = cacheStartPosition
         self.nextPosition = nextPosition
         self.seedToken = seedToken
         self.seedHidden = seedHidden
+        self.seedTopProbability = seedTopProbability
         self.proposalAppended = proposalAppended
+        self.minimumDraftProbability = minimumDraftProbability
+    }
+
+    /// Entries the cache holds: committed entries, then the tentative entries of the current
+    /// proposal.
+    public var entryCount: Int { nextPosition - cacheStartPosition }
+
+    /// Whether every cache layer holds exactly ``entryCount`` entries. A state without cache
+    /// layers tracks positions only, and is always aligned.
+    public var isAligned: Bool { cache.allSatisfy { $0.offset == entryCount } }
+
+    /// Removes the last `count` entries: tentative proposal entries first, then committed ones.
+    ///
+    /// The precomputed seed proposal belongs to the removed tail, so it is dropped too.
+    ///
+    /// - Parameter count: The entries to remove.
+    /// - Returns: `false`, leaving the state unchanged, when the state is not aligned, holds
+    ///   fewer than `count` entries, or a cache layer cannot trim them.
+    public mutating func removeLastEntries(_ count: Int) -> Bool {
+        guard count > 0 else { return count == 0 && isAligned }
+        guard isAligned, count <= entryCount,
+            cache.isEmpty || trimPromptCache(cache, numTokens: count) == count
+        else { return false }
+
+        nextPosition -= count
+        proposalAppended = Swift.max(0, proposalAppended - count)
+        dropSeed()
+        return isAligned
+    }
+
+    /// The arrays of the seed proposal the state holds: ``seedToken``, ``seedHidden`` and
+    /// ``seedTopProbability``, those present.
+    package var seedArrays: [MLXArray] {
+        [seedToken, seedHidden, seedTopProbability].compactMap { $0 }
+    }
+
+    /// Drops the seed proposal: ``seedToken``, ``seedHidden`` and ``seedTopProbability``.
+    package mutating func dropSeed() {
+        seedToken = nil
+        seedHidden = nil
+        seedTopProbability = nil
+    }
+
+    /// Removes every entry and starts the empty cache at `position`.
+    ///
+    /// - Parameter position: The absolute position of the first entry the cache will hold.
+    /// - Returns: `false`, leaving the state unchanged, when the entries cannot be removed.
+    mutating func restart(at position: Int) -> Bool {
+        guard position >= 0, removeLastEntries(entryCount) else { return false }
+        cacheStartPosition = position
+        nextPosition = position
+        proposalAppended = 0
+        return true
     }
 }
 
@@ -161,6 +266,10 @@ public protocol StatefulMTPDrafterModel: MTPDrafterModel {
     )
 
     /// Stateful variant of ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:sampler:)``.
+    ///
+    /// A drafter whose state sets a ``MTPDrafterState/minimumDraftProbability`` may stop its
+    /// chain early and return fewer than `blockSize - 1` drafts, but at least one; the iterator
+    /// verifies the drafts it returns.
     func draftBlock(
         target: any LanguageModel,
         lastToken: MLXArray,
@@ -185,6 +294,259 @@ public protocol StatefulMTPDrafterModel: MTPDrafterModel {
         state: inout MTPDrafterState,
         sampler: any LogitSampler
     )
+}
+
+/// Optional capability for stateful MTP drafters whose private state can be
+/// normalized at a generation boundary and resumed from a later prompt suffix.
+///
+/// `ChatSession` deliberately does not know how a drafter's cache is shifted,
+/// which seed values are speculative, or how target hidden states must be
+/// paired with suffix tokens. The MTP iterator owns that lifecycle and calls
+/// this interface at the model seam. A conforming drafter also cold-starts at a
+/// position a warm target cache already holds, so a warm cache without an aligned
+/// continuation still speculates. Stateful drafters that do not conform are
+/// still usable for cold generations; a warm target cache continues without
+/// speculation rather than combining it with a fresh drafter state.
+///
+/// The default implementations describe a shifted drafter (Qwen NextN), which
+/// pairs each input token with the target hidden state of the preceding
+/// position. Such a drafter implements only ``appendDrafterState(target:tokens:targetHidden:positionDeltas:state:sampler:)``.
+public protocol ResumableMTPDrafterModel: StatefulMTPDrafterModel {
+    /// The identity a continuation of this drafter records, so that only a drafter of the same
+    /// identity resumes it. Drafters that hold the same identity build the same cache layers and
+    /// read them the same way.
+    ///
+    /// The default is the type name. A drafter type whose instances can differ in configuration
+    /// gives ``MTPDrafterID/init(drafterType:configuration:)``.
+    var drafterID: MTPDrafterID { get }
+
+    /// The width of the target hidden rows the drafter reads and of the seed hidden row it
+    /// keeps, which a restored ``MTPDrafterContinuation`` must match.
+    ///
+    /// The default is `nil`: the drafter does not state the width, and a restore checks only the
+    /// shape of the rows.
+    var hiddenSize: Int? { get }
+
+    /// Convert `state` to a canonical boundary after the target cache has
+    /// discarded any verified-but-unemitted lookahead.
+    ///
+    /// Return `false` when the private state cannot be proven to represent the
+    /// supplied target position. The caller then keeps the target cache and
+    /// drops only the MTP continuation.
+    func finalizeDrafterState(
+        target: any LanguageModel,
+        targetBoundaryHidden: MLXArray,
+        targetProcessedTokenCount: Int,
+        discardedTargetTokens: Int,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState
+    ) -> Bool
+
+    /// Extend a canonical boundary over a prompt suffix and prime the next
+    /// speculative round.
+    ///
+    /// `targetBoundaryHidden` is the hidden state of the final token already
+    /// represented by the warm target cache. `suffixTargetHidden` contains one
+    /// row per newly evaluated suffix token, and `firstBonus` is the token
+    /// sampled after that suffix.
+    func resumeDrafterState(
+        target: any LanguageModel,
+        suffixTokens: MLXArray,
+        suffixTargetHidden: MLXArray,
+        targetBoundaryHidden: MLXArray,
+        firstBonus: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool
+
+    /// Append one committed entry for each token of `tokens` at `state.nextPosition`, and
+    /// seed the next proposal from the last appended entry.
+    ///
+    /// Entry `i` pairs `tokens[i]` with the target hidden row `targetHidden[i]`, the row of
+    /// the position before the token. Together with
+    /// ``MTPDrafterState/removeLastEntries(_:)`` this edits the drafter state the same way a
+    /// cold prefill over the resulting tokens would build it.
+    ///
+    /// - Parameters:
+    ///   - target: The main language model the drafter speculates for.
+    ///   - tokens: The tokens to append, shape `[B, n]`.
+    ///   - targetHidden: At least `n` target hidden rows, shape `[B, ≥n, hidden]`.
+    ///   - positionDeltas: Optional target position deltas for multimodal RoPE.
+    ///   - state: The drafter state. It must be aligned and hold no tentative entries.
+    ///   - sampler: The sampler of the seed proposal.
+    /// - Returns: `false`, leaving the state unchanged, when the inputs or the state do not
+    ///   allow the append.
+    func appendDrafterState(
+        target: any LanguageModel,
+        tokens: MLXArray,
+        targetHidden: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool
+
+    /// Start an empty drafter state at `position`, a position the warm target cache already
+    /// holds, and prime it over the prompt suffix the target just prefilled.
+    ///
+    /// The entry for the first suffix token needs the target hidden row of the position before
+    /// it, which no cache keeps, so the entries begin with the second suffix token. Speculation
+    /// stays exact without the earlier entries: only the acceptance rate depends on them.
+    ///
+    /// - Parameters:
+    ///   - target: The main language model the drafter speculates for.
+    ///   - suffixTokens: The prompt suffix the target prefilled at `position`, shape `[B, n]`.
+    ///   - suffixTargetHidden: One target hidden row per suffix token.
+    ///   - firstBonus: The token the target sampled after the suffix.
+    ///   - position: The target cache position of the first suffix token.
+    ///   - positionDeltas: Optional target position deltas for multimodal RoPE.
+    ///   - state: The drafter state to replace. Any entries it holds are removed.
+    ///   - sampler: The sampler of the seed proposal.
+    /// - Returns: `false` when the drafter cannot start at `position`.
+    func coldStartDrafterState(
+        target: any LanguageModel,
+        suffixTokens: MLXArray,
+        suffixTargetHidden: MLXArray,
+        firstBonus: MLXArray,
+        position: Int,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool
+}
+
+extension ResumableMTPDrafterModel {
+    /// The fully qualified type name of the drafter.
+    public var drafterID: MTPDrafterID {
+        MTPDrafterID(String(reflecting: Self.self))
+    }
+
+    /// `nil`: the drafter does not state the width of its hidden rows.
+    public var hiddenSize: Int? { nil }
+
+    /// Resumes a shifted drafter: the boundary hidden row pairs with the first suffix token, and
+    /// each suffix hidden row pairs with the token after it, ending with `firstBonus`.
+    public func resumeDrafterState(
+        target: any LanguageModel,
+        suffixTokens: MLXArray,
+        suffixTargetHidden: MLXArray,
+        targetBoundaryHidden: MLXArray,
+        firstBonus: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool {
+        let suffix = normalizedMTPTokenBatch(suffixTokens)
+        let suffixLength = suffix.dim(-1)
+        guard suffixLength > 0, suffixTargetHidden.dim(1) >= suffixLength,
+            targetBoundaryHidden.dim(1) == 1
+        else { return false }
+
+        return appendDrafterState(
+            target: target,
+            tokens: concatenated([suffix, normalizedMTPColumn(firstBonus)], axis: 1),
+            targetHidden: concatenated(
+                [targetBoundaryHidden, suffixTargetHidden[0..., ..<suffixLength, 0...]], axis: 1),
+            positionDeltas: positionDeltas, state: &state, sampler: sampler)
+    }
+
+    /// Cold-starts a shifted drafter: each suffix hidden row pairs with the token after it,
+    /// ending with `firstBonus`, so the entries begin at `position`.
+    public func coldStartDrafterState(
+        target: any LanguageModel,
+        suffixTokens: MLXArray,
+        suffixTargetHidden: MLXArray,
+        firstBonus: MLXArray,
+        position: Int,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> Bool {
+        let suffix = normalizedMTPTokenBatch(suffixTokens)
+        let suffixLength = suffix.dim(-1)
+        guard suffixLength > 0, suffixTargetHidden.dim(1) >= suffixLength,
+            state.restart(at: position)
+        else { return false }
+
+        return appendDrafterState(
+            target: target,
+            tokens: concatenated([suffix[0..., 1...], normalizedMTPColumn(firstBonus)], axis: 1),
+            targetHidden: suffixTargetHidden[0..., ..<suffixLength, 0...],
+            positionDeltas: positionDeltas, state: &state, sampler: sampler)
+    }
+
+    /// Prefills a shifted drafter over the whole prompt: a cold start at position zero.
+    public func prepareDrafterState(
+        target: any LanguageModel,
+        promptTokens: MLXArray,
+        targetHidden: MLXArray,
+        firstBonus: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) {
+        _ = coldStartDrafterState(
+            target: target, suffixTokens: promptTokens, suffixTargetHidden: targetHidden,
+            firstBonus: firstBonus, position: 0, positionDeltas: positionDeltas, state: &state,
+            sampler: sampler)
+    }
+
+    /// Commits a verified round to a shifted drafter: removes every tentative entry of the
+    /// proposal, then appends the accepted drafts and `finalToken`, each paired with the
+    /// verifier hidden row of the position before it.
+    ///
+    /// A chained draft's tentative entry pairs it with the drafter's own hidden row, which a
+    /// prefill over the accepted tokens would not hold, so even the entries of accepted drafts
+    /// are written again from the verifier rows. The drafter then holds one entry for each token
+    /// the main cache holds, as a cold prefill over them builds it.
+    public func commitDrafterState(
+        target: any LanguageModel,
+        targetHidden: MLXArray,
+        draftTokens: MLXArray,
+        acceptedCount: Int,
+        finalToken: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) {
+        _ = state.removeLastEntries(state.proposalAppended)
+
+        let finalColumn = normalizedMTPColumn(finalToken)
+        let tokens =
+            acceptedCount > 0
+            ? concatenated(
+                [normalizedMTPTokenBatch(draftTokens)[0..., ..<acceptedCount], finalColumn],
+                axis: 1)
+            : finalColumn
+        _ = appendDrafterState(
+            target: target, tokens: tokens,
+            targetHidden: targetHidden[0..., ..<(acceptedCount + 1), 0...],
+            positionDeltas: positionDeltas, state: &state, sampler: sampler)
+    }
+
+    /// Normalizes a shifted drafter at a resumable target boundary.
+    ///
+    /// A shifted drafter pairs each input token with the target hidden state from the
+    /// preceding position. At a generation boundary its private cache must therefore end one
+    /// position before the target cache so the saved boundary hidden state can bridge the next
+    /// prompt suffix. Tentative entries of a proposal the target never verified are removed
+    /// first.
+    public func finalizeDrafterState(
+        target _: any LanguageModel,
+        targetBoundaryHidden _: MLXArray,
+        targetProcessedTokenCount: Int,
+        discardedTargetTokens: Int,
+        positionDeltas _: MLXArray?,
+        state: inout MTPDrafterState
+    ) -> Bool {
+        let committedPosition = state.nextPosition - state.proposalAppended
+        guard targetProcessedTokenCount > 0,
+            committedPosition == targetProcessedTokenCount + discardedTargetTokens,
+            state.removeLastEntries(state.proposalAppended + discardedTargetTokens + 1)
+        else { return false }
+
+        return state.nextPosition == targetProcessedTokenCount - 1
+    }
 }
 
 extension StatefulMTPDrafterModel {
@@ -212,6 +574,97 @@ extension StatefulMTPDrafterModel {
         if rejected > 0 {
             trimPromptCache(state.cache, numTokens: rejected)
         }
+    }
+}
+
+/// Tokens proposed by an MTP drafter together with the processed logits that
+/// defined each proposal distribution.
+///
+/// `processedLogits` has shape `[B, blockSize - 1, vocabularySize]`. Each row
+/// is captured after the drafter-side ``LogitProcessor`` and before the
+/// ``LogitSampler``. Keeping this information is what lets the verifier apply
+/// distribution-preserving speculative sampling instead of accepting only
+/// independently sampled exact-token matches.
+public struct MTPDraftBlockOutput {
+    public let tokens: MLXArray
+    public let processedLogits: MLXArray
+
+    public init(tokens: MLXArray, processedLogits: MLXArray) {
+        self.tokens = tokens
+        self.processedLogits = processedLogits
+    }
+}
+
+/// Optional refinement for MTP drafters that support exact speculative
+/// sampling.
+///
+/// The base ``MTPDrafterModel`` API is retained for source compatibility and
+/// for greedy-only custom drafters. Non-greedy MTP generation requires this
+/// refinement: without the drafter distribution `q`, no verifier can preserve
+/// the target distribution `p` on rejection.
+public protocol MTPDistributionDrafterModel: MTPDrafterModel {
+    func draftBlockWithLogits(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput
+}
+
+/// A stateful drafter that also reports the distribution of each proposal, so a sampled stream
+/// can verify its drafts by rejection sampling (``MTPSampledVerification/rejectionSampling``).
+///
+/// The iterator calls the stateful method with the stream's drafter state. The stateless
+/// requirement of ``MTPDistributionDrafterModel`` drafts from a fresh state, as the stateless
+/// ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:sampler:)``
+/// of a stateful drafter does.
+public protocol StatefulMTPDistributionDrafterModel: StatefulMTPDrafterModel,
+    MTPDistributionDrafterModel
+{
+    /// Stateful variant of
+    /// ``MTPDistributionDrafterModel/draftBlockWithLogits(target:lastToken:lastHidden:sharedKV:positionDeltas:queryOffset:blockSize:processor:sampler:)``.
+    ///
+    /// Each proposal is drawn with `sampler` from the logits `processor` shaped, and the output
+    /// carries those processed logits. The state changes as the token-only stateful
+    /// `draftBlock` changes it, so ``StatefulMTPDrafterModel/commitDrafterState(target:targetHidden:draftTokens:acceptedCount:finalToken:positionDeltas:state:sampler:)``
+    /// reconciles it the same way.
+    func draftBlockWithLogits(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state: inout MTPDrafterState,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput
+}
+
+extension StatefulMTPDistributionDrafterModel {
+    /// Drafts from a fresh drafter state.
+    public func draftBlockWithLogits(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
+        var state = makeState(parameters: nil)
+        return draftBlockWithLogits(
+            target: target, lastToken: lastToken, lastHidden: lastHidden, sharedKV: sharedKV,
+            positionDeltas: positionDeltas, queryOffset: queryOffset, blockSize: blockSize,
+            state: &state, processor: processor, sampler: sampler)
     }
 }
 
@@ -257,6 +710,21 @@ public final class MTPDrafterContainer: Sendable {
             try await action($0)
         }
     }
+
+    /// Checks that the drafter can draft for the model of `target`.
+    ///
+    /// A ``ChatSession`` with an incompatible drafter does not throw: it decodes without
+    /// speculation and reports ``SpeculativeDecodingFallbackReason/incompatibleDrafter``. Call
+    /// this to learn why, or to refuse the pairing up front.
+    ///
+    /// - Parameter target: The container of the model the drafter speculates for.
+    /// - Throws: The ``MTPDrafterCompatibilityError`` of
+    ///   ``MTPDrafterModel/validateCompatibility(with:)`` when the drafter cannot draft for it.
+    public func validateCompatibility(with target: ModelContainer) async throws {
+        let targetModel = await target.perform { SendableBox($0.model) }.consume()
+        let drafter = await perform { SendableBox($0.model) }.consume()
+        try drafter.validateCompatibility(with: targetModel)
+    }
 }
 
 // MARK: - Cross-model state keys
@@ -301,11 +769,93 @@ public let mtpPositionDeltasKey =
 /// reads as `false` (no emit), so non-MTP callers are unaffected.
 public let mtpEmitFlagKey = LMOutput.Key<Bool>("mtp.emitDrafterState")
 
-/// Requests a recurrent-cache checkpoint after this many verification input
-/// tokens. Hybrid Qwen models use `1` for MTP-1 so a rejected draft restores
-/// state after the always-committed bonus token without replaying the model.
-public let mtpCacheCheckpointIndexKey =
-    LMOutput.Key<Int>("mtp.cacheCheckpointIndex")
+/// Receives the target hidden rows of one prefill chunk, as a target's
+/// ``LanguageModel/prepare(_:cache:state:prefill:)`` evaluates it.
+///
+/// - Parameters:
+///   - tokens: The tokens of the chunk, shape `[B, n]`.
+///   - hiddenStates: One target hidden row per token of the chunk, shape `[B, n, hidden]`, in the
+///     representation of ``mtpLastHiddenStatesKey``.
+///   - positionDeltas: The position deltas the drafter applies to the chunk, as
+///     ``mtpPositionDeltasKey`` carries them, or `nil` for a target without them.
+public typealias MTPPrefillChunkHandler = (
+    _ tokens: MLXArray, _ hiddenStates: MLXArray, _ positionDeltas: MLXArray?
+) -> Void
+
+/// The MTP iterator sets this key, beside ``mtpEmitFlagKey``, on the ``LMOutput/State`` it passes
+/// to the target's ``LanguageModel/prepare(_:cache:state:prefill:)``. A target that prefills the
+/// prompt in chunks calls the handler after the forward of each chunk but the last one, with
+/// that chunk's hidden rows, so a drafter fills its own cache chunk by chunk and no chunk's rows
+/// outlive the next chunk. The ``mtpLastHiddenStatesKey`` of the state `prepare` returns, or of
+/// the iterator's forward over the tokens `prepare` returns, then holds the rows of the remaining
+/// positions only.
+public let mtpPrefillChunkHandlerKey = LMOutput.Key<MTPPrefillChunkHandler>(
+    "mtp.prefillChunkHandler")
+
+extension LMOutput.State {
+    /// The ``mtpPrefillChunkHandlerKey`` handler a target's chunked prefill calls, or `nil` when
+    /// the state carries none or does not ask the target for MTP drafter state at all.
+    package var mtpPrefillChunkHandler: MTPPrefillChunkHandler? {
+        self[mtpEmitFlagKey] == true ? self[mtpPrefillChunkHandlerKey] : nil
+    }
+
+    /// Hands one prefill chunk to the ``mtpPrefillChunkHandler``: the chunk's tokens, the
+    /// ``mtpLastHiddenStatesKey`` rows its forward emitted, and its position deltas. Does nothing
+    /// when the state carries no handler or the forward emitted no hidden rows.
+    ///
+    /// A target's chunked `prepare` calls this on the state it was handed, after each chunk's
+    /// forward.
+    ///
+    /// - Parameters:
+    ///   - tokens: The tokens of the chunk, shape `[B, n]`.
+    ///   - output: The output of the chunk's forward.
+    ///   - positionDeltas: The position deltas of the chunk, for a target that computes them
+    ///     before the forward; `nil` takes the ``mtpPositionDeltasKey`` deltas of `output`.
+    package func feedMTPPrefillChunk(
+        tokens: MLXArray, output: LMOutput, positionDeltas: MLXArray? = nil
+    ) {
+        guard let handler = mtpPrefillChunkHandler,
+            let hiddenStates = output.state?[mtpLastHiddenStatesKey]
+        else { return }
+        handler(tokens, hiddenStates, positionDeltas ?? output.state?[mtpPositionDeltasKey])
+    }
+
+    /// This state without the transient values the MTP iterator and its target exchange, or
+    /// `nil` when nothing else is left. Model-owned continuation state, such as the M-RoPE
+    /// anchors of a Qwen VLM, stays.
+    package var withoutMTPExchange: LMOutput.State? {
+        var state = self
+        state[mtpEmitFlagKey] = nil
+        state[mtpPrefillChunkHandlerKey] = nil
+        state[mtpVerifyKeepsSnapshotsKey] = nil
+        state[mtpLastHiddenStatesKey] = nil
+        state[mtpSharedKVStatesKey] = nil
+        state[mtpSharedKVSourceIndicesKey] = nil
+        state[mtpSharedKVOffsetsKey] = nil
+        state[mtpPositionDeltasKey] = nil
+        return state.isEmpty ? nil : state
+    }
+
+    /// This state, asking a target's forward for MTP drafter state and handing its hidden rows to
+    /// `drafterFeed`, or this state unchanged when there is no feed.
+    ///
+    /// - Parameter drafterFeed: The handler that takes the hidden rows of each forward, or nil.
+    /// - Returns: The state to pass to the forward.
+    package func feeding(_ drafterFeed: MTPPrefillChunkHandler?) -> LMOutput.State {
+        guard let drafterFeed else { return self }
+        var state = self
+        state[mtpEmitFlagKey] = true
+        state[mtpPrefillChunkHandlerKey] = drafterFeed
+        return state
+    }
+}
+
+/// Asks the recurrent layers of a hybrid target to keep the state after each
+/// token of a verify pass, its snapshot slots. A round that rejects `r`
+/// drafts then rewinds the main cache in place by `r` tokens, to the slot
+/// after its last accepted token, without replaying the model.
+public let mtpVerifyKeepsSnapshotsKey =
+    LMOutput.Key<Bool>("mtp.verifyKeepsSnapshots")
 
 /// Which cache entry each ``mtpSharedKVStatesKey`` tuple was read from, keyed the same way.
 ///
@@ -343,8 +893,8 @@ public protocol MTPStatsCollecting {
     /// Total tokens accepted by the target across all speculation rounds.
     var acceptedDraftTokens: Int { get }
 
-    /// nil if the iterator stayed in speculative mode for the full stream;
-    /// non-nil if sticky-passthrough engaged, with the reason string captured
-    /// at the moment of engagement.
+    /// Nil when speculation completed with a resumable boundary. Non-nil if
+    /// sticky passthrough engaged or a stateful continuation had to be
+    /// discarded, with the first failure reason captured by the iterator.
     var passthroughReason: String? { get }
 }

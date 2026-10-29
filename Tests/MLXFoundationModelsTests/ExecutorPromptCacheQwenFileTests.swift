@@ -480,7 +480,7 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
     }
 
     /// Writes `entry` to the file of ``key`` in `directory`, through
-    /// ``ExecutorPromptCacheFile/prepare(_:key:)`` and ``ExecutorPromptCacheFile/write(_:to:)``.
+    /// ``ExecutorPromptCacheFile/prepare(_:key:report:)`` and ``ExecutorPromptCacheFile/write(_:to:)``.
     ///
     /// - Parameters:
     ///   - entry: The entry to write.

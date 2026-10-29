@@ -53,7 +53,7 @@ struct GenerateLoopStopTokenTests {
                 info = completion
             }
         }
-        let recorded = await task.value
+        let recorded = await task.value.consume().generatedTokens
 
         #expect(recorded == Self.answeredTokens + [Self.stopToken])
         #expect(info?.generationTokenCount == Self.answeredTokens.count)

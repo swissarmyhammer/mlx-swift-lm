@@ -14,6 +14,21 @@ public protocol LogitSampler {
     func sample(logits: MLXArray) -> MLXArray
 }
 
+/// A sampler that can also expose the normalized distribution it samples.
+///
+/// Speculative sampling needs both the target distribution `p` and the
+/// drafter distribution `q` to apply the acceptance probability
+/// `min(1, p(token) / q(token))` and, on rejection, sample from the residual
+/// distribution `max(p - q, 0)`. Plain ``LogitSampler`` intentionally keeps
+/// the smaller API used by ordinary generation; samplers that can support the
+/// exact speculative algorithm opt in through this refinement.
+public protocol DistributionLogitSampler: LogitSampler {
+    /// Normalized log-probabilities after applying the sampler's temperature
+    /// and probability filters. The returned tensor has the same shape as
+    /// `logits` and sums to one in probability space along the last axis.
+    func logProbabilities(logits: MLXArray) -> MLXArray
+}
+
 /// A `LogitProcessor` is an optional visitor of `logits`.
 ///
 /// The ``LogitProcessor`` is called with the input (prompt) before generating tokens:
@@ -221,6 +236,10 @@ public struct GenerateParameters: Sendable {
     /// default). Inert at `temperature == 0` (argmax has no RNG).
     public var seed: UInt64?
 
+    /// How an MTP stream with a stateful drafter (Qwen MTP) verifies its drafts when it
+    /// samples. Inert at `temperature == 0`, where the drafts and the verifier are argmax.
+    public var mtpSampledVerification: MTPSampledVerification = .sampleAndMatch
+
     /// Penalty factor for repeating tokens
     public var repetitionPenalty: Float?
 
@@ -396,7 +415,7 @@ public struct ArgMaxSampler: LogitSampler {
 /// Each filter operates on the full vocabulary in original token order, masking
 /// rejected tokens with `-inf`. This matches the composable filter chain in
 /// `mlx_lm.sample_utils.make_sampler`.
-public struct TopPSampler: LogitSampler {
+public struct TopPSampler: DistributionLogitSampler {
     let temperature: MLXArray
     let topP: MLXArray?
     let topK: Int?
@@ -454,6 +473,22 @@ public struct TopPSampler: LogitSampler {
         }
     }
 
+    /// The normalized log-probabilities that ``sample(logits:)`` draws from, after the
+    /// filters and the temperature. Speculative rejection sampling reads p and q here.
+    public func logProbabilities(logits: MLXArray) -> MLXArray {
+        var logprobs = logSoftmax(logits.dtype == .bfloat16 ? logits.asType(.float32) : logits)
+        if let topP {
+            logprobs = applyTopP(logprobs, topP: topP)
+        }
+        if let minP {
+            logprobs = applyMinP(logprobs, minP: minP)
+        }
+        if let topK {
+            logprobs = applyTopK(logprobs, topK: topK)
+        }
+        return logSoftmax(logprobs * (1 / temperature))
+    }
+
     /// Keep tokens whose cumulative probability exceeds `1 - topP` (nucleus sampling).
     /// Matches `apply_top_p` from `mlx_lm/sample_utils.py`.
     private func applyTopP(_ logprobs: MLXArray, topP: MLXArray) -> MLXArray {
@@ -489,7 +524,7 @@ public struct TopPSampler: LogitSampler {
 }
 
 /// Sampler that uses `temperature` to sample the logits.
-public struct CategoricalSampler: LogitSampler {
+public struct CategoricalSampler: DistributionLogitSampler {
     let temperature: MLXArray
     let randomState: MLXRandom.RandomState
 
@@ -508,6 +543,12 @@ public struct CategoricalSampler: LogitSampler {
         return withRandomState(randomState) {
             categorical(logits * (1 / temperature))
         }
+    }
+
+    /// The normalized log-probabilities that ``sample(logits:)`` draws from.
+    public func logProbabilities(logits: MLXArray) -> MLXArray {
+        let logits = logits.dtype == .bfloat16 ? logits.asType(.float32) : logits
+        return logSoftmax(logits * (1 / temperature))
     }
 }
 
@@ -782,6 +823,15 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
     var evictedTokenCount: Int { get }
     var reasoningTokenCount: Int? { get }
 
+    /// Whether the forward pass of the token the most recent `next()` call returned has
+    /// already advanced the cache.
+    ///
+    /// ``TokenIterator`` runs that pass before it returns the token. A speculative iterator
+    /// returns the final token of a round before any pass feeds it. The generation loop
+    /// reports a suppressed stop token in ``GenerateCompletionInfo/stopTokenFedToCache``
+    /// only when this is `true`. The default is `true`.
+    var hasCachedLastToken: Bool { get }
+
     /// Records a token included in the generated completion.
     mutating func recordEmittedToken(_ token: Int)
 
@@ -802,6 +852,10 @@ extension TokenIteratorProtocol {
     public var lastLogProbabilities: DeferredTokenLogProbabilities? { nil }
     public var evictedTokenCount: Int { 0 }
     public var reasoningTokenCount: Int? { nil }
+
+    /// Default: `true`, for iterators that feed each token before they return it.
+    public var hasCachedLastToken: Bool { true }
+
     public mutating func recordEmittedToken(_ token: Int) {}
 
     /// Default: a no-op, for iterators with nothing to discard.
@@ -809,7 +863,7 @@ extension TokenIteratorProtocol {
 }
 
 /// Normalized logits shared by reporting and filtered sampling.
-private struct LogProbabilityDistribution {
+struct LogProbabilityDistribution {
     let values: MLXArray
 
     init(logits: MLXArray) {
@@ -959,6 +1013,11 @@ public struct TokenIterator: TokenIteratorProtocol {
 
     /// Wall-clock time spent priming the cache with the prompt before the first generated token.
     public var promptPrefillTime: TimeInterval = 0.0
+
+    /// Why the MTP drafter the generation was configured with does not speculate in this
+    /// iterator, or `nil` when the generation named no drafter that falls back. The generation
+    /// loop reports it on the completion information.
+    package var speculationFallback: MTPDrafterFallback?
 
     /// Initialize a `TokenIterator` with the given tokens. Note: this has been
     /// replaced with ``init(input:model:cache:state:parameters:components:)``.
@@ -1314,6 +1373,15 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     /// back into either model yet, so it is deliberately excluded.
     private var mainCommittedPendingTokenCount = 0
     private var draftCommittedPendingTokenCount = 0
+
+    /// Whether the main cache held the last token ``next()`` returned when it returned it.
+    ///
+    /// `true` for an accepted draft, which the verify pass of its round fed. The final token
+    /// of a round, the first token that the main prefill logits gave, and each token of a
+    /// plain round are returned before any forward pass feeds them.
+    public var hasCachedLastToken: Bool {
+        pendingIndex > 0 && pendingIndex - 1 < mainCommittedPendingTokenCount
+    }
 
     /// Why speculation stopped and the rest of the stream decodes one token at a time, or `nil`
     /// while rounds are still speculative. Engaged when a cache can neither stage nor trim a
@@ -2376,28 +2444,35 @@ public func generate(
     )
     return generateSpeculativeStream(
         iterator: iterator, input: input, parameters: parameters, context: context,
-        wiredMemoryTicket: wiredMemoryTicket, tools: tools)
+        wiredMemoryTicket: wiredMemoryTicket, tools: tools,
+        tokenCollector: IgnoringGeneratedTokens()
+    ).0
 }
 
 /// Builds the text/tool-call `AsyncStream<Generation>` shared by
 /// ``generate(input:cache:state:parameters:context:draftModel:draftCache:numDraftTokens:components:wiredMemoryTicket:tools:)``
-/// and ``generate(input:cache:parameters:context:mtpDrafter:blockSize:components:wiredMemoryTicket:tools:)`` -- both
+/// and ``generateTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)`` -- both
 /// construct their own speculative-decoding iterator (drafter differs) and then delegate here for
 /// identical `generateLoopTask`/handler wiring.
-private func generateSpeculativeStream(
+///
+/// - Parameter tokenCollector: what the task answers when the generation ends.
+/// - Returns: the stream, and the task that generates it.
+private func generateSpeculativeStream<Collector: GeneratedTokenCollector>(
     iterator: consuming any TokenIteratorProtocol,
     input: LMInput,
     parameters: GenerateParameters,
     context: ModelContext,
     wiredMemoryTicket: WiredMemoryTicket?,
-    tools: [[String: any Sendable]]?
-) -> AsyncStream<Generation> {
-    let (stream, _) = generateLoopTask(
+    tools: [[String: any Sendable]]?,
+    tokenCollector: Collector
+) -> (AsyncStream<Generation>, Task<Collector.Result, Never>) {
+    generateLoopTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
+        tokenCollector: tokenCollector,
         handler: TextToolTokenLoopHandler(
             tokenizer: context.tokenizer,
             stopStrings: context.configuration.effectiveStopStrings,
@@ -2406,12 +2481,11 @@ private func generateSpeculativeStream(
             toolCallPolicy: parameters.toolCallPolicy
         )
     )
-    return stream
 }
 
 /// Deprecated low-level entry point: wraps an existing `TokenIterator` in the same
 /// text/tool-call `AsyncStream<Generation>` pipeline as
-/// ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)``, without
+/// `generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`, without
 /// exposing the underlying `Task` handle.
 @available(
     *, deprecated,
@@ -2474,6 +2548,45 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
     )
 }
 
+/// Receives what the prefill of a generation left, before the generation reads its first
+/// token: the model state, and a reader of the drafter continuation at the end of the prompt.
+///
+/// The reader gives `nil` when the generation does not speculate with a resumable drafter. It
+/// copies the drafter caches, thus a caller calls it only when it keeps a prompt cache
+/// checkpoint at the end of the prompt, and only during the callback.
+package typealias PreparedGenerationState =
+    (LMOutput.State?, _ promptBoundaryContinuation: () -> MTPDrafterContinuation?) -> Void
+
+/// Builds the token iterator of one token-recording generation and hands `preparedState` what
+/// its prefill left.
+///
+/// - Parameters:
+///   - input: the input for the language model.
+///   - cache: optional ``KVCache``.
+///   - state: optional model state saved with `cache`.
+///   - parameters: the configuration options for token generation.
+///   - context: the model context, including the model and its tokenizer.
+///   - speculation: the MTP drafter the generation speculates with, or `nil` for plain decode.
+///   - mtpContinuation: the drafter continuation saved with `cache`, or `nil`.
+///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``.
+///   - preparedState: receives the model state the prefill left and the reader of the drafter
+///     continuation at the end of the prompt (see ``PreparedGenerationState``).
+/// - Returns: the iterator, after its prefill and before its first token is read.
+/// - Throws: an error when the iterator cannot be built.
+private func makePreparedIterator(
+    input: LMInput, cache: [KVCache]?, state: LMOutput.State?,
+    parameters: GenerateParameters, context: ModelContext,
+    speculation: MTPSpeculation?, mtpContinuation: MTPDrafterContinuation?,
+    components: GenerationComponents, preparedState: PreparedGenerationState
+) throws -> any TokenIteratorProtocol {
+    let iterator = try MTPSpeculation.makeTokenIterator(
+        speculation: speculation, input: input, cache: cache, state: state,
+        mtpContinuation: mtpContinuation, parameters: parameters, model: context.model,
+        components: components)
+    preparedState(iterator.state) { MTPSpeculation.promptBoundaryContinuation(of: iterator) }
+    return iterator
+}
+
 /// Package variant of
 /// ``generate(input:cache:state:parameters:context:components:wiredMemoryTicket:tools:)``
 /// that also answers the tokens the generation fed into `cache`.
@@ -2488,38 +2601,67 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
 ///   - state: optional model state saved with `cache`.
 ///   - parameters: the configuration options for token generation.
 ///   - context: the model context, including the model and its tokenizer.
+///   - speculation: the MTP drafter the generation speculates with, or `nil`
+///     for plain decode. A drafter that cannot draft for the model decodes
+///     plainly too (``MTPSpeculation/makeTokenIterator(speculation:input:cache:state:mtpContinuation:parameters:model:components:)``).
+///   - mtpContinuation: the drafter continuation saved with `cache`, or `nil`.
+///     The generation resumes it when it is aligned with `cache` and made by the
+///     drafter of `speculation`, and else starts the drafter at the cached
+///     position.
 ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``.
 ///   - wiredMemoryTicket: optional wired memory ticket.
 ///   - tools: optional tool schemas used to parse tool-call arguments.
-///   - preparedState: receives the model state the prefill left. A caller
-///     that carries `cache` to a later turn seeds that turn with it; a Qwen VL
-///     model keys its M-RoPE anchor there and refuses a warm cache without it.
+///   - preparedState: receives what the prefill left (see
+///     ``PreparedGenerationState``). A caller that carries `cache` to a later
+///     turn seeds that turn with the model state; a Qwen VL model keys its
+///     M-RoPE anchor there and refuses a warm cache without it.
+///   - drafterContinuation: receives, when the generation ends, the drafter
+///     continuation aligned with what `cache` then holds, or `nil` when the
+///     generation did not speculate with a resumable drafter.
 /// - Returns: the stream of text and tool calls, and the task that generates
 ///   them. The value of the task is every generated token, in order.
 /// - Throws: an error when the iterator cannot be built.
 package func generateTaskRecordingTokens(
     input: LMInput, cache: [KVCache]? = nil, state: LMOutput.State? = nil,
     parameters: GenerateParameters, context: ModelContext,
+    speculation: MTPSpeculation? = nil,
+    mtpContinuation: MTPDrafterContinuation? = nil,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil,
-    preparedState: (LMOutput.State?) -> Void = { _ in }
+    preparedState: PreparedGenerationState = { _, _ in },
+    drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in }
 ) throws -> (AsyncStream<Generation>, Task<[Int], Never>) {
-    let iterator = try TokenIterator(
-        input: input, model: context.model, cache: cache, state: state,
-        parameters: parameters, components: components)
-    preparedState(iterator.state)
-    return generateTaskRecordingTokens(
+    let iterator = try makePreparedIterator(
+        input: input, cache: cache, state: state, parameters: parameters, context: context,
+        speculation: speculation, mtpContinuation: mtpContinuation, components: components,
+        preparedState: preparedState)
+    return generateLoopTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
-        tools: tools)
+        tokenCollector: RecordingGeneratedTokenList(drafterContinuation: drafterContinuation),
+        handler: TextToolTokenLoopHandler(
+            tokenizer: context.tokenizer,
+            stopStrings: context.configuration.effectiveStopStrings,
+            format: context.configuration.toolCallFormat ?? .json,
+            tools: tools,
+            toolCallPolicy: parameters.toolCallPolicy
+        )
+    )
 }
 
 /// Internal variant used by `ChatSession` to keep its token-prefix record in
-/// lockstep with the KV cache.
+/// lockstep with the KV cache and receive the iterator's finalized
+/// continuation state.
+struct RecordedGenerationResult {
+    let generatedTokens: [Int]
+    let state: LMOutput.State?
+    let mtpDrafterContinuation: MTPDrafterContinuation?
+}
+
 func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
     promptTokenCount: Int,
     modelConfiguration: ModelConfiguration,
@@ -2528,7 +2670,7 @@ func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil,
     toolCallPolicy: ToolCallPolicy = .init()
-) -> (AsyncStream<Generation>, Task<[Int], Never>) {
+) -> (AsyncStream<Generation>, Task<SendableBox<RecordedGenerationResult>, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
         modelConfiguration: modelConfiguration,
@@ -2553,7 +2695,7 @@ func generateTaskRecordingTokens<Handler: TokenLoopHandler>(
     tokenizer: Tokenizer,
     iterator: consuming any TokenIteratorProtocol,
     handler: consuming Handler
-) -> (AsyncStream<Handler.Output>, Task<[Int], Never>) {
+) -> (AsyncStream<Handler.Output>, Task<SendableBox<RecordedGenerationResult>, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
         modelConfiguration: modelConfiguration,
@@ -2654,29 +2796,35 @@ public func generateTokens(
         components: components
     )
     return generateSpeculativeTokenStream(
-        iterator: iterator, input: input, context: context, wiredMemoryTicket: wiredMemoryTicket)
+        iterator: iterator, input: input, context: context, wiredMemoryTicket: wiredMemoryTicket,
+        tokenCollector: IgnoringGeneratedTokens()
+    ).0
 }
 
 /// Builds the raw-token `AsyncStream<TokenGeneration>` shared by
-/// ``generateTokens(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
-/// and ``generateTokens(input:cache:parameters:context:mtpDrafter:blockSize:wiredMemoryTicket:)`` -- both
+/// ``generateTokens(input:cache:state:parameters:context:draftModel:draftCache:numDraftTokens:components:wiredMemoryTicket:)``
+/// and ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:)`` -- both
 /// construct their own speculative-decoding iterator (drafter differs) and then delegate here for
 /// identical `generateLoopTask`/handler wiring.
-private func generateSpeculativeTokenStream(
+///
+/// - Parameter tokenCollector: what the task answers when the generation ends.
+/// - Returns: the stream, and the task that generates it.
+private func generateSpeculativeTokenStream<Collector: GeneratedTokenCollector>(
     iterator: consuming any TokenIteratorProtocol,
     input: LMInput,
     context: ModelContext,
-    wiredMemoryTicket: WiredMemoryTicket?
-) -> AsyncStream<TokenGeneration> {
-    let (stream, _) = generateLoopTask(
+    wiredMemoryTicket: WiredMemoryTicket?,
+    tokenCollector: Collector
+) -> (AsyncStream<TokenGeneration>, Task<Collector.Result, Never>) {
+    generateLoopTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
+        tokenCollector: tokenCollector,
         handler: RawTokenLoopHandler()
     )
-    return stream
 }
 
 /// Generates tokens asynchronously using MTP speculative decoding.
@@ -2687,9 +2835,17 @@ private func generateSpeculativeTokenStream(
 /// single `draftBlock(...)` call. The drafter shares the target's
 /// tokenizer (via `context.tokenizer`).
 ///
+/// To continue `cache` in a later call with the drafter state of this one, call
+/// ``generateTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)``,
+/// whose task gives back the ``MTPDrafterContinuation``.
+///
 /// - Parameters:
 ///   - input: language model input for the main (verifier) model.
 ///   - cache: optional ``KVCache`` for the main model.
+///   - state: optional model state saved with `cache`, as
+///     ``PromptCacheSnapshot/state``. Pass it whenever `cache` came from a
+///     snapshot: models that position from a carried anchor need it to place
+///     later tokens correctly.
 ///   - parameters: generation parameters (sampling, max tokens, KV
 ///     quantization, etc.).
 ///   - context: model context for the main (verifier) model.
@@ -2703,9 +2859,15 @@ private func generateSpeculativeTokenStream(
 ///     cache that quantizes mid-stream, say — the iterator logs once, reports
 ///     ``GenerateCompletionInfo/passthroughReason``, and finishes the stream
 ///     with ordinary single-token generation.
-///   - blockSize: total tokens per round (`blockSize - 1` drafted plus the
+///   - mtpContinuation: the drafter continuation that the generation which left
+///     `cache` gave back, or `nil` to start the drafter at the cached position.
+///   - blockSize: total tokens per round (up to `blockSize - 1` drafted plus the
 ///     bonus from the previous verify). Mirrors mlx-vlm's
-///     `draft_block_size`. Default 4 matches mlx-vlm's example configs.
+///     `draft_block_size`. Default 4 matches mlx-vlm's example configs. A drafter
+///     caps it at its ``MTPDrafterModel/maximumBlockSize``.
+///   - minimumDraftProbability: the drafter top-1 probability below which a
+///     chaining drafter (Qwen MTP) stops a round's chain early, as llama.cpp's
+///     `--spec-draft-p-min`; 0 drafts the whole block every round.
 ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``
 ///   - wiredMemoryTicket: optional wired memory ticket.
 ///   - tools: Optional tool schemas used to parse arguments and authorize function names.
@@ -2714,26 +2876,71 @@ private func generateSpeculativeTokenStream(
 public func generate(
     input: LMInput,
     cache: [KVCache]? = nil,
+    state: LMOutput.State? = nil,
     parameters: GenerateParameters,
     context: ModelContext,
     mtpDrafter: any MTPDrafterModel,
+    mtpContinuation: MTPDrafterContinuation? = nil,
     blockSize: Int = 4,
+    minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
+    try generateTask(
+        input: input, cache: cache, state: state, parameters: parameters, context: context,
+        mtpDrafter: mtpDrafter, mtpContinuation: mtpContinuation, blockSize: blockSize,
+        minimumDraftProbability: minimumDraftProbability, components: components,
+        wiredMemoryTicket: wiredMemoryTicket, tools: tools
+    ).0
+}
+
+/// Generates text and tool calls with MTP speculative decoding, and returns the
+/// stream plus the `Task` that generates it.
+///
+/// The same generation as
+/// ``generate(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)``.
+/// The value of the task is the ``MTPDrafterContinuation`` the drafter left at
+/// the end of the generation, aligned with what `cache` then holds. Hand it to
+/// the next call that continues `cache`, so that call resumes the drafter
+/// rather than starting it again at the cached position. The value is `nil`
+/// when the drafter keeps no state across calls, or when the generation stopped
+/// speculating.
+///
+/// - Parameters: the parameters of
+///   ``generate(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)``.
+/// - Returns: the stream of text and tool calls, and the task that generates it.
+/// - Throws: an error if the iterator initialization fails.
+public func generateTask(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    state: LMOutput.State? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    mtpDrafter: any MTPDrafterModel,
+    mtpContinuation: MTPDrafterContinuation? = nil,
+    blockSize: Int = 4,
+    minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
+    components: GenerationComponents = .init(),
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    tools: [[String: any Sendable]]? = nil
+) throws -> (AsyncStream<Generation>, Task<MTPDrafterContinuation?, Never>) {
     let iterator = try MTPSpeculativeTokenIterator(
         input: input,
         mainModel: context.model,
         drafter: mtpDrafter,
         mainCache: cache,
+        mainState: state,
+        mtpContinuation: mtpContinuation,
         parameters: parameters,
         blockSize: blockSize,
+        minimumDraftProbability: minimumDraftProbability,
         components: components
     )
     return generateSpeculativeStream(
         iterator: iterator, input: input, parameters: parameters, context: context,
-        wiredMemoryTicket: wiredMemoryTicket, tools: tools)
+        wiredMemoryTicket: wiredMemoryTicket, tools: tools,
+        tokenCollector: MTPContinuationCollector())
 }
 
 /// Generates raw token IDs asynchronously using MTP speculative decoding.
@@ -2750,27 +2957,79 @@ public func generate(
 /// iterator logs once, reports
 /// ``GenerateCompletionInfo/passthroughReason`` on the emitted `.info` event,
 /// and finishes the stream with ordinary single-token generation.
+///
+/// To continue `cache` in a later call with the drafter state of this one, call
+/// ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:)``,
+/// whose task gives back the ``MTPDrafterContinuation``.
+///
+/// - Parameters: the parameters of
+///   ``generate(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)``,
+///   without the tool schemas.
+/// - Returns: an `AsyncStream<TokenGeneration>` yielding token IDs and a final `.info`.
+/// - Throws: an error if the iterator initialization fails.
 public func generateTokens(
     input: LMInput,
     cache: [KVCache]? = nil,
+    state: LMOutput.State? = nil,
     parameters: GenerateParameters,
     context: ModelContext,
     mtpDrafter: any MTPDrafterModel,
+    mtpContinuation: MTPDrafterContinuation? = nil,
     blockSize: Int = 4,
+    minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> AsyncStream<TokenGeneration> {
+    try generateTokensTask(
+        input: input, cache: cache, state: state, parameters: parameters, context: context,
+        mtpDrafter: mtpDrafter, mtpContinuation: mtpContinuation, blockSize: blockSize,
+        minimumDraftProbability: minimumDraftProbability, components: components,
+        wiredMemoryTicket: wiredMemoryTicket
+    ).0
+}
+
+/// Generates raw token IDs with MTP speculative decoding, and returns the
+/// stream plus the `Task` that generates it.
+///
+/// The same generation as
+/// ``generateTokens(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:)``.
+/// The value of the task is the ``MTPDrafterContinuation`` the drafter left at
+/// the end of the generation, as
+/// ``generateTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)``
+/// describes it.
+///
+/// - Parameters: the parameters of
+///   ``generateTokens(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:)``.
+/// - Returns: the stream of token IDs, and the task that generates it.
+/// - Throws: an error if the iterator initialization fails.
+public func generateTokensTask(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    state: LMOutput.State? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    mtpDrafter: any MTPDrafterModel,
+    mtpContinuation: MTPDrafterContinuation? = nil,
+    blockSize: Int = 4,
+    minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
+    components: GenerationComponents = .init(),
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) throws -> (AsyncStream<TokenGeneration>, Task<MTPDrafterContinuation?, Never>) {
     let iterator = try MTPSpeculativeTokenIterator(
         input: input,
         mainModel: context.model,
         drafter: mtpDrafter,
         mainCache: cache,
+        mainState: state,
+        mtpContinuation: mtpContinuation,
         parameters: parameters,
         blockSize: blockSize,
+        minimumDraftProbability: minimumDraftProbability,
         components: components
     )
     return generateSpeculativeTokenStream(
-        iterator: iterator, input: input, context: context, wiredMemoryTicket: wiredMemoryTicket)
+        iterator: iterator, input: input, context: context, wiredMemoryTicket: wiredMemoryTicket,
+        tokenCollector: MTPContinuationCollector())
 }
 
 /// Generates raw token IDs asynchronously and returns the stream plus a `Task`.
@@ -2804,16 +3063,46 @@ public func generateTokensTask(
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
-    let iterator = try TokenIterator(
-        input: input, model: context.model, cache: cache, state: state,
-        parameters: parameters, components: components)
-    return generateTokenTask(
+    try generateTokensTask(
+        input: input, cache: cache, state: state, parameters: parameters, context: context,
+        speculation: nil, includeStopToken: includeStopToken, components: components,
+        wiredMemoryTicket: wiredMemoryTicket)
+}
+
+/// Package variant of
+/// ``generateTokensTask(input:cache:state:parameters:context:includeStopToken:components:wiredMemoryTicket:)``
+/// that speculates with an MTP drafter when the drafter can draft for the model.
+///
+/// - Parameters:
+///   - speculation: the MTP drafter the generation speculates with, or `nil`
+///     for plain decode, as
+///     ``MTPSpeculation/makeTokenIterator(speculation:input:cache:state:mtpContinuation:parameters:model:components:)``
+///     takes it.
+///   - The other parameters are those of the public variant.
+/// - Returns: the stream of token IDs, and the task that generates it.
+/// - Throws: an error when the iterator cannot be built.
+package func generateTokensTask(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    state: LMOutput.State? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    speculation: MTPSpeculation?,
+    includeStopToken: Bool = false,
+    components: GenerationComponents = .init(),
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) throws -> (AsyncStream<TokenGeneration>, Task<Void, Never>) {
+    let iterator = try MTPSpeculation.makeTokenIterator(
+        speculation: speculation, input: input, cache: cache, state: state,
+        parameters: parameters, model: context.model, components: components)
+    return generateLoopTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
         includeStopToken: includeStopToken,
-        wiredMemoryTicket: wiredMemoryTicket
+        handler: RawTokenLoopHandler()
     )
 }
 
@@ -2827,9 +3116,16 @@ public func generateTokensTask(
 /// stream and its forward pass has already advanced the cache. A caller that
 /// keeps a token ledger of that cache needs the whole list.
 ///
-///   - preparedState: receives the model state the prefill left. A caller
-///     that carries `cache` to a later turn seeds that turn with it; a Qwen VL
-///     model keys its M-RoPE anchor there and refuses a warm cache without it.
+///   - speculation: the MTP drafter the generation speculates with, or `nil`
+///     for plain decode, as
+///     ``generateTaskRecordingTokens(input:cache:state:parameters:context:speculation:mtpContinuation:components:wiredMemoryTicket:tools:preparedState:drafterContinuation:)``
+///     takes it.
+///   - mtpContinuation: the drafter continuation saved with `cache`, or `nil`,
+///     as that function takes it.
+///   - preparedState: receives what the prefill left, as that function hands it
+///     over.
+///   - drafterContinuation: receives, when the generation ends, the drafter
+///     continuation aligned with what `cache` then holds, or `nil`.
 /// - Returns: the stream of raw tokens, and the task that generates them. The
 ///   value of the task is every generated token.
 package func generateProtocolTokensTask(
@@ -2839,21 +3135,24 @@ package func generateProtocolTokensTask(
     parameters: GenerateParameters,
     context: ModelContext,
     decoder: (any TokenStreamDecoder)?,
+    speculation: MTPSpeculation? = nil,
+    mtpContinuation: MTPDrafterContinuation? = nil,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
-    preparedState: (LMOutput.State?) -> Void = { _ in }
+    preparedState: PreparedGenerationState = { _, _ in },
+    drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in }
 ) throws -> (AsyncStream<TokenGeneration>, Task<[Int], Never>) {
-    let iterator = try TokenIterator(
-        input: input, model: context.model, cache: cache, state: state,
-        parameters: parameters, components: components)
-    preparedState(iterator.state)
+    let iterator = try makePreparedIterator(
+        input: input, cache: cache, state: state, parameters: parameters, context: context,
+        speculation: speculation, mtpContinuation: mtpContinuation, components: components,
+        preparedState: preparedState)
     return generateLoopTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
-        tokenCollector: RecordingGeneratedTokens(),
+        tokenCollector: RecordingGeneratedTokenList(drafterContinuation: drafterContinuation),
         handler: RawTokenLoopHandler(
             additionalStopTokenIDs: decoder?.additionalStopTokenIDs ?? [],
             receivesStopTokens: decoder?.receivesStopTokens ?? false)
@@ -2899,12 +3198,51 @@ private protocol GeneratedTokenCollector: Sendable {
     associatedtype Result: Sendable
 
     mutating func record(_ token: Int)
-    consuming func result() -> Result
+    consuming func result(iterator: any TokenIteratorProtocol) -> Result
+}
+
+extension GeneratedTokenCollector {
+
+    /// The drafter continuation an MTP iterator left at the end of its generation.
+    ///
+    /// - Parameter iterator: the iterator of the generation.
+    /// - Returns: the continuation, or `nil` when `iterator` is not an MTP iterator or left none.
+    static func drafterContinuation(
+        leftBy iterator: any TokenIteratorProtocol
+    ) -> MTPDrafterContinuation? {
+        (iterator as? any MTPDrafterContinuationProviding)?.mtpDrafterContinuation
+    }
 }
 
 private struct IgnoringGeneratedTokens: GeneratedTokenCollector {
     mutating func record(_ token: Int) {}
-    consuming func result() {}
+    consuming func result(iterator _: any TokenIteratorProtocol) {}
+}
+
+/// Records the generated tokens, and hands the drafter continuation an MTP iterator left to a
+/// callback, for callers that keep a token ledger and take the drafter state apart from it.
+private struct RecordingGeneratedTokenList: GeneratedTokenCollector {
+    private var tokens: [Int] = []
+
+    /// Receives the drafter continuation when the generation ends, or `nil` when the iterator
+    /// left none.
+    private let receiveDrafterContinuation: @Sendable (MTPDrafterContinuation?) -> Void
+
+    /// Creates a collector that hands the drafter continuation to `drafterContinuation`.
+    ///
+    /// - Parameter drafterContinuation: receives the continuation; the default drops it.
+    init(drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in }) {
+        self.receiveDrafterContinuation = drafterContinuation
+    }
+
+    mutating func record(_ token: Int) {
+        tokens.append(token)
+    }
+
+    consuming func result(iterator: any TokenIteratorProtocol) -> [Int] {
+        receiveDrafterContinuation(Self.drafterContinuation(leftBy: iterator))
+        return tokens
+    }
 }
 
 private struct RecordingGeneratedTokens: GeneratedTokenCollector {
@@ -2914,8 +3252,24 @@ private struct RecordingGeneratedTokens: GeneratedTokenCollector {
         tokens.append(token)
     }
 
-    consuming func result() -> [Int] {
-        tokens
+    consuming func result(
+        iterator: any TokenIteratorProtocol
+    ) -> SendableBox<RecordedGenerationResult> {
+        SendableBox(
+            RecordedGenerationResult(
+                generatedTokens: tokens,
+                state: iterator.state,
+                mtpDrafterContinuation: Self.drafterContinuation(leftBy: iterator)))
+    }
+}
+
+/// Records no token, and answers the drafter continuation an MTP iterator left,
+/// for the callers that continue the cache with the same drafter.
+private struct MTPContinuationCollector: GeneratedTokenCollector {
+    mutating func record(_ token: Int) {}
+
+    consuming func result(iterator: any TokenIteratorProtocol) -> MTPDrafterContinuation? {
+        Self.drafterContinuation(leftBy: iterator)
     }
 }
 
@@ -2980,6 +3334,10 @@ private func generateLoopTask<
             // prompt-cache consumer can reconcile the resulting one-token
             // offset gap -- see `GenerateCompletionInfo.stopTokenFedToCache`.
             var stopTokenFedToCache: Int?
+            // The terminal stop token that stays out of the output, whether or
+            // not a forward pass fed it -- see
+            // `GenerateCompletionInfo.discardedStopToken`.
+            var discardedStopToken: Int?
             let emit: (sending Handler.Output) -> Bool = {
                 if case .terminated = continuation.yield($0) { return false }
                 return true
@@ -3024,13 +3382,17 @@ private func generateLoopTask<
 
                 // Check for end-of-sequence tokens. When `includeStopToken` is
                 // false the stop token stays out of the emitted output and out
-                // of `tokenCount`, whether the handler receives it or not. Its
-                // forward pass already advanced the cache, thus its identity
+                // of `tokenCount`, whether the handler receives it or not. When
+                // its forward pass already advanced the cache, its identity
                 // goes into `stopTokenFedToCache` for the caller that keeps a
-                // token ledger beside the cache.
+                // token ledger beside the cache. A speculative iterator can
+                // return a stop token that no forward pass has fed.
                 if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
                     if !includeStopToken {
-                        stopTokenFedToCache = token
+                        discardedStopToken = token
+                        if iterator.hasCachedLastToken {
+                            stopTokenFedToCache = token
+                        }
                     }
                     let deliverToHandler =
                         includeStopToken
@@ -3113,6 +3475,7 @@ private func generateLoopTask<
             let generateTime = now - start
 
             let mtpStats = iterator as? MTPStatsCollecting
+            let speculationFallback = (iterator as? TokenIterator)?.speculationFallback
             let reasoningTokenCount = iterator.reasoningTokenCount.map {
                 Swift.min(Swift.max($0, 0), tokenCount)
             }
@@ -3126,20 +3489,24 @@ private func generateLoopTask<
                 generationTime: generateTime,
                 stopReason: stopReason ?? .cancelled,
                 stopTokenFedToCache: stopTokenFedToCache,
+                discardedStopToken: discardedStopToken,
                 proposedDraftTokens: mtpStats?.proposedDraftTokens,
                 acceptedDraftTokens: mtpStats?.acceptedDraftTokens,
-                passthroughReason: mtpStats?.passthroughReason,
-                speculativeDecodingTelemetry: iterator.speculativeDecodingTelemetry
+                passthroughReason: mtpStats?.passthroughReason ?? speculationFallback?.statedReason,
+                speculativeDecodingTelemetry: iterator.speculativeDecodingTelemetry,
+                speculativeDecodingFallbackReason: speculationFallback?.reason
             )
             _ = continuation.yield(handler.infoEvent(info))
 
             // Synchronize with the stream to ensure tasks are completed
             Stream.defaultStream.synchronize()
 
+            let result = tokenCollector.result(iterator: iterator)
+
             // Finalize the stream
             continuation.finish()
 
-            return tokenCollector.result()
+            return result
         }
 
         if let ticket = wiredMemoryTicket {
@@ -3239,8 +3606,22 @@ public struct GenerateCompletionInfo: Sendable {
     ///
     /// `nil` when generation ended some other way (token budget, cancellation,
     /// or `includeStopToken == true`, where the stop token IS yielded and
-    /// therefore already counted).
+    /// therefore already counted), and when no forward pass fed the stop token
+    /// (see ``TokenIteratorProtocol/hasCachedLastToken``): a speculative
+    /// iterator returns the final token of a round before the next round feeds
+    /// it, so the cache then holds every counted token and not the stop token.
     public let stopTokenFedToCache: Int?
+
+    /// The stop token that ended the generation and that the output left out,
+    /// whether or not a forward pass fed it to the cache.
+    ///
+    /// The model generated this token, but it stays out of
+    /// ``generationTokenCount``. Plain decode and speculative decode of the same
+    /// text name the same token here, while ``stopTokenFedToCache`` names it only
+    /// when the cache holds it. `nil` when generation ended some other way
+    /// (token budget, cancellation, a handler that stopped), and when
+    /// `includeStopToken == true`, where the stop token is yielded and counted.
+    public let discardedStopToken: Int?
 
     /// Total tokens proposed by the MTP drafter across all speculation rounds
     /// in this stream, or nil for non-MTP iterators. Sourced from the
@@ -3253,14 +3634,25 @@ public struct GenerateCompletionInfo: Sendable {
     /// are non-nil and proposed > 0.
     public let acceptedDraftTokens: Int?
 
-    /// Non-nil when the MTP iterator transitioned into sticky-passthrough
-    /// mode for the remainder of the stream; carries the reason string
-    /// captured at the moment of engagement. Nil if the iterator stayed
-    /// speculative for the full stream or for non-MTP streams.
+    /// Non-nil when the MTP iterator transitioned into sticky passthrough or
+    /// could not export a resumable stateful boundary, or when the configured
+    /// MTP drafter cannot draft for the model and the generation decoded
+    /// without speculation. Carries the first failure reason, in words. Nil
+    /// when speculation completed with a resumable boundary, or for streams
+    /// configured with no MTP drafter.
     public let passthroughReason: String?
 
     /// Speculative decoding telemetry, when generation used speculative decoding.
     public let speculativeDecodingTelemetry: SpeculativeDecodingTelemetry?
+
+    /// Why the generation selected ordinary generation despite configured speculation.
+    ///
+    /// Nil means no fallback was recorded; it does not prove speculative rounds occurred.
+    /// ``ChatSession`` records each of its fallbacks. The MTP generation paths the
+    /// FoundationModels adapter runs record
+    /// ``SpeculativeDecodingFallbackReason/incompatibleDrafter``, with its stated reason in
+    /// ``passthroughReason``; other MTP iterator diagnostics use ``passthroughReason`` alone.
+    public internal(set) var speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
 
     /// Number of tool-call-shaped outputs rejected during this generation.
     public let rejectedToolCallCount: Int
@@ -3303,12 +3695,14 @@ public struct GenerateCompletionInfo: Sendable {
         generationTime: TimeInterval,
         stopReason: GenerateStopReason = .stop,
         stopTokenFedToCache: Int? = nil,
+        discardedStopToken: Int? = nil,
         proposedDraftTokens: Int? = nil,
         acceptedDraftTokens: Int? = nil,
         passthroughReason: String? = nil,
         speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? = nil,
         rejectedToolCallCount: Int = 0,
-        recoveredToolCallCount: Int = 0
+        recoveredToolCallCount: Int = 0,
+        speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason? = nil
     ) {
         self.promptTokenCount = promptTokenCount
         self.cachedPromptTokenCount = cachedPromptTokenCount
@@ -3320,12 +3714,14 @@ public struct GenerateCompletionInfo: Sendable {
         self.generateTime = generationTime
         self.stopReason = stopReason
         self.stopTokenFedToCache = stopTokenFedToCache
+        self.discardedStopToken = discardedStopToken
         self.proposedDraftTokens = proposedDraftTokens
         self.acceptedDraftTokens = acceptedDraftTokens
         self.passthroughReason = passthroughReason
         self.speculativeDecodingTelemetry = speculativeDecodingTelemetry
         self.rejectedToolCallCount = rejectedToolCallCount
         self.recoveredToolCallCount = recoveredToolCallCount
+        self.speculativeDecodingFallbackReason = speculativeDecodingFallbackReason
     }
 
     /// A human-readable multi-line summary of prompt/generation token counts, throughput,
@@ -3362,12 +3758,14 @@ public struct GenerateCompletionInfo: Sendable {
             generationTime: generateTime,
             stopReason: stopReason,
             stopTokenFedToCache: stopTokenFedToCache,
+            discardedStopToken: discardedStopToken,
             proposedDraftTokens: proposedDraftTokens,
             acceptedDraftTokens: acceptedDraftTokens,
             passthroughReason: passthroughReason,
             speculativeDecodingTelemetry: speculativeDecodingTelemetry,
             rejectedToolCallCount: rejected,
-            recoveredToolCallCount: recovered)
+            recoveredToolCallCount: recovered,
+            speculativeDecodingFallbackReason: speculativeDecodingFallbackReason)
     }
 }
 
@@ -3445,6 +3843,17 @@ public enum Generation: Sendable {
     func attributingCachedPromptTokens(_ count: Int) -> Generation {
         guard count > 0, case .info(var info) = self else { return self }
         info.cachedPromptTokenCount = count
+        return .info(info)
+    }
+
+    /// Adds session-owned cache and fallback metadata to `.info`; other events pass through.
+    func attributingSessionMetadata(
+        cachedPromptTokenCount: Int,
+        speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
+    ) -> Generation {
+        guard case .info(var info) = self else { return self }
+        info.cachedPromptTokenCount = cachedPromptTokenCount
+        info.speculativeDecodingFallbackReason = speculativeDecodingFallbackReason
         return .info(info)
     }
 }

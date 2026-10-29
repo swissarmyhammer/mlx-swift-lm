@@ -52,7 +52,7 @@ public struct WiredMemoryOutcome: Sendable, Equatable {
 ///   lowers the limit. A request below the standing limit changes nothing.
 ///
 /// The limit is one process-wide value, thus every instance drives the same
-/// ``MLX/WiredMemoryManager/shared`` manager. Each instance keeps its own
+/// `MLX/WiredMemoryManager/shared` manager. Each instance keeps its own
 /// high-water mark.
 ///
 /// Where no wired-memory control exists — an older system, or a device that is

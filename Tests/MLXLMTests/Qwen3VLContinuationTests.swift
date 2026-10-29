@@ -16,6 +16,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXLMTestSupport
 import MLXVLM
 import XCTest
 
@@ -418,9 +419,7 @@ final class Qwen3VLContinuationTests: XCTestCase {
                     prefill: .init()))
             XCTAssertNotNil(savedState)
 
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
-                .appendingPathExtension("safetensors")
+            let url = TemporaryPromptCacheFile.makeURL()
             defer { try? FileManager.default.removeItem(at: url) }
             try savePromptCache(url: url, cache: warmCache, state: savedState)
 

@@ -1,0 +1,1 @@
+{"id":"01M5QWG190DKYJSBR19HBE1YTR","timestamp":"2026-10-24T21:19:01.920405Z","op":"create","item_id":"01M5QWG19032QTT2Z2AXRKP08P","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: e4e669\n+tag_name: mtp\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: e4e669\n-tag_name: mtp\n","transaction_id":null}

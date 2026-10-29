@@ -747,7 +747,7 @@ final class DeepSeekV4ChunkCache {
 /// The layer reads two things: a sliding window of the most recent keys, and
 /// the pooled chunks of everything before them. This cache holds both. The
 /// window is a plain `RotatingKVCache`, and the chunks are one
-/// ``DeepSeekV4ChunkCache`` for the compressor of the attention and, on a
+/// `DeepSeekV4ChunkCache` for the compressor of the attention and, on a
 /// layer that holds an indexer, a second one for the compressor inside it.
 ///
 /// Every `KVCache` requirement that speaks of keys and values goes straight to
@@ -871,7 +871,7 @@ public final class DeepSeekV4Cache: KVCache {
     }
 
     /// The serialized meta state: the meta state of the window, then
-    /// ``stateFormat``.
+    /// `stateFormat`.
     ///
     /// The branches keep their own numbers in ``state`` rather than here, thus
     /// a reader may set the two in either order.
@@ -976,7 +976,7 @@ extension DeepSeekV4Cache: PromptCacheRestorable {
 
     /// Checks a saved state and meta state before any setter reads them.
     ///
-    /// The meta state must end in ``stateFormat``, the window part must fit a
+    /// The meta state must end in `stateFormat`, the window part must fit a
     /// `RotatingKVCache`, each branch part must be a pooled-cache state, and a layer with no
     /// indexer accepts only the absent branch state.
     ///

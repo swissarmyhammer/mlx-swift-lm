@@ -433,7 +433,7 @@ struct TranscriptConverterTests {
                 )),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
 
         #expect(messages.map(\.role) == [.user, .assistant])
         #expect(messages[1].content == "4")
@@ -463,7 +463,7 @@ struct TranscriptConverterTests {
             .toolCalls(Transcript.ToolCalls(id: "tc_1", [toolCall])),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
 
         #expect(messages.map(\.role) == [.user, .assistant])
         #expect(messages[1].reasoning == "I need the tool.")
@@ -501,7 +501,7 @@ struct TranscriptConverterTests {
                 )),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
 
         #expect(messages.map(\.role) == [.user, .assistant])
         #expect(messages[0].reasoning == nil)
@@ -546,7 +546,7 @@ struct TranscriptConverterTests {
                 )),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
 
         #expect(messages.map(\.role) == [.user, .assistant, .user, .assistant])
         #expect(messages[1].reasoning == "Let me add: 2 plus 2 is 4.")
@@ -575,7 +575,7 @@ struct TranscriptConverterTests {
                 )),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
 
         #expect(messages.count == 1)
         #expect(messages[0].reasoning == "before\nafter")
@@ -597,7 +597,7 @@ struct TranscriptConverterTests {
                 )),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: false)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .dropped)
 
         #expect(messages.count == 1)
         #expect(messages[0].reasoning == nil)

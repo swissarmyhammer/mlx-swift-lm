@@ -1,0 +1,1 @@
+{"id":"01M5ZQTZF6Y7C7CGTWFK3CP81P","timestamp":"2026-10-27T22:31:33.094574Z","op":"create","item_id":"01M5ZQTZF6WPA7GJS6PGA0J87C","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: f9c513\n+tag_name: speculative-decoding\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: f9c513\n-tag_name: speculative-decoding\n","transaction_id":null}

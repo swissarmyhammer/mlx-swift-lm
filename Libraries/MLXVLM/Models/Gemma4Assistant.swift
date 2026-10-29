@@ -174,7 +174,7 @@ public final class Gemma4AssistantDraftInner: Module {
 /// `mlx_vlm/speculative/drafters/gemma4_assistant/gemma4_assistant.py`
 /// (SHA d49d428). Conforms to `MTPDrafterModel`; consumed by
 /// `MTPSpeculativeTokenIterator` (Phase B).
-public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
+public final class Gemma4AssistantDraftModel: Module, MTPDistributionDrafterModel {
     public let config: Gemma4AssistantConfiguration
 
     @ModuleInfo(key: "model") public var model: Gemma4AssistantDraftInner
@@ -201,8 +201,100 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         super.init()
     }
 
-    public func isCompatible(with target: any LanguageModel) -> Bool {
-        target is Gemma4BackboneProviding
+    public func validateCompatibility(with target: any LanguageModel) throws {
+        guard let provider = target as? any Gemma4BackboneProviding else {
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: "Gemma4AssistantDraftModel",
+                expected: "a Gemma 4 VLM target",
+                actual: String(describing: type(of: target))
+            )
+        }
+
+        func mismatch(_ property: String, expected: String, actual: String)
+            -> MTPDrafterCompatibilityError
+        {
+            .incompatibleTarget(
+                drafter: "Gemma4AssistantDraftModel",
+                expected: "\(property) \(expected)",
+                actual: "\(type(of: target)) with \(property) \(actual)")
+        }
+
+        let backbone = provider.textBackbone
+        let targetConfig = backbone.config
+        let draftConfig = config.textConfiguration
+        guard targetConfig.hiddenSize == config.backboneHiddenSize else {
+            throw mismatch(
+                "hiddenSize", expected: "\(config.backboneHiddenSize)",
+                actual: "\(targetConfig.hiddenSize)")
+        }
+        guard targetConfig.vocabularySize == draftConfig.vocabularySize else {
+            throw mismatch(
+                "vocabularySize", expected: "\(draftConfig.vocabularySize)",
+                actual: "\(targetConfig.vocabularySize)")
+        }
+
+        let sourceCount = backbone.firstKVSharedLayerIdx
+        guard sourceCount > 0, sourceCount <= backbone.layers.count else {
+            throw mismatch(
+                "KV-owning layer count", expected: "in 1...\(backbone.layers.count)",
+                actual: "\(sourceCount)")
+        }
+        let sourceLayers = backbone.layers.prefix(sourceCount)
+        var targetAttention: [String: Gemma4TextAttention] = [:]
+        // The target emits drafter state only when both KV types are available.
+        for layerType in ["full_attention", "sliding_attention"] {
+            guard let source = sourceLayers.last(where: { $0.layerType == layerType }) else {
+                throw mismatch(
+                    "\(layerType) KV source", expected: "in the KV-owning layer prefix",
+                    actual: "missing")
+            }
+            targetAttention[layerType] = source.selfAttention
+        }
+
+        for layer in model.layers {
+            guard let source = targetAttention[layer.layerType] else {
+                throw mismatch(
+                    "drafter layer type", expected: "full_attention or sliding_attention",
+                    actual: layer.layerType)
+            }
+            let attention = layer.selfAttention
+            guard source.numHeads > 0, source.numKVHeads > 0,
+                attention.numHeads > 0, attention.numKVHeads > 0
+            else {
+                throw mismatch(
+                    "\(layer.layerType) head counts", expected: "positive query and KV counts",
+                    actual: "target Q=\(source.numHeads), KV=\(source.numKVHeads); "
+                        + "drafter Q=\(attention.numHeads), KV=\(attention.numKVHeads)")
+            }
+            guard source.headDim == attention.headDim else {
+                throw mismatch(
+                    "\(layer.layerType) headDim", expected: "\(attention.headDim)",
+                    actual: "\(source.headDim)")
+            }
+            guard source.numKVHeads == attention.numKVHeads else {
+                throw mismatch(
+                    "\(layer.layerType) numKVHeads", expected: "\(attention.numKVHeads)",
+                    actual: "\(source.numKVHeads)")
+            }
+            guard attention.numHeads % source.numKVHeads == 0 else {
+                throw mismatch(
+                    "\(layer.layerType) drafter query heads",
+                    expected: "a multiple of \(source.numKVHeads)",
+                    actual: "\(attention.numHeads)")
+            }
+        }
+
+        guard draftConfig.slidingWindow > 0 else {
+            throw mismatch(
+                "drafter slidingWindow", expected: "greater than 0",
+                actual: "\(draftConfig.slidingWindow)")
+        }
+        let targetWindow = targetConfig.slidingWindow > 0 ? targetConfig.slidingWindow : 4096
+        guard targetWindow <= draftConfig.slidingWindow else {
+            throw mismatch(
+                "effective target slidingWindow", expected: "at most \(draftConfig.slidingWindow)",
+                actual: "\(targetWindow)")
+        }
     }
 
     public func draftBlock(
@@ -210,11 +302,35 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
-        positionDeltas _: MLXArray?,
+        positionDeltas: MLXArray?,
         queryOffset: Int,
         blockSize: Int,
         sampler: any LogitSampler
     ) -> MLXArray {
+        draftBlockWithLogits(
+            target: target,
+            lastToken: lastToken,
+            lastHidden: lastHidden,
+            sharedKV: sharedKV,
+            positionDeltas: positionDeltas,
+            queryOffset: queryOffset,
+            blockSize: blockSize,
+            processor: nil,
+            sampler: sampler
+        ).tokens
+    }
+
+    public func draftBlockWithLogits(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas _: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
         precondition(blockSize >= 2, "blockSize must be >= 2 (K-1 drafted + 1 bonus)")
 
         // Derive target-bound constants inline per round. Mirrors mlx-vlm's
@@ -237,8 +353,11 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         var tok =
             lastToken.ndim == 1 ? lastToken.reshaped([lastToken.dim(0), 1]) : lastToken
         var hPrev = lastHidden
+        var processor = processor
         var tokens: [MLXArray] = []
+        var processedLogits: [MLXArray] = []
         tokens.reserveCapacity(blockSize - 1)
+        processedLogits.reserveCapacity(blockSize - 1)
 
         for _ in 0 ..< (blockSize - 1) {
             let tokEmbed =
@@ -251,12 +370,18 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
             )
             hPrev = newHidden
             // logits: [B, L, vocab]; take last step → [B, vocab]
-            let lastStepLogits = logits[0..., -1, 0...]
+            var lastStepLogits = logits[0..., -1, 0...]
+            lastStepLogits = processor?.process(logits: lastStepLogits) ?? lastStepLogits
             let nextTok = sampler.sample(logits: lastStepLogits)
+            processor?.didSample(token: nextTok)
             tok = nextTok.ndim == 1 ? nextTok.reshaped([nextTok.dim(0), 1]) : nextTok
             tokens.append(tok)
+            processedLogits.append(lastStepLogits.expandedDimensions(axis: 1))
         }
-        return concatenated(tokens, axis: 1)
+        return MTPDraftBlockOutput(
+            tokens: concatenated(tokens, axis: 1),
+            processedLogits: concatenated(processedLogits, axis: 1)
+        )
     }
 
     /// One drafter forward — pre-projection, layer loop with shared K/V,

@@ -17,7 +17,8 @@
 /// closes that turn and in the markers they resolve, thus they share this one
 /// body.
 ///
-/// The splice declines a turn whose cached tokens end inside an open think
+/// The splice declines a turn whose written tokens — those the caches hold, and
+/// the last ones a speculative round returned unfed — end inside an open think
 /// block: the generation stopped inside its reasoning, and the model wrote no
 /// close of the block. The render of that turn closes the block before the
 /// commit, and a splice would make the model read its unclosed reasoning and
@@ -93,7 +94,8 @@ struct CommittedTurnSplice: Sendable {
     ///
     /// The splice declines every state it cannot prove:
     ///
-    /// - The caches must not end inside an open think block.
+    /// - The tokens the model wrote — those the caches hold, then those they
+    ///   miss — must not end inside an open think block.
     /// - The new render must hold the render of the previous prefill as a WHOLE
     ///   prefix. That proves the template rewrote no already-cached rendered
     ///   region, thus the generation region is the only region left that the two
@@ -105,8 +107,15 @@ struct CommittedTurnSplice: Sendable {
     ///   a generation that stopped on the token budget, or a speculative
     ///   iterator that returned the commit before the cache represented it — is
     ///   spliced AT the commit, thus the suffix carries the commit and the model
-    ///   reads its own unterminated answer in front of it. Any other lookahead
-    ///   the render cannot explain is declined.
+    ///   reads its own unterminated answer in front of it.
+    /// - The tokens the previous generation returned and the caches do not
+    ///   hold are the last tokens the model wrote: an MTP round returns its
+    ///   final verified token before any forward pass feeds it. They go in
+    ///   front of the commit, thus the model reads its whole answer before it
+    ///   (card `^g2t7caa`). A trailing commit among them is the model's own
+    ///   commit, which the commit of the render stands for. Lookahead the
+    ///   render cannot explain — tokens past a commit the ledger holds, or a
+    ///   commit before their end — is declined.
     /// - The render must add the commit ``commitSelection`` names after the
     ///   render before it.
     ///
@@ -115,7 +124,10 @@ struct CommittedTurnSplice: Sendable {
     ///   - cache: what the caches currently hold.
     /// - Returns: the splice, or `nil` to leave the turn to the next rule.
     func decision(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
-        guard thinkBlock?.endsInsideBlock(cache.cachedTokens) != true,
+        // The model read the tokens the caches miss as it wrote them, thus they
+        // count toward the think block it was in.
+        let writtenTokens = cache.cachedTokens + turn.previousGenerationUncommittedTokens
+        guard thinkBlock?.endsInsideBlock(writtenTokens) != true,
             !cache.previousRenderTokens.isEmpty,
             !cache.cachedTokens.isEmpty,
             cache.mainCacheIsAligned,
@@ -124,23 +136,27 @@ struct CommittedTurnSplice: Sendable {
             turn.promptTokens.starts(with: cache.previousRenderTokens),
             let commitIndex = commitIndex(
                 in: turn.promptTokens, after: cache.previousRenderTokens.count),
-            let suffixStart = suffixStart(at: commitIndex, of: turn, cache: cache),
-            suffixStart < turn.promptTokens.endIndex
+            let feed = feed(at: commitIndex, of: turn, cache: cache),
+            feed.suffixStart < turn.promptTokens.endIndex
         else {
             return nil
         }
 
-        let representedTokens = cache.cachedTokens + turn.promptTokens[suffixStart...]
+        let representedTokens =
+            cache.cachedTokens + feed.uncommittedTokens + turn.promptTokens[feed.suffixStart...]
         let canContinueWithDraft =
             !turn.usesSpeculativeDecoding
-            || (cache.hasDraftCache && cache.draftCacheIsAligned)
+            || cache.speculativeReuseCapability.canContinueWithoutRebuild
         if canContinueWithDraft {
-            return .appendSuffix(suffixStart: suffixStart, representedTokens: representedTokens)
+            return .appendSuffix(
+                suffixStart: feed.suffixStart, representedTokens: representedTokens,
+                uncommittedTokens: feed.uncommittedTokens)
         }
         // The draft cache cannot follow the live trajectory. Preserve the
         // authoritative main cache and use it alone for this continuation.
         return .appendSuffixToMain(
-            suffixStart: suffixStart, representedTokens: representedTokens)
+            suffixStart: feed.suffixStart, representedTokens: representedTokens,
+            uncommittedTokens: feed.uncommittedTokens)
     }
 
     /// The index of the commit that closes the turn, among the commits the new
@@ -164,30 +180,44 @@ struct CommittedTurnSplice: Sendable {
         }
     }
 
-    /// Where the fed suffix of the new render begins.
+    /// What the splice feeds: the tokens the model wrote that the caches miss,
+    /// and then the new render from ``suffixStart``.
+    private struct Feed {
+        /// The generated tokens to feed ahead of the suffix.
+        let uncommittedTokens: [Int]
+
+        /// The index of the new render where the fed suffix begins.
+        let suffixStart: Int
+    }
+
+    /// What the splice feeds for the new render.
     ///
     /// - Parameters:
     ///   - commitIndex: the index of the commit in the new render.
     ///   - turn: the prompt-side facts of this turn.
     ///   - cache: what the caches currently hold.
-    /// - Returns: the index, or `nil` when the previous generation left tokens
+    /// - Returns: the feed, or `nil` when the previous generation left tokens
     ///   the render cannot explain.
-    private func suffixStart(
+    private func feed(
         at commitIndex: Int, of turn: PromptCacheTurn, cache: PromptCacheState
-    ) -> Int? {
+    ) -> Feed? {
         let uncommitted = turn.previousGenerationUncommittedTokens
         if cache.cachedTokens.last == endOfTurnToken, uncommitted.isEmpty {
             // The model closed its turn and the cache holds that commit, thus
             // the suffix begins after it.
-            return commitIndex + 1
+            return Feed(uncommittedTokens: [], suffixStart: commitIndex + 1)
         }
-        if uncommitted.isEmpty || uncommitted == [endOfTurnToken] {
-            // The cache does not hold the commit: the generation stopped on the
-            // token budget, or a speculative iterator returned the commit as its
-            // final verifier sample before the cache represented it. The suffix
-            // carries the commit either way.
-            return commitIndex
+        // The cache does not hold the commit: the generation stopped on the
+        // token budget, or a speculative iterator returned its final verifier
+        // samples before the cache represented them. The suffix carries the
+        // commit of the render, which stands for a commit the model wrote.
+        let written =
+            uncommitted.last == endOfTurnToken ? uncommitted.dropLast() : uncommitted[...]
+        guard !written.contains(endOfTurnToken),
+            written.isEmpty || cache.cachedTokens.last != endOfTurnToken
+        else {
+            return nil
         }
-        return nil
+        return Feed(uncommittedTokens: Array(written), suffixStart: commitIndex)
     }
 }

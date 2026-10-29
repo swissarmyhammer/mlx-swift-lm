@@ -32,10 +32,18 @@ enum ExecutorPromptCacheFileError: Error, Equatable {
 
 /// Writes one ``ExecutorPromptCacheEntry`` to one safetensors file and reads it back.
 ///
-/// The file holds the caches, the model state and the two token ledgers of the entry. The write
-/// has two steps: ``prepare(_:key:)`` reads the caches while the caller owns them, and
-/// ``write(_:to:)`` writes the file later, on any task. The write goes to a partial file first
-/// and then takes the real name, thus a crash never leaves a half file under the real name.
+/// The file holds the caches, the model state, the two token ledgers, the uncommitted tokens and
+/// the MTP drafter state of the entry. The write has two steps: ``prepare(_:key:report:)`` reads
+/// the caches while the caller owns them, and ``write(_:to:)`` writes the file later, on any
+/// task. The write goes to a partial file first and then takes the real name, thus a crash never
+/// leaves a half file under the real name.
+///
+/// The drafter state goes in under ``MTPDrafterContinuation/reservedKeyPrefix``, beside the main
+/// caches. The format name does not change with it or with the uncommitted tokens: a file
+/// without the drafter keys, as the writer wrote before it kept drafter states, reads back with
+/// no drafter state, and the next turn starts its drafter cold. A file without the uncommitted
+/// tokens key, as the writer wrote before it kept them, reads back with no uncommitted tokens.
+/// The checkpoint of an entry is not written.
 enum ExecutorPromptCacheFile {
 
     /// The format that each file of this writer names.
@@ -66,12 +74,15 @@ enum ExecutorPromptCacheFile {
         /// The whole prompt that the last pass rendered.
         static let renderTokens = "renderTokens"
 
+        /// The tokens the last pass generated that the caches do not hold.
+        static let uncommittedTokens = "uncommittedTokens"
+
         /// The bytes that the entry holds in memory.
         static let byteCount = "byteCount"
     }
 
-    /// Reads the caches, the model state and the ledgers of `entry`, and makes the input of
-    /// ``write(_:to:)``.
+    /// Reads the caches, the model state, the ledgers and the drafter state of `entry`, and
+    /// makes the input of ``write(_:to:)``.
     ///
     /// The caller runs this function while it owns the caches of `entry`. The input holds new
     /// array handles and no reference to a cache, thus the caches can take more tokens before
@@ -80,11 +91,14 @@ enum ExecutorPromptCacheFile {
     /// - Parameters:
     ///   - entry: The entry to write.
     ///   - key: The session that the entry belongs to.
+    ///   - report: Receives the log line of a drafter state that cannot be written. The file
+    ///     then keeps the main caches alone.
     /// - Returns: The input of ``write(_:to:)``.
     /// - Throws: ``ExecutorPromptCacheFileError/tokenOutOfRange(_:)`` for a token ID that does
     ///   not fit in an Int32, or the `KVCacheError` of the prompt cache save.
     static func prepare(
-        _ entry: ExecutorPromptCacheEntry, key: ExecutorPromptCacheKey
+        _ entry: ExecutorPromptCacheEntry, key: ExecutorPromptCacheKey,
+        report: (String) -> Void = ExecutorPromptCacheLog.info
     ) throws -> PromptCacheSaveInput {
         let metadata = [
             MetadataKey.format: format,
@@ -92,10 +106,36 @@ enum ExecutorPromptCacheFile {
             MetadataKey.sessionID: key.sessionID,
             MetadataKey.tokens: try TokenLedger.encode(entry.tokens),
             MetadataKey.renderTokens: try TokenLedger.encode(entry.renderTokens),
+            MetadataKey.uncommittedTokens: try TokenLedger.encode(entry.uncommittedTokens),
             MetadataKey.byteCount: String(entry.byteCount),
         ]
         return try preparePromptCacheSave(
-            cache: entry.caches, metadata: metadata, state: entry.state)
+            cache: entry.caches, metadata: metadata, state: entry.state,
+            drafterContinuation: serializedDrafterState(of: entry, key: key, report: report))
+    }
+
+    /// The serialized drafter state of `entry`.
+    ///
+    /// A drafter state is worth less than the main caches beside it, thus a drafter state that
+    /// cannot be serialized goes to the log and the file keeps the main caches.
+    ///
+    /// - Parameters:
+    ///   - entry: The entry to write.
+    ///   - key: The session that the entry belongs to.
+    ///   - report: Receives the log line of a drafter state that cannot be serialized.
+    /// - Returns: The serialized drafter state, or nil when the entry keeps none or it cannot be
+    ///   serialized.
+    private static func serializedDrafterState(
+        of entry: ExecutorPromptCacheEntry, key: ExecutorPromptCacheKey,
+        report: (String) -> Void
+    ) -> SerializedMTPDrafterContinuation? {
+        guard let drafterState = entry.drafterState else { return nil }
+        do {
+            return try SerializedMTPDrafterContinuation(drafterState)
+        } catch {
+            report(ExecutorPromptCacheReport.drafterSpillFailureLine(key: key, error: error))
+            return nil
+        }
     }
 
     /// Writes a prepared entry to `url`.
@@ -104,7 +144,7 @@ enum ExecutorPromptCacheFile {
     /// `url`, which replaces a file of that name. A failed write removes the partial file.
     ///
     /// - Parameters:
-    ///   - input: The input that ``prepare(_:key:)`` made.
+    ///   - input: The input that ``prepare(_:key:report:)`` made.
     ///   - url: The URL of the file.
     /// - Throws: The error of the safetensors writer, or a `POSIXError` when the rename fails.
     static func write(_ input: PromptCacheSaveInput, to url: URL) throws {
@@ -125,6 +165,11 @@ enum ExecutorPromptCacheFile {
     ///   - key: The session that the entry must belong to.
     ///   - templates: The fresh caches of the model, one for each layer. After a throw their
     ///     state is not defined. Discard them.
+    ///   - drafter: The MTP drafter that reads the drafter state of the file, or nil. Without a
+    ///     drafter the entry keeps no drafter state.
+    ///   - parameters: The generation parameters of the turn, which decide the drafter caches.
+    ///   - report: Receives the log line of a drafter state that does not read back. The entry
+    ///     then keeps no drafter state, and the main caches still read back.
     /// - Returns: The entry. Its caches are the templates, or the caches that the load made in
     ///   place of a template.
     /// - Throws: ``ExecutorPromptCacheFileError`` when the file is truncated, names another
@@ -132,7 +177,9 @@ enum ExecutorPromptCacheFile {
     ///   stand at the end of the ledger. The error of the file system or of the prompt cache load
     ///   when the file is missing or is not a prompt cache that fits the templates.
     static func read(
-        from url: URL, key: ExecutorPromptCacheKey, templates: [KVCache]
+        from url: URL, key: ExecutorPromptCacheKey, templates: [KVCache],
+        drafter: (any ResumableMTPDrafterModel)? = nil, parameters: GenerateParameters? = nil,
+        report: (String) -> Void = ExecutorPromptCacheLog.info
     ) throws -> ExecutorPromptCacheEntry {
         try SafetensorsLength.requireWholeFile(at: url)
         let snapshot = try loadPromptCacheSnapshot(url: url, into: templates)
@@ -147,6 +194,8 @@ enum ExecutorPromptCacheFile {
         }
         let tokens = try TokenLedger.decode(metadata, key: MetadataKey.tokens)
         let renderTokens = try TokenLedger.decode(metadata, key: MetadataKey.renderTokens)
+        let uncommittedTokens = try TokenLedger.decodeIfPresent(
+            metadata, key: MetadataKey.uncommittedTokens)
         let offsets = snapshot.cache.map(\.offset)
         guard offsets.allSatisfy({ $0 == tokens.count }) else {
             throw ExecutorPromptCacheFileError.offsetMismatch(
@@ -154,7 +203,41 @@ enum ExecutorPromptCacheFile {
         }
         return ExecutorPromptCacheEntry(
             caches: snapshot.cache, tokens: tokens, renderTokens: renderTokens,
-            state: snapshot.state)
+            uncommittedTokens: uncommittedTokens, state: snapshot.state,
+            drafterState: restoredDrafterState(
+                snapshot.drafterContinuation, at: tokens.count, drafter: drafter,
+                parameters: parameters, key: key, report: report))
+    }
+
+    /// The drafter state a file keeps, restored for `drafter`.
+    ///
+    /// - Parameters:
+    ///   - serialized: The serialized drafter state of the file, or nil when the file keeps none.
+    ///   - mainTokenCount: The length of the ledger of the file, where the drafter state must
+    ///     stand.
+    ///   - drafter: The drafter of the turn, or nil.
+    ///   - parameters: The generation parameters of the turn.
+    ///   - key: The session of the file.
+    ///   - report: Receives the log line of a drafter state that does not read back.
+    /// - Returns: The drafter state, or nil when the file keeps none, the turn has no drafter,
+    ///   the drafter state does not read back, or another drafter made it or it stands at
+    ///   another position. The drafter then starts cold.
+    private static func restoredDrafterState(
+        _ serialized: SerializedMTPDrafterContinuation?, at mainTokenCount: Int,
+        drafter: (any ResumableMTPDrafterModel)?, parameters: GenerateParameters?,
+        key: ExecutorPromptCacheKey, report: (String) -> Void
+    ) -> MTPDrafterContinuation? {
+        guard let serialized, let drafter else { return nil }
+        let drafterState: MTPDrafterContinuation
+        do {
+            drafterState = try serialized.restored(by: drafter, parameters: parameters)
+        } catch {
+            report(ExecutorPromptCacheReport.drafterRestoreFailureLine(key: key, error: error))
+            return nil
+        }
+        return drafterState.isAligned(
+            withMainTokenCount: mainTokenCount, drafterID: drafter.drafterID)
+            ? drafterState : nil
     }
 
     /// The file name of one entry of `key`.
@@ -267,6 +350,20 @@ private enum TokenLedger {
                 return Int(Int32(littleEndian: value))
             }
         }
+    }
+
+    /// Decodes the ledger under `key` of `metadata`, or gives an empty ledger when the file has
+    /// no metadata under `key`, as a file of an earlier writer that did not write that ledger.
+    ///
+    /// - Parameters:
+    ///   - metadata: The user metadata of the file.
+    ///   - key: The metadata key of the ledger.
+    /// - Returns: The ledger, or an empty ledger when the key is missing.
+    /// - Throws: ``ExecutorPromptCacheFileError/ledgerNotDecodable(_:)`` when the text is not
+    ///   base64, or the bytes are not whole Int32 values.
+    static func decodeIfPresent(_ metadata: [String: String], key: String) throws -> [Int] {
+        guard metadata[key] != nil else { return [] }
+        return try decode(metadata, key: key)
     }
 }
 

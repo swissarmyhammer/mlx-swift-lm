@@ -174,6 +174,23 @@ let package = Package(
             name: "MLXTestPrecision",
             path: "Tests/MLXTestPrecision"
         ),
+        // Test doubles shared by the MLXLMTests bundle and the
+        // MLXFoundationModelsTests bundle: the tiny Qwen 3.5 target with its
+        // MTP drafter on seeded random weights, its tokenizer stub, and the
+        // JSON of the small Qwen 3.5 configurations. A test bundle cannot
+        // import another test bundle, thus the doubles live in this target.
+        // Not a product: only the test bundles of this package link it.
+        .target(
+            name: "MLXLMTestSupport",
+            dependencies: [
+                "MLXLMCommon",
+                "MLXLLM",
+                "MLXVLM",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+            ],
+            path: "Tests/MLXLMTestSupport"
+        ),
 
         // Scripted tokenizers and models
         .target(
@@ -198,7 +215,9 @@ let package = Package(
                 "MLXEmbedders",
                 "MLXRerankers",
                 "MLXTestPrecision",
+                "MLXLMTestSupport",
                 "MLXScriptedLM",
+                "BenchmarkHelpers",
             ],
             path: "Tests/MLXLMTests",
             exclude: [
@@ -346,6 +365,10 @@ let package = Package(
                 // Float32 arithmetic for the float32 comparisons of this
                 // bundle (for example the cold check of the Qwen file tests).
                 "MLXTestPrecision",
+                // The Qwen 3.5 + MTP fixture of the executor tests.
+                "MLXLMTestSupport",
+                // The transcript helpers this bundle shares with IntegrationTesting.
+                "IntegrationTestHelpers",
             ],
             path: "Tests/MLXFoundationModelsTests"
         ),

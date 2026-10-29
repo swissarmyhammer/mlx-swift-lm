@@ -15,12 +15,66 @@ struct TranscriptConverter {
 
     private static let logger = MLXLogger(label: "TranscriptConverter")
 
+    /// How the history keeps the reasoning of a past turn, as the reasoning
+    /// protocol of the model states it.
+    enum HistoryReasoning: Equatable, Sendable {
+        /// Every reasoning entry is dropped: the answer carries forward, the
+        /// chain-of-thought does not.
+        case dropped
+
+        /// The reasoning of every turn rides on the assistant message of its
+        /// turn (``ReasoningConfig/replaysReasoningIntoHistory``, Qwen).
+        case everyTurn
+
+        /// Only the reasoning of a turn whose response is empty rides on the
+        /// assistant message of its turn
+        /// (``ReasoningConfig/replaysUnclosedReasoningIntoHistory``,
+        /// DeepSeek-V4). Such a turn stopped inside the block its prompt
+        /// opened, thus `ChatSession` records its whole text as the reasoning
+        /// and an empty content, and the render closes the block after the
+        /// text the model wrote. The reasoning of every other turn is dropped,
+        /// as `ChatSession` keeps the whole text of such a turn as the content.
+        case reasoningOnlyTurns
+
+        /// How the history keeps reasoning for a model whose reasoning
+        /// protocol is `config`. A protocol that replays every turn wins over
+        /// the unclosed-only flag, as it does in `ChatSession`.
+        ///
+        /// - Parameter config: the reasoning protocol of the model, or `nil`
+        ///   for a model with none.
+        init(for config: ReasoningConfig?) {
+            if config?.replaysReasoningIntoHistory == true {
+                self = .everyTurn
+            } else if config?.replaysUnclosedReasoningIntoHistory == true {
+                self = .reasoningOnlyTurns
+            } else {
+                self = .dropped
+            }
+        }
+
+        /// `message` with the reasoning this mode keeps: under
+        /// ``reasoningOnlyTurns`` an assistant message with a content or tool
+        /// calls loses its reasoning; every other message stays as it is.
+        ///
+        /// - Parameter message: a converted message.
+        /// - Returns: the message the history keeps.
+        func kept(_ message: Chat.Message) -> Chat.Message {
+            guard self == .reasoningOnlyTurns, !message.content.isEmpty || message.tool != nil
+            else {
+                return message
+            }
+            var answered = message
+            answered.reasoning = nil
+            return answered
+        }
+    }
+
     /// The MLX `Chat.Message` array for a collection of transcript entries.
     ///
     /// - Parameters:
     ///   - entries: Transcript entries from FoundationModels
-    ///   - replayReasoning: whether the text of a `.reasoning` entry rides on
-    ///     the assistant message of its turn, as ``Chat/Message/reasoning``.
+    ///   - reasoning: which turns keep the text of their `.reasoning` entry
+    ///     on the assistant message of the turn, as ``Chat/Message/reasoning``.
     ///     The framework appends a turn's reasoning entry AFTER the response
     ///     entry of that turn -- the response entry opens with the turn, the
     ///     reasoning entry opens when the first reasoning fragment arrives --
@@ -30,22 +84,33 @@ struct TranscriptConverter {
     ///     assistant message right before it. Consecutive reasoning entries
     ///     join with newlines, the way the segments of one entry do; a
     ///     reasoning entry with no assistant message on either side is
-    ///     dropped. `false` (the default) drops every reasoning entry: the
-    ///     answer carries forward, the chain-of-thought does not.
-    ///     `ReasoningConfig.replaysReasoningIntoHistory` decides which model
-    ///     family replays.
+    ///     dropped. ``HistoryReasoning/dropped`` (the default) drops every
+    ///     reasoning entry, and ``HistoryReasoning/reasoningOnlyTurns`` drops
+    ///     the reasoning of every turn but one whose response is empty.
+    ///     ``HistoryReasoning/init(for:)`` decides which model family replays.
+    ///
+    ///     A turn that stopped on its token budget inside its reasoning leaves
+    ///     a response entry with no text beside its reasoning entry. Under
+    ///     replay that turn comes back as an assistant message with an empty
+    ///     content and the reasoning, as `ChatSession` records it, thus the
+    ///     history render writes the reasoning the model wrote inside the think
+    ///     block of the turn, and the render of the next turn extends the
+    ///     tokens the prompt cache holds. A response entry with no text and no
+    ///     reasoning still gives no message.
     /// - Returns: Array of MLX Chat.Message objects
     static func mlxMessages(
-        for entries: some Collection<Transcript.Entry>, replayReasoning: Bool = false
+        for entries: some Collection<Transcript.Entry>, reasoning: HistoryReasoning = .dropped
     ) throws -> [Chat.Message] {
+        let replays = reasoning != .dropped
         var messages: [Chat.Message] = []
         var replay = ReasoningReplay()
         for entry in entries {
-            if replayReasoning, case .reasoning(let reasoning) = entry {
-                replay.hold(extractText(from: reasoning.segments))
+            if replays, case .reasoning(let entryReasoning) = entry {
+                replay.hold(extractText(from: entryReasoning.segments))
                 continue
             }
-            guard var message = try convert(entry: entry) else { continue }
+            let placeholder = replays ? reasoningOnlyTurn(of: entry) : nil
+            guard var message = try placeholder ?? convert(entry: entry) else { continue }
             replay.settle(before: &message, in: &messages)
             messages.append(message)
             if message.role == .assistant {
@@ -53,7 +118,32 @@ struct TranscriptConverter {
             }
         }
         replay.settle(in: &messages)
-        return messages
+        return messages.filter { !holdsNothing($0) }.map(reasoning.kept)
+    }
+
+    /// The assistant message that holds the place of `entry` when it is a
+    /// response entry with no text, for the reasoning of its turn to ride on.
+    ///
+    /// - Parameter entry: the entry to convert.
+    /// - Returns: an assistant message with an empty content, or `nil` when
+    ///   `entry` is not a response entry with no text.
+    private static func reasoningOnlyTurn(of entry: Transcript.Entry) -> Chat.Message? {
+        guard case .response(let response) = entry, extractText(from: response.segments) == nil
+        else {
+            return nil
+        }
+        return .assistant("")
+    }
+
+    /// Whether `message` is the place of a response entry with no text that no
+    /// reasoning took: an assistant message with no content, no reasoning and
+    /// no tool calls. No other entry converts to such a message.
+    ///
+    /// - Parameter message: a converted message.
+    /// - Returns: `true` when the history keeps nothing of `message`.
+    private static func holdsNothing(_ message: Chat.Message) -> Bool {
+        message.role == .assistant && message.content.isEmpty && message.reasoning == nil
+            && message.tool == nil
     }
 
     /// The reasoning text between two assistant messages, and the assistant
@@ -102,7 +192,7 @@ struct TranscriptConverter {
     }
 
     /// Converts a single transcript entry to its chat message — the per-entry
-    /// body of ``mlxMessages(for:replayReasoning:)``, which owns the
+    /// body of ``mlxMessages(for:reasoning:)``, which owns the
     /// cross-entry reasoning state around it.
     ///
     /// - Parameter entry: the entry to convert.
