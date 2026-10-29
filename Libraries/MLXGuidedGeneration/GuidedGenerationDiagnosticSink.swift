@@ -79,6 +79,21 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     /// Each rollback of the grammar matcher after a rejected draft, in order.
     public private(set) var rollbacks: [GuidedRollbackRecord] = []
 
+    /// The times the adaptive guard of the MTP rounds paused speculation, over every guided
+    /// generation the sink saw.
+    public private(set) var adaptivePauseCount = 0
+
+    /// The times the adaptive guard probed plain decode, over every guided generation.
+    public private(set) var adaptiveProbeCount = 0
+
+    /// The tokens the adaptive guard decoded plainly in its probes and pauses. They are no
+    /// drafts: ``draftedTokenCount`` and ``acceptedDraftTokenCount`` leave them out.
+    public private(set) var adaptivePlainTokenCount = 0
+
+    /// The block size the adaptive guard of the last guided generation chose last, or `nil`
+    /// when no guarded generation ran.
+    public private(set) var adaptiveBlockSize: Int?
+
     /// Why the configured MTP drafter did not speculate, in words, when it cannot draft for
     /// the target; `nil` otherwise.
     public private(set) var speculationFallbackReason: String?
@@ -181,6 +196,18 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     /// - Parameter rollback: The drafts and the matcher acceptances the rollback undid.
     public func recordRollback(_ rollback: GuidedRollbackRecord) {
         rollbacks.append(rollback)
+    }
+
+    /// Records the decisions of the adaptive guard of one guided generation.
+    ///
+    /// - Parameters:
+    ///   - controller: The decisions of the guard at the end of the generation.
+    ///   - plainTokens: The tokens the guard decoded plainly.
+    package func recordAdaptiveDecisions(of controller: MTPAdaptiveController, plainTokens: Int) {
+        adaptivePauseCount += controller.pauseCount
+        adaptiveProbeCount += controller.probeCount
+        adaptivePlainTokenCount += plainTokens
+        adaptiveBlockSize = controller.blockSize
     }
 
     /// Records why the configured MTP drafter decodes plainly.

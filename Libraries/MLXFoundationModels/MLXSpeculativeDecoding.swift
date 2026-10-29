@@ -64,6 +64,10 @@ public struct MLXSpeculativeDecoding: Sendable {
     /// to speculate whatever the drafter weighs.
     public let memoryPolicy: SpeculativeDecodingMemoryPolicy?
 
+    /// How each generation guards against decoding slower than plain decode; see
+    /// ``MTPAdaptivePolicy``. The default is enabled.
+    public let adaptivePolicy: MTPAdaptivePolicy
+
     /// The loader of the drafter that drafts for a target, as the target loaded.
     private let pickDrafterLoader: @Sendable (any LanguageModel) -> DrafterLoader
 
@@ -82,11 +86,14 @@ public struct MLXSpeculativeDecoding: Sendable {
     ///     `memoryPolicy` weighs before the drafter loads, or `nil`. A negative estimate counts
     ///     as zero.
     ///   - memoryPolicy: the memory policy that admits the drafter on each call, or `nil`.
+    ///   - adaptivePolicy: how each generation guards against decoding slower than plain decode.
     ///   - loadDrafter: loads the drafter container of `drafterConfiguration`.
     /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)`` when
-    ///   `blockSize` is smaller than 2, and
+    ///   `blockSize` is smaller than 2,
     ///   ``SpeculativeDecodingConfigurationError/invalidMTPMinimumDraftProbability(_:)`` when
-    ///   `minimumDraftProbability` is not from 0 to 1.
+    ///   `minimumDraftProbability` is not from 0 to 1, and
+    ///   ``SpeculativeDecodingConfigurationError/invalidMTPAdaptivePolicy(_:)`` when a setting of
+    ///   `adaptivePolicy` is outside its range.
     public init(
         drafterConfiguration: ModelConfiguration,
         blockSize: Int = SpeculativeDecodingConfig.defaultMTPBlockSize,
@@ -94,13 +101,14 @@ public struct MLXSpeculativeDecoding: Sendable {
             SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
         drafterBytes: Int? = nil,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
+        adaptivePolicy: MTPAdaptivePolicy = .default,
         loadDrafter: @escaping DrafterLoader
     ) throws {
         try self.init(
             drafterConfiguration: drafterConfiguration, blockSize: blockSize,
             minimumDraftProbability: minimumDraftProbability,
             drafterBytes: drafterBytes, memoryPolicy: memoryPolicy,
-            pickDrafterLoader: { _ in loadDrafter })
+            adaptivePolicy: adaptivePolicy, pickDrafterLoader: { _ in loadDrafter })
     }
 
     /// Creates MTP speculative decoding with a drafter that the factory of `registration`
@@ -128,8 +136,9 @@ public struct MLXSpeculativeDecoding: Sendable {
     ///     `memoryPolicy` weighs before the drafter loads, or `nil`. A negative estimate counts
     ///     as zero.
     ///   - memoryPolicy: the memory policy that admits the drafter on each call, or `nil`.
+    ///   - adaptivePolicy: how each generation guards against decoding slower than plain decode.
     /// - Throws: the errors of
-    ///   ``init(drafterConfiguration:blockSize:minimumDraftProbability:drafterBytes:memoryPolicy:loadDrafter:)``.
+    ///   ``init(drafterConfiguration:blockSize:minimumDraftProbability:drafterBytes:memoryPolicy:adaptivePolicy:loadDrafter:)``.
     public init(
         drafterConfiguration: ModelConfiguration,
         from downloader: any Downloader,
@@ -139,12 +148,14 @@ public struct MLXSpeculativeDecoding: Sendable {
         minimumDraftProbability: Float =
             SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
         drafterBytes: Int? = nil,
-        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
+        adaptivePolicy: MTPAdaptivePolicy = .default
     ) throws {
         try self.init(
             drafterConfiguration: drafterConfiguration, blockSize: blockSize,
             minimumDraftProbability: minimumDraftProbability,
             drafterBytes: drafterBytes, memoryPolicy: memoryPolicy,
+            adaptivePolicy: adaptivePolicy,
             pickDrafterLoader: { target in
                 registration.drafterLoader(
                     for: target, from: downloader, using: tokenizerLoader)
@@ -152,14 +163,17 @@ public struct MLXSpeculativeDecoding: Sendable {
     }
 
     /// Creates MTP speculative decoding whose target picks the loader of its drafter, after
-    /// checking the block size and the confidence floor.
+    /// checking the block size, the confidence floor and the adaptive policy.
     private init(
         drafterConfiguration: ModelConfiguration, blockSize: Int, minimumDraftProbability: Float,
         drafterBytes: Int?, memoryPolicy: SpeculativeDecodingMemoryPolicy?,
+        adaptivePolicy: MTPAdaptivePolicy,
         pickDrafterLoader: @escaping @Sendable (any LanguageModel) -> DrafterLoader
     ) throws {
         try SpeculativeDecodingConfig.validate(mtpBlockSize: blockSize)
         try SpeculativeDecodingConfig.validate(minimumDraftProbability: minimumDraftProbability)
+        try adaptivePolicy.validate()
+        self.adaptivePolicy = adaptivePolicy
         self.drafterConfiguration = drafterConfiguration
         self.blockSize = blockSize
         self.minimumDraftProbability = minimumDraftProbability
@@ -224,7 +238,7 @@ public struct MLXSpeculativeDecoding: Sendable {
         let drafter = await container.perform { SendableBox($0.model) }.consume()
         return MTPSpeculation(
             drafter: drafter, blockSize: blockSize,
-            minimumDraftProbability: minimumDraftProbability)
+            minimumDraftProbability: minimumDraftProbability, adaptivePolicy: adaptivePolicy)
     }
 }
 

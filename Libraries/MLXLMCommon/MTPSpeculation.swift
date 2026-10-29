@@ -18,16 +18,24 @@ package struct MTPSpeculation {
     /// The drafter top-1 probability below which a chaining drafter stops a round's chain.
     package let minimumDraftProbability: Float
 
+    /// How each generation guards against decoding slower than plain decode.
+    package let adaptivePolicy: MTPAdaptivePolicy
+
     /// Creates the speculation of `drafter`.
     ///
     /// - Parameters:
     ///   - drafter: the drafter.
     ///   - blockSize: the tokens of each round.
     ///   - minimumDraftProbability: the confidence floor of a chaining drafter.
-    package init(drafter: any MTPDrafterModel, blockSize: Int, minimumDraftProbability: Float) {
+    ///   - adaptivePolicy: how each generation guards against decoding slower than plain decode.
+    package init(
+        drafter: any MTPDrafterModel, blockSize: Int, minimumDraftProbability: Float,
+        adaptivePolicy: MTPAdaptivePolicy = .default
+    ) {
         self.drafter = drafter
         self.blockSize = blockSize
         self.minimumDraftProbability = minimumDraftProbability
+        self.adaptivePolicy = adaptivePolicy
     }
 
     /// The drafter when it can resume a drafter state across generations, or `nil`.
@@ -109,7 +117,7 @@ package struct MTPSpeculation {
                     mainCache: cache, mainState: state, mtpContinuation: mtpContinuation,
                     parameters: parameters, blockSize: speculation.blockSize,
                     minimumDraftProbability: speculation.minimumDraftProbability,
-                    components: components)
+                    adaptivePolicy: speculation.adaptivePolicy, components: components)
             } catch MTPInitializationError.unsupportedSpeculativeCache {
                 // The probe throws before the prefill, thus the plain iterator below starts
                 // from the same cache.

@@ -149,6 +149,18 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     private var passthrough = false
     private var passthroughLoggedOnce = false
 
+    /// The guard that lowers the block size or pauses speculation while rounds decode slower
+    /// than plain decode, or `nil` when its policy is disabled or the drafter cannot pause.
+    private var adaptiveGuard: MTPAdaptiveGuard?
+
+    /// The plain steps of the adaptive guard's current probe or pause.
+    private var plainRun = PlainRun()
+
+    /// The block size of the next round: the adaptive guard's, else the configured one.
+    private var roundBlockSize: Int {
+        adaptiveGuard?.controller.blockSize ?? blockSize
+    }
+
     /// Verify-position index in the prior round's emitted hidden that
     /// produced the newly-accepted bonus's logit prediction. Set at the end
     /// of each `speculateRound()`. `nil` on the first round means slice the
@@ -163,7 +175,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     public var promptPrefillTime: TimeInterval = 0.0
     private var telemetry = SpeculativeDecodingTelemetry()
     public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? {
-        telemetry.roundCount > 0 ? telemetry : nil
+        guard telemetry.roundCount > 0 else { return nil }
+        var reported = telemetry
+        if let adaptiveGuard {
+            reported.recordAdaptiveDecisions(of: adaptiveGuard.controller)
+        }
+        return reported
     }
 
     public var evictedTokenCount: Int {
@@ -241,10 +258,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     ///   - blockSize: The tokens of each round: up to `blockSize - 1` drafts and the bonus.
     ///   - minimumDraftProbability: The drafter top-1 probability below which a chaining
     ///     drafter stops a round's chain, from 0 (draft every step) to 1.
+    ///   - adaptivePolicy: How the stream guards against decoding slower than plain decode.
     ///   - components: Optional behavioral components, e.g. a custom ``LogitProcessor``.
     /// - Throws: An ``MTPDrafterCompatibilityError`` when `drafter` cannot draft for
-    ///   `mainModel`, a ``SpeculativeDecodingConfigurationError`` for a floor outside 0 to 1, or
-    ///   the error of the prefill.
+    ///   `mainModel`, a ``SpeculativeDecodingConfigurationError`` for a floor outside 0 to 1 or
+    ///   an adaptive policy setting outside its range, or the error of the prefill.
     public init(
         input: LMInput,
         mainModel: any LanguageModel,
@@ -255,6 +273,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         parameters: GenerateParameters,
         blockSize: Int,
         minimumDraftProbability: Float = 0,
+        adaptivePolicy: MTPAdaptivePolicy = .default,
         components: GenerationComponents = .init()
     ) throws {
         try drafter.validateCompatibility(with: mainModel)
@@ -271,9 +290,20 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             parameters: parameters,
             blockSize: blockSize,
             minimumDraftProbability: minimumDraftProbability,
+            adaptivePolicy: adaptivePolicy,
             components: components)
     }
 
+    /// Prefills the main model with `input` and prepares the drafter for the first round, on a
+    /// cache storage and with the clock its adaptive guard times its units with.
+    ///
+    /// - Parameters:
+    ///   - mainCacheStorage: The cache of `mainModel` and its timeline.
+    ///   - adaptiveClock: The clock of the adaptive guard.
+    ///   - Other parameters: As
+    ///     ``init(input:mainModel:drafter:mainCache:mainState:mtpContinuation:parameters:blockSize:minimumDraftProbability:adaptivePolicy:components:)``
+    ///     takes them.
+    /// - Throws: As that initializer throws.
     package init(
         input: LMInput,
         mainModel: any LanguageModel,
@@ -284,6 +314,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         parameters: GenerateParameters,
         blockSize: Int,
         minimumDraftProbability: Float = 0,
+        adaptivePolicy: MTPAdaptivePolicy = .default,
+        adaptiveClock: MTPAdaptiveClock = .system,
         components: GenerationComponents = .init()
     ) throws {
         try drafter.validateCompatibility(with: mainModel)
@@ -295,6 +327,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             )
         }
         try SpeculativeDecodingConfig.validate(minimumDraftProbability: minimumDraftProbability)
+        try adaptivePolicy.validate()
         let kvCachePlan = mainCacheStorage.plan
         let mainCacheStorage = try kvCachePlan.validated(mainCacheStorage)
         let mainCache = mainCacheStorage.cache
@@ -364,6 +397,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let effectiveBlockSize = Swift.min(
             drafterBlockSize, Self.maximumBlockSize(for: mainCache))
         self.blockSize = effectiveBlockSize
+        self.adaptiveGuard =
+            speculates && Self.adaptiveGuardCanPause(drafter)
+            ? MTPAdaptiveGuard(
+                policy: adaptivePolicy, blockSize: effectiveBlockSize, clock: adaptiveClock)
+            : nil
 
         // Probe by opening a round at the width rounds will actually use and discarding it,
         // rather than duplicating the leaf classification as a predicate that could drift from
@@ -825,6 +863,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // A prior round keeps the recurrent snapshot slots of the tokens it accepted until its
         // pending output is drained, so early finalization can rewind its accepted drafts.
         discardSpeculativePromptCacheCheckpoints(mainCache)
+        catchUpDrafter()
 
         // A speculative round can emit up to `maximumDrafts + 1` tokens: the
         // accepted draft prefix plus the verifier's correction/bonus token.
@@ -834,7 +873,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let remaining = maxTokens - tokenCount
             guard remaining > 0 else { return }
 
-            let draftBudget = Swift.min(remaining - 1, blockSize - 1)
+            let draftBudget = Swift.min(remaining - 1, roundBlockSize - 1)
             guard draftBudget > 0 else {
                 if let token = passthroughStep(maintainingDrafterState: true) {
                     pendingTokens.append(token)
@@ -843,7 +882,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             }
             maximumDrafts = draftBudget
         } else {
-            maximumDrafts = blockSize - 1
+            maximumDrafts = roundBlockSize - 1
         }
 
         guard let state = mainState,
@@ -968,6 +1007,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 state: &currentDrafterState,
                 sampler: mtpDrafterSeedSampler)
             drafterState = currentDrafterState
+            // The next round's seed gate reads the seed's probability on the host. Starting its
+            // computation now overlaps it with the consumer reading this round's tokens.
+            let seedArrays = currentDrafterState.seedArrays
+            if !seedArrays.isEmpty {
+                asyncEval(seedArrays)
+            }
         }
 
         let rejected = numDraft - accepted
@@ -1371,11 +1416,16 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return nextPlainToken()
         }
 
+        if beginAdaptiveUnit() == .decodePlainly {
+            return autoreleasepool { nextGuardedPlainToken() }
+        }
+
         // Run a new speculation round (may transition to passthrough).
         pendingTokens.removeAll(keepingCapacity: true)
         pendingIndex = 0
         committedPendingTokenCount = 0
         autoreleasepool { speculateRound() }
+        adaptiveGuard?.recordEmitted(pendingTokens.count)
 
         if pendingTokens.isEmpty {
             // speculateRound chose passthrough -- fall through.
@@ -1413,9 +1463,162 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
 }
 
+// MARK: - Adaptive guard
+
+extension MTPSpeculativeTokenIterator {
+
+    /// The plain steps of a probe or a pause: the token decoded ahead, and the drafter entries
+    /// the plain forwards owe the drafter.
+    ///
+    /// Each plain step feeds the target the token it returns, as ``TokenIterator`` does, and
+    /// samples the next token before it returns, so the forward of the next token runs while the
+    /// consumer reads this one. The drafter takes the tokens of the run in one append when
+    /// speculation resumes or the stream finalizes.
+    struct PlainRun {
+
+        /// The token the last plain forward sampled, which no call returned and no forward fed,
+        /// or `nil`.
+        var lookahead: MLXArray?
+
+        /// Each token a plain forward sampled, shape `[1]`, in order.
+        var sampledTokens: [MLXArray] = []
+
+        /// The target hidden row of the position before each sampled token, shape
+        /// `[1, 1, hidden]`.
+        var hiddenRows: [MLXArray] = []
+
+        /// The target position deltas of the last plain forward, or `nil`.
+        var positionDeltas: MLXArray?
+    }
+
+    /// Whether the adaptive guard can pause `drafter`: a drafter without state follows the
+    /// target alone, and a resumable drafter appends the entries of a run of plain tokens in one
+    /// commit. Another stateful drafter keeps speculating at the configured block size.
+    static func adaptiveGuardCanPause(_ drafter: any MTPDrafterModel) -> Bool {
+        !(drafter is any StatefulMTPDrafterModel) || drafter is any ResumableMTPDrafterModel
+    }
+
+    /// Ends the unit the adaptive guard times and starts the next one.
+    ///
+    /// - Returns: What the next unit runs: a round at the guard's block size without a guard.
+    private mutating func beginAdaptiveUnit() -> MTPAdaptiveController.Step {
+        guard var adaptiveGuard else { return .speculate(blockSize: blockSize) }
+        let step = adaptiveGuard.beginUnit(contextLength: mainCacheStorage.processedTokenCount)
+        self.adaptiveGuard = adaptiveGuard
+        return step
+    }
+
+    /// Decodes one token of a probe or a pause without speculation.
+    ///
+    /// The step returns the token the previous plain forward sampled, or samples it now at the
+    /// start of a run, and feeds it before it returns so the next token computes while the
+    /// consumer reads this one. The last step of a run, and the step before the token limit,
+    /// feed nothing: the stream then stands as after a round, its last token not yet fed.
+    private mutating func nextGuardedPlainToken() -> Int {
+        pendingTokens.removeAll(keepingCapacity: true)
+        pendingIndex = 0
+        committedPendingTokenCount = 0
+        lastRoundAccepted = nil
+        let endsRun =
+            (adaptiveGuard?.controller.plainStepsRemaining ?? 0) <= 1
+            || maxTokens.map { $0 - tokenCount <= 1 } ?? false
+
+        let token = plainRun.lookahead ?? feedPlainStep(y.tokens)
+        plainRun.lookahead = nil
+        y = .init(tokens: token)
+        if !endsRun, !passthrough {
+            plainRun.lookahead = feedPlainStep(token)
+        }
+        hasCachedLastToken = plainRun.lookahead != nil
+        if passthrough, let lookahead = plainRun.lookahead {
+            // The stream stopped speculating with a token decoded ahead: it is returned next,
+            // and plain decode feeds it after that.
+            plainRun.lookahead = nil
+            pendingTokens = [lookahead.item(Int.self)]
+            y = .init(tokens: lookahead)
+        }
+        lastLogProbabilities = nil
+        telemetry.recordGeneratedToken()
+        telemetry.recordAdaptivePlainToken()
+        adaptiveGuard?.recordEmitted(1)
+        return token.item(Int.self)
+    }
+
+    /// Feeds `token` to the target with the drafter state requested, and samples the next
+    /// token from its logits.
+    ///
+    /// The forward's hidden row joins the run's owed drafter entries. A forward whose drafter
+    /// state cannot be placed or is missing ends speculation for the stream.
+    ///
+    /// - Parameter token: The token to feed, shape `[1]`.
+    /// - Returns: The sampled token, shape `[1]`, its evaluation started.
+    private mutating func feedPlainStep(_ token: MLXArray) -> MLXArray {
+        var stepState = mainState ?? LMOutput.State()
+        stepState[mtpEmitFlagKey] = true
+        stepState[mtpVerifyKeepsSnapshotsKey] = nil
+        let input = LMInput.Text(tokens: token)
+        let result = mainModel(input[text: .newAxis], cache: mainCache, state: stepState)
+        mainCacheStorage.commitProcessedTokens(input.cacheSequenceLength)
+        mainState = result.state
+        if !reconcileSharedKVState(
+            &mainState, discarding: 0, lengths: mainCacheStorage.emittedLength(forLeaf:))
+        {
+            switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
+            mainState = nil
+        }
+        let sampled = sampleToken(from: result.logits)
+        recordPlainRow(sampled: sampled, state: result.state)
+        kvCachePlan.apply(to: mainCacheStorage)
+        asyncEval([sampled] + mainCache.flatMap(\.evaluationState))
+        return sampled
+    }
+
+    /// Records the drafter entry a plain forward owes: `sampled` with the forward's hidden row.
+    ///
+    /// - Parameters:
+    ///   - sampled: The token the forward sampled, shape `[1]`.
+    ///   - state: The state the forward returned.
+    private mutating func recordPlainRow(sampled: MLXArray, state: LMOutput.State?) {
+        guard !passthrough else { return }
+        guard let hidden = state?[mtpLastHiddenStatesKey], hidden.dim(1) > 0 else {
+            switchToPassthrough(reason: "main model did not emit drafter state")
+            return
+        }
+        let row = hidden[0..., (-1)..., 0...]
+        plainRun.sampledTokens.append(sampled)
+        plainRun.hiddenRows.append(row)
+        plainRun.positionDeltas = state?[mtpPositionDeltasKey]
+        targetBoundaryHidden = row
+    }
+
+    /// Commits the tokens of the plain steps since the last round to the drafter in one
+    /// append, each with the target hidden row of the position before it, so that the drafter
+    /// again holds one entry for each token the main cache holds.
+    private mutating func catchUpDrafter() {
+        let tokens = plainRun.sampledTokens
+        let hiddenRows = plainRun.hiddenRows
+        plainRun.sampledTokens = []
+        plainRun.hiddenRows = []
+        guard !passthrough, !tokens.isEmpty,
+            let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
+            var state = drafterState
+        else { return }
+        let sampled = concatenated(tokens)
+        let accepted = sampled.dim(0) - 1
+        statefulDrafter.commitDrafterState(
+            target: mainModel, targetHidden: concatenated(hiddenRows, axis: 1),
+            draftTokens: sampled[..<accepted], acceptedCount: accepted,
+            finalToken: sampled[accepted...], positionDeltas: plainRun.positionDeltas,
+            state: &state, sampler: mtpDrafterSeedSampler)
+        drafterState = state
+    }
+}
+
 extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
     mutating func finalizeGeneration() {
         defer { processor?.finalizeGeneration() }
+        // A stream that stops inside a probe or a pause owes the drafter the plain tokens.
+        catchUpDrafter()
         // A round retains the recurrent snapshot slots of the tokens it accepted, the
         // checkpoint of an early-finalization rewind, whether it rejected drafts or not.
         // Release them even when no committed lookahead remains.

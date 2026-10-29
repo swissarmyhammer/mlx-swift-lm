@@ -61,6 +61,40 @@ struct GuidedGenerationMTPTests {
         #expect(plain.sink.decisionMargins.allSatisfy { $0 >= 0 })
     }
 
+    /// A guard under which every judged round loses lowers the block size, pauses speculation and
+    /// resumes it; the paused decisions and the rounds after them write plain guided output.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(arguments: GuidedFixtureSchema.allCases, Self.blockSizes)
+    func aSchemaWritesThePlainOutputAcrossPauses(
+        schema: GuidedFixtureSchema, blockSize: Int
+    ) throws {
+        let fixture = try Qwen35MTPFixture()
+        let plain = try GuidedFixtureRun.generate(
+            schema: schema.json, prompt: Self.prompt, fixture: fixture, blockSize: nil)
+        let unguarded = try GuidedFixtureRun.generate(
+            schema: schema.json, prompt: Self.prompt, fixture: fixture, blockSize: blockSize,
+            adaptivePolicy: .disabled)
+        let guarded = try GuidedFixtureRun.generate(
+            schema: schema.json, prompt: Self.prompt, fixture: fixture, blockSize: blockSize,
+            adaptivePolicy: .losingEveryRound)
+
+        #expect(guarded.text == plain.text)
+        #expect(guarded.tokenCount == plain.tokenCount)
+        #expect(guarded.incomplete == plain.incomplete)
+        #expect(guarded.sink.decisions == plain.sink.decisions)
+        #expect(guarded.sink.draftedTokenCount > 0)
+        #expect(guarded.sink.draftedTokenCount < unguarded.sink.draftedTokenCount)
+        #expect(guarded.sink.adaptivePauseCount > 0)
+        #expect(guarded.sink.adaptivePlainTokenCount > 0)
+        #expect(guarded.sink.adaptiveBlockSize == MTPAdaptiveController.minimumBlockSize)
+        #expect(unguarded.sink.adaptiveBlockSize == nil)
+        // A paused token is no draft: the accepted drafts and the paused tokens are distinct
+        // tokens of the output.
+        #expect(
+            guarded.sink.acceptedDraftTokenCount + guarded.sink.adaptivePlainTokenCount
+                <= guarded.sink.generatedTokenCount)
+    }
+
     /// The independent drafter makes the target reject most drafts. After each rejection the
     /// matcher rolls back, with the tokens a rejected draft forced, and every decision reads the
     /// mask and the biases plain decoding read at its position.

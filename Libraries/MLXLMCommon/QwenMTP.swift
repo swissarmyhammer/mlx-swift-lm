@@ -65,6 +65,15 @@ extension MTPDraftBlockOutput {
         MLX.exp(MLX.min(logits.max(axis: -1) - MLX.logSumExp(logits, axis: -1)))
     }
 
+    /// Whether `sampler` draws without random state, so a draw made and then dropped leaves
+    /// every later draw as it was: an argmax, alone or behind a suppressed-token mask.
+    private static func drawsWithoutRandomState(_ sampler: any LogitSampler) -> Bool {
+        if let suppressing = sampler as? SuppressTokensSampler {
+            return drawsWithoutRandomState(suppressing.base)
+        }
+        return sampler is ArgMaxSampler
+    }
+
     /// Chains up to `blockSize - 1` proposals of a shifted MTP predictor from `lastToken`: each
     /// step feeds the token the step before drew and appends one tentative entry to `cache`.
     ///
@@ -118,22 +127,48 @@ extension MTPDraftBlockOutput {
         var processedLogits: [MLXArray] = []
         tokens.reserveCapacity(blockSize - 1)
         processedLogits.reserveCapacity(blockSize - 1)
+        // A chain whose dropped steps leave nothing behind reads each step's confidence one step
+        // late: the GPU runs the next step while the host waits for the read, and a step below
+        // the floor costs one drafter step more.
+        let readsAhead =
+            minimumDraftProbability > 0 && processor == nil && drawsWithoutRandomState(sampler)
+        var unreadProbability: MLXArray?
 
         for stepIndex in 0 ..< (blockSize - 1) {
             hidden = forward(inputEmbedding(token), hidden, cache, queryOffset + stepIndex)
             var logits = mtpLastLogits(
                 hidden: hidden, targetEmbedTokens: targetEmbedTokens, lmHead: lmHead)
             logits = processor?.process(logits: logits) ?? logits
-            if minimumDraftProbability > 0,
+            if minimumDraftProbability > 0, !readsAhead,
                 lowestTopProbability(of: logits).item(Float.self) < minimumDraftProbability
             {
                 break
             }
             let next = sampler.sample(logits: logits)
+            if readsAhead {
+                let probability = lowestTopProbability(of: logits)
+                asyncEval(next, probability)
+                if let unread = unreadProbability,
+                    unread.item(Float.self) < minimumDraftProbability
+                {
+                    // The step before fell below the floor: drop its draft, and the entry this
+                    // step appended, as a chain that read the floor at that step would stop.
+                    tokens.removeLast()
+                    processedLogits.removeLast()
+                    trimPromptCache(cache, numTokens: 1)
+                    unreadProbability = nil
+                    break
+                }
+                unreadProbability = probability
+            }
             processor?.didSample(token: next)
             token = next.ndim == 1 ? next.reshaped([next.dim(0), 1]) : next
             tokens.append(token)
             processedLogits.append(logits.expandedDimensions(axis: 1))
+        }
+        if let unreadProbability, unreadProbability.item(Float.self) < minimumDraftProbability {
+            tokens.removeLast()
+            processedLogits.removeLast()
         }
 
         guard !tokens.isEmpty else { return nil }

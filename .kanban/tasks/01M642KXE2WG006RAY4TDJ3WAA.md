@@ -19,6 +19,39 @@ comments:
     - processor path gated (4 syncs): quiet 3.76 / 4.13, loaded 5.80 / 6.21
     => ~0.3 ms per sync on a quiet host, with heavy-tailed outliers under load (18 ms once).
   timestamp: 2026-10-29T15:34:45.910931+00:00
+- actor: claude-code
+  id: 01m647p1y5q4c2pjb42b58r2q2
+  text: |-
+    Phase 1 landed: 94787c95 on worktree-agent-a24c62ee3c2f35eec (base mtp 268dab08).
+
+    Design:
+    - MTPAdaptivePolicy (public, on by default; .disabled to opt out) on SpeculativeDecodingConfig (adaptivePolicy:), MLXSpeculativeDecoding, MTPSpeculation, MTPSpeculativeTokenIterator init. Validated; invalid -> SpeculativeDecodingConfigurationError.invalidMTPAdaptivePolicy.
+    - MTPAdaptiveController (clock-free, unit-tested) + MTPAdaptiveGuard (injectable clock). Each unit (round or plain step) is timed from its start to the next unit's start, so consumer time counts for both. Speculative tok/s (EWMA) vs plain tok/s from short probes (4 steps, 1 warm-up discarded) taken in-stream at the current position. Rounds losing (< requiredSpeedup) lower block size by 1 per judgment, at block 2 pause (64 tokens, doubling to 1024 while resumes keep losing); winning by growthSpeedup grows back after a hold. Probe interval 64 rounds, doubling to 512 while spec leads by margin. A plain estimate is re-probed when older than 32 rounds before a slow verdict, and (after the coordinator's SWE-bench data) whenever the context grew >10% and >=4096 tokens since it was measured, so long-context plain cost is measured at the current KV length.
+    - Pause = pipelined plain decode (TokenIterator-style lookahead, emit flag on). Drafter catch-up: one batched commitDrafterState over the paused tokens + hidden rows at resume or finalize; drafter stays nextPosition == processed. Only for stateless or resumable drafters.
+    - Guided (GuidedSpeculation): same guard; paused decisions feed one-token verifies, drafter catches up in one commit.
+    - Telemetry: adaptivePauseCount, adaptiveProbeCount, adaptivePlainTokenCount, adaptiveBlockSizeChangeCount, adaptiveBlockSize (nil without a guard). Guided has no telemetry surface (not added).
+    - Host syncs: chained pMin read one step ahead (argmax, no processor) so the GPU runs step k+1 while the host reads p_k; identical drafts/entries (trim one entry on stop). Seed + seed probability asyncEval'd at commit.
+
+    Measure (tiny fixture, debug, host load 8-14 + 30 busy threads): 4-draft chain ms ungated/read-ahead/per-step: quiet 3.55/4.38/5.28, loaded 3.67/6.29/7.43 (earlier run 4.94/5.18/9.10).
+
+    Not done / notes: generate(...mtpDrafter:) free functions keep the default policy (no new param, to avoid DocC link churn). One edit was made with a python one-liner instead of the files tool (test file only). The guided pause test and the context-growth controller test were written before the code but not run RED separately.
+
+    Open thresholds needing real-model data: minimumRoundSamples 16, probeLength 4, probeInterval 64/512, stalePlainEstimateRounds 32, stalePlainContextGrowth 0.1 + 4096-token floor, requiredSpeedup 1.0, growthSpeedup 1.2, growthHoldRounds 128, pauseLength 64/1024, smoothing 0.25; read-ahead waste (<=1 drafter step) vs sync saving at 32k/100k.
+
+    ### implement — changed
+    - evidence: swift build --build-tests (0 compiler warnings; SwiftBuild 'missing creator for mutated node' bundle notice only); xctest MLXLMTests 2060 pass, MLXGuidedGenerationTests 72, MLXFoundationModelsTests 428, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6; 0 failures, 0 skipped. Commit 94787c95.
+    - next: phase 2 real-model runs on user's go.
+  timestamp: 2026-10-29T16:25:26.725091+00:00
+- actor: claude-code
+  id: 01m648fnj0g1v1sqngwwf1ep8b
+  text: |-
+    Rebased onto mtp cef34758 -> e1bdd285 (one commit). Conflict only in MLXSpeculativeDecoding.swift: kept upstream drafterBytes/memoryPolicy/admits* intact and added adaptivePolicy (param after memoryPolicy, validated, passed to MTPSpeculation). GuidedSpeculation/MLXLanguageModel auto-merged; SpeculativeDecodingOutcome metadata keys untouched.
+    Guided sink: GuidedGenerationDiagnosticSink gains adaptivePauseCount/adaptiveProbeCount/adaptivePlainTokenCount/adaptiveBlockSize (package recordAdaptiveDecisions, reported once at end of GuidedSpeculation.decode). Paused decisions never call recordSpeculativeRound, so drafted/accepted counts exclude paused plain tokens (test asserts accepted + paused <= generated). generate(...mtpDrafter:) free functions left unchanged (4 public signatures + DocC link churn = not cheap).
+
+    ### implement — changed
+    - evidence: swift build --build-tests 0 compiler warnings; xctest MLXLMTests 2060, MLXGuidedGenerationTests 72, MLXFoundationModelsTests 455, CXGrammarTests 7, MLXHuggingFaceMacrosTests 7 — 0 failures, 0 skipped; IntegrationTesting xcodebuild build-for-testing Release: TEST BUILD SUCCEEDED. Commit e1bdd285.
+    - next: phase 2 on go.
+  timestamp: 2026-10-29T16:39:26.016244+00:00
 position_column: doing
 position_ordinal: '8380'
 title: 'MTP: stay faster than plain under CPU load (adaptive block size / plain fallback, fewer host syncs)'
