@@ -86,17 +86,29 @@ enum BenchmarkLog {
     /// `value` rounded to a whole number, as a result line writes the acceptance of a draft
     /// depth.
     static func whole(_ value: Double) -> String {
-        String(format: "%.0f", value)
+        fixed(value, decimals: wholeDecimals)
     }
 
     /// `value` with one decimal, as a result line writes a time or a rate.
     static func decimal(_ value: Double) -> String {
-        String(format: "%.1f", value)
+        fixed(value, decimals: decimalDecimals)
     }
 
     /// `value` with two decimals, as a result line writes a throughput or a ratio.
     static func hundredths(_ value: Double) -> String {
-        String(format: "%.2f", value)
+        fixed(value, decimals: hundredthsDecimals)
+    }
+
+    /// The decimals of `whole(_:)`.
+    private static let wholeDecimals = 0
+    /// The decimals of `decimal(_:)`.
+    private static let decimalDecimals = 1
+    /// The decimals of `hundredths(_:)`.
+    private static let hundredthsDecimals = 2
+
+    /// `value` written with `decimals` digits after the point.
+    private static func fixed(_ value: Double, decimals: Int) -> String {
+        String(format: "%.*f", decimals, value)
     }
 }
 

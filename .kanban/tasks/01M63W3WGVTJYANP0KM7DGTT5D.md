@@ -28,7 +28,14 @@ comments:
     - qwen38FourBitMTPGeneration() passed after 752.5 s, run under the bench lock. Means in tok/s: bs2/p0 82.7, bs3/p0 77.0, bs3/p.75 80.0, bs4/p0 77.4, bs4/p.75 85.6, bs5/p0 67.8, bs5/p.75 87.8, bs6/p0 64.4, bs6/p.75 87.2. Fastest, and fastest no slower than one draft: blockSize 5 pMin 0.75. Noise 8.4%, thermal state 1. Load average 8.75 before, 9.56 after; uptime showed 9.07/10.82/11.17 before and 9.56/12.32/11.81 after, so the machine was busy.
     - next: /review
   timestamp: 2026-10-29T13:57:51.714554+00:00
-position_column: doing
+- actor: claude-code
+  id: 01m63zevvggb7k5erw20x5g30m
+  text: |-
+    ### review — findings
+    - evidence: review sha bf19dbde~1..bf19dbde — 1 finding (1 confirmed, 0 refuted) — Libraries/BenchmarkHelpers/BenchmarkHelpers.swift:88
+    - next: implement the duplication/duplication finding (collapse BenchmarkLog.whole/decimal/hundredths onto one precision-parameterized helper), then re-review
+  timestamp: 2026-10-29T14:01:42.512693+00:00
+position_column: review
 position_ordinal: '80'
 title: 'BenchmarkHelpers: move benchmarkMTPBlockSweep onto the Benchmark namespace'
 ---
@@ -41,3 +48,13 @@ title: 'BenchmarkHelpers: move benchmarkMTPBlockSweep onto the Benchmark namespa
 
 ## Tests
 - [x] `swift build --build-tests` clean; IntegrationTesting Release `build-for-testing` clean. #benchmark #mtp
+
+## Review Findings (2026-10-29 08:58)
+
+> Scope: `review sha bf19dbde~1..bf19dbde` — reviewed the diffs only — lines this change added or modified. 5 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M63W3WGVTJYANP0KM7DGTT5D.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M63W3WGVTJYANP0KM7DGTT5D.md` — no validator matches this file
+
+- [x] `Libraries/BenchmarkHelpers/BenchmarkHelpers.swift:88` `duplication/duplication` — `BenchmarkLog.whole(_:)` is a near-verbatim copy of `decimal(_:)` and `hundredths(_:)`. The three bodies differ only by the format literal (`%.0f`, `%.1f`, `%.2f`), so they are one function with a precision argument. Three copies of the same `String(format:)` wrapper can drift apart as the result-line format changes. Replace the three wrappers with one `private static func fixed(_ value: Double, decimals: Int) -> String { String(format: "%.*f", decimals, value) }`, or keep the named entry points as one-line calls into it. Keep the names so call sites still read by intent. This is a small change confined to the marked lines.
