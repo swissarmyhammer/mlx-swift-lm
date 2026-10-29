@@ -57,11 +57,27 @@ comments:
     - evidence: 5 files — Libraries/MLXLMCommon/MTPDrafterModelFactory.swift, Libraries/MLXLMCommon/ChatSession.swift, Libraries/MLXLLM/Qwen35TextMTPRegistration.swift, Libraries/MLXVLM/Qwen35VLMMTPRegistration.swift, Tests/MLXLMTests/ChatSessionDeferredMTPDrafterTests.swift. `swift build --build-tests`: 0 compiler warnings (only the existing build-system "missing creator for mutated node" note). xctest results: ChatSessionDeferredMTPDrafterTests 6 tests pass; "Speculative decoding configuration" (SpeculativeDecodingConfigTests) 10 tests pass. Full bundles: MLXLMTests 920 XCTest + 1972 Swift Testing pass (the benchmarkVerification skip was already there). MLXFoundationModelsTests 376, MLXGuidedGenerationTests 70, CXGrammarTests 7 and MLXHuggingFaceMacrosTests 5 all pass. Both review findings are flipped to [x]. No decode-path change, so no Release benchmark.
     - next: /review
   timestamp: 2026-10-29T00:36:50.182714+00:00
+- actor: claude-code
+  id: 01m62herjc0tve5xh5hr9jg3mp
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (89c81045) — 0 findings, 0 confirmed, 0 refuted (7 attempted, 0 failed); the 2 prior items in `## Review Findings (2026-10-28 19:26)` are checked
+    - next: task moved to done
+  timestamp: 2026-10-29T00:37:44.652998+00:00
+- actor: claude-code
+  id: 01m62hf3z9a27kxp1sf4g0rqpj
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 5 files (MTPDrafterRegistration replaces the Qwen text/VLM shortcuts)
+    - test: green — build 0 warnings; MLXLMTests 920+1972, FoundationModels 376, GuidedGeneration 70, CXGrammar 7, Macros 5
+    - commit: 89c81045
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T00:37:56.329887+00:00
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: fff680
 title: 'MTP: deferred drafter loading in ChatSession through MTPDrafterModelFactory and the memory policy'
 ---
 ## What
