@@ -116,11 +116,8 @@ public struct MLXSpeculativeDecoding: Sendable {
             drafterConfiguration: drafterConfiguration, blockSize: blockSize,
             minimumDraftProbability: minimumDraftProbability,
             pickDrafterLoader: { target in
-                let registration = registration.registration(for: target)
-                return { configuration in
-                    try await registration.loadContainer(
-                        from: downloader, using: tokenizerLoader, configuration: configuration)
-                }
+                registration.drafterLoader(
+                    for: target, from: downloader, using: tokenizerLoader)
             })
     }
 

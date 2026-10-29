@@ -200,22 +200,49 @@ struct MTPDrafterFallbackTests {
     }
 
     @Test(
+        "the drafter loader of a registration that matches the target loads its target's drafter",
+        arguments: [false, true])
+    func matchingRegistrationLoaderLoadsTheDrafterOfItsTarget(vision: Bool) async throws {
+        try await expectLoadsTheDrafterOfItsTarget(vision: vision) { checkpoint, target in
+            let load = MTPDrafterRegistration.matchingTarget(.qwen35Text, .qwen35VLM)
+                .drafterLoader(
+                    for: target, from: UnusedDownloader(), using: UnusedTokenizerLoader())
+            return try await load(checkpoint)
+        }
+    }
+
+    @Test(
         "a chat session configuration that matches the target loads the drafter of its target",
         arguments: [false, true])
     func chatSessionConfigurationLoadsTheDrafterOfItsTarget(vision: Bool) async throws {
+        try await expectLoadsTheDrafterOfItsTarget(vision: vision) { checkpoint, target in
+            let configuration = try SpeculativeDecodingConfig(
+                mtpDrafterConfiguration: checkpoint,
+                mtpDrafterBytes: Self.drafterBytes, from: UnusedDownloader(),
+                using: UnusedTokenizerLoader(),
+                registration: .matchingTarget(.qwen35Text, .qwen35VLM))
+            let source = try #require(configuration.mtpDrafterSource)
+            return try await source.loader(for: target)()
+        }
+    }
+
+    /// Loads a standalone Qwen3.8 MTP checkpoint with `load` for the text or the
+    /// vision-language target, and expects the drafter class of that target.
+    ///
+    /// - Parameters:
+    ///   - vision: whether the checkpoint and the target are the vision-language ones.
+    ///   - load: loads the drafter of the checkpoint for the target.
+    private func expectLoadsTheDrafterOfItsTarget(
+        vision: Bool,
+        load: (ModelConfiguration, any LanguageModel) async throws -> MTPDrafterContainer
+    ) async throws {
         let checkpoint = try await Qwen35MTPCheckpointFixture(
             vision: vision, standalone: true, family: "qwen3_8")
         defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
-        let configuration = try SpeculativeDecodingConfig(
-            mtpDrafterConfiguration: ModelConfiguration(directory: checkpoint.directory),
-            mtpDrafterBytes: Self.drafterBytes, from: UnusedDownloader(),
-            using: UnusedTokenizerLoader(),
-            registration: .matchingTarget(.qwen35Text, .qwen35VLM))
-        let source = try #require(configuration.mtpDrafterSource)
         let target: any LanguageModel =
             vision ? try Qwen35VLMMTPFixture().target : try Qwen35MTPFixture().target
 
-        let drafter = try await source.loader(for: target)()
+        let drafter = try await load(ModelConfiguration(directory: checkpoint.directory), target)
 
         let model = await drafter.perform { SendableBox($0.model) }.consume()
         #expect(

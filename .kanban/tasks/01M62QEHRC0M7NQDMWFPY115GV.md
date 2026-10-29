@@ -31,6 +31,36 @@ comments:
     - evidence: 20 files — new Libraries/MLXLMCommon/MTPDrafterFallback.swift, Tests/MLXLMTests/MTPDrafterFallbackTests.swift, Tests/MLXFoundationModelsTests/MTPDrafterFallbackExecutorTests.swift; modified Libraries/MLXLMCommon/{ChatSession,Evaluate,MTPDrafterModelFactory,MTPSpeculation,TokenLoopHandler}.swift, Libraries/MLXLLM/Qwen35TextMTPRegistration.swift, Libraries/MLXVLM/Qwen35VLMMTPRegistration.swift, Libraries/MLXFoundationModels/{MLXLanguageModel,MLXSpeculativeDecoding}.swift, Libraries/MLXGuidedGeneration/{GuidedSpeculation,GuidedGenerationDiagnosticSink}.swift, Tests/MLXLMTestSupport/Qwen35MTPCheckpointFixture.swift, Tests/MLXLMTests/{ChatSessionDeferredMTPDrafterTests,SpeculativeDecodingConfigTests}.swift, Tests/MLXFoundationModelsTests/GuidedGenerationMTPTestSupport.swift; 5 bundles 0 failures 0 skipped; Release guards within 3%.
     - next: /review
   timestamp: 2026-10-29T09:09:25.730015+00:00
+- actor: claude-code
+  id: 01m63f1kv5fsxn2xzbmp2fbdjj
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (c23c785f) — 1 finding (1 confirmed, 5 refuted, 21 attempted): Libraries/MLXFoundationModels/MLXSpeculativeDecoding.swift:119
+    - next: implement the finding (share one loader-building helper on MTPDrafterRegistration used by both ChatSession and MLXLanguageModel), then re-review
+  timestamp: 2026-10-29T09:14:51.109120+00:00
+- actor: claude-code
+  id: 01m63f21zvtg0fqzdav15tn53k
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 20 files (fallback reason + log, matchingTarget registration)
+    - test: green — 5 bundles 0 failures 0 skipped; Release 100.3/87.5/83.4 vs plain 59.5; edit turn 123 tokens
+    - commit: c23c785f
+    - review: findings — Libraries/MLXFoundationModels/MLXSpeculativeDecoding.swift:119
+  timestamp: 2026-10-29T09:15:05.595992+00:00
+- actor: claude-code
+  id: 01m63fha4m1sfqafkcmg8z34yr
+  text: |-
+    Finding fix (reuse/reuse at MLXSpeculativeDecoding.swift:119). Added `MTPDrafterRegistration.drafterLoader(for:from:using:)` (public, MLXLMCommon/MTPDrafterModelFactory.swift): picks the family with `registration(for: target)` and returns a `@Sendable (ModelConfiguration) async throws -> MTPDrafterContainer` that runs that family's `loadContainer`. `MLXSpeculativeDecoding`'s registration init now passes `{ target in registration.drafterLoader(for: target, from:, using:) }`; `SpeculativeDecodingConfig`'s matching-target init calls the same helper and only binds its `configuration` (`return { try await load(configuration) }`), since ChatSession's `DrafterLoader` takes no argument. Both inline pick-and-load copies are gone. TDD: new parameterized test `matchingRegistrationLoaderLoadsTheDrafterOfItsTarget` in Tests/MLXLMTests/MTPDrafterFallbackTests.swift failed to compile (no member `drafterLoader`) before, passes after. It shares a private `expectLoadsTheDrafterOfItsTarget(vision:load:)` helper with the existing ChatSession-config test, so the two tests do not copy the checkpoint/target/class-check block. No decode-path change, so no Release rerun.
+
+    Flipping the finding checkbox via `update task` returned an output too large to show (82 KB board dump), so check the description: the finding should read `- [x]`.
+  timestamp: 2026-10-29T09:23:25.460634+00:00
+- actor: claude-code
+  id: 01m63fhjm4vvczpaexbnnqtthr
+  text: |-
+    ### implement — changed
+    - evidence: 4 files — Libraries/MLXLMCommon/MTPDrafterModelFactory.swift (new `MTPDrafterRegistration.drafterLoader(for:from:using:)`), Libraries/MLXLMCommon/ChatSession.swift, Libraries/MLXFoundationModels/MLXSpeculativeDecoding.swift, Tests/MLXLMTests/MTPDrafterFallbackTests.swift; `swift build --build-tests` 0 compiler warnings (only SwiftPM's existing Cmlx-bundle "missing creator" note); `xcrun xctest` MLXLMTests 2011 swift-testing + 920 XCTest, MLXFoundationModelsTests 407, MLXGuidedGenerationTests 70, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6: 0 failures, 0 skipped (MTPDrafterFallbackTests, MTPDrafterFallbackExecutorTests, ChatSessionDeferredMTPDrafterTests passed); finding flipped to [x]
+    - next: /review
+  timestamp: 2026-10-29T09:23:34.148845+00:00
 position_column: doing
 position_ordinal: '8180'
 title: 'MTP: report when a configured drafter silently falls back to plain decode'
@@ -44,3 +74,13 @@ The user priority is that MTP stays on and fast, so losing it must be visible.
 - [x] Consider making the drafter registration pick the matching text/VLM drafter for the loaded target
 
 #mtp #foundation-models
+
+## Review Findings (2026-10-29 04:10)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 18 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M62QEHRC0M7NQDMWFPY115GV.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M62QEHRC0M7NQDMWFPY115GV.md` — no validator matches this file
+
+- [x] `Libraries/MLXFoundationModels/MLXSpeculativeDecoding.swift:119` `reuse/reuse` — The `pickDrafterLoader` closure reimplements the same registration-pick-and-load closure that `ChatSession`'s matching-target initializer builds. It is the second copy of that logic in this change. Share one loader-building helper on `MTPDrafterRegistration`, as in the ChatSession finding, and have this initializer call it instead of repeating the closure.

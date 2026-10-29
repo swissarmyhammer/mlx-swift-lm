@@ -226,6 +226,27 @@ public struct MTPDrafterRegistration: Sendable {
         families.first { $0.drafts(for: target) } ?? candidates.first ?? self
     }
 
+    /// The loader of the drafter that drafts for `target`: it registers the drafter model types
+    /// of the family that ``registration(for:)`` picks for `target`, then loads a drafter
+    /// configuration with the factory of that family.
+    ///
+    /// - Parameters:
+    ///   - target: the model the drafter speculates for, as it loaded
+    ///   - downloader: the downloader that fetches a remote checkpoint
+    ///   - tokenizerLoader: the tokenizer loader the factory takes; an MTP drafter borrows the
+    ///     tokenizer of its target, so the load reads no tokenizer
+    /// - Returns: the loader, which takes the drafter checkpoint
+    public func drafterLoader(
+        for target: any LanguageModel, from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader
+    ) -> @Sendable (ModelConfiguration) async throws -> MTPDrafterContainer {
+        let family = registration(for: target)
+        return { configuration in
+            try await family.loadContainer(
+                from: downloader, using: tokenizerLoader, configuration: configuration)
+        }
+    }
+
     /// Registers the drafter model types, then loads the drafter of `configuration` with
     /// ``factory``.
     ///

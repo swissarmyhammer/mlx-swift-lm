@@ -340,11 +340,9 @@ public struct SpeculativeDecodingConfig: Sendable {
     ) throws {
         try self.init(
             mtpDrafterSource: .deferredMatchingTarget(bytes: max(0, mtpDrafterBytes)) { target in
-                let registration = registration.registration(for: target)
-                return {
-                    try await registration.loadContainer(
-                        from: downloader, using: tokenizerLoader, configuration: configuration)
-                }
+                let load = registration.drafterLoader(
+                    for: target, from: downloader, using: tokenizerLoader)
+                return { try await load(configuration) }
             },
             blockSize: blockSize, minimumDraftProbability: minimumDraftProbability,
             memoryPolicy: memoryPolicy)
