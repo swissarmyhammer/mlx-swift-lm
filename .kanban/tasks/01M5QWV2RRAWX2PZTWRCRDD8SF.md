@@ -26,12 +26,28 @@ comments:
     - follow-up filed: ^8f954cv (keep-aware multi-row mask so maxKVSize rings keep speculating past the window).
     - next: /review
   timestamp: 2026-10-29T01:17:55.065896+00:00
+- actor: claude-code
+  id: 01m62kzpef6whh69rfchdmtyn6
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (5724dbc3) — 0 findings, 0 confirmed, 1 refuted, 21 attempted, 0 failed; 12 files reviewed, 5 not matched by any validator (.kanban task files, skills/mlx-swift-lm/references/kv-cache.md)
+    - next: task moved to done
+  timestamp: 2026-10-29T01:21:56.687446+00:00
+- actor: claude-code
+  id: 01m62m01hekvrm421nnjmyjz6d
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 13 files (rotating rewind fix, drafter window, kept-prefix fallback, rotating continuation restore)
+    - test: green — 5 bundles; Release MTP 92.0/82.7/80.2 vs plain 59.5; edit turn 123 tokens
+    - commit: 5724dbc3
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T01:22:08.046934+00:00
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 - 01M5SJPFM01WFRYWMQXVGMA4MQ
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: fff780
 title: 'MTP: define drafter behaviour with maxKVSize (rotating) and quantized main KV caches'
 ---
 ## What
