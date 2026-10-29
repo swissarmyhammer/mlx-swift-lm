@@ -154,11 +154,22 @@ struct GenerationBenchmarkTests {
     /// ``museGlimmerSystemPromptCacheWithRewindReserve()`` keeps, so a fork can rewind them.
     private static let museGlimmerRewindReserve = 512
 
-    /// Measures generation of `checkpoint` and writes its throughput.
+    /// Measures generation of `checkpoint`, writes its throughput, and expects each
+    /// run to prefill and generate tokens at a positive, finite rate.
     private func generation(_ checkpoint: BenchmarkCheckpoint) async throws {
         let container = try await checkpoint.container()
         let stats = try await Benchmark.llmGeneration(container: container)
         stats.logSummary(label: checkpoint.id)
+        #expect(stats.promptTokenCount > 0, "\(checkpoint.id) prefilled no prompt tokens")
+        #expect(stats.generationTokenCount > 0, "\(checkpoint.id) generated no tokens")
+        let rates = [
+            ("prefill", stats.prefillTokensPerSecond), ("decode", stats.decodeTokensPerSecond),
+        ]
+        for (phase, tokensPerSecond) in rates {
+            #expect(
+                tokensPerSecond.isFinite && tokensPerSecond > 0,
+                "\(checkpoint.id) \(phase) \(tokensPerSecond) tok/s")
+        }
     }
 
     /// Measures the reuse of a cached system prompt by `checkpoint`, and expects

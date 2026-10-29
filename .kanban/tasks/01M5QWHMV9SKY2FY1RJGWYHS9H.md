@@ -160,6 +160,18 @@ comments:
     - commit: 3689d0a0
     - review: findings — IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift:160
   timestamp: 2026-10-29T13:24:33.278198+00:00
+- actor: claude-code
+  id: 01m63xps5gmj1yxx5g65e1j5cg
+  text: |-
+    Resolved the 08:16 finding (GenerationBenchmarkTests.swift:160 test-integrity/no-test-cheating). The shared `generation` helper keeps `logSummary` and now checks four things: `stats.promptTokenCount > 0`, `stats.generationTokenCount > 0`, and a prefill rate and a decode rate that are each finite and > 0. That covers qwen38Generation, qwen38FourBitGeneration and museGlimmerGeneration. I checked the other tests in the file for the same cause. systemPromptCache expects reuse on every fork and follow-up, and each array holds `runs` entries, so it can fail. qwen38FourBitMTPGeneration, qwen38FourBitMTPSampledGeneration and qwen38FourBitMTPSystemPromptCache all assert. None of them can fail only by throwing, so they are unchanged. I flipped the item to [x] by editing the live board file .kanban/tasks/01M5QWHMV9SKY2FY1RJGWYHS9H.md in the main checkout, because `update task` needs the whole description.
+
+    ### implement — changed
+    - evidence: branch worktree-agent-a214d25cc7d3a58a9, commit 61ef1e31 on mtp d31b63f6. 1 file: IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift.
+      - `swift build --build-tests`: Build complete, 0 Swift warnings. The only warning is SwiftPM's "missing creator" for the Cmlx bundle, which was there before.
+      - IntegrationTesting Release build-for-testing: TEST BUILD SUCCEEDED. Its warnings come only from the mlx-swift metal/C++17 headers and appintentsmetadataprocessor.
+      - Under bench.lock: qwen38Generation passed in 17.0 s (prefill 1086 tok at 1258 tok/s, decode 64 tok at 60.9 tok/s), qwen38FourBitGeneration passed in 18.8 s (1227 and 58.9 tok/s), museGlimmerGeneration passed in 28.7 s (1177 and 47.3 tok/s). 3/3 passed. Load average was 7.18 before and 16.49 after.
+    - next: /review
+  timestamp: 2026-10-29T13:31:04.752841+00:00
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 - 01M5QWHA34WP7DQMWQ4AHNB0J9
@@ -289,4 +301,4 @@ title: 'MTP: benchmark ChatSession multi-turn with MTP and prompt-cache reuse'
 > - `.kanban/tasks/01M63W3WGVTJYANP0KM7DGTT5D.jsonl` — no validator matches this file
 > - `.kanban/tasks/01M63W3WGVTJYANP0KM7DGTT5D.md` — no validator matches this file
 
-- [ ] `IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift:160` `test-integrity/no-test-cheating` — The shared `generation` helper measures throughput and asserts nothing about the result, so qwen38Generation, qwen38FourBitGeneration and museGlimmerGeneration can only fail by throwing. A run that generates zero tokens, or reports a degenerate timing, still passes. Every test should be able to fail. Add assertions to the helper after line 160, for example `#expect(stats.generationTokenCount > 0)` and `#expect(stats.promptTokenCount > 0)`, or have `llmGeneration` expose the token counts and check them. Keep `logSummary` as the measurement output.
+- [x] `IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift:160` `test-integrity/no-test-cheating` — The shared `generation` helper measures throughput and asserts nothing about the result, so qwen38Generation, qwen38FourBitGeneration and museGlimmerGeneration can only fail by throwing. A run that generates zero tokens, or reports a degenerate timing, still passes. Every test should be able to fail. Add assertions to the helper after line 160, for example `#expect(stats.generationTokenCount > 0)` and `#expect(stats.promptTokenCount > 0)`, or have `llmGeneration` expose the token counts and check them. Keep `logSummary` as the measurement output.
