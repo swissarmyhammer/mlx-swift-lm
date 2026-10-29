@@ -33,15 +33,17 @@ enum ExecutorPromptCacheFileError: Error, Equatable {
 /// Writes one ``ExecutorPromptCacheEntry`` to one safetensors file and reads it back.
 ///
 /// The file holds the caches, the model state, the two token ledgers, the uncommitted tokens and
-/// the MTP drafter state of the entry. The write has two steps: ``prepare(_:key:report:)`` reads the caches while the
-/// caller owns them, and ``write(_:to:)`` writes the file later, on any task. The write goes to
-/// a partial file first and then takes the real name, thus a crash never leaves a half file
-/// under the real name.
+/// the MTP drafter state of the entry. The write has two steps: ``prepare(_:key:report:)`` reads
+/// the caches while the caller owns them, and ``write(_:to:)`` writes the file later, on any
+/// task. The write goes to a partial file first and then takes the real name, thus a crash never
+/// leaves a half file under the real name.
 ///
 /// The drafter state goes in under ``MTPDrafterContinuation/reservedKeyPrefix``, beside the main
-/// caches. The format name does not change with it: a file without those keys, as the writer
-/// wrote before it kept drafter states, reads back with no drafter state, and the next turn
-/// starts its drafter cold. The checkpoint of an entry is not written.
+/// caches. The format name does not change with it or with the uncommitted tokens: a file
+/// without the drafter keys, as the writer wrote before it kept drafter states, reads back with
+/// no drafter state, and the next turn starts its drafter cold. A file without the uncommitted
+/// tokens key, as the writer wrote before it kept them, reads back with no uncommitted tokens.
+/// The checkpoint of an entry is not written.
 enum ExecutorPromptCacheFile {
 
     /// The format that each file of this writer names.
@@ -192,7 +194,7 @@ enum ExecutorPromptCacheFile {
         }
         let tokens = try TokenLedger.decode(metadata, key: MetadataKey.tokens)
         let renderTokens = try TokenLedger.decode(metadata, key: MetadataKey.renderTokens)
-        let uncommittedTokens = try TokenLedger.decode(
+        let uncommittedTokens = try TokenLedger.decodeIfPresent(
             metadata, key: MetadataKey.uncommittedTokens)
         let offsets = snapshot.cache.map(\.offset)
         guard offsets.allSatisfy({ $0 == tokens.count }) else {
@@ -348,6 +350,20 @@ private enum TokenLedger {
                 return Int(Int32(littleEndian: value))
             }
         }
+    }
+
+    /// Decodes the ledger under `key` of `metadata`, or gives an empty ledger when the file has
+    /// no metadata under `key`, as a file of an earlier writer that did not write that ledger.
+    ///
+    /// - Parameters:
+    ///   - metadata: The user metadata of the file.
+    ///   - key: The metadata key of the ledger.
+    /// - Returns: The ledger, or an empty ledger when the key is missing.
+    /// - Throws: ``ExecutorPromptCacheFileError/ledgerNotDecodable(_:)`` when the text is not
+    ///   base64, or the bytes are not whole Int32 values.
+    static func decodeIfPresent(_ metadata: [String: String], key: String) throws -> [Int] {
+        guard metadata[key] != nil else { return [] }
+        return try decode(metadata, key: key)
     }
 }
 

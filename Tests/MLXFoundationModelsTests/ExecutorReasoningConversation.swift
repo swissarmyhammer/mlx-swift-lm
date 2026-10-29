@@ -22,14 +22,48 @@ enum ExecutorReasoningConversation {
     /// The identifier of the instructions entry, which names the session of every pass.
     static let sessionID = "executor-prompt-cache-reasoning-follow-up"
 
+    /// The token IDs the prompts spell. Each is an arbitrary word of the fixture's vocabulary
+    /// with no role beyond being distinct, thus each is named after its value. No two prompts
+    /// share one.
+    private enum PromptToken {
+        static let two = 2
+        static let three = 3
+        static let four = 4
+        static let five = 5
+        static let six = 6
+        static let seven = 7
+        static let eight = 8
+        static let nine = 9
+        static let eleven = 11
+        static let twelve = 12
+        static let fourteen = 14
+        static let fifteen = 15
+        static let eighteen = 18
+        static let nineteen = 19
+        static let twentyOne = 21
+        static let twentySeven = 27
+        static let thirtyThree = 33
+        static let thirtyFive = 35
+        static let forty = 40
+    }
+
     /// The tokens of the instructions.
-    static let instructions = [7, 21, 4, 33, 12, 18]
+    static let instructions = [
+        PromptToken.seven, PromptToken.twentyOne, PromptToken.four, PromptToken.thirtyThree,
+        PromptToken.twelve, PromptToken.eighteen,
+    ]
 
     /// The tokens of the first prompt.
-    static let firstPrompt = [3, 14, 15, 9, 2, 6, 5, 35]
+    static let firstPrompt = [
+        PromptToken.three, PromptToken.fourteen, PromptToken.fifteen, PromptToken.nine,
+        PromptToken.two, PromptToken.six, PromptToken.five, PromptToken.thirtyFive,
+    ]
 
     /// The tokens of the follow-up prompt.
-    static let followUpPrompt = [11, 40, 8, 27, 19]
+    static let followUpPrompt = [
+        PromptToken.eleven, PromptToken.forty, PromptToken.eight, PromptToken.twentySeven,
+        PromptToken.nineteen,
+    ]
 
     /// The token that opens a think block. The template writes it after the last message, thus
     /// each turn starts inside its reasoning.

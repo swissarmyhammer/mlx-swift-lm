@@ -46,8 +46,42 @@ comments:
     - files: Libraries/MLXLMCommon/{PromptCacheReusePolicy,PromptCacheCheckpoint,ChatSession}.swift, Libraries/MLXLMCommon/Tool/Parsers/CommittedTurnSplice.swift, Libraries/MLXFoundationModels/{ExecutorPromptCache,ExecutorPromptCacheFile,MLXLanguageModel}.swift; tests: new CommittedTurnUncommittedTokenTests, ChatSessionUnfedTokenSpliceTests, ExecutorPromptCacheUnfedTokenTests, ExecutorReasoningConversation, MLXLMTestSupport/QwenThinkBlockScalarTokenizer; edited ExecutorPromptCacheReasoningFollowUpTests, Qwen/DSMLCommittedTurnRuleTests, MuseGlimmerTests
     - next: /review; re-run qwen38FourBitMTPGeneration on a quiet machine
   timestamp: 2026-10-29T12:44:19.515867+00:00
+- actor: claude-code
+  id: 01m63vctv4686mby0n399xgmby
+  text: |-
+    ### review — findings
+    - evidence: review sha 0534c446~1..0534c446 — 5 findings (21 confirmed, 6 refuted) — Libraries/MLXFoundationModels/ExecutorPromptCacheFile.swift:195, Libraries/MLXLMCommon/ChatSession.swift:1916, Tests/MLXFoundationModelsTests/ExecutorReasoningConversation.swift:26, :29, :32
+    - next: implement the 5 open items in the 2026-10-29 07:45 Review Findings section
+  timestamp: 2026-10-29T12:50:41.636198+00:00
+- actor: claude-code
+  id: 01m63vdjr8w0t9906d3dz1tgrs
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — splice feeds uncommitted last tokens; executor keeps/spills them; ChatSession uses the same splice (worktree 2994ef33, applied cleanly onto mtp)
+    - test: green in worktree (5 bundles, MTPPromptCacheTests 26/233 both, ledger 324 both, SystemPromptCache edit 123); merged-tree test run in progress; speed guard unconfirmed under load
+    - commit: 0534c446
+    - review: findings — ExecutorPromptCacheFile.swift:195, ChatSession.swift:1916, ExecutorReasoningConversation.swift:26, :29, :32
+  timestamp: 2026-10-29T12:51:06.120689+00:00
+- actor: claude-code
+  id: 01m63w82bhnytbpm5aqx8sejmp
+  text: |-
+    Review findings (2026-10-29 07:45) worked, in worktree branch worktree-agent-a50e8aaca8bea5119 (reset to mtp 0534c446 first).
+
+    - ExecutorPromptCacheFile: new `TokenLedger.decodeIfPresent` reads a missing `uncommittedTokens` key as []; type doc now states both compat paths (drafter keys, uncommitted key). TDD: new `ExecutorPromptCacheUnfedTokenTests.aFileWrittenBeforeTheUncommittedTokensRestoresItsEntryAndItsDrafterState` writes the follow-up entry (with drafter state) minus the key, reads with the fixture drafter; RED `.ledgerNotDecodable("uncommittedTokens")`, then GREEN (tokens, renderTokens equal, uncommitted [], drafter state restored and aligned).
+    - Gotcha: `PromptCacheSaveInput.metadata` is the FLAT metadata; caller keys sit under `1.` (private `FlatMetadataSection.userMetadata`), so the test strips `1.uncommittedTokens`. Swift Testing filters via `swift test --skip-build --filter` fail here (default metallib not found), so single-test runs go through the whole xctest bundle.
+    - ChatSession: `.appendSuffix` and `.appendSuffixToMain` share one case that builds the input once; the main-only reset sits under `if case .appendSuffixToMain = decision`.
+    - ExecutorReasoningConversation: prompt token IDs named in a private `PromptToken` enum. swiftlint no_magic_numbers (allowed [0,1,-1,100], test_parent_classes []) reports 19 violations on the old file, 0 on the new one.
+  timestamp: 2026-10-29T13:05:34.065078+00:00
+- actor: claude-code
+  id: 01m63w85wqnym965xav02pvdwz
+  text: |-
+    ### implement — changed
+    - evidence: branch worktree-agent-a50e8aaca8bea5119, commit 1a9300b1 (on mtp 0534c446); `swift build --build-tests` 0 Swift warnings; xcrun xctest: MLXLMTests 2020 Swift Testing + 920 XCTest, MLXFoundationModelsTests 427, MLXGuidedGenerationTests 72, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6 — 0 failures, 0 skipped; swiftlint no_magic_numbers 0 violations
+    - files: Libraries/MLXFoundationModels/ExecutorPromptCacheFile.swift, Libraries/MLXLMCommon/ChatSession.swift, Tests/MLXFoundationModelsTests/ExecutorPromptCacheUnfedTokenTests.swift, Tests/MLXFoundationModelsTests/ExecutorReasoningConversation.swift
+    - next: /review (all 5 findings of 2026-10-29 07:45 checked)
+  timestamp: 2026-10-29T13:05:37.687979+00:00
 position_column: doing
-position_ordinal: '8180'
+position_ordinal: '8680'
 title: 'FoundationModels: an MTP turn that stops on its token budget leaves its last token out of the cache, and the Qwen splice drops it from the next turn'
 ---
 Found in ^k2zn64x (Release MTPPromptCacheTests, Qwen3.8-27B-4bit, `.reasoning`, 128-token budget). The MTP turn 1 ledger is 206 tokens (79 prompt + 127 generated), the plain ledger 207: the MTP iterator returns its final verified token without feeding it. Turn 2 splices at the `<|im_end|>` commit (reused=207 for both). `reconcilePromptCache` gets no `previousGenerationUncommittedTokens` from the executor, thus `CommittedTurnSplice.suffixStart` takes the empty-uncommitted branch and the model reads its answer without that last token before `<|im_end|>`. `ChatSession` tracks `uncommittedTokens` and passes them, so its splice declines (or feeds the token).
@@ -58,3 +92,17 @@ Found in ^k2zn64x (Release MTPPromptCacheTests, Qwen3.8-27B-4bit, `.reasoning`, 
 - [x] Release: MTPPromptCacheTests still recomputes only the new message (26 of 233) and the drafter still resumes
 
 #mtp #foundation-models #prompt-cache
+
+## Review Findings (2026-10-29 07:45)
+
+> Scope: `review sha 0534c446~1..0534c446` — reviewed the diffs only — lines this change added or modified. 16 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M63JA4CQK6Q4VTYBVG2T7CAA.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M63JA4CQK6Q4VTYBVG2T7CAA.md` — no validator matches this file
+
+- [x] `Libraries/MLXFoundationModels/ExecutorPromptCacheFile.swift:195` `completeness/inverse-operation-coverage` — The writer now emits an `uncommittedTokens` metadata key, and the reader requires it. A spill file written before this change has no such key, so `TokenLedger.decode` throws `ledgerNotDecodable` and the whole entry fails to restore. The file's doc comment says the format name is unchanged and that older files read back with the new part empty, but that compatibility holds only for drafter state, not for this key. Decode a missing `uncommittedTokens` key as `[]`, the same way the drafter state is treated when absent, and add a read test using a file without that key. Alternatively, state in the doc comment that files without the key are unsupported and make that explicit in the format check.
+- [x] `Libraries/MLXLMCommon/ChatSession.swift:1916` `reuse/reuse` — The `.appendSuffixToMain` case repeats the inline feed construction from `.appendSuffix` (same `LMInput(tokens: MLXArray(uncommittedTokens + promptTokenIds[suffixStart...]))` shape). This is a second copy of a near-identical splice, not an extension of a shared path. Compute the input once for both splice cases, for example by grouping them in one `case` that sets `input` and `unfedGeneratedTokens` and then handles the main-only reset separately. Or share the helper proposed for the `.appendSuffix` finding.
+- [x] `Tests/MLXFoundationModelsTests/ExecutorReasoningConversation.swift:26` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXFoundationModelsTests/ExecutorReasoningConversation.swift:29` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXFoundationModelsTests/ExecutorReasoningConversation.swift:32` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.

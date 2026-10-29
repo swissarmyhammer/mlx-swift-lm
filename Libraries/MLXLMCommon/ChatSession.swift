@@ -1904,25 +1904,21 @@ public final class ChatSession {
                             case .prefillAll:
                                 break
 
-                            case .appendSuffix(let suffixStart, _, let uncommittedTokens):
+                            case .appendSuffix(let suffixStart, _, let uncommittedTokens),
+                                .appendSuffixToMain(let suffixStart, _, let uncommittedTokens):
                                 input = LMInput(
                                     tokens: MLXArray(
                                         uncommittedTokens + promptTokenIds[suffixStart...]))
                                 cachedPromptTokenCount = suffixStart
                                 unfedGeneratedTokens = uncommittedTokens
-
-                            case .appendSuffixToMain(let suffixStart, _, let uncommittedTokens):
-                                input = LMInput(
-                                    tokens: MLXArray(
-                                        uncommittedTokens + promptTokenIds[suffixStart...]))
-                                cachedPromptTokenCount = suffixStart
-                                unfedGeneratedTokens = uncommittedTokens
-                                // The speculative state does not represent the
-                                // same continuation path. Preserve the authoritative
-                                // target cache and use it alone for this turn.
-                                draftKVCache = nil
-                                mtpDrafterContinuation = nil
-                                requiresMainOnlyContinuation = true
+                                if case .appendSuffixToMain = decision {
+                                    // The speculative state does not represent the
+                                    // same continuation path. Preserve the authoritative
+                                    // target cache and use it alone for this turn.
+                                    draftKVCache = nil
+                                    mtpDrafterContinuation = nil
+                                    requiresMainOnlyContinuation = true
+                                }
 
                             case .appendMediaSuffix(let suffixStart, _):
                                 // A declined split was downgraded to `.rebuild`

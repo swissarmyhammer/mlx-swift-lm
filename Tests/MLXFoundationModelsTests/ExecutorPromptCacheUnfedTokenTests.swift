@@ -4,6 +4,7 @@
 
 import Foundation
 import FoundationModels
+import MLX
 import MLXLMTestSupport
 import Testing
 
@@ -96,11 +97,48 @@ struct ExecutorPromptCacheUnfedTokenTests {
         #expect(restored.uncommittedTokens == entry.uncommittedTokens)
     }
 
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aFileWrittenBeforeTheUncommittedTokensRestoresItsEntryAndItsDrafterState() async throws {
+        let setup = try await makeSetup()
+        let conversation = try await converseWithAnUnfedLastToken(setup)
+        let entry = try #require(conversation.entry, "The follow-up pass must check in.")
+        let drafterState = try conversation.drafterState()
+        let key = ExecutorPromptCacheKey(
+            modelID: Self.spillModelID, sessionID: ExecutorReasoningConversation.sessionID)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+            ExecutorPromptCacheFile.fileName(for: key, generation: Self.spillGeneration))
+        defer { try? FileManager.default.removeItem(at: url) }
+        // The writer before the uncommitted tokens wrote the same file without their key.
+        let input = try ExecutorPromptCacheFile.prepare(entry, key: key)
+        try #require(input.metadata[Self.uncommittedTokensKey] != nil)
+        var metadata = input.metadata
+        metadata[Self.uncommittedTokensKey] = nil
+        try save(arrays: input.arrays, metadata: metadata, url: url)
+
+        let restored = try ExecutorPromptCacheFile.read(
+            from: url, key: key, templates: setup.fixture.target.newCache(parameters: nil),
+            drafter: setup.fixture.drafter)
+
+        #expect(restored.tokens == entry.tokens)
+        #expect(restored.renderTokens == entry.renderTokens)
+        #expect(restored.uncommittedTokens.isEmpty)
+        let restoredDrafterState = try #require(
+            restored.drafterState, "The file keeps the drafter state of the entry.")
+        #expect(
+            restoredDrafterState.isAligned(
+                withMainTokenCount: entry.tokens.count, drafterID: drafterState.drafterID))
+    }
+
     /// The model the key of the spilled entry names.
     private static let spillModelID = "executor-prompt-cache-unfed-token"
 
     /// The generation the file name of the spilled entry holds.
     private static let spillGeneration: UInt64 = 1
+
+    /// The flat metadata key under which a file keeps the uncommitted tokens of an entry: the
+    /// `uncommittedTokens` key of the writer, in the caller-metadata part (`1.`) of the file.
+    private static let uncommittedTokensKey = "1.uncommittedTokens"
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
