@@ -271,7 +271,7 @@ struct GenerationBenchmarkTests {
     @Test(.enabled(if: qwen38FourBitMTPIsLocal))
     func qwen38FourBitMTPGeneration() async throws {
         let (context, drafter) = try await loadQwen38FourBitMTP()
-        let sweep = try await benchmarkMTPBlockSweep(context: context, drafter: drafter)
+        let sweep = try await Benchmark.mtpBlockSweep(context: context, drafter: drafter)
         let shipped = try #require(sweep.row(for: .shipped))
         let fastest = try #require(sweep.fastestNoSlowerThanSingleDraft)
 

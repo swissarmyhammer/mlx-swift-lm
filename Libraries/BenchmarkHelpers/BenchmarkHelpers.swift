@@ -83,6 +83,12 @@ enum BenchmarkLog {
         logger.warning("\(text, privacy: .public)")
     }
 
+    /// `value` rounded to a whole number, as a result line writes the acceptance of a draft
+    /// depth.
+    static func whole(_ value: Double) -> String {
+        String(format: "%.0f", value)
+    }
+
     /// `value` with one decimal, as a result line writes a time or a rate.
     static func decimal(_ value: Double) -> String {
         String(format: "%.1f", value)

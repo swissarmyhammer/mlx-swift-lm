@@ -83,6 +83,13 @@ public struct MTPGenerationResult: Sendable {
 private typealias DecodeRun = (tokens: [Int], info: GenerateCompletionInfo)
 
 extension Benchmark {
+    /// The tokens each decode of an MTP benchmark generates at most when the caller names
+    /// none.
+    public static let defaultMTPMaxTokens = 192
+
+    /// The timed runs of each decode of an MTP benchmark when the caller names none.
+    public static let defaultMTPRuns = 3
+
     /// Benchmark MTP speculative decoding against plain decoding of the same model,
     /// greedy unless `sampling` samples. Each prompt runs once to warm up, then `runs`
     /// timed times each way.
@@ -103,11 +110,11 @@ extension Benchmark {
         context: ModelContext,
         drafter: any MTPDrafterModel,
         prompts: [MTPBenchmarkPrompt] = MTPBenchmarkPrompt.defaults,
-        maxTokens: Int = 192,
+        maxTokens: Int = defaultMTPMaxTokens,
         blockSize: Int = SpeculativeDecodingConfig.defaultMTPBlockSize,
         minimumDraftProbability: Float =
             SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
-        runs: Int = 3,
+        runs: Int = defaultMTPRuns,
         sampling: GenerateParameters = GenerateParameters(temperature: 0)
     ) async throws -> [MTPGenerationResult] {
         precondition(runs > 0, "runs must be greater than zero")

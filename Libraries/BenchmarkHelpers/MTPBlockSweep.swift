@@ -20,9 +20,9 @@ extension MTPGenerationResult {
     /// The acceptance of each draft depth as a result line shows it, `d1 82% d2 61% …`, or `-`
     /// when no round drafted.
     var depthAcceptanceSummary: String {
-        guard !depthAcceptanceRates.isEmpty else { return "-" }
+        guard !depthAcceptanceRates.isEmpty else { return MTPBlockSweep.absentValue }
         return depthAcceptanceRates.enumerated()
-            .map { "d\($0.offset + 1) \(String(format: "%.0f", $0.element * 100))%" }
+            .map { "d\($0.offset + 1) \(BenchmarkLog.whole($0.element * 100))%" }
             .joined(separator: " ")
     }
 
@@ -32,46 +32,15 @@ extension MTPGenerationResult {
     /// - Returns: The line.
     func summaryLine(passthroughReason: String?) -> String {
         "MTP \(prompt): \(generatedTokenCount) tok, "
-            + "plain \(String(format: "%.1f", baselineTokensPerSecond)) tok/s, "
-            + "MTP \(String(format: "%.1f", mtpTokensPerSecond)) tok/s "
-            + "(\(String(format: "%.2f", speedup))x), "
-            + "acceptance \(String(format: "%.1f", acceptanceRate * 100))% "
+            + "plain \(BenchmarkLog.decimal(baselineTokensPerSecond)) tok/s, "
+            + "MTP \(BenchmarkLog.decimal(mtpTokensPerSecond)) tok/s "
+            + "(\(BenchmarkLog.hundredths(speedup))x), "
+            + "acceptance \(BenchmarkLog.decimal(acceptanceRate * 100))% "
             + "[\(depthAcceptanceSummary)], "
-            + "\(String(format: "%.2f", acceptanceLength)) tok/verify, "
+            + "\(BenchmarkLog.hundredths(acceptanceLength)) tok/verify, "
             + "tokens \(tokenMatch?.summary ?? (matchesBaseline ? "exact" : "sampled"))"
             + (passthroughReason.map { ", passthrough: \($0)" } ?? "")
     }
-}
-
-/// The plain greedy tokens after `input`, each with the two most likely candidates of its
-/// step, so that ``MTPChatTokenMatch`` can tell a near-tie from a divergence.
-///
-/// The decode runs outside the timed runs: asking for the candidates reads log probabilities
-/// beside the logits and does not change the tokens.
-///
-/// - Parameters:
-///   - input: The prompt.
-///   - context: The model.
-///   - parameters: The greedy parameters of the timed runs.
-///   - count: The tokens the timed plain runs generated.
-/// - Returns: The first `count` plain tokens with their candidates.
-/// - Throws: The error of the token iterator.
-func plainTokensWithCandidates(
-    input: LMInput, context: ModelContext, parameters: GenerateParameters, count: Int
-) throws -> [MTPChatToken] {
-    var candidateParameters = parameters
-    candidateParameters.logProbabilities = MTPBlockSweep.reportedCandidateCount
-    var iterator = try TokenIterator(
-        input: input, model: context.model, parameters: candidateParameters)
-    var tokens: [MTPChatToken] = []
-    while tokens.count < count, let token = iterator.next() {
-        tokens.append(
-            MTPChatToken(
-                token: token,
-                candidates: iterator.lastLogProbabilities?.materialize().topLogProbabilities
-                    ?? []))
-    }
-    return tokens
 }
 
 // MARK: - Block size and confidence floor sweep
@@ -126,8 +95,9 @@ public struct MTPBlockSetting: Sendable, Hashable, CustomStringConvertible {
             .map { MTPBlockSetting(blockSize: blockSize, minimumDraftProbability: $0) }
     }
 
+    /// The setting as a result line names it, `blockSize 4 pMin 0.75`.
     public var description: String {
-        "blockSize \(blockSize) pMin \(String(format: "%.2f", minimumDraftProbability))"
+        "blockSize \(blockSize) pMin \(BenchmarkLog.hundredths(Double(minimumDraftProbability)))"
     }
 }
 
@@ -150,6 +120,18 @@ public struct MTPBlockSweepRow: Sendable {
     public func result(for prompt: String) -> MTPGenerationResult? {
         results.first { $0.prompt == prompt }
     }
+
+    /// The line of the row in the sweep's table: the mean throughput, then each prompt's MTP
+    /// and plain throughputs and the acceptance of each draft depth.
+    func summaryLine() -> String {
+        let prompts = results.map {
+            "\($0.prompt) \(BenchmarkLog.decimal($0.mtpTokensPerSecond)) "
+                + "(plain \(BenchmarkLog.decimal($0.baselineTokensPerSecond)), "
+                + "\($0.depthAcceptanceSummary))"
+        }
+        return "MTP sweep \(setting): mean \(BenchmarkLog.decimal(meanMTPTokensPerSecond)) tok/s; "
+            + prompts.joined(separator: "; ")
+    }
 }
 
 /// The measurements of a sweep over ``MTPBlockSetting``s, and the machine load around them.
@@ -158,6 +140,9 @@ public struct MTPBlockSweep: Sendable {
     /// The candidates the plain decode reports for each step: the two best tokens, whose gap
     /// tells a near-tie.
     static let reportedCandidateCount = 2
+
+    /// What a result line writes in place of a value the sweep did not measure.
+    static let absentValue = "-"
 
     /// One row for each setting, in the order measured.
     public let rows: [MTPBlockSweepRow]
@@ -171,14 +156,19 @@ public struct MTPBlockSweep: Sendable {
 
     /// The row of the highest ``MTPBlockSweepRow/meanMTPTokensPerSecond``.
     public var fastest: MTPBlockSweepRow? {
-        rows.max { $0.meanMTPTokensPerSecond < $1.meanMTPTokensPerSecond }
+        Self.fastest(among: rows)
     }
 
     /// The fastest row among those ``isNoSlowerThanSingleDraft(_:)`` admits: the setting a
     /// default may take, since it is the fastest combined and costs no prompt more than noise.
     public var fastestNoSlowerThanSingleDraft: MTPBlockSweepRow? {
-        rows.filter(isNoSlowerThanSingleDraft)
-            .max { $0.meanMTPTokensPerSecond < $1.meanMTPTokensPerSecond }
+        Self.fastest(among: rows.filter(isNoSlowerThanSingleDraft))
+    }
+
+    /// The row of `candidates` of the highest ``MTPBlockSweepRow/meanMTPTokensPerSecond``, or
+    /// `nil` when there is none.
+    private static func fastest(among candidates: [MTPBlockSweepRow]) -> MTPBlockSweepRow? {
+        candidates.max { $0.meanMTPTokensPerSecond < $1.meanMTPTokensPerSecond }
     }
 
     /// Whether `row` decodes each prompt at least as fast as ``MTPBlockSetting/singleDraft``,
@@ -216,26 +206,29 @@ public struct MTPBlockSweep: Sendable {
     /// The lines of the sweep's table: one for each row, the fastest row, the noise, and the
     /// load around the sweep.
     public func summaryLines() -> [String] {
-        let rowLines = rows.map { row in
-            let prompts = row.results.map {
-                "\($0.prompt) \(String(format: "%.1f", $0.mtpTokensPerSecond)) "
-                    + "(plain \(String(format: "%.1f", $0.baselineTokensPerSecond)), "
-                    + "\($0.depthAcceptanceSummary))"
-            }
-            return
-                "MTP sweep \(row.setting): mean \(String(format: "%.1f", row.meanMTPTokensPerSecond)) "
-                + "tok/s; " + prompts.joined(separator: "; ")
-        }
-        let load = [loadAverageBefore, loadAverageAfter]
-            .map { $0.map { String(format: "%.2f", $0) } ?? "-" }
-        return rowLines + [
-            "MTP sweep fastest: \(fastest.map { "\($0.setting)" } ?? "-"); "
-                + "fastest no slower than one draft on any prompt: "
-                + "\(fastestNoSlowerThanSingleDraft.map { "\($0.setting)" } ?? "-"); "
-                + "noise \(String(format: "%.1f", noiseFraction * 100))%; "
-                + "load average \(load[0]) before, \(load[1]) after; "
-                + "thermal state \(ProcessInfo.processInfo.thermalState.rawValue)"
-        ]
+        rows.map { $0.summaryLine() } + [closingLine()]
+    }
+
+    /// The last line of the sweep's table: the fastest rows, the noise, and the load and
+    /// thermal state around the sweep.
+    private func closingLine() -> String {
+        "MTP sweep fastest: \(Self.settingName(of: fastest)); "
+            + "fastest no slower than one draft on any prompt: "
+            + "\(Self.settingName(of: fastestNoSlowerThanSingleDraft)); "
+            + "noise \(BenchmarkLog.decimal(noiseFraction * 100))%; "
+            + "load average \(Self.loadName(loadAverageBefore)) before, "
+            + "\(Self.loadName(loadAverageAfter)) after; "
+            + "thermal state \(ProcessInfo.processInfo.thermalState.rawValue)"
+    }
+
+    /// The setting of `row` as a result line names it, or ``absentValue``.
+    private static func settingName(of row: MTPBlockSweepRow?) -> String {
+        row.map { "\($0.setting)" } ?? absentValue
+    }
+
+    /// `loadAverage` as a result line writes it, or ``absentValue``.
+    private static func loadName(_ loadAverage: Double?) -> String {
+        loadAverage.map(BenchmarkLog.hundredths) ?? absentValue
     }
 
     /// The one-minute load average of the system, or `nil` when it does not report it.
@@ -245,42 +238,78 @@ public struct MTPBlockSweep: Sendable {
     }
 }
 
-/// Benchmarks MTP speculative decoding of each setting of `settings` against plain decoding,
-/// greedy, with ``Benchmark/mtpGeneration(context:drafter:prompts:maxTokens:blockSize:minimumDraftProbability:runs:sampling:)``,
-/// and writes the table of the sweep.
-///
-/// - Parameters:
-///   - context: The model.
-///   - drafter: The MTP drafter of the model.
-///   - settings: The settings to measure, in order.
-///   - prompts: The prompts, each a result of each row.
-///   - maxTokens: The tokens each decode generates at most.
-///   - runs: The timed runs of each decode.
-/// - Returns: The rows of the sweep and the load around it.
-/// - Throws: The error of a decode.
-public func benchmarkMTPBlockSweep(
-    context: ModelContext,
-    drafter: any MTPDrafterModel,
-    settings: [MTPBlockSetting] = MTPBlockSetting.sweep,
-    prompts: [MTPBenchmarkPrompt] = MTPBenchmarkPrompt.defaults,
-    maxTokens: Int = 192,
-    runs: Int = 3
-) async throws -> MTPBlockSweep {
-    let loadAverageBefore = MTPBlockSweep.currentLoadAverage()
-    var rows: [MTPBlockSweepRow] = []
-    for setting in settings {
-        BenchmarkLog.line("MTP sweep \(setting):")
-        rows.append(
-            MTPBlockSweepRow(
-                setting: setting,
-                results: try await Benchmark.mtpGeneration(
-                    context: context, drafter: drafter, prompts: prompts, maxTokens: maxTokens,
-                    blockSize: setting.blockSize,
-                    minimumDraftProbability: setting.minimumDraftProbability, runs: runs)))
+// MARK: - Runner
+
+extension Benchmark {
+    /// Benchmarks MTP speculative decoding of each setting of `settings` against plain
+    /// decoding, greedy, with
+    /// ``mtpGeneration(context:drafter:prompts:maxTokens:blockSize:minimumDraftProbability:runs:sampling:)``,
+    /// and writes the table of the sweep.
+    ///
+    /// - Parameters:
+    ///   - context: The model.
+    ///   - drafter: The MTP drafter of the model.
+    ///   - settings: The settings to measure, in order.
+    ///   - prompts: The prompts, each a result of each row.
+    ///   - maxTokens: The tokens each decode generates at most.
+    ///   - runs: The timed runs of each decode; at least one.
+    /// - Returns: The rows of the sweep and the load around it.
+    /// - Throws: The error of a decode.
+    public static func mtpBlockSweep(
+        context: ModelContext,
+        drafter: any MTPDrafterModel,
+        settings: [MTPBlockSetting] = MTPBlockSetting.sweep,
+        prompts: [MTPBenchmarkPrompt] = MTPBenchmarkPrompt.defaults,
+        maxTokens: Int = defaultMTPMaxTokens,
+        runs: Int = defaultMTPRuns
+    ) async throws -> MTPBlockSweep {
+        let loadAverageBefore = MTPBlockSweep.currentLoadAverage()
+        var rows: [MTPBlockSweepRow] = []
+        for setting in settings {
+            BenchmarkLog.line("MTP sweep \(setting):")
+            rows.append(
+                MTPBlockSweepRow(
+                    setting: setting,
+                    results: try await mtpGeneration(
+                        context: context, drafter: drafter, prompts: prompts,
+                        maxTokens: maxTokens, blockSize: setting.blockSize,
+                        minimumDraftProbability: setting.minimumDraftProbability, runs: runs)))
+        }
+        let sweep = MTPBlockSweep(
+            rows: rows, loadAverageBefore: loadAverageBefore,
+            loadAverageAfter: MTPBlockSweep.currentLoadAverage())
+        sweep.summaryLines().forEach(BenchmarkLog.line)
+        return sweep
     }
-    let sweep = MTPBlockSweep(
-        rows: rows, loadAverageBefore: loadAverageBefore,
-        loadAverageAfter: MTPBlockSweep.currentLoadAverage())
-    sweep.summaryLines().forEach(BenchmarkLog.line)
-    return sweep
+
+    /// The plain greedy tokens after `input`, each with the two most likely candidates of its
+    /// step, so that ``MTPChatTokenMatch`` can tell a near-tie from a divergence.
+    ///
+    /// The decode runs outside the timed runs: asking for the candidates reads log
+    /// probabilities beside the logits and does not change the tokens.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt.
+    ///   - context: The model.
+    ///   - parameters: The greedy parameters of the timed runs.
+    ///   - count: The tokens the timed plain runs generated.
+    /// - Returns: The first `count` plain tokens with their candidates.
+    /// - Throws: The error of the token iterator.
+    static func plainTokensWithCandidates(
+        input: LMInput, context: ModelContext, parameters: GenerateParameters, count: Int
+    ) throws -> [MTPChatToken] {
+        var candidateParameters = parameters
+        candidateParameters.logProbabilities = MTPBlockSweep.reportedCandidateCount
+        var iterator = try TokenIterator(
+            input: input, model: context.model, parameters: candidateParameters)
+        var tokens: [MTPChatToken] = []
+        while tokens.count < count, let token = iterator.next() {
+            tokens.append(
+                MTPChatToken(
+                    token: token,
+                    candidates: iterator.lastLogProbabilities?.materialize().topLogProbabilities
+                        ?? []))
+        }
+        return tokens
+    }
 }
