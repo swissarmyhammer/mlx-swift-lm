@@ -6,6 +6,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import Synchronization
 import os
 
 // MARK: - Identity
@@ -73,13 +74,24 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
         checkpoint?.tokens.count
     }
 
+    /// The MTP drafter continuation the last pass left where `caches` end,
+    /// or nil when that pass did not speculate with a resumable drafter.
+    ///
+    /// The next turn resumes it when its render extends `tokens` and its
+    /// drafter has the identity the continuation records; else that turn
+    /// starts its drafter cold. It is not model state: the target never
+    /// reads it.
+    let drafterState: MTPDrafterContinuation?
+
     /// The bytes this entry holds in memory: the resident bytes of every
-    /// cache, plus the arrays of `state`, plus the bytes of `checkpoint`.
+    /// cache, plus the arrays of `state`, plus the bytes of `checkpoint`,
+    /// plus the bytes of `drafterState`.
     ///
     /// The count reads only shapes and element types, thus it evaluates
     /// nothing. It is computed one time, when the entry is made, because the
-    /// store reads it at each check-in and each eviction. The checkpoint is
-    /// in the count, thus the memory budget of the store controls it too.
+    /// store reads it at each check-in and each eviction. The checkpoint and
+    /// the drafter state are in the count, thus the memory budget of the
+    /// store controls them too.
     let byteCount: Int
 
     /// Creates an entry for caches that hold `tokens`.
@@ -92,18 +104,39 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     ///   - state: the model state the last pass left, or nil.
     ///   - checkpoint: the recurrent state at an earlier position of
     ///     `tokens`, or nil.
+    ///   - drafterState: the MTP drafter continuation at the end of
+    ///     `tokens`, or nil.
     init(
         caches: [KVCache], tokens: [Int], renderTokens: [Int] = [],
-        state: LMOutput.State? = nil, checkpoint: PromptCacheCheckpoint? = nil
+        state: LMOutput.State? = nil, checkpoint: PromptCacheCheckpoint? = nil,
+        drafterState: MTPDrafterContinuation? = nil
     ) {
         self.caches = caches
         self.tokens = tokens
         self.renderTokens = renderTokens
         self.state = state
         self.checkpoint = checkpoint
+        self.drafterState = drafterState
         self.byteCount =
             caches.reduce(0) { $0 + $1.residentByteCount } + (state?.residentByteCount ?? 0)
-            + (checkpoint?.byteCount ?? 0)
+            + (checkpoint?.byteCount ?? 0) + (drafterState?.byteCount ?? 0)
+    }
+
+    /// The drafter state a pass that extends `tokens` with the drafter
+    /// `drafterID` resumes.
+    ///
+    /// - Parameter drafterID: the identity of the drafter of the pass, or nil
+    ///   when the pass does not speculate with a resumable drafter.
+    /// - Returns: `drafterState`, or nil when the entry keeps none, when
+    ///   another drafter made it, or when it does not stand at the end of
+    ///   `tokens`. The drafter of the pass then starts cold.
+    func drafterState(resumableBy drafterID: MTPDrafterID?) -> MTPDrafterContinuation? {
+        guard let drafterID, let drafterState,
+            drafterState.isAligned(withMainTokenCount: tokens.count, drafterID: drafterID)
+        else {
+            return nil
+        }
+        return drafterState
     }
 }
 
@@ -1012,12 +1045,26 @@ struct ExecutorPromptCachePlan {
     /// commits carries to the next turn, or nil.
     var checkpoint: PromptCacheCheckpoint?
 
+    /// The MTP drafter continuation the generation of this pass resumes,
+    /// aligned with what `caches` hold before `input` is fed, or nil for a
+    /// drafter that starts cold.
+    ///
+    /// The plan hands it to the generation beside `caches`, never as model
+    /// state: the target never reads it.
+    var drafterState: MTPDrafterContinuation?
+
     /// Plans what `entry` may serve for `input`, building fresh caches when it
     /// may serve nothing.
     ///
     /// The protocol rules and the standard rules decide first. When none of
     /// them reuses the caches, the checkpoint the entry carries can still
     /// serve a render that agrees with the entry up to that checkpoint.
+    ///
+    /// The drafter state of the entry comes along only when the render
+    /// extends the ledger whole and the drafter `drafterID` made the state.
+    /// The key of a session names no drafter, thus a session that changed its
+    /// drafter finds the state of the old one and starts the new one cold. A
+    /// checkpoint restore takes the drafter state of the checkpoint.
     ///
     /// - Parameters:
     ///   - entry: the cache the session carries, or nil for a cold session.
@@ -1026,6 +1073,8 @@ struct ExecutorPromptCachePlan {
     ///   - parameters: the generation parameters the new caches must match.
     ///   - protocolRules: the cache-reuse rules of the model's response
     ///     protocol, consulted before the standard prefix rules.
+    ///   - drafterID: the identity of the drafter of the pass, or nil when the
+    ///     pass does not speculate with a resumable drafter.
     /// - Returns: the plan, or nil when a carried cache cannot serve this input
     ///   at all. Media, a mask that hides a token and a batch of more than one
     ///   row each place content in the model's input that a token ledger cannot
@@ -1035,7 +1084,8 @@ struct ExecutorPromptCachePlan {
         input: LMInput,
         model: any LanguageModel,
         parameters: GenerateParameters,
-        protocolRules: [any PromptCacheReuseRule] = []
+        protocolRules: [any PromptCacheReuseRule] = [],
+        drafterID: MTPDrafterID? = nil
     ) throws -> ExecutorPromptCachePlan? {
         guard let promptTokens = ledgerTokens(of: input), !promptTokens.isEmpty else {
             return nil
@@ -1048,7 +1098,7 @@ struct ExecutorPromptCachePlan {
                 protocolRules: protocolRules, carriesModelState: entry.state != nil),
             reuse.suffixStart < promptTokens.count
         {
-            return ExecutorPromptCachePlan(
+            var plan = ExecutorPromptCachePlan(
                 caches: entry.caches,
                 input: reuse.suffixStart == 0
                     ? input
@@ -1058,9 +1108,19 @@ struct ExecutorPromptCachePlan {
                 representedTokens: reuse.representedTokens,
                 state: entry.state,
                 decision: decision(of: reuse, render: promptTokens, ledger: entry.tokens))
+            // A splice or a rewind moves the caches away from the end of the
+            // ledger, where the drafter state stands, and the drafter state
+            // cannot move with them.
+            if reuse.kind == .extend {
+                plan.drafterState = entry.drafterState(resumableBy: drafterID)
+            }
+            return plan
         }
 
-        if let entry, let restored = restoring(entry, input: input, promptTokens: promptTokens) {
+        if let entry,
+            let restored = restoring(
+                entry, input: input, promptTokens: promptTokens, drafterID: drafterID)
+        {
             return restored
         }
 
@@ -1104,7 +1164,7 @@ struct ExecutorPromptCachePlan {
     /// entry carries and feeds the render past it, or nil when the
     /// checkpoint cannot serve the render.
     ///
-    /// ``make(reusing:input:model:parameters:protocolRules:)`` asks for this
+    /// ``make(reusing:input:model:parameters:protocolRules:drafterID:)`` asks for this
     /// plan only when no rule found a reuse, thus a checkpoint never takes
     /// the place of an extension, a splice or a rewind.
     ///
@@ -1112,9 +1172,12 @@ struct ExecutorPromptCachePlan {
     ///   - entry: the cache the session carries.
     ///   - input: the prepared input of the pass about to run.
     ///   - promptTokens: the whole rendered prompt of `input`.
-    /// - Returns: the plan, or nil.
+    ///   - drafterID: the identity of the drafter of the pass, or nil.
+    /// - Returns: the plan, or nil. The plan resumes a copy of the drafter
+    ///   state the checkpoint keeps, when the drafter `drafterID` made it.
     private static func restoring(
-        _ entry: ExecutorPromptCacheEntry, input: LMInput, promptTokens: [Int]
+        _ entry: ExecutorPromptCacheEntry, input: LMInput, promptTokens: [Int],
+        drafterID: MTPDrafterID?
     ) -> ExecutorPromptCachePlan? {
         guard let checkpoint = entry.checkpoint, checkpoint.serves(promptTokens),
             let caches = checkpoint.restored(onto: entry.caches)
@@ -1122,7 +1185,7 @@ struct ExecutorPromptCachePlan {
             return nil
         }
         let reusedTokenCount = checkpoint.tokens.count
-        return ExecutorPromptCachePlan(
+        var plan = ExecutorPromptCachePlan(
             caches: caches,
             input: narrowed(input, to: Array(promptTokens[reusedTokenCount...])),
             reusedTokenCount: reusedTokenCount,
@@ -1130,6 +1193,8 @@ struct ExecutorPromptCachePlan {
             representedTokens: promptTokens,
             state: checkpoint.state,
             decision: .restore(.init(render: promptTokens, ledger: entry.tokens)))
+        plan.drafterState = drafterID.flatMap { checkpoint.drafterContinuation(resumableBy: $0) }
+        return plan
     }
 
     /// This plan, with the prompt fed up to `boundary` before generation, a
@@ -1147,6 +1212,11 @@ struct ExecutorPromptCachePlan {
     ///   - model: the model that feeds the caches.
     ///   - parameters: the generation parameters. Their prefill parameters
     ///     cut the fed tokens into forward passes, as a prefill does.
+    ///   - speculation: the MTP drafter of the pass, or nil. The fed tokens go
+    ///     into the drafter too, from `drafterState` when it stands where the
+    ///     caches stand and from a cold drafter state there otherwise, thus the
+    ///     checkpoint keeps the drafter state at `boundary` and the generation
+    ///     resumes it there.
     /// - Returns: the plan to generate with. This plan as it is when
     ///   `boundary` is not past the reused tokens or not before the end of
     ///   the prompt: the caches hold that position already, or only the
@@ -1154,13 +1224,19 @@ struct ExecutorPromptCachePlan {
     /// - Throws: `CancellationError` when the task is cancelled between two
     ///   forward passes.
     func prefillingToCheckpoint(
-        at boundary: Int, model: any LanguageModel, parameters: GenerateParameters
+        at boundary: Int, model: any LanguageModel, parameters: GenerateParameters,
+        speculation: MTPSpeculation? = nil
     ) throws -> ExecutorPromptCachePlan {
+        // A splice can leave the caches at a position other than the reused
+        // count, thus the drafter starts where the caches stand.
+        let drafterFeed = speculation?.prefillFeed(
+            target: model, parameters: parameters, cachePosition: caches.first?.offset ?? 0,
+            continuation: drafterState)
         guard
             let feed = try PromptCacheCheckpoint.prefillToCheckpoint(
                 at: boundary, of: promptTokens, representing: representedTokens,
                 from: reusedTokenCount, into: caches, state: state, model: model,
-                prefill: parameters.prefill)
+                prefill: parameters.prefill, drafterFeed: drafterFeed)
         else {
             return self
         }
@@ -1174,17 +1250,27 @@ struct ExecutorPromptCachePlan {
             decision: decision)
         plan.prefilledTokenCount = boundary - reusedTokenCount
         plan.checkpoint = feed.checkpoint
+        // The fed tokens moved the caches past the drafter state this plan
+        // carried, thus only the state the feed left can be resumed.
+        plan.drafterState = feed.drafterContinuation
         return plan
     }
 
     /// A checkpoint of the caches at the end of the prompt, which the
     /// generation reaches when its prefill ends.
     ///
-    /// - Parameter state: the model state the prefill left.
+    /// - Parameters:
+    ///   - state: the model state the prefill left.
+    ///   - drafterState: the MTP drafter continuation at the end of the
+    ///     prompt, or nil. The checkpoint keeps a compacted copy of it.
     /// - Returns: the checkpoint, or nil when every cache can rewind or a
     ///   cache does not stand at the end of the prompt.
-    func checkpointAtPromptEnd(state: LMOutput.State?) -> PromptCacheCheckpoint? {
-        PromptCacheCheckpoint(caches: caches, tokens: representedTokens, state: state)
+    func checkpointAtPromptEnd(
+        state: LMOutput.State?, drafterState: MTPDrafterContinuation? = nil
+    ) -> PromptCacheCheckpoint? {
+        PromptCacheCheckpoint(
+            caches: caches, tokens: representedTokens, state: state,
+            drafterContinuation: drafterState)
     }
 
     /// The rank of a token array a processor batched: one row for each
@@ -1256,27 +1342,39 @@ struct ExecutorPromptCachePlan {
     ///   - state: the model state the prefill of this pass left, which the
     ///     next turn seeds its iterator with, or nil for a model that carries
     ///     none.
+    ///   - drafterState: the MTP drafter continuation the generation of this
+    ///     pass handed over when it ended, or nil.
     /// - Returns: the entry to check in, or nil when the caches did not land on
     ///   a position this ledger can name and the session must start cold.
-    ///   ``commitOutcome(generatedTokens:state:)`` names the reason.
+    ///   ``commitOutcome(generatedTokens:state:drafterState:)`` names the
+    ///   reason.
     func committed(
-        generatedTokens: [Int], state: LMOutput.State? = nil
+        generatedTokens: [Int], state: LMOutput.State? = nil,
+        drafterState: MTPDrafterContinuation? = nil
     ) -> ExecutorPromptCacheEntry? {
-        commitOutcome(generatedTokens: generatedTokens, state: state).entry
+        commitOutcome(generatedTokens: generatedTokens, state: state, drafterState: drafterState)
+            .entry
     }
 
     /// The cache this finished pass leaves for the next turn, or the reason it
     /// leaves none.
     ///
-    /// This is ``committed(generatedTokens:state:)`` with the reason kept,
-    /// thus the log line of the pass can name it.
+    /// This is ``committed(generatedTokens:state:drafterState:)`` with the
+    /// reason kept, thus the log line of the pass can name it.
+    ///
+    /// The entry keeps `drafterState` only when it stands at the end of the
+    /// ledger, the stop token included when the generation fed it: a drafter
+    /// state of any other position cannot be resumed there.
     ///
     /// - Parameters:
     ///   - generatedTokens: every token this pass generated, in order.
     ///   - state: the model state the prefill of this pass left, or nil.
+    ///   - drafterState: the MTP drafter continuation the generation of this
+    ///     pass handed over when it ended, or nil.
     /// - Returns: the entry to check in, or the refusal.
     func commitOutcome(
-        generatedTokens: [Int], state: LMOutput.State? = nil
+        generatedTokens: [Int], state: LMOutput.State? = nil,
+        drafterState: MTPDrafterContinuation? = nil
     ) -> ExecutorPromptCacheCommitOutcome {
         guard let position = caches.first?.offset else { return .refused(.noCaches) }
         let positions = caches.map(\.offset)
@@ -1294,13 +1392,18 @@ struct ExecutorPromptCachePlan {
                     position: position, ledgerLength: ledgerLength,
                     generatedTokenCount: generatedTokens.count))
         }
+        let ledger = representedTokens + generatedTokens.prefix(committedGeneratedTokenCount)
         return .checkedIn(
             ExecutorPromptCacheEntry(
                 caches: caches,
-                tokens: representedTokens + generatedTokens.prefix(committedGeneratedTokenCount),
+                tokens: ledger,
                 renderTokens: promptTokens,
                 state: state,
-                checkpoint: checkpoint))
+                checkpoint: checkpoint,
+                drafterState: drafterState.flatMap {
+                    $0.isAligned(withMainTokenCount: ledger.count, drafterID: $0.drafterID)
+                        ? $0 : nil
+                }))
     }
 }
 
@@ -1607,6 +1710,29 @@ enum ExecutorPromptCacheReport {
         "prompt cache restore \(session(key)) failed, the turn starts cold: \(error)"
     }
 
+    /// The line of a turn whose spilled drafter state did not read back. The
+    /// main caches restored, thus only the drafter starts cold.
+    ///
+    /// - Parameters:
+    ///   - key: the session of the turn.
+    ///   - error: why the read failed.
+    /// - Returns: one line with the session and the error.
+    static func drafterRestoreFailureLine(key: ExecutorPromptCacheKey, error: any Error) -> String {
+        "prompt cache restore \(session(key)) drafter state failed, the drafter starts cold: \(error)"
+    }
+
+    /// The line of a spill whose drafter state cannot be written. The file
+    /// keeps the main caches, thus the next turn starts only its drafter cold.
+    ///
+    /// - Parameters:
+    ///   - key: the session of the entry.
+    ///   - error: why the drafter state cannot be written.
+    /// - Returns: one line with the session and the error.
+    static func drafterSpillFailureLine(key: ExecutorPromptCacheKey, error: any Error) -> String {
+        "prompt cache spill \(session(key)) drafter state failed, the file keeps the main caches: "
+            + "\(error)"
+    }
+
     /// The source field of a plan line: `source=none`, `source=memory`, or
     /// `source=disk` and the seconds of the restore.
     private static func field(of source: ExecutorPromptCacheSource) -> String {
@@ -1663,7 +1789,7 @@ enum ExecutorPromptCacheLog {
 ///
 /// A session whose cache went to disk gives the slot a pending restore. The
 /// restore reads the file into the fresh caches of the model, thus it runs
-/// inside the model container: ``restoreIfPending(model:parameters:)`` runs it
+/// inside the model container: ``restoreIfPending(model:parameters:speculation:)`` runs it
 /// one time, before the first plan. The executor, not the slot, deletes the
 /// file.
 ///
@@ -1754,7 +1880,7 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     }
 
     /// Creates a slot whose session found its cache on disk. The slot reads
-    /// the file at ``restoreIfPending(model:parameters:)``.
+    /// the file at ``restoreIfPending(model:parameters:speculation:)``.
     ///
     /// - Parameters:
     ///   - handle: the file of the cache, which the check-out gave.
@@ -1799,10 +1925,19 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     /// file, another cache class, a wrong offset -- writes one log line, and
     /// the pass starts cold: a failed restore never fails the turn.
     ///
+    /// A drafter state in the file that does not read back writes its own log
+    /// line, and only the drafter of the pass starts cold.
+    ///
     /// - Parameters:
     ///   - model: the model that makes the fresh caches.
     ///   - parameters: the generation parameters the fresh caches must match.
-    func restoreIfPending(model: any LanguageModel, parameters: GenerateParameters) {
+    ///   - speculation: the MTP drafter of the pass, which reads the drafter
+    ///     state of the file, or nil. Without a resumable drafter the entry
+    ///     keeps no drafter state.
+    func restoreIfPending(
+        model: any LanguageModel, parameters: GenerateParameters,
+        speculation: MTPSpeculation? = nil
+    ) {
         guard case .pendingRestore(let handle) = carried else { return }
         carried = .none
         let clock = ContinuousClock()
@@ -1810,7 +1945,8 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
         do {
             let restored = try ExecutorPromptCacheFile.read(
                 from: handle.url, key: handle.key,
-                templates: model.newCache(parameters: parameters))
+                templates: model.newCache(parameters: parameters),
+                drafter: speculation?.resumableDrafter, parameters: parameters, report: report)
             carried = .restored(restored, restoreDuration: clock.now - start)
         } catch {
             report(ExecutorPromptCacheReport.restoreFailureLine(key: handle.key, error: error))
@@ -1821,7 +1957,7 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     /// and logs the decision.
     ///
     /// The slot gives up its entry: the pass owns the caches until
-    /// ``commit(_:generatedTokens:state:)`` takes them back.
+    /// ``commit(_:generatedTokens:state:drafterState:)`` takes them back.
     ///
     /// - Parameters:
     ///   - input: the prepared input of the pass about to run.
@@ -1834,8 +1970,12 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     ///     when the pass takes no checkpoint. The pass takes a checkpoint of
     ///     a hybrid model there: before its generation when the boundary is
     ///     before the end of the prompt, and when
-    ///     ``prefillDidEnd(state:)`` reports the end of the prefill when the
+    ///     ``prefillDidEnd(state:drafterState:)`` reports the end of the prefill when the
     ///     boundary is the end of the prompt.
+    ///   - speculation: the MTP drafter of the pass, or nil. The plan resumes
+    ///     the drafter state the entry or its checkpoint keeps for that
+    ///     drafter, and a checkpoint before the end of the prompt keeps the
+    ///     drafter state at its position.
     ///   - decodeTokens: decodes the tokens on each side of a seam for the log
     ///     line of a rewind, a restore or a rebuild.
     /// - Returns: the plan, or nil when the pass carries no cache.
@@ -1845,12 +1985,12 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     func plan(
         input: LMInput, model: any LanguageModel, parameters: GenerateParameters,
         protocolRules: [any PromptCacheReuseRule] = [], transcriptBoundary: Int? = nil,
-        decodeTokens: ([Int]) -> String
+        speculation: MTPSpeculation? = nil, decodeTokens: ([Int]) -> String
     ) throws -> ExecutorPromptCachePlan? {
         let carriedSource = source
         var plan = try ExecutorPromptCachePlan.make(
             reusing: entry, input: input, model: model, parameters: parameters,
-            protocolRules: protocolRules)
+            protocolRules: protocolRules, drafterID: speculation?.resumableDrafter?.drafterID)
         carried = .none
         reusedTokenCount = plan?.reusedTokenCount ?? 0
         report(
@@ -1858,7 +1998,8 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
                 key: key, source: carriedSource, plan: plan, decodeTokens: decodeTokens))
         if let planned = plan, let transcriptBoundary {
             plan = try planned.prefillingToCheckpoint(
-                at: transcriptBoundary, model: model, parameters: parameters)
+                at: transcriptBoundary, model: model, parameters: parameters,
+                speculation: speculation)
             promptEndCheckpointPlan =
                 transcriptBoundary == planned.promptTokens.count ? planned : nil
         }
@@ -1873,9 +2014,18 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     /// feeds its first generated token, thus the caches stand at the end of
     /// the prompt.
     ///
-    /// - Parameter state: the model state the prefill left.
-    func prefillDidEnd(state: LMOutput.State?) {
-        promptEndCheckpoint = promptEndCheckpointPlan?.checkpointAtPromptEnd(state: state)
+    /// - Parameters:
+    ///   - state: the model state the prefill left.
+    ///   - drafterState: reads the MTP drafter continuation at the end of the
+    ///     prompt, or gives nil when the generation does not speculate with a
+    ///     resumable drafter. It is read only when the pass takes the
+    ///     checkpoint, because the read copies the drafter caches.
+    func prefillDidEnd(
+        state: LMOutput.State?, drafterState: () -> MTPDrafterContinuation? = { nil }
+    ) {
+        promptEndCheckpoint = promptEndCheckpointPlan.flatMap {
+            $0.checkpointAtPromptEnd(state: state, drafterState: drafterState())
+        }
         promptEndCheckpointPlan = nil
     }
 
@@ -1903,11 +2053,14 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     /// - Parameters:
     ///   - plan: the plan the pass ran, or nil when the pass carried no plan.
     ///     The entry carries the checkpoint of the plan, or else the
-    ///     checkpoint ``prefillDidEnd(state:)`` took.
+    ///     checkpoint ``prefillDidEnd(state:drafterState:)`` took.
     ///   - generatedTokens: the tokens the pass generated, in order.
     ///   - state: the model state the prefill of the pass left, or nil.
+    ///   - drafterState: the MTP drafter continuation the generation of the
+    ///     pass handed over when it ended, or nil.
     func commit(
-        _ plan: ExecutorPromptCachePlan?, generatedTokens: [Int], state: LMOutput.State? = nil
+        _ plan: ExecutorPromptCachePlan?, generatedTokens: [Int], state: LMOutput.State? = nil,
+        drafterState: MTPDrafterContinuation? = nil
     ) {
         var plan = plan
         if plan?.checkpoint == nil {
@@ -1915,10 +2068,37 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
         }
         promptEndCheckpoint = nil
         let outcome =
-            plan?.commitOutcome(generatedTokens: generatedTokens, state: state)
+            plan?.commitOutcome(
+                generatedTokens: generatedTokens, state: state, drafterState: drafterState)
             ?? .refused(.noPlan)
         carried = outcome.entry.map { .memory($0) } ?? .none
         report(ExecutorPromptCacheReport.commitLine(key: key, outcome: outcome))
+    }
+}
+
+/// Holds the MTP drafter continuation a generation hands over when it ends,
+/// until the pass commits its cache.
+///
+/// The generation task hands the continuation over and the response task reads
+/// it after it awaited that task, thus a `Mutex` holds it.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+final class ExecutorDrafterStateReceiver: Sendable {
+
+    /// The continuation the generation handed over, or nil.
+    private let received = Mutex<MTPDrafterContinuation?>(nil)
+
+    /// Creates a receiver that holds no continuation.
+    init() {}
+
+    /// The callback a generation hands its continuation to when it ends.
+    var receive: @Sendable (MTPDrafterContinuation?) -> Void {
+        { continuation in self.received.withLock { $0 = continuation } }
+    }
+
+    /// The continuation the generation handed over, or nil when it handed
+    /// none or did not end yet.
+    var drafterState: MTPDrafterContinuation? {
+        received.withLock { $0 }
     }
 }
 

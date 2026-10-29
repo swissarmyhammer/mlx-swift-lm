@@ -2123,6 +2123,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///     plan.
         ///   - state: the model state the prefill of the pass left, which the
         ///     next turn seeds its iterator with.
+        ///   - drafterState: receives the MTP drafter continuation of the
+        ///     generation when it ends, which the next turn resumes.
         ///   - promptCache: the slot that keeps the cache for the next turn.
         ///   - body: reads the token stream of the same generation.
         /// - Throws: the error that `body` throws.
@@ -2130,6 +2132,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             task: Task<[Int], Never>,
             plan: ExecutorPromptCachePlan?,
             state: LMOutput.State?,
+            drafterState: ExecutorDrafterStateReceiver,
             promptCache: ExecutorPromptCacheSlot,
             body: () async throws -> Void
         ) async rethrows {
@@ -2139,7 +2142,40 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 await cancelAndDrain(task)
                 throw error
             }
-            promptCache.commit(plan, generatedTokens: await task.value, state: state)
+            // The generation hands its drafter state over before the task
+            // returns its tokens, thus the receiver holds it here.
+            let generatedTokens = await task.value
+            promptCache.commit(
+                plan, generatedTokens: generatedTokens, state: state,
+                drafterState: drafterState.drafterState)
+        }
+
+        /// Reads the cache of the session back from disk when it went there,
+        /// and plans the pass that is about to run.
+        ///
+        /// - Parameters:
+        ///   - promptCache: the slot of the session.
+        ///   - input: the prepared input of the pass.
+        ///   - parameters: the generation parameters of the pass.
+        ///   - transcriptBoundary: the index of the prompt where the pass
+        ///     takes its checkpoint, or nil.
+        ///   - speculation: the MTP drafter of the pass, or nil. The plan
+        ///     resumes the drafter state the cache keeps for that drafter.
+        ///   - context: the loaded model context.
+        /// - Returns: the plan, or nil when the pass carries no cache.
+        /// - Throws: the error of the plan.
+        private static func planPromptCache(
+            _ promptCache: ExecutorPromptCacheSlot, input: LMInput,
+            parameters: GenerateParameters, transcriptBoundary: Int?,
+            speculation: MTPSpeculation?, context: ModelContext
+        ) throws -> ExecutorPromptCachePlan? {
+            promptCache.restoreIfPending(
+                model: context.model, parameters: parameters, speculation: speculation)
+            return try promptCache.plan(
+                input: input, model: context.model, parameters: parameters,
+                protocolRules: promptCacheReuseRules(of: context),
+                transcriptBoundary: transcriptBoundary, speculation: speculation,
+                decodeTokens: context.tokenizer.decode(tokenIds:))
         }
 
         private func runAllowedToolGeneration(
@@ -2160,12 +2196,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 maxTokens: requestedMaxTokens ?? Self.defaultMaxTokens,
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration)
-            promptCache.restoreIfPending(model: context.model, parameters: params)
-            let plan = try promptCache.plan(
-                input: input, model: context.model, parameters: params,
-                protocolRules: Self.promptCacheReuseRules(of: context),
-                transcriptBoundary: transcriptBoundary,
-                decodeTokens: context.tokenizer.decode(tokenIds:))
+            let plan = try Self.planPromptCache(
+                promptCache, input: input, parameters: params,
+                transcriptBoundary: transcriptBoundary, speculation: speculation,
+                context: context)
             let format = context.configuration.toolCallFormat ?? .json
             var router = AllowedToolOutputRouter(
                 format: format,
@@ -2178,6 +2212,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             var detokenizer = context.tokenizer.makeStreamingDetokenizer()
             var result = AllowedToolGenerationResult()
             var preparedState: LMOutput.State?
+            let finalDrafterState = ExecutorDrafterStateReceiver()
             let (stream, task) = try Self.startTrackedGeneration {
                 try generateProtocolTokensTask(
                     input: plan?.input ?? input,
@@ -2187,14 +2222,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     context: context,
                     decoder: protocolDecoder,
                     speculation: speculation,
-                    preparedState: {
-                        preparedState = $0
-                        promptCache.prefillDidEnd(state: $0)
-                    })
+                    mtpContinuation: plan?.drafterState,
+                    preparedState: { state, drafterState in
+                        preparedState = state
+                        promptCache.prefillDidEnd(state: state, drafterState: drafterState)
+                    },
+                    drafterContinuation: finalDrafterState.receive)
             }
 
             try await withPromptCacheCommit(
-                task: task, plan: plan, state: preparedState, promptCache: promptCache
+                task: task, plan: plan, state: preparedState,
+                drafterState: finalDrafterState, promptCache: promptCache
             ) {
                 generationLoop: for await generation in stream {
                     try Task.checkCancellation()
@@ -2456,18 +2494,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration
             )
-            promptCache.restoreIfPending(model: context.model, parameters: params)
-            let plan = try promptCache.plan(
-                input: input, model: context.model, parameters: params,
-                protocolRules: Self.promptCacheReuseRules(of: context),
-                transcriptBoundary: transcriptBoundary,
-                decodeTokens: context.tokenizer.decode(tokenIds:))
+            let plan = try Self.planPromptCache(
+                promptCache, input: input, parameters: params,
+                transcriptBoundary: transcriptBoundary, speculation: speculation,
+                context: context)
 
             // The token-recording form is what lets this pass leave a prompt
             // cache behind: the ledger of that cache names the render plus the
             // tokens generation fed into it, and the text stream alone does not
             // carry those token identifiers.
             var preparedState: LMOutput.State?
+            let finalDrafterState = ExecutorDrafterStateReceiver()
             let (stream, task) = try Self.startTrackedGeneration {
                 try generateTaskRecordingTokens(
                     input: plan?.input ?? input,
@@ -2476,14 +2513,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     parameters: params,
                     context: context,
                     speculation: speculation,
-                    preparedState: {
-                        preparedState = $0
-                        promptCache.prefillDidEnd(state: $0)
-                    })
+                    mtpContinuation: plan?.drafterState,
+                    preparedState: { state, drafterState in
+                        preparedState = state
+                        promptCache.prefillDidEnd(state: state, drafterState: drafterState)
+                    },
+                    drafterContinuation: finalDrafterState.receive)
             }
 
             try await withPromptCacheCommit(
-                task: task, plan: plan, state: preparedState, promptCache: promptCache
+                task: task, plan: plan, state: preparedState,
+                drafterState: finalDrafterState, promptCache: promptCache
             ) {
                 for await generation in stream {
                     try Task.checkCancellation()
@@ -2591,12 +2631,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration
             )
-            promptCache.restoreIfPending(model: context.model, parameters: params)
-            let plan = try promptCache.plan(
-                input: input, model: context.model, parameters: params,
-                protocolRules: Self.promptCacheReuseRules(of: context),
-                transcriptBoundary: transcriptBoundary,
-                decodeTokens: context.tokenizer.decode(tokenIds:))
+            let plan = try Self.planPromptCache(
+                promptCache, input: input, parameters: params,
+                transcriptBoundary: transcriptBoundary, speculation: speculation,
+                context: context)
 
             var emitter = ReasoningEventEmitter(
                 config: reasoningConfig, primedInside: primedInside)
@@ -2613,6 +2651,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // never executable.
             var rejectedToolCall: RejectedToolCall?
             var preparedState: LMOutput.State?
+            let finalDrafterState = ExecutorDrafterStateReceiver()
             let (stream, task) = try Self.startTrackedGeneration {
                 try generateProtocolTokensTask(
                     input: plan?.input ?? input,
@@ -2622,14 +2661,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     context: context,
                     decoder: protocolDecoder,
                     speculation: speculation,
-                    preparedState: {
-                        preparedState = $0
-                        promptCache.prefillDidEnd(state: $0)
-                    })
+                    mtpContinuation: plan?.drafterState,
+                    preparedState: { state, drafterState in
+                        preparedState = state
+                        promptCache.prefillDidEnd(state: state, drafterState: drafterState)
+                    },
+                    drafterContinuation: finalDrafterState.receive)
             }
 
             try await withPromptCacheCommit(
-                task: task, plan: plan, state: preparedState, promptCache: promptCache
+                task: task, plan: plan, state: preparedState,
+                drafterState: finalDrafterState, promptCache: promptCache
             ) {
                 generationLoop: for await generation in stream {
                     try Task.checkCancellation()

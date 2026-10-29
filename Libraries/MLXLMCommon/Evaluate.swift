@@ -2534,6 +2534,15 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
     )
 }
 
+/// Receives what the prefill of a generation left, before the generation reads its first
+/// token: the model state, and a reader of the drafter continuation at the end of the prompt.
+///
+/// The reader gives `nil` when the generation does not speculate with a resumable drafter. It
+/// copies the drafter caches, thus a caller calls it only when it keeps a prompt cache
+/// checkpoint at the end of the prompt, and only during the callback.
+package typealias PreparedGenerationState =
+    (LMOutput.State?, _ promptBoundaryContinuation: () -> MTPDrafterContinuation?) -> Void
+
 /// Package variant of
 /// ``generate(input:cache:state:parameters:context:components:wiredMemoryTicket:tools:)``
 /// that also answers the tokens the generation fed into `cache`.
@@ -2550,13 +2559,18 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
 ///   - context: the model context, including the model and its tokenizer.
 ///   - speculation: the MTP drafter the generation speculates with, or `nil`
 ///     for plain decode. A drafter that cannot draft for the model decodes
-///     plainly too (``MTPSpeculation/makeTokenIterator(speculation:input:cache:state:parameters:model:components:)``).
+///     plainly too (``MTPSpeculation/makeTokenIterator(speculation:input:cache:state:mtpContinuation:parameters:model:components:)``).
+///   - mtpContinuation: the drafter continuation saved with `cache`, or `nil`.
+///     The generation resumes it when it is aligned with `cache` and made by the
+///     drafter of `speculation`, and else starts the drafter at the cached
+///     position.
 ///   - components: optional behavioral components, e.g. a custom ``LogitProcessor``.
 ///   - wiredMemoryTicket: optional wired memory ticket.
 ///   - tools: optional tool schemas used to parse tool-call arguments.
-///   - preparedState: receives the model state the prefill left. A caller
-///     that carries `cache` to a later turn seeds that turn with it; a Qwen VL
-///     model keys its M-RoPE anchor there and refuses a warm cache without it.
+///   - preparedState: receives what the prefill left (see
+///     ``PreparedGenerationState``). A caller that carries `cache` to a later
+///     turn seeds that turn with the model state; a Qwen VL model keys its
+///     M-RoPE anchor there and refuses a warm cache without it.
 ///   - drafterContinuation: receives, when the generation ends, the drafter
 ///     continuation aligned with what `cache` then holds, or `nil` when the
 ///     generation did not speculate with a resumable drafter.
@@ -2567,16 +2581,18 @@ package func generateTaskRecordingTokens(
     input: LMInput, cache: [KVCache]? = nil, state: LMOutput.State? = nil,
     parameters: GenerateParameters, context: ModelContext,
     speculation: MTPSpeculation? = nil,
+    mtpContinuation: MTPDrafterContinuation? = nil,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil,
-    preparedState: (LMOutput.State?) -> Void = { _ in },
+    preparedState: PreparedGenerationState = { _, _ in },
     drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in }
 ) throws -> (AsyncStream<Generation>, Task<[Int], Never>) {
     let iterator = try MTPSpeculation.makeTokenIterator(
         speculation: speculation, input: input, cache: cache, state: state,
-        parameters: parameters, model: context.model, components: components)
-    preparedState(iterator.state)
+        mtpContinuation: mtpContinuation, parameters: parameters, model: context.model,
+        components: components)
+    preparedState(iterator.state) { MTPSpeculation.promptBoundaryContinuation(of: iterator) }
     return generateLoopTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
@@ -3017,7 +3033,7 @@ public func generateTokensTask(
 /// - Parameters:
 ///   - speculation: the MTP drafter the generation speculates with, or `nil`
 ///     for plain decode, as
-///     ``MTPSpeculation/makeTokenIterator(speculation:input:cache:state:parameters:model:components:)``
+///     ``MTPSpeculation/makeTokenIterator(speculation:input:cache:state:mtpContinuation:parameters:model:components:)``
 ///     takes it.
 ///   - The other parameters are those of the public variant.
 /// - Returns: the stream of token IDs, and the task that generates it.
@@ -3059,11 +3075,12 @@ package func generateTokensTask(
 ///
 ///   - speculation: the MTP drafter the generation speculates with, or `nil`
 ///     for plain decode, as
-///     ``generateTaskRecordingTokens(input:cache:state:parameters:context:speculation:components:wiredMemoryTicket:tools:preparedState:drafterContinuation:)``
+///     ``generateTaskRecordingTokens(input:cache:state:parameters:context:speculation:mtpContinuation:components:wiredMemoryTicket:tools:preparedState:drafterContinuation:)``
 ///     takes it.
-///   - preparedState: receives the model state the prefill left. A caller
-///     that carries `cache` to a later turn seeds that turn with it; a Qwen VL
-///     model keys its M-RoPE anchor there and refuses a warm cache without it.
+///   - mtpContinuation: the drafter continuation saved with `cache`, or `nil`,
+///     as that function takes it.
+///   - preparedState: receives what the prefill left, as that function hands it
+///     over.
 ///   - drafterContinuation: receives, when the generation ends, the drafter
 ///     continuation aligned with what `cache` then holds, or `nil`.
 /// - Returns: the stream of raw tokens, and the task that generates them. The
@@ -3076,15 +3093,17 @@ package func generateProtocolTokensTask(
     context: ModelContext,
     decoder: (any TokenStreamDecoder)?,
     speculation: MTPSpeculation? = nil,
+    mtpContinuation: MTPDrafterContinuation? = nil,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
-    preparedState: (LMOutput.State?) -> Void = { _ in },
+    preparedState: PreparedGenerationState = { _, _ in },
     drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in }
 ) throws -> (AsyncStream<TokenGeneration>, Task<[Int], Never>) {
     let iterator = try MTPSpeculation.makeTokenIterator(
         speculation: speculation, input: input, cache: cache, state: state,
-        parameters: parameters, model: context.model, components: components)
-    preparedState(iterator.state)
+        mtpContinuation: mtpContinuation, parameters: parameters, model: context.model,
+        components: components)
+    preparedState(iterator.state) { MTPSpeculation.promptBoundaryContinuation(of: iterator) }
     return generateLoopTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,
