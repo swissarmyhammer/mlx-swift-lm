@@ -20,8 +20,24 @@ comments:
     - evidence: 3 files — Libraries/MLXLMCommon/Evaluate.swift (`SpeculativeTokenIterator.hasCachedLastToken`), Tests/MLXLMTests/SpeculativeStopTokenCacheTests.swift (new, 5 KB, 2 tests x 2 slots), Tests/MLXLMTests/SpeculativeDecodingTests.swift (`CacheTrackingTransitionModel` private -> internal). `swift build --build-tests`: 0 compiler warnings. The only build warning is SwiftPM's "missing creator for mutated node" on the Cmlx bundle, which is not a compiler warning. xctest: CXGrammarTests 7 passed, MLXFoundationModelsTests 404 passed, MLXGuidedGenerationTests 70 passed, MLXHuggingFaceMacrosTests 6 passed, MLXLMTests 1990 swift-testing + 920 XCTest passed, 0 failures. `benchmarkVerification` was already skipped before this change. Release integration: qwen38FourBitMTPGeneration MTP 92.5/83.1/80.8 tok/s (plain 59.6); qwen38FourBitMTPSampledGeneration passed; qwen38FourBitMTPSystemPromptCache passed with no known issues, edit turn prefilled 123 tok with MTP on.
     - next: /review
   timestamp: 2026-10-29T05:39:28.335538+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m632t5wv22ssdjzvczyqh11q
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (610a7974) — findings 0, confirmed 0, refuted 1, attempted 7, failed 0; 3 files reviewed, 2 .kanban files skipped (no validator matched)
+    - next: none — task moved to done
+  timestamp: 2026-10-29T05:41:04.539528+00:00
+- actor: claude-code
+  id: 01m632tkre621jscnmyn5vp3g3
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 3 files (hasCachedLastToken from mainCommittedPendingTokenCount, new stop-token cache tests)
+    - test: green — 5 bundles; Release MTP 92.5/83.1/80.8 vs plain 59.6; edit turn 123 tokens
+    - commit: 610a7974
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T05:41:18.734432+00:00
+position_column: done
+position_ordinal: fffb80
 title: 'Speculative decoding: report the true cache state of a stop token from SpeculativeTokenIterator (hasCachedLastToken)'
 ---
 ## What
