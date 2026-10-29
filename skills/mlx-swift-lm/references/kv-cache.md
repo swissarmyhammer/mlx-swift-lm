@@ -217,10 +217,21 @@ try savePromptCache(
     drafterContinuation: try SerializedMTPDrafterContinuation(continuation))
 
 let snapshot = try loadPromptCacheSnapshot(url: fileURL)
-// nil for a file saved without one. The restore throws for another drafter or
-// damaged values; the drafter then cold-starts at the cached position.
-let resumed = try snapshot.drafterContinuation?.restored(by: drafter)
+// nil for a file saved without one. The restore throws for another drafter,
+// drafter caches of another class or window than `parameters` give, or damaged
+// values; the drafter then cold-starts at the cached position.
+let resumed = try snapshot.drafterContinuation?.restored(
+    by: drafter, parameters: parameters)
 ```
+
+The Qwen MTP drafter cache follows the main attention caches: with
+`maxKVSize` (or a typed capacity) it is a `RotatingKVCache` of the same window
+with a small rewind reserve, so pass the stream's `GenerateParameters` to the
+restore. A quantized main cache (`kvBits`) leaves the drafter cache in full
+precision. A ring that keeps a prefix (as `maxKVSize` makes it) stops MTP
+speculation once a verify would reach past the window, since a multi-token
+verify there would not attend as plain decode does; a typed capacity with
+`preservedPrefixTokens: 0` keeps speculating past the window.
 
 ## Attention Masks
 

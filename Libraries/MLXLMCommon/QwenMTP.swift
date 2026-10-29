@@ -4,6 +4,9 @@ import Foundation
 import MLX
 import MLXNN
 
+/// The logger of the shifted MTP drafters.
+private let qwenMTPLogger = MLXLogger(label: "qwen-mtp")
+
 package func normalizedMTPTokenBatch(_ tokens: MLXArray) -> MLXArray {
     switch tokens.ndim {
     case 1:
@@ -180,6 +183,74 @@ package struct ShiftedMTPDrafter {
 
     /// One predictor forward.
     private let forward: Forward
+
+    /// The longest rewind of a drafter state, in rounds of the most tokens: a finalize removes
+    /// the tentative entries of a proposal (fewer than one round), the verified lookahead the
+    /// main cache discards (fewer than one round), and the boundary entry.
+    private static let longestRewindInRounds = 2
+
+    /// The rows a drafter cache ring keeps beyond its attention window, so that each rewind of
+    /// a drafter state stays exact after the ring wraps.
+    ///
+    /// - Parameter maximumBlockSize: The most tokens of a round of the drafter.
+    /// - Returns: The rewind reserve of each drafter cache ring.
+    package static func rewindReserve(maximumBlockSize: Int) -> Int {
+        longestRewindInRounds * maximumBlockSize
+    }
+
+    /// The cache of each predictor layer in a stream of `parameters`.
+    ///
+    /// The drafter holds the entries of the main cache one position earlier, so its cache takes
+    /// the shape of the main full-attention caches:
+    ///
+    /// - When the main caches rotate (`maxKVSize`, or a typed capacity), each drafter layer is a
+    ///   ``RotatingKVCache`` of the same window and kept prefix, with a rewind reserve of
+    ///   ``rewindReserve(maximumBlockSize:)`` rows (or the stream's own reserve when larger). The
+    ///   drafter then stays bounded, and each rewind of its state stays exact after its ring
+    ///   wraps. Its entries keep counting logical positions, as the main cache does.
+    /// - Otherwise each layer is a ``KVCacheSimple``. A quantized main cache (`kvBits`, a
+    ///   quantizing ``KVCachePlan``) leaves the drafter in full precision: the plan applies to
+    ///   the main cache only, and the drafter cache is small next to it.
+    ///
+    /// - Parameters:
+    ///   - layerCount: The predictor layers.
+    ///   - parameters: The generation parameters of the stream, or `nil` for none.
+    ///   - maximumBlockSize: The most tokens of a round of the drafter.
+    /// - Returns: One cache for each predictor layer.
+    package static func makeCache(
+        layerCount: Int, parameters: GenerateParameters?, maximumBlockSize: Int
+    ) -> [KVCache] {
+        guard let capacity = mainCacheCapacity(parameters: parameters) else {
+            return (0 ..< layerCount).map { _ in KVCacheSimple() }
+        }
+        let reserve = Swift.max(
+            rewindReserve(maximumBlockSize: maximumBlockSize),
+            parameters?.kvCache?.rewind?.maxTokens ?? 0)
+        return (0 ..< layerCount).map { _ in capacity.makeRotatingCache(rewindCapacity: reserve) }
+    }
+
+    /// The capacity of the main full-attention caches of a stream of `parameters`, or `nil`
+    /// when they do not rotate.
+    ///
+    /// The main caches of the stream are built from the same parameters first, so a request
+    /// they refuse never reaches the drafter. Should one reach it, the drafter keeps an unbounded
+    /// cache: it then decodes exactly, with more memory.
+    ///
+    /// - Parameter parameters: The generation parameters of the stream, or `nil` for none.
+    /// - Returns: The capacity, or `nil`.
+    private static func mainCacheCapacity(
+        parameters: GenerateParameters?
+    ) -> KVCacheConfiguration.Capacity? {
+        do {
+            return try parameters?.effectiveKVCacheCapacity()
+        } catch {
+            assertionFailure("MTP drafter cache of invalid KV cache parameters: \(error)")
+            qwenMTPLogger.error(
+                "The KV cache parameters are invalid (\(error)); the MTP drafter cache is unbounded"
+            )
+            return nil
+        }
+    }
 
     /// - Parameters:
     ///   - targetEmbedTokens: The target's token embedding.

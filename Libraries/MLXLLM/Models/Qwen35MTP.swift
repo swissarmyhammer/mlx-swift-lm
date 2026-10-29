@@ -40,8 +40,24 @@ final class Qwen35MTPPredictor: Module {
         super.init()
     }
 
-    func newCache() -> [KVCache] {
-        layers.map { _ in KVCacheSimple() }
+    /// The cache of each predictor layer in a stream of `parameters`, as
+    /// ``ShiftedMTPDrafter/makeCache(layerCount:parameters:maximumBlockSize:)`` builds it.
+    ///
+    /// The drafter cache follows the main full-attention caches one position behind:
+    ///
+    /// - A rotating main cache (`maxKVSize`) gives a ring of the same window, with a rewind
+    ///   reserve for the drafts of the longest round, so the drafter stays bounded and rewinds
+    ///   its rejected drafts exactly after the ring wraps.
+    /// - A quantized main cache (`kvBits`, a quantizing `KVCachePlan`) leaves this cache in
+    ///   full precision (bf16 weights give bf16 rows). It is one layer: about
+    ///   2 × 4 KV heads × 256 × 2 B = 4 KB for each token, small next to the main cache.
+    ///
+    /// - Parameter parameters: The generation parameters of the stream, or `nil` for none.
+    /// - Returns: One cache for each predictor layer.
+    func newCache(parameters: GenerateParameters? = nil) -> [KVCache] {
+        ShiftedMTPDrafter.makeCache(
+            layerCount: layers.count, parameters: parameters,
+            maximumBlockSize: GatedDeltaDecodeKernel.mostTokens)
     }
 
     func callAsFunction(
@@ -154,8 +170,10 @@ public final class Qwen35MTPDraftModel: Module, ResumableMTPDrafterModel,
         }
     }
 
+    /// A drafter state whose cache follows the main caches of `parameters`: see
+    /// ``Qwen35MTPPredictor/newCache(parameters:)``.
     public func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
-        MTPDrafterState(cache: mtp.newCache())
+        MTPDrafterState(cache: mtp.newCache(parameters: parameters))
     }
 
     public func appendDrafterState(

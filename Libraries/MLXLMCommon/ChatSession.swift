@@ -1664,7 +1664,8 @@ public final class ChatSession {
                         if let saved = savedDrafterContinuation {
                             mtpDrafterContinuation = Self.restoredDrafterContinuation(
                                 saved, drafter: mtpDrafter,
-                                drafterIsCompatible: mtpDrafterIsCompatible)
+                                drafterIsCompatible: mtpDrafterIsCompatible,
+                                parameters: generateParameters)
                             savedDrafterContinuation = nil
                         }
                         // Why an MTP turn decodes plainly, decided before any cache work.
@@ -2721,20 +2722,23 @@ extension ChatSession {
     ///
     /// The drafter cold-starts when the pass has no drafter that resumes continuations, when the
     /// drafter cannot draft for the model, and when it refuses the saved values: a continuation
-    /// of another drafter, or values a damaged file holds.
+    /// of another drafter, drafter caches of another class or window than `parameters` give, or
+    /// values a damaged file holds.
     ///
     /// - Parameters:
     ///   - saved: the continuation the file saved.
     ///   - drafter: the MTP drafter of the pass, or nil.
     ///   - drafterIsCompatible: whether `drafter` can draft for the model of the pass.
+    ///   - parameters: the generation parameters of the pass, which decide the drafter caches
+    ///     the continuation restores into: a ring of the main window when the main caches rotate.
     /// - Returns: the restored continuation, or nil.
     private static func restoredDrafterContinuation(
         _ saved: SerializedMTPDrafterContinuation, drafter: (any MTPDrafterModel)?,
-        drafterIsCompatible: Bool
+        drafterIsCompatible: Bool, parameters: GenerateParameters
     ) -> MTPDrafterContinuation? {
         guard drafterIsCompatible, let drafter = drafter as? any ResumableMTPDrafterModel
         else { return nil }
-        return try? saved.restored(by: drafter)
+        return try? saved.restored(by: drafter, parameters: parameters)
     }
 }
 

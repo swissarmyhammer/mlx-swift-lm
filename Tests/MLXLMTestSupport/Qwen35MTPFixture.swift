@@ -97,8 +97,13 @@ public struct Qwen35MTPFixture {
     /// - Parameters:
     ///   - mode: How the drafter proposes tokens.
     ///   - seed: The seed of the weights.
+    ///   - headDimension: The width of each full-attention head of the target and the drafter.
+    ///     A quantized KV cache needs a width its quantization group size divides.
     /// - Throws: The error of the configuration decoder or of a weight update.
-    public init(drafter mode: DrafterMode = .copiesTarget, seed: UInt64 = defaultSeed) throws {
+    public init(
+        drafter mode: DrafterMode = .copiesTarget, seed: UInt64 = defaultSeed,
+        headDimension: Int = Qwen35FixtureJSON.defaultHeadDimension
+    ) throws {
         let configuration = try JSONDecoder().decode(
             Qwen35TextConfiguration.self,
             from: Data(
@@ -106,7 +111,7 @@ public struct Qwen35MTPFixture {
                     mtpLayers: Self.mtpLayers, hiddenLayers: Self.hiddenLayers,
                     fullAttentionInterval: Self.fullAttentionInterval,
                     hiddenSize: Self.hiddenSize, vocabularySize: Self.vocabularySize,
-                    tieWordEmbeddings: false
+                    tieWordEmbeddings: false, headDimension: headDimension
                 ).utf8))
         let target = withRandomState(MLXRandom.RandomState(seed: seed)) {
             Qwen35TextModel(configuration)

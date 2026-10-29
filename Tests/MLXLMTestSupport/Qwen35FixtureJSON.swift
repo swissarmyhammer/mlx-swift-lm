@@ -17,6 +17,9 @@ public enum Qwen35FixtureJSON {
     /// The vocabulary size of the default configuration.
     public static let defaultVocabularySize = 16
 
+    /// The width of each full-attention head of the default configuration.
+    public static let defaultHeadDimension = 8
+
     /// The JSON of a small Qwen 3.5 text configuration.
     ///
     /// - Parameters:
@@ -31,6 +34,8 @@ public enum Qwen35FixtureJSON {
     ///   - vocabularySize: The number of tokens of the vocabulary.
     ///   - tieWordEmbeddings: Whether the LM head reuses the token embeddings. A model with
     ///     its own LM head has a token-to-token map that is not the identity.
+    ///   - headDimension: The width of each full-attention head. A quantized KV cache needs a
+    ///     width its quantization group size divides.
     /// - Returns: The JSON text.
     public static func text(
         mtpLayers: Int,
@@ -41,7 +46,8 @@ public enum Qwen35FixtureJSON {
         fullAttentionInterval: Int = 1,
         hiddenSize: Int = defaultHiddenSize,
         vocabularySize: Int = defaultVocabularySize,
-        tieWordEmbeddings: Bool = true
+        tieWordEmbeddings: Bool = true,
+        headDimension: Int = defaultHeadDimension
     ) -> String {
         """
         {
@@ -51,7 +57,7 @@ public enum Qwen35FixtureJSON {
           "intermediate_size": 32,
           "num_attention_heads": 2,
           "num_key_value_heads": 1,
-          "head_dim": 8,
+          "head_dim": \(headDimension),
           "linear_num_value_heads": 2,
           "linear_num_key_heads": 1,
           "linear_key_head_dim": 8,
@@ -81,7 +87,7 @@ public enum Qwen35FixtureJSON {
     }
 
     /// The JSON of a small Qwen 3.5 vision-language configuration over a text configuration
-    /// from ``text(mtpLayers:mtpUseDedicatedEmbeddings:numExperts:expertsPerToken:hiddenLayers:fullAttentionInterval:hiddenSize:vocabularySize:tieWordEmbeddings:)``.
+    /// from ``text(mtpLayers:mtpUseDedicatedEmbeddings:numExperts:expertsPerToken:hiddenLayers:fullAttentionInterval:hiddenSize:vocabularySize:tieWordEmbeddings:headDimension:)``.
     ///
     /// - Parameters:
     ///   - mtpLayers: The number of multi-token prediction layers.
@@ -101,7 +107,7 @@ public enum Qwen35FixtureJSON {
     /// The JSON of a small Qwen 3.5 vision-language configuration.
     ///
     /// - Parameter textConfigJSON: The JSON of the text configuration, from
-    ///   ``text(mtpLayers:mtpUseDedicatedEmbeddings:numExperts:expertsPerToken:hiddenLayers:fullAttentionInterval:hiddenSize:vocabularySize:tieWordEmbeddings:)``.
+    ///   ``text(mtpLayers:mtpUseDedicatedEmbeddings:numExperts:expertsPerToken:hiddenLayers:fullAttentionInterval:hiddenSize:vocabularySize:tieWordEmbeddings:headDimension:)``.
     /// - Returns: The JSON text, with a tiny vision tower.
     public static func visionLanguage(textConfigJSON: String) -> String {
         """

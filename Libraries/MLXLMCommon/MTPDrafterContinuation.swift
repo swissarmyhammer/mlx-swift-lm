@@ -71,7 +71,7 @@ private enum FNV1aHash {
 /// that continues the same main cache. Its drafter state is opaque to callers outside
 /// the package. A prompt cache keeps a continuation beside its main caches: ``copy()`` forks it,
 /// ``byteCount`` measures it, and ``arrays()``, ``metadata()`` and
-/// ``init(arrays:metadata:drafter:)`` serialize it.
+/// ``init(arrays:metadata:drafter:parameters:)`` serialize it.
 ///
 /// The drafter state cannot be trimmed by itself: entry `j` needs the target hidden row of
 /// position `j`, and no cache keeps old hidden rows. A continuation is thus aligned with a main

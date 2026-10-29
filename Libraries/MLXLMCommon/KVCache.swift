@@ -669,10 +669,34 @@ public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
     return cache.first?.trim(count) ?? 0
 }
 
+/// Whether every attention entry of a hybrid attention/recurrent cache can rewind, in place,
+/// the rejected drafts of a speculative verify of `positions` tokens written into it: up to
+/// `positions - 1` tokens, since the bonus token at the head of the verify is always kept.
+///
+/// A trimmable entry rewinds what it holds. A ``RotatingKVCache`` rewinds the drafts once its
+/// ring has wrapped too: a write of several rows keeps the window before its oldest row, thus
+/// `positions - 1` rows more than the window, and the rewind cuts only those. Each Mamba entry
+/// keeps a snapshot slot for each verified token instead, as deep as its model advertises.
+///
+/// - Parameters:
+///   - cache: The cache of each layer.
+///   - positions: The tokens of the verify: the bonus and the drafts.
+/// - Returns: `true` when ``rewindSpeculativePromptCache(_:numTokens:)`` can rewind the drafts
+///   the verify rejects.
+package func canRewindSpeculativeVerify(_ cache: [KVCache], positions: Int) -> Bool {
+    cache.allSatisfy { entry in
+        switch entry {
+        case is MambaCache: true
+        case is RotatingKVCache: positions > 1
+        default: entry.isTrimmable
+        }
+    }
+}
+
 /// Rewind the rejected tail of a speculative verify in a hybrid
 /// attention/recurrent cache by `numTokens` tokens. Attention entries trim
-/// normally; Mamba entries select the snapshot slot the verify kept after its
-/// last accepted token. A verify of `T` tokens keeps `T` slots and rewinds
+/// exactly, as far as ``KVCache/maxTrimCount`` allows; Mamba entries select the snapshot slot
+/// the verify kept after its last accepted token. A verify of `T` tokens keeps `T` slots and rewinds
 /// one to `T - 1` tokens: the bonus token at its head is always committed.
 /// A rewind keeps the slots of the tokens it keeps, thus a later rewind of the
 /// same verify, short of its bonus token, rewinds further: a stream that stops
@@ -703,22 +727,21 @@ private func rewindSpeculativeEntries(
 ) -> Int {
     guard numTokens > 0,
         cache.allSatisfy({ entry in
-            if entry.isTrimmable {
-                return entry.offset >= numTokens
+            if let recurrent = entry as? MambaCache {
+                return recurrent.speculativeSlotCount > numTokens
             }
-            return ((entry as? MambaCache)?.speculativeSlotCount ?? 0) > numTokens
+            return entry.maxTrimCount >= numTokens
         })
     else { return 0 }
 
     for entry in cache {
-        if entry.isTrimmable {
-            guard entry.trim(numTokens) == numTokens else {
-                preconditionFailure("Speculative cache validation and rewind diverged")
+        if let recurrent = entry as? MambaCache {
+            guard recurrent.selectSpeculativeSlot(rollingBack: numTokens) else {
+                preconditionFailure("Missing recurrent speculative snapshot slot")
             }
         } else {
-            guard (entry as? MambaCache)?.selectSpeculativeSlot(rollingBack: numTokens) == true
-            else {
-                preconditionFailure("Missing recurrent speculative snapshot slot")
+            guard entry.trim(numTokens) == numTokens else {
+                preconditionFailure("Speculative cache validation and rewind diverged")
             }
         }
     }

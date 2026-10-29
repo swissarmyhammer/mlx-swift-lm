@@ -10,11 +10,11 @@ extension MTPDrafterContinuation {
     /// A prompt cache file keeps the continuation beside the arrays and the metadata of its main
     /// caches. The keys of the main caches never start with this prefix, so a reader removes the
     /// keys that do before it restores the main caches, and hands them to
-    /// ``init(arrays:metadata:drafter:)``.
+    /// ``init(arrays:metadata:drafter:parameters:)``.
     public static let reservedKeyPrefix = "__mlx_lm_mtp_drafter_"
 
     /// The version of the serialized form that ``metadata()`` records and
-    /// ``init(arrays:metadata:drafter:)`` reads.
+    /// ``init(arrays:metadata:drafter:parameters:)`` reads.
     static let serializationFormatVersion = "1"
 
     /// The axis of the batch rows of every serialized array: the boundary and the seed hidden
@@ -90,8 +90,10 @@ extension MTPDrafterContinuation {
 
     /// Restores a continuation from its ``arrays()`` and ``metadata()``.
     ///
-    /// The drafter caches restore into the fresh caches of `drafter`, which checks the number of
-    /// layers, the class of each cache and its configuration. The boundary and the seed hidden
+    /// The drafter caches restore into the fresh caches `drafter` makes for `parameters`, which
+    /// checks the number of layers, the class of each cache and its configuration: a ring
+    /// restores only into a ring of its window, as the stream of `parameters` rotates its
+    /// caches, and a cache of another class is refused. The boundary and the seed hidden
     /// rows must have the width of ``ResumableMTPDrafterModel/hiddenSize`` when the drafter
     /// states one. The seed hidden row, the seed token and every array of the drafter caches
     /// must have the batch of the boundary hidden row. The restored continuation resumes a
@@ -102,6 +104,10 @@ extension MTPDrafterContinuation {
     ///   - metadata: The metadata of the continuation. Keys without ``reservedKeyPrefix`` are
     ///     ignored.
     ///   - drafter: The drafter that resumes the continuation.
+    ///   - parameters: The generation parameters of the stream that resumes the continuation,
+    ///     which decide the drafter caches (see
+    ///     ``StatefulMTPDrafterModel/makeState(parameters:)``), or `nil` for the caches of a
+    ///     stream without a cache configuration.
     /// - Throws: ``KVCacheError`` for an unknown format version, a continuation of another
     ///   drafter identity, drafter caches that do not fit the caches of `drafter`, positions that
     ///   do not match each other or the entries of the drafter caches, a missing boundary hidden
@@ -109,7 +115,7 @@ extension MTPDrafterContinuation {
     ///   one token for each batch row, or a seed proposal or drafter cache of another batch.
     public init(
         arrays: [String: MLXArray], metadata: [String: String],
-        drafter: any ResumableMTPDrafterModel
+        drafter: any ResumableMTPDrafterModel, parameters: GenerateParameters? = nil
     ) throws {
         guard metadata[SerializedKey.formatVersion] == Self.serializationFormatVersion else {
             throw KVCacheError(message: "Unsupported MTP drafter continuation format")
@@ -128,7 +134,7 @@ extension MTPDrafterContinuation {
             in: arrays, batchSize: batchSize, hiddenSize: drafter.hiddenSize)
         let snapshot = try restorePromptCacheSnapshot(
             arrays: Self.cacheEntries(of: arrays), metadata: Self.cacheEntries(of: metadata),
-            into: drafter.makeState(parameters: nil).cache)
+            into: drafter.makeState(parameters: parameters).cache)
         try Self.checkCacheBatch(snapshot.cache, batchSize: batchSize)
         let state = try Self.drafterState(cache: snapshot.cache, seed: seed, metadata: metadata)
         eval([targetBoundaryHidden] + [state.seedToken, state.seedHidden].compactMap { $0 })
@@ -286,8 +292,9 @@ extension MTPDrafterContinuation {
 ///
 /// Only a drafter can check and restore a continuation, and a prompt cache load has none. A
 /// ``PromptCacheSnapshot`` thus carries the serialized form, and the generation that has the
-/// drafter restores it with ``restored(by:)``. A restore that throws (a continuation of another
-/// drafter, or damaged values) leaves the drafter to cold-start at the cached position.
+/// drafter restores it with ``restored(by:parameters:)``. A restore that throws (a continuation
+/// of another drafter, drafter caches of another class or window, or damaged values) leaves the
+/// drafter to cold-start at the cached position.
 // swiftlint:disable:next no_unchecked_sendable The value is immutable, and each MLXArray in it is a handle that no cache writes: the arrays of a live continuation come from MTPDrafterContinuation.arrays(), which gives new handles, and a prompt cache load evaluates the arrays it reads before it returns.
 public struct SerializedMTPDrafterContinuation: @unchecked Sendable {
 
@@ -320,17 +327,21 @@ public struct SerializedMTPDrafterContinuation: @unchecked Sendable {
         self.metadata = Self.reservedEntries(of: metadata)
     }
 
-    /// Restores the continuation for `drafter`, with every check of
-    /// ``MTPDrafterContinuation/init(arrays:metadata:drafter:)``.
+    /// Restores the continuation for `drafter` in the stream of `parameters`, with every check of
+    /// ``MTPDrafterContinuation/init(arrays:metadata:drafter:parameters:)``.
     ///
-    /// - Parameter drafter: The drafter that resumes the continuation.
+    /// - Parameters:
+    ///   - drafter: The drafter that resumes the continuation.
+    ///   - parameters: The generation parameters of the stream that resumes the continuation, or
+    ///     `nil` for a stream without a cache configuration.
     /// - Returns: The continuation, with each array evaluated.
     /// - Throws: ``KVCacheError`` for each error of
-    ///   ``MTPDrafterContinuation/init(arrays:metadata:drafter:)``.
-    public func restored(by drafter: any ResumableMTPDrafterModel) throws
-        -> MTPDrafterContinuation
-    {
-        try MTPDrafterContinuation(arrays: arrays, metadata: metadata, drafter: drafter)
+    ///   ``MTPDrafterContinuation/init(arrays:metadata:drafter:parameters:)``.
+    public func restored(
+        by drafter: any ResumableMTPDrafterModel, parameters: GenerateParameters? = nil
+    ) throws -> MTPDrafterContinuation {
+        try MTPDrafterContinuation(
+            arrays: arrays, metadata: metadata, drafter: drafter, parameters: parameters)
     }
 
     /// Removes the serialized continuation from the flat arrays of a prompt cache file and reads

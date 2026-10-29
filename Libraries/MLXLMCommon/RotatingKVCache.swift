@@ -380,6 +380,17 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             && positions < storageCapacity - offset
     }
 
+    /// The most rows one write of several rows can add while each of its queries attends as it
+    /// would in a write of one row at a time, or `nil` when every such write does.
+    ///
+    /// A write of several rows masks a window over the rows it presents, which leaves the kept
+    /// prefix out of the view of each query past the window. A write of one row keeps the
+    /// prefix in the ring, so its query sees the prefix and the newest rows. The two views
+    /// differ only in a ring that keeps a prefix, and only for a query past the window.
+    package var rowsAttendingAsSingleRowWrites: Int? {
+        keep == 0 ? nil : Swift.max(0, maxCacheSize - offset)
+    }
+
     /// Rewind the newest `n` positions.
     ///
     /// Before the ring wraps this is exact bookkeeping. After it wraps, the ring is

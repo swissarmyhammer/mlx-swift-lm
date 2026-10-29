@@ -369,13 +369,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // rather than duplicating the leaf classification as a predicate that could drift from
         // it. Qwen's hybrid cache is the one typed exception: its target advertises a bounded
         // recurrent checkpoint and performs the round in place.
-        let nativeRewindDepth =
-            (mainModel as? any SpeculativeCacheRewindModel)?
-            .maximumNativeTargetCacheRewind ?? 0
-        let usesNativeHybridRewind =
-            nativeRewindDepth >= effectiveBlockSize - 1
-            && mainCache.contains { $0 is MambaCache }
-            && mainCache.allSatisfy { $0.isTrimmable || $0 is MambaCache }
+        let usesNativeHybridRewind = Self.verifiesInPlace(
+            mainModel: mainModel, mainCache: mainCache, drafts: effectiveBlockSize - 1)
         // A stream that decodes plainly opens no round, so its cache need not stage one.
         if speculates, !usesNativeHybridRewind {
             guard
@@ -464,9 +459,60 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     static let missingPromptHiddenReason =
         "MTP drafter has no target hidden state for the prompt; continuing without speculation"
 
+    /// The passthrough reason of a stream whose rotating main cache keeps a prefix (as
+    /// `maxKVSize` makes it), once a verify would reach past the window.
+    ///
+    /// A verify writes its tokens at once, and a write of several rows masks a window over them:
+    /// a query past the window does not see the kept prefix. Plain decode writes one token at a
+    /// time and each token sees the kept prefix. The verify would thus not give the plain tokens.
+    static let keptPrefixWindowReason =
+        "rotating main KV cache keeps a prefix, and a verify past its window does not attend as "
+        + "plain decode does; continuing without speculation"
+
     static let missingSharedKVSourcesReason =
         "main model did not report which cache entries its shared K/V came from; continuing "
         + "without speculation"
+
+    /// Whether a round of `drafts` drafts verifies in place on a hybrid target and rewinds its
+    /// rejected drafts there, rather than through a staged round.
+    ///
+    /// The target must keep a recurrent snapshot slot for each draft (Qwen's Gated DeltaNet
+    /// layers), and every attention entry must rewind the drafts after the verify wrote them:
+    /// see ``canRewindSpeculativeVerify(_:positions:)``. A rotating ring that has wrapped, from
+    /// `maxKVSize`, still rewinds them, thus such a stream keeps speculating past its window.
+    ///
+    /// - Parameters:
+    ///   - mainModel: The target model.
+    ///   - mainCache: The cache of the target.
+    ///   - drafts: The most drafts of the round.
+    /// - Returns: `true` when the round verifies in place.
+    static func verifiesInPlace(
+        mainModel: any LanguageModel, mainCache: [KVCache], drafts: Int
+    ) -> Bool {
+        let nativeRewindDepth =
+            (mainModel as? any SpeculativeCacheRewindModel)?.maximumNativeTargetCacheRewind ?? 0
+        return nativeRewindDepth >= drafts
+            && mainCache.contains { $0 is MambaCache }
+            && canRewindSpeculativeVerify(mainCache, positions: drafts + 1)
+    }
+
+    /// The drafts of a round that verifies in place: `drafts`, or fewer so that each query of the
+    /// verify attends as plain decode would attend at its position.
+    ///
+    /// Only a rotating main cache that keeps a prefix bounds the round, near its window: see
+    /// ``RotatingKVCache/rowsAttendingAsSingleRowWrites``. The verify holds the bonus and the
+    /// drafts.
+    ///
+    /// - Parameters:
+    ///   - drafts: The most drafts of the round.
+    ///   - mainCache: The cache of the target.
+    /// - Returns: The drafts, or `nil` when not one draft fits.
+    static func drafts(_ drafts: Int, fittingWindowOf mainCache: [KVCache]) -> Int? {
+        let fitting = mainCache.lazy
+            .compactMap { ($0 as? RotatingKVCache)?.rowsAttendingAsSingleRowWrites }
+            .reduce(drafts) { Swift.min($0, $1 - 1) }
+        return fitting > 0 ? fitting : nil
+    }
 
     /// The tightest sliding window among the cache's layers, or `nil` when no layer slides.
     static func narrowestSlidingWindow(in cache: [KVCache]) -> Int? {
@@ -808,7 +854,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // A speculative round can emit up to `maximumDrafts + 1` tokens: the
         // accepted draft prefix plus the verifier's correction/bonus token.
         // Keep the whole pending buffer within the remaining output budget.
-        let maximumDrafts: Int
+        let budgetedDrafts: Int
         if let maxTokens {
             let remaining = maxTokens - tokenCount
             guard remaining > 0 else { return }
@@ -820,9 +866,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 }
                 return
             }
-            maximumDrafts = draftBudget
+            budgetedDrafts = draftBudget
         } else {
-            maximumDrafts = blockSize - 1
+            budgetedDrafts = blockSize - 1
         }
 
         guard let state = mainState,
@@ -841,13 +887,21 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // keeps the snapshot slots of its recurrent entries and rewinds them in place by the
         // rejected drafts; the typed capability and
         // cache topology keep that exception fail-closed.
-        let nativeRewindDepth =
-            (mainModel as? any SpeculativeCacheRewindModel)?
-            .maximumNativeTargetCacheRewind ?? 0
-        let nativeHybridRewind =
-            nativeRewindDepth >= maximumDrafts
-            && mainCache.contains { $0 is MambaCache }
-            && mainCache.allSatisfy { $0.isTrimmable || $0 is MambaCache }
+        let nativeHybridRewind = Self.verifiesInPlace(
+            mainModel: mainModel, mainCache: mainCache, drafts: budgetedDrafts)
+        // An in-place verify past the window of a ring that keeps a prefix would not attend as
+        // plain decode does: shorten the round to the window, and stop speculating at it.
+        let maximumDrafts: Int
+        if nativeHybridRewind {
+            guard let fittingDrafts = Self.drafts(budgetedDrafts, fittingWindowOf: mainCache)
+            else {
+                switchToPassthrough(reason: Self.keptPrefixWindowReason)
+                return
+            }
+            maximumDrafts = fittingDrafts
+        } else {
+            maximumDrafts = budgetedDrafts
+        }
         let round =
             nativeHybridRewind
             ? nil : mainCacheStorage.beginRound(maximumPositions: maximumDrafts + 1)
@@ -964,7 +1018,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                     mainCache, numTokens: rejected)
                 precondition(
                     rewound == rejected,
-                    "Target advertised native speculative rewind depth \(nativeRewindDepth), but rewound \(rewound) of \(rejected) positions"
+                    "Target advertised an in-place speculative rewind of \(maximumDrafts) drafts, but rewound \(rewound) of \(rejected) positions"
                 )
                 // Qwen MTP: attention KV trims the rejected drafts while every
                 // GDN cache selects the snapshot slot of its last accepted
@@ -1412,11 +1466,8 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
         let lookahead = committedPendingTokenCount - consumed
         guard lookahead > 0 else { return }
 
-        let usesNativeHybridRewind =
-            ((mainModel as? any SpeculativeCacheRewindModel)?
-                .maximumNativeTargetCacheRewind ?? 0) >= blockSize - 1
-            && mainCache.contains { $0 is MambaCache }
-            && mainCache.allSatisfy { $0.isTrimmable || $0 is MambaCache }
+        let usesNativeHybridRewind = Self.verifiesInPlace(
+            mainModel: mainModel, mainCache: mainCache, drafts: blockSize - 1)
         let rewound: Int
         if usesNativeHybridRewind {
             let trimmed = mainCacheStorage.trim(lookahead)
