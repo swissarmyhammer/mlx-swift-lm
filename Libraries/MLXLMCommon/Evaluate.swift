@@ -1369,6 +1369,15 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     private var mainCommittedPendingTokenCount = 0
     private var draftCommittedPendingTokenCount = 0
 
+    /// Whether the main cache held the last token ``next()`` returned when it returned it.
+    ///
+    /// `true` for an accepted draft, which the verify pass of its round fed. The final token
+    /// of a round, the first token that the main prefill logits gave, and each token of a
+    /// plain round are returned before any forward pass feeds them.
+    public var hasCachedLastToken: Bool {
+        pendingIndex > 0 && pendingIndex - 1 < mainCommittedPendingTokenCount
+    }
+
     /// Why speculation stopped and the rest of the stream decodes one token at a time, or `nil`
     /// while rounds are still speculative. Engaged when a cache can neither stage nor trim a
     /// round: generation stays correct, it just stops speculating.

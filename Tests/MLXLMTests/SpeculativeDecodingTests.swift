@@ -404,7 +404,7 @@ struct SpeculativeDecodingTests {
 /// ``StableTransitionLanguageModel`` variant that maintains a real KV cache,
 /// so tests can assert cache-offset accounting (e.g. ``finalizeGeneration()``
 /// trimming verified-but-unreturned lookahead).
-private final class CacheTrackingTransitionModel: Module, LanguageModel,
+final class CacheTrackingTransitionModel: Module, LanguageModel,
     KVCacheDimensionProvider
 {
     let vocabularySize: Int
