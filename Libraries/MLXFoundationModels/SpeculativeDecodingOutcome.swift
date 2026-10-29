@@ -88,6 +88,14 @@ final class SpeculativeDecodingOutcome: Sendable {
             fallbackReason: info.speculativeDecodingFallbackReason)
     }
 
+    /// Records a fallback of the whole call that no pass reports, such as a drafter the memory
+    /// policy did not admit, which leaves every pass of the call to plain decode.
+    ///
+    /// - Parameter fallbackReason: Why the call decodes plainly.
+    func record(fallbackReason: SpeculativeDecodingFallbackReason) {
+        record(drafted: 0, accepted: 0, fallbackReason: fallbackReason)
+    }
+
     /// Runs one guided pass and records the MTP rounds and fallbacks it reported to its sink.
     ///
     /// A sink a test bound stays bound, and only what the pass added to it counts. With no

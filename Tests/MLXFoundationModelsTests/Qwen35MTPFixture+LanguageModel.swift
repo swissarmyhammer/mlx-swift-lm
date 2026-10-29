@@ -62,14 +62,20 @@ extension Qwen35MTPFixture {
     /// Each load makes a new fixture and hands out its drafter, thus `log` sees every load the
     /// model cache asks for.
     ///
-    /// - Parameter log: Records each load, or `nil`.
+    /// - Parameters:
+    ///   - log: Records each load, or `nil`.
+    ///   - drafterBytes: The byte estimate the memory policy weighs before the drafter loads,
+    ///     or `nil` for none.
+    ///   - memoryPolicy: The memory policy that admits the drafter, or `nil` for none.
     /// - Returns: The speculative decoding.
     /// - Throws: The error of the configuration when the drafter refuses the block size.
     static func makeSpeculativeDecoding(
-        log: DrafterLoadLog? = nil
+        log: DrafterLoadLog? = nil, drafterBytes: Int? = nil,
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) throws -> MLXSpeculativeDecoding {
         try MLXSpeculativeDecoding(
-            drafterConfiguration: drafterConfiguration, blockSize: blockSize
+            drafterConfiguration: drafterConfiguration, blockSize: blockSize,
+            drafterBytes: drafterBytes, memoryPolicy: memoryPolicy
         ) { configuration in
             let container = MTPDrafterContainer(
                 context: MTPDrafterContext(

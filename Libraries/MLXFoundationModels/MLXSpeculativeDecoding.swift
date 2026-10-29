@@ -7,7 +7,7 @@ import Foundation
 import MLXLMCommon
 
 /// MTP speculative decoding for an ``MLXLanguageModel``: the drafter checkpoint, how it loads,
-/// and the shape of each round.
+/// the memory policy that admits it, and the shape of each round.
 ///
 /// The model loads the drafter one time, on the first generation or warm-up that needs it, and
 /// keeps it beside its weights in the shared model cache; ``MLXLanguageModel/evict()`` drops
@@ -16,6 +16,13 @@ import MLXLMCommon
 /// to plain decode. Schema and required-tool output speculate too: each draft takes the grammar
 /// mask, and the output is the output of plain guided decoding.
 ///
+/// A ``memoryPolicy`` weighs the drafter beside the loaded model on each call, as the memory
+/// policy of a `ChatSession` does: with ``drafterBytes`` before the drafter loads, and without
+/// it on the parameters of the loaded drafter. A drafter the policy does not admit leaves the
+/// call to plain decode, which reports
+/// `SpeculativeDecodingFallbackReason.memoryBudgetExceeded`, or, under the `.fail` action, the
+/// call throws `SpeculativeDecodingMemoryError`. With an estimate, neither loads the drafter.
+///
 /// ```swift
 /// let model = MLXLanguageModel(
 ///     configuration: ModelConfiguration(id: "mlx-community/Qwen3.8-27B-4bit"),
@@ -23,7 +30,8 @@ import MLXLMCommon
 ///     speculativeDecoding: try MLXSpeculativeDecoding(
 ///         drafterConfiguration: ModelConfiguration(id: "mlx-community/Qwen3.8-27B-MTP-4bit"),
 ///         from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-///         registration: .qwen35Text),
+///         registration: .qwen35Text,
+///         drafterBytes: drafterBytes, memoryPolicy: .recommendedWorkingSet),
 ///     weightsLocation: weightsLocation,
 ///     load: load)
 /// ```
@@ -48,6 +56,14 @@ public struct MLXSpeculativeDecoding: Sendable {
     /// chain early; 0 drafts the whole block every round.
     public let minimumDraftProbability: Float
 
+    /// The estimated resident parameter bytes of the drafter, which ``memoryPolicy`` weighs
+    /// before the drafter loads, or `nil` to weigh the parameters of the loaded drafter.
+    public let drafterBytes: Int?
+
+    /// The memory policy that admits the drafter beside the loaded model on each call, or `nil`
+    /// to speculate whatever the drafter weighs.
+    public let memoryPolicy: SpeculativeDecodingMemoryPolicy?
+
     /// The loader of the drafter that drafts for a target, as the target loaded.
     private let pickDrafterLoader: @Sendable (any LanguageModel) -> DrafterLoader
 
@@ -62,6 +78,10 @@ public struct MLXSpeculativeDecoding: Sendable {
     ///   - drafterConfiguration: the drafter checkpoint, as a model id or a local directory.
     ///   - blockSize: the tokens of each round.
     ///   - minimumDraftProbability: the confidence floor of a chaining drafter, from 0 to 1.
+    ///   - drafterBytes: the estimated resident parameter bytes of the drafter, which
+    ///     `memoryPolicy` weighs before the drafter loads, or `nil`. A negative estimate counts
+    ///     as zero.
+    ///   - memoryPolicy: the memory policy that admits the drafter on each call, or `nil`.
     ///   - loadDrafter: loads the drafter container of `drafterConfiguration`.
     /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)`` when
     ///   `blockSize` is smaller than 2, and
@@ -72,11 +92,14 @@ public struct MLXSpeculativeDecoding: Sendable {
         blockSize: Int = SpeculativeDecodingConfig.defaultMTPBlockSize,
         minimumDraftProbability: Float =
             SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
+        drafterBytes: Int? = nil,
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
         loadDrafter: @escaping DrafterLoader
     ) throws {
         try self.init(
             drafterConfiguration: drafterConfiguration, blockSize: blockSize,
             minimumDraftProbability: minimumDraftProbability,
+            drafterBytes: drafterBytes, memoryPolicy: memoryPolicy,
             pickDrafterLoader: { _ in loadDrafter })
     }
 
@@ -101,8 +124,12 @@ public struct MLXSpeculativeDecoding: Sendable {
     ///     drafter model types that runs before the load.
     ///   - blockSize: the tokens of each round.
     ///   - minimumDraftProbability: the confidence floor of a chaining drafter, from 0 to 1.
+    ///   - drafterBytes: the estimated resident parameter bytes of the drafter, which
+    ///     `memoryPolicy` weighs before the drafter loads, or `nil`. A negative estimate counts
+    ///     as zero.
+    ///   - memoryPolicy: the memory policy that admits the drafter on each call, or `nil`.
     /// - Throws: the errors of
-    ///   ``init(drafterConfiguration:blockSize:minimumDraftProbability:loadDrafter:)``.
+    ///   ``init(drafterConfiguration:blockSize:minimumDraftProbability:drafterBytes:memoryPolicy:loadDrafter:)``.
     public init(
         drafterConfiguration: ModelConfiguration,
         from downloader: any Downloader,
@@ -110,11 +137,14 @@ public struct MLXSpeculativeDecoding: Sendable {
         registration: MTPDrafterRegistration,
         blockSize: Int = SpeculativeDecodingConfig.defaultMTPBlockSize,
         minimumDraftProbability: Float =
-            SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability
+            SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
+        drafterBytes: Int? = nil,
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) throws {
         try self.init(
             drafterConfiguration: drafterConfiguration, blockSize: blockSize,
             minimumDraftProbability: minimumDraftProbability,
+            drafterBytes: drafterBytes, memoryPolicy: memoryPolicy,
             pickDrafterLoader: { target in
                 registration.drafterLoader(
                     for: target, from: downloader, using: tokenizerLoader)
@@ -125,6 +155,7 @@ public struct MLXSpeculativeDecoding: Sendable {
     /// checking the block size and the confidence floor.
     private init(
         drafterConfiguration: ModelConfiguration, blockSize: Int, minimumDraftProbability: Float,
+        drafterBytes: Int?, memoryPolicy: SpeculativeDecodingMemoryPolicy?,
         pickDrafterLoader: @escaping @Sendable (any LanguageModel) -> DrafterLoader
     ) throws {
         try SpeculativeDecodingConfig.validate(mtpBlockSize: blockSize)
@@ -132,6 +163,8 @@ public struct MLXSpeculativeDecoding: Sendable {
         self.drafterConfiguration = drafterConfiguration
         self.blockSize = blockSize
         self.minimumDraftProbability = minimumDraftProbability
+        self.drafterBytes = drafterBytes.map { max(0, $0) }
+        self.memoryPolicy = memoryPolicy
         self.pickDrafterLoader = pickDrafterLoader
     }
 
@@ -141,6 +174,42 @@ public struct MLXSpeculativeDecoding: Sendable {
     /// - Returns: the loader.
     func drafterLoader(for target: any LanguageModel) -> DrafterLoader {
         pickDrafterLoader(target)
+    }
+
+    /// Whether ``memoryPolicy`` admits the drafter beside `target` before the drafter loads.
+    ///
+    /// The policy weighs the parameters of `target` and ``drafterBytes``. With no policy, or
+    /// no estimate to weigh, the drafter may load, and
+    /// ``admitsLoadedDrafter(_:beside:)`` decides on the loaded drafter.
+    ///
+    /// - Parameter target: the loaded model the drafter speculates for.
+    /// - Returns: `false` when the policy does not admit the estimate, else `true`.
+    /// - Throws: `SpeculativeDecodingMemoryError` when the policy does not admit the estimate
+    ///   and its action is `.fail`.
+    func admitsDrafterBeforeLoading(beside target: any LanguageModel) throws -> Bool {
+        guard let memoryPolicy, let drafterBytes else { return true }
+        return try memoryPolicy.admitsSpeculation(
+            mainModelBytes: SpeculativeDecodingMemoryPolicy.modelWeightBytes(target),
+            draftModelBytes: drafterBytes)
+    }
+
+    /// Whether ``memoryPolicy`` admits the loaded `drafter` beside `target`, when it had no
+    /// estimate to weigh before the load.
+    ///
+    /// - Parameters:
+    ///   - drafter: the loaded drafter.
+    ///   - target: the loaded model the drafter speculates for.
+    /// - Returns: `false` when the policy weighed the parameters of both models and does not
+    ///   admit them, else `true`.
+    /// - Throws: `SpeculativeDecodingMemoryError` when the policy does not admit the drafter and
+    ///   its action is `.fail`.
+    func admitsLoadedDrafter(
+        _ drafter: any MTPDrafterModel, beside target: any LanguageModel
+    ) throws -> Bool {
+        guard let memoryPolicy, drafterBytes == nil else { return true }
+        return try memoryPolicy.admitsSpeculation(
+            mainModelBytes: SpeculativeDecodingMemoryPolicy.modelWeightBytes(target),
+            draftModelBytes: SpeculativeDecodingMemoryPolicy.modelWeightBytes(drafter))
     }
 
     /// The speculation of a generation with the drafter of `container`.

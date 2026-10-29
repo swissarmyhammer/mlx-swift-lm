@@ -164,20 +164,45 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// loaded target picks the drafter loader, so a registration that matches the target
     /// loads the drafter family of the target as it loaded.
     ///
+    /// The memory policy of ``speculativeDecoding`` weighs the drafter beside the loaded
+    /// target first: on its byte estimate before the load, else on the loaded drafter. A
+    /// drafter it does not admit gives `nil`, and the call reports
+    /// `SpeculativeDecodingFallbackReason.memoryBudgetExceeded`; a drafter the estimate does
+    /// not admit never loads.
+    ///
     /// - Parameter container: the loaded target, from ``loadContainer()``.
     /// - Returns: the speculation, or `nil`.
-    /// - Throws: the error of the drafter load.
+    /// - Throws: the error of the drafter load, and `SpeculativeDecodingMemoryError` when the
+    ///   memory policy does not admit the drafter and its action is `.fail`.
     func loadMTPSpeculation(for container: ModelContainer) async throws -> MTPSpeculation? {
         guard let speculativeDecoding else { return nil }
-        let loadDrafter = await container.perform { context in
-            speculativeDecoding.drafterLoader(for: context.model)
+        let (loadDrafter, admitsDrafter) = try await container.perform { context in
+            (
+                speculativeDecoding.drafterLoader(for: context.model),
+                try speculativeDecoding.admitsDrafterBeforeLoading(beside: context.model)
+            )
         }
+        guard admitsDrafter else { return Self.memoryBudgetFallback() }
         let drafter = try await Self.cache.loadDrafter(
             ModelCache.DrafterKey(modelID: modelID, drafterID: speculativeDecoding.drafterID)
         ) {
             try await loadDrafter(speculativeDecoding.drafterConfiguration)
         }
-        return await speculativeDecoding.speculation(with: drafter)
+        let speculation = await speculativeDecoding.speculation(with: drafter)
+        let admitsLoadedDrafter = try await container.perform(nonSendable: speculation) {
+            context, speculation in
+            try speculativeDecoding.admitsLoadedDrafter(speculation.drafter, beside: context.model)
+        }
+        return admitsLoadedDrafter ? speculation : Self.memoryBudgetFallback()
+    }
+
+    /// The speculation of a call whose memory policy did not admit the drafter: none. The
+    /// call reports `SpeculativeDecodingFallbackReason.memoryBudgetExceeded`.
+    ///
+    /// - Returns: `nil`.
+    private static func memoryBudgetFallback() -> MTPSpeculation? {
+        SpeculativeDecodingOutcome.current?.record(fallbackReason: .memoryBudgetExceeded)
+        return nil
     }
 
     /// The process-global MLX buffer-reuse pool limit in bytes: 256 binary

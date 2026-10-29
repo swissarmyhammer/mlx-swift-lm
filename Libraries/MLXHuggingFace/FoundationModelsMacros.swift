@@ -34,14 +34,16 @@ import MLXLMCommon
 /// loader is `loadModelContainer`, which tries `VLMModelFactory` first, so
 /// with MLXVLM linked a Qwen3.5-family target loads as a vision-language
 /// model and its drafter takes the `.qwen35VLM` registration of MLXVLM
-/// (`import MLXVLM`):
+/// (`import MLXVLM`). The macro forwards `speculativeDecoding` as written, so
+/// its memory policy and drafter byte estimate reach the model:
 /// ```swift
 /// let model = #huggingFaceLanguageModel(
 ///     configuration: ModelConfiguration(id: "mlx-community/Qwen3.8-27B-4bit"),
 ///     speculativeDecoding: try MLXSpeculativeDecoding(
 ///         drafterConfiguration: ModelConfiguration(id: "mlx-community/Qwen3.8-27B-MTP-4bit"),
 ///         from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-///         registration: .qwen35VLM))
+///         registration: .qwen35VLM,
+///         drafterBytes: drafterBytes, memoryPolicy: .recommendedWorkingSet))
 /// ```
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 @freestanding(expression)
