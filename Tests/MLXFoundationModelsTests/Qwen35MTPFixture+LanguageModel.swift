@@ -3,6 +3,7 @@
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 import Foundation
+import FoundationModels
 import MLXLMCommon
 import MLXLMTestSupport
 
@@ -11,22 +12,133 @@ import MLXLMTestSupport
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 extension Qwen35MTPFixture {
 
+    /// The drafter configuration the speculative decoding of the fixture names.
+    static let drafterConfiguration = ModelConfiguration(id: "probe/qwen35-mtp-fixture-drafter")
+
     /// A FoundationModels language model whose load gives the container of the fixture's
     /// target, so that an executor test can run a `LanguageModelSession` on it.
     ///
     /// The model takes a fresh identity, thus the process-wide model cache keeps it apart
     /// from every other test.
     ///
-    /// - Parameter weights: The directory that makes the model available, from
-    ///   `makeScriptedWeightsDirectory()`.
+    /// - Parameters:
+    ///   - weights: The directory that makes the model available, from
+    ///     `makeScriptedWeightsDirectory()`.
+    ///   - capabilities: The capabilities the model declares.
+    ///   - resolver: The resolver that patches the configuration of each call.
+    ///   - eosTokenIds: The tokens that end a generation.
+    ///   - tokenizer: The tokenizer that renders the prompts and decodes the replies, or `nil`
+    ///     for the fixture's own.
+    ///   - speculativeDecoding: The MTP drafter of the model, or `nil` for plain decode.
     /// - Returns: The model.
-    func makeLanguageModel(weights: URL) -> MLXLanguageModel {
-        let container = makeModelContainer()
+    func makeLanguageModel(
+        weights: URL, capabilities: [LanguageModelCapabilities.Capability] = [],
+        resolver: any ModelConfigurationResolver = DefaultConfigurationResolver(),
+        eosTokenIds: Set<Int> = [], tokenizer: (any Tokenizer)? = nil,
+        speculativeDecoding: MLXSpeculativeDecoding? = nil
+    ) -> MLXLanguageModel {
+        var context = makeModelContext(eosTokenIds: eosTokenIds)
+        if let tokenizer {
+            context.tokenizer = tokenizer
+            context.processor = ScalarTokenizerInputProcessor(
+                tokenizer: tokenizer, configuration: context.configuration)
+        }
+        let container = ModelContainer(context: context)
         return MLXLanguageModel(
             configuration: ModelConfiguration(id: "probe/qwen35-mtp-fixture-\(UUID().uuidString)"),
-            capabilities: [],
+            capabilities: capabilities,
+            configurationResolver: resolver,
+            speculativeDecoding: speculativeDecoding,
             weightsLocation: { _ in weights },
             load: { _, _ in container })
+    }
+
+    /// Speculative decoding with the drafter of a fixture, in rounds of ``blockSize``.
+    ///
+    /// Each load makes a new fixture and hands out its drafter, thus `log` sees every load the
+    /// model cache asks for.
+    ///
+    /// - Parameter log: Records each load, or `nil`.
+    /// - Returns: The speculative decoding.
+    /// - Throws: The error of the configuration when the drafter refuses the block size.
+    static func makeSpeculativeDecoding(
+        log: DrafterLoadLog? = nil
+    ) throws -> MLXSpeculativeDecoding {
+        try MLXSpeculativeDecoding(
+            drafterConfiguration: drafterConfiguration, blockSize: blockSize
+        ) { configuration in
+            let container = MTPDrafterContainer(
+                context: MTPDrafterContext(
+                    configuration: configuration, model: try Qwen35MTPFixture().drafter))
+            log?.recordLoad(of: container)
+            return container
+        }
+    }
+}
+
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+extension Qwen35VLMMTPFixture {
+
+    /// A FoundationModels language model over the fixture's target, which reads images, with
+    /// its MTP drafter or without it.
+    ///
+    /// The fixture must read images, as `init(seed:readsImages:)` makes it.
+    ///
+    /// - Parameters:
+    ///   - weights: The directory that makes the model available.
+    ///   - speculates: Whether the model speculates with the fixture's drafter.
+    /// - Returns: The model, which declares `.vision`.
+    /// - Throws: The error of the configuration when the drafter refuses the block size.
+    func makeLanguageModel(weights: URL, speculates: Bool) throws -> MLXLanguageModel {
+        let container = makeModelContainer()
+        let speculativeDecoding =
+            speculates
+            ? try MLXSpeculativeDecoding(
+                drafterConfiguration: Qwen35MTPFixture.drafterConfiguration,
+                blockSize: Qwen35MTPFixture.blockSize
+            ) { configuration in
+                MTPDrafterContainer(
+                    context: MTPDrafterContext(
+                        configuration: configuration,
+                        model: try Qwen35VLMMTPFixture(readsImages: true).drafter))
+            } : nil
+        return MLXLanguageModel(
+            configuration: ModelConfiguration(id: "probe/qwen35-vlm-mtp-\(UUID().uuidString)"),
+            capabilities: [.vision],
+            speculativeDecoding: speculativeDecoding,
+            weightsLocation: { _ in weights },
+            load: { _, _ in container })
+    }
+}
+
+/// The loads of an MTP drafter, and whether the drafter each load gave is still alive.
+///
+/// The model cache loads on its own task and the test reads on its task, thus every access
+/// takes the lock, which is the invariant behind `@unchecked Sendable`.
+final class DrafterLoadLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var loads: [WeakDrafter] = []
+
+    /// A loaded drafter container, held weakly so the log keeps none alive.
+    private struct WeakDrafter {
+        weak var container: MTPDrafterContainer?
+    }
+
+    /// Records one load that gave `container`.
+    ///
+    /// - Parameter container: The container the load gave.
+    func recordLoad(of container: MTPDrafterContainer) {
+        lock.withLock { loads.append(WeakDrafter(container: container)) }
+    }
+
+    /// The number of loads so far.
+    var loadCount: Int {
+        lock.withLock { loads.count }
+    }
+
+    /// The number of loaded drafters something still holds.
+    var liveDrafterCount: Int {
+        lock.withLock { loads.filter { $0.container != nil }.count }
     }
 }
 

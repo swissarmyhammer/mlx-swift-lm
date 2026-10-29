@@ -155,4 +155,23 @@ public struct MTPDrafterRegistration: Sendable {
         self.factory = factory
         self.registerDrafterTypes = registerDrafterTypes
     }
+
+    /// Registers the drafter model types, then loads the drafter of `configuration` with
+    /// ``factory``.
+    ///
+    /// - Parameters:
+    ///   - downloader: the downloader that fetches a remote checkpoint
+    ///   - tokenizerLoader: the tokenizer loader the factory takes; an MTP drafter borrows the
+    ///     tokenizer of its target, so the load reads no tokenizer
+    ///   - configuration: the drafter checkpoint, as a model id or a local directory
+    /// - Returns: the loaded drafter
+    /// - Throws: the error of the load
+    public func loadContainer(
+        from downloader: any Downloader, using tokenizerLoader: any TokenizerLoader,
+        configuration: ModelConfiguration
+    ) async throws -> MTPDrafterContainer {
+        await registerDrafterTypes()
+        return try await factory.loadContainer(
+            from: downloader, using: tokenizerLoader, configuration: configuration)
+    }
 }

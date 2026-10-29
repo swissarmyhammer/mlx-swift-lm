@@ -98,11 +98,12 @@ public struct ScalarTokenizer: Tokenizer {
     }
 }
 
-/// An input processor that renders the messages of a `UserInput` with a ``ScalarTokenizer``.
+/// An input processor that renders the messages of a `UserInput` with the chat template of a
+/// test tokenizer, such as ``ScalarTokenizer``.
 public struct ScalarTokenizerInputProcessor: UserInputProcessor {
 
     /// The tokenizer that renders the messages.
-    public let tokenizer: ScalarTokenizer
+    public let tokenizer: any Tokenizer
 
     /// The configuration of the model of the processor.
     public let configuration: ModelConfiguration
@@ -112,7 +113,7 @@ public struct ScalarTokenizerInputProcessor: UserInputProcessor {
     /// - Parameters:
     ///   - tokenizer: The tokenizer that renders the messages.
     ///   - configuration: The configuration of the model of the processor.
-    public init(tokenizer: ScalarTokenizer, configuration: ModelConfiguration) {
+    public init(tokenizer: any Tokenizer, configuration: ModelConfiguration) {
         self.tokenizer = tokenizer
         self.configuration = configuration
     }

@@ -104,30 +104,67 @@ public enum Qwen35FixtureJSON {
                 mtpLayers: mtpLayers, hiddenSize: hiddenSize, vocabularySize: vocabularySize))
     }
 
+    /// The image tokens of a vision-language configuration that reads images: the token that
+    /// opens an image, and the placeholder token of each of its patches.
+    public struct ImageTokens: Sendable {
+
+        /// The token that opens an image in the prompt.
+        public let visionStart: Int
+
+        /// The placeholder token of one patch of an image.
+        public let image: Int
+
+        /// Names the image tokens.
+        ///
+        /// - Parameters:
+        ///   - visionStart: The token that opens an image.
+        ///   - image: The placeholder token of one patch.
+        public init(visionStart: Int, image: Int) {
+            self.visionStart = visionStart
+            self.image = image
+        }
+    }
+
     /// The JSON of a small Qwen 3.5 vision-language configuration.
     ///
-    /// - Parameter textConfigJSON: The JSON of the text configuration, from
-    ///   ``text(mtpLayers:mtpUseDedicatedEmbeddings:numExperts:expertsPerToken:hiddenLayers:fullAttentionInterval:hiddenSize:vocabularySize:tieWordEmbeddings:headDimension:)``.
+    /// - Parameters:
+    ///   - textConfigJSON: The JSON of the text configuration, from
+    ///     ``text(mtpLayers:mtpUseDedicatedEmbeddings:numExperts:expertsPerToken:hiddenLayers:fullAttentionInterval:hiddenSize:vocabularySize:tieWordEmbeddings:headDimension:)``.
+    ///   - visionOutputSize: The width of the features the vision tower gives the language model.
+    ///     A model that reads images needs the width of the hidden state of its text model.
+    ///   - imageTokens: The image tokens, or `nil` for the defaults of the configuration, which a
+    ///     small vocabulary does not hold.
     /// - Returns: The JSON text, with a tiny vision tower.
-    public static func visionLanguage(textConfigJSON: String) -> String {
-        """
-        {
-          "model_type": "qwen3_5",
-          "text_config": \(textConfigJSON),
-          "vision_config": {
-            "model_type": "qwen3_5_vit",
-            "depth": 1,
-            "hidden_size": 16,
-            "intermediate_size": 32,
-            "out_hidden_size": 16,
-            "num_heads": 2,
-            "patch_size": 2,
-            "spatial_merge_size": 1,
-            "temporal_patch_size": 1,
-            "num_position_embeddings": 16
-          }
-        }
-        """
+    public static func visionLanguage(
+        textConfigJSON: String, visionOutputSize: Int = defaultHiddenSize,
+        imageTokens: ImageTokens? = nil
+    ) -> String {
+        let imageTokenFields =
+            imageTokens.map {
+                """
+                "vision_start_token_id": \($0.visionStart),
+                  "image_token_id": \($0.image),
+                """
+            } ?? ""
+        return """
+            {
+              "model_type": "qwen3_5",
+              \(imageTokenFields)
+              "text_config": \(textConfigJSON),
+              "vision_config": {
+                "model_type": "qwen3_5_vit",
+                "depth": 1,
+                "hidden_size": 16,
+                "intermediate_size": 32,
+                "out_hidden_size": \(visionOutputSize),
+                "num_heads": 2,
+                "patch_size": 2,
+                "spatial_merge_size": 1,
+                "temporal_patch_size": 1,
+                "num_position_embeddings": 16
+              }
+            }
+            """
     }
 
     /// The JSON of a Qwen 3.5 configuration that wraps a small text configuration without a

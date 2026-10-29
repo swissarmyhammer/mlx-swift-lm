@@ -1,6 +1,31 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m62mgkf93kcbsx54jwnb4m56
+  text: |-
+    Picked up (mtp @ 3222fb36). Research:
+    - MLXFoundationModels does not import MLXLLM/MLXVLM, so `MLXSpeculativeDecoding` carries an `MTPDrafterRegistration` (MLXLMCommon, public: `.qwen35Text` / `.qwen35VLM`) plus downloader/tokenizer loader, mirroring `SpeculativeDecodingConfig(mtpDrafterConfiguration:...registration:)`, and a closure form for tests.
+    - Executor paths: runUnconstrained/runReasoning/runAllowedToolGeneration use `generateTaskRecordingTokens` / `generateProtocolTokensTask` (package, Evaluate.swift); think-then-call phase 1 uses public `generateTokensTask`; phase 2 and schema use GuidedGenerationLoop (separate task ^SJR74AK). Plan: a package `MTPSpeculation` (drafter + blockSize + floor) and one iterator choice helper (MTP when `isCompatible(with:)`, TokenIterator otherwise or on `unsupportedSpeculativeCache`), a package `generateTokensTask(... speculation:)` overload for phase 1.
+    - Prompt cache: `ExecutorPromptCachePlan.commitOutcome` takes the ledger from the cache POSITION (`generatedTokens.prefix(position - ledger)`), so an MTP bonus token that no forward fed never enters the ledger; main-cache prefix reuse keeps working, and a warm cache without a continuation cold-starts the resumable Qwen drafter at the cached position (^5fq... cold start work). Drafter state reuse across turns is ^SJQVM27's job; this card adds the completion callback it will consume.
+    - Usage: `generatedTokenCount(of:)` adds the stop token only when `stopTokenFedToCache` is set; an MTP stop on the bonus slot is not fed, so usage would be one lower than plain decode. Needs the loop to report the generated stop token itself.
+    - Test fixture gaps: `ScalarTokenizer.convertIdToToken` never returns nil, so `TokenizerVocabExtractor` (required-tool / think-then-call grammar tokenizer) loops forever on it; `Qwen35VLMMTPFixture`'s vision tower outputs 16 wide into a 32-wide text model and its image token ids are outside the 64 vocab, so an image turn cannot run on it as is.
+    - ChatSession sends media turns to plain decode (`.unsupportedMedia`); the VLM Qwen35 target does feed MTP state for image prompts (prepareContinuation chunk handler with rope deltas), so the executor will speculate on image turns.
+  timestamp: 2026-10-29T01:31:10.697902+00:00
+- actor: claude-code
+  id: 01m62qdmpcgpwnbmm2pgwwa8hb
+  text: |-
+    implement step: MTP wired into MLXLanguageModel.
+    - New `MLXSpeculativeDecoding` (drafter config + blockSize, validated through `ChatSession.validate(mtpBlockSize:)`); `MLXLanguageModel(speculativeDecoding:)`.
+    - ModelCache: generic coalesced LoadTask; drafter slot keyed by (modelID, drafterID); remove/evictAll drop or cancel drafters.
+    - MLXLMCommon: `MTPSpeculation.makeTokenIterator` (MTP when isCompatible, else TokenIterator; unsupported cache falls back). `generateTaskRecordingTokens` / `generateProtocolTokensTask` / package `generateTokensTask` take `speculation:` and a `drafterContinuation` completion callback for ^SJQVM27 to use. `GenerateCompletionInfo.discardedStopToken` lets usage counting stay correct when a bonus-slot stop token never reaches the cache.
+    - Executor: speculation is loaded before container.perform and passed in. Drafter runs inside the same perform with no nested perform. The think-then-call phase-1 drafter state ends with its task (comment + test). On close, phase 1 cancels and keeps draining. warmUp loads the drafter and runs a short greedy MTP stream.
+    - Tests: MTPSpeculationTests (7), MTPExecutorTests (11). Greedy parity for text, reasoning, allowed tools, think-then-call, VLM image, `.uncached`; seeded sampling repeats; drafter loads once across sessions and warmUp; eviction frees it; usage is the same. Integration test MTPGenerationTests.swift.
+    - Results: all 5 bundles pass (MLXLMTests 1988+920, MLXFoundationModelsTests 388, MLXGuidedGenerationTests 70, CXGrammarTests 7, macros 5); 0 warnings; lint clean on new files.
+    - Release: MTPGenerationTests MTP 85.7 vs plain 59.7 tok/s on math. qwen38FourBitMTPGeneration 91.7/82.3/80.3 (plain ~59). qwen38FourBitMTPSystemPromptCache passes (edit turn prefilled 123). qwen38FourBitMTPSampledGeneration passes.
+    - Note: an incompatible drafter (e.g. a target loaded as VLM by loadModelContainer) silently falls back to plain decoding. That is worth a follow-up task to report it.
+  timestamp: 2026-10-29T02:21:59.372069+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
@@ -8,8 +33,8 @@ depends_on:
 - 01M5QWGEWP4506CZYXCPV3C64M
 - 01M5QWJ40KYCBZ9SW5CR9AH2BJ
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: todo
-position_ordinal: 8f80
+position_column: doing
+position_ordinal: '8180'
 title: 'MTP: FoundationModels — run MLXLanguageModel text, reasoning and tool turns with the MTP drafter'
 ---
 ## What

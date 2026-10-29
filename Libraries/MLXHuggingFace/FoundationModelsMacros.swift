@@ -33,7 +33,7 @@ import MLXLMCommon
 public macro huggingFaceLanguageModel(
     configuration: ModelConfiguration,
     // The `capabilities` / `configurationResolver` defaults mirror
-    // `MLXLanguageModel.init(configuration:capabilities:configurationResolver:weightsLocation:load:)`.
+    // `MLXLanguageModel.init(configuration:capabilities:configurationResolver:speculativeDecoding:weightsLocation:load:)`.
     // The expansion forwards each argument only when the caller supplies it, so
     // an omitted argument falls through to the initializer's own default rather
     // than the value written here — keep the two in sync so this signature does

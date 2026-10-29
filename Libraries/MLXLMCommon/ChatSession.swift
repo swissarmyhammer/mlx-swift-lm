@@ -114,6 +114,20 @@ public struct SpeculativeDecodingConfig: Sendable {
     /// The probabilities a confidence floor can take.
     private static let minimumDraftProbabilityRange: ClosedRange<Float> = 0 ... 1
 
+    /// The smallest MTP block: one draft and the bonus token.
+    private static let minimumMTPBlockSize = 2
+
+    /// Checks that `blockSize` holds at least one draft beside the bonus token.
+    ///
+    /// - Parameter blockSize: The tokens of each MTP round.
+    /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)`` when it does
+    ///   not.
+    package static func validate(mtpBlockSize blockSize: Int) throws {
+        guard blockSize >= minimumMTPBlockSize else {
+            throw SpeculativeDecodingConfigurationError.invalidMTPBlockSize(blockSize)
+        }
+    }
+
     /// Checks that `minimumDraftProbability` is a probability from 0 to 1.
     ///
     /// - Parameter minimumDraftProbability: The confidence floor of a chaining MTP drafter.
@@ -309,8 +323,7 @@ public struct SpeculativeDecodingConfig: Sendable {
             mtpDrafterBytes: mtpDrafterBytes, blockSize: blockSize,
             minimumDraftProbability: minimumDraftProbability, memoryPolicy: memoryPolicy
         ) {
-            await registration.registerDrafterTypes()
-            return try await registration.factory.loadContainer(
+            try await registration.loadContainer(
                 from: downloader, using: tokenizerLoader, configuration: configuration)
         }
     }
@@ -321,9 +334,7 @@ public struct SpeculativeDecodingConfig: Sendable {
         mtpDrafterSource source: MTPDrafterSource, blockSize: Int,
         minimumDraftProbability: Float, memoryPolicy: SpeculativeDecodingMemoryPolicy?
     ) throws {
-        guard blockSize >= 2 else {
-            throw SpeculativeDecodingConfigurationError.invalidMTPBlockSize(blockSize)
-        }
+        try Self.validate(mtpBlockSize: blockSize)
         try Self.validate(minimumDraftProbability: minimumDraftProbability)
 
         self.strategy = .mtp(

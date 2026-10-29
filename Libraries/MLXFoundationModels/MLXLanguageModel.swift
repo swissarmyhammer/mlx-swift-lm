@@ -118,8 +118,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// On-disk resolution (`weightsLocation`) and download progress use
     /// `configuration.name`, not this value: both want a path-shaped id.
     public var modelID: String {
+        Self.cacheIdentity(of: configuration)
+    }
+
+    /// The identity of a checkpoint in the model cache: `"\(id)@\(revision)"` for a Hub
+    /// checkpoint at a revision other than ``defaultRevision``, else `configuration.name`.
+    ///
+    /// ``modelID`` names the model with it, and an MTP drafter
+    /// (``MLXSpeculativeDecoding``) names its drafter checkpoint with it.
+    ///
+    /// - Parameter configuration: the checkpoint.
+    /// - Returns: the identity.
+    static func cacheIdentity(of configuration: ModelConfiguration) -> String {
         switch configuration.id {
-        case .id(let id, let revision) where revision != Self.defaultRevision:
+        case .id(let id, let revision) where revision != defaultRevision:
             return "\(id)@\(revision)"
         case .id, .directory:
             return configuration.name
@@ -141,6 +153,25 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             modelID: modelID,
             suppressDownloadingState: suppressDownloadingState,
             loader: makeContainerLoader())
+    }
+
+    /// The speculation of the generations of one response: the MTP drafter of
+    /// ``speculativeDecoding``, which the shared model cache loads one time beside
+    /// this model, or `nil` when the model has none.
+    ///
+    /// The drafter model leaves its container here, before the response enters the
+    /// target's `ModelContainer.perform`, thus no generation nests a second lock.
+    ///
+    /// - Returns: the speculation, or `nil`.
+    /// - Throws: the error of the drafter load.
+    func loadMTPSpeculation() async throws -> MTPSpeculation? {
+        guard let speculativeDecoding else { return nil }
+        let drafter = try await Self.cache.loadDrafter(
+            ModelCache.DrafterKey(modelID: modelID, drafterID: speculativeDecoding.drafterID)
+        ) {
+            try await speculativeDecoding.loadDrafter(speculativeDecoding.drafterConfiguration)
+        }
+        return await speculativeDecoding.speculation(with: drafter)
     }
 
     /// The process-global MLX buffer-reuse pool limit in bytes: 256 binary
@@ -338,7 +369,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// `.allowed` tool routing, guided `.required` developer tool calls,
     /// and reasoning (chain-of-thought) routing.
     ///
-    /// Capabilities are declared explicitly by the caller at ``init(configuration:capabilities:configurationResolver:weightsLocation:load:)``
+    /// Capabilities are declared explicitly by the caller at ``init(configuration:capabilities:configurationResolver:speculativeDecoding:weightsLocation:load:)``
     /// and stored verbatim. The caller includes
     /// `.guidedGeneration`/`.toolCalling`/`.reasoning` as appropriate; the
     /// adapter does not consult ``ReasoningHeuristics`` (which remains a
@@ -355,6 +386,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// for this instance. Defaults to ``DefaultConfigurationResolver`` when
     /// omitted.
     public let configurationResolver: any ModelConfigurationResolver
+
+    /// The MTP drafter the text, reasoning and tool turns of this model speculate
+    /// with, or `nil` for plain decode.
+    public let speculativeDecoding: MLXSpeculativeDecoding?
 
     /// Configuration the framework uses to create and cache executors.
     public var executorConfiguration: Executor.Configuration {
@@ -374,6 +409,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///     Stored verbatim; the adapter never infers or expands the set.
     ///   - configurationResolver: Patches a per-call ``ModelConfiguration``
     ///     (reasoning config, extra stop tokens) for this instance.
+    ///   - speculativeDecoding: The MTP drafter the text, reasoning and tool
+    ///     turns speculate with, or `nil` for plain decode.
     ///   - weightsLocation: Resolves a model identifier to its on-disk weights
     ///     directory, for the availability checks.
     ///   - load: Loads the model container for a configuration.
@@ -390,12 +427,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
         configurationResolver: any ModelConfigurationResolver =
             DefaultConfigurationResolver(),
+        speculativeDecoding: MLXSpeculativeDecoding? = nil,
         weightsLocation: @Sendable @escaping (String) -> URL,
         load: @escaping ContainerLoader
     ) {
         self.configuration = configuration
         self.capabilities = LanguageModelCapabilities(capabilities)
         self.configurationResolver = configurationResolver
+        self.speculativeDecoding = speculativeDecoding
         self.weightsLocation = weightsLocation
         self.load = load
     }
@@ -471,12 +510,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         _ = try await Self.makeGrammarTokenizer(
             modelID: modelID, tokenizer: tokenizer)
 
+        // The MTP drafter loads here too, once, into the same model cache a
+        // later `respond` reads.
+        let speculation = try await loadMTPSpeculation()
+
         // Force Metal shader JIT with a minimal 1-token generate, run inside
         // `perform` so the forward pass + synchronize serialize against any
         // concurrent `respond`. `maxTokens: 1` makes the stream end on
         // its own; we consume it fully (no early break) so generation runs to
         // completion and leaves no dangling GPU work to race the teardown sync.
-        try await container.perform { context in
+        try await container.perform(nonSendable: speculation) { context, speculation in
             // Exactly one synchronize on every exit path (success or throw),
             // per the Metal teardown invariant. `prepare` is CPU-only, so on a
             // pre-forward-pass throw this just synchronizes an idle stream.
@@ -489,7 +532,37 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             ) {
                 // Drain to completion.
             }
+            if let speculation {
+                try await Self.warmUp(speculation, input: input, context: context)
+            }
         }
+    }
+
+    /// The token the prefill of an MTP stream samples before its first round.
+    private static let prefillBonusTokenCount = 1
+
+    /// Runs one short greedy MTP stream, so the first speculating `respond` pays
+    /// no shader-JIT cost for the drafter and verify kernels.
+    ///
+    /// The stream runs the prefill bonus and one full round, and is drained to its
+    /// end, as the plain warm-up generate is.
+    ///
+    /// - Parameters:
+    ///   - speculation: the drafter of the model.
+    ///   - input: the warm-up prompt.
+    ///   - context: the loaded model context.
+    /// - Throws: the error of the iterator.
+    private static func warmUp(
+        _ speculation: MTPSpeculation, input: LMInput, context: ModelContext
+    ) async throws {
+        let parameters = GenerateParameters(
+            maxTokens: prefillBonusTokenCount + speculation.blockSize, temperature: 0)
+        let (stream, task) = try generateTokensTask(
+            input: input, parameters: parameters, context: context, speculation: speculation)
+        for await _ in stream {
+            // Drain to completion.
+        }
+        await task.value
     }
 
     // MARK: - Executor
@@ -599,21 +672,23 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 cachedTokenCount: promptCache.reusedTokenCount)
         }
 
-        /// Every token a pass generated and its caches hold, the stop token
-        /// included.
+        /// Every token a pass generated, the stop token included.
         ///
         /// The generation loop leaves the stop token out of
         /// `generationTokenCount` when it suppresses that token from the
-        /// output, and names it in `stopTokenFedToCache` instead: its forward
-        /// pass already advanced the caches. The prompt-cache ledger holds it,
-        /// thus the output count a turn reports adds it back, and the prompt
-        /// count plus the output count of a turn reaches every token the next
-        /// turn can reuse.
+        /// output, and names it in `discardedStopToken` instead, thus the
+        /// output count a turn reports adds it back. Plain decode feeds the
+        /// stop token to the caches before it returns it; MTP decode can
+        /// return it as the last token of a round, which no forward pass fed.
+        /// Both report the same count, because both generated the token. The
+        /// prompt-cache ledger follows the caches alone
+        /// (`ExecutorPromptCachePlan.commitOutcome`), thus the next turn
+        /// reuses what the caches hold either way.
         ///
         /// - Parameter info: the completion report of the pass.
-        /// - Returns: the generated token count, with the fed stop token.
+        /// - Returns: the generated token count, with the stop token.
         static func generatedTokenCount(of info: GenerateCompletionInfo) -> Int {
-            info.generationTokenCount + (info.stopTokenFedToCache == nil ? 0 : 1)
+            info.generationTokenCount + (info.discardedStopToken == nil ? 0 : 1)
         }
 
         /// The cache-reuse rules of the model's response protocol.
@@ -1015,6 +1090,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 from: request.enabledToolDefinitions)
 
             let container = try await model.loadContainer()
+            // The MTP drafter of the model, taken out of its own container here,
+            // before the target's `perform` below, thus no lock nests.
+            let speculation = try await model.loadMTPSpeculation()
 
             // Encode schema to JSON if present
             let schemaJSON: String?
@@ -1072,9 +1150,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
                 // Generate tokens inside actor isolation. `messages` carries
                 // non-Sendable `Chat.Message` instances (UserInput.Image and
-                // .Video are not Sendable), so route the array through
-                // perform(nonSendable:_:) which boxes it across the actor hop.
-                try await container.perform(nonSendable: messages) { context, messages in
+                // .Video are not Sendable), and the drafter model is not
+                // Sendable either, so route both through
+                // perform(nonSendable:_:) which boxes them across the actor hop.
+                try await container.perform(nonSendable: (messages, speculation)) {
+                    context, values in
+                    let (renderedMessages, speculation) = values
                     try AttachmentLabelValidator.default.validate(
                         labeledAttachments, with: context.tokenizer)
 
@@ -1086,7 +1167,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // the transcript again with the reasoning attached, which
                     // the render taken before the model loaded could not do.
                     let messages = try Self.historyMessages(
-                        of: request.transcript, resolved: resolved, otherwise: messages)
+                        of: request.transcript, resolved: resolved,
+                        otherwise: renderedMessages)
 
                     // Render the prompt through the model's UserInputProcessor.
                     let userInput = UserInput(chat: messages)
@@ -1140,6 +1222,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             toolCallsEntryID: toolCallsEntryID,
                             reasoningEntryID: reasoningEntryID,
                             promptCache: promptCache,
+                            speculation: speculation,
                             context: context,
                             channel: channel)
                     } else if let schemaJSON {
@@ -1163,6 +1246,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             responseEntryID: entryID,
                             reasoningEntryID: reasoningEntryID,
                             promptCache: promptCache,
+                            speculation: speculation,
                             context: context,
                             channel: channel
                         )
@@ -1392,6 +1476,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - toolCallsEntryID: The transcript entry id for tool-call events
         ///   - reasoningEntryID: The transcript entry id for reasoning events
         ///   - promptCache: The session's prompt-cache slot
+        ///   - speculation: The MTP drafter the turn speculates with, or nil
         ///   - context: The loaded model context
         ///   - channel: The channel to send response events into
         private func runToolGeneration(
@@ -1410,6 +1495,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             toolCallsEntryID: String,
             reasoningEntryID: String,
             promptCache: ExecutorPromptCacheSlot,
+            speculation: MTPSpeculation?,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -1485,6 +1571,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     toolCallsEntryID: toolCallsEntryID,
                     reasoningEntryID: reasoningEntryID,
                     promptCache: promptCache,
+                    speculation: speculation,
                     context: context,
                     channel: channel)
                 return
@@ -1502,6 +1589,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 toolCallsEntryID: toolCallsEntryID,
                 reasoningEntryID: reasoningEntryID,
                 promptCache: promptCache,
+                speculation: speculation,
                 context: context,
                 channel: channel)
         }
@@ -1532,6 +1620,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - toolCallsEntryID: The transcript entry id for tool-call events
         ///   - reasoningEntryID: The transcript entry id for reasoning events
         ///   - promptCache: The session's prompt-cache slot
+        ///   - speculation: The MTP drafter the turn speculates with, or nil
         ///   - context: The loaded model context
         ///   - channel: The channel to send response events into
         private func runAllowedToolTurn(
@@ -1549,6 +1638,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             toolCallsEntryID: String,
             reasoningEntryID: String,
             promptCache: ExecutorPromptCacheSlot,
+            speculation: MTPSpeculation?,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -1577,6 +1667,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 samplingConfiguration: samplingConfiguration,
                 reasoningEntryID: reasoningEntryID,
                 promptCache: promptCache,
+                speculation: speculation,
                 context: context,
                 channel: channel)
 
@@ -1645,6 +1736,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - toolCallsEntryID: The transcript entry id for tool-call events
         ///   - reasoningEntryID: The transcript entry id for reasoning events
         ///   - promptCache: The session's prompt-cache slot
+        ///   - speculation: The MTP drafter of the think-then-call phase, or nil.
+        ///     The grammar phase after it decodes plainly.
         ///   - context: The loaded model context
         ///   - channel: The channel to send response events into
         private func runRequiredToolTurn(
@@ -1660,6 +1753,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             toolCallsEntryID: String,
             reasoningEntryID: String,
             promptCache: ExecutorPromptCacheSlot,
+            speculation: MTPSpeculation?,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -1739,6 +1833,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     samplingConfiguration: samplingConfiguration,
                     reasoningEntryID: reasoningEntryID,
                     responseEntryID: entryID,
+                    speculation: speculation,
                     context: context, channel: channel)
                 reasoningTokenIDs = phase1.tokenIDs
                 if !phase1.closed {
@@ -1867,10 +1962,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             /// Longest the canceller waits for quiescence.
             ///
-            /// An active section ends within one forward pass plus a stream
-            /// synchronize — under a second on a 1B model and within
-            /// seconds on a 30B model. The bound stands far above both so a
-            /// pathological hang cannot block the canceller forever.
+            /// An active section ends within one decode step plus a stream
+            /// synchronize. The generation loop checks cancellation before
+            /// each step: one forward pass for plain decode, and one whole
+            /// round for MTP decode — the drafter passes of the round and one
+            /// verify pass, a few forward passes at most. That is under a
+            /// second on a 1B model and within seconds on a 30B model. The
+            /// bound stands far above both so a pathological hang cannot
+            /// block the canceller forever.
             private static let quiescenceTimeout: TimeInterval = 60
 
             private let condition = NSCondition()
@@ -2053,6 +2152,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             samplingConfiguration: MLXSamplingConfiguration?,
             reasoningEntryID: String,
             promptCache: ExecutorPromptCacheSlot,
+            speculation: MTPSpeculation?,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> AllowedToolGenerationResult {
@@ -2086,6 +2186,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     parameters: params,
                     context: context,
                     decoder: protocolDecoder,
+                    speculation: speculation,
                     preparedState: {
                         preparedState = $0
                         promptCache.prefillDidEnd(state: $0)
@@ -2344,6 +2445,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             samplingConfiguration: MLXSamplingConfiguration?,
             entryID: String,
             promptCache: ExecutorPromptCacheSlot,
+            speculation: MTPSpeculation?,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -2373,6 +2475,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     state: plan?.state,
                     parameters: params,
                     context: context,
+                    speculation: speculation,
                     preparedState: {
                         preparedState = $0
                         promptCache.prefillDidEnd(state: $0)
@@ -2427,6 +2530,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             responseEntryID: String,
             reasoningEntryID: String,
             promptCache: ExecutorPromptCacheSlot,
+            speculation: MTPSpeculation?,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -2442,6 +2546,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     responseEntryID: responseEntryID,
                     reasoningEntryID: reasoningEntryID,
                     promptCache: promptCache,
+                    speculation: speculation,
                     context: context,
                     channel: channel)
             } else {
@@ -2453,6 +2558,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     samplingConfiguration: samplingConfiguration,
                     entryID: responseEntryID,
                     promptCache: promptCache,
+                    speculation: speculation,
                     context: context,
                     channel: channel)
             }
@@ -2476,6 +2582,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             responseEntryID: String,
             reasoningEntryID: String,
             promptCache: ExecutorPromptCacheSlot,
+            speculation: MTPSpeculation?,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -2514,6 +2621,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     parameters: params,
                     context: context,
                     decoder: protocolDecoder,
+                    speculation: speculation,
                     preparedState: {
                         preparedState = $0
                         promptCache.prefillDidEnd(state: $0)
@@ -2770,6 +2878,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             samplingConfiguration: MLXSamplingConfiguration?,
             reasoningEntryID: String,
             responseEntryID: String,
+            speculation: MTPSpeculation?,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws -> (tokenIDs: [Int], closed: Bool) {
@@ -2782,15 +2891,23 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 config: config, primedInside: primedInside, tokenizer: context.tokenizer
             )
 
+            // Phase 1 speculates from a cache of its own. Its drafter state ends
+            // with its task: phase 2 feeds the prompt and the reasoning tokens to
+            // the guided loop's own new cache and runs no drafter, thus it needs
+            // none of the state this phase leaves.
             let (stream, task) = try Self.startTrackedGeneration {
                 try generateTokensTask(
-                    input: input, parameters: params, context: context)
+                    input: input, parameters: params, context: context,
+                    speculation: speculation)
             }
             var closed = false
             do {
                 for await generation in stream {
                     try Task.checkCancellation()
-                    guard case .token(let token) = generation else { continue }
+                    if case .info(let info) = generation {
+                        Self.observeCompletion(info)
+                    }
+                    guard !closed, case .token(let token) = generation else { continue }
                     for segment in collector.ingest(token) {
                         await Self.send(
                             segment, responseEntryID: responseEntryID,
@@ -2799,7 +2916,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     if collector.shouldStopAfterReasoning {
                         GuidedGenerationDiagnosticSink.current?.recordToolReasoningClose()
                         closed = true
-                        break
+                        // Stop the generation, and read the stream to its end, which
+                        // reports the completion of this phase.
+                        task.cancel()
                     }
                 }
             } catch {
