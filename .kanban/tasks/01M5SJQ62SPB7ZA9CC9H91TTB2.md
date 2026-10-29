@@ -61,6 +61,22 @@ comments:
     - evidence: 10 files — IntegrationTesting/.../TextGeneration/MTPGenerationTests.swift, Libraries/MLXFoundationModels/ModelCache.swift, Libraries/MLXHuggingFace/FoundationModelsMacros.swift, Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift, Tests/MLXFoundationModelsTests/MTPExecutorTestSupport.swift, Tests/MLXFoundationModelsTests/MTPExecutorTests.swift, Tests/MLXFoundationModelsTests/Qwen35MTPFixture+LanguageModel.swift, Tests/MLXHuggingFaceMacrosTests/LanguageModelMacroTests.swift, Tests/MLXLMTestSupport/Qwen35VLMMTPFixture.swift, Tests/MLXLMTests/MTPSpeculationTests.swift. `swift build --build-tests`: 0 compiler warnings; the only other line is SwiftPM's "missing creator for mutated node" note on mlx-swift_Cmlx.bundle. xctest: MLXLMTests 920 XCTest + 1988 Swift Testing passed (benchmarkVerification skipped, as before), MLXFoundationModelsTests 388, MLXGuidedGenerationTests 70, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6. IntegrationTesting xcodebuild build-for-testing (Release): TEST BUILD SUCCEEDED. All 10 findings checked.
     - next: /review
   timestamp: 2026-10-29T02:42:56.679200+00:00
+- actor: claude-code
+  id: 01m62rs2smgz5y0vc6b3c5jfrs
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (c59afdd6) — 0 findings (0 confirmed, 1 refuted, 7 attempted, 0 failed); 10 files reviewed, 4 .kanban files not matched by any validator. All 10 items of Review Findings (2026-10-28 21:22) checked. 12/12 subtasks checked after I compared each one with 25d957fd..HEAD: MLXSpeculativeDecoding + ModelCache DrafterKey slot with coalesced loads and per-model eviction; MTPSpeculation.makeTokenIterator in all three generate functions; a phase-1 drafter-state comment in the think-then-call reasoning phase; the drafter model taken out of its container once (MLXSpeculativeDecoding) and run inside the target's perform; the drain comment updated for MTP rounds; MTPExecutorTests covers greedy parity (text, reasoning, allowed tools, think-then-call, VLM image, .uncached), seeded sampling, load-once/warmUp, eviction, usage, and cancellation; MTPGenerationTests on the real model (Release run recorded on the card at 85.7 vs 59.7 tok/s); the MLXFoundationModelsTests xctest run passed (388).
+    - next: none — task moved to done
+  timestamp: 2026-10-29T02:45:42.836535+00:00
+- actor: claude-code
+  id: 01m62rsnjkyec9b3s70gf4rqe1
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 10 files (macro forwards speculativeDecoding, Mutex/AsyncStream instead of unchecked Sendable, Logger, named constants)
+    - test: green — 5 bundles 0 failures, 0 warnings; IntegrationTesting Release test build succeeded
+    - commit: c59afdd6
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T02:46:02.067655+00:00
 depends_on:
 - 01M5SJNWMNA5D8N2VWEJJPT9A2
 - 01M5QWG18ZZAMS370KT33CTVTY
@@ -68,29 +84,29 @@ depends_on:
 - 01M5QWGEWP4506CZYXCPV3C64M
 - 01M5QWJ40KYCBZ9SW5CR9AH2BJ
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: fff880
 title: 'MTP: FoundationModels — run MLXLanguageModel text, reasoning and tool turns with the MTP drafter'
 ---
 ## What
 No FoundationModels path can use MTP today. `Executor.respond` → `runRespond` (Libraries/MLXFoundationModels/MLXLanguageModel.swift ~958-1168) goes to `runTextGeneration` / `runUnconstrained` / `runReasoning` / `runToolGeneration`, and these call `generateTaskRecordingTokens`, `generateProtocolTokensTask`, and `generateTokensTask` (Libraries/MLXLMCommon/Evaluate.swift ~2500, ~2797, ~2835). Each makes a plain `TokenIterator`. `ModelCache` (Libraries/MLXFoundationModels/ModelCache.swift ~46-139) has no drafter slot. The default FoundationModels sampling is random (temperature 0.6, Evaluate.swift ~256), so this task needs the sampling task. The prompt-cache entry work is a separate task.
 
-- [ ] Add an MTP option to `MLXLanguageModel` (for example `speculativeDecoding: MLXSpeculativeDecoding?` with a drafter model ID and `blockSize`), and a `ModelCache` drafter slot keyed by (model ID, drafter ID). Load the drafter through `MTPDrafterModelFactory` with the MLXLLM and MLXVLM Qwen35 MTP registrations, one time, coalesced like model loads. `remove` / `evictAll` of a model also evicts its drafter. `warmUp` (MLXLanguageModel.swift ~442-493) also loads the drafter and runs one short MTP stream.
-- [ ] Add an iterator choice to `generateTaskRecordingTokens`, `generateProtocolTokensTask`, and `generateTokensTask`: when a drafter is present and `isCompatible(with:)` is true, build `MTPSpeculativeTokenIterator` with the `state:` input and the drafter-state completion callback; otherwise `TokenIterator`. The think-then-call phase 1 (`generateTokensTask`, ~2786) drops its drafter state at phase 2; write this in a comment and test it.
-- [ ] Run the drafter inside the existing `container.perform` of the target (~1077). Do not nest a `perform` on the `MTPDrafterContainer` (MTPDrafterModel.swift ~238-259); take the drafter model out of its container one time, so that no lock order can deadlock.
-- [ ] Cancellation: `generateLoopTask` checks cancellation before each `next()` (Evaluate.swift ~3015), and one MTP `next()` can run a full round. Make sure the drain in MLXLanguageModel.swift (~1870, "one forward pass") still holds, or update its comment and test.
+- [x] Add an MTP option to `MLXLanguageModel` (for example `speculativeDecoding: MLXSpeculativeDecoding?` with a drafter model ID and `blockSize`), and a `ModelCache` drafter slot keyed by (model ID, drafter ID). Load the drafter through `MTPDrafterModelFactory` with the MLXLLM and MLXVLM Qwen35 MTP registrations, one time, coalesced like model loads. `remove` / `evictAll` of a model also evicts its drafter. `warmUp` (MLXLanguageModel.swift ~442-493) also loads the drafter and runs one short MTP stream.
+- [x] Add an iterator choice to `generateTaskRecordingTokens`, `generateProtocolTokensTask`, and `generateTokensTask`: when a drafter is present and `isCompatible(with:)` is true, build `MTPSpeculativeTokenIterator` with the `state:` input and the drafter-state completion callback; otherwise `TokenIterator`. The think-then-call phase 1 (`generateTokensTask`, ~2786) drops its drafter state at phase 2; write this in a comment and test it.
+- [x] Run the drafter inside the existing `container.perform` of the target (~1077). Do not nest a `perform` on the `MTPDrafterContainer` (MTPDrafterModel.swift ~238-259); take the drafter model out of its container one time, so that no lock order can deadlock.
+- [x] Cancellation: `generateLoopTask` checks cancellation before each `next()` (Evaluate.swift ~3015), and one MTP `next()` can run a full round. Make sure the drain in MLXLanguageModel.swift (~1870, "one forward pass") still holds, or update its comment and test.
 
 ## Acceptance Criteria
-- [ ] On the shared fixture, a `LanguageModelSession` with `.greedy` gives the same text with and without MTP for plain text, reasoning, allowed-tools, and think-then-call turns, for a turn with an image (VLM target), and with the `.uncached` prompt-cache scope.
-- [ ] With the default sampling mode and a fixed seed, an MTP session runs MTP (no passthrough), and two runs with the same seed give the same text.
-- [ ] The drafter loads one time across two sessions of the same model and in `warmUp`, and evicting the model frees the drafter.
-- [ ] Reported usage (prompt and generated token counts) is the same with and without MTP for the same greedy text.
-- [ ] Release integration test on the M5 Max: a greedy FoundationModels session with Qwen3.8-27B-4bit + MTP gives the same tokens as without MTP (or the first difference is at a position where the top-2 target logits differ by < 1e-3), and decode tok/s is higher on the math prompt (`#expect`).
+- [x] On the shared fixture, a `LanguageModelSession` with `.greedy` gives the same text with and without MTP for plain text, reasoning, allowed-tools, and think-then-call turns, for a turn with an image (VLM target), and with the `.uncached` prompt-cache scope.
+- [x] With the default sampling mode and a fixed seed, an MTP session runs MTP (no passthrough), and two runs with the same seed give the same text.
+- [x] The drafter loads one time across two sessions of the same model and in `warmUp`, and evicting the model frees the drafter.
+- [x] Reported usage (prompt and generated token counts) is the same with and without MTP for the same greedy text.
+- [x] Release integration test on the M5 Max: a greedy FoundationModels session with Qwen3.8-27B-4bit + MTP gives the same tokens as without MTP (or the first difference is at a position where the top-2 target logits differ by < 1e-3), and decode tok/s is higher on the math prompt (`#expect`).
 
 ## Tests
-- [ ] Tests/MLXFoundationModelsTests/MTPExecutorTests.swift: the paths above, the load count, warm-up, eviction, usage, and cancellation.
-- [ ] IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPGenerationTests.swift: the real-model test; it skips when `mlx-community/Qwen3.8-27B-MTP-4bit` is not local.
-- [ ] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` passes.
+- [x] Tests/MLXFoundationModelsTests/MTPExecutorTests.swift: the paths above, the load count, warm-up, eviction, usage, and cancellation.
+- [x] IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPGenerationTests.swift: the real-model test; it skips when `mlx-community/Qwen3.8-27B-MTP-4bit` is not local.
+- [x] `swift build --build-tests && xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` passes.
 
 ## Workflow
 - Use `/tdd` — write failing tests first, then implement to make them pass. #mtp #qwen38 #foundation-models
