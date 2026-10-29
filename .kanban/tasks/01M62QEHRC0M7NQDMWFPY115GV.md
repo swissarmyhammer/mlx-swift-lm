@@ -61,8 +61,24 @@ comments:
     - evidence: 4 files — Libraries/MLXLMCommon/MTPDrafterModelFactory.swift (new `MTPDrafterRegistration.drafterLoader(for:from:using:)`), Libraries/MLXLMCommon/ChatSession.swift, Libraries/MLXFoundationModels/MLXSpeculativeDecoding.swift, Tests/MLXLMTests/MTPDrafterFallbackTests.swift; `swift build --build-tests` 0 compiler warnings (only SwiftPM's existing Cmlx-bundle "missing creator" note); `xcrun xctest` MLXLMTests 2011 swift-testing + 920 XCTest, MLXFoundationModelsTests 407, MLXGuidedGenerationTests 70, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6: 0 failures, 0 skipped (MTPDrafterFallbackTests, MTPDrafterFallbackExecutorTests, ChatSessionDeferredMTPDrafterTests passed); finding flipped to [x]
     - next: /review
   timestamp: 2026-10-29T09:23:34.148845+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m63fkvre955mj91sb3esvwxq
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (cd6eca89) — 0 findings (0 confirmed, 0 refuted, 7 attempted, 0 failed); 4 files reviewed, 2 kanban files skipped (no validator matched). Prior finding (MLXSpeculativeDecoding.swift:119 reuse/reuse) checked and addressed by the shared MTPDrafterRegistration.drafterLoader(for:from:using:).
+    - next: task moved to done
+  timestamp: 2026-10-29T09:24:49.038606+00:00
+- actor: claude-code
+  id: 01m63fm95f38ycdhhagvp1dnpc
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 4 files (shared MTPDrafterRegistration.drafterLoader)
+    - test: green — 5 bundles 0 failures 0 skipped
+    - commit: cd6eca89
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T09:25:02.767565+00:00
+position_column: done
+position_ordinal: ffff8180
 title: 'MTP: report when a configured drafter silently falls back to plain decode'
 ---
 When `MLXLanguageModel` (and `ChatSession`) are given an MTP drafter that is not compatible with the loaded target (for example the generic `loadModelContainer` loads Qwen3.8 as a VLM while the drafter is the text drafter), generation quietly runs the plain iterator and proposes 0 drafts. Found during ^h91ttb2: the first integration run silently lost MTP.
