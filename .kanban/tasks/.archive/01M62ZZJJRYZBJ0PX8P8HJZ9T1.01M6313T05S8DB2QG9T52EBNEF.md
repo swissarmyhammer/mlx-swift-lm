@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m6313q2fa23jaq4pdme81ggv
+  text: 'Duplicate of ^115gv (01M62QEHRC0M7NQDMWFPY115GV, "MTP: report when a configured drafter silently falls back to plain decode"), filed from ^h91ttb2 for the same VLM-load silent fallback. Archived; the guided-generation case (^9xe94tr benchmark drafted 0 tokens) is folded into ^115gv.'
+  timestamp: 2026-10-29T05:11:19.887443+00:00
 position_column: todo
 position_ordinal: a180
 title: 'FoundationModels: Qwen3.8 loaded by the default factory order is the VLM model, so a `.qwen35Text` MTP drafter never drafts'

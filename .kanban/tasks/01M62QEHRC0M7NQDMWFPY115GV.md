@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m6313rzccvcbgaa5fwwx860e
+  text: 'Also covers the guided-generation path (folded in from duplicate ^8hjz9t1): in ^9xe94tr the Release guided JSON benchmark drafted 0 tokens when the target loaded through loadModelContainer as a VLM with `.qwen35Text`. The fallback report must cover GuidedGenerationLoop / GuidedSpeculation as well as ChatSession and MLXLanguageModel.'
+  timestamp: 2026-10-29T05:11:21.836590+00:00
 position_column: todo
 position_ordinal: 9d80
 title: 'MTP: report when a configured drafter silently falls back to plain decode'
