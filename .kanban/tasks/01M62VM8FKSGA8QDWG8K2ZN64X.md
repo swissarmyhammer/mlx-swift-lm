@@ -23,8 +23,24 @@ comments:
     - evidence: 8 files — Libraries/MLXFoundationModels/TranscriptConverter.swift (reasoning-only turn replay), Libraries/MLXFoundationModels/ExecutorPromptCache.swift (drafter resumes on splice), Tests/MLXFoundationModelsTests/TranscriptConverterReasoningOnlyTurnTests.swift (new, 3.3 KB), Tests/MLXFoundationModelsTests/ExecutorPromptCacheReasoningFollowUpTests.swift (new, 16.8 KB), Tests/MLXFoundationModelsTests/MTPExecutorTestSupport.swift, Tests/MLXFoundationModelsTests/Qwen35MTPFixture+LanguageModel.swift, IntegrationTesting/.../MTPPromptCacheTests.swift, IntegrationTesting/.../Qwen38FourBitMTPModel.swift. RED first: the converter test failed with roles [.user,.user]; the executor follow-up test failed with cached 14 vs ledger 31/30; the splice-drafter test failed with cacheStartPosition ≠ 0. The drafter test after a reasoning-only turn passed before the fix: the checkpoint drafter also starts at 0, so it guards and does not prove. `swift build --build-tests`: 0 compiler warnings (only the SwiftPM "missing creator for mutated node" note). swift-format lint clean on the changed files. xcrun xctest: MLXFoundationModelsTests 414 pass; MLXLMTests 920 XCTest + 2011 Swift Testing pass; MLXGuidedGenerationTests 70; CXGrammarTests 7; MLXHuggingFaceMacrosTests 6; 0 failures, 0 skipped. Release (load ~3.2–3.7): MTPPromptCacheTests pass, turn 1 79/79 both, turn 2 MTP 26 of 233 / plain 26 of 233 (before: 160 of 235 both), MTP 89.7/85.6 tok/s vs plain 60.2/59.5, drafter resumed (start 0). Guards: qwen38FourBitMTPGeneration pass, default blockSize 5 pMin 0.75 100.2/87.6/83.4 tok/s (plain ~59.5); qwen38FourBitMTPSystemPromptCache pass, edit turn prefilled 123, follow-ups 24–38, no known issues.
     - next: /review
   timestamp: 2026-10-29T10:12:38.293377+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m63jhpq6treq5n8kq8k7mwq2
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (b17ff441) — 0 findings, 0 confirmed, 1 refuted, 7 attempted, 0 failed; 8 files reviewed, 6 .kanban files skipped (no validator)
+    - next: none — task moved to done
+  timestamp: 2026-10-29T10:16:04.070647+00:00
+- actor: claude-code
+  id: 01m63jj4e899qxn29gn9baw3ab
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 8 files (reasoning-only turns kept, drafter resumes after splice, real protocol in integration model)
+    - test: green — 5 bundles 0 failures 0 skipped; Release MTPPromptCacheTests turn 2 26/233 (was 160/235); guards 100.2/87.6/83.4, edit turn 123
+    - commit: b17ff441
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T10:16:18.121+00:00
+position_column: done
+position_ordinal: ffff8280
 title: 'FoundationModels: a follow-up turn recomputes the previous assistant reply (160 of 235 tokens) instead of extending the cache'
 ---
 Found during ^jyqwe0c with the real-model two-turn test (IntegrationTesting MTPPromptCacheTests, Qwen3.8-27B-4bit): turn 2 recomputes 160 of 235 prompt tokens, with or without MTP. The ExecutorPromptCache main cache only reaches the end of the turn-1 user message, so the turn-1 reply and everything after it are recomputed. Also, a turn that ends with its stop token in the cache cannot extend on the next turn (the next prompt omits the stop token) and must restore from the checkpoint.
