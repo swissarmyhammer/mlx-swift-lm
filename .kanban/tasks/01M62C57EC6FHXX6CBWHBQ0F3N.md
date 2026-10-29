@@ -75,8 +75,24 @@ comments:
     - evidence: 3 files — Libraries/MLXLMCommon/MTPDrafterContinuation.swift, Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift, Tests/MLXLMTests/Qwen35MTPSeedGateTests.swift. `swift build --build-tests` 0 compiler warnings (only the known swift-build "missing creator" note on the Cmlx bundle). xctest: MLXLMTests 920 XCTest + 2000 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 404, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6; 0 failures, 0 skipped. Release qwen38FourBitMTPGeneration SUCCEEDED (bs5 pMin 0.75 100.4/87.4/83.4), qwen38FourBitMTPSystemPromptCache SUCCEEDED (edit turn 123 tok, no known issues). Both 02:30 findings checked.
     - next: /review
   timestamp: 2026-10-29T07:57:24.486002+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m63anw4y0f0ybg3yt90gz9z0
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (51f0f585) — 0 findings, 0 confirmed, 0 refuted (7 attempted, 0 failed); 3 files reviewed, 2 .kanban files skipped (no validator). Both items in ## Review Findings (2026-10-29 02:30) checked.
+    - next: task moved to done
+  timestamp: 2026-10-29T07:58:32.094935+00:00
+- actor: claude-code
+  id: 01m63ap92fc11h1ecdmh4sks1z
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 3 files (shared heldArrays accessor, exact VLM seed probability test)
+    - test: green — 5 bundles 0 failures 0 skipped; Release default 100.4/87.4/83.4 vs bs2 92.9/83.2/80.7; edit turn 123 tokens
+    - commit: 51f0f585
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T07:58:45.327457+00:00
+position_column: done
+position_ordinal: fffe80
 title: 'MTP: gate chained Qwen drafts on the seed''s confidence so deeper blocks stop costing prose and code'
 ---
 ## What
