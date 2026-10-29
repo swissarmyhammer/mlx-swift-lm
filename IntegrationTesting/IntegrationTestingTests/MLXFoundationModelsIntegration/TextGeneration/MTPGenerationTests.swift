@@ -86,13 +86,9 @@ struct MTPGenerationTests {
                 ).content
             }
         }
-        let response = session.transcript.compactMap { entry -> Transcript.Response? in
-            guard case .response(let response) = entry else { return nil }
-            return response
-        }.last
         return Turn(
             text: text, completion: try #require(log.last),
-            metadata: try #require(response).metadata)
+            metadata: try #require(session.transcript.lastResponse).metadata)
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -116,9 +112,17 @@ struct MTPGenerationTests {
 
         #expect((mtp.completion.proposedDraftTokens ?? 0) > 0)
         #expect(mtp.completion.passthroughReason == nil)
-        // The response entry of the real model's turn says that MTP drafted, and how much.
+        // The response entry of the real model's turn says that MTP drafted, and how much: the
+        // counts of the speculative telemetry of the turn's one pass, with no fallback.
+        let telemetry = try #require(mtp.completion.speculativeDecodingTelemetry)
         #expect(try mtp.metadata["speculativeDecoding"]?.value(Bool.self) == true)
-        #expect(try (mtp.metadata["acceptedDraftTokenCount"]?.value(Int.self) ?? 0) > 0)
+        #expect(
+            try mtp.metadata["draftedTokenCount"]?.value(Int.self) == telemetry.draftTokenCount)
+        #expect(
+            try mtp.metadata["acceptedDraftTokenCount"]?.value(Int.self)
+                == telemetry.acceptedDraftTokenCount)
+        #expect(telemetry.acceptedDraftTokenCount > 0)
+        #expect(mtp.metadata["speculativeDecodingFallbackReason"] == nil)
         #expect(plain.metadata["speculativeDecoding"] == nil)
         try await expectPlainTokens(mtp: mtp.text, plain: plain.text, prompt: prompt)
         #expect(mtp.completion.tokensPerSecond > plain.completion.tokensPerSecond)

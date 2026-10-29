@@ -1318,7 +1318,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
                     Stream.gpu.synchronize()
                 }
-                await Self.emitSpeculativeDecodingOutcome(entryID: entryID, into: channel)
                 outcome = .success(())
             } catch is CancellationError {
                 // Synchronize GPU before rethrowing to ensure in-flight operations complete.
@@ -1345,6 +1344,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if let promptCacheKey {
                 await ExecutorPromptCacheStore.current.checkIn(promptCacheKey, promptCache.entry)
             }
+            // The `do` block opened the response entry with its first metadata, thus the entry
+            // reports the MTP outcome of the call whatever the outcome: a call that was cancelled
+            // or threw reports what its passes recorded before they stopped.
+            await Self.emitSpeculativeDecodingOutcome(entryID: entryID, into: channel)
             try outcome.get()
         }
 

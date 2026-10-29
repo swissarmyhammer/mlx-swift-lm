@@ -4,6 +4,7 @@
 
 import Foundation
 import FoundationModels
+import IntegrationTestHelpers
 import MLXLMCommon
 import MLXLMTestSupport
 import Testing
@@ -127,10 +128,23 @@ struct SpeculativeDecodingOutcomeMetadataTests {
     /// target.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func expectIncompatibleFallback(_ reported: ReportedOutcome) {
+        expectNoDrafts(reported, fallbackReason: "incompatibleDrafter")
+    }
+
+    /// Expects that `reported` says MTP never drafted, with `fallbackReason` as the reason.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectNoDrafts(_ reported: ReportedOutcome, fallbackReason: String?) {
         #expect(reported.speculativeDecoding == false)
-        #expect(reported.fallbackReason == "incompatibleDrafter")
+        #expect(reported.fallbackReason == fallbackReason)
         #expect(reported.draftedTokenCount == 0)
         #expect(reported.acceptedDraftTokenCount == 0)
+    }
+
+    /// Whether `event` is the completion report of a pass.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func isCompletion(_ event: MLXLanguageModel.Executor.GenerationEvent) -> Bool {
+        guard case .completion = event else { return false }
+        return true
     }
 
     /// Runs one turn of `session` and returns what the executor streamed with the metadata of
@@ -147,11 +161,7 @@ struct SpeculativeDecodingOutcomeMetadataTests {
                 _ = try await session.respond(to: prompt, options: Self.greedy)
             }
         }
-        let response = try #require(
-            session.transcript.compactMap { entry -> Transcript.Response? in
-                guard case .response(let response) = entry else { return nil }
-                return response
-            }.last)
+        let response = try #require(session.transcript.lastResponse)
         return (log.recorded, response.metadata)
     }
 
@@ -315,6 +325,27 @@ struct SpeculativeDecodingOutcomeMetadataTests {
             counts: DraftCounts(turns.speculative.sink))
     }
 
+    /// The fixture models of a think-then-call pass -- a reasoning phase that closes inside the
+    /// budget, then the grammar phase of a required tool call -- and the request of the pass.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func thinkThenCallPass(weights: URL) async throws -> (
+        models: GuidedExecutorModels, request: LanguageModelExecutorGenerationRequest
+    ) {
+        let prompt = Self.prompt + [Self.reasoningStartToken]
+        let models = try GuidedExecutorModels(
+            weights: weights, capabilities: [.reasoning, .toolCalling],
+            resolver: try await FixtureReasoningResolver.closingAtGreedyToken(
+                Self.reasoningEndIndex, of: prompt, maxTokens: Self.generatedTokenCount,
+                start: Self.reasoningStartToken, tokenizer: ToolCallAlphabetTokenizer()))
+        let request = makeExecutorRequest(
+            transcript: models.transcript(prompt: prompt),
+            enabledTools: [Self.lookupTool],
+            generationOptions: GenerationOptions(
+                samplingMode: .greedy, maximumResponseTokens: Self.generatedTokenCount,
+                toolCallingMode: .required))
+        return (models, request)
+    }
+
     /// Think-then-call runs two passes: the reasoning phase, which reports its drafts in its
     /// completion report, and the grammar phase, which reports them to the guided sink. The
     /// response reports the sum.
@@ -323,19 +354,7 @@ struct SpeculativeDecodingOutcomeMetadataTests {
     func aThinkThenCallPassSumsBothPhases() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let tokenizer = ToolCallAlphabetTokenizer()
-        let prompt = Self.prompt + [Self.reasoningStartToken]
-        let models = try GuidedExecutorModels(
-            weights: weights, capabilities: [.reasoning, .toolCalling],
-            resolver: try await FixtureReasoningResolver.closingAtGreedyToken(
-                Self.reasoningEndIndex, of: prompt, maxTokens: Self.generatedTokenCount,
-                start: Self.reasoningStartToken, tokenizer: tokenizer))
-        let request = makeExecutorRequest(
-            transcript: models.transcript(prompt: prompt),
-            enabledTools: [Self.lookupTool],
-            generationOptions: GenerationOptions(
-                samplingMode: .greedy, maximumResponseTokens: Self.generatedTokenCount,
-                toolCallingMode: .required))
+        let (models, request) = try await thinkThenCallPass(weights: weights)
 
         let turns = try await models.respond(to: request)
 
@@ -365,6 +384,50 @@ struct SpeculativeDecodingOutcomeMetadataTests {
 
         #expect(turns.speculative.turn.failure == nil)
         expectIncompatibleFallback(ReportedOutcome(turns.speculative.turn.metadata))
+    }
+
+    // MARK: - Passes that throw
+
+    /// The pass is cancelled at the completion report of its reasoning phase: that phase drafted,
+    /// and the grammar phase never starts. The response reports the drafts of the reasoning
+    /// phase.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("a cancelled pass reports the drafts its passes reported before the cancellation")
+    func aCancelledPassReportsItsDrafts() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let (models, request) = try await thinkThenCallPass(weights: weights)
+
+        let speculative = try await models.respondSpeculatively(
+            to: request, cancellingAt: Self.isCompletion)
+
+        #expect(speculative.turn.failure == String(describing: CancellationError()))
+        #expect(speculative.sink.draftedTokenCount == 0)
+        expectSpeculated(
+            ReportedOutcome(speculative.turn.metadata),
+            counts: DraftCounts(speculative.turn.completions) + DraftCounts(speculative.sink))
+    }
+
+    /// A model that always reasons, called without `.reasoning`, fails the call inside the
+    /// response, before any pass generates.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("a pass that throws reports in its response entry that MTP never drafted")
+    func aFailedPassReportsItsOutcome() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let models = try GuidedExecutorModels(
+            weights: weights, capabilities: [],
+            resolver: FixtureReasoningResolver(reasoningConfig: .alwaysOnThinking))
+        let request = makeExecutorRequest(
+            transcript: models.transcript(prompt: Self.prompt),
+            generationOptions: GuidedExecutorModels.greedy)
+
+        let turns = try await models.respond(to: request)
+
+        let failure = turns.speculative.turn.failure
+        #expect(failure?.contains("always reasons") == true, "\(failure ?? "no failure")")
+        expectNoDrafts(ReportedOutcome(turns.speculative.turn.metadata), fallbackReason: nil)
+        #expect(Key.all.isDisjoint(with: turns.plain.turn.metadata.keys))
     }
 }
 

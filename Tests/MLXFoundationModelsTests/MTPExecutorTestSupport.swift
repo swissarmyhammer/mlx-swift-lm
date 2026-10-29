@@ -122,6 +122,9 @@ final class MTPTurnLog: Sendable {
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 enum MTPExecutorTurns {
 
+    /// Whether a pass is cancelled at an event it streamed.
+    typealias Cancellation = @Sendable (MLXLanguageModel.Executor.GenerationEvent) -> Bool
+
     /// Runs one turn of `session` and records what the executor streamed.
     ///
     /// - Parameters:
@@ -170,14 +173,21 @@ enum MTPExecutorTurns {
     /// The pass bypasses the session, thus a turn that a session would continue -- a tool
     /// call -- or a request a session cannot build -- an image prompt -- runs one pass.
     ///
+    /// The pass runs on a task of its own, which `cancels` may cancel: the observer cancels
+    /// that task right after it recorded the first event `cancels` accepts, from inside the
+    /// executor, at that point of the pass. The task of the caller stays uncancelled.
+    ///
     /// - Parameters:
     ///   - request: The request of the pass.
     ///   - model: The model of the pass.
+    ///   - cancels: Whether the pass is cancelled at an event it streamed; by default no event
+    ///     cancels it.
     /// - Returns: What the pass streamed, the error it threw in ``MTPTurn/failure``, and the
     ///   error the channel's consumer met in ``MTPTurn/channelFailure``.
     /// - Throws: The error of the executor's initializer.
     static func respond(
-        to request: LanguageModelExecutorGenerationRequest, model: MLXLanguageModel
+        to request: LanguageModelExecutorGenerationRequest, model: MLXLanguageModel,
+        cancellingAt cancels: @escaping Cancellation = { _ in false }
     ) async throws -> MTPTurn {
         let executor = try makeMLXExecutor(for: model)
         let channel = LanguageModelExecutorGenerationChannel()
@@ -187,13 +197,25 @@ enum MTPExecutorTurns {
             for try await _ in channel {}
         }
         let log = MTPTurnLog()
-        var failure: String?
-        await MLXLanguageModel.Executor.$generationObserver.withValue(log.observer) {
-            do {
-                try await executor.respond(to: request, model: model, streamingInto: channel)
-            } catch {
-                failure = String(describing: error)
+        let observer: @Sendable (MLXLanguageModel.Executor.GenerationEvent) -> Void = { event in
+            log.record(event)
+            if cancels(event) {
+                withUnsafeCurrentTask { $0?.cancel() }
             }
+        }
+        // An unstructured task inherits the task-local values of the caller: the prompt cache
+        // store and the guided diagnostic sink a test bound.
+        let pass = Task {
+            try await MLXLanguageModel.Executor.$generationObserver.withValue(observer) {
+                try await executor.respond(to: request, model: model, streamingInto: channel)
+            }
+        }
+        let failure: String?
+        do {
+            try await pass.value
+            failure = nil
+        } catch {
+            failure = String(describing: error)
         }
         consumer.cancel()
         var turn = log.recorded
@@ -265,6 +287,13 @@ struct FixtureReasoningResolver: ModelConfigurationResolver {
             endDelimiter: tokenizer.decode(tokenIds: [end], skipSpecialTokens: false),
             promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
             replaysReasoningIntoHistory: replaysReasoningIntoHistory)
+    }
+
+    /// Makes a resolver that gives each call `reasoningConfig`.
+    ///
+    /// - Parameter reasoningConfig: The reasoning protocol each call gets.
+    init(reasoningConfig: ReasoningConfig) {
+        self.reasoningConfig = reasoningConfig
     }
 
     /// A resolver whose reasoning opens with `start` and closes with the token at `endIndex` of

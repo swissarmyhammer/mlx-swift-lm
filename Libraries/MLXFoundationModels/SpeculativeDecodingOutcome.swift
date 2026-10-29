@@ -29,6 +29,10 @@ import Synchronization
 /// - ``MetadataKey/draftedTokenCount`` and ``MetadataKey/acceptedDraftTokenCount``: the sums
 ///   over every pass of the call.
 ///
+/// A call that is cancelled or throws reports too, with what its passes recorded before it
+/// stopped: a pass of the generation loop that stops before its completion report records
+/// nothing, and a guided pass records the rounds it ran before the throw.
+///
 /// A `Mutex` holds the tally: the passes of one call run in sequence, but across actor hops,
 /// so each read and write takes the lock.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)

@@ -367,6 +367,8 @@ let package = Package(
                 "MLXTestPrecision",
                 // The Qwen 3.5 + MTP fixture of the executor tests.
                 "MLXLMTestSupport",
+                // The transcript helpers this bundle shares with IntegrationTesting.
+                "IntegrationTestHelpers",
             ],
             path: "Tests/MLXFoundationModelsTests"
         ),

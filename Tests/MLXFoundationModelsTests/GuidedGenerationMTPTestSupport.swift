@@ -325,13 +325,30 @@ struct GuidedExecutorModels {
         )
     }
 
-    /// Runs `request` on `model` with a diagnostic sink bound.
+    /// Runs `request` on the speculative model, and cancels the pass at the first event
+    /// `cancels` accepts.
+    ///
+    /// - Parameters:
+    ///   - request: The request of the pass.
+    ///   - cancels: Whether the pass is cancelled at an event it streamed.
+    /// - Returns: What the pass streamed and recorded.
+    /// - Throws: The error of the executor's initializer.
+    func respondSpeculatively(
+        to request: LanguageModelExecutorGenerationRequest,
+        cancellingAt cancels: @escaping MTPExecutorTurns.Cancellation
+    ) async throws -> Turn {
+        try await Self.respond(to: request, model: speculative, cancellingAt: cancels)
+    }
+
+    /// Runs `request` on `model` with a diagnostic sink bound, and cancels the pass at the
+    /// first event `cancels` accepts.
     private static func respond(
-        to request: LanguageModelExecutorGenerationRequest, model: MLXLanguageModel
+        to request: LanguageModelExecutorGenerationRequest, model: MLXLanguageModel,
+        cancellingAt cancels: @escaping MTPExecutorTurns.Cancellation = { _ in false }
     ) async throws -> Turn {
         let sink = GuidedGenerationDiagnosticSink()
         let turn = try await GuidedGenerationDiagnosticSink.$current.withValue(sink) {
-            try await MTPExecutorTurns.respond(to: request, model: model)
+            try await MTPExecutorTurns.respond(to: request, model: model, cancellingAt: cancels)
         }
         return Turn(turn: turn, sink: sink)
     }
