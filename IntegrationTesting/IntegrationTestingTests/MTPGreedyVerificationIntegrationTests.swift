@@ -117,7 +117,7 @@ private struct GreedyMTPFixture {
         }
         Stream.defaultStream(.gpu).synchronize()
         let start = ContinuousClock.now
-        var tokens = [Int]()
+        var tokens: [Int] = []
         while tokens.count < stopAfter, let token = iterator.next() { tokens.append(token) }
         iterator.finalizeGeneration()
         let finalCaches = iterator.mainCache + (iterator.drafterState?.cache ?? [])
@@ -174,8 +174,8 @@ struct MTPGreedyVerificationIntegrationTests {
     func batchedVerificationDecodeSpeed() async throws {
         let fixture = try await GreedyMTPFixture.load()
         let reference = try fixture.run(batched: false, stopAfter: fullDecodeTokenCount)
-        var sequentialSeconds = [Double]()
-        var batchedSeconds = [Double]()
+        var sequentialSeconds: [Double] = []
+        var batchedSeconds: [Double] = []
         for repetition in 0 ..< timedRepetitions {
             for batched in repetition.isMultiple(of: 2) ? [false, true] : [true, false] {
                 let result = try fixture.run(batched: batched, stopAfter: fullDecodeTokenCount)
