@@ -64,8 +64,15 @@ comments:
     - evidence: branch worktree-agent-ad8b635eacd770cf2 (on mtp 15260451), commit 09f2fd91. 9 files: Libraries/MLXFoundationModels/{MLXLanguageModel.swift, SpeculativeDecodingOutcome.swift, README.md}, Libraries/IntegrationTestHelpers/Transcript+LastResponse.swift (new), Package.swift, Tests/MLXFoundationModelsTests/{SpeculativeDecodingOutcomeMetadataTests.swift, MTPExecutorTestSupport.swift, GuidedGenerationMTPTestSupport.swift}, IntegrationTesting/.../MTPGenerationTests.swift. RED: 2 new tests failed with 7 issues (keys absent); GREEN after. swift build --build-tests: 0 Swift warnings (only the SwiftPM build-system line "missing creator for mutated node", which a no-op build also prints). xctest: MLXFoundationModelsTests 454 ST, MLXGuidedGenerationTests 72, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6, MLXLMTests 920 XCTest + 2035 ST; 0 failures, 0 skipped. IntegrationTesting Release build-for-testing: TEST BUILD SUCCEEDED. swift-format lint clean. All 3 review findings checked.
     - next: /review; the real-model MTPGenerationTests run is still waiting for a GPU slot.
   timestamp: 2026-10-29T16:22:31.806007+00:00
-position_column: doing
-position_ordinal: '8480'
+- actor: claude-code
+  id: 01m647mg9safqymb6z59bzhcnc
+  text: |-
+    ### review — clean
+    - evidence: review sha d3086858~1..d3086858 — 0 findings (0 confirmed, 0 refuted, 7 attempted, 0 failed); all 3 items of `## Review Findings (2026-10-29 10:49)` checked
+    - next: none — task moved to done
+  timestamp: 2026-10-29T16:24:35.897022+00:00
+position_column: done
+position_ordinal: ffff8d80
 title: 'FoundationModels: report each MLXLanguageModel call''s MTP outcome in Transcript.Response metadata'
 ---
 Requested by the Router session (foundationmodelsrouter-ce): Router turns MTP on (Qwen3.8-27B-4bit + Qwen3.8-27B-MTP-4bit) for SWE-bench and its telemetry must prove MTP ran. On stable 148f227e the MTP outcome (GenerateCompletionInfo.speculativeDecodingFallbackReason, accepted/drafted tokens) is only visible through the internal test-only `generationObserver`. Router already reads `Transcript.Response.metadata["incompleteOutput"]` emitted through `emitMetadata`; use the same channel.
