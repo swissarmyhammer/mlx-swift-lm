@@ -144,12 +144,28 @@ comments:
       - token matches are exact or a near-tie with gap 0.125
     - next: /review
   timestamp: 2026-10-29T13:03:44.363090+00:00
+- actor: claude-code
+  id: 01m63xa8cjm5k4v4p0q9hqvx9h
+  text: |-
+    ### review — findings
+    - evidence: review sha 3689d0a0~1..3689d0a0 — 1 finding (confirmed 1, refuted 6): IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift:160. All 83 prior items in the 07:17 and 07:24 sections are checked.
+    - next: resolve the 2026-10-29 08:16 `## Review Findings` item, then re-review.
+  timestamp: 2026-10-29T13:24:14.354168+00:00
+- actor: claude-code
+  id: 01m63xatvyb98wky9wgwseqt77
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — 83 findings fixed (Benchmark namespace, 7-file split, os.Logger, constants, docs, shared loaders, skip on missing checkpoints) in worktree, applied to mtp
+    - test: green in worktree (build 0 warnings, Release MTPGeneration + SystemPromptCache passed); merged-tree run in progress
+    - commit: 3689d0a0
+    - review: findings — IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift:160
+  timestamp: 2026-10-29T13:24:33.278198+00:00
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 - 01M5QWHA34WP7DQMWQ4AHNB0J9
 - 01M5SWXS9E09Y97PV3BV51TPYA
 position_column: doing
-position_ordinal: '8580'
+position_ordinal: '80'
 title: 'MTP: benchmark ChatSession multi-turn with MTP and prompt-cache reuse'
 ---
 ## What
@@ -262,3 +278,15 @@ title: 'MTP: benchmark ChatSession multi-turn with MTP and prompt-cache reuse'
 - [x] `IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift:40` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
 - [x] `IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift:141` `swift/optionals` — `guard let container = ... else { return }` in the test helper `systemPromptCache` returns before the `#expect` assertions at lines 147-148 run, so the test passes when the model is missing and the cache checks never execute. Gate each test with `.enabled(if: ...)`, or unwrap with `let container = try #require(await checkpoint.containerOrSkip(testName: testName))`, so the assertions cannot be bypassed silently.
 - [x] `IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift:293` `reuse/reuse` — qwen38FourBitMTPSystemPromptCache repeats the drafter setup that loadQwen38FourBitMTP already encapsulates: it calls Qwen35TextMTPRegistration.register() and then loads the drafter through MTPDrafterModelFactory with the same hubDownloader, tokenizer loader, and qwen38FourBitMTPDrafterID. A later change to the drafter setup would have to be made in two places and could diverge. Extract the drafter half of loadQwen38FourBitMTP into a shared helper, for example `loadQwen38FourBitMTPDrafter() async throws -> any MTPDrafterModel`, and call it from both tests. Or have the system-prompt test take the drafter from a shared loader, so the registration and load arguments exist in one place.
+
+## Review Findings (2026-10-29 08:16)
+
+> Scope: `review sha 3689d0a0~1..3689d0a0` — reviewed the diffs only — lines this change added or modified. 10 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M5QWHMV9SKY2FY1RJGWYHS9H.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M5QWHMV9SKY2FY1RJGWYHS9H.md` — no validator matches this file
+> - `.kanban/tasks/01M63W3WGVTJYANP0KM7DGTT5D.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M63W3WGVTJYANP0KM7DGTT5D.md` — no validator matches this file
+
+- [ ] `IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift:160` `test-integrity/no-test-cheating` — The shared `generation` helper measures throughput and asserts nothing about the result, so qwen38Generation, qwen38FourBitGeneration and museGlimmerGeneration can only fail by throwing. A run that generates zero tokens, or reports a degenerate timing, still passes. Every test should be able to fail. Add assertions to the helper after line 160, for example `#expect(stats.generationTokenCount > 0)` and `#expect(stats.promptTokenCount > 0)`, or have `llmGeneration` expose the token counts and check them. Keep `logSummary` as the measurement output.
