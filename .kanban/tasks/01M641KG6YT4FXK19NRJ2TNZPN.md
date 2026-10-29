@@ -54,6 +54,47 @@ comments:
     - evidence: 32ba1416 (on a304cf9b) — MTPNearTieDivergenceTests.swift (new), MTPSWEBenchScaleTests.swift, Qwen38FourBitMTPModel.swift; Release build-for-testing succeeded, swift build --build-tests 0 Swift warnings
     - next: phase 2 run under the bench lock when the orchestrator says "run phase 2" (now covers MTPSWEBenchScaleTests and MTPNearTieDivergenceTests)
   timestamp: 2026-10-29T15:06:28.941360+00:00
+- actor: claude-code
+  id: 01m6470wh3qkawnm6x73bczgv8
+  text: |-
+    Phase 1, round 3 (coordinator change), commit 2a3bcb3a. Nothing has run on the GPU.
+    - Sweep: `decodeRateFromTwoToOneHundredThousandContextTokens(path:)` runs on the router and text paths. It measures 2k, 8k, 32k, 64k and 100k tokens, running MTP then plain back to back with 512 tokens each. Each point gets its own prompt-cache store; MTP cold-prefills and plain reuses the cached prefix (the reuse is logged). Each line logs MTP/plain ratio, acceptance, tokens per verify, effective block size, ms per round and plain ms per token.
+    - New `MTPRoundCostBreakdownTests` (15.5 KB, log category MTPRoundCost, prefix "MTP ROUND COST:") runs on both paths at 32k and 100k tokens. It prefills the target and drafter in 2048-token chunks, then times each part as the median of 8 runs with a GPU sync around each:
+      - plain one-token forward;
+      - verify forward at 1 to 5 rows;
+      - drafter proposal at block sizes 2 to 5, with each chained step's increment;
+      - one host sync.
+      It also logs the drafter's cache entry count, which tests suspect 1 (drafter attention over the full context). The verify rows against plain show suspect 2 (a slower multi-row SDPA).
+    - Build: xcodebuild Release build-for-testing succeeded with no Swift warnings. `swift build --build-tests` is clean.
+  timestamp: 2026-10-29T16:13:53.059108+00:00
+- actor: claude-code
+  id: 01m647vmt166pwwjvx1411ze4v
+  text: |-
+    Phase 1, round 4 (adaptive MTP guard). Prepared as local WIP commit 646578ad on top of 2a3bcb3a. Not built and not rebased: waiting for the coordinator's sha of the guard landing on mtp. I wrote it against the API in the in-progress guard worktree agent-a24c62ee3c2f35eec:
+    - `MTPAdaptivePolicy.default` and `.disabled`;
+    - `MLXSpeculativeDecoding(drafterConfiguration:from:using:registration:...adaptivePolicy:)`;
+    - the telemetry fields `adaptivePauseCount`, `adaptiveProbeCount`, `adaptivePlainTokenCount`, `adaptiveBlockSizeChangeCount` and `adaptiveBlockSize` (an optional Int).
+
+    That worktree was mid-rebase with conflicts in MLXSpeculativeDecoding.swift (the memoryPolicy/drafterBytes parameters next to adaptivePolicy), so the final init's argument order may differ.
+
+    Changes:
+    - `Qwen38FourBitMTPModel.make` takes `adaptivePolicy` (default `.default`).
+    - The breakdown uses `.disabled`.
+    - The sweep runs three models on both paths at 2k/8k/32k/64k/100k, each with a 1024-token budget. Order: guard off (cold prefill with the drafter), then guard on (reuses the cache), then plain (reuses the cache).
+    - It logs both ratios against plain. The guard-on line adds pauses, probes, plain tokens, block size changes and the final block size.
+    - It asserts only on guard-on: rate >= plain × 0.97, it drafted, no passthrough or fallback, and it wrote at least 1024 tokens. Plain also gets the token-count and context checks. Nothing is asserted on guard-off.
+    - A guard pause sets no fallback or passthrough reason in the guard code, so those checks hold with the guard on.
+  timestamp: 2026-10-29T16:28:29.889028+00:00
+- actor: claude-code
+  id: 01m648qr4j3cbyb096mce0as7r
+  text: |-
+    ### implement — changed
+    - evidence: rebased the 4 commits onto mtp ed863693 (clean, no conflicts). The real `MLXSpeculativeDecoding(…registration:…drafterBytes:memoryPolicy:adaptivePolicy:)` accepts the prepared call unchanged, since it skips the defaulted parameters.
+    - xcodebuild Release build-for-testing: TEST BUILD SUCCEEDED. The full log has 1 warning line, the appintentsmetadataprocessor "Metadata extraction skipped" note, and 0 Swift warnings from repo sources. All repo modules and IntegrationTestingTests were recompiled.
+    - swift build --build-tests: Build complete. Its only note is llbuild's "missing creator for mutated node" on the Cmlx bundle, which is not a Swift warning.
+    - commits: eb4268b9, eff25c2c, 910303f7, 9fac368b (head) on worktree-agent-ac12e219c380a9047. Not pushed.
+    - next: wait for "run phase 2". Estimated runtime: sweep ~30–45 min for both paths, breakdown ~10–15 min, session test ~40 min, near-tie test ~10 min; ~1.75–2.25 h total. No GPU work has run yet.
+  timestamp: 2026-10-29T16:43:50.802389+00:00
 position_column: doing
 position_ordinal: '8180'
 title: 'MTP: measure Qwen3.8 MTP at SWE-bench scale (tens of thousands of context tokens, ~16k-token decodes, tool turns)'

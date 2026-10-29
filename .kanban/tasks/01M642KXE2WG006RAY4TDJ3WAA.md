@@ -101,6 +101,22 @@ comments:
     - Commit: 71cc7c66 (source only, no .kanban).
     - Real-model subtasks left unchecked for the GPU slot.
   timestamp: 2026-10-29T17:05:14.754233+00:00
+- actor: claude-code
+  id: 01m64a33ff13z003s4cf450qxs
+  text: |-
+    ### review — clean
+    - evidence: review sha 3b1e122e~1..3b1e122e — 0 findings (0 confirmed, 1 refuted, 7 files attempted, 0 failed); all 9 items of ## Review Findings (2026-10-29 11:40) are checked. No new section appended.
+    - next: task left in review, not moved to done, because the 4 real-model subtasks (quantify ratio vs load, host-sync measurement, adaptive policy verification, release guards under load) are still unchecked pending the GPU slot. Move to done once those are checked and a re-review is clean.
+  timestamp: 2026-10-29T17:07:31.439545+00:00
+- actor: claude-code
+  id: 01m64a3jtp9c7cbq7fm3z13zyt
+  text: |-
+    ### finish iteration 2 — clean (code); task held in review
+    - implement: changed — guided stand-down recorded + logged, shared helpers, named constants
+    - test: green — 5 bundles 0 fail/0 skip, Release build-for-testing ok
+    - commit: 3b1e122e
+    - review: clean — held in review until the real-model subtasks are measured in the GPU slot (guard on vs off vs plain, 2k–100k). Not on stable yet: the guard is on by default, so stable waits for that measurement.
+  timestamp: 2026-10-29T17:07:47.158266+00:00
 position_column: review
 position_ordinal: '80'
 title: 'MTP: stay faster than plain under CPU load (adaptive block size / plain fallback, fewer host syncs)'
