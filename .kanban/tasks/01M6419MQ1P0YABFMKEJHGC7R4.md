@@ -20,8 +20,24 @@ comments:
     - evidence: commit c3aa0e25 (parent 6354610a) on worktree-agent-a96eeb70bc03d7a68; files: Libraries/MLXFoundationModels/{MLXSpeculativeDecoding.swift, MLXLanguageModel.swift, SpeculativeDecodingOutcome.swift, README.md}, Libraries/MLXHuggingFace/FoundationModelsMacros.swift, Tests/MLXFoundationModelsTests/{MLXSpeculativeDecodingMemoryPolicyTests.swift (new), Qwen35MTPFixture+LanguageModel.swift}, Tests/MLXHuggingFaceMacrosTests/LanguageModelMacroMemoryPolicyTests.swift (new). 5 bundles 0 failures 0 skipped (FM 452, macros 7); verify-docs exit 0; IntegrationTesting Release build-for-testing succeeded.
     - next: real-model Release check waits for "GPU go"; then /review.
   timestamp: 2026-10-29T15:48:08.926186+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m64610g6ew6r6z62b5gd90tf
+  text: |-
+    ### review — clean
+    - evidence: review sha 1a152cc6~1..1a152cc6 — 0 findings (0 confirmed, 0 refuted; 7 files attempted, 0 failed; Libraries/MLXFoundationModels/README.md not reviewed — no validator matches it); no prior Review Findings sections
+    - next: task moved to done
+  timestamp: 2026-10-29T15:56:28.550389+00:00
+- actor: claude-code
+  id: 01m6461g8mf6ppke570n2q6d6v
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — optional drafterBytes/memoryPolicy on MLXSpeculativeDecoding (worktree c3aa0e25, applied to mtp)
+    - test: green — 5 bundles 0 fail/0 skip, verify-docs exit 0, Release build-for-testing ok
+    - commit: 1a152cc6
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T15:56:44.692454+00:00
+position_column: done
+position_ordinal: ffff8c80
 title: 'FoundationModels: memory policy on MLXSpeculativeDecoding so the drafter load falls back to plain decode with a reason'
 ---
 Requested by the Router session (lower priority than the MTP outcome metadata task). ChatSession's SpeculativeDecodingConfig takes a `SpeculativeDecodingMemoryPolicy` (e.g. `.recommendedWorkingSet`); `MLXSpeculativeDecoding` (MLXLanguageModel) has none, so a drafter load can overcommit.
