@@ -33,6 +33,45 @@ comments:
     - evidence: 3 files — Libraries/BenchmarkHelpers/SequentialGreedyMTPVerification.swift (new), Tests/MLXLMTests/MTPGreedyVerificationTests.swift, IntegrationTesting/IntegrationTestingTests/MTPGreedyVerificationBenchmarkTests.swift (new). `swift build --build-tests` 0 compiler warnings; xctest 5 bundles 0 failures 0 skipped (MLXLMTests 920 XCTest + 1991 Swift Testing); Release xcodebuild MTPGreedyVerificationBenchmarkTests TEST SUCCEEDED (block 8, all 7 accepted: 2099.6 us sequential vs 228.4 us batched, 9.19x).
     - next: /review. Follow-up ^55qc043 for the remaining MTP_GREEDY_BENCHMARK reader in MTPGreedyVerificationIntegrationTests.
   timestamp: 2026-10-29T06:18:48.480087+00:00
+- actor: claude-code
+  id: 01m63523dpnthsjm3t8t7ann80
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (67e6a852): 3 findings — IntegrationTesting/IntegrationTestingTests/MTPGreedyVerificationBenchmarkTests.swift:17, :26, :92
+    - next: implement the 3 open items in the 2026-10-29 01:19 Review Findings section
+  timestamp: 2026-10-29T06:20:21.302824+00:00
+- actor: claude-code
+  id: 01m6352gs750qgt4sd69bavkx5
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 3 files (benchmark to IntegrationTesting, shared SequentialGreedyMTPVerification)
+    - test: green — 5 bundles 0 failures 0 skipped; Release benchmark passed
+    - commit: 67e6a852
+    - review: findings — MTPGreedyVerificationBenchmarkTests.swift:17, :26, :92
+  timestamp: 2026-10-29T06:20:34.983995+00:00
+- actor: claude-code
+  id: 01m6356p3f8n1yqrsr070m028p
+  text: |-
+    Fixed the 3 findings from 2026-10-29 01:19 in IntegrationTesting/IntegrationTestingTests/MTPGreedyVerificationBenchmarkTests.swift.
+
+    - magic-numbers (block sizes `[2, 4, 8]`): replaced with `private enum BenchmarkBlockSize: Int, CaseIterable { case oneDraft = 2, threeDrafts = 4, sevenDrafts = 8 }`. Enum raw values are a swiftlint carve-out. The test iterates `BenchmarkBlockSize.allCases.map(\.rawValue)`.
+    - magic-numbers (`Int32(9)`): now `private let rejectedDraft: Int32 = 9`. A typed declaration is carved out, but a call argument is not.
+    - The same cause elsewhere in the file: `(blockSize - 1) / 2` is now `draftCount / halfOfDraftsDivisor`, a named constant. swiftlint had not flagged it.
+    - stdout: `print(String(format:))` is now a file-scope `os` `Logger` (`subsystem: "com.apple.FoundationModels-MLX", category: "MTPGreedyVerificationBenchmark"`), the same pattern as Qwen35SessionPromptCacheTests and PromptCacheSpoolCostAssessmentTests, logged with `.info("\(measurement, privacy: .public)")`. The `[MTPGREEDYBENCH]` prefix is kept so the line is still easy to grep. No print/debugPrint/dump/_printChanges remains (rg exit 1).
+
+    Verification:
+    - swiftlint 0.65.1 `no_magic_numbers` using the validator's settings (`allowed_numbers: [0, 1, -1, 100]`), with a temp config in scratchpad: 0 findings. Before the change it reported 17:36, 17:39, 17:42 and 26:35.
+    - `no_direct_standard_out_logs` is not a built-in swiftlint rule (swiftlint rejects that id), so the stdout check was done with rg.
+    - `swift build --build-tests`: Build complete, 0 compiler warnings. The only line is the existing SwiftPM "missing creator for mutated node" note on the Cmlx bundle. The file belongs to the xcodeproj, not to SwiftPM.
+    - Release xcodebuild `-only-testing:IntegrationTestingTests/MTPGreedyVerificationBenchmarkTests`: TEST SUCCEEDED, 1 test passed in 5.32 s. No warning names this file; the only warning is the existing appintents metadata note. The Logger lines show up in the xcodebuild output, e.g. `[MTPGreedyVerificationBenchmark] [MTPGREEDYBENCH] block=8 accepted=7 sequential=2208.7 us batched=236.7 us speedup=9.33x`.
+  timestamp: 2026-10-29T06:22:51.503521+00:00
+- actor: claude-code
+  id: 01m6356rf7v3v50xwp3cg99jj0
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — IntegrationTesting/IntegrationTestingTests/MTPGreedyVerificationBenchmarkTests.swift. swiftlint no_magic_numbers 0 findings (was 4). No stdout writes left. `swift build --build-tests` 0 compiler warnings. Release xcodebuild MTPGreedyVerificationBenchmarkTests TEST SUCCEEDED (1 test, 5.32 s). All 3 findings checked.
+    - next: /review
+  timestamp: 2026-10-29T06:22:53.927405+00:00
 position_column: doing
 position_ordinal: '8180'
 title: Move MTPGreedyVerificationTests.benchmarkVerification off its MTP_GREEDY_BENCHMARK switch
@@ -46,3 +85,17 @@ Earlier cards (^gg7bvm7 comments) noted it as pre-existing without a card of its
 - [x] `MLXLMTests` reports zero skipped tests.
 
 #mtp #test
+
+## Review Findings (2026-10-29 01:19)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 3 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M61YHNPNARJ8AQABVSMN05MJ.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M61YHNPNARJ8AQABVSMN05MJ.md` — no validator matches this file
+> - `.kanban/tasks/01M634YDZDNSBDD28B055QC043.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M634YDZDNSBDD28B055QC043.md` — no validator matches this file
+
+- [x] `IntegrationTesting/IntegrationTestingTests/MTPGreedyVerificationBenchmarkTests.swift:17` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MTPGreedyVerificationBenchmarkTests.swift:26` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MTPGreedyVerificationBenchmarkTests.swift:92` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.

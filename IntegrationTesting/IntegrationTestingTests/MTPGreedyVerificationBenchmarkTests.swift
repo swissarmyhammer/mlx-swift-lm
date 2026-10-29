@@ -10,11 +10,24 @@ import BenchmarkHelpers
 import Foundation
 import MLX
 import Testing
+import os
 
 @testable import MLXLMCommon
 
-/// The verify blocks the benchmark times: the drafts of a round and its bonus row.
-private let benchmarkBlockSizes = [2, 4, 8]
+/// The log every measurement line of this suite goes to.
+private let measurementLog = Logger(
+    subsystem: "com.apple.FoundationModels-MLX", category: "MTPGreedyVerificationBenchmark")
+
+/// The verify blocks the benchmark times: the drafts of a round and its bonus row. The raw
+/// value is the rows of the block.
+private enum BenchmarkBlockSize: Int, CaseIterable {
+    case oneDraft = 2
+    case threeDrafts = 4
+    case sevenDrafts = 8
+}
+
+/// The divisor that takes half of the drafts of a block, the middle accepted count.
+private let halfOfDraftsDivisor = 2
 
 /// The tokens of the Qwen3.5 vocabulary, the width of each verify row.
 private let qwen35VocabularySize = 151_936
@@ -23,7 +36,7 @@ private let qwen35VocabularySize = 151_936
 private let predictedToken = 7
 
 /// The draft that stands where the walk must reject.
-private let rejectedDraft = Int32(9)
+private let rejectedDraft: Int32 = 9
 
 /// The logit of the predicted token, and of every other token.
 private let predictedLogit: Float = 1
@@ -78,9 +91,10 @@ private enum VerificationPath: CaseIterable {
 struct MTPGreedyVerificationBenchmarkTests {
 
     @Test func batchedVerificationCostByBlockSize() {
-        for blockSize in benchmarkBlockSizes {
+        for blockSize in BenchmarkBlockSize.allCases.map(\.rawValue) {
             let logits = makeLogits(blockSize: blockSize)
-            for accepted in [0, (blockSize - 1) / 2, blockSize - 1] {
+            let draftCount = blockSize - 1
+            for accepted in [0, draftCount / halfOfDraftsDivisor, draftCount] {
                 let drafts = makeDrafts(blockSize: blockSize, accepted: accepted)
                 let batched = batchedGreedyMTPVerification(logits: logits, draftTokens: drafts)
                 let reference = SequentialGreedyMTPVerification.verify(
@@ -89,12 +103,12 @@ struct MTPGreedyVerificationBenchmarkTests {
                 #expect(batched.tokens == reference.tokens)
 
                 let medians = medianMicroseconds(logits: logits, drafts: drafts)
-                print(
-                    String(
-                        format:
-                            "[MTPGREEDYBENCH] block=%d accepted=%d sequential=%.1f us batched=%.1f us speedup=%.2fx",
-                        blockSize, accepted, medians.sequential, medians.batched,
-                        medians.sequential / medians.batched))
+                let measurement = String(
+                    format:
+                        "[MTPGREEDYBENCH] block=%d accepted=%d sequential=%.1f us batched=%.1f us speedup=%.2fx",
+                    blockSize, accepted, medians.sequential, medians.batched,
+                    medians.sequential / medians.batched)
+                measurementLog.info("\(measurement, privacy: .public)")
             }
         }
     }
