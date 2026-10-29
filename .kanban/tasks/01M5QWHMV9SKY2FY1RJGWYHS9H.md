@@ -172,12 +172,28 @@ comments:
       - Under bench.lock: qwen38Generation passed in 17.0 s (prefill 1086 tok at 1258 tok/s, decode 64 tok at 60.9 tok/s), qwen38FourBitGeneration passed in 18.8 s (1227 and 58.9 tok/s), museGlimmerGeneration passed in 28.7 s (1177 and 47.3 tok/s). 3/3 passed. Load average was 7.18 before and 16.49 after.
     - next: /review
   timestamp: 2026-10-29T13:31:04.752841+00:00
+- actor: claude-code
+  id: 01m63xrp805yhwj3ynrmh45c3k
+  text: |-
+    ### review — clean
+    - evidence: review sha 9d7bacfc~1..9d7bacfc — 0 findings (0 confirmed, 0 refuted, 7 attempted, 0 failed); 1 file reviewed (GenerationBenchmarkTests.swift), 2 .kanban files not matched by any validator. The prior 2026-10-29 08:16 item (test-integrity/no-test-cheating at GenerationBenchmarkTests.swift:160) is checked and addressed: `generation` now expects promptTokenCount > 0, generationTokenCount > 0, and finite positive prefill/decode tok/s.
+    - next: none — task moved to done.
+  timestamp: 2026-10-29T13:32:07.296542+00:00
+- actor: claude-code
+  id: 01m63xs9ysefm4pdypv8z2fx6q
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — 1 file (generation helper asserts token counts and finite positive rates)
+    - test: green — build 0 warnings; Release qwen38Generation/qwen38FourBitGeneration/museGlimmerGeneration passed; merged tree green at 3689d0a0
+    - commit: 9d7bacfc
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T13:32:27.481176+00:00
 depends_on:
 - 01M5QWGWNFDVP77YAW9ACHVXY1
 - 01M5QWHA34WP7DQMWQ4AHNB0J9
 - 01M5SWXS9E09Y97PV3BV51TPYA
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffff8980
 title: 'MTP: benchmark ChatSession multi-turn with MTP and prompt-cache reuse'
 ---
 ## What
