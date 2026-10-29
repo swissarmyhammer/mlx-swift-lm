@@ -30,8 +30,14 @@ comments:
     - Process notes: the worktree first sat on `main`; I reset it to `mtp` before any work. The old `pgrep -f` wait deadlocked on other agents' wait loops; I followed the coordinator's rule (`pgrep -x` plus bench.lock).
     - next: the card is a measured no-go. Close it, or re-scope it to a case where decisions force 1-3 tokens (for example a tokenizer and schema with short forced keys) before trying again.
   timestamp: 2026-10-29T12:10:24.615175+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m63t9j2hmbpaamv6kvy8yppt
+  text: |-
+    ### closed — measured no-go (user decision 2026-10-29)
+    All three variants (forced tokens as certain drafts; plus spare verify rows; decision-only forced drafts) measured no faster on Release qwen38GuidedJSONWithMTP (A 61.67/62.35 vs 62.68/63.71, B 62.03/62.34 vs 64.17/63.47, C 64.58/65.70 vs 64.77/65.02 MTP tok/s; divergence none). Code reverted; attempt kept in the session scratchpad (forced-drafts-attempt.patch). The user chose to close this card as a no-go rather than re-scope it.
+  timestamp: 2026-10-29T12:31:25.777308+00:00
+position_column: done
+position_ordinal: ffff8680
 title: 'Guided MTP: verify grammar-forced tokens inside the draft round instead of a separate forward'
 ---
 After ^ashrw1b (feed the decided token ahead of the forced tokens), guided JSON MTP dropped from 74.71 to 67.59 tok/s (plain 54.05 → 52.27). Part is the MTP-only cost: a decision that forces tokens now costs a 2-token forward plus a target decision before the next draft round. The implementer checked starting the round after the last forced token (fewer tokens per forward) but not treating forced tokens as zero-cost drafts in the verify batch.
