@@ -437,17 +437,20 @@ Sampled, one turn, temperature 0.7, top-p 0.95, seed 38
 Multi-turn ``ChatSession``, greedy, default block and floor
 (`qwen38FourBitMTPSystemPromptCache`: three chats with a system prompt of about
 2,200 tokens; follow-ups, follow-ups with thinking on, and an edit; load average
-6 to 8):
+8.6 at the start and 7.0 at the end, from other work on the machine):
 
 - Each follow-up turn reuses the cache and prefills 24 to 38 new tokens, and the
   drafter is fed the same suffix.
 - The edit turn goes back to the end of the first reply in a fork. It reuses
   2,169 cached tokens and prefills 123, as the plain session does.
-- Follow-up turns decode at about 98 to 105 tokens per second with MTP against
-  about 55 to 56 without it (1.77x to 1.90x), with an acceptance of 78% to 93%.
+- Follow-up turns, the edit turn included, decode at 85.1 to 102.9 tokens per
+  second with MTP against 55.7 to 56.1 without it (1.53x to 1.83x), with an
+  acceptance of 77.6% to 92.7%. The cold first turns decode at 86.6 to 104.9.
 
-FoundationModels `MLXLanguageModel`, default block and floor (load average 8
-to 14):
+FoundationModels `MLXLanguageModel`, default block and floor (load average 13.9
+at the start and 8.3 at the end, from other work on the machine; each test runs
+its plain and MTP sessions back to back, so the speedups are the comparable
+figures):
 
 | Case | Plain | MTP | Speedup |
 |---|---|---|---|
@@ -458,11 +461,11 @@ to 14):
 The second cached turn recomputes 26 of its 233 prompt tokens, as plain does,
 and the drafter resumes from the state the first turn left.
 
-Before this work, on the same machine, the MTP port this branch started from
-(upstream PR 724, block 2) decoded about 80 / 71 / 70 tokens per second on
-math / code / prose. The first recorded baseline, on an M5 Max at block 2 and
-temperature 0, was math 34.9 to 52.3, code 33.2 to 43.4 and prose 25.0 to 26.3
-tokens per second (plain to MTP).
+Before this work, on the same machine at block 2, MTP decoded 80.1 / 71.2 /
+70.2 tokens per second on math / code / prose, and 82.5 / 74.4 / 71.6 after the
+port of upstream PR 724 (batched greedy verification). The first recorded
+baseline, on an M5 Max at block 2 and temperature 0, was math 34.9 to 52.3,
+code 33.2 to 43.4 and prose 25.0 to 26.3 tokens per second (plain to MTP).
 
 A greedy MTP turn cannot always match plain decoding bit for bit: the verify
 pass runs several tokens through the model in one forward pass, and the 4-bit
