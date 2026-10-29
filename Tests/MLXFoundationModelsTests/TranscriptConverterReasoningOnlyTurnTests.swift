@@ -16,52 +16,25 @@ import Testing
 @Suite
 struct TranscriptConverterReasoningOnlyTurnTests {
 
-    /// The reasoning the turn wrote before its token budget ran out.
-    private static let reasoning = "Let me add: 2 plus"
-
-    /// The entries of a reasoning-only turn and the prompt after it, in the order the framework
-    /// appends them: the response entry opens with the turn, and the reasoning entry opens
-    /// when the first reasoning fragment arrives.
-    ///
-    /// - Parameter responseSegments: The segments of the response entry of the turn.
-    /// - Returns: The entries.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private static func reasoningOnlyTurn(
-        responseSegments: [Transcript.Segment] = []
-    ) -> [Transcript.Entry] {
-        [
-            .prompt(
-                Transcript.Prompt(
-                    segments: [.text(Transcript.TextSegment(content: "What is 2+2?"))],
-                    responseFormat: nil)),
-            .response(Transcript.Response(assetIDs: [], segments: responseSegments)),
-            .reasoning(
-                Transcript.Reasoning(segments: [.text(Transcript.TextSegment(content: reasoning))])),
-            .prompt(
-                Transcript.Prompt(
-                    segments: [.text(Transcript.TextSegment(content: "And 3+3?"))],
-                    responseFormat: nil)),
-        ]
-    }
-
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test(arguments: [[], [Transcript.Segment.text(Transcript.TextSegment(content: ""))]])
     func aReplayedReasoningOnlyTurnBecomesAnAssistantMessageWithTheReasoning(
         responseSegments: [Transcript.Segment]
     ) throws {
         let messages = try TranscriptConverter.mlxMessages(
-            for: Self.reasoningOnlyTurn(responseSegments: responseSegments), reasoning: .everyTurn)
+            for: ReasoningOnlyTurnFixture.reasoningOnlyTurn(responseSegments: responseSegments),
+            reasoning: .everyTurn)
 
         try #require(messages.map(\.role) == [.user, .assistant, .user])
         #expect(messages[1].content.isEmpty)
-        #expect(messages[1].reasoning == Self.reasoning)
+        #expect(messages[1].reasoning == ReasoningOnlyTurnFixture.reasoning)
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
     func aReasoningOnlyTurnThatIsNotReplayedStaysOutOfTheHistory() throws {
         let messages = try TranscriptConverter.mlxMessages(
-            for: Self.reasoningOnlyTurn(), reasoning: .dropped)
+            for: ReasoningOnlyTurnFixture.reasoningOnlyTurn(), reasoning: .dropped)
 
         #expect(messages.map(\.role) == [.user, .user])
     }
@@ -69,7 +42,7 @@ struct TranscriptConverterReasoningOnlyTurnTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
     func anEmptyResponseWithNoReasoningStaysOutOfTheHistory() throws {
-        let entries = Self.reasoningOnlyTurn().filter {
+        let entries = ReasoningOnlyTurnFixture.reasoningOnlyTurn().filter {
             if case .reasoning = $0 { return false }
             return true
         }

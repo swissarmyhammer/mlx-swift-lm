@@ -18,63 +18,29 @@ import Testing
 @Suite
 struct TranscriptConverterUnclosedReasoningTests {
 
-    /// The reasoning the turns write.
-    private static let reasoning = "Let me add: 2 plus"
-
     /// The model the configurations name.
     private static let modelID = "test/unclosed-reasoning"
-
-    /// A prompt entry that asks `question`.
-    ///
-    /// - Parameter question: The text of the prompt.
-    /// - Returns: The entry.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private static func prompt(_ question: String) -> Transcript.Entry {
-        .prompt(
-            Transcript.Prompt(
-                segments: [.text(Transcript.TextSegment(content: question))], responseFormat: nil))
-    }
-
-    /// The reasoning entry of a turn.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private static var reasoningEntry: Transcript.Entry {
-        .reasoning(Transcript.Reasoning(segments: [.text(Transcript.TextSegment(content: reasoning))]))
-    }
-
-    /// The entries of one turn whose response holds `answer`, and the prompt after it, in the
-    /// order the framework appends them: the response entry opens with the turn, and the
-    /// reasoning entry opens when the first reasoning fragment arrives.
-    ///
-    /// - Parameter answer: The text of the response, or `nil` for a turn that stopped inside
-    ///   its reasoning.
-    /// - Returns: The entries.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private static func turn(answer: String?) -> [Transcript.Entry] {
-        let segments = answer.map { [Transcript.Segment.text(Transcript.TextSegment(content: $0))] }
-        return [
-            prompt("What is 2+2?"),
-            .response(Transcript.Response(assetIDs: [], segments: segments ?? [])),
-            reasoningEntry,
-            prompt("And 3+3?"),
-        ]
-    }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
     func aTurnThatStoppedInsideItsReasoningKeepsTheReasoning() throws {
         let messages = try TranscriptConverter.mlxMessages(
-            for: Self.turn(answer: nil), reasoning: .reasoningOnlyTurns)
+            for: ReasoningOnlyTurnFixture.reasoningOnlyTurn(responseSegments: []),
+            reasoning: .reasoningOnlyTurns)
 
         try #require(messages.map(\.role) == [.user, .assistant, .user])
         #expect(messages[1].content.isEmpty)
-        #expect(messages[1].reasoning == Self.reasoning)
+        #expect(messages[1].reasoning == ReasoningOnlyTurnFixture.reasoning)
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
     func aTurnThatAnsweredDropsItsReasoning() throws {
+        let answer = Transcript.Segment.text(Transcript.TextSegment(content: "4"))
+
         let messages = try TranscriptConverter.mlxMessages(
-            for: Self.turn(answer: "4"), reasoning: .reasoningOnlyTurns)
+            for: ReasoningOnlyTurnFixture.reasoningOnlyTurn(responseSegments: [answer]),
+            reasoning: .reasoningOnlyTurns)
 
         try #require(messages.map(\.role) == [.user, .assistant, .user])
         #expect(messages[1].content == "4")
@@ -88,8 +54,8 @@ struct TranscriptConverterUnclosedReasoningTests {
             id: "call_1", toolName: "get_weather",
             arguments: try GeneratedContent(json: #"{"location":"Paris"}"#))
         let entries: [Transcript.Entry] = [
-            Self.prompt("Weather in Paris?"),
-            Self.reasoningEntry,
+            ReasoningOnlyTurnFixture.prompt("Weather in Paris?"),
+            ReasoningOnlyTurnFixture.reasoningEntry,
             .toolCalls(Transcript.ToolCalls(id: "tc_1", [call])),
         ]
 
@@ -104,7 +70,7 @@ struct TranscriptConverterUnclosedReasoningTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
     func anEmptyResponseWithNoReasoningStaysOutOfTheHistory() throws {
-        let entries = Self.turn(answer: nil).filter {
+        let entries = ReasoningOnlyTurnFixture.reasoningOnlyTurn(responseSegments: []).filter {
             if case .reasoning = $0 { return false }
             return true
         }
@@ -133,14 +99,15 @@ struct TranscriptConverterUnclosedReasoningTests {
     func theHistoryOfAnUnclosedReasoningProtocolKeepsTheReasoningOnlyTurn() throws {
         let resolved = ModelConfiguration(
             id: Self.modelID, reasoningConfig: DeepSeekV4EncodingTokenizer.reasoningConfig)
-        let transcript = Transcript(entries: Self.turn(answer: nil))
+        let transcript = Transcript(
+            entries: ReasoningOnlyTurnFixture.reasoningOnlyTurn(responseSegments: []))
 
         let messages = try MLXLanguageModel.Executor.historyMessages(
             of: transcript, resolved: resolved,
             otherwise: TranscriptConverter.mlxMessages(for: transcript))
 
         try #require(messages.map(\.role) == [.user, .assistant, .user])
-        #expect(messages[1].reasoning == Self.reasoning)
+        #expect(messages[1].reasoning == ReasoningOnlyTurnFixture.reasoning)
     }
 }
 
