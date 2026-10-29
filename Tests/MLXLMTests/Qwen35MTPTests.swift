@@ -817,11 +817,12 @@ struct Qwen35MTPDrafterStateTests {
         _ fixture: Qwen35MTPFixture, hidden: MLXArray, state: inout MTPDrafterState,
         sampler: any LogitSampler
     ) {
-        for _ in 0 ..< Qwen35MTPFixture.blockSize {
+        let oneDraftBlockSize = MTPDraftBlockOutput.minimumChainedMTPBlockSize
+        for _ in 0 ..< oneDraftBlockSize {
             let proposal = fixture.drafter.draftBlock(
                 target: fixture.target, lastToken: bonus,
                 lastHidden: hidden[0..., (-1)..., 0...], sharedKV: [:], positionDeltas: nil,
-                queryOffset: state.nextPosition, blockSize: Qwen35MTPFixture.blockSize,
+                queryOffset: state.nextPosition, blockSize: oneDraftBlockSize,
                 state: &state, sampler: sampler)
             eval(proposal)
         }

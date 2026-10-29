@@ -1527,8 +1527,7 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
         // all of its lazy MLX values have been settled.
         var arrays = [targetBoundaryHidden]
         arrays.append(contentsOf: currentDrafterState.cache.flatMap(\.state))
-        if let seedToken = currentDrafterState.seedToken { arrays.append(seedToken) }
-        if let seedHidden = currentDrafterState.seedHidden { arrays.append(seedHidden) }
+        arrays.append(contentsOf: currentDrafterState.seedArrays)
         eval(arrays)
 
         drafterState = currentDrafterState

@@ -190,8 +190,7 @@ package final class MTPDrafterPrefillFeed {
         }
         // Only the final segment's seed starts the first round, and an unused seed would keep
         // this chunk's graph alive.
-        state.seedToken = nil
-        state.seedHidden = nil
+        state.dropSeed()
         let boundary = hiddenStates[0..., (count - 1)..., 0...]
         boundaryHidden = boundary
         fedTokenCount += count

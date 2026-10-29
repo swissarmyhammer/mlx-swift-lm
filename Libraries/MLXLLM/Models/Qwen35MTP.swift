@@ -198,11 +198,9 @@ public final class Qwen35MTPDraftModel: Module, ResumableMTPDrafterModel,
                 ? targetHidden : targetHidden[0..., ..<count, 0...],
             cache: state.cache, positionOffset: state.nextPosition)
         state.nextPosition += count
-        let seedHidden = mtpHidden[0..., (-1)..., 0...]
-        state.seedHidden = seedHidden
-        state.seedToken = sampleMTPSeed(
-            hidden: seedHidden, targetEmbedTokens: targetEmbedTokens, lmHead: lmHead,
-            sampler: sampler)
+        state.drawSeed(
+            hidden: mtpHidden[0..., (-1)..., 0...], targetEmbedTokens: targetEmbedTokens,
+            lmHead: lmHead, sampler: sampler)
         return state.isAligned
     }
 

@@ -231,17 +231,18 @@ struct QwenMTPDistributionDraftTests {
         let fixture = try Qwen35MTPFixture()
         var tokenState = Self.preparedState(fixture)
         var distributionState = Self.preparedState(fixture)
+        let oneDraftBlockSize = MTPDraftBlockOutput.minimumChainedMTPBlockSize
 
         let token = fixture.drafter.draftBlock(
             target: fixture.target, lastToken: MLXArray([Self.firstBonus]),
             lastHidden: MLXArray.zeros([1, 1, Qwen35MTPFixture.hiddenSize]), sharedKV: [:],
             positionDeltas: nil, queryOffset: Self.promptTokens.count,
-            blockSize: Qwen35MTPFixture.blockSize, state: &tokenState, sampler: ArgMaxSampler())
+            blockSize: oneDraftBlockSize, state: &tokenState, sampler: ArgMaxSampler())
         let output = fixture.drafter.draftBlockWithLogits(
             target: fixture.target, lastToken: MLXArray([Self.firstBonus]),
             lastHidden: MLXArray.zeros([1, 1, Qwen35MTPFixture.hiddenSize]), sharedKV: [:],
             positionDeltas: nil, queryOffset: Self.promptTokens.count,
-            blockSize: Qwen35MTPFixture.blockSize, state: &distributionState, processor: nil,
+            blockSize: oneDraftBlockSize, state: &distributionState, processor: nil,
             sampler: ArgMaxSampler())
 
         #expect(output.tokens.asArray(Int.self) == token.asArray(Int.self))

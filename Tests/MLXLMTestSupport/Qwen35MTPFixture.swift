@@ -58,9 +58,10 @@ public struct Qwen35MTPFixture {
     /// The number of layers of the drafter.
     public static let mtpLayers = 1
 
-    /// The tokens of each MTP round: one drafted token and the bonus token. The Qwen MTP
-    /// drafter drafts one token for each round.
-    public static let blockSize = 2
+    /// The tokens of each MTP round: the shipped default, the seed and the drafts chained after
+    /// it, and the bonus token. The shipped confidence floor applies with it, and the seeds of the
+    /// fixture's drafter fall below that floor, so most rounds draft the seed alone.
+    public static let blockSize = SpeculativeDecodingConfig.defaultMTPBlockSize
 
     /// The seed of the independent drafter is this far from the seed of the target, thus its
     /// weights differ from the target's. ``Qwen35VLMMTPFixture`` seeds its drafter the same way.

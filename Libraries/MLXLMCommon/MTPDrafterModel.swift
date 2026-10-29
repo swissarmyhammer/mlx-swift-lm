@@ -152,6 +152,14 @@ public struct MTPDrafterState {
     public var seedToken: MLXArray?
     public var seedHidden: MLXArray?
 
+    /// The probability the logits of ``seedToken`` give their most likely token, the lowest over
+    /// the batch, as a lazy scalar; `nil` when the seed's logits are not known, as in a restored
+    /// continuation.
+    ///
+    /// A chained round whose seed falls below ``minimumDraftProbability`` drafts the seed alone,
+    /// without a chained step.
+    public var seedTopProbability: MLXArray?
+
     /// Number of tentative cache entries appended by the current proposal.
     public var proposalAppended: Int
 
@@ -168,6 +176,7 @@ public struct MTPDrafterState {
         nextPosition: Int = 0,
         seedToken: MLXArray? = nil,
         seedHidden: MLXArray? = nil,
+        seedTopProbability: MLXArray? = nil,
         proposalAppended: Int = 0,
         minimumDraftProbability: Float = 0
     ) {
@@ -176,6 +185,7 @@ public struct MTPDrafterState {
         self.nextPosition = nextPosition
         self.seedToken = seedToken
         self.seedHidden = seedHidden
+        self.seedTopProbability = seedTopProbability
         self.proposalAppended = proposalAppended
         self.minimumDraftProbability = minimumDraftProbability
     }
@@ -203,9 +213,21 @@ public struct MTPDrafterState {
 
         nextPosition -= count
         proposalAppended = Swift.max(0, proposalAppended - count)
+        dropSeed()
+        return isAligned
+    }
+
+    /// The arrays of the seed proposal the state holds: ``seedToken``, ``seedHidden`` and
+    /// ``seedTopProbability``, those present.
+    package var seedArrays: [MLXArray] {
+        [seedToken, seedHidden, seedTopProbability].compactMap { $0 }
+    }
+
+    /// Drops the seed proposal: ``seedToken``, ``seedHidden`` and ``seedTopProbability``.
+    package mutating func dropSeed() {
         seedToken = nil
         seedHidden = nil
-        return isAligned
+        seedTopProbability = nil
     }
 
     /// Removes every entry and starts the empty cache at `position`.
