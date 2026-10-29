@@ -61,8 +61,24 @@ comments:
     - evidence: 1 file — Tests/MLXFoundationModelsTests/GuidedGenerationModelFeedTests.swift; swift build --build-tests 0 compiler warnings (only the pre-existing build-system note about mlx-swift_Cmlx.bundle); xcrun xctest: CXGrammarTests 7, MLXGuidedGenerationTests 72, MLXHuggingFaceMacrosTests 6, MLXFoundationModelsTests 415 (GuidedGenerationModelFeedTests 12 cases), MLXLMTests 920 XCTest + 2011 Swift Testing — all passed, 0 failures, 0 skipped; MTP feed regressions caught (15 and 16 issues), then restored
     - next: /review
   timestamp: 2026-10-29T10:47:13.899546+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m63md1v9s15fdf0g9bnm4n5c
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (0da10dd0) — 0 findings, 0 confirmed, 0 refuted (7 attempted, 0 failed); prior item from Review Findings (2026-10-29 05:34) is checked
+    - next: none — task moved to done
+  timestamp: 2026-10-29T10:48:28.777320+00:00
+- actor: claude-code
+  id: 01m63mdgf78jkrbsy5sd9wnnx3
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 1 test file (MTP paths in theTargetIsFedEveryEmittedToken, CacheRecordingTarget)
+    - test: green — 5 bundles 0 failures 0 skipped; MTP feed regressions caught
+    - commit: 0da10dd0
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T10:48:43.751831+00:00
+position_column: done
+position_ordinal: ffff8380
 title: 'Guided generation: feed the sampled token to the model when its commit fast-forwards'
 ---
 ## What
