@@ -80,8 +80,24 @@ comments:
     - files: Libraries/MLXFoundationModels/ExecutorPromptCacheFile.swift, Libraries/MLXLMCommon/ChatSession.swift, Tests/MLXFoundationModelsTests/ExecutorPromptCacheUnfedTokenTests.swift, Tests/MLXFoundationModelsTests/ExecutorReasoningConversation.swift
     - next: /review (all 5 findings of 2026-10-29 07:45 checked)
   timestamp: 2026-10-29T13:05:37.687979+00:00
-position_column: doing
-position_ordinal: '8680'
+- actor: claude-code
+  id: 01m63wxxpajfvyma5j4hpdh0st
+  text: |-
+    ### review — clean
+    - evidence: review sha 330c77f3~1..330c77f3 — 0 findings (7 attempted, 1 refuted, 0 confirmed); 4 files reviewed; all 5 items in Review Findings (2026-10-29 07:45) checked
+    - next: none; task moved to done
+  timestamp: 2026-10-29T13:17:30.186381+00:00
+- actor: claude-code
+  id: 01m63wydd92wapw57d07w6g4fa
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 4 files (decodeIfPresent for old spill files + test, shared splice input, named constants) in worktree, applied to mtp
+    - test: green — worktree 5 bundles 0 failures 0 skipped; merged tree at 0534c446 green (Release MTP 95.0/86.0/77.7 vs plain ~58.5 at load ~10–18, edit turn 123)
+    - commit: 330c77f3
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T13:17:46.281309+00:00
+position_column: done
+position_ordinal: ffff8880
 title: 'FoundationModels: an MTP turn that stops on its token budget leaves its last token out of the cache, and the Qwen splice drops it from the next turn'
 ---
 Found in ^k2zn64x (Release MTPPromptCacheTests, Qwen3.8-27B-4bit, `.reasoning`, 128-token budget). The MTP turn 1 ledger is 206 tokens (79 prompt + 127 generated), the plain ledger 207: the MTP iterator returns its final verified token without feeding it. Turn 2 splices at the `<|im_end|>` commit (reused=207 for both). `reconcilePromptCache` gets no `previousGenerationUncommittedTokens` from the executor, thus `CommittedTurnSplice.suffixStart` takes the empty-uncommitted branch and the model reads its answer without that last token before `<|im_end|>`. `ChatSession` tracks `uncommittedTokens` and passes them, so its splice declines (or feeds the token).
