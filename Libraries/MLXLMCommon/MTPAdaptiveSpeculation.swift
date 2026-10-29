@@ -20,8 +20,19 @@ public struct MTPAdaptivePolicy: Sendable, Hashable {
     /// for the whole stream.
     public var isEnabled: Bool
 
-    /// The rounds at one block size the guard measures before it judges that block size.
+    /// The rounds of the shortest window a verdict judges. Each verdict judges the rounds
+    /// since the last verdict, probe, pause or block size change by their aggregate tokens per
+    /// second; a window whose verdict is not yet clear doubles, up to ``maximumRoundSamples``.
     public var minimumRoundSamples: Int
+
+    /// The rounds of the longest window. A window that reaches it without a clear loss keeps
+    /// the block size.
+    public var maximumRoundSamples: Int
+
+    /// The standard errors of a window's rate by which it must trail plain decode's rate to
+    /// lose, or lead it to win. Single rounds vary widely, with a burst of rejected drafts or
+    /// a host stall, so a window that trails plain decode by less than this proves nothing.
+    public var significance: Double
 
     /// The plain steps of one probe. The first step of each plain run refills the decode
     /// pipeline, so the estimate leaves it out; a probe takes at least two steps.
@@ -61,7 +72,7 @@ public struct MTPAdaptivePolicy: Sendable, Hashable {
     /// The most plain tokens of one pause.
     public var maximumPauseLength: Int
 
-    /// The weight of the newest sample in each moving estimate, above 0 and at most 1.
+    /// The weight of the newest plain step in the moving plain estimate, above 0 and at most 1.
     public var smoothing: Double
 
     /// The guard with its tuned settings.
@@ -78,7 +89,9 @@ public struct MTPAdaptivePolicy: Sendable, Hashable {
     ///
     /// - Parameters:
     ///   - isEnabled: Whether the guard runs.
-    ///   - minimumRoundSamples: The rounds that judge one block size.
+    ///   - minimumRoundSamples: The rounds of the shortest window a verdict judges.
+    ///   - maximumRoundSamples: The rounds of the longest window a verdict judges.
+    ///   - significance: The standard errors by which a window must trail plain decode to lose.
     ///   - probeLength: The plain steps of one probe, its warm-up step included.
     ///   - probeInterval: The rounds between two probes, at first.
     ///   - maximumProbeInterval: The most rounds between two probes.
@@ -91,10 +104,12 @@ public struct MTPAdaptivePolicy: Sendable, Hashable {
     ///   - growthHoldRounds: The rounds after a lowering without growth.
     ///   - pauseLength: The plain tokens of the first pause.
     ///   - maximumPauseLength: The most plain tokens of one pause.
-    ///   - smoothing: The weight of the newest sample in each moving estimate.
+    ///   - smoothing: The weight of the newest plain step in the plain estimate.
     public init(
         isEnabled: Bool = true,
         minimumRoundSamples: Int = 16,
+        maximumRoundSamples: Int = 128,
+        significance: Double = 2,
         probeLength: Int = 4,
         probeInterval: Int = 64,
         maximumProbeInterval: Int = 512,
@@ -109,6 +124,8 @@ public struct MTPAdaptivePolicy: Sendable, Hashable {
     ) {
         self.isEnabled = isEnabled
         self.minimumRoundSamples = minimumRoundSamples
+        self.maximumRoundSamples = maximumRoundSamples
+        self.significance = significance
         self.probeLength = probeLength
         self.probeInterval = probeInterval
         self.maximumProbeInterval = maximumProbeInterval
@@ -129,6 +146,11 @@ public struct MTPAdaptivePolicy: Sendable, Hashable {
     private var requirements: [(holds: Bool, statement: String)] {
         [
             (minimumRoundSamples >= 1, "minimumRoundSamples must be at least 1"),
+            (
+                maximumRoundSamples >= minimumRoundSamples,
+                "maximumRoundSamples must be at least minimumRoundSamples"
+            ),
+            (significance >= 0 && significance.isFinite, "significance must not be negative"),
             (
                 probeLength >= Self.minimumProbeLength,
                 "probeLength must be at least \(Self.minimumProbeLength)"
@@ -213,6 +235,66 @@ struct MTPThroughputEstimate: Sendable {
     }
 }
 
+/// The rounds one verdict judges: their aggregate tokens per second, and the standard error of
+/// that rate from how the rounds spread around it.
+struct MTPRoundWindow: Sendable {
+
+    /// The rounds the window holds.
+    private(set) var count = 0
+
+    /// The tokens of the rounds.
+    private var tokens = 0.0
+
+    /// The seconds of the rounds.
+    private var seconds = 0.0
+
+    /// The sum of each round's tokens squared.
+    private var tokensSquared = 0.0
+
+    /// The sum of each round's tokens times its seconds.
+    private var tokensSeconds = 0.0
+
+    /// The sum of each round's seconds squared.
+    private var secondsSquared = 0.0
+
+    /// The factor of the cross term of a squared residual: (t - r s)^2 = t^2 - 2 r t s + r^2 s^2.
+    private static let crossTermFactor = 2.0
+
+    /// The tokens per second of the rounds together, or 0 before the first round.
+    var tokensPerSecond: Double {
+        seconds > 0 ? tokens / seconds : 0
+    }
+
+    /// The standard error of ``tokensPerSecond``, from the residual of each round against the
+    /// window's rate, or 0 below two rounds.
+    var standardError: Double {
+        guard count > 1, seconds > 0 else { return 0 }
+        let rate = tokensPerSecond
+        let residual = Swift.max(
+            0,
+            tokensSquared - Self.crossTermFactor * rate * tokensSeconds
+                + rate * rate * secondsSquared)
+        let rounds = Double(count)
+        return (residual * rounds / (rounds - 1)).squareRoot() / seconds
+    }
+
+    /// Adds a round. A round without tokens or without measurable time is left out.
+    ///
+    /// - Parameters:
+    ///   - roundTokens: The tokens the round emitted.
+    ///   - roundSeconds: The seconds of the round.
+    mutating func add(tokens roundTokens: Int, seconds roundSeconds: Double) {
+        guard roundTokens > 0, roundSeconds > 0, roundSeconds.isFinite else { return }
+        let roundTokens = Double(roundTokens)
+        count += 1
+        tokens += roundTokens
+        seconds += roundSeconds
+        tokensSquared += roundTokens * roundTokens
+        tokensSeconds += roundTokens * roundSeconds
+        secondsSquared += roundSeconds * roundSeconds
+    }
+}
+
 /// The decisions of the adaptive guard, from the costs of the rounds and plain steps it measured.
 ///
 /// The controller holds no clock: each round and each plain step reports its own tokens and
@@ -272,11 +354,13 @@ package struct MTPAdaptiveController: Sendable {
     package private(set) var blockSizeChangeCount = 0
 
     private var phase = Phase.speculating
-    private var speculative = MTPThroughputEstimate()
     private var plain = MTPThroughputEstimate()
 
-    /// The rounds measured at the current block size.
-    private var roundsAtBlockSize = 0
+    /// The rounds since the last verdict, probe, pause or block size change.
+    private var window = MTPRoundWindow()
+
+    /// The rounds the window must hold before the next verdict.
+    private var verdictRounds: Int
 
     /// The rounds since the last plain step.
     private var roundsSincePlainSample = 0
@@ -314,6 +398,7 @@ package struct MTPAdaptiveController: Sendable {
         self.blockSize = blockSize
         self.probeInterval = policy.probeInterval
         self.nextPauseLength = policy.pauseLength
+        self.verdictRounds = policy.minimumRoundSamples
     }
 
     /// What the stream runs next.
@@ -340,8 +425,7 @@ package struct MTPAdaptiveController: Sendable {
     ///   - contextLength: The tokens the target cache held when the round began, or 0 when
     ///     the stream does not report them.
     package mutating func recordRound(tokens: Int, seconds: Double, contextLength: Int = 0) {
-        speculative.add(tokens: tokens, seconds: seconds, smoothing: policy.smoothing)
-        roundsAtBlockSize += 1
+        window.add(tokens: tokens, seconds: seconds)
         roundsSincePlainSample += 1
         growthHeldRounds = Swift.max(0, growthHeldRounds - 1)
         self.contextLength = contextLength
@@ -385,16 +469,29 @@ package struct MTPAdaptiveController: Sendable {
             && roundsSincePlainSample < probeInterval && !contextOutgrewEstimate
     }
 
-    /// Judges the block size once it has enough rounds: keeps it, lowers it, grows it, pauses
-    /// speculation, or first probes plain decode when the plain estimate is missing or due.
+    /// Judges the block size once the window holds enough rounds, or first probes plain decode
+    /// when the plain estimate is missing or due.
+    ///
+    /// The window loses when its rate trails plain decode's by more than ``significance``
+    /// standard errors: the guard lowers the block size, or pauses at the smallest one. It wins
+    /// when its rate leads by as much, or when it reached its longest length without losing: the
+    /// guard keeps the block size, or grows it after a lead of ``growthSpeedup``. Otherwise the
+    /// window doubles and is judged again, so a window whose rate beats plain decode never loses.
     private mutating func judgeBlockSize() {
-        guard roundsAtBlockSize >= policy.minimumRoundSamples else { return }
+        guard window.count >= verdictRounds else { return }
         guard plainEstimateIsCurrent else { return startProbe() }
-        let speedup = speculative.tokensPerSecond / plain.tokensPerSecond
-        if speedup < policy.requiredSpeedup {
+        let required = plain.tokensPerSecond * policy.requiredSpeedup
+        let margin = policy.significance * window.standardError
+        let rate = window.tokensPerSecond
+        if rate + margin < required {
             backOff()
+        } else if rate - margin >= required || window.count >= policy.maximumRoundSamples {
+            let leadsByMargin = rate - margin >= plain.tokensPerSecond * policy.growthSpeedup
+            restartRoundMeasurement()
+            keepSpeculating(leadsByMargin: leadsByMargin)
         } else {
-            keepSpeculating(speedup: speedup)
+            verdictRounds = Swift.min(
+                Self.backoffFactor * window.count, policy.maximumRoundSamples)
         }
     }
 
@@ -411,12 +508,13 @@ package struct MTPAdaptiveController: Sendable {
 
     /// Keeps speculating after rounds that win: restores the first pause's length after a
     /// resume, sets the probe interval after a probe, and grows a lowered block size.
-    private mutating func keepSpeculating(speedup: Double) {
+    ///
+    /// - Parameter leadsByMargin: Whether the rounds led plain decode by ``growthSpeedup``.
+    private mutating func keepSpeculating(leadsByMargin: Bool) {
         if resumedFromPause {
             resumedFromPause = false
             nextPauseLength = policy.pauseLength
         }
-        let leadsByMargin = speedup >= policy.growthSpeedup
         if awaitsProbeVerdict {
             awaitsProbeVerdict = false
             probeInterval =
@@ -436,14 +534,16 @@ package struct MTPAdaptiveController: Sendable {
         restartRoundMeasurement()
     }
 
-    /// Forgets the measured rounds.
+    /// Forgets the measured rounds and starts a window of the shortest length.
     private mutating func restartRoundMeasurement() {
-        speculative = MTPThroughputEstimate()
-        roundsAtBlockSize = 0
+        window = MTPRoundWindow()
+        verdictRounds = policy.minimumRoundSamples
     }
 
-    /// Starts a probe of plain decode.
+    /// Starts a probe of plain decode. The rounds after it form a new window, judged against
+    /// the probe's estimate.
     private mutating func startProbe() {
+        restartRoundMeasurement()
         phase = .probing(remaining: policy.probeLength)
         probeCount += 1
         awaitsWarmupStep = true

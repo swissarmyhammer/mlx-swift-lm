@@ -37,6 +37,13 @@ struct MTPAdaptiveControllerTests {
     /// The seconds of a round that emits one token at half plain decode's rate.
     private static let slowRoundSeconds = 0.2
 
+    /// The seconds of each round of a window whose rounds alternate the fast round's tokens and
+    /// one token: together they decode 5% slower than plain decode, within their spread.
+    private static let dippingRoundSeconds = 0.21
+
+    /// The rounds between probes of a controller that must not probe during a test.
+    private static let patientRounds = 1024
+
     /// Records `count` rounds of `tokens` tokens in `seconds` each.
     private func recordRounds(
         _ count: Int, tokens: Int, seconds: Double = unitSeconds,
@@ -50,6 +57,14 @@ struct MTPAdaptiveControllerTests {
     /// Records one round that emits one token at half plain decode's rate.
     private func recordSlowRound(into controller: inout MTPAdaptiveController) {
         controller.recordRound(tokens: Self.plainTokens, seconds: Self.slowRoundSeconds)
+    }
+
+    /// Records the shortest window of rounds that each emit one token at half plain decode's
+    /// rate.
+    private func recordSlowWindow(into controller: inout MTPAdaptiveController) {
+        for _ in 0 ..< Self.policy.minimumRoundSamples {
+            recordSlowRound(into: &controller)
+        }
     }
 
     /// Records the plain steps the controller asks for, at plain decode's rate.
@@ -111,14 +126,37 @@ struct MTPAdaptiveControllerTests {
         #expect(controller.blockSizeChangeCount == 0)
     }
 
-    @Test("a round slower than plain decode lowers the block size by one")
-    func slowRoundLowersTheBlockSize() {
+    @Test("a window of rounds slower than plain decode lowers the block size by one")
+    func slowWindowLowersTheBlockSize() {
         var controller = probedController()
 
         recordSlowRound(into: &controller)
+        let blockSizeBeforeTheWindowEnds = controller.blockSize
+        recordSlowWindow(into: &controller)
 
+        #expect(blockSizeBeforeTheWindowEnds == Self.blockSize)
         #expect(controller.nextStep == .speculate(blockSize: Self.blockSize - 1))
         #expect(controller.blockSizeChangeCount == 1)
+    }
+
+    @Test("a window that trails plain decode by less than its spread keeps the block size")
+    func insignificantDipKeepsTheBlockSize() {
+        var policy = Self.policy
+        policy.probeInterval = Self.patientRounds
+        policy.maximumProbeInterval = Self.patientRounds
+        policy.stalePlainEstimateRounds = Self.patientRounds
+        var controller = MTPAdaptiveController(policy: policy, blockSize: Self.blockSize)
+        recordRounds(policy.minimumRoundSamples, tokens: Self.fastRoundTokens, into: &controller)
+        recordPlainRun(into: &controller)
+
+        for round in 0 ..< policy.maximumRoundSamples {
+            let tokens = round.isMultiple(of: 2) ? Self.fastRoundTokens : Self.plainTokens
+            controller.recordRound(tokens: tokens, seconds: Self.dippingRoundSeconds)
+        }
+
+        #expect(controller.blockSizeChangeCount == 0)
+        #expect(controller.pauseCount == 0)
+        #expect(controller.nextStep == .speculate(blockSize: Self.blockSize))
     }
 
     @Test("slow rounds lower the block size to the smallest one before they pause speculation")
@@ -181,7 +219,7 @@ struct MTPAdaptiveControllerTests {
     @Test("fast rounds grow a lowered block size back once the hold has passed")
     func fastRoundsGrowTheBlockSizeBack() {
         var controller = probedController()
-        recordSlowRound(into: &controller)
+        recordSlowWindow(into: &controller)
 
         recordRounds(
             Self.policy.growthHoldRounds - 1, tokens: Self.fastRoundTokens, into: &controller)
@@ -200,7 +238,7 @@ struct MTPAdaptiveControllerTests {
             into: &controller)
         #expect(controller.nextStep == .speculate(blockSize: Self.blockSize))
 
-        recordSlowRound(into: &controller)
+        recordSlowWindow(into: &controller)
 
         #expect(controller.nextStep == .decodePlainly)
         #expect(controller.blockSize == Self.blockSize)
@@ -221,8 +259,11 @@ struct MTPAdaptiveControllerTests {
             Int(
                 Double(probedContext) * (1 + Self.policy.stalePlainContextGrowth)) + 1
 
-        controller.recordRound(
-            tokens: Self.fastRoundTokens, seconds: Self.unitSeconds, contextLength: grownContext)
+        for _ in 0 ..< Self.policy.minimumRoundSamples {
+            controller.recordRound(
+                tokens: Self.fastRoundTokens, seconds: Self.unitSeconds,
+                contextLength: grownContext)
+        }
 
         #expect(controller.nextStep == .decodePlainly)
         #expect(controller.probeCount == 2)
@@ -292,6 +333,9 @@ struct MTPAdaptiveControllerTests {
         "a policy outside its ranges is refused",
         arguments: [
             MTPAdaptivePolicy(minimumRoundSamples: 0),
+            MTPAdaptivePolicy(minimumRoundSamples: 8, maximumRoundSamples: 4),
+            MTPAdaptivePolicy(significance: -1),
+            MTPAdaptivePolicy(significance: .infinity),
             MTPAdaptivePolicy(probeLength: 1),
             MTPAdaptivePolicy(probeInterval: 0),
             MTPAdaptivePolicy(probeInterval: 8, maximumProbeInterval: 4),
