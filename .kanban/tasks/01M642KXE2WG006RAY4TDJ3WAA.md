@@ -117,6 +117,61 @@ comments:
     - commit: 3b1e122e
     - review: clean — held in review until the real-model subtasks are measured in the GPU slot (guard on vs off vs plain, 2k–100k). Not on stable yet: the guard is on by default, so stable waits for that measurement.
   timestamp: 2026-10-29T17:07:47.158266+00:00
+- actor: claude-code
+  id: 01m64exjcjn4kvmjs74a0qn0z3
+  text: |-
+    Coordinator steps 1–2 after the real-model step-4 sweep. On the sweep, guard on was below guard off at all 10 points, and it went to block 2 and paused even though guard off beat plain everywhere.
+
+    **Step 1: d51f7990** (on mtp fb641ddf)
+    - `MTPAdaptivePolicy.default` is now `.disabled`.
+    - A new `MTPAdaptivePolicy.enabled` keeps the tuned settings, for callers that opt in.
+    - Every `adaptivePolicy: = .default` parameter is now off: ChatSession, MTPSpeculation, the MTP iterator, MLXSpeculativeDecoding and the guided test support.
+    - Docs are updated. The policy test now asserts that `.default == .disabled`.
+    - All 5 bundles passed with 0 failures and 0 skips.
+
+    **Step 2: 95034052. Cause: the decision rule, not the timing.**
+    - I checked how time is charged to units, and it is sound:
+      - Plain steps are pipelined like TokenIterator, so a step lasts about one forward.
+      - The warm-up step is dropped.
+      - Consumer time per token is a real cost for both rounds and plain steps.
+      - Drafter catch-up after a pause lands in the first round after the resume. That round is 1 of at least 16 in its window, a few percent at most.
+    - The bias was in the old controller:
+      - It judged after every round, on an average weighted 0.25 toward the newest round, which in effect covers about the last 7 rounds.
+      - Any short run of rejected drafts, or one stalled round, pulled that average below plain even while the overall rate was 1.19–1.75x plain.
+      - Example, text 2k: four 1-token rounds followed by one 3x round drop the average to about 44 tok/s against plain 55.
+      - It lowered the block size immediately, but growing back needed 1.2x and a 128-round hold. So each dip ratcheted down to block 2, and then pauses followed.
+    - The fix: judge windows of rounds instead.
+      - Each window covers the rounds since the last verdict, probe, pause or block change. Its rate is total tokens over total seconds, with the standard error of that ratio estimate.
+      - Loss means `rate + significance·SE < plain·requiredSpeedup`. Win means `rate − significance·SE ≥ plain·requiredSpeedup`.
+      - An undecided window doubles, from minimumRoundSamples (16) up to the new `maximumRoundSamples` (128). At the maximum it keeps the block size.
+      - The new `significance` setting defaults to 2.
+      - A window whose rate beats plain can therefore never lose.
+      - A probe now starts a new window.
+    - New test, `Tests/MLXLMTests/MTPAdaptiveReplayTests.swift`:
+      - It replays the 10 points (guard-off ms/round, tokens per verify, plain ms/token from ^j2tnzpn) through the `.enabled` controller for 1024 tokens.
+      - Each 20-round cycle has a 4-round burst of 1-token rounds followed by one 3x stall, keeping each point's mean cost; a companion test checks the means within 0.01.
+      - It asserts no block change and no pause. It was RED at all 10 points before the fix and is GREEN after.
+    - Controller tests:
+      - Four tests updated to need a window of rounds per verdict: slowWindowLowersTheBlockSize, fastRoundsGrowTheBlockSizeBack, staleEstimateIsProbedFirst, grownContextIsProbedAgain.
+      - Added insignificantDipKeepsTheBlockSize, plus validation of the two new settings.
+    - The guard stays off by default. Turning it back on needs a GPU rerun of the sweep and the ChatSession follow-ups, not done here.
+
+    ### implement — changed
+    - evidence:
+      - d51f7990: MTPAdaptiveSpeculation.swift, MLXSpeculativeDecoding.swift, MTPAdaptiveControllerTests.swift.
+      - 95034052: MTPAdaptiveSpeculation.swift, MTPAdaptiveControllerTests.swift, MTPAdaptiveReplayTests.swift (new).
+      - `swift build --build-tests`: 0 warnings. swiftlint no_magic_numbers: 0 violations.
+      - Bundles, 0 failures and 0 skipped:
+
+        | Bundle | Tests |
+        |---|---|
+        | MLXLMTests | 2063 |
+        | Guided | 72 |
+        | FM | 457 |
+        | CXGrammar | 7 |
+        | Macros | 7 |
+    - next: on the GPU slot, rerun the step-4 sweep and the ChatSession follow-ups with `adaptivePolicy: .enabled`.
+  timestamp: 2026-10-29T18:31:52.978823+00:00
 position_column: review
 position_ordinal: '80'
 title: 'MTP: stay faster than plain under CPU load (adaptive block size / plain fallback, fewer host syncs)'

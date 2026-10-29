@@ -95,6 +95,65 @@ comments:
     - commits: eb4268b9, eff25c2c, 910303f7, 9fac368b (head) on worktree-agent-ac12e219c380a9047. Not pushed.
     - next: wait for "run phase 2". Estimated runtime: sweep ~30–45 min for both paths, breakdown ~10–15 min, session test ~40 min, near-tie test ~10 min; ~1.75–2.25 h total. No GPU work has run yet.
   timestamp: 2026-10-29T16:43:50.802389+00:00
+- actor: claude-code
+  id: 01m64a9kz8a5w8ba1hr32q6t9d
+  text: |-
+    ### implement — changed
+    - evidence: rebased onto mtp fb641ddf, which includes the guard review fixes in 3b1e122e. The rebase was clean.
+    - commits: f9e09ce0, ae5fe3c8, e3e9deee, fe3b25d8 (head).
+    - xcodebuild Release build-for-testing: TEST BUILD SUCCEEDED. The log has 0 Swift warnings from repo sources; its only warning line is the appintentsmetadataprocessor note.
+    - swift build --build-tests: Build complete, 0 Swift warnings. Its only note is llbuild's "missing creator".
+    - the sweep is unguided text, so the new guided stand-down fallback does not touch its guard-on fallback check.
+    - next: on "run phase 2", one lock hold running, in order: MTPRoundCostBreakdownTests, the sweep, MTPNearTieDivergenceTests, MTPGenerationTests, then GenerationBenchmarkTests/qwen38FourBitMTPSystemPromptCache() and GuidedGenerationBenchmarkTests/qwen38GuidedJSONWithMTP(). Uptime before and after each step; the session test is skipped.
+  timestamp: 2026-10-29T17:11:04.936312+00:00
+- actor: claude-code
+  id: 01m64dbt4a6r6b3z1gq1pd2f12
+  text: |-
+    ### phase 2: run (head fe3b25d8). Lock taken 12:18:22, released 13:03:12.
+    Step results (uptime load averages, before → after):
+    1. MTPRoundCostBreakdownTests: passed, 446 s. 8.60 → 7.97.
+    2. Sweep: passed, 2110 s. 7.97 → 5.41.
+    3. MTPNearTieDivergenceTests: failed on the router path, 40 s. 5.41 → 10.98.
+    4. MTPGenerationTests: passed, 9 s. 10.98 → 10.22.
+    5. qwen38GuidedJSONWithMTP passed; qwen38FourBitMTPSystemPromptCache failed. 10.22 → 6.79.
+    A TestudoApp UI-test xcodebuild from another session was running at the same time.
+
+    Breakdown (guard off; ms; verify by rows 1–5; drafter by block 2–5; chained steps):
+    - text 32k: plain 21.44; verify 21.85/26.59/35.33/42.48/48.95; drafter 1.42/2.83/4.42/5.90; chained 1.41/1.60/1.47; sync 0.183
+    - text 100k: plain 26.42; verify 27.43/36.31/48.60/58.32/68.92; drafter 1.78/8.89/21.30/24.47; chained 7.11/12.41/3.18; sync 0.249
+    - router 32k: plain 22.42; verify 22.66/30.79/40.43/45.84/53.94; drafter 1.54/3.19/4.56/6.04; chained 1.65/1.36/1.49; sync 0.251
+    - router 100k: plain 27.59; verify 28.88/43.59/57.25/70.02/81.98; drafter 1.99/8.77/19.09/22.31; chained 6.78/10.32/3.21; sync 0.182
+    - The drafter cache holds the full context (32768 and 100000 entries).
+
+    Sweep (tok/s; MTP/plain ratio):
+
+    | path, context | plain | guard off | guard on | guard on: pauses / probes / plain tokens / block changes / final block |
+    |---|---|---|---|---|
+    | text 2k | 55.2 | 88.0 (1.59) | 84.8 (1.53) | 1/5/84/6/5 |
+    | text 8k | 54.4 | 95.3 (1.75) | 82.8 (1.52) | 2/4/144/3/2 |
+    | text 32k | 47.8 | 74.6 (1.56) | 60.6 (1.27) | 3/6/216/3/2 |
+    | text 64k | 38.3 | 52.4 (1.37) | 43.5 (1.14) | 5/3/460/3/2 |
+    | text 100k | 32.3 | 43.7 (1.35) | 33.9 (1.05) | 5/3/588/3/2 |
+    | router 2k | 55.3 | 76.3 (1.38) | 65.3 (1.18) | 5/5/448/3/2 |
+    | router 8k | 53.5 | 76.3 (1.43) | 60.2 (1.13) | 7/3/460/3/2 |
+    | router 32k | 46.8 | 55.6 (1.19) | 48.1 (1.03) | 4/2/796/3/2 |
+    | router 64k | 37.3 | 48.6 (1.30) | 37.8 (1.01) | 4/3/671/3/2 |
+    | router 100k | 30.3 | 37.9 (1.25) | 29.8 (0.99) | 4/2/782/3/2 |
+
+    Guard-off acceptance, tokens per verify and effective block, by point:
+    - text: 0.88/2.92/3.18, 0.96/3.75/3.87, 0.93/3.39/3.58, 0.91/3.01/3.21, 0.90/3.26/3.51
+    - router: 0.85/2.78/3.09, 0.94/3.76/3.93, 0.83/2.43/2.72, 0.95/3.84/3.97, 0.94/3.95/4.13
+
+    Guard-off ms per round: text 33.2/39.4/45.4/57.5/74.7; router 36.4/49.3/43.8/78.9/104.3. Plain ms per token: text 18.1/18.4/20.9/26.1/31.0; router 18.1/18.7/21.4/26.8/33.0.
+
+    Findings:
+    - (a) Guard on is below guard off at all 10 points, by 4–25%. It drops to block size 2 and decodes up to 796 of 1024 tokens plainly, even though guard off beats plain everywhere (1.19–1.75). The worst point is router 100k at 0.986 of plain, 1.6% above the 0.97 floor. This needs a follow-up on the guard (^tdj3waa).
+    - (b) A one-row verify costs about the same as plain decode. Each extra row costs ~6.8 ms at 32k and ~10–13 ms at 100k, so a 5-row verify is 2.3–3.0x a plain forward and is the largest part of a round. Suspect 2 is confirmed as the main cost.
+    - (c) Drafter chained steps stay ~1.5 ms at 32k but jump to 3–12 ms each at 100k, so a full block-5 proposal is 22–24 ms. Suspect 1 is confirmed as the secondary cost.
+    - (d) Near-tie, router path: first divergence at generated token 74 (ledger 148). Plain wrote 58614, MTP wrote 16570. The top-2 gap is 0.0 on both the plain row and the verify row, an exact tie. The replay ranks 16570 first, but plain decode wrote 58614 ("replay reproduces plain false"), so MTPChatTokenMatch fails on how the exact tie was ordered. It is a near tie by the gap. Text path: token 88, gap 0.125 on both rows, holds.
+    - (e) qwen38FourBitMTPSystemPromptCache, follow-ups: tokens exact on every turn, but turn 1 is MTP 51.8 vs plain 56.0 tok/s (0.92x, 102 tokens) and turn 2 is 46.0 vs 55.9 (0.82x, 117 tokens). Turn 0 was 1.60x. The edit and thinking scenarios ran 1.44–1.77x.
+    - Plain never reused the MTP cache in the sweep (cached 0 at every point), so it prefilled cold; decode rates are unaffected. promptTime in the sweep lines is not a prefill time.
+  timestamp: 2026-10-29T18:04:42.506922+00:00
 position_column: doing
 position_ordinal: '8180'
 title: 'MTP: measure Qwen3.8 MTP at SWE-bench scale (tens of thousands of context tokens, ~16k-token decodes, tool turns)'
