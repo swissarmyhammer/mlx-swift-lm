@@ -172,6 +172,13 @@ comments:
         | Macros | 7 |
     - next: on the GPU slot, rerun the step-4 sweep and the ChatSession follow-ups with `adaptivePolicy: .enabled`.
   timestamp: 2026-10-29T18:31:52.978823+00:00
+- actor: claude-code
+  id: 01m64f1g6qh10rhwgjg138rd3s
+  text: |-
+    ### review — clean
+    - evidence: `review sha fb641ddf..31febc53` (ee74cc93, 31febc53) — 4 files reviewed, 0 not reviewed; counts findings 0, confirmed 0, refuted 0 (7 attempted, 0 failed, 0 skipped). All 9 prior findings from 2026-10-29 11:40 are checked.
+    - next: task stays in `review`, not moved to `done` — the real-model subtasks (quantify MTP/plain vs load, host-sync measurement, release guards at quiet load and under synthetic load) are still open and wait for the GPU, which another team has reserved for an 8–12 h run.
+  timestamp: 2026-10-29T18:34:01.815045+00:00
 position_column: review
 position_ordinal: '80'
 title: 'MTP: stay faster than plain under CPU load (adaptive block size / plain fallback, fewer host syncs)'
