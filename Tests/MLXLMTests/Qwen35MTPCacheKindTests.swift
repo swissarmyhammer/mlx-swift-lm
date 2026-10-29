@@ -10,8 +10,8 @@ import Testing
 ///
 /// A rotating main cache gives the drafter a cache that rotates with the same window and keeps a
 /// rewind reserve, so the drafter stays bounded and rewinds its rejected entries after its ring
-/// wraps. A ring without a kept prefix speculates past its window; a ring that keeps a prefix
-/// stops speculating before a verify would attend past it. A quantized main cache leaves the
+/// wraps. A ring speculates past its window, with or without a kept prefix, since a verify of
+/// several tokens attends as plain decode does. A quantized main cache leaves the
 /// drafter cache in full precision. In each case the greedy MTP tokens are the plain greedy
 /// tokens of the same cache configuration.
 @Suite(.serialized)
@@ -103,9 +103,9 @@ struct Qwen35MTPCacheKindTests {
     }
 
     @Test(
-        "greedy MTP decode over a ring that keeps a prefix stops speculating at the window and equals plain decode",
+        "greedy MTP decode over a ring that keeps a prefix speculates past the window and equals plain decode",
         arguments: Qwen35MTPFixture.DrafterMode.allCases, blockSizes)
-    func prefixKeepingRingStopsSpeculatingAtTheWindow(
+    func prefixKeepingRingSpeculatesPastTheWindow(
         mode: Qwen35MTPFixture.DrafterMode, blockSize: Int
     ) throws {
         let fixture = try Qwen35MTPFixture(drafter: mode)
@@ -117,8 +117,8 @@ struct Qwen35MTPCacheKindTests {
         let tokens = drain(&mtp)
 
         #expect(tokens == expected)
-        #expect(mtp.passthroughReason == MTPSpeculativeTokenIterator.keptPrefixWindowReason)
-        #expect(mtp.proposedCount > 0)
+        #expect(mtp.passthroughReason == nil)
+        #expect(try #require(mtp.drafterState).entryCount > Self.window)
     }
 
     @Test(

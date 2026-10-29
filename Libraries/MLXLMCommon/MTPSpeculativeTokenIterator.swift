@@ -459,16 +459,6 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     static let missingPromptHiddenReason =
         "MTP drafter has no target hidden state for the prompt; continuing without speculation"
 
-    /// The passthrough reason of a stream whose rotating main cache keeps a prefix (as
-    /// `maxKVSize` makes it), once a verify would reach past the window.
-    ///
-    /// A verify writes its tokens at once, and a write of several rows masks a window over them:
-    /// a query past the window does not see the kept prefix. Plain decode writes one token at a
-    /// time and each token sees the kept prefix. The verify would thus not give the plain tokens.
-    static let keptPrefixWindowReason =
-        "rotating main KV cache keeps a prefix, and a verify past its window does not attend as "
-        + "plain decode does; continuing without speculation"
-
     static let missingSharedKVSourcesReason =
         "main model did not report which cache entries its shared K/V came from; continuing "
         + "without speculation"
@@ -479,7 +469,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// The target must keep a recurrent snapshot slot for each draft (Qwen's Gated DeltaNet
     /// layers), and every attention entry must rewind the drafts after the verify wrote them:
     /// see ``canRewindSpeculativeVerify(_:positions:)``. A rotating ring that has wrapped, from
-    /// `maxKVSize`, still rewinds them, thus such a stream keeps speculating past its window.
+    /// `maxKVSize`, still rewinds them, and each verify query attends as plain decode does, kept
+    /// prefix included (``RotatingKVCache/makeMask(n:windowSize:returnArray:)``); thus such a
+    /// stream keeps speculating past its window.
     ///
     /// - Parameters:
     ///   - mainModel: The target model.
@@ -494,24 +486,6 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         return nativeRewindDepth >= drafts
             && mainCache.contains { $0 is MambaCache }
             && canRewindSpeculativeVerify(mainCache, positions: drafts + 1)
-    }
-
-    /// The drafts of a round that verifies in place: `drafts`, or fewer so that each query of the
-    /// verify attends as plain decode would attend at its position.
-    ///
-    /// Only a rotating main cache that keeps a prefix bounds the round, near its window: see
-    /// ``RotatingKVCache/rowsAttendingAsSingleRowWrites``. The verify holds the bonus and the
-    /// drafts.
-    ///
-    /// - Parameters:
-    ///   - drafts: The most drafts of the round.
-    ///   - mainCache: The cache of the target.
-    /// - Returns: The drafts, or `nil` when not one draft fits.
-    package static func drafts(_ drafts: Int, fittingWindowOf mainCache: [KVCache]) -> Int? {
-        let fitting = mainCache.lazy
-            .compactMap { ($0 as? RotatingKVCache)?.rowsAttendingAsSingleRowWrites }
-            .reduce(drafts) { Swift.min($0, $1 - 1) }
-        return fitting > 0 ? fitting : nil
     }
 
     /// The tightest sliding window among the cache's layers, or `nil` when no layer slides.
@@ -854,7 +828,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // A speculative round can emit up to `maximumDrafts + 1` tokens: the
         // accepted draft prefix plus the verifier's correction/bonus token.
         // Keep the whole pending buffer within the remaining output budget.
-        let budgetedDrafts: Int
+        let maximumDrafts: Int
         if let maxTokens {
             let remaining = maxTokens - tokenCount
             guard remaining > 0 else { return }
@@ -866,9 +840,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 }
                 return
             }
-            budgetedDrafts = draftBudget
+            maximumDrafts = draftBudget
         } else {
-            budgetedDrafts = blockSize - 1
+            maximumDrafts = blockSize - 1
         }
 
         guard let state = mainState,
@@ -888,20 +862,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // rejected drafts; the typed capability and
         // cache topology keep that exception fail-closed.
         let nativeHybridRewind = Self.verifiesInPlace(
-            mainModel: mainModel, mainCache: mainCache, drafts: budgetedDrafts)
-        // An in-place verify past the window of a ring that keeps a prefix would not attend as
-        // plain decode does: shorten the round to the window, and stop speculating at it.
-        let maximumDrafts: Int
-        if nativeHybridRewind {
-            guard let fittingDrafts = Self.drafts(budgetedDrafts, fittingWindowOf: mainCache)
-            else {
-                switchToPassthrough(reason: Self.keptPrefixWindowReason)
-                return
-            }
-            maximumDrafts = fittingDrafts
-        } else {
-            maximumDrafts = budgetedDrafts
-        }
+            mainModel: mainModel, mainCache: mainCache, drafts: maximumDrafts)
         let round =
             nativeHybridRewind
             ? nil : mainCacheStorage.beginRound(maximumPositions: maximumDrafts + 1)

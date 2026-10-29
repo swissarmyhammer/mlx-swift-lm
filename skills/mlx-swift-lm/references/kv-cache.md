@@ -228,10 +228,16 @@ The Qwen MTP drafter cache follows the main attention caches: with
 `maxKVSize` (or a typed capacity) it is a `RotatingKVCache` of the same window
 with a small rewind reserve, so pass the stream's `GenerateParameters` to the
 restore. A quantized main cache (`kvBits`) leaves the drafter cache in full
-precision. A ring that keeps a prefix (as `maxKVSize` makes it) stops MTP
-speculation once a verify would reach past the window, since a multi-token
-verify there would not attend as plain decode does; a typed capacity with
-`preservedPrefixTokens: 0` keeps speculating past the window.
+precision. MTP keeps speculating past the window of every ring, including one
+that keeps a prefix (as `maxKVSize` makes it).
+
+A write of several rows into a `RotatingKVCache` that keeps a prefix masks each
+query as a write of one row would: the query sees the kept prefix and the
+newest rows that fill the rest of the window. A chunked prefill and a
+multi-token MTP verify thus attend as plain one-token decode does, and give its
+tokens; how a stream batches its tokens does not change them. (Python mlx-lm
+masks a plain window over such a write, which drops the kept prefix first for
+each query past the window.)
 
 ## Attention Masks
 

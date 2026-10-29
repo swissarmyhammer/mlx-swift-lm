@@ -172,9 +172,8 @@ struct GuidedTarget {
     func verifiesInPlace(tokens count: Int) -> Bool {
         let rewound = count - 1
         guard rewound > 0 else { return true }
-        return MTPSpeculativeTokenIterator.drafts(rewound, fittingWindowOf: cache) == rewound
-            && MTPSpeculativeTokenIterator.verifiesInPlace(
-                mainModel: model, mainCache: cache, drafts: rewound)
+        return MTPSpeculativeTokenIterator.verifiesInPlace(
+            mainModel: model, mainCache: cache, drafts: rewound)
     }
 
     /// `state`, asking the target's forward for its drafter state.

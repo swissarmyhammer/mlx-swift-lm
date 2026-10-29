@@ -380,17 +380,6 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             && positions < storageCapacity - offset
     }
 
-    /// The most rows one write of several rows can add while each of its queries attends as it
-    /// would in a write of one row at a time, or `nil` when every such write does.
-    ///
-    /// A write of several rows masks a window over the rows it presents, which leaves the kept
-    /// prefix out of the view of each query past the window. A write of one row keeps the
-    /// prefix in the ring, so its query sees the prefix and the newest rows. The two views
-    /// differ only in a ring that keeps a prefix, and only for a query past the window.
-    package var rowsAttendingAsSingleRowWrites: Int? {
-        keep == 0 ? nil : Swift.max(0, maxCacheSize - offset)
-    }
-
     /// Rewind the newest `n` positions.
     ///
     /// Before the ring wraps this is exact bookkeeping. After it wraps, the ring is
@@ -426,7 +415,12 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         return trimmed
     }
 
-    /// Optimized mask creation for rotating cache with offset capping
+    /// The mask of the next write of `n` rows, over the rows that write presents.
+    ///
+    /// A write of several rows into a ring that keeps a prefix, under the ring's own window,
+    /// gives each query the view a write of one row gives it: the kept prefix and the newest
+    /// rows up to the query. Chunked prefill and a speculative verify then attend as plain
+    /// decode does, so how a stream batches its tokens does not change them.
     public override func makeMask(
         n: Int, windowSize: Int?, returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
@@ -440,6 +434,9 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
             // Decide if we need an array mask
             if cappedOffset + n > actualWindowSize || returnArray {
+                if keep > 0, actualWindowSize == maxCacheSize {
+                    return .array(prefixKeepingCausalMask(n: n, offset: cappedOffset))
+                }
                 return .array(
                     createCausalMask(n: n, offset: cappedOffset, windowSize: actualWindowSize))
             }
@@ -474,6 +471,25 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             }
             return .none
         }
+    }
+
+    /// The causal mask of a write of `n` rows after `offset` presented rows, in which each query
+    /// sees the kept prefix and the `maxCacheSize - keep` newest rows up to it.
+    ///
+    /// A write presents the kept prefix, then the newest rows in temporal order, then its own
+    /// rows. A write of one row overwrites the oldest row after the prefix, so its query sees
+    /// the prefix and the rows up to it that fill the rest of the window. A plain window over
+    /// the presentation would instead drop the prefix first for each query past the window.
+    ///
+    /// - Parameters:
+    ///   - n: The rows of the write.
+    ///   - offset: The rows the write presents before its own.
+    /// - Returns: A mask that is `true` where a query of the write may attend to a key.
+    private func prefixKeepingCausalMask(n: Int, offset: Int) -> MLXArray {
+        let newest = createCausalMask(n: n, offset: offset, windowSize: maxCacheSize - keep)
+        let causal = createCausalMask(n: n, offset: offset)
+        let prefix = MLXArray(Int32(0) ..< Int32(offset + n)) .< Int32(keep)
+        return newest | (causal & prefix)
     }
 
     public var debugDescription: String {
