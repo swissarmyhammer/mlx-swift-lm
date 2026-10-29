@@ -14,17 +14,32 @@ import MLXVLM
 /// weights from a seed, thus every run of a test decodes the same tokens.
 public struct Qwen35VLMMTPFixture {
 
-    /// The image tokens of a fixture that reads images: two tokens at the top of the vocabulary.
+    /// The id of the last token of the vocabulary.
+    private static let lastTokenID = Qwen35MTPFixture.vocabularySize - 1
+
+    /// The image tokens of a fixture that reads images: the two tokens at the top of the
+    /// vocabulary.
     public static let imageTokens = Qwen35FixtureJSON.ImageTokens(
-        visionStart: Qwen35MTPFixture.vocabularySize - 2,
-        image: Qwen35MTPFixture.vocabularySize - 1)
+        visionStart: lastTokenID - 1, image: lastTokenID)
 
-    /// The patch grid of the image ``makeImage()`` gives: one frame of two by two patches.
-    public static let imageGrid = THW(1, 2, 2)
+    /// The patches along each side of the image ``makeImage()`` gives.
+    private static let patchesPerSide = 2
 
-    /// The values of one patch: three color channels of one frame of two by two pixels, the
-    /// patch size of ``Qwen35FixtureJSON/visionLanguage(textConfigJSON:visionOutputSize:imageTokens:)``.
-    public static let patchValueCount = 3 * 2 * 2
+    /// The patch grid of the image ``makeImage()`` gives: one frame of ``patchesPerSide`` by
+    /// ``patchesPerSide`` patches.
+    public static let imageGrid = THW(1, patchesPerSide, patchesPerSide)
+
+    /// The color channels of each pixel of an image.
+    private static let colorChannelCount = 3
+
+    /// The pixels along each side of one patch: the `patch_size` of
+    /// ``Qwen35FixtureJSON/visionLanguage(textConfigJSON:visionOutputSize:imageTokens:)``,
+    /// whose `temporal_patch_size` makes each patch one frame.
+    private static let patchSize = 2
+
+    /// The values of one patch: the color channels of one frame of ``patchSize`` by
+    /// ``patchSize`` pixels.
+    public static let patchValueCount = colorChannelCount * patchSize * patchSize
 
     /// The configuration of the model, as a loaded model would carry it.
     public let modelConfiguration = ModelConfiguration(id: "tiny-qwen35-vlm-mtp")

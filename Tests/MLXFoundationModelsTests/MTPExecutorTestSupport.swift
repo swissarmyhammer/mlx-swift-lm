@@ -50,6 +50,10 @@ struct MTPTurn: Sendable {
     /// The description of the error the turn threw, or `nil` when it returned.
     var failure: String?
 
+    /// The description of the error the consumer of the executor's channel met while it
+    /// drained the channel, or `nil` when it drained cleanly.
+    var channelFailure: String?
+
     /// Whether some pass of the turn speculated: it proposed drafts and did not fall back to
     /// plain decode.
     var speculated: Bool {
@@ -148,7 +152,8 @@ enum MTPExecutorTurns {
     /// - Parameters:
     ///   - request: The request of the pass.
     ///   - model: The model of the pass.
-    /// - Returns: What the pass streamed, and the error it threw in ``MTPTurn/failure``.
+    /// - Returns: What the pass streamed, the error it threw in ``MTPTurn/failure``, and the
+    ///   error the channel's consumer met in ``MTPTurn/channelFailure``.
     /// - Throws: The error of the executor's initializer.
     static func respond(
         to request: LanguageModelExecutorGenerationRequest, model: MLXLanguageModel
@@ -157,10 +162,9 @@ enum MTPExecutorTurns {
         let channel = LanguageModelExecutorGenerationChannel()
         // The channel is a rendezvous, thus a consumer must run beside the executor or every
         // send parks it.
-        let consumer = Task<Void, Never> {
-            do { for try await _ in channel {} } catch {}
+        let consumer = Task<Void, any Error> {
+            for try await _ in channel {}
         }
-        defer { consumer.cancel() }
         let log = MTPTurnLog()
         var failure: String?
         await MLXLanguageModel.Executor.$generationObserver.withValue(log.observer) {
@@ -170,9 +174,27 @@ enum MTPExecutorTurns {
                 failure = String(describing: error)
             }
         }
+        consumer.cancel()
         var turn = log.recorded
         turn.failure = failure
+        turn.channelFailure = await channelFailure(of: consumer)
         return turn
+    }
+
+    /// The error a cancelled channel consumer met, other than the `CancellationError` that
+    /// stopping it gives.
+    ///
+    /// - Parameter consumer: The consumer, already cancelled.
+    /// - Returns: The description of the error, or `nil` when the consumer ended cleanly.
+    private static func channelFailure(of consumer: Task<Void, any Error>) async -> String? {
+        do {
+            try await consumer.value
+            return nil
+        } catch is CancellationError {
+            return nil
+        } catch {
+            return String(describing: error)
+        }
     }
 }
 
@@ -276,24 +298,24 @@ struct ToolCallAlphabetTokenizer: Tokenizer {
 /// shows whether a generation still handles tokens, and the delay keeps a generation running
 /// long enough for a test to cancel it mid-decode.
 ///
-/// The counter is a class shared by every copy, and its lock guards it, which is the invariant
-/// behind `@unchecked Sendable`.
-final class DecodeCounter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var count = 0
+/// The counter is a class shared by every copy of the tokenizer, and a `Mutex` holds its count.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+final class DecodeCounter: Sendable {
+    private let count = Mutex(0)
 
     /// Counts one decode.
     func record() {
-        lock.withLock { count += 1 }
+        count.withLock { $0 += 1 }
     }
 
     /// The decodes so far.
     var decodeCount: Int {
-        lock.withLock { count }
+        count.withLock { $0 }
     }
 }
 
 /// See ``DecodeCounter``.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 struct SlowCountingTokenizer: Tokenizer {
 
     /// The tokenizer the decode copies.

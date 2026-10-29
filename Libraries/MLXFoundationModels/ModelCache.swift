@@ -61,6 +61,10 @@ actor ModelCache {
         let modelID: String
 
         /// The identity of the drafter checkpoint.
+        ///
+        /// Read by the synthesized `Hashable` conformance, which keeps two drafters of one
+        /// model apart in ``drafters`` and ``drafterLoadingTasks``; periphery sees no caller.
+        // periphery:ignore
         let drafterID: String
     }
 

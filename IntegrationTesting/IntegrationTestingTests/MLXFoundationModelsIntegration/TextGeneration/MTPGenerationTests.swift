@@ -16,6 +16,7 @@ import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
 import Synchronization
+import os
 import Testing
 import Tokenizers
 
@@ -51,6 +52,13 @@ struct MTPGenerationTests {
 
     /// The prompt whose decode tok/s the test holds above plain decode.
     private static let mathPrompt = MTPBenchmarkPrompt.defaults.first { $0.name == "math" }
+
+    /// Prefix that makes every measurement line greppable in the log.
+    private static let measurementPrefix = "MTP GENERATION:"
+
+    /// The log every measurement line of this suite goes to.
+    private static let measurementLog = Logger(
+        subsystem: "com.apple.FoundationModels-MLX", category: "MTPGeneration")
 
     /// What one turn wrote, and the completion of its generation.
     private struct Turn {
@@ -142,13 +150,13 @@ struct MTPGenerationTests {
 
         let plain = try await respond(plainModel, to: prompt, tokens: Self.generatedTokenCount)
         let mtp = try await respond(mtpModel, to: prompt, tokens: Self.generatedTokenCount)
-        print(
-            """
-            [MTPGenerationTests] math: MTP \(mtp.completion.tokensPerSecond) tok/s \
+        let measurement = """
+            \(Self.measurementPrefix) math: MTP \(mtp.completion.tokensPerSecond) tok/s \
             (accepted \(mtp.completion.acceptedDraftTokens ?? 0) of \
             \(mtp.completion.proposedDraftTokens ?? 0)), plain \
             \(plain.completion.tokensPerSecond) tok/s
-            """)
+            """
+        Self.measurementLog.info("\(measurement, privacy: .public)")
 
         #expect((mtp.completion.proposedDraftTokens ?? 0) > 0)
         #expect(mtp.completion.passthroughReason == nil)

@@ -231,14 +231,14 @@ public struct LanguageModelMacro: ExpressionMacro {
         }
 
         // Forward the caller's configuration verbatim, then forward
-        // capabilities / configurationResolver only when the caller supplied
-        // them so the MLXLanguageModel init's own defaults apply otherwise.
+        // capabilities / configurationResolver / speculativeDecoding only when
+        // the caller supplied them so the MLXLanguageModel init's own defaults
+        // apply otherwise. The order is the initializer's parameter order.
         var arguments = ["configuration: \(configuration)"]
-        if let capabilities = argument("capabilities") {
-            arguments.append("capabilities: \(capabilities)")
-        }
-        if let resolver = argument("configurationResolver") {
-            arguments.append("configurationResolver: \(resolver)")
+        for label in ["capabilities", "configurationResolver", "speculativeDecoding"] {
+            if let value = argument(label) {
+                arguments.append("\(label): \(value)")
+            }
         }
         arguments.append(
             """

@@ -6,6 +6,7 @@ import Foundation
 import FoundationModels
 import MLXLMCommon
 import MLXLMTestSupport
+import Synchronization
 
 @testable import MLXFoundationModels
 
@@ -113,14 +114,14 @@ extension Qwen35VLMMTPFixture {
 
 /// The loads of an MTP drafter, and whether the drafter each load gave is still alive.
 ///
-/// The model cache loads on its own task and the test reads on its task, thus every access
-/// takes the lock, which is the invariant behind `@unchecked Sendable`.
-final class DrafterLoadLog: @unchecked Sendable {
-    private let lock = NSLock()
-    private var loads: [WeakDrafter] = []
+/// The model cache loads on its own task and the test reads on its task, thus a `Mutex` holds
+/// the loads.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+final class DrafterLoadLog: Sendable {
+    private let loads = Mutex<[WeakDrafter]>([])
 
     /// A loaded drafter container, held weakly so the log keeps none alive.
-    private struct WeakDrafter {
+    private struct WeakDrafter: Sendable {
         weak var container: MTPDrafterContainer?
     }
 
@@ -128,17 +129,17 @@ final class DrafterLoadLog: @unchecked Sendable {
     ///
     /// - Parameter container: The container the load gave.
     func recordLoad(of container: MTPDrafterContainer) {
-        lock.withLock { loads.append(WeakDrafter(container: container)) }
+        loads.withLock { $0.append(WeakDrafter(container: container)) }
     }
 
     /// The number of loads so far.
     var loadCount: Int {
-        lock.withLock { loads.count }
+        loads.withLock { $0.count }
     }
 
     /// The number of loaded drafters something still holds.
     var liveDrafterCount: Int {
-        lock.withLock { loads.filter { $0.container != nil }.count }
+        loads.withLock { $0.filter { $0.container != nil }.count }
     }
 }
 

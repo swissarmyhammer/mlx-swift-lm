@@ -43,25 +43,6 @@ struct MTPSpeculationTests {
         let cacheOffset: Int
     }
 
-    /// The drafter continuation a generation hands its completion callback.
-    ///
-    /// The generation calls back on its own thread and the test reads on its task, thus every
-    /// access takes the lock, which is the invariant behind `@unchecked Sendable`.
-    private final class ContinuationBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var received: MTPDrafterContinuation??
-
-        /// Keeps `continuation`.
-        func record(_ continuation: MTPDrafterContinuation?) {
-            lock.withLock { received = .some(continuation) }
-        }
-
-        /// The kept continuation, or `nil` when ``record(_:)`` was not called.
-        var continuation: MTPDrafterContinuation?? {
-            lock.withLock { received }
-        }
-    }
-
     /// The speculation of the fixture's own drafter.
     private func speculation(of fixture: Qwen35MTPFixture) -> MTPSpeculation {
         MTPSpeculation(
@@ -75,19 +56,23 @@ struct MTPSpeculationTests {
     ) async throws -> Run {
         let context = fixture.makeModelContext(eosTokenIds: eosTokenIds)
         let cache = try context.model.newCache(parameters: nil)
-        let box = ContinuationBox()
+        // The generation calls back on its own thread; the stream hands the value to this
+        // task, and its first element is what the callback received.
+        let (continuations, callback) = AsyncStream.makeStream(of: MTPDrafterContinuation?.self)
         let (stream, task) = try generateTaskRecordingTokens(
             input: LMInput(tokens: MLXArray(Self.prompt.map(Int32.init))), cache: cache,
             parameters: GenerateParameters(maxTokens: Self.generatedTokenCount, temperature: 0),
             context: context, speculation: speculation,
-            drafterContinuation: { box.record($0) })
+            drafterContinuation: { callback.yield($0) })
         var info: GenerateCompletionInfo?
         for await event in stream {
             if case .info(let completion) = event { info = completion }
         }
         let tokens = await task.value
+        callback.finish()
+        var received = continuations.makeAsyncIterator()
         return Run(
-            tokens: tokens, info: try #require(info), drafterContinuation: box.continuation,
+            tokens: tokens, info: try #require(info), drafterContinuation: await received.next(),
             cacheOffset: cache[0].offset)
     }
 

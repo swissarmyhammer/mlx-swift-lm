@@ -215,8 +215,10 @@ struct MTPExecutorTests {
             to: request, model: models.speculative)
 
         #expect(plain.failure == nil)
+        #expect(plain.channelFailure == nil)
         #expect(!plain.reasoningText.isEmpty)
         #expect(speculative.failure == nil)
+        #expect(speculative.channelFailure == nil)
         #expect(speculative.reasoningText == plain.reasoningText)
         #expect(speculative.toolCalls == plain.toolCalls)
         #expect(speculative.metadataKeys == plain.metadataKeys)
@@ -254,6 +256,9 @@ struct MTPExecutorTests {
             to: request, model: try fixture.makeLanguageModel(weights: weights, speculates: true))
 
         #expect(plain.failure == nil)
+        #expect(plain.channelFailure == nil)
+        #expect(speculative.failure == nil)
+        #expect(speculative.channelFailure == nil)
         #expect(!plain.responseText.isEmpty)
         #expect(speculative.responseText == plain.responseText)
         #expect(speculative.speculated)
@@ -424,6 +429,7 @@ struct MTPExecutorTests {
     /// Waits until `counter` counted `decodes` decodes.
     ///
     /// - Returns: true when the count was reached, false when ``generationStartTimeout`` won.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func waitForDecodes(_ decodes: Int, of counter: DecodeCounter) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: generationStartTimeout)
         while counter.decodeCount < decodes {
