@@ -716,8 +716,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///
         /// A protocol that replays reasoning into history renders the
         /// transcript again with each `.reasoning` entry attached to the
-        /// assistant entry after it. Every other protocol keeps `messages`,
-        /// the render taken before the model loaded, which drops the reasoning.
+        /// assistant entry of its turn. A protocol that replays only a turn
+        /// that stopped inside its reasoning
+        /// (`ReasoningConfig.replaysUnclosedReasoningIntoHistory`,
+        /// DeepSeek-V4) renders it again with the reasoning of each turn whose
+        /// response is empty, as `ChatSession` records such a turn, thus the
+        /// render of the next turn extends the tokens the cache holds instead
+        /// of omitting the turn. Every other protocol keeps `messages`, the
+        /// render taken before the model loaded, which drops the reasoning.
         ///
         /// - Parameters:
         ///   - transcript: the transcript of the request.
@@ -730,11 +736,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             of transcript: Transcript, resolved: ModelConfiguration,
             otherwise messages: [Chat.Message]
         ) throws -> [Chat.Message] {
-            guard resolved.reasoningConfig?.replaysReasoningIntoHistory == true else {
+            let reasoning = TranscriptConverter.HistoryReasoning(for: resolved.reasoningConfig)
+            guard reasoning != .dropped else {
                 return messages
             }
             let replayed = try TranscriptConverter.mlxMessages(
-                for: transcript, replayReasoning: true)
+                for: transcript, reasoning: reasoning)
             return replayed.isEmpty ? messages : replayed
         }
 

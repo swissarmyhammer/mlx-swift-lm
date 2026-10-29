@@ -50,7 +50,7 @@ struct TranscriptConverterReasoningOnlyTurnTests {
         responseSegments: [Transcript.Segment]
     ) throws {
         let messages = try TranscriptConverter.mlxMessages(
-            for: Self.reasoningOnlyTurn(responseSegments: responseSegments), replayReasoning: true)
+            for: Self.reasoningOnlyTurn(responseSegments: responseSegments), reasoning: .everyTurn)
 
         try #require(messages.map(\.role) == [.user, .assistant, .user])
         #expect(messages[1].content.isEmpty)
@@ -61,7 +61,7 @@ struct TranscriptConverterReasoningOnlyTurnTests {
     @Test
     func aReasoningOnlyTurnThatIsNotReplayedStaysOutOfTheHistory() throws {
         let messages = try TranscriptConverter.mlxMessages(
-            for: Self.reasoningOnlyTurn(), replayReasoning: false)
+            for: Self.reasoningOnlyTurn(), reasoning: .dropped)
 
         #expect(messages.map(\.role) == [.user, .user])
     }
@@ -74,7 +74,7 @@ struct TranscriptConverterReasoningOnlyTurnTests {
             return true
         }
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
 
         #expect(messages.map(\.role) == [.user, .user])
     }
