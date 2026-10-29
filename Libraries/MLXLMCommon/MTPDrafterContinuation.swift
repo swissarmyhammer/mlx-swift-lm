@@ -155,9 +155,15 @@ public struct MTPDrafterContinuation: @unchecked Sendable {
     }
 
     /// Every array this continuation holds: the drafter cache arrays, the boundary hidden row,
-    /// and the seed proposal.
-    private var heldArrays: [MLXArray] {
-        state.cache.flatMap(\.state) + [targetBoundaryHidden] + state.seedArrays
+    /// and the seed proposal. A value that hands the continuation over evaluates these.
+    package var heldArrays: [MLXArray] {
+        state.cache.flatMap(\.state) + boundaryAndSeedArrays
+    }
+
+    /// The arrays this continuation holds beside its drafter caches: the boundary hidden row and
+    /// the seed proposal.
+    private var boundaryAndSeedArrays: [MLXArray] {
+        [targetBoundaryHidden] + state.seedArrays
     }
 
     /// The bytes this continuation holds in memory: the buffers of the drafter caches (see
@@ -165,8 +171,7 @@ public struct MTPDrafterContinuation: @unchecked Sendable {
     ///
     /// The count reads only shapes and element types, thus it evaluates nothing.
     public var byteCount: Int {
-        state.cache.reduce(0) { $0 + $1.residentByteCount }
-            + ([targetBoundaryHidden] + state.seedArrays).totalByteCount
+        state.cache.reduce(0) { $0 + $1.residentByteCount } + boundaryAndSeedArrays.totalByteCount
     }
 
     /// Whether a generation that continues a main cache of `mainTokenCount` tokens with the

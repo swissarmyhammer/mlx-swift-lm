@@ -1523,19 +1523,17 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
             return
         }
 
-        // The continuation crosses back from the generation task only after
-        // all of its lazy MLX values have been settled.
-        var arrays = [targetBoundaryHidden]
-        arrays.append(contentsOf: currentDrafterState.cache.flatMap(\.state))
-        arrays.append(contentsOf: currentDrafterState.seedArrays)
-        eval(arrays)
-
         drafterState = currentDrafterState
-        finalizedContinuation = MTPDrafterContinuation(
+        let continuation = MTPDrafterContinuation(
             state: currentDrafterState,
             targetBoundaryHidden: targetBoundaryHidden,
             targetProcessedTokenCount: mainCacheStorage.processedTokenCount,
             drafterID: resumableDrafter.drafterID)
+
+        // The continuation crosses back from the generation task only after
+        // all of its lazy MLX values have been settled.
+        eval(continuation.heldArrays)
+        finalizedContinuation = continuation
     }
 }
 

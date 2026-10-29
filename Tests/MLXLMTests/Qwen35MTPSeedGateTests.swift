@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import MLXLMTestSupport
+import MLXNN
 import Testing
 
 @testable import MLXLLM
@@ -60,15 +61,23 @@ struct Qwen35MTPSeedGateTests {
         try #require(state.seedTopProbability).item(Float.self)
     }
 
+    /// The top-1 probability of the logits `lmHead` gives the seed's hidden row of `state`,
+    /// computed apart from the drafter.
+    private func expectedSeedProbability(
+        _ state: MTPDrafterState, lmHead: Linear?
+    ) throws -> Float {
+        let seedHidden = try #require(state.seedHidden)
+        let lmHead = try #require(lmHead)
+        let logits = lmHead(seedHidden)[0..., -1, 0...]
+        return softmax(logits, axis: -1).max().item(Float.self)
+    }
+
     @Test("a commit keeps the top-1 probability of the seed it draws")
     func commitKeepsTheSeedProbability() throws {
         let fixture = try Qwen35MTPFixture()
         let state = QwenMTPDistributionDraftTests.preparedState(fixture)
-        let seedHidden = try #require(state.seedHidden)
-        let lmHead = try #require(fixture.target.lmHead)
 
-        let logits = lmHead(seedHidden)[0..., -1, 0...]
-        let expected = softmax(logits, axis: -1).max().item(Float.self)
+        let expected = try expectedSeedProbability(state, lmHead: fixture.target.lmHead)
 
         #expect(abs(try seedProbability(state) - expected) <= Self.probabilityTolerance)
     }
@@ -84,9 +93,10 @@ struct Qwen35MTPSeedGateTests {
             firstBonus: MLXArray([QwenMTPDistributionDraftTests.firstBonus]),
             positionDeltas: nil, state: &state, sampler: ArgMaxSampler())
 
-        let probability = try seedProbability(state)
+        let expected = try expectedSeedProbability(
+            state, lmHead: fixture.target.languageModel.lmHead)
 
-        #expect(probability > 0 && probability <= 1)
+        #expect(abs(try seedProbability(state) - expected) <= Self.probabilityTolerance)
     }
 
     @Test(

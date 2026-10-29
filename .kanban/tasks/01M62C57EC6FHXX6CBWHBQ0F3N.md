@@ -42,6 +42,39 @@ comments:
     - evidence: 14 files — Libraries/MLXLMCommon/{QwenMTP,MTPDrafterModel,MTPDrafterContinuation,MTPDrafterPrefillFeed,MTPSpeculativeTokenIterator,ChatSession}.swift, Libraries/MLXLLM/Models/Qwen35MTP.swift, Libraries/MLXVLM/Models/Qwen35MTP.swift, Tests/MLXLMTestSupport/Qwen35MTPFixture.swift, Tests/MLXLMTests/{Qwen35MTPSeedGateTests (new, 8.5 KB), Qwen35MTPSamplingTests, Qwen35MTPTests}.swift. `swift build --build-tests` 0 compiler warnings (only the swift-build "missing creator for mutated node" note on the Cmlx bundle). xctest: MLXLMTests 920 XCTest + 2000 Swift Testing pass, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 404, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6; 0 failures, 0 skipped. Release: qwen38FourBitMTPGeneration SUCCEEDED (shipped bs5 pMin 0.75 100.5/87.5/83.5 vs bs2 92.8/83.3/81.0, plain 59.5), qwen38FourBitMTPSystemPromptCache SUCCEEDED (edit turn 123 tok, no known issues), qwen38FourBitMTPSampledGeneration SUCCEEDED.
     - next: /review
   timestamp: 2026-10-29T07:30:18.855300+00:00
+- actor: claude-code
+  id: 01m6398hvt1ynnv91gxet6dx3c
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (7b8c7896) — 2 findings (2 confirmed, 3 refuted) — Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:1530, Tests/MLXLMTests/Qwen35MTPSeedGateTests.swift:89
+    - next: implement the 2 open items in the 2026-10-29 02:30 Review Findings section
+  timestamp: 2026-10-29T07:33:47.002413+00:00
+- actor: claude-code
+  id: 01m63990b6e9wpc611p80wdh4a
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 12 files (seed gate, default bs5 pMin 0.75)
+    - test: green — 5 bundles 0 failures 0 skipped; Release bs5/0.75 100.5/87.5/83.5 vs bs2 92.8/83.3/81.0, plain 59.5; edit turn 123 tokens
+    - commit: 7b8c7896
+    - review: findings — MTPSpeculativeTokenIterator.swift:1530, Qwen35MTPSeedGateTests.swift:89
+  timestamp: 2026-10-29T07:34:01.830120+00:00
+- actor: claude-code
+  id: 01m63akmqdm8dqds25d3tvtzyc
+  text: |-
+    Worked the 2 findings of Review Findings (2026-10-29 02:30):
+    1. duplication — `MTPDrafterContinuation.heldArrays` is now `package`; `finalizeDrafterContinuation` builds the continuation first and evals `continuation.heldArrays`, so the inline rebuild is gone. Same file: `byteCount` repeated `[targetBoundaryHidden] + state.seedArrays`; both now share a private `boundaryAndSeedArrays`. Left alone: `MTPDrafterContinuationSerialization` deserializing init evals boundary + seed token/hidden before `self` exists (different file, not covered by the finding).
+    2. no-test-cheating — the VLM fixture does expose the logits (`fixture.target.languageModel.lmHead`, untied embeddings, internal via @testable), so I used the real check, not the bounds-check fallback. A shared `expectedSeedProbability(_:lmHead:)` helper now computes softmax max of `lmHead(seedHidden)` for both the LLM and VLM tests (it replaced the copied block), and each test asserts within `probabilityTolerance`.
+    Gotcha: `try #require(lmHead)(seedHidden)` crashes swift-frontend (Xcode 27.1, assertion `inserted` in ConstraintSystem::recordArgumentList). Bind the #require result to a local first.
+    Note: `dump validators` wrote a 754K-char rules file, too large to read whole. I followed the duplication, test-integrity, swift and code-hygiene rules named in the findings.
+    Release (load 3.0-4.5, noise 0.4%, thermal 1): qwen38FourBitMTPGeneration SUCCEEDED. Shipped bs5 pMin 0.75 ran 100.4/87.4/83.4 (mean 90.4), bs2 92.9/83.2/80.7, plain 59.5, and was still the fastest and the default-rule winner. qwen38FourBitMTPSystemPromptCache SUCCEEDED with no known issues: edit turn prefilled 123 tok (cached 2169), drafter prefilled 123, 98.4 tok/s MTP vs 56.3 plain, tokens exact.
+  timestamp: 2026-10-29T07:57:18.957494+00:00
+- actor: claude-code
+  id: 01m63akt46jt21rj490rtr31r9
+  text: |-
+    ### implement — changed
+    - evidence: 3 files — Libraries/MLXLMCommon/MTPDrafterContinuation.swift, Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift, Tests/MLXLMTests/Qwen35MTPSeedGateTests.swift. `swift build --build-tests` 0 compiler warnings (only the known swift-build "missing creator" note on the Cmlx bundle). xctest: MLXLMTests 920 XCTest + 2000 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 404, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6; 0 failures, 0 skipped. Release qwen38FourBitMTPGeneration SUCCEEDED (bs5 pMin 0.75 100.4/87.4/83.4), qwen38FourBitMTPSystemPromptCache SUCCEEDED (edit turn 123 tok, no known issues). Both 02:30 findings checked.
+    - next: /review
+  timestamp: 2026-10-29T07:57:24.486002+00:00
 position_column: doing
 position_ordinal: '8180'
 title: 'MTP: gate chained Qwen drafts on the seed''s confidence so deeper blocks stop costing prose and code'
@@ -61,3 +94,14 @@ Measured cause: every chained round pays one chained MTP step (MTP layer + full-
 
 ## Workflow
 - Use `/tdd`. #mtp #qwen38 #perf
+
+## Review Findings (2026-10-29 02:30)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 12 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M62C57EC6FHXX6CBWHBQ0F3N.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M62C57EC6FHXX6CBWHBQ0F3N.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:1530` `duplication/duplication` — The eval list built in `finalizeDrafterContinuation` repeats the held-arrays list that `MTPDrafterContinuation.heldArrays` already defines: the boundary hidden row, the drafter cache arrays, and the seed arrays. Both lists must include the same arrays. If one gains or loses an array, the eval and the continuation's held arrays can silently disagree. Expose one shared accessor, such as a package-level `heldArrays` on `MTPDrafterContinuation` or a helper taking the boundary row and `MTPDrafterState`, and use it both for the `eval` call here and for the continuation. Remove the inline rebuild.
+- [x] `Tests/MLXLMTests/Qwen35MTPSeedGateTests.swift:89` `test-integrity/no-test-cheating` — The VLM test is named 'a VLM commit keeps the top-1 probability of the seed it draws', but its only assertion is `probability > 0 && probability <= 1`. Any value in (0, 1] passes, so a broken probability computation (for example a constant 0.5, or the wrong reduction) would still pass. The sibling LLM test `commitKeepsTheSeedProbability` checks the value against an independently computed softmax max, so this one is a weakened version of that check. Compute the expected top-1 probability from the VLM drafter's seed logits, as `commitKeepsTheSeedProbability` does with `lmHead(seedHidden)`, and assert it is within `probabilityTolerance`. If the VLM fixture cannot expose its logits, keep the range check but add a comment that it is a bounds check only, and rely on the LLM test for the value.
