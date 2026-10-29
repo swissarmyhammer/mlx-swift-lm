@@ -32,8 +32,8 @@ enum ExecutorPromptCacheFileError: Error, Equatable {
 
 /// Writes one ``ExecutorPromptCacheEntry`` to one safetensors file and reads it back.
 ///
-/// The file holds the caches, the model state, the two token ledgers and the MTP drafter state
-/// of the entry. The write has two steps: ``prepare(_:key:report:)`` reads the caches while the
+/// The file holds the caches, the model state, the two token ledgers, the uncommitted tokens and
+/// the MTP drafter state of the entry. The write has two steps: ``prepare(_:key:report:)`` reads the caches while the
 /// caller owns them, and ``write(_:to:)`` writes the file later, on any task. The write goes to
 /// a partial file first and then takes the real name, thus a crash never leaves a half file
 /// under the real name.
@@ -72,6 +72,9 @@ enum ExecutorPromptCacheFile {
         /// The whole prompt that the last pass rendered.
         static let renderTokens = "renderTokens"
 
+        /// The tokens the last pass generated that the caches do not hold.
+        static let uncommittedTokens = "uncommittedTokens"
+
         /// The bytes that the entry holds in memory.
         static let byteCount = "byteCount"
     }
@@ -101,6 +104,7 @@ enum ExecutorPromptCacheFile {
             MetadataKey.sessionID: key.sessionID,
             MetadataKey.tokens: try TokenLedger.encode(entry.tokens),
             MetadataKey.renderTokens: try TokenLedger.encode(entry.renderTokens),
+            MetadataKey.uncommittedTokens: try TokenLedger.encode(entry.uncommittedTokens),
             MetadataKey.byteCount: String(entry.byteCount),
         ]
         return try preparePromptCacheSave(
@@ -188,6 +192,8 @@ enum ExecutorPromptCacheFile {
         }
         let tokens = try TokenLedger.decode(metadata, key: MetadataKey.tokens)
         let renderTokens = try TokenLedger.decode(metadata, key: MetadataKey.renderTokens)
+        let uncommittedTokens = try TokenLedger.decode(
+            metadata, key: MetadataKey.uncommittedTokens)
         let offsets = snapshot.cache.map(\.offset)
         guard offsets.allSatisfy({ $0 == tokens.count }) else {
             throw ExecutorPromptCacheFileError.offsetMismatch(
@@ -195,7 +201,7 @@ enum ExecutorPromptCacheFile {
         }
         return ExecutorPromptCacheEntry(
             caches: snapshot.cache, tokens: tokens, renderTokens: renderTokens,
-            state: snapshot.state,
+            uncommittedTokens: uncommittedTokens, state: snapshot.state,
             drafterState: restoredDrafterState(
                 snapshot.drafterContinuation, at: tokens.count, drafter: drafter,
                 parameters: parameters, key: key, report: report))

@@ -12,19 +12,29 @@ package enum PromptCacheReuseDecision: Equatable {
     /// Feed the whole prompt. The cache holds nothing worth reusing.
     case prefillAll
 
-    /// The cache already represents a usable prefix. Feed only
-    /// `promptTokens[suffixStart...]`; afterwards the cache represents
+    /// The cache already represents a usable prefix. Feed `uncommittedTokens`
+    /// and then `promptTokens[suffixStart...]`; afterwards the cache represents
     /// `representedTokens`.
     ///
     /// `representedTokens` is not necessarily the rendered prompt. A response
     /// protocol may keep generated tokens that a cold template render cannot
     /// reproduce, in which case the ledger diverges from the render by design.
-    case appendSuffix(suffixStart: Int, representedTokens: [Int])
+    ///
+    /// `uncommittedTokens` are tokens the previous generation returned and the
+    /// cache does not hold: a speculative round returns its final verifier
+    /// sample before any forward pass feeds it. A protocol rule that splices
+    /// onto the tokens the model wrote feeds them ahead of the suffix, thus the
+    /// model reads its whole answer. They are not prompt tokens, and they are
+    /// empty on every standard path.
+    case appendSuffix(suffixStart: Int, representedTokens: [Int], uncommittedTokens: [Int] = [])
 
     /// Feed a suffix into the main cache while discarding unusable speculative
     /// state (an ordinary draft cache or an MTP continuation). The current
-    /// generation must use the main model only.
-    case appendSuffixToMain(suffixStart: Int, representedTokens: [Int])
+    /// generation must use the main model only. `uncommittedTokens` go ahead of
+    /// the suffix, as ``appendSuffix(suffixStart:representedTokens:uncommittedTokens:)``
+    /// states.
+    case appendSuffixToMain(
+        suffixStart: Int, representedTokens: [Int], uncommittedTokens: [Int] = [])
 
     /// The cache already represents a usable prefix, but this turn introduces
     /// new media, so a plain token slice would drop the payload that belongs
@@ -447,11 +457,37 @@ package struct PromptCacheReuse: Equatable, Sendable {
     /// The rule that decided this reuse.
     package let kind: PromptCacheReuseKind
 
+    /// The tokens the previous generation returned that the caches do not
+    /// hold, which the caller feeds ahead of the suffix. Empty unless a
+    /// protocol rule spliced onto a ledger that misses the last tokens the
+    /// model wrote. They are not prompt tokens.
+    package let uncommittedTokens: [Int]
+
     /// Creates a reuse of `suffixStart` leading tokens that `kind` decided.
-    package init(suffixStart: Int, representedTokens: [Int], kind: PromptCacheReuseKind) {
+    ///
+    /// - Parameters:
+    ///   - suffixStart: the leading prompt tokens the caches hold.
+    ///   - representedTokens: the tokens the caches represent once the caller
+    ///     has fed `uncommittedTokens` and the suffix.
+    ///   - kind: the rule that decided this reuse.
+    ///   - uncommittedTokens: the tokens to feed ahead of the suffix.
+    package init(
+        suffixStart: Int, representedTokens: [Int], kind: PromptCacheReuseKind,
+        uncommittedTokens: [Int] = []
+    ) {
         self.suffixStart = suffixStart
         self.representedTokens = representedTokens
         self.kind = kind
+        self.uncommittedTokens = uncommittedTokens
+    }
+
+    /// The tokens the caller feeds for `promptTokens`: ``uncommittedTokens``,
+    /// then the prompt from ``suffixStart``.
+    ///
+    /// - Parameter promptTokens: the whole rendered prompt this reuse serves.
+    /// - Returns: the tokens to feed.
+    package func fedTokens(of promptTokens: [Int]) -> [Int] {
+        uncommittedTokens + promptTokens[suffixStart...]
     }
 }
 
@@ -482,6 +518,9 @@ package struct PromptCacheReuse: Equatable, Sendable {
 ///     with `caches`, such as the M-RoPE anchor of a Qwen VL model. That
 ///     state is tied to the prefill that made it, thus the caches must not
 ///     rewind under it: a prompt that rewrites a cached token gets no reuse.
+///   - previousGenerationUncommittedTokens: the tokens the previous
+///     generation returned that `caches` does not hold, as
+///     ``PromptCacheTurn/previousGenerationUncommittedTokens`` states.
 /// - Returns: what the caches hold and represent when this function returns.
 ///   `nil` when the caches cannot serve this prompt at all, and the caller must
 ///   build new ones.
@@ -491,11 +530,14 @@ package func reconcilePromptCache(
     previousRenderTokens: [Int] = [],
     caches: [KVCache],
     protocolRules: [any PromptCacheReuseRule] = [],
-    carriesModelState: Bool = false
+    carriesModelState: Bool = false,
+    previousGenerationUncommittedTokens: [Int] = []
 ) -> PromptCacheReuse? {
     guard !caches.isEmpty else { return nil }
 
-    let turn = PromptCacheTurn(promptTokens: promptTokens, carriesModelState: carriesModelState)
+    let turn = PromptCacheTurn(
+        promptTokens: promptTokens, carriesModelState: carriesModelState,
+        previousGenerationUncommittedTokens: previousGenerationUncommittedTokens)
     let cacheState = PromptCacheState(
         cachedTokens: cachedTokens,
         previousRenderTokens: previousRenderTokens,
@@ -511,14 +553,15 @@ package func reconcilePromptCache(
         // hold nothing and the whole prompt is fed into them.
         return PromptCacheReuse(suffixStart: 0, representedTokens: promptTokens, kind: .prefill)
 
-    case .appendSuffix(let suffixStart, let representedTokens),
-        .appendSuffixToMain(let suffixStart, let representedTokens):
+    case .appendSuffix(let suffixStart, let representedTokens, let uncommittedTokens),
+        .appendSuffixToMain(let suffixStart, let representedTokens, let uncommittedTokens):
         // A protocol rule splices past the turn the model committed; the
         // standard rule extends the ledger. The two can agree on the numbers,
         // thus the verdict names the rule and the numbers do not.
         return PromptCacheReuse(
             suffixStart: suffixStart, representedTokens: representedTokens,
-            kind: verdict.isProtocolDecision ? .splice : .extend)
+            kind: verdict.isProtocolDecision ? .splice : .extend,
+            uncommittedTokens: uncommittedTokens)
 
     case .trimToCommonPrefix(let commonPrefixLength, _),
         .trimToCommonPrefixMainOnly(let commonPrefixLength, _):
@@ -543,7 +586,7 @@ package func reconcilePromptCache(
 /// Reconciles live caches with a newly rendered prompt through the standard
 /// rules alone, and reports how much of that prompt the caches already hold.
 ///
-/// This is ``reconcilePromptCache(promptTokens:cachedTokens:previousRenderTokens:caches:protocolRules:)``
+/// This is ``reconcilePromptCache(promptTokens:cachedTokens:previousRenderTokens:caches:protocolRules:carriesModelState:previousGenerationUncommittedTokens:)``
 /// for a caller whose ledger holds a render alone, thus the answer is the
 /// prefix and nothing more.
 ///

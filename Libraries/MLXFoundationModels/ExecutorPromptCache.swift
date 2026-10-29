@@ -49,6 +49,16 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// splice.
     let renderTokens: [Int]
 
+    /// The tokens the last pass generated and `caches` does not hold, which is
+    /// what ``ChatSession`` keeps as its uncommitted tokens.
+    ///
+    /// An MTP round returns its final verified token before any forward pass
+    /// feeds it, thus a pass that stops on its token budget there leaves that
+    /// token here. The next turn hands them to the reuse rules, and a splice
+    /// feeds them ahead of the commit that closes the turn, thus the model
+    /// reads its whole answer. Empty after a plain decode.
+    let uncommittedTokens: [Int]
+
     /// The model state the last pass left with `caches`, or nil for a model
     /// that carries none.
     ///
@@ -101,6 +111,8 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     ///   - tokens: the exact tokens `caches` represents.
     ///   - renderTokens: the whole prompt the last pass rendered, or empty
     ///     when no render is on record.
+    ///   - uncommittedTokens: the tokens the last pass generated that `caches`
+    ///     does not hold.
     ///   - state: the model state the last pass left, or nil.
     ///   - checkpoint: the recurrent state at an earlier position of
     ///     `tokens`, or nil.
@@ -108,12 +120,13 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     ///     `tokens`, or nil.
     init(
         caches: [KVCache], tokens: [Int], renderTokens: [Int] = [],
-        state: LMOutput.State? = nil, checkpoint: PromptCacheCheckpoint? = nil,
-        drafterState: MTPDrafterContinuation? = nil
+        uncommittedTokens: [Int] = [], state: LMOutput.State? = nil,
+        checkpoint: PromptCacheCheckpoint? = nil, drafterState: MTPDrafterContinuation? = nil
     ) {
         self.caches = caches
         self.tokens = tokens
         self.renderTokens = renderTokens
+        self.uncommittedTokens = uncommittedTokens
         self.state = state
         self.checkpoint = checkpoint
         self.drafterState = drafterState
@@ -1033,13 +1046,22 @@ struct ExecutorPromptCachePlan {
     /// The rule that decided this plan, which the log line of the pass names.
     let decision: ExecutorPromptCacheDecision
 
-    /// The prompt tokens that this pass fed to the model before generation
-    /// started, to take a checkpoint between them and `input`. Zero when the
-    /// pass feeds the whole tail through `input`.
+    /// The tokens that this pass fed to the model before generation started,
+    /// to take a checkpoint between them and `input`: prompt tokens, and the
+    /// ``uncommittedTokens`` that go ahead of them. Zero when the pass feeds
+    /// the whole tail through `input`.
     ///
     /// These tokens are not reused: the pass fed them. They are not in
     /// `input` either, thus the usage of the pass adds them back.
     var prefilledTokenCount = 0
+
+    /// The tokens the previous pass generated and the carried caches did not
+    /// hold, which this pass feeds ahead of the prompt tail (see
+    /// ``ExecutorPromptCacheEntry/uncommittedTokens``). They go first in the
+    /// feed to the checkpoint when the pass takes one, and first in `input`
+    /// otherwise. They end the previous answer, thus the usage of this pass
+    /// does not count them as prompt tokens.
+    var uncommittedTokens: [Int] = []
 
     /// The checkpoint this pass took before generation, which the entry it
     /// commits carries to the next turn, or nil.
@@ -1097,19 +1119,20 @@ struct ExecutorPromptCachePlan {
             let reuse = reconcilePromptCache(
                 promptTokens: promptTokens, cachedTokens: entry.tokens,
                 previousRenderTokens: entry.renderTokens, caches: entry.caches,
-                protocolRules: protocolRules, carriesModelState: entry.state != nil),
+                protocolRules: protocolRules, carriesModelState: entry.state != nil,
+                previousGenerationUncommittedTokens: entry.uncommittedTokens),
             reuse.suffixStart < promptTokens.count
         {
+            let fedTokens = reuse.fedTokens(of: promptTokens)
             var plan = ExecutorPromptCachePlan(
                 caches: entry.caches,
-                input: reuse.suffixStart == 0
-                    ? input
-                    : narrowed(input, to: Array(promptTokens[reuse.suffixStart...])),
+                input: fedTokens == promptTokens ? input : narrowed(input, to: fedTokens),
                 reusedTokenCount: reuse.suffixStart,
                 promptTokens: promptTokens,
                 representedTokens: reuse.representedTokens,
                 state: entry.state,
                 decision: decision(of: reuse, render: promptTokens, ledger: entry.tokens))
+            plan.uncommittedTokens = reuse.uncommittedTokens
             // An extension and a splice both feed the render onto the caches
             // where the ledger ends, and the drafter state stands there too, as
             // `ChatSession` resumes it after either. A rewind moves the caches
@@ -1239,8 +1262,8 @@ struct ExecutorPromptCachePlan {
         guard
             let feed = try PromptCacheCheckpoint.prefillToCheckpoint(
                 at: boundary, of: promptTokens, representing: representedTokens,
-                from: reusedTokenCount, into: caches, state: state, model: model,
-                prefill: parameters.prefill, drafterFeed: drafterFeed)
+                from: reusedTokenCount, after: uncommittedTokens, into: caches, state: state,
+                model: model, prefill: parameters.prefill, drafterFeed: drafterFeed)
         else {
             return self
         }
@@ -1252,7 +1275,8 @@ struct ExecutorPromptCachePlan {
             representedTokens: representedTokens,
             state: feed.state,
             decision: decision)
-        plan.prefilledTokenCount = boundary - reusedTokenCount
+        plan.prefilledTokenCount = uncommittedTokens.count + boundary - reusedTokenCount
+        plan.uncommittedTokens = uncommittedTokens
         plan.checkpoint = feed.checkpoint
         // The fed tokens moved the caches past the drafter state this plan
         // carried, thus only the state the feed left can be resumed.
@@ -1402,6 +1426,7 @@ struct ExecutorPromptCachePlan {
                 caches: caches,
                 tokens: ledger,
                 renderTokens: promptTokens,
+                uncommittedTokens: Array(generatedTokens.dropFirst(committedGeneratedTokenCount)),
                 state: state,
                 checkpoint: checkpoint,
                 drafterState: drafterState.flatMap {
@@ -1627,9 +1652,13 @@ enum ExecutorPromptCacheReport {
             return head + "rule=none (the input carries media, a batch or a mask)"
         }
         let rendered = plan.promptTokens.count
+        // The tokens of the previous answer a splice feeds ahead of the prompt
+        // are named apart, because they are no prompt tokens.
+        let uncommitted =
+            plan.uncommittedTokens.isEmpty ? "" : " uncommitted=\(plan.uncommittedTokens.count)"
         let counts =
             "rendered=\(rendered) reused=\(plan.reusedTokenCount) "
-            + "fed=\(rendered - plan.reusedTokenCount) rule=\(plan.decision.name)"
+            + "fed=\(rendered - plan.reusedTokenCount)\(uncommitted) rule=\(plan.decision.name)"
         guard let seam = plan.decision.divergence else { return head + counts }
         return head + counts
             + " divergence=\(seam.index) render=<<<\(decodeTokens(seam.renderTokens))>>> "
@@ -1853,6 +1882,13 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     /// count them, thus the usage of the pass adds them back.
     private(set) var prefilledTokenCount = 0
 
+    /// The tokens of the previous answer that the last planned pass fed ahead
+    /// of its prompt (see ``ExecutorPromptCachePlan/uncommittedTokens``). The
+    /// generation or the checkpoint feed counts them among the tokens it fed,
+    /// and they are no prompt tokens, thus the usage of the pass takes them
+    /// out.
+    private(set) var uncommittedTokenCount = 0
+
     /// The plan of the pass that takes its checkpoint at the end of the
     /// prompt, when the generation reports that its prefill ended. Nil when
     /// the pass takes no checkpoint there.
@@ -2008,6 +2044,7 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
                 transcriptBoundary == planned.promptTokens.count ? planned : nil
         }
         prefilledTokenCount = plan?.prefilledTokenCount ?? 0
+        uncommittedTokenCount = plan?.uncommittedTokens.count ?? 0
         return plan
     }
 
@@ -2046,6 +2083,7 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
         carried = .none
         reusedTokenCount = 0
         prefilledTokenCount = 0
+        uncommittedTokenCount = 0
         promptEndCheckpointPlan = nil
         promptEndCheckpoint = nil
         report(ExecutorPromptCacheReport.guidedLine(key: key))

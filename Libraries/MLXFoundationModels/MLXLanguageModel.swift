@@ -659,7 +659,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// that count plus the prefix the cache already held, and the held part
         /// is the cached part. A pass that takes a checkpoint of a hybrid model
         /// feeds part of the prompt before its generation starts; the
-        /// generation does not count that part, thus it is added back.
+        /// generation does not count that part, thus it is added back. A pass
+        /// that splices after an MTP turn also feeds the last token of that
+        /// turn, which no forward pass fed: it ends the previous answer and is
+        /// no prompt token, thus it is taken out.
         ///
         /// - Parameters:
         ///   - fedTokenCount: the prompt tokens the generation of the pass fed
@@ -674,7 +677,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) -> LanguageModelExecutorGenerationChannel.Usage.Input {
             .init(
                 totalTokenCount: fedTokenCount + promptCache.prefilledTokenCount
-                    + promptCache.reusedTokenCount,
+                    + promptCache.reusedTokenCount - promptCache.uncommittedTokenCount,
                 cachedTokenCount: promptCache.reusedTokenCount)
         }
 

@@ -1770,6 +1770,11 @@ public final class ChatSession {
                         }
                         var checkpointPrefill: CheckpointPrefill?
                         var leadingPrefill: CheckpointPrefill?
+                        // The tokens the previous generation returned and the caches miss,
+                        // which a splice feeds ahead of the prompt from
+                        // `cachedPromptTokenCount`: the end of the previous answer, which
+                        // the model must read before the commit that closes it.
+                        var unfedGeneratedTokens: [Int] = []
                         if var currentConversation = conversation {
                             let promptTokenIds = preparedInput.text.tokens.asArray(Int.self)
                             let cachedTokenIds = currentConversation.cachedTokens
@@ -1899,15 +1904,19 @@ public final class ChatSession {
                             case .prefillAll:
                                 break
 
-                            case .appendSuffix(let suffixStart, _):
+                            case .appendSuffix(let suffixStart, _, let uncommittedTokens):
                                 input = LMInput(
-                                    tokens: MLXArray(Array(promptTokenIds[suffixStart...])))
+                                    tokens: MLXArray(
+                                        uncommittedTokens + promptTokenIds[suffixStart...]))
                                 cachedPromptTokenCount = suffixStart
+                                unfedGeneratedTokens = uncommittedTokens
 
-                            case .appendSuffixToMain(let suffixStart, _):
+                            case .appendSuffixToMain(let suffixStart, _, let uncommittedTokens):
                                 input = LMInput(
-                                    tokens: MLXArray(Array(promptTokenIds[suffixStart...])))
+                                    tokens: MLXArray(
+                                        uncommittedTokens + promptTokenIds[suffixStart...]))
                                 cachedPromptTokenCount = suffixStart
+                                unfedGeneratedTokens = uncommittedTokens
                                 // The speculative state does not represent the
                                 // same continuation path. Preserve the authoritative
                                 // target cache and use it alone for this turn.
@@ -1982,8 +1991,8 @@ public final class ChatSession {
                             // Usually the rendered prompt, but a protocol rule may
                             // keep generated tokens the cold render cannot reproduce.
                             switch decision {
-                            case .appendSuffix(_, let representedTokens),
-                                .appendSuffixToMain(_, let representedTokens),
+                            case .appendSuffix(_, let representedTokens, _),
+                                .appendSuffixToMain(_, let representedTokens, _),
                                 .appendMediaSuffix(_, let representedTokens):
                                 currentConversation.cachedTokens = representedTokens
                             case .prefillAll, .trimToCommonPrefix,
@@ -2004,6 +2013,9 @@ public final class ChatSession {
                             currentConversation.checkpoints.removeAllButLeading(
                                 servingPrompt: promptTokenIds)
                             var prefillStart = cachedPromptTokenCount
+                            // The first feed to a checkpoint feeds the unfed generated tokens
+                            // ahead of the prompt, thus no later feed does.
+                            var unfedTokensAtPrefillStart = unfedGeneratedTokens
                             // A turn that speculates feeds its MTP drafter what it feeds
                             // to a checkpoint, so the drafter continuation stands at each
                             // checkpoint and the generation resumes it there.
@@ -2023,10 +2035,12 @@ public final class ChatSession {
                                 let prefill = try Self.prefillToCheckpoint(
                                     at: leadingBoundary, of: promptTokenIds,
                                     representing: currentConversation.cachedTokens,
-                                    from: prefillStart, into: kvCache, state: lmState,
+                                    from: prefillStart, after: unfedTokensAtPrefillStart,
+                                    into: kvCache, state: lmState,
                                     model: model, parameters: generateParameters,
                                     drafterFeed: drafterFeed)
                             {
+                                unfedTokensAtPrefillStart = []
                                 currentConversation.checkpoints.setLeading(prefill.checkpoint)
                                 lmState = prefill.state
                                 // The fed tokens moved the main cache past the continuation
@@ -2040,7 +2054,8 @@ public final class ChatSession {
                                 let prefill = try Self.prefillToCheckpoint(
                                     at: checkpointBoundary, of: promptTokenIds,
                                     representing: currentConversation.cachedTokens,
-                                    from: prefillStart, into: kvCache, state: lmState,
+                                    from: prefillStart, after: unfedTokensAtPrefillStart,
+                                    into: kvCache, state: lmState,
                                     model: model, parameters: generateParameters,
                                     drafterFeed: drafterFeed)
                             {
@@ -2073,7 +2088,11 @@ public final class ChatSession {
                                 format: modelConfiguration.toolCallFormat ?? .json,
                                 tools: toolValidationSchemas,
                                 toolCallPolicy: generateParameters.toolCallPolicy)
-                            base.cachedPromptTokenCount = cachedPromptTokenCount
+                            // The prefill counts the unfed generated tokens among the
+                            // tokens it fed, thus the cached part leaves their place in the
+                            // render out, and the two add up to the whole prompt.
+                            base.cachedPromptTokenCount =
+                                cachedPromptTokenCount - unfedGeneratedTokens.count
                             base.speculativeDecodingFallbackReason =
                                 speculativeDecodingFallbackReason
                             return MLXLMCommon.generateTaskRecordingTokens(
@@ -2241,6 +2260,7 @@ public final class ChatSession {
                                         lmState = nil
                                         input = preparedInput
                                         cachedPromptTokenCount = 0
+                                        unfedGeneratedTokens = []
                                     }
 
                                     // Allocate the draft KV cache once and reuse it across turns,
@@ -2616,7 +2636,8 @@ extension ChatSession {
         /// nil when no drafter took them.
         let drafterContinuation: MTPDrafterContinuation?
 
-        /// The number of prompt tokens fed.
+        /// The number of tokens fed: the prompt tokens, and the unfed generated
+        /// tokens that went ahead of them.
         let tokenCount: Int
 
         /// The time the feed took, in seconds.
@@ -2659,6 +2680,8 @@ extension ChatSession {
     ///     fed the whole prompt. A protocol rule can keep generated tokens here
     ///     that the render does not hold.
     ///   - start: the leading prompt tokens the caches already hold.
+    ///   - uncommittedTokens: the tokens the previous generation returned and
+    ///     the caches miss, which go ahead of the prompt.
     ///   - storage: the live caches.
     ///   - state: the model state to seed the first forward pass with.
     ///   - model: the model that feeds the caches.
@@ -2673,26 +2696,27 @@ extension ChatSession {
     ///   forward passes.
     private static func prefillToCheckpoint(
         at boundary: Int, of promptTokens: [Int], representing representedTokens: [Int],
-        from start: Int, into storage: KVCacheStorage, state: LMOutput.State?,
-        model: any LanguageModel, parameters: GenerateParameters,
+        from start: Int, after uncommittedTokens: [Int], into storage: KVCacheStorage,
+        state: LMOutput.State?, model: any LanguageModel, parameters: GenerateParameters,
         drafterFeed: MTPDrafterPrefillFeed?
     ) throws -> CheckpointPrefill? {
         let begin = Date.timeIntervalSinceReferenceDate
         guard
             let feed = try PromptCacheCheckpoint.prefillToCheckpoint(
                 at: boundary, of: promptTokens, representing: representedTokens, from: start,
-                into: storage.cache, state: state, model: model, prefill: parameters.prefill,
-                drafterFeed: drafterFeed)
+                after: uncommittedTokens, into: storage.cache, state: state, model: model,
+                prefill: parameters.prefill, drafterFeed: drafterFeed)
         else {
             return nil
         }
-        storage.commitProcessedTokens(boundary - start)
+        let fedTokenCount = uncommittedTokens.count + boundary - start
+        storage.commitProcessedTokens(fedTokenCount)
         return CheckpointPrefill(
             remainingInput: LMInput(tokens: MLXArray(Array(promptTokens[boundary...]))),
             state: feed.state,
             checkpoint: feed.checkpoint,
             drafterContinuation: feed.drafterContinuation,
-            tokenCount: boundary - start,
+            tokenCount: fedTokenCount,
             time: Date.timeIntervalSinceReferenceDate - begin)
     }
 

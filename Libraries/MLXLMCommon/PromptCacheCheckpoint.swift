@@ -220,8 +220,8 @@ package struct PromptCacheCheckpoint {
         return state
     }
 
-    /// Feeds the prompt from `start` up to `boundary` into `caches`, and takes
-    /// a checkpoint there.
+    /// Feeds `uncommittedTokens` and then the prompt from `start` up to
+    /// `boundary` into `caches`, and takes a checkpoint there.
     ///
     /// - Parameters:
     ///   - boundary: the index of the prompt where the checkpoint goes.
@@ -230,6 +230,10 @@ package struct PromptCacheCheckpoint {
     ///     fed the whole prompt. A protocol rule can keep generated tokens here
     ///     that the render does not hold.
     ///   - start: the leading prompt tokens the caches already hold.
+    ///   - uncommittedTokens: the tokens the previous generation returned and
+    ///     the caches miss, which a splice feeds ahead of the prompt (see
+    ///     ``PromptCacheReuse/uncommittedTokens``). They go in the same forward
+    ///     passes as the prompt tokens.
     ///   - caches: the live caches, one for each layer of the model.
     ///   - state: the model state to seed the first forward pass with, or nil.
     ///   - model: the model that feeds the caches.
@@ -248,8 +252,8 @@ package struct PromptCacheCheckpoint {
     ///   forward passes.
     package static func prefillToCheckpoint(
         at boundary: Int, of promptTokens: [Int], representing representedTokens: [Int],
-        from start: Int, into caches: [KVCache], state: LMOutput.State?,
-        model: any LanguageModel, prefill: PrefillParameters,
+        from start: Int, after uncommittedTokens: [Int] = [], into caches: [KVCache],
+        state: LMOutput.State?, model: any LanguageModel, prefill: PrefillParameters,
         drafterFeed: MTPDrafterPrefillFeed? = nil
     ) throws -> (
         state: LMOutput.State?, checkpoint: PromptCacheCheckpoint?,
@@ -257,8 +261,8 @@ package struct PromptCacheCheckpoint {
     )? {
         guard boundary > start, boundary < promptTokens.count else { return nil }
         let fedState = try Self.prefill(
-            Array(promptTokens[start ..< boundary]), into: caches, state: state, model: model,
-            prefill: prefill, drafterFeed: drafterFeed?.chunkHandler)
+            uncommittedTokens + promptTokens[start ..< boundary], into: caches, state: state,
+            model: model, prefill: prefill, drafterFeed: drafterFeed?.chunkHandler)
         let drafterContinuation = drafterFeed?.continuation
         let checkpoint = PromptCacheCheckpoint(
             caches: caches,
