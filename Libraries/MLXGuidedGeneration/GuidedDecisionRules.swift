@@ -1,7 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
 import MLX
-import MLXLMCommon
 
 /// The grammar state one guided decision reads: the matcher's mask there, its additive array, the
 /// tokens the generation counted before it, and the run of whitespace tokens before it.

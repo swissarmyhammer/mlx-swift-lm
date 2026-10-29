@@ -21,6 +21,15 @@ struct GuidedDecoder {
     /// The characters of output a progress line of the diagnostic log shows.
     private static let progressLogPrefixLength = 200
 
+    /// The index, from the end of the sorted constrained logits, of the second-best logit.
+    private static let runnerUpLogitIndex = -2
+
+    /// The milliseconds in one second.
+    private static let millisecondsPerSecond: Int64 = 1000
+
+    /// The attoseconds in one millisecond.
+    private static let attosecondsPerMillisecond: Int64 = 1_000_000_000_000_000
+
     /// The rules of the generation.
     let rules: GuidedDecisionRules
 
@@ -114,7 +123,7 @@ struct GuidedDecoder {
     /// bias of ``position``.
     private func topTwoMargin(of logits: MLXArray) -> Float {
         let best = sorted(rules.constrainedLogits(logits[0..., -1, 0...], at: position), axis: -1)
-        return (best[0..., -1] - best[0..., -2]).item(Float.self)
+        return (best[0..., -1] - best[0..., Self.runnerUpLogitIndex]).item(Float.self)
     }
 
     /// Emits a draft the target accepted. The matcher took the draft when it was drafted.
@@ -271,6 +280,7 @@ struct GuidedDecoder {
     /// The whole milliseconds from `instant` to now.
     private func milliseconds(since instant: ContinuousClock.Instant) -> Int64 {
         let elapsed = (clock.now - instant).components
-        return elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000
+        return elapsed.seconds * Self.millisecondsPerSecond
+            + elapsed.attoseconds / Self.attosecondsPerMillisecond
     }
 }

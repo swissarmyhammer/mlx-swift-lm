@@ -27,6 +27,9 @@ private let mtpBenchmarkFilesAreLocal =
     hfSnapshotDir(modelId: mtpBenchmarkTargetID) != nil
     && hfSnapshotDir(modelId: mtpBenchmarkDrafterID) != nil
 
+/// The days of the plan of ``MTPBenchmarkTrip``, which fix the length of its array.
+private let mtpBenchmarkTripDayCount = 3
+
 /// The trip the MTP benchmark asks for: free text, a number and a fixed-length array, so the
 /// grammar alternates forced and free tokens.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -38,7 +41,8 @@ private struct MTPBenchmarkTrip {
     @Guide(description: "The nights the trip lasts.")
     let nights: Int
 
-    @Guide(description: "One short plan for each day of the trip.", .count(3))
+    @Guide(
+        description: "One short plan for each day of the trip.", .count(mtpBenchmarkTripDayCount))
     let days: [String]
 }
 
@@ -797,9 +801,12 @@ struct GuidedGenerationBenchmarkTests {
 // MARK: - Duration convenience
 
 extension Duration {
+    /// The attoseconds in one second.
+    fileprivate static let attosecondsPerSecond = 1e18
+
     /// Total seconds as a Double, combining the seconds and attoseconds components.
     fileprivate var seconds: Double {
-        Double(components.seconds) + Double(components.attoseconds) / 1e18
+        Double(components.seconds) + Double(components.attoseconds) / Self.attosecondsPerSecond
     }
 }
 
