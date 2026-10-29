@@ -2012,7 +2012,7 @@ struct Qwen35CompiledVerifyTests {
     private static let promptLength = 8
 
     /// The prompt of each greedy decode of these tests.
-    private static let prompt = [3, 14, 15, 9, 2, 6, 5, 35]
+    static let prompt = [3, 14, 15, 9, 2, 6, 5, 35]
 
     /// The tokens each greedy decode of these tests generates.
     private static let generatedTokenCount = 48

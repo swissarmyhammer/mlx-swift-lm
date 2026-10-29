@@ -8,6 +8,7 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import Testing
 
@@ -202,8 +203,12 @@ enum GDNDecodeKernelFixture {
     /// configuration.
     private static let attentionHeadDim = 32
 
-    /// The vocabulary size of the test configuration.
-    private static let vocabularySize = 32
+    /// The vocabulary size of the test configuration: the vocabulary of the
+    /// Qwen 3.5 MTP fixtures, so each decode prompt of the Qwen 3.5 suites is a
+    /// token of a whole model of this configuration too. An id past the
+    /// vocabulary would make the embedding read past its table, and a decode
+    /// would then change from one process to the next.
+    private static let vocabularySize = Qwen35MTPFixture.vocabularySize
 
     /// The layer interval of the full-attention layers of the test
     /// configuration.
