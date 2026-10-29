@@ -1233,6 +1233,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             requestedMaxTokens: requestedMaxTokens,
                             entryID: entryID,
                             promptCache: promptCache,
+                            speculation: speculation,
                             context: context,
                             channel: channel)
                     } else {
@@ -1695,6 +1696,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     requestedMaxTokens: requestedMaxTokens,
                     entryID: entryID,
                     promptCache: promptCache,
+                    speculation: speculation,
                     context: context,
                     channel: channel)
             } else {
@@ -1736,8 +1738,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - toolCallsEntryID: The transcript entry id for tool-call events
         ///   - reasoningEntryID: The transcript entry id for reasoning events
         ///   - promptCache: The session's prompt-cache slot
-        ///   - speculation: The MTP drafter of the think-then-call phase, or nil.
-        ///     The grammar phase after it decodes plainly.
+        ///   - speculation: The MTP drafter of the think-then-call phase and of
+        ///     the grammar phase after it, or nil.
         ///   - context: The loaded model context
         ///   - channel: The channel to send response events into
         private func runRequiredToolTurn(
@@ -1880,7 +1882,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         hardReserve: hardReserve,
                         closingBias: closingBias,
                         whitespaceBias: whitespaceBias,
-                        whitespaceTokenIDs: whitespaceTokenIDs
+                        whitespaceTokenIDs: whitespaceTokenIDs,
+                        speculation: speculation
                     ) { text in
                         outputBuffer += text
                         GuidedGenerationDiagnosticSink.current?.recordEmit()
@@ -2368,6 +2371,18 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 into: channel)
         }
 
+        /// Runs schema output: guided generation constrained to the JSON schema of the request.
+        ///
+        /// - Parameters:
+        ///   - schemaJSON: The JSON schema the grammar constrains to
+        ///   - input: The rendered prompt
+        ///   - modelID: The model identifier the constraint caches key on
+        ///   - requestedMaxTokens: The caller's token budget, when set
+        ///   - entryID: The transcript entry id for response events
+        ///   - promptCache: The session's prompt-cache slot
+        ///   - speculation: The MTP drafter the grammar pass speculates with, or nil
+        ///   - context: The loaded model context
+        ///   - channel: The channel to send response events into
         private func runSchemaGeneration(
             schemaJSON: String,
             input: LMInput,
@@ -2375,6 +2390,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             requestedMaxTokens: Int?,
             entryID: String,
             promptCache: ExecutorPromptCacheSlot,
+            speculation: MTPSpeculation?,
             context: ModelContext,
             channel: LanguageModelExecutorGenerationChannel
         ) async throws {
@@ -2430,7 +2446,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         hardReserve: hardReserve,
                         closingBias: bias.closing,
                         whitespaceBias: bias.whitespace,
-                        whitespaceTokenIDs: bias.whitespaceTokenIDs
+                        whitespaceTokenIDs: bias.whitespaceTokenIDs,
+                        speculation: speculation
                     ) { text in
                         textContinuation.yield(text)
                         GuidedGenerationDiagnosticSink.current?.recordEmit()

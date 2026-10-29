@@ -49,6 +49,26 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     /// Number of required-tool reasoning close boundaries observed.
     public private(set) var toolReasoningCloseCount = 0
 
+    /// The position of each decision, in generation order: plain decoding records one per
+    /// decided token, and an MTP round one per draft the target accepted and one per token the
+    /// target decided itself.
+    public private(set) var decisions: [GuidedDecisionRecord] = []
+
+    /// The gap between the two best constrained logits of each token the target decided from
+    /// its own logits, in order: every sampled token of plain decoding, and the token after the
+    /// accepted drafts of an MTP round. A gap near zero marks a near-tie, where decoding noise
+    /// can flip the decision.
+    public private(set) var decisionMargins: [Float] = []
+
+    /// The drafts the MTP rounds proposed.
+    public private(set) var draftedTokenCount = 0
+
+    /// The drafts the target accepted.
+    public private(set) var acceptedDraftTokenCount = 0
+
+    /// Each rollback of the grammar matcher after a rejected draft, in order.
+    public private(set) var rollbacks: [GuidedRollbackRecord] = []
+
     private let cancelAfterEmitCount: Int?
     private let cancelOnToolReasoningClose: Bool
 
@@ -103,4 +123,64 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
             withUnsafeCurrentTask { $0?.cancel() }
         }
     }
+
+    /// Records the position of one decision.
+    ///
+    /// - Parameter decision: The position's mask and bias.
+    public func recordDecision(_ decision: GuidedDecisionRecord) {
+        decisions.append(decision)
+    }
+
+    /// Records the gap between the two best constrained logits of one decision.
+    ///
+    /// - Parameter margin: The gap.
+    public func recordDecisionMargin(_ margin: Float) {
+        decisionMargins.append(margin)
+    }
+
+    /// Records one MTP round.
+    ///
+    /// - Parameters:
+    ///   - draftedTokenCount: The drafts the round proposed.
+    ///   - acceptedDraftTokenCount: The drafts the target accepted.
+    public func recordSpeculativeRound(draftedTokenCount: Int, acceptedDraftTokenCount: Int) {
+        self.draftedTokenCount += draftedTokenCount
+        self.acceptedDraftTokenCount += acceptedDraftTokenCount
+    }
+
+    /// Records one rollback of the grammar matcher.
+    ///
+    /// - Parameter rollback: The drafts and the matcher acceptances the rollback undid.
+    public func recordRollback(_ rollback: GuidedRollbackRecord) {
+        rollbacks.append(rollback)
+    }
+}
+
+/// The position of one guided decision: the grammar mask and the logit bias the decision read.
+public struct GuidedDecisionRecord: Equatable, Sendable {
+
+    /// The tokens the generation counted before the decision.
+    public let tokenCount: Int
+
+    /// The grammar's packed token bitmask.
+    public let mask: [Int32]
+
+    /// Whether the grammar mask excludes tokens.
+    public let needsApply: Bool
+
+    /// Whether the grammar had terminated.
+    public let isTerminated: Bool
+
+    /// The bias the decision added to the logits, or `nil` for none.
+    public let bias: [Float]?
+}
+
+/// One rollback of the grammar matcher after the target rejected a draft.
+public struct GuidedRollbackRecord: Equatable, Sendable {
+
+    /// The drafts the rollback undid: the rejected draft and the drafts after it.
+    public let rejectedDraftCount: Int
+
+    /// The tokens the matcher rolled back: the drafts and the tokens each forced.
+    public let acceptanceCount: Int
 }

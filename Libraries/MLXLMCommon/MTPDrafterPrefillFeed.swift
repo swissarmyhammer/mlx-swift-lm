@@ -127,6 +127,43 @@ package final class MTPDrafterPrefillFeed {
             ? continuation : nil
     }
 
+    /// The drafter state after the whole prompt: the state the chunks left, extended over the
+    /// final prompt segment the target's last forward evaluated, up to the first bonus token.
+    ///
+    /// The segment resumes the drafter from the boundary the chunks left. When no chunk reached
+    /// the drafter, or the drafter refuses the resume, the drafter cold-starts at the segment.
+    ///
+    /// - Parameters:
+    ///   - finalSegment: The prompt tokens after the fed chunks, shape `[B, n]` or `[n]`.
+    ///   - segmentHidden: At least one target hidden row for each token of `finalSegment`.
+    ///   - firstBonus: The token the target decided after the prompt.
+    ///   - positionDeltas: The target position deltas of the last forward, or `nil`.
+    /// - Returns: The state, or `nil` when the drafter can neither resume nor cold-start.
+    package func primedState(
+        finalSegment: MLXArray, segmentHidden: MLXArray, firstBonus: MLXArray,
+        positionDeltas: MLXArray?
+    ) -> MTPDrafterState? {
+        let segmentLength = normalizedMTPTokenBatch(finalSegment).dim(-1)
+        guard segmentLength > 0, segmentHidden.dim(1) >= segmentLength else { return nil }
+        let rows = segmentHidden[0..., ..<segmentLength, 0...]
+        var primed = state
+        if isIntact, let boundaryHidden,
+            drafter.resumeDrafterState(
+                target: target, suffixTokens: finalSegment, suffixTargetHidden: rows,
+                targetBoundaryHidden: boundaryHidden, firstBonus: firstBonus,
+                positionDeltas: positionDeltas, state: &primed, sampler: mtpDrafterSeedSampler)
+        {
+            return primed
+        }
+        guard
+            drafter.coldStartDrafterState(
+                target: target, suffixTokens: finalSegment, suffixTargetHidden: rows,
+                firstBonus: firstBonus, position: startPosition + fedTokenCount,
+                positionDeltas: positionDeltas, state: &primed, sampler: mtpDrafterSeedSampler)
+        else { return nil }
+        return primed
+    }
+
     /// Appends the entries one prefill chunk completes, and keeps the chunk's last hidden row as
     /// the new boundary.
     ///

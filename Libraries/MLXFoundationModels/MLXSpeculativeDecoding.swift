@@ -13,7 +13,8 @@ import MLXLMCommon
 /// keeps it beside its weights in the shared model cache; ``MLXLanguageModel/evict()`` drops
 /// both. Text, reasoning, allowed-tool and think-then-call turns then speculate whenever the
 /// drafter can draft for the loaded model; a drafter that cannot draft for it leaves each turn
-/// to plain decode. Schema and required-tool output still decode plainly.
+/// to plain decode. Schema and required-tool output speculate too: each draft takes the grammar
+/// mask, and the output is the output of plain guided decoding.
 ///
 /// ```swift
 /// let model = MLXLanguageModel(

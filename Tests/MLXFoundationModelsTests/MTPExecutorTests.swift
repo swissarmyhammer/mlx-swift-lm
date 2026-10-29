@@ -173,7 +173,8 @@ struct MTPExecutorTests {
 
     /// Phase 1 of think-then-call speculates; phase 2, the grammar pass, starts from the
     /// prompt and the reasoning tokens alone, so the drafter state of phase 1 does not reach
-    /// it, and the grammar pass runs as it runs after plain decode.
+    /// it: the grammar pass primes a new drafter state, and writes what it writes after plain
+    /// decode.
     ///
     /// The tokens spell characters, so the grammar pass on the fixture's target writes JSON.
     /// The random weights do not close a tool call within the budget, thus both passes end

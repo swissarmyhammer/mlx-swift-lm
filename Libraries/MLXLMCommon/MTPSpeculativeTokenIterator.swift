@@ -486,7 +486,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     ///   - mainCache: The cache of the target.
     ///   - drafts: The most drafts of the round.
     /// - Returns: `true` when the round verifies in place.
-    static func verifiesInPlace(
+    package static func verifiesInPlace(
         mainModel: any LanguageModel, mainCache: [KVCache], drafts: Int
     ) -> Bool {
         let nativeRewindDepth =
@@ -507,7 +507,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     ///   - drafts: The most drafts of the round.
     ///   - mainCache: The cache of the target.
     /// - Returns: The drafts, or `nil` when not one draft fits.
-    static func drafts(_ drafts: Int, fittingWindowOf mainCache: [KVCache]) -> Int? {
+    package static func drafts(_ drafts: Int, fittingWindowOf mainCache: [KVCache]) -> Int? {
         let fitting = mainCache.lazy
             .compactMap { ($0 as? RotatingKVCache)?.rowsAttendingAsSingleRowWrites }
             .reduce(drafts) { Swift.min($0, $1 - 1) }
