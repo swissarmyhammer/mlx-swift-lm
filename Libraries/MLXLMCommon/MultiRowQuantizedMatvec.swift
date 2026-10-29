@@ -25,9 +25,9 @@ import MLXNN
 /// projections through ``quantizedMatmulRows(_:_:)`` gives the logits of a
 /// plain decode for the quantized matmuls.
 ///
-/// A model runs its projections through ``projection(_:by:)``, which takes
+/// A model runs its projections through `projection(_:by:)`, which takes
 /// the kernel only inside the scope of a speculative verify
-/// (``run(asSpeculativeVerify:_:)``). Every other call of 3 to 8 rows keeps
+/// (`run(asSpeculativeVerify:_:)`). Every other call of 3 to 8 rows keeps
 /// the matvec of MLX and its bits.
 public enum MultiRowQuantizedMatvec {
 

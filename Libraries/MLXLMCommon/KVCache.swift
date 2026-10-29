@@ -86,7 +86,7 @@ public protocol KVCache: Evaluatable, Updatable {
     ///
     /// This is a requirement and not only an extension member, so that a call
     /// through `any KVCache` goes to the implementation of the dynamic type.
-    /// The default implementation is the sum of `nbytes` over ``innerState()``.
+    /// The default implementation is the sum of `nbytes` over `innerState()`.
     var residentByteCount: Int { get }
 
     /// The arrays the generation loop evaluates with each token.

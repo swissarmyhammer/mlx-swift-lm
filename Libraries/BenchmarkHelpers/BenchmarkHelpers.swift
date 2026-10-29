@@ -11,7 +11,7 @@ import os
 
 /// The namespace of the public benchmark runners.
 ///
-/// Each runner writes one ``BenchmarkLog`` line for each timed run and returns its
+/// Each runner writes one `BenchmarkLog` line for each timed run and returns its
 /// measurements.
 public enum Benchmark {
     /// Milliseconds in one second, to report a time in seconds as milliseconds.

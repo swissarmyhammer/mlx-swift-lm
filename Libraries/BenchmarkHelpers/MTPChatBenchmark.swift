@@ -22,11 +22,11 @@ public struct MTPChatEdit: Sendable {
 }
 
 /// A scripted chat that ``Benchmark/mtpSystemPromptCache(container:drafter:scenarios:systemPrompt:systemPromptCharacterCount:blockSize:)``
-/// runs in a ``ChatSession`` with MTP speculative decoding and in one without speculation.
+/// runs in a `ChatSession` with MTP speculative decoding and in one without speculation.
 public struct MTPChatScenario: Sendable {
     /// The name of the chat in the result lines.
     public let name: String
-    /// The thinking switch of both sessions, ``ChatSession/thinkingEnabled``.
+    /// The thinking switch of both sessions, `ChatSession/thinkingEnabled`.
     public let thinking: Bool
     /// The user prompts, one for each turn, asked in order in one session.
     public let prompts: [String]
@@ -106,7 +106,7 @@ public struct MTPChatTurn: Sendable {
     public let isEdit: Bool
     /// Prompt tokens the turn prefilled.
     public let promptTokenCount: Int
-    /// Prompt tokens the reused cache served, ``GenerateCompletionInfo/cachedPromptTokenCount``.
+    /// Prompt tokens the reused cache served, `GenerateCompletionInfo/cachedPromptTokenCount`.
     public let cachedPromptTokenCount: Int
     /// Prefill time, in milliseconds.
     public let promptTimeMs: Double
@@ -306,7 +306,7 @@ private struct MTPChatSessionRunner {
 }
 
 extension Benchmark {
-    /// Benchmark MTP speculative decoding in a multi-turn ``ChatSession`` that reuses
+    /// Benchmark MTP speculative decoding in a multi-turn `ChatSession` that reuses
     /// its prompt cache, beside a session without speculation over the same turns.
     ///
     /// Both sessions share a system prompt of `systemPromptCharacterCount` benchmark

@@ -55,7 +55,7 @@ import Foundation
 /// it, and it refuses every other text.
 ///
 /// The rule gives nothing for `parameter`, whose name is one token. It gives two
-/// literals for `tool_calls`, and neither is necessary here: ``extractToolCalls``
+/// literals for `tool_calls`, and neither is necessary here: `extractToolCalls`
 /// reads the closing tag of the BLOCK never — it walks the invoke elements alone
 /// — and the only reader of ``endTag`` is `ToolCallProcessor`, which uses it to
 /// flush its streaming buffer. A short block closing tag thus holds the buffer

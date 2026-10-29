@@ -249,9 +249,9 @@ enum DeepSeekV4BytePairMerge {
 ///    identifier. A marker stands outside the pre-tokenizer, thus a newline
 ///    beside a marker never joins the marker's last character.
 /// 2. Each text between two markers breaks into the pieces of
-///    ``DeepSeekV4PreTokenizer``, and each piece takes the byte-level spelling
-///    of ``DeepSeekV4ByteLevel``.
-/// 3. Each spelled piece merges through ``DeepSeekV4BytePairMerge``.
+///    `DeepSeekV4PreTokenizer`, and each piece takes the byte-level spelling
+///    of `DeepSeekV4ByteLevel`.
+/// 3. Each spelled piece merges through `DeepSeekV4BytePairMerge`.
 ///
 /// A vocabulary that holds no identifier for a marker, and a vocabulary that
 /// is not byte-level, are both signs that the wrapped tokenizer is not the

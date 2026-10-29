@@ -4,10 +4,10 @@ import MLX
 import MLXLMCommon
 
 /// The greedy MTP verification one row at a time: the reference the batched verification of
-/// ``MTPSpeculativeTokenIterator`` must match, and the baseline its benchmark times it against.
+/// `MTPSpeculativeTokenIterator` must match, and the baseline its benchmark times it against.
 public enum SequentialGreedyMTPVerification {
 
-    /// Samples each verify row with ``ArgMaxSampler`` and stops at the first row whose token
+    /// Samples each verify row with `ArgMaxSampler` and stops at the first row whose token
     /// differs from its draft, or after the bonus row when every draft matches.
     ///
     /// - Parameters:

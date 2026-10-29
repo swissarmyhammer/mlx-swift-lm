@@ -170,7 +170,7 @@ public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel,
     }
 
     /// A drafter state whose cache follows the main caches of `parameters`: see
-    /// ``Qwen35VLMNextNPredictor/newCache(parameters:)``.
+    /// `Qwen35VLMNextNPredictor/newCache(parameters:)`.
     public func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
         MTPDrafterState(cache: mtp.newCache(parameters: parameters))
     }

@@ -94,7 +94,7 @@ public struct MTPBlockSetting: Sendable, Hashable, CustomStringConvertible {
         self.minimumDraftProbability = minimumDraftProbability
     }
 
-    /// The setting a ``SpeculativeDecodingConfig`` takes when it names none.
+    /// The setting a `SpeculativeDecodingConfig` takes when it names none.
     public static let shipped = MTPBlockSetting(
         blockSize: SpeculativeDecodingConfig.defaultMTPBlockSize,
         minimumDraftProbability: SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability)

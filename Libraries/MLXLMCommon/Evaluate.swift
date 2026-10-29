@@ -2485,7 +2485,7 @@ private func generateSpeculativeStream<Collector: GeneratedTokenCollector>(
 
 /// Deprecated low-level entry point: wraps an existing `TokenIterator` in the same
 /// text/tool-call `AsyncStream<Generation>` pipeline as
-/// ``generate(input:cache:parameters:context:wiredMemoryTicket:tools:)``, without
+/// `generate(input:cache:parameters:context:wiredMemoryTicket:tools:)`, without
 /// exposing the underlying `Task` handle.
 @available(
     *, deprecated,

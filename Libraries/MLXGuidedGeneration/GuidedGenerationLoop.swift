@@ -19,7 +19,7 @@ import MLXLMCommon
 /// and can inject fast-forwarded tokens into both the output stream and the
 /// KV cache.
 ///
-/// With an MTP drafter the loop speculates (see ``GuidedSpeculation``) and
+/// With an MTP drafter the loop speculates (see `GuidedSpeculation`) and
 /// writes the output plain decoding writes.
 public enum GuidedGenerationLoop {
 

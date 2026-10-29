@@ -48,7 +48,7 @@ extension LLMModel {
     /// remainder paying full attention cost against the whole prompt.
     ///
     /// When `state` asks for MTP drafter state and carries an
-    /// ``MLXLMCommon/mtpPrefillChunkHandlerKey`` handler, each chunk's hidden
+    /// `MLXLMCommon/mtpPrefillChunkHandlerKey` handler, each chunk's hidden
     /// rows go to the handler right after the chunk's forward.
     public func prepare(
         _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters

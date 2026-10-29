@@ -68,7 +68,7 @@ public struct LLMGenerationStats: Sendable {
 
 /// Why a generation benchmark could not measure a run.
 public enum LLMGenerationBenchmarkError: LocalizedError {
-    /// The generation ended without its ``GenerateCompletionInfo``.
+    /// The generation ended without its `GenerateCompletionInfo`.
     case missingCompletionInfo
 
     /// A description of the failure for the benchmark output.
@@ -342,7 +342,7 @@ public struct PromptCacheStats: Sendable {
 
 extension Benchmark {
     /// Benchmark the reuse of a cached system prompt. Each run prefills the system
-    /// prompt cold in a new ``ChatSession``. It then asks a second question two ways:
+    /// prompt cold in a new `ChatSession`. It then asks a second question two ways:
     /// in a fork of the session with an empty history, and as a follow-up turn of the
     /// session itself.
     ///
