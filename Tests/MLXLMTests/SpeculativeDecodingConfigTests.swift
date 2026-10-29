@@ -19,14 +19,14 @@ struct SpeculativeDecodingConfigTests {
         #expect(configuration.memoryPolicy == nil)
 
         switch configuration.strategy {
-        case .mtp(let configuredDrafter, let blockSize, let minimumDraftProbability):
+        case .mtp(.loaded(let configuredDrafter), let blockSize, let minimumDraftProbability):
             #expect(configuredDrafter === drafter)
             #expect(blockSize == SpeculativeDecodingConfig.defaultMTPBlockSize)
             #expect(
                 minimumDraftProbability
                     == SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability)
-        case .draftModel:
-            Issue.record("Expected the MTP speculative-decoding strategy")
+        case .mtp(.deferred, _, _), .draftModel:
+            Issue.record("Expected the eager MTP speculative-decoding strategy")
         }
     }
 
@@ -79,7 +79,8 @@ struct SpeculativeDecodingConfigTests {
         )
 
         #expect(configuration.numDraftTokens == 3)
-        guard case .mtp(let configuredDrafter, let blockSize, _) = configuration.strategy else {
+        guard case .mtp(.loaded(let configuredDrafter), let blockSize, _) = configuration.strategy
+        else {
             Issue.record("Expected the MTP speculative-decoding strategy")
             return
         }

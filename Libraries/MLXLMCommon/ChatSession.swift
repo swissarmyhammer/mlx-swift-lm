@@ -59,14 +59,48 @@ public enum SpeculativeDecodingConfigurationError: Error, Sendable, Equatable, L
 /// ```
 public struct SpeculativeDecodingConfig: Sendable {
 
-    package enum DraftModelSource: Sendable {
-        case loaded(ModelContainer)
-        case deferred(bytes: Int, @Sendable () async throws -> ModelContainer)
+    /// Where a drafter comes from: given loaded, or loaded by a closure when a turn first
+    /// speculates, after the memory policy admits the byte estimate.
+    package enum DrafterSource<Drafter: Sendable>: Sendable {
+        case loaded(Drafter)
+        case deferred(bytes: Int, @Sendable () async throws -> Drafter)
+
+        /// The drafter, when it was given loaded.
+        package var loadedDrafter: Drafter? {
+            guard case .loaded(let drafter) = self else { return nil }
+            return drafter
+        }
+
+        /// The byte estimate of a deferred drafter, which the memory policy weighs before the
+        /// drafter loads, or nil when the drafter was given loaded.
+        package var estimatedBytes: Int? {
+            guard case .deferred(let bytes, _) = self else { return nil }
+            return bytes
+        }
+
+        /// The drafter: the loaded one, or a new one from the loader.
+        ///
+        /// - Returns: The drafter.
+        /// - Throws: The error of the loader.
+        package func load() async throws -> Drafter {
+            switch self {
+            case .loaded(let drafter):
+                return drafter
+            case .deferred(_, let load):
+                return try await load()
+            }
+        }
     }
+
+    /// The source of a separate draft model.
+    package typealias DraftModelSource = DrafterSource<ModelContainer>
+
+    /// The source of an MTP drafter.
+    package typealias MTPDrafterSource = DrafterSource<MTPDrafterContainer>
 
     package enum Strategy: Sendable {
         case draftModel(DraftModelSource)
-        case mtp(MTPDrafterContainer, blockSize: Int, minimumDraftProbability: Float)
+        case mtp(MTPDrafterSource, blockSize: Int, minimumDraftProbability: Float)
     }
 
     /// The default block size of an MTP configuration: the tokens of each round, its drafts and
@@ -101,10 +135,23 @@ public struct SpeculativeDecodingConfig: Sendable {
     /// is admitted by the memory policy. MTP configurations also return `nil`
     /// because their drafter uses ``MTPDrafterContainer`` instead.
     public var draftModel: ModelContainer? {
-        if case .draftModel(.loaded(let draftModel)) = strategy {
-            return draftModel
-        }
-        return nil
+        guard case .draftModel(let source) = strategy else { return nil }
+        return source.loadedDrafter
+    }
+
+    /// The MTP drafter, when it was provided eagerly.
+    ///
+    /// Configurations initialized with an MTP drafter loader return `nil`, because
+    /// ``ChatSession`` loads that drafter only when a turn first speculates. Draft-model
+    /// configurations also return `nil`.
+    package var mtpDrafter: MTPDrafterContainer? {
+        mtpDrafterSource?.loadedDrafter
+    }
+
+    /// The source of the MTP drafter, or nil for a draft-model configuration.
+    package var mtpDrafterSource: MTPDrafterSource? {
+        guard case .mtp(let source, _, _) = strategy else { return nil }
+        return source
     }
 
     /// Number of candidate tokens proposed per verification cycle.
@@ -181,35 +228,127 @@ public struct SpeculativeDecodingConfig: Sendable {
         minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) throws {
+        try self.init(
+            mtpDrafterSource: .loaded(mtpDrafter), blockSize: blockSize,
+            minimumDraftProbability: minimumDraftProbability, memoryPolicy: memoryPolicy)
+    }
+
+    /// Initialize speculative decoding with an MTP drafter loader.
+    ///
+    /// ``ChatSession`` calls `loadMTPDrafter` on the first turn that speculates, and only when
+    /// the memory policy admits `mtpDrafterBytes` beside the session's model; the session and
+    /// its forks then share the loaded drafter. A policy that does not admit the drafter falls
+    /// back to decoding without speculation, or throws ``SpeculativeDecodingMemoryError``, as its
+    /// action says, without loading it. This is the preferred initializer when the drafter may
+    /// not fit comfortably beside the model.
+    ///
+    /// - Parameters:
+    ///   - mtpDrafterBytes: estimated resident parameter bytes of the drafter
+    ///   - blockSize: total number of tokens in each verification block. A drafter caps it at its
+    ///     ``MTPDrafterModel/maximumBlockSize``.
+    ///   - minimumDraftProbability: the drafter top-1 probability below which a chaining drafter
+    ///     (Qwen MTP) stops a round's chain early; 0 drafts the whole block every round.
+    ///   - memoryPolicy: optional memory policy that each turn checks before it speculates: on
+    ///     `mtpDrafterBytes` before the drafter loads, then on the loaded drafter's parameters
+    ///     and the drafter state the session carries.
+    ///   - loadMTPDrafter: closure that loads the drafter only if speculation is admitted
+    /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)``
+    ///   when `blockSize` is smaller than 2, and
+    ///   ``SpeculativeDecodingConfigurationError/invalidMTPMinimumDraftProbability(_:)`` when
+    ///   `minimumDraftProbability` is not from 0 to 1.
+    public init(
+        mtpDrafterBytes: Int,
+        blockSize: Int = defaultMTPBlockSize,
+        minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
+        loadMTPDrafter: @escaping @Sendable () async throws -> MTPDrafterContainer
+    ) throws {
+        try self.init(
+            mtpDrafterSource: .deferred(bytes: max(0, mtpDrafterBytes), loadMTPDrafter),
+            blockSize: blockSize, minimumDraftProbability: minimumDraftProbability,
+            memoryPolicy: memoryPolicy)
+    }
+
+    /// Initialize speculative decoding with an MTP drafter that `factory` loads from
+    /// `configuration` on the first turn that speculates.
+    ///
+    /// The deferred load follows
+    /// ``init(mtpDrafterBytes:blockSize:minimumDraftProbability:memoryPolicy:loadMTPDrafter:)``:
+    /// ``ChatSession`` loads the drafter only once the memory policy admits `mtpDrafterBytes`.
+    /// The load first runs `registerDrafterTypes`, which registers the drafter model types the
+    /// registry of `factory` needs, such as `Qwen35TextMTPRegistration.register` of MLXLLM.
+    ///
+    /// - Parameters:
+    ///   - configuration: the drafter checkpoint, as a model id or a local directory
+    ///   - mtpDrafterBytes: estimated resident parameter bytes of the drafter
+    ///   - downloader: the downloader that fetches a remote checkpoint
+    ///   - tokenizerLoader: the tokenizer loader the factory takes; an MTP drafter borrows the
+    ///     tokenizer of its target, so the load reads no tokenizer
+    ///   - factory: the factory that loads the drafter
+    ///   - registerDrafterTypes: registers the drafter model types with the registry of
+    ///     `factory` before the load
+    ///   - blockSize: total number of tokens in each verification block
+    ///   - minimumDraftProbability: the drafter top-1 probability below which a chaining drafter
+    ///     stops a round's chain early; 0 drafts the whole block every round.
+    ///   - memoryPolicy: optional memory policy that each turn checks before it speculates
+    /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)``
+    ///   when `blockSize` is smaller than 2, and
+    ///   ``SpeculativeDecodingConfigurationError/invalidMTPMinimumDraftProbability(_:)`` when
+    ///   `minimumDraftProbability` is not from 0 to 1.
+    public init(
+        mtpDrafterConfiguration configuration: ModelConfiguration,
+        mtpDrafterBytes: Int,
+        from downloader: any Downloader,
+        using tokenizerLoader: any TokenizerLoader,
+        factory: MTPDrafterModelFactory = .shared,
+        registerDrafterTypes: @escaping @Sendable () async -> Void = {},
+        blockSize: Int = defaultMTPBlockSize,
+        minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
+    ) throws {
+        try self.init(
+            mtpDrafterBytes: mtpDrafterBytes, blockSize: blockSize,
+            minimumDraftProbability: minimumDraftProbability, memoryPolicy: memoryPolicy
+        ) {
+            await registerDrafterTypes()
+            return try await factory.loadContainer(
+                from: downloader, using: tokenizerLoader, configuration: configuration)
+        }
+    }
+
+    /// Initialize speculative decoding with the MTP drafter of `source`, after checking the
+    /// block size and the confidence floor.
+    private init(
+        mtpDrafterSource source: MTPDrafterSource, blockSize: Int,
+        minimumDraftProbability: Float, memoryPolicy: SpeculativeDecodingMemoryPolicy?
+    ) throws {
         guard blockSize >= 2 else {
             throw SpeculativeDecodingConfigurationError.invalidMTPBlockSize(blockSize)
         }
         try Self.validate(minimumDraftProbability: minimumDraftProbability)
 
         self.strategy = .mtp(
-            mtpDrafter, blockSize: blockSize, minimumDraftProbability: minimumDraftProbability)
+            source, blockSize: blockSize, minimumDraftProbability: minimumDraftProbability)
         self.numDraftTokens = blockSize - 1
         self.memoryPolicy = memoryPolicy
     }
 
+    /// The byte estimate of a deferred draft model or MTP drafter, which the memory policy
+    /// weighs before the drafter loads, or nil when the drafter was provided loaded.
     package var estimatedDraftModelBytes: Int? {
-        guard case .draftModel(.deferred(let bytes, _)) = strategy else {
-            return nil
+        switch strategy {
+        case .draftModel(let source):
+            source.estimatedBytes
+        case .mtp(let source, _, _):
+            source.estimatedBytes
         }
-        return bytes
     }
 
     package func loadDraftModel() async throws -> ModelContainer {
         guard case .draftModel(let source) = strategy else {
             preconditionFailure("MTP speculation does not use a draft ModelContainer")
         }
-
-        switch source {
-        case .loaded(let draftModel):
-            return draftModel
-        case .deferred(_, let load):
-            return try await load()
-        }
+        return try await source.load()
     }
 }
 
@@ -564,6 +703,9 @@ public final class ChatSession {
     public var instructions: String?
     private let cache: SerialAccessContainer<Cache>
     private let loadedDraftModel: SerialAccessContainer<ModelContainer?>
+    /// The MTP drafter of the session: the one the configuration provided, or the one the first
+    /// speculative turn loaded. The session's forks share it, so it loads once for all of them.
+    private let loadedMTPDrafter: SerialAccessContainer<MTPDrafterContainer?>
     public var processing: UserInput.Processing
     public var generateParameters: GenerateParameters
 
@@ -662,6 +804,7 @@ public final class ChatSession {
         self.instructions = instructions
         self.cache = .init(.empty)
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
+        self.loadedMTPDrafter = .init(speculativeDecoding?.mtpDrafter)
         self.processing = processing
         self.generateParameters = generateParameters
         self.components = components
@@ -698,6 +841,7 @@ public final class ChatSession {
         self.instructions = instructions
         self.cache = .init(.empty)
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
+        self.loadedMTPDrafter = .init(speculativeDecoding?.mtpDrafter)
         self.processing = processing
         self.generateParameters = generateParameters
         self.components = components
@@ -738,6 +882,7 @@ public final class ChatSession {
         self.instructions = instructions
         self.cache = .init(.history(history))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
+        self.loadedMTPDrafter = .init(speculativeDecoding?.mtpDrafter)
         self.processing = processing
         self.generateParameters = generateParameters
         self.components = components
@@ -778,6 +923,7 @@ public final class ChatSession {
         self.instructions = instructions
         self.cache = .init(.history(history))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
+        self.loadedMTPDrafter = .init(speculativeDecoding?.mtpDrafter)
         self.processing = processing
         self.generateParameters = generateParameters
         self.components = components
@@ -880,6 +1026,7 @@ public final class ChatSession {
                     savedDrafterContinuation: savedDrafterContinuation,
                     plan: (try? generateParameters.kvCachePlan()) ?? .disabled)))
         self.loadedDraftModel = .init(speculativeDecoding?.draftModel)
+        self.loadedMTPDrafter = .init(speculativeDecoding?.mtpDrafter)
         self.processing = processing
         self.generateParameters = generateParameters
         self.components = components
@@ -1034,8 +1181,10 @@ public final class ChatSession {
         self.model = source.model
         self.instructions = source.instructions
         self.cache = .init(cache)
-        // The same configuration loads the same draft model, so the sessions share it.
+        // The same configuration loads the same draft model or MTP drafter, so the sessions
+        // share it.
         self.loadedDraftModel = source.loadedDraftModel
+        self.loadedMTPDrafter = source.loadedMTPDrafter
         self.processing = source.processing
         self.generateParameters = source.generateParameters
         self.components = source.components
@@ -1307,7 +1456,7 @@ public final class ChatSession {
             [
                 model,
                 instructions, processing, tools, toolDispatch,
-                additionalContext, thinkingEnabled, cache, loadedDraftModel,
+                additionalContext, thinkingEnabled, cache, loadedDraftModel, loadedMTPDrafter,
                 generateParameters = parameters, components, speculativeDecoding
             ] in
             do {
@@ -1498,17 +1647,18 @@ public final class ChatSession {
                         let willFallBackBeforeLoadingDraft =
                             (try? draftAdmissionBeforeLoading?.get()) == false
 
+                        // An MTP turn loads a deferred drafter only once the memory policy
+                        // admits its byte estimate; a fail action throws here, before the load.
+                        let usesMTP = speculativeDecoding?.mtpDrafterSource != nil
                         let mtpDrafter: (any MTPDrafterModel)?
-                        if let speculativeDecoding,
-                            case .mtp(let drafterContainer, _, _) = speculativeDecoding.strategy
+                        if let source = speculativeDecoding?.mtpDrafterSource,
+                            try draftAdmissionBeforeLoading?.get() != false
                         {
-                            mtpDrafter = await drafterContainer.perform { context in
-                                SendableBox(context.model)
-                            }.consume()
+                            mtpDrafter = try await Self.mtpDrafterModel(
+                                of: source, sharedThrough: loadedMTPDrafter)
                         } else {
                             mtpDrafter = nil
                         }
-                        let usesMTP = mtpDrafter != nil
                         // Whether the MTP drafter can draft for `model`, decided once for
                         // both the continuation restore and the fallback reason.
                         let mtpDrafterIsCompatible = mtpDrafter?.isCompatible(with: model) == true
@@ -1519,13 +1669,14 @@ public final class ChatSession {
                             savedDrafterContinuation = nil
                         }
                         // Why an MTP turn decodes plainly, decided before any cache work.
-                        let mtpFallbackReason = try mtpDrafter.flatMap {
-                            try Self.mtpFallbackReason(
-                                drafter: $0, drafterIsCompatible: mtpDrafterIsCompatible,
+                        let mtpFallbackReason =
+                            try usesMTP
+                            ? Self.mtpFallbackReason(
+                                drafter: mtpDrafter, drafterIsCompatible: mtpDrafterIsCompatible,
                                 model: model, parameters: generateParameters,
                                 memoryPolicy: speculativeDecoding?.memoryPolicy,
                                 continuation: mtpDrafterContinuation)
-                        }
+                            : nil
                         let speculationIsEligible =
                             usesMTP ? mtpFallbackReason == nil : speculativeDecoding != nil
 
@@ -2500,17 +2651,45 @@ extension ChatSession {
             time: Date.timeIntervalSinceReferenceDate - begin)
     }
 
+    /// The MTP drafter model of `source`, from the drafter that `slot` holds.
+    ///
+    /// The first call with an empty `slot` loads the drafter of `source` and stores it in `slot`,
+    /// which the session shares with its forks; `slot` stays locked during the load, so the
+    /// session and its forks load a deferred drafter once.
+    ///
+    /// - Parameters:
+    ///   - source: the MTP drafter of the configuration.
+    ///   - slot: the drafter the session and its forks share.
+    /// - Returns: the drafter model.
+    /// - Throws: the error of the loader of a deferred drafter.
+    private static func mtpDrafterModel(
+        of source: SpeculativeDecodingConfig.MTPDrafterSource,
+        sharedThrough slot: SerialAccessContainer<MTPDrafterContainer?>
+    ) async throws -> any MTPDrafterModel {
+        let container = try await slot.update { stored in
+            if let stored { return stored }
+            let loaded = try await source.load()
+            stored = loaded
+            return loaded
+        }
+        return await container.perform { context in
+            SendableBox(context.model)
+        }.consume()
+    }
+
     /// Why a turn with the MTP drafter `drafter` decodes without speculation,
     /// as the session knows before it touches the caches, or nil when nothing
     /// stops it yet.
     ///
-    /// An incompatible drafter comes first, then a sampling the drafter cannot
-    /// draft for, then the memory policy. The policy weighs the parameters of
-    /// `model` against the parameters of `drafter` plus the drafter state the
-    /// session carries.
+    /// A drafter the memory policy did not admit to load comes first, then an
+    /// incompatible drafter, then a sampling the drafter cannot draft for, then
+    /// the memory policy. The policy weighs the parameters of `model` against the
+    /// parameters of `drafter` plus the drafter state the session carries.
     ///
     /// - Parameters:
-    ///   - drafter: the MTP drafter of the session.
+    ///   - drafter: the MTP drafter of the session, or nil when the memory policy
+    ///     did not admit the byte estimate of a deferred drafter, which thus never
+    ///     loaded.
     ///   - drafterIsCompatible: whether `drafter` can draft for `model`.
     ///   - model: the model the drafter speculates for.
     ///   - parameters: the generation parameters of the turn.
@@ -2521,10 +2700,11 @@ extension ChatSession {
     ///   admit the drafter and its action is
     ///   ``SpeculativeDecodingMemoryAction/fail``.
     private static func mtpFallbackReason(
-        drafter: any MTPDrafterModel, drafterIsCompatible: Bool, model: any LanguageModel,
+        drafter: (any MTPDrafterModel)?, drafterIsCompatible: Bool, model: any LanguageModel,
         parameters: GenerateParameters, memoryPolicy: SpeculativeDecodingMemoryPolicy?,
         continuation: MTPDrafterContinuation?
     ) throws -> SpeculativeDecodingFallbackReason? {
+        guard let drafter else { return .memoryBudgetExceeded }
         guard drafterIsCompatible else { return .incompatibleDrafter }
         guard !drafter.requiresGreedySampling || parameters.temperature == 0 else {
             return .unsupportedSampling
