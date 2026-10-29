@@ -104,14 +104,9 @@ struct MTPExecutorTests {
         tokenizer: any Tokenizer = ScalarTokenizer(
             vocabularySize: Qwen35MTPFixture.vocabularySize)
     ) async throws -> FixtureReasoningResolver {
-        let fixture = try Qwen35MTPFixture()
-        let decode = try await fixture.decodeGreedily(
-            prompt: prompt, maxTokens: Self.generatedTokenCount, speculative: false)
-        let endToken = decode.tokens[Self.reasoningEndIndex]
-        try #require(decode.tokens.firstIndex(of: endToken) == Self.reasoningEndIndex)
-        try #require(!decode.tokens.contains(Self.reasoningStartToken))
-        return FixtureReasoningResolver(
-            start: Self.reasoningStartToken, end: endToken, tokenizer: tokenizer)
+        try await FixtureReasoningResolver.closingAtGreedyToken(
+            Self.reasoningEndIndex, of: prompt, maxTokens: Self.generatedTokenCount,
+            start: Self.reasoningStartToken, tokenizer: tokenizer)
     }
 
     // MARK: - Paths
@@ -222,7 +217,7 @@ struct MTPExecutorTests {
         #expect(speculative.channelFailure == nil)
         #expect(speculative.reasoningText == plain.reasoningText)
         #expect(speculative.toolCalls == plain.toolCalls)
-        #expect(speculative.metadataKeys == plain.metadataKeys)
+        #expect(speculative.outputMetadataKeys == plain.outputMetadataKeys)
         #expect(speculative.usage == plain.usage)
         #expect(speculative.speculated)
     }

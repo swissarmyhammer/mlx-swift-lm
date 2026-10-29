@@ -113,6 +113,19 @@ The direct `MLXLanguageModel` initializer takes the same `speculativeDecoding:` 
 - **Drafter loading and eviction.** The model loads the drafter one time, on the first generation or warm-up that needs it, and keeps it beside its weights in the shared model cache. Concurrent first uses share one load. `evict()` drops the drafter with the weights and the prompt cache entries of the model, and cancels a drafter load in flight; a custom `loadDrafter` closure must honor that cancellation. Two models that name the same drafter checkpoint each load their own copy.
 - **Which turns speculate.** Text, reasoning, allowed-tool and think-then-call turns speculate at any temperature. Schema (`@Generable`) output and required-tool calls speculate too: each draft takes the grammar mask, a rejected draft rolls the grammar matcher back over it and its forced tokens, and the output is the output of plain guided decoding. Guided turns keep no prompt cache, so each one feeds the drafter the whole prompt.
 
+### What each response reports
+
+Each call of a model with `speculativeDecoding:` set writes its MTP outcome into the metadata of its response entry (`Transcript.Response.metadata`), the same metadata that carries `"incompleteOutput"`:
+
+| Key | Type | Value |
+| --- | --- | --- |
+| `"speculativeDecoding"` | `Bool` | `true` when MTP drafted in at least one round of the call. |
+| `"speculativeDecodingFallbackReason"` | `String` | The `SpeculativeDecodingFallbackReason` case name, such as `"incompatibleDrafter"`, when a pass of the call fell back to plain decode. Absent when no pass fell back. |
+| `"draftedTokenCount"` | `Int` | The drafts the call proposed. |
+| `"acceptedDraftTokenCount"` | `Int` | The drafts of the call that the model accepted. |
+
+One call can run several passes: think-then-call runs a reasoning phase and a grammar phase, and an allowed-tool turn with a schema can run a schema pass after its tool pass. The two counts are the sums over every pass of the call, and the fallback reason is the first fallback a pass of the call reported, in the order the passes ran. Text, reasoning and allowed-tool passes report their counts in the speculative telemetry of their completion info; schema and required-tool grammar passes report them through the guided-generation diagnostic sink, which the call binds without recording any decoding detail. A streamed call and a call that returns its whole response report the same metadata. A call of a model without `speculativeDecoding:` writes none of these keys.
+
 ### What the prompt cache keeps
 
 The executor prompt cache keeps the MTP drafter state with each session's entry, so a follow-up turn resumes the drafter instead of feeding it the whole conversation again:

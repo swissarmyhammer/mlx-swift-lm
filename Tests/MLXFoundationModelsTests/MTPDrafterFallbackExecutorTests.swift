@@ -43,20 +43,6 @@ struct MTPDrafterFallbackExecutorTests {
             && statedReason.contains(Self.textTargetName)
     }
 
-    /// Speculative decoding whose drafter is the vision-language drafter, which cannot draft
-    /// for the text target of ``Qwen35MTPFixture``.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func incompatibleSpeculativeDecoding() throws -> MLXSpeculativeDecoding {
-        try MLXSpeculativeDecoding(
-            drafterConfiguration: Qwen35MTPFixture.drafterConfiguration,
-            blockSize: Qwen35MTPFixture.blockSize
-        ) { configuration in
-            MTPDrafterContainer(
-                context: MTPDrafterContext(
-                    configuration: configuration, model: try Qwen35VLMMTPFixture().drafter))
-        }
-    }
-
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test("a text turn with an incompatible drafter writes the plain text and says why")
     func aTextTurnWithAnIncompatibleDrafterSaysWhy() async throws {
@@ -65,7 +51,8 @@ struct MTPDrafterFallbackExecutorTests {
         let fixture = try Qwen35MTPFixture()
         let plain = fixture.makeLanguageModel(weights: weights)
         let speculative = fixture.makeLanguageModel(
-            weights: weights, speculativeDecoding: try incompatibleSpeculativeDecoding())
+            weights: weights,
+            speculativeDecoding: try Qwen35MTPFixture.makeIncompatibleSpeculativeDecoding())
 
         let turns = try await MTPExecutorTurns.respond(
             plain: plain, speculative: speculative,

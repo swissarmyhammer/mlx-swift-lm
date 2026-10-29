@@ -195,7 +195,7 @@ struct GuidedGenerationMTPTests {
         #expect(turns.speculative.turn.failure == nil)
         #expect(!turns.plain.turn.responseText.isEmpty)
         #expect(turns.speculative.turn.responseText == turns.plain.turn.responseText)
-        #expect(turns.speculative.turn.metadataKeys == turns.plain.turn.metadataKeys)
+        #expect(turns.speculative.turn.outputMetadataKeys == turns.plain.turn.outputMetadataKeys)
         #expect(turns.speculative.turn.usage == turns.plain.turn.usage)
         #expect(turns.speculative.sink.draftedTokenCount > 0)
         #expect(turns.plain.sink.draftedTokenCount == 0)
@@ -224,7 +224,7 @@ struct GuidedGenerationMTPTests {
         #expect(turns.plain.turn.failure == nil)
         #expect(turns.speculative.turn.failure == nil)
         #expect(turns.speculative.turn.toolCalls == turns.plain.turn.toolCalls)
-        #expect(turns.speculative.turn.metadataKeys == turns.plain.turn.metadataKeys)
+        #expect(turns.speculative.turn.outputMetadataKeys == turns.plain.turn.outputMetadataKeys)
         #expect(turns.speculative.turn.usage == turns.plain.turn.usage)
         #expect(turns.speculative.sink.draftedTokenCount > 0)
     }

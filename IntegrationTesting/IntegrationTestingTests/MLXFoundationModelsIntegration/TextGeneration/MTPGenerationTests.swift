@@ -43,10 +43,13 @@ struct MTPGenerationTests {
     private static let measurementLog = Logger(
         subsystem: "com.apple.FoundationModels-MLX", category: "MTPGeneration")
 
-    /// What one turn wrote, and the completion of its generation.
+    /// What one turn wrote, the completion of its generation, and the metadata of the response
+    /// entry the turn left in the session's transcript.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private struct Turn {
         let text: String
         let completion: GenerateCompletionInfo
+        let metadata: [String: GeneratedContent]
     }
 
     /// Records the completion events of a turn.
@@ -83,7 +86,13 @@ struct MTPGenerationTests {
                 ).content
             }
         }
-        return Turn(text: text, completion: try #require(log.last))
+        let response = session.transcript.compactMap { entry -> Transcript.Response? in
+            guard case .response(let response) = entry else { return nil }
+            return response
+        }.last
+        return Turn(
+            text: text, completion: try #require(log.last),
+            metadata: try #require(response).metadata)
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -107,6 +116,10 @@ struct MTPGenerationTests {
 
         #expect((mtp.completion.proposedDraftTokens ?? 0) > 0)
         #expect(mtp.completion.passthroughReason == nil)
+        // The response entry of the real model's turn says that MTP drafted, and how much.
+        #expect(try mtp.metadata["speculativeDecoding"]?.value(Bool.self) == true)
+        #expect(try (mtp.metadata["acceptedDraftTokenCount"]?.value(Int.self) ?? 0) > 0)
+        #expect(plain.metadata["speculativeDecoding"] == nil)
         try await expectPlainTokens(mtp: mtp.text, plain: plain.text, prompt: prompt)
         #expect(mtp.completion.tokensPerSecond > plain.completion.tokensPerSecond)
         await mtpModel.evict()

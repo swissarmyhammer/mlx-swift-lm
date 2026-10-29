@@ -278,14 +278,22 @@ struct GuidedExecutorModels {
     /// - Parameters:
     ///   - weights: The directory that makes the models available.
     ///   - capabilities: The capabilities both models declare.
+    ///   - resolver: The resolver that patches the configuration of each call of both models.
+    ///   - speculativeDecoding: The MTP drafter of the speculative model, or `nil` for the
+    ///     fixture's own.
     /// - Throws: The error of the fixture or of the speculative decoding.
-    init(weights: URL, capabilities: [LanguageModelCapabilities.Capability]) throws {
+    init(
+        weights: URL, capabilities: [LanguageModelCapabilities.Capability],
+        resolver: any ModelConfigurationResolver = DefaultConfigurationResolver(),
+        speculativeDecoding: MLXSpeculativeDecoding? = nil
+    ) throws {
         let fixture = try Qwen35MTPFixture()
         plain = fixture.makeLanguageModel(
-            weights: weights, capabilities: capabilities, tokenizer: tokenizer)
+            weights: weights, capabilities: capabilities, resolver: resolver, tokenizer: tokenizer)
         speculative = fixture.makeLanguageModel(
-            weights: weights, capabilities: capabilities, tokenizer: tokenizer,
-            speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding())
+            weights: weights, capabilities: capabilities, resolver: resolver, tokenizer: tokenizer,
+            speculativeDecoding: try speculativeDecoding
+                ?? Qwen35MTPFixture.makeSpeculativeDecoding())
     }
 
     /// A transcript of one prompt of `prompt` tokens.

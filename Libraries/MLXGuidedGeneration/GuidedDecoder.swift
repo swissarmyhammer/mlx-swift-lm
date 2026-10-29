@@ -60,7 +60,9 @@ struct GuidedDecoder {
     /// Whether the generation writes the diagnostic log.
     private let diagnosticLog: Bool
 
-    /// The test sink that records the generation, or `nil`.
+    /// The test sink that records the decisions of the generation, or `nil`: a bound sink
+    /// that does not record decoding (``GuidedGenerationDiagnosticSink/recordsDecoding``)
+    /// reaches no decision.
     private let diagnosticSink: GuidedGenerationDiagnosticSink?
 
     /// The clock of the diagnostic log.
@@ -87,7 +89,9 @@ struct GuidedDecoder {
         self.detokenizer = tokenizer.makeStreamingDetokenizer()
         self.emit = emit
         self.diagnosticLog = diagnosticLog
-        self.diagnosticSink = GuidedGenerationDiagnosticSink.current
+        self.diagnosticSink = GuidedGenerationDiagnosticSink.current.flatMap {
+            $0.recordsDecoding ? $0 : nil
+        }
         self.startInstant = clock.now
     }
 

@@ -28,6 +28,7 @@ struct MTPTurnUsage: Sendable, Equatable {
 }
 
 /// What the executor streamed for one session turn.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 struct MTPTurn: Sendable {
 
     /// The response text, in the order the turn streamed it.
@@ -44,6 +45,23 @@ struct MTPTurn: Sendable {
 
     /// The keys of each metadata update, in order.
     var metadataKeys: [String] = []
+
+    /// The metadata of the response entry: each update merged over the ones before it.
+    var metadata: [String: any ConvertibleToGeneratedContent & Sendable] = [:]
+
+    /// The keys of the MTP outcome of a call, which only a model with a drafter writes.
+    static let speculativeDecodingOutcomeKeys: Set = [
+        SpeculativeDecodingOutcome.MetadataKey.speculativeDecoding,
+        SpeculativeDecodingOutcome.MetadataKey.fallbackReason,
+        SpeculativeDecodingOutcome.MetadataKey.acceptedDraftTokenCount,
+        SpeculativeDecodingOutcome.MetadataKey.draftedTokenCount,
+    ]
+
+    /// The keys of each metadata update other than the MTP outcome keys, in order: the keys a
+    /// model writes whether it speculates or not.
+    var outputMetadataKeys: [String] {
+        metadataKeys.filter { !Self.speculativeDecodingOutcomeKeys.contains($0) }
+    }
 
     /// The name and the arguments of each tool call, in order.
     var toolCalls: [String] = []
@@ -91,7 +109,9 @@ final class MTPTurnLog: Sendable {
                         generatedTokenCount: output.totalTokenCount,
                         reasoningTokenCount: output.reasoningTokenCount))
             case .completion(let info): turn.completions.append(info)
-            case .updateMetadata(let values, _): turn.metadataKeys += values.keys.sorted()
+            case .updateMetadata(let values, _):
+                turn.metadataKeys += values.keys.sorted()
+                turn.metadata.merge(values) { _, update in update }
             case .toolCall(_, let name, let arguments): turn.toolCalls.append(name + arguments)
             }
         }
@@ -245,6 +265,30 @@ struct FixtureReasoningResolver: ModelConfigurationResolver {
             endDelimiter: tokenizer.decode(tokenIds: [end], skipSpecialTokens: false),
             promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
             replaysReasoningIntoHistory: replaysReasoningIntoHistory)
+    }
+
+    /// A resolver whose reasoning opens with `start` and closes with the token at `endIndex` of
+    /// the greedy decode of `prompt` on the fixture's target, so a turn on that prompt reads the
+    /// tokens before `endIndex` as reasoning.
+    ///
+    /// - Parameters:
+    ///   - endIndex: The position in the greedy decode of the token that closes the reasoning.
+    ///   - prompt: The prompt tokens.
+    ///   - maxTokens: The tokens the greedy decode generates.
+    ///   - start: The token that opens the reasoning; the decode must not hold it.
+    ///   - tokenizer: The tokenizer that spells the delimiters.
+    /// - Returns: The resolver.
+    /// - Throws: An issue when the closing token stands earlier in the decode, or the decode
+    ///   holds `start`; the error of the fixture.
+    static func closingAtGreedyToken(
+        _ endIndex: Int, of prompt: [Int], maxTokens: Int, start: Int, tokenizer: any Tokenizer
+    ) async throws -> FixtureReasoningResolver {
+        let decode = try await Qwen35MTPFixture().decodeGreedily(
+            prompt: prompt, maxTokens: maxTokens, speculative: false)
+        let endToken = decode.tokens[endIndex]
+        try #require(decode.tokens.firstIndex(of: endToken) == endIndex)
+        try #require(!decode.tokens.contains(start))
+        return FixtureReasoningResolver(start: start, end: endToken, tokenizer: tokenizer)
     }
 
     func resolve(

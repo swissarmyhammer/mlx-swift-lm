@@ -85,7 +85,7 @@ struct GuidedSpeculation {
             of: speculation.drafter, with: target.model)
         {
             GuidedGenerationDiagnosticSink.current?.recordSpeculationFallback(
-                fallback.statedReason)
+                fallback.statedReason, reason: fallback.reason)
             return nil
         }
         guard let drafter = speculation.drafter as? any GuidedMTPDrafter,

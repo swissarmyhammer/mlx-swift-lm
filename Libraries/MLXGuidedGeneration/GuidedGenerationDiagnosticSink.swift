@@ -1,21 +1,31 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import MLXLMCommon
 
-/// Test-only diagnostic capture for the tool-call grammar/tokenizer boundary.
+/// Diagnostic capture for the tool-call grammar/tokenizer boundary and the MTP rounds of a
+/// guided generation.
 ///
-/// Off by default: production never binds `current`, so every recording site is
-/// a nil-guarded no-op and there is no behavior change. A test binds an instance
-/// with `GuidedGenerationDiagnosticSink.$current.withValue(_:)` around a real
-/// generation call, drives the executor, then reads the accumulated signals.
+/// A test binds an instance with `GuidedGenerationDiagnosticSink.$current.withValue(_:)`
+/// around a real generation call, drives the executor, then reads the accumulated signals.
+/// Outside a test, `MLXFoundationModels` binds a sink made with `recordsDecoding: false`
+/// around each guided pass of a call that speculates, and reads the MTP rounds and
+/// fallbacks of the pass for the response metadata of the call. Such a sink records no
+/// decision, margin or token, so the decoder pays nothing for it. With no sink bound, every
+/// recording site is a nil-guarded no-op.
 ///
 /// Reference type so writes made deep in the synchronous generation loop are
 /// visible to the test afterward. `@unchecked Sendable` because it is mutated
 /// only within the single generation task, never concurrently.
 public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
 
-    /// Task-local injection point. `nil` in production.
+    /// Task-local injection point: a test's sink, the speculation-only sink of a guided pass
+    /// that speculates, or `nil`.
     @TaskLocal public static var current: GuidedGenerationDiagnosticSink?
+
+    /// Whether the decoder records its decisions, margins, tokens and termination here. A sink
+    /// that does not records only the MTP rounds, rollbacks and fallbacks.
+    public let recordsDecoding: Bool
 
     /// Model-sampled token IDs, in generation order. Grammar-forced tokens are
     /// recorded separately in `fastForwardTokenIDs`.
@@ -73,15 +83,29 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     /// the target; `nil` otherwise.
     public private(set) var speculationFallbackReason: String?
 
+    /// Why each guided generation whose configured MTP drafter cannot draft for the target
+    /// decoded plainly, one reason for each such generation, in order.
+    public private(set) var speculationFallbacks: [SpeculativeDecodingFallbackReason] = []
+
     private let cancelAfterEmitCount: Int?
     private let cancelOnToolReasoningClose: Bool
 
+    /// Creates a sink.
+    ///
+    /// - Parameters:
+    ///   - cancelAfterEmitCount: The emit boundary at which ``recordEmit()`` cancels its task,
+    ///     or `nil` for none.
+    ///   - cancelOnToolReasoningClose: Whether ``recordToolReasoningClose()`` cancels its task.
+    ///   - recordsDecoding: Whether the decoder records its decisions, margins, tokens and
+    ///     termination; `false` records only the MTP rounds, rollbacks and fallbacks.
     public init(
         cancelAfterEmitCount: Int? = nil,
-        cancelOnToolReasoningClose: Bool = false
+        cancelOnToolReasoningClose: Bool = false,
+        recordsDecoding: Bool = true
     ) {
         self.cancelAfterEmitCount = cancelAfterEmitCount
         self.cancelOnToolReasoningClose = cancelOnToolReasoningClose
+        self.recordsDecoding = recordsDecoding
     }
 
     // MARK: Recording (called from generation; no-ops when the sink is unbound)
@@ -161,10 +185,15 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
 
     /// Records why the configured MTP drafter decodes plainly.
     ///
-    /// - Parameter statedReason: The drafter, the target, and why the drafter cannot draft for
-    ///   the target.
-    public func recordSpeculationFallback(_ statedReason: String) {
+    /// - Parameters:
+    ///   - statedReason: The drafter, the target, and why the drafter cannot draft for the
+    ///     target.
+    ///   - reason: The fallback reason the generation reports.
+    public func recordSpeculationFallback(
+        _ statedReason: String, reason: SpeculativeDecodingFallbackReason
+    ) {
         speculationFallbackReason = statedReason
+        speculationFallbacks.append(reason)
     }
 }
 

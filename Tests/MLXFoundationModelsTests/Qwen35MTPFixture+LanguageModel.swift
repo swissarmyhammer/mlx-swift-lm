@@ -78,6 +78,21 @@ extension Qwen35MTPFixture {
             return container
         }
     }
+
+    /// Speculative decoding whose drafter is the vision-language drafter, which cannot draft for
+    /// the text target of the fixture.
+    ///
+    /// - Returns: The speculative decoding.
+    /// - Throws: The error of the configuration when the drafter refuses the block size.
+    static func makeIncompatibleSpeculativeDecoding() throws -> MLXSpeculativeDecoding {
+        try MLXSpeculativeDecoding(
+            drafterConfiguration: drafterConfiguration, blockSize: blockSize
+        ) { configuration in
+            MTPDrafterContainer(
+                context: MTPDrafterContext(
+                    configuration: configuration, model: try Qwen35VLMMTPFixture().drafter))
+        }
+    }
 }
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)

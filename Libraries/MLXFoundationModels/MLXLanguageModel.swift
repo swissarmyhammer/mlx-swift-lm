@@ -613,12 +613,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// the guided-generation text forwarder).
         @TaskLocal static var generationObserver: (@Sendable (GenerationEvent) -> Void)?
 
-        /// Shows the test observer what one generation pass reported when it
-        /// ended.
+        /// Takes what one generation pass reported when it ended: into the MTP
+        /// outcome of the call, when the model speculates, and to the test
+        /// observer.
         ///
         /// - Parameter info: the completion report of the pass.
         static func observeCompletion(_ info: GenerateCompletionInfo) {
+            SpeculativeDecodingOutcome.current?.record(info)
             generationObserver?(.completion(info))
+        }
+
+        /// Sends the MTP outcome of the call to its response entry, when the
+        /// model speculates. A call of a model with no drafter sends nothing.
+        ///
+        /// - Parameters:
+        ///   - entryID: the response entry of the call.
+        ///   - channel: the channel to send the metadata into.
+        static func emitSpeculativeDecodingOutcome(
+            entryID: String, into channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            guard let outcome = SpeculativeDecodingOutcome.current else { return }
+            await emitMetadata(outcome.metadata, entryID: entryID, into: channel)
         }
 
         static func emit(
@@ -1052,9 +1067,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             streamingInto channel: LanguageModelExecutorGenerationChannel
         ) async throws {
             let coordinator = GenerationDrainCoordinator()
+            // Each pass of a call of a model that speculates reports its MTP
+            // outcome here, and the response entry reports the whole call.
+            let speculationOutcome = model.speculativeDecoding.map { _ in
+                SpeculativeDecodingOutcome()
+            }
             try await withTaskCancellationHandler {
                 try await Self.$drainCoordinator.withValue(coordinator) {
-                    try await runRespond(to: request, model: model, streamingInto: channel)
+                    try await SpeculativeDecodingOutcome.$current.withValue(speculationOutcome) {
+                        try await runRespond(to: request, model: model, streamingInto: channel)
+                    }
                 }
             } onCancel: {
                 coordinator.cancelActiveAndAwaitQuiescence()
@@ -1271,6 +1293,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
                     Stream.gpu.synchronize()
                 }
+                await Self.emitSpeculativeDecodingOutcome(entryID: entryID, into: channel)
                 outcome = .success(())
             } catch is CancellationError {
                 // Synchronize GPU before rethrowing to ensure in-flight operations complete.
@@ -2098,6 +2121,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// synchronized before the section leaves, thus a canceller that the
         /// coordinator releases finds the GPU quiet.
         ///
+        /// The MTP rounds and fallbacks of the pass go into the MTP outcome of
+        /// the call, when the model speculates.
+        ///
         /// - Parameter body: the guided-generation pass.
         /// - Returns: what `body` returned.
         /// - Throws: `CancellationError` when the respond task is already
@@ -2105,13 +2131,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private static func withGuidedGenerationSection<Value>(
             _ body: () throws -> Value
         ) throws -> Value {
-            guard let coordinator = drainCoordinator else { return try body() }
+            guard let coordinator = drainCoordinator else {
+                return try SpeculativeDecodingOutcome.recordingGuidedPass(body)
+            }
             try coordinator.enterSection()
             defer {
                 Stream.gpu.synchronize()
                 coordinator.leaveSection()
             }
-            return try body()
+            return try SpeculativeDecodingOutcome.recordingGuidedPass(body)
         }
 
         /// Stops the generation task and waits until it stops.
