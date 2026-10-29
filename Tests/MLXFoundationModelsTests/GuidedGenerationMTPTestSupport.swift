@@ -201,15 +201,20 @@ struct GuidedFixtureRun {
     ///   - fixture: The fixture whose target decodes, and whose drafter drafts.
     ///   - blockSize: The tokens of each MTP round, or `nil` to decode plainly.
     ///   - drafter: The drafter of the MTP rounds, or `nil` for the fixture's own.
+    ///   - target: The model that decodes in place of the fixture's target, or `nil` for the
+    ///     fixture's target.
     /// - Returns: What the generation wrote.
     /// - Throws: An error of the generation other than running out of budget.
     static func generate(
         schema: String, prompt: [Int], fixture: Qwen35MTPFixture, blockSize: Int?,
-        drafter: (any MTPDrafterModel)? = nil
+        drafter: (any MTPDrafterModel)? = nil, target: (any MLXLMCommon.LanguageModel)? = nil
     ) throws -> GuidedFixtureRun {
         let tokenizer = ToolCallAlphabetTokenizer()
         var context = fixture.makeModelContext()
         context.tokenizer = tokenizer
+        if let target {
+            context.model = target
+        }
         let grammar = try Grammar(schema: schema, tokenizer: tokenizer)
         let speculation = blockSize.map {
             MTPSpeculation(

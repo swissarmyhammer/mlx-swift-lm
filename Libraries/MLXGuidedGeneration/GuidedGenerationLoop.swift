@@ -207,19 +207,19 @@ public enum GuidedGenerationLoop {
 
     // MARK: - Internal (visible for testing)
 
-    /// The tokens a guided decision feeds the target: the decided token, or the tokens the
-    /// grammar fast-forwarded after it when there are any.
+    /// The tokens a guided decision feeds the target: the decided token, then the tokens the
+    /// grammar fast-forwarded after it.
     ///
-    /// When a commit fast-forwards, the loop feeds the forced tokens alone and not the decided
-    /// token before them, as it always has. An MTP round feeds the same tokens for each of its
-    /// drafts, so its output stays the output of plain decoding.
+    /// The target's cache thus holds every token the generation emits, and each later decision
+    /// reads logits conditioned on all of them. An MTP round feeds the same tokens for each of
+    /// its drafts, so its output stays the output of plain decoding.
     ///
     /// - Parameters:
     ///   - sampled: The decided token.
     ///   - fastForward: The tokens the grammar forced after it.
-    /// - Returns: The tokens of the next forward, at least one.
+    /// - Returns: The tokens of the next forward, the decided token first.
     static func modelFeed(sampled: Int32, fastForward: [Int32]) -> [Int32] {
-        fastForward.isEmpty ? [sampled] : fastForward
+        [sampled] + fastForward
     }
 
     /// Build the set of token ids that terminate generation.

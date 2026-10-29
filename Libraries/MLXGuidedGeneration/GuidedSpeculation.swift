@@ -18,12 +18,14 @@ typealias GuidedMTPDrafter = ResumableMTPDrafterModel & StatefulMTPDistributionD
 /// main cache rewinds the rejected tail in place. Guided output with MTP is thus the output of
 /// plain guided decoding.
 ///
-/// The tokens a draft feeds the target are the tokens plain decoding feeds for it: see
+/// The tokens a draft feeds the target are the tokens plain decoding feeds for it, the draft and
+/// then the tokens its commit forced: see
 /// ``GuidedGenerationLoop/modelFeed(sampled:fastForward:)``. A draft whose commit forces tokens
-/// ends its chain, and its forced tokens join the verify of its round. Forced tokens a decision
-/// leaves feed in verify-shaped forwards of their own. Both run on the targets that verify in
-/// place only (the Qwen 3.5 hybrids), where a verify forward of several tokens on a populated
-/// cache gives each row the one-token logits; every other target decodes plainly.
+/// ends its chain, and the draft with its forced tokens joins the verify of its round. A decision
+/// of the target that forces tokens feeds itself and them in verify-shaped forwards of their own.
+/// Both run on the targets that verify in place only (the Qwen 3.5 hybrids), where a verify
+/// forward of several tokens on a populated cache gives each row the one-token logits; every
+/// other target decodes plainly.
 struct GuidedSpeculation {
 
     /// The drafter.
@@ -235,8 +237,8 @@ struct GuidedSpeculation {
             ? target.mostVerifiedTokens : drafts + 1
     }
 
-    /// Feeds `feed`, the tokens a decision forced, in verify-shaped forwards of `chunkLength`
-    /// tokens at most, and decides the token after them.
+    /// Feeds `feed`, a decided token and the tokens its commit forced, in verify-shaped forwards
+    /// of `chunkLength` tokens at most, and decides the token after them.
     ///
     /// - Returns: The tokens the decision feeds the target, or `nil` when the generation stops.
     private mutating func feedForcedTokens(
