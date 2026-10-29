@@ -28,6 +28,39 @@ comments:
     - evidence: 5 files — Libraries/MLXGuidedGeneration/GuidedGenerationLoop.swift, Libraries/MLXGuidedGeneration/GuidedSpeculation.swift, Tests/MLXFoundationModelsTests/GuidedGenerationMTPTestSupport.swift, Tests/MLXFoundationModelsTests/GuidedGenerationModelFeedTests.swift (new), Tests/MLXGuidedGenerationTests/GuidedModelFeedTests.swift (new); swift build --build-tests 0 warnings; 5 xctest bundles 0 failures 0 skipped; release guided JSON MTP bench plain 52.27 / MTP 67.59 tok/s, divergence=none (was 54.05 / 74.71)
     - next: /review
   timestamp: 2026-10-29T10:33:31.531962+00:00
+- actor: claude-code
+  id: 01m63kneyermw8fenszbnwn9tj
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (3c69b862) — 1 finding (1 confirmed, 0 refuted, 7 attempted) — Tests/MLXFoundationModelsTests/GuidedGenerationModelFeedTests.swift:39
+    - next: implement the open finding (cover the MTP path in theTargetIsFedEveryEmittedToken), then re-review
+  timestamp: 2026-10-29T10:35:35.758899+00:00
+- actor: claude-code
+  id: 01m63knwxmvt9m5tmx1xg56eh6
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 5 files (modelFeed feeds decided + forced tokens, feed tests)
+    - test: green — 5 bundles 0 failures 0 skipped; Release guided JSON plain 52.27 / MTP 67.59, identical
+    - commit: 3c69b862
+    - review: findings — Tests/MLXFoundationModelsTests/GuidedGenerationModelFeedTests.swift:39
+  timestamp: 2026-10-29T10:35:50.068716+00:00
+- actor: claude-code
+  id: 01m63makq7cmxv83ma1x9rap8n
+  text: |-
+    Finding (GuidedGenerationModelFeedTests.swift:39, MTP coverage) addressed, tests only.
+    - `theTargetIsFedEveryEmittedToken` now takes `blockSize` from `[nil, 2, 4]` (plain, single draft, 3-draft chains, as GuidedGenerationMTPTests) x 4 schemas = 12 cases. Also asserts `speculationFallbackReason == nil` and `(draftedTokenCount > 0) == (blockSize != nil)`, so the MTP cases really speculate.
+    - Why the wrapper had to go: a wrapping `LanguageModel` makes the MTP path fall back. `Qwen35MTPDraftModel.validateCompatibility` and its embedding/LM-head lookup only accept `Qwen35TextModel`/`Qwen35Model`. The recorder is now `CacheRecordingTarget: Qwen35TextModel`, a subclass under `@testable import MLXLLM` (the class is public, not final). It copies the fixture target's configuration and weights (`update(parameters:verify: .noUnusedKeys)`) and overrides `callAsFunction(_:cache:state:)`, the only forward GuidedTarget calls (prefill, feedOneAtATime, verify). The default LLMModel.prepare hands a 5-token prompt over whole, so the prompt goes through the same override.
+    - What gets compared: the tokens the target's cache keeps, not the raw forward inputs. Before each forward the record is cut back to the full-attention cache's `offset`, which drops verify rows that `keepVerified`/`rewindSpeculativePromptCache` rewound. After the run it is cut to the offset of the last cache. Prefix and count invariants are the same as on the plain path. (`cachedTokens` is nil when no attention layer was seen, and `#require` then fails the test.)
+    - Regression proof, both temporary and both restored (GuidedSpeculation.swift is not in the diff): (1) `feedForcedTokens` dropping the decided token made 8/8 MTP cases fail with 15 issues while 4/4 plain cases passed; (2) `verifyBatch` using `last.feed.dropFirst()` (the draft-chain feed) made 8/8 MTP cases fail with 16 issues while plain passed.
+    - Running one Swift Testing suite: a copy of swiftpm-testing-helper sits in .build/out/Products/Debug (gitignored), run as in the earlier comment.
+  timestamp: 2026-10-29T10:47:08.775590+00:00
+- actor: claude-code
+  id: 01m63marqbk823p4ck9y48r54t
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Tests/MLXFoundationModelsTests/GuidedGenerationModelFeedTests.swift; swift build --build-tests 0 compiler warnings (only the pre-existing build-system note about mlx-swift_Cmlx.bundle); xcrun xctest: CXGrammarTests 7, MLXGuidedGenerationTests 72, MLXHuggingFaceMacrosTests 6, MLXFoundationModelsTests 415 (GuidedGenerationModelFeedTests 12 cases), MLXLMTests 920 XCTest + 2011 Swift Testing — all passed, 0 failures, 0 skipped; MTP feed regressions caught (15 and 16 issues), then restored
+    - next: /review
+  timestamp: 2026-10-29T10:47:13.899546+00:00
 position_column: doing
 position_ordinal: '8180'
 title: 'Guided generation: feed the sampled token to the model when its commit fast-forwards'
@@ -47,3 +80,13 @@ The MTP guided path (^9xe94tr) reproduces the same feed through one shared funct
 - [x] The cache holds every emitted token.
 
 #guided-generation #bug
+
+## Review Findings (2026-10-29 05:34)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 5 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M62ZZ9BTD0JN7650FASHRW1B.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M62ZZ9BTD0JN7650FASHRW1B.md` — no validator matches this file
+
+- [x] `Tests/MLXFoundationModelsTests/GuidedGenerationModelFeedTests.swift:39` `completeness/invariant-propagation` — The feed-every-emitted-token test runs only the plain path (`blockSize: nil`). The change's stated purpose is that the MTP guided path also feeds the decided token plus its forced tokens, and that path has its own feed code (`GuidedSpeculation.feedForcedTokens`, plus draft chains that call `modelFeed` through `GuidedDraftChain`). Nothing in the diff asserts that the MTP path's target receives the same token sequence, so a regression confined to the MTP feed would pass this test. Parameterize `theTargetIsFedEveryEmittedToken` over the MTP path as well (a non-nil `blockSize` with the fixture drafter), and assert the same prefix and count invariants as the plain path. If the MTP path cannot run on the test target, state that in the test's doc comment and say which path the test covers.
