@@ -146,8 +146,24 @@ comments:
     - evidence: 4 files — Tests/MLXLMTests/RelativeRMSError.swift (new; the single shared relativeRMSError(reference, actual)), Tests/MLXLMTests/VerifyAttentionAccuracyTests.swift (relativeError deleted, 3 call sites), Tests/MLXLMTests/ParoQuantTests.swift (private copy deleted), Tests/MLXLMTests/KVCacheQuantizationTests.swift (third private copy + referencePowerFloor deleted, 13 call sites switched to (reference, actual)). Card: the 09:47 finding is flipped to [x], and the <5 ms subtask text now names ^vre4msr/^8p0rfxx/^mm16fx2. `swift build --build-tests`: Build complete, 0 source warnings. The only line is the existing llbuild "missing creator for mutated node" on mlx-swift_Cmlx.bundle. `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: exit 0, 920 XCTest with 0 failures, 2082 Swift Testing tests in 198 suites passed, 0 ✘, 0 skipped. ParoQuantTests, KVCacheTests and VerifyAttentionAccuracyTests all pass. Other bundles, each exit 0: CXGrammarTests 7 passed; MLXFoundationModelsTests 457 passed; MLXGuidedGenerationTests 72 passed; MLXHuggingFaceMacrosTests 7 XCTest with 0 failures.
     - next: /review
   timestamp: 2026-10-30T15:00:08.545059+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m66n8vxjh8p6jytxchhcb7yr
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (b55bcc0c) — 0 findings, 0 confirmed, 1 refuted, 7 attempted; 4 files reviewed. Every prior Review Findings item (09:29, 09:47) is checked; the 09:47 reuse/reuse item is addressed by the shared relativeRMSError in Tests/MLXLMTests/RelativeRMSError.swift.
+    - next: task moved to done.
+  timestamp: 2026-10-30T15:01:23.506714+00:00
+- actor: claude-code
+  id: 01m66n9y60fer9p92e4p8dm17k
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — shared relativeRMSError (3 copies → 1)
+    - test: green — 5 bundles 0 fail/0 skip
+    - commit: b55bcc0c
+    - review: clean — task moved to done
+  timestamp: 2026-10-30T15:01:58.592994+00:00
+position_column: done
+position_ordinal: ffff9180
 title: 'MTP: cut the per-row cost of the multi-row verify at long context (5-row verify is 2.3–3.0x a plain forward at 32k–100k)'
 ---
 Step-4 breakdown (^j2tnzpn, Release, M5 Ultra, Qwen3.8-27B-4bit + MTP-4bit, guard off): a 1-row verify costs about a plain forward, but each extra row adds ~5–7 ms at 32k and ~10–13 ms at 100k context:
