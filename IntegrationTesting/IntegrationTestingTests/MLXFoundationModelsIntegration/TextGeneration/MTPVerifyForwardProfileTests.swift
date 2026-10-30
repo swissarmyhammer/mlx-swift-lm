@@ -224,7 +224,8 @@ struct MTPVerifyForwardProfileTests {
     /// The tensors of one cache: the keys and the values.
     private static let keysAndValues = 2
 
-    /// The most tokens of a verify: the bonus token and four drafts.
+    /// The most tokens of a verify the profile measures: the bonus token and four drafts, a
+    /// block of five.
     private static let mostVerifyRows = 5
 
     /// The score factor of a head of 256 numbers.

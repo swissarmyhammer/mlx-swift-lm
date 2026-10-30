@@ -26,8 +26,8 @@ struct Qwen35VerifyAttentionTests {
     /// and some more.
     private static let cachedKeys = DecodeAttentionKernel.fewestKeys + 76
 
-    /// The tokens of the verify: the bonus token and four drafts, as the MTP
-    /// head of Qwen3.8 drafts a block of five.
+    /// The tokens of the verify: the bonus token and four drafts, a block of
+    /// five.
     private static let verifyTokens = 5
 
     /// The layer: a head of 256 numbers, the only width the kernel reads.

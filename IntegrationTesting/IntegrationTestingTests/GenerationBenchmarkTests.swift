@@ -267,7 +267,9 @@ struct GenerationBenchmarkTests {
     /// The shipped default (``MTPBlockSetting/shipped``) writes the plain tokens up to a
     /// near-tie of plain's two best tokens, and is the fastest setting over the math, code and
     /// prose prompts combined among the settings that decode no prompt slower than one draft for
-    /// each round (``MTPBlockSetting/singleDraft``), each within the noise the sweep measured.
+    /// each round (``MTPBlockSetting/singleDraft``). Each comparison allows
+    /// ``MTPBlockSweep/noiseAllowance``: the noise the sweep measured, and at least the noise of
+    /// repeated quiet-load sweeps (``MTPBlockSweep/quietLoadNoiseFloor``).
     @Test(.enabled(if: qwen38FourBitMTPIsLocal))
     func qwen38FourBitMTPGeneration() async throws {
         let (context, drafter) = try await loadQwen38FourBitMTP()
@@ -279,7 +281,7 @@ struct GenerationBenchmarkTests {
         #expect(sweep.isNoSlowerThanSingleDraft(shipped), "shipped \(shipped.setting)")
         #expect(
             shipped.meanMTPTokensPerSecond
-                >= fastest.meanMTPTokensPerSecond * (1 - sweep.noiseFraction),
+                >= fastest.meanMTPTokensPerSecond * (1 - sweep.noiseAllowance),
             """
             shipped \(shipped.setting) \(shipped.meanMTPTokensPerSecond) tok/s, fastest \
             \(fastest.setting) \(fastest.meanMTPTokensPerSecond) tok/s

@@ -96,6 +96,7 @@ struct MTPBlockSweepTests {
             closing.hasPrefix(
                 "MTP sweep fastest: blockSize 4 pMin 0.75; "
                     + "fastest no slower than one draft on any prompt: blockSize 3 pMin 0.00; "
-                    + "noise 0.0%; load average 1.25 before, - after; thermal state "))
+                    + "noise 0.0%, allowance 1.1%; load average 1.25 before, - after; "
+                    + "thermal state "))
     }
 }

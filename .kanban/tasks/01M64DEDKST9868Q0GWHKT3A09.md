@@ -56,8 +56,29 @@ comments:
     - evidence: 11 files — Libraries/MLXLMCommon/QwenMTP.swift, Libraries/MLXLMCommon/Evaluate.swift, Libraries/MLXLMCommon/ChatSession.swift, Libraries/MLXLMCommon/Documentation.docc/using.md, Tests/MLXLMTests/Qwen35MTPDrafterWindowTests.swift (new), Tests/MLXFoundationModelsTests/ExecutorPromptCacheDrafterWindowTests.swift (new), IntegrationTesting/.../TextGeneration/MTPDrafterWindowSweepTests.swift (new), MTPRoundCostBreakdownTests.swift, Qwen38FourBitMTPModel.swift, MTPSWEBenchScaleTests.swift (+ new task ^0p5fjwc). `swift build --build-tests` 0 compiler warnings; 5 bundles via xcrun xctest exit 0, 0 failures, 0 skipped; Release: MTPRoundCostBreakdownTests pass (688 s), MTPDrafterWindowSweepTests pass (4493 s), qwen38FourBitMTPSystemPromptCache pass (edit turn 123 tokens). Default window = whole context (no window wins).
     - next: /review
   timestamp: 2026-10-30T17:55:18.879774+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m66zk419p5y00zyf9bx540f2
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (39d23442) — 4 findings (confirmed 9, refuted 5, attempted 14): MTPDrafterWindowSweepTests.swift:35, MTPDrafterWindowSweepTests.swift:38, MTPRoundCostBreakdownTests.swift:159, Qwen38FourBitMTPModel.swift:243
+    - next: implement the 4 open items in the 2026-10-30 12:56 Review Findings section, then re-review
+  timestamp: 2026-10-30T18:01:45.257796+00:00
+- actor: claude-code
+  id: 01m66zm1zhjvjhm7pewk0dqqn0
+  text: |-
+    ### finish iteration 1 — findings (held for a user decision)
+    - implement: changed — opt-in mtpDrafterAttentionWindow; every measured window slower (0.78–0.96x of whole context), default whole context
+    - test: green — build 0 warnings; 5 bundles 0 fail/0 skip; Release sweep/round-cost/system-prompt-cache pass
+    - commit: 39d23442
+    - review: findings — MTPDrafterWindowSweepTests.swift:35, :38, MTPRoundCostBreakdownTests.swift:159, Qwen38FourBitMTPModel.swift:243
+    - held: asked the user whether to remove the opt-in window entirely (it never wins). The fix pass depends on that answer.
+  timestamp: 2026-10-30T18:02:15.921259+00:00
+- actor: claude-code
+  id: 01m6728dccsar12q0sqd0eqs4g
+  text: 'User decision 2026-10-30: keep the opt-in drafter attention window for now (default stays whole context). Proceed with the 4 open review findings (MTPDrafterWindowSweepTests.swift:35, :38, MTPRoundCostBreakdownTests.swift:159, Qwen38FourBitMTPModel.swift:243) after the current ^p2bbykc step.'
+  timestamp: 2026-10-30T18:48:20.108534+00:00
+position_column: review
+position_ordinal: '80'
 title: 'MTP: cheaper drafting at long context — window the drafter''s attention (drafter steps cost 3–12 ms at 100k)'
 ---
 Step-4 breakdown (^j2tnzpn): the drafter's cache holds the full context (32768 / 100000 entries) and its attention runs over all of it on every chained step. Chained-step cost is ~1.5 ms at 32k but 3–12 ms at 100k (block-5 proposal 22–24 ms vs 6 ms at 32k).
@@ -69,3 +90,19 @@ The drafter only proposes tokens; the target verifies them, so a drafter that at
 - [x] Output identity tests (greedy equals plain up to the near-tie rule) and ChatSession/ExecutorPromptCache continuation tests with the window. — Qwen35MTPDrafterWindowTests (14 tests: ring shape, bounds, exact plain identity text+VLM, prefix-keeping, wrap rejects, windowed attention equals a whole-context drafter fed the window, continuation restore/refuse, ChatSession file resume / cold start) and ExecutorPromptCacheDrafterWindowTests (spill file reads back for the same window, cold for another window or full); the Release sweep holds MTPChatTokenMatch at all 30 MTP points.
 
 #mtp #perf
+
+## Review Findings (2026-10-30 12:56)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 9 file(s) reviewed, 5 not reviewed.
+
+> 5 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M64DEDKST9868Q0GWHKT3A09.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M64DEDKST9868Q0GWHKT3A09.md` — no validator matches this file
+> - `.kanban/tasks/01M66XNGB2TY2WY01KP0P5FJWC.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M66XNGB2TY2WY01KP0P5FJWC.md` — no validator matches this file
+> - `Libraries/MLXLMCommon/Documentation.docc/using.md` — no validator matches this file
+
+- [ ] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPDrafterWindowSweepTests.swift:35` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [ ] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPDrafterWindowSweepTests.swift:38` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [ ] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPRoundCostBreakdownTests.swift:159` `swift/naming-clarity` — The loop variable `drafts` names one `DrafterWindowCost` element, but `drafts` is also the name of the collection it iterates (`cost.drafts`). The singular element is named after the plural collection, so the role of each iteration value is unclear at the use site. Rename the loop variable to its role, for example `for drafterCost in cost.drafts {`, and update lines 160-161 to `drafterCost.entryCount` and `drafterCost.draft`.
+- [ ] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/Qwen38FourBitMTPModel.swift:243` `code-hygiene/disallowed-constructs-swift` — no_unchecked_sendable: Instead of @unchecked Sendable, write a plain Sendable conformance or a @preconcurrency import. If the type really must be @unchecked Sendable, write // swiftlint:disable:next no_unchecked_sendable above it with the synchronization invariant that makes the type thread-safe.

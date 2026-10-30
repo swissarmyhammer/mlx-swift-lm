@@ -278,7 +278,7 @@ let session = ChatSession(
 
 Each round holds up to `blockSize` tokens: up to `blockSize - 1` drafts and the
 model's own token. The default ``SpeculativeDecodingConfig/defaultMTPBlockSize``
-is 5. The Qwen head chains its drafts, and
+is 4. The Qwen head chains its drafts, and
 ``SpeculativeDecodingConfig/defaultMTPMinimumDraftProbability`` (0.75) stops the
 chain at the first draft whose top-1 probability falls below that floor. A round
 whose first draft (the seed) falls below the floor drafts that one token alone.
@@ -419,19 +419,31 @@ model forward pass wrote. Each one-turn prompt writes 192 tokens. The integratio
 `GenerationBenchmarkTests` and the FoundationModels MTP suites in
 `IntegrationTesting` measure these numbers.
 
-Greedy, one turn (`qwen38FourBitMTPGeneration`, load average about 4):
+Greedy, one turn (`qwen38FourBitMTPGeneration`, load average 2.2 at the start
+and 2.8 at the end):
 
 | Setting | Prompt | Plain | MTP | Speedup | Acceptance | Tokens per verify |
 |---|---|---|---|---|---|---|
-| Default (block 5, floor 0.75) | math | 59.5 | 100.4 | 1.69x | 86.8% | 3.31 |
-| Default (block 5, floor 0.75) | code | 59.5 | 87.4 | 1.47x | 80.2% | 2.26 |
-| Default (block 5, floor 0.75) | prose | 59.6 | 83.4 | 1.40x | 76.3% | 2.13 |
-| Block 2, no floor | math | 59.7 | 92.9 | 1.56x | 93.9% | 1.96 |
-| Block 2, no floor | code | 59.7 | 83.2 | 1.40x | 73.6% | 1.75 |
-| Block 2, no floor | prose | 59.6 | 80.7 | 1.35x | 69.0% | 1.70 |
+| Default (block 4, floor 0.75) | math | 59.5 | 99.5 | 1.67x | 88.1% | 3.00 |
+| Default (block 4, floor 0.75) | code | 59.6 | 86.7 | 1.45x | 79.1% | 2.16 |
+| Default (block 4, floor 0.75) | prose | 59.7 | 83.7 | 1.40x | 76.7% | 2.11 |
+| Block 5, floor 0.75 | math | 59.6 | 101.1 | 1.70x | 86.8% | 3.31 |
+| Block 5, floor 0.75 | code | 59.7 | 87.3 | 1.46x | 80.2% | 2.26 |
+| Block 5, floor 0.75 | prose | 59.6 | 83.0 | 1.39x | 76.3% | 2.13 |
+| Block 2, no floor | math | 59.8 | 96.1 | 1.61x | 93.9% | 1.96 |
+| Block 2, no floor | code | 59.8 | 86.3 | 1.44x | 73.6% | 1.75 |
+| Block 2, no floor | prose | 59.8 | 83.9 | 1.40x | 69.0% | 1.70 |
+
+The default is the fastest setting over the three prompts combined that decodes
+no prompt slower than block 2. Block 5 decodes math and code faster, but it
+decoded prose about 1% slower than block 2 in each of two quiet runs, more than
+the 0.4% that two measurements of one setting differ by. The test allows each
+comparison the noise it measured, and at least 1.1%, the largest gap that two
+quiet runs showed for one setting and prompt.
 
 Sampled, one turn, temperature 0.7, top-p 0.95, seed 38
-(`qwen38FourBitMTPSampledGeneration`, default block and floor):
+(`qwen38FourBitMTPSampledGeneration`, block 5 and floor 0.75, the default before
+block 4):
 
 | Mode | Prompt | Plain | MTP | Speedup | Acceptance | Tokens per verify |
 |---|---|---|---|---|---|---|
@@ -445,17 +457,17 @@ Sampled, one turn, temperature 0.7, top-p 0.95, seed 38
 Multi-turn ``ChatSession``, greedy, default block and floor
 (`qwen38FourBitMTPSystemPromptCache`: three chats with a system prompt of about
 2,200 tokens; follow-ups, follow-ups with thinking on, and an edit; load average
-8.6 at the start and 7.0 at the end, from other work on the machine):
+about 4 at the start and 7.1 at the end, from other work on the machine):
 
 - Each follow-up turn reuses the cache and prefills 24 to 38 new tokens, and the
   drafter is fed the same suffix.
 - The edit turn goes back to the end of the first reply in a fork. It reuses
   2,169 cached tokens and prefills 123, as the plain session does.
-- Follow-up turns, the edit turn included, decode at 85.1 to 102.9 tokens per
-  second with MTP against 55.7 to 56.1 without it (1.53x to 1.83x), with an
-  acceptance of 77.6% to 92.7%. The cold first turns decode at 86.6 to 104.9.
+- Follow-up turns, the edit turn included, decode at 82.4 to 92.2 tokens per
+  second with MTP against 54.6 to 55.0 without it (1.50x to 1.69x), with an
+  acceptance of 84.2% to 96.2%. The cold first turns decode at 82.6 to 95.7.
 
-FoundationModels `MLXLanguageModel`, default block and floor (load average 13.9
+FoundationModels `MLXLanguageModel`, block 5 and floor 0.75 (load average 13.9
 at the start and 8.3 at the end, from other work on the machine; each test runs
 its plain and MTP sessions back to back, so the speedups are the comparable
 figures):

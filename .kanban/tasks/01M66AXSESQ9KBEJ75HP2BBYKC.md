@@ -1,8 +1,90 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '8580'
+comments:
+- actor: claude-code
+  id: 01m674zc6ewvx2kdz4jyz8x092
+  text: |-
+    Re-measured the block sweep on HEAD fc72aef8, which includes the split-K verify kernel b10ff7fd. Release, M5 Ultra, bench lock held, 9 settings x math/code/prose, 3 timed runs each.
+
+    Quiet sweeps (load below 4 at start and end):
+    - sweep1 (load 2.16 -> 2.78, noise 0.5%): bs2 96.1/86.3/83.9 (mean 88.8); bs4/0.75 99.5/86.7/83.7 (mean 90.0); bs5/0.75 101.1/87.3/83.0 (mean 90.5)
+    - sweep2 (load 3.18 -> 2.85, noise 0.3%): bs2 95.6/85.8/83.4 (mean 88.3); bs4/0.75 99.2/86.3/83.4 (mean 89.7); bs5/0.75 100.6/87.3/82.7 (mean 90.2)
+    - Both quiet sweeps FAILED the old guard: bs5 prose was -1.07% and -0.84% against bs2, beyond a noise of 0.3-0.5%.
+    - bs6/0.75 prose was about 79 (-5%). Every pMin-0 row with blockSize 3 or more was much slower on code and prose.
+
+    Loaded sweeps, which another workload pushed past load 14 mid-run (these are not quiet data):
+    - sweep3: noise 8.4%, thermal state 1
+    - sweep4: noise 7.1%, load 3.65 -> 15.4
+    - Both passed only because the noise was wide.
+
+    Noise of the compared quantity: I compared sweep1 with sweep2 for the same setting and prompt across all 27 MTP throughputs. Both sweeps share a shift of +0.36%. Net of that shift, the gaps have a standard deviation of 0.37% and a maximum of 1.09% (bs3/0 code). Each gap is the difference of two measurements, which is what an in-sweep comparison is. So a single comparison has a noise of about 1.1% (about 3 sigma). That is wider than the 0.3-0.5% plain-throughput spread the old check used, which explains the flakiness.
+
+    Decision, from data:
+    - Pooled over both quiet sweeps, bs5/0.75 is -0.96% +/- 0.26% on prose against bs2. That is about 3.7 sigma, so it is slower beyond noise and fails the rule.
+    - bs4/0.75 is -0.12% +/- 0.26% on prose (a tie with bs2), +3.7% on math and +0.5% on code. Its mean of 89.7-90.0 is +1.3% over bs2. It is the fastest setting that is never slower than bs2 beyond noise.
+    - So the default moves to blockSize 4. pMin stays 0.75.
+
+    Dead end: the MCP shell aborts commands that run past 30 min, so the long xcodebuild runs now go through nohup and polling. Killing a stuck run was denied by the permission classifier, so sweep4 ran to completion under load.
+  timestamp: 2026-10-30T19:35:49.710612+00:00
+- actor: claude-code
+  id: 01m6780waaw5zesry6ktezzsk1
+  text: |-
+    Implementation landed (not committed).
+
+    1. Default changed from data: `SpeculativeDecodingConfig.defaultMTPBlockSize` is now 4 (was 5). `defaultMTPMinimumDraftProbability` stays 0.75. The doc comment in ChatSession.swift gives the reason: bs5 is about 1% slower than bs2 on prose in each of two quiet sweeps.
+
+    2. Statistically sound check, in Libraries/BenchmarkHelpers/MTPBlockSweep.swift:
+    - New `MTPBlockSweep.quietLoadNoiseFloor = 0.011`. This is the largest drift-corrected gap between two quiet sweeps' MTP throughputs of one setting and prompt. The standard deviation of those gaps is 0.37%.
+    - New `noiseAllowance = max(noiseFraction, quietLoadNoiseFloor)`.
+    - `isNoSlowerThanSingleDraft` and the test's mean comparison against `fastestNoSlowerThanSingleDraft` now use `noiseAllowance`.
+    - The closing line writes `noise X%, allowance Y%`.
+    - The effect: a within-noise prose wobble (bs4 vs bs2: -0.24%/0.0%) passes. A 3.5% regression like the original card still fails. Under load the run's own noise still dominates.
+    - No withKnownIssue was added.
+
+    3. Tests written first:
+    - New Tests/MLXLMTests/MTPBlockSweepNoiseAllowanceTests.swift (5 tests). RED was a compile failure: the members did not exist. Then GREEN.
+    - MTPBlockSweepTests: updated the expected closing line.
+
+    4. Docs:
+    - using.md: the default is 4. The greedy table was re-measured (quiet sweep1) with rows for the default bs4, bs5 and bs2, plus a paragraph on the rule and the allowance.
+    - The ChatSession multi-turn paragraph was re-measured at the new default.
+    - The sampled and FoundationModels tables are relabeled "block 5, floor 0.75" because they were measured at bs5. Their guards pass at bs4, but those runs overlapped other suites, so the numbers are not clean.
+    - Comment wording updated in Qwen35VerifyAttentionTests and MTPVerifyForwardProfileTests: they no longer claim the default drafts 5.
+
+    Verification (Release, bench lock):
+    - qwen38FourBitMTPGeneration at the new default passed (load 2.96 -> 12.58, noise 5.2%). bs4/0.75 was the fastest overall and the fastest admissible setting: 99.5/86.1/82.1 vs bs2 95.9/84.2/81.6.
+    - qwen38FourBitMTPSystemPromptCache passed. The edit turn has cached 2169 and prefilled 123, the same as plain. MTP ran at 92.2 against 54.6 plain (1.69x). Follow-ups were 1.50-1.69x.
+    - qwen38FourBitMTPSampledGeneration, MTPGenerationTests and qwen38GuidedJSONWithMTP passed.
+    - MTPPromptCacheTests failed when run together with MTPGenerationTests. MTPGenerationTests' `evict()` calls `ExecutorPromptCacheStore.evict(modelID:)` and wipes the other suite's session entry. Rerun alone, it passed: turn 2 recomputed 26 of 233, as plain does. Filed as ^1y1x0mb. This is a pre-existing test-isolation issue, not caused by the default change.
+
+    Unit bundles (Debug, xcrun xctest), all with 0 failures and 0 skips:
+    - CXGrammarTests: 7
+    - MLXFoundationModelsTests: 457
+    - MLXGuidedGenerationTests: 72
+    - MLXHuggingFaceMacrosTests: 7
+    - MLXLMTests: 2078 swift-testing + 920 XCTest
+
+    `swift build --build-tests` has 0 compiler warnings. The only line it prints is SwiftPM's existing build-system note, `missing creator for mutated node ... mlx-swift_Cmlx.bundle`, which earlier builds in the scratchpad also show.
+  timestamp: 2026-10-30T20:29:04.714157+00:00
+- actor: claude-code
+  id: 01m6780x5xrmemdxf1tbh839j7
+  text: |-
+    ### implement — changed
+    - evidence: 8 files —
+      - Libraries/BenchmarkHelpers/MTPBlockSweep.swift
+      - Libraries/MLXLMCommon/ChatSession.swift
+      - Libraries/MLXLMCommon/Documentation.docc/using.md
+      - IntegrationTesting/IntegrationTestingTests/GenerationBenchmarkTests.swift
+      - IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPVerifyForwardProfileTests.swift
+      - Tests/MLXLMTests/MTPBlockSweepNoiseAllowanceTests.swift (new)
+      - Tests/MLXLMTests/MTPBlockSweepTests.swift
+      - Tests/MLXLMTests/Qwen35VerifyAttentionTests.swift
+    - tests: 5 unit bundles, 0 fail and 0 skip. Release qwen38FourBitMTPGeneration and qwen38FourBitMTPSystemPromptCache pass.
+    - next: /review
+  timestamp: 2026-10-30T20:29:05.597747+00:00
+position_column: doing
+position_ordinal: '8280'
 title: 'MTP block sweep guard: shipped bs5/pMin0.75 trails single-draft bs2 on prose at quiet load (noise 1.2%)'
 ---
 `GenerationBenchmarkTests.qwen38FourBitMTPGeneration()` failed at quiet load (2026-10-30 06:41, load 2.5 before / 7.3 after, thermal state 1, Release, HEAD 02226efe; the sweep does not use the adaptive guard) on `sweep.isNoSlowerThanSingleDraft(shipped)`:

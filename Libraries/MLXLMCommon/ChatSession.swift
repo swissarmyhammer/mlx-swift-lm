@@ -117,10 +117,12 @@ public struct SpeculativeDecodingConfig: Sendable {
     }
 
     /// The default block size of an MTP configuration: the tokens of each round, its drafts and
-    /// the bonus token. Five, with ``defaultMTPMinimumDraftProbability``: on an M5 Ultra this
-    /// decodes Qwen3.8-27B-4bit fastest over math, code and prose combined, and no prompt slower
-    /// than one draft for each round.
-    public static let defaultMTPBlockSize = 5
+    /// the bonus token. Four, with ``defaultMTPMinimumDraftProbability``: on an M5 Ultra this
+    /// decodes Qwen3.8-27B-4bit fastest over math, code and prose combined among the settings
+    /// that decode no prompt slower than one draft for each round. A block of five decodes math
+    /// and code faster still, but prose about 1% slower than one draft, in each of two
+    /// quiet-load sweeps.
+    public static let defaultMTPBlockSize = 4
 
     /// The default confidence floor of an MTP configuration: a chained round drafts while the
     /// drafter's top-1 probability reaches 0.75, as llama.cpp users report fastest at five drafts

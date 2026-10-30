@@ -172,14 +172,32 @@ public struct MTPBlockSweep: Sendable {
     }
 
     /// Whether `row` decodes each prompt at least as fast as ``MTPBlockSetting/singleDraft``,
-    /// within ``noiseFraction``. `false` when the sweep did not measure one draft for each round.
+    /// within ``noiseAllowance``. `false` when the sweep did not measure one draft for each
+    /// round.
     public func isNoSlowerThanSingleDraft(_ row: MTPBlockSweepRow) -> Bool {
         guard let singleDraft = self.row(for: .singleDraft) else { return false }
         return row.results.allSatisfy { result in
             singleDraft.result(for: result.prompt).map {
-                result.mtpTokensPerSecond >= $0.mtpTokensPerSecond * (1 - noiseFraction)
+                result.mtpTokensPerSecond >= $0.mtpTokensPerSecond * (1 - noiseAllowance)
             } ?? false
         }
+    }
+
+    /// The least noise a comparison of two MTP throughputs of one sweep allows, as a fraction
+    /// of a throughput.
+    ///
+    /// Two quiet-load sweeps (load average below 4) of Qwen3.8-27B-4bit on an M5 Ultra
+    /// measured each setting and prompt twice. Net of the shift common to every row of the
+    /// two sweeps, the MTP throughputs of one setting and prompt differed by a standard
+    /// deviation of 0.37%, and by 1.1% at most. Each such gap is the difference of two
+    /// measurements, as a comparison of two rows of one sweep is, so a gap within this floor
+    /// is noise even when the plain throughputs of the sweep (``noiseFraction``) spread less.
+    public static let quietLoadNoiseFloor = 0.011
+
+    /// The noise a comparison of two throughputs of the sweep allows: ``noiseFraction``, and
+    /// at least ``quietLoadNoiseFloor``.
+    public var noiseAllowance: Double {
+        Swift.max(noiseFraction, Self.quietLoadNoiseFloor)
     }
 
     /// The row of `setting`, or `nil` when the sweep did not measure it.
@@ -209,13 +227,14 @@ public struct MTPBlockSweep: Sendable {
         rows.map { $0.summaryLine() } + [closingLine()]
     }
 
-    /// The last line of the sweep's table: the fastest rows, the noise, and the load and
-    /// thermal state around the sweep.
+    /// The last line of the sweep's table: the fastest rows, the noise and its allowance, and
+    /// the load and thermal state around the sweep.
     private func closingLine() -> String {
         "MTP sweep fastest: \(Self.settingName(of: fastest)); "
             + "fastest no slower than one draft on any prompt: "
             + "\(Self.settingName(of: fastestNoSlowerThanSingleDraft)); "
-            + "noise \(BenchmarkLog.decimal(noiseFraction * 100))%; "
+            + "noise \(BenchmarkLog.decimal(noiseFraction * 100))%, "
+            + "allowance \(BenchmarkLog.decimal(noiseAllowance * 100))%; "
             + "load average \(Self.loadName(loadAverageBefore)) before, "
             + "\(Self.loadName(loadAverageAfter)) after; "
             + "thermal state \(ProcessInfo.processInfo.thermalState.rawValue)"
