@@ -94,8 +94,24 @@ comments:
     - evidence: 3 files — IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPDrafterWindowSweepTests.swift, MTPRoundCostBreakdownTests.swift, Qwen38FourBitMTPModel.swift; all 4 findings checked. swiftlint no_magic_numbers 0 violations; xcodebuild build-for-testing Release (IntegrationTesting scheme, arm64, ENABLE_TESTABILITY/ONLY_ACTIVE_ARCH) TEST BUILD SUCCEEDED, no warnings in the 3 files (objects rebuilt); `swift build --build-tests` 0 compiler warnings (only the pre-existing SwiftPM "missing creator for mutated node ... mlx-swift_Cmlx.bundle"); xcrun xctest 5 bundles exit 0, 0 failures, 0 skipped: CXGrammarTests 7, MLXGuidedGenerationTests 72, MLXHuggingFaceMacrosTests 7, MLXFoundationModelsTests 457, MLXLMTests 920 XCTest + 2078 Swift Testing. No real-model runs.
     - next: /review
   timestamp: 2026-10-30T20:42:39.971044+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m678wn6j6yag43qjhbwvd3pq
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (173e5f7a) — 0 findings (0 confirmed, 0 refuted; 7 attempted, 0 failed); 3 Swift files reviewed, 2 .kanban files unmatched. All 4 items of Review Findings (2026-10-30 12:56) checked. LoadedWithDrafter.perform takes the drafter container then the target container; the only callers (MTPDrafterWindowSweepTests, MTPRoundCostBreakdownTests) take no further lock inside the body, and no library path takes them in the reverse order, so the order is fixed. The drafter model crosses only via perform(nonSendable:) into a @Sendable body whose result is Sendable, so it does not leave the drafter's isolation.
+    - next: none — task moved to done
+  timestamp: 2026-10-30T20:44:14.930834+00:00
+- actor: claude-code
+  id: 01m678xqfbt28d7e9ytterbzca
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — named sweep constants, drafterCost, Sendable LoadedWithDrafter.perform
+    - test: green — build 0 warnings; 5 bundles 0 fail/0 skip; Release build-for-testing ok
+    - commit: 173e5f7a
+    - review: clean — task moved to done (opt-in window kept per user)
+  timestamp: 2026-10-30T20:44:50.027447+00:00
+position_column: done
+position_ordinal: ffff9580
 title: 'MTP: cheaper drafting at long context — window the drafter''s attention (drafter steps cost 3–12 ms at 100k)'
 ---
 Step-4 breakdown (^j2tnzpn): the drafter's cache holds the full context (32768 / 100000 entries) and its attention runs over all of it on every chained step. Chained-step cost is ~1.5 ms at 32k but 3–12 ms at 100k (block-5 proposal 22–24 ms vs 6 ms at 32k).
