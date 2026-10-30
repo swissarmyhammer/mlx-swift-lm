@@ -24,8 +24,24 @@ comments:
     - evidence: 2 files — Package.swift (MLXCXGrammar excludes the vendored xgrammar .h files via VendoredXGrammar.headers), Libraries/MLXLMCommon/ChatSession.swift (stale DocC link now names adaptivePolicy:). Fresh detached worktree at bc7c7949: scripts/verify-docs.sh BEFORE exit 1 (MLXGuidedGeneration + MLXHuggingFace: picojson.h 'algorithm' not found in ExtractAPI; MLXLMCommon: link to init(mtpDrafterBytes:...:loadMTPDrafter:) does not exist). Same worktree with the 2 files copied, after rm -rf .build: exit 0, 10/10 archives, "All documentation builds passed."; MLXCXGrammar.symbols.json holds 32 symbols, all from xgrammar_c.h. swift build --build-tests exit 0, 0 compiler warnings (only the pre-existing Swift Build notice "missing creator for mutated node" for mlx-swift_Cmlx.bundle, also present at HEAD). xcrun xctest: CXGrammarTests 7, MLXGuidedGenerationTests 72, MLXHuggingFaceMacrosTests 7 XCTest, MLXFoundationModelsTests 457, MLXLMTests 920 XCTest + 2065 Swift Testing — all exit 0, 0 failures, 0 skipped. Logs: session scratchpad ppj-verify-before.log, ppj-verify-after-clean.log, ppj-build.log, ppj-test-*.log. Not committed.
     - next: /review
   timestamp: 2026-10-30T12:18:23.613404+00:00
-position_column: doing
-position_ordinal: '8380'
+- actor: claude-code
+  id: 01m66c0pqv3c9et415ptqw31z2
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (467bbeb0) — 0 findings, 0 confirmed, 0 refuted (7 validator runs attempted, 0 failed); 2 .kanban files not reviewed (no validator matches); no prior Review Findings sections
+    - next: task moved to done
+  timestamp: 2026-10-30T12:19:38.875165+00:00
+- actor: claude-code
+  id: 01m66c1hyx8m0dnnrpmy3mnrpm
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — Package.swift (exclude vendored xgrammar headers from MLXCXGrammar), ChatSession.swift doc link
+    - test: green — verify-docs.sh exit 1 → 0 in a clean worktree (10/10); build 0 warnings; 5 bundles 0 fail/0 skip
+    - commit: 467bbeb0
+    - review: clean — task moved to done
+  timestamp: 2026-10-30T12:20:06.749267+00:00
+position_column: done
+position_ordinal: ffff8e80
 title: 'Docs: scripts/verify-docs.sh fails on Xcode 27.1 for MLXGuidedGeneration/MLXHuggingFace (picojson ''algorithm'' not found in ExtractAPI)'
 ---
 Pre-existing, not caused by mtp: reproduces in clean worktrees at 08d789b2 (old stable), 75fb5184 and 268dab08 with Xcode 27.1 / Swift 6.4. `swift package generate-documentation --target MLXGuidedGeneration|MLXHuggingFace --warnings-as-errors` fails while ExtractAPI builds the MLXCXGrammar symbol graph: `Libraries/MLXCXGrammar/xgrammar/3rdparty/picojson/picojson.h:44:10: fatal error: 'algorithm' file not found` — ExtractAPI passes the C++ headers to clang as `-x objective-c-header`, so libc++ is not on the include path. Logs: session scratchpad docs-268dab08.log, docs-08d789b2.log, docs-75fb5184.log. An earlier "All documentation builds passed" at 75fb5184 had produced empty symbolgraphs dirs, so it never extracted these targets.
