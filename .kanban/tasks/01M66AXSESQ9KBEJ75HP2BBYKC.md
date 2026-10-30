@@ -83,8 +83,24 @@ comments:
     - tests: 5 unit bundles, 0 fail and 0 skip. Release qwen38FourBitMTPGeneration and qwen38FourBitMTPSystemPromptCache pass.
     - next: /review
   timestamp: 2026-10-30T20:29:05.597747+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m6785pnasemjzp1936msfcjw
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (b512e821) — 0 findings, 0 confirmed, 2 refuted, 7 files attempted; 7 files not reviewed (no validator matched: .kanban task files, Libraries/MLXLMCommon/Documentation.docc/using.md)
+    - next: none — task moved to done
+  timestamp: 2026-10-30T20:31:42.762155+00:00
+- actor: claude-code
+  id: 01m6786sshg8geq31tavaaneep
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — default blockSize 4 (pMin 0.75) from two quiet sweeps; noise-floored sweep check; docs
+    - test: green — 5 bundles 0 fail/0 skip; Release MTPGeneration + SystemPromptCache pass (edit turn 123)
+    - commit: b512e821 (+ README default-4 fix in the closing commit; the review skipped .md files and README still said 5)
+    - review: clean — task moved to done
+  timestamp: 2026-10-30T20:32:18.737522+00:00
+position_column: done
+position_ordinal: ffff9480
 title: 'MTP block sweep guard: shipped bs5/pMin0.75 trails single-draft bs2 on prose at quiet load (noise 1.2%)'
 ---
 `GenerationBenchmarkTests.qwen38FourBitMTPGeneration()` failed at quiet load (2026-10-30 06:41, load 2.5 before / 7.3 after, thermal state 1, Release, HEAD 02226efe; the sweep does not use the adaptive guard) on `sweep.isNoSlowerThanSingleDraft(shipped)`:
