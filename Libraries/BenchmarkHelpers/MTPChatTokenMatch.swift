@@ -31,18 +31,25 @@ public struct MTPChatToken: Sendable, Equatable {
 /// ``MTPChatTokenMatch/nearTieLogitTolerance``, and where plain's two best
 /// tokens lie closer than that the argmax can flip. Plain decoding flips the
 /// same way between a warm and a cold prompt cache.
+///
+/// The rule is symmetric: it asks only that both tokens lie near the best
+/// logit, not which of them the reported candidates rank first. Candidates read
+/// from a replay of plain decoding can rank a tie the other way round from the
+/// decode that wrote plain's token.
 public enum MTPChatTokenMatch: Sendable, Equatable {
     /// The MTP turn generated exactly the tokens of the plain turn.
     case exact
-    /// The turns part where plain's two best tokens lie within
-    /// ``nearTieLogitTolerance`` of each other, and MTP took the second.
+    /// The turns part where the tokens of both turns lie within
+    /// ``nearTieLogitTolerance`` of the best logit plain reported. `gap` is how
+    /// far below that best logit the lower of the two lies.
     case nearTie(step: Int, gap: Float)
-    /// The turns part anywhere else. `gap` is the distance between plain's two
-    /// best logits at `step`, or `nil` when plain did not report them.
+    /// The turns part anywhere else. `gap` is how far below plain's best logit
+    /// at `step` the lower of the two tokens lies, or `nil` when either token is
+    /// not among the candidates plain reported, or a turn ended at `step`.
     case diverged(step: Int, gap: Float?)
 
-    /// The widest gap between plain's two best logits at which MTP may still
-    /// take the second: the decoding-noise bound of a verify pass.
+    /// The farthest a diverging token may lie below plain's best logit and still
+    /// count as a near tie: the decoding-noise bound of a verify pass.
     ///
     /// Measured on Qwen3.8-27B-4bit over the same prefilled cache and the same
     /// 48 continuation tokens: a two-token verify forward was bit-equal to
@@ -62,15 +69,32 @@ public enum MTPChatTokenMatch: Sendable, Equatable {
             return
         }
         let candidates = step < plain.count ? plain[step].candidates : []
-        guard candidates.count >= 2 else {
+        let tokens = [mtp, plain].map { step < $0.count ? $0[step].token : nil }
+        guard let gap = Self.distanceBelowBest(of: tokens, in: candidates) else {
             self = .diverged(step: step, gap: nil)
             return
         }
-        let gap = candidates[0].logProbability - candidates[1].logProbability
-        let takesRunnerUp = step < mtp.count && mtp[step].token == candidates[1].token
         self =
-            takesRunnerUp && gap <= Self.nearTieLogitTolerance
+            gap <= Self.nearTieLogitTolerance
             ? .nearTie(step: step, gap: gap) : .diverged(step: step, gap: gap)
+    }
+
+    /// How far below the best logit of `candidates` the lowest of `tokens` lies.
+    ///
+    /// - Parameters:
+    ///   - tokens: The tokens to place, `nil` for a turn that wrote none.
+    ///   - candidates: The candidates reported for the step.
+    /// - Returns: The distance, or `nil` when a token is `nil` or not among
+    ///   `candidates`.
+    private static func distanceBelowBest(
+        of tokens: [Int?], in candidates: [GenerateTokenLogProbability]
+    ) -> Float? {
+        guard let best = candidates.map(\.logProbability).max() else { return nil }
+        let distances = tokens.compactMap { token in
+            candidates.first { $0.token == token }.map { best - $0.logProbability }
+        }
+        guard distances.count == tokens.count else { return nil }
+        return distances.max()
     }
 
     /// Whether the MTP turn wrote what plain decoding writes, up to a near-tie.

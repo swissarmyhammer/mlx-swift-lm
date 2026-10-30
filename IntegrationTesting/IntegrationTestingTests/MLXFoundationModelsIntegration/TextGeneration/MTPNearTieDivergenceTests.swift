@@ -29,8 +29,9 @@ import os
 private let nearTieTimeLimitMinutes = 30
 
 /// The first token where greedy MTP parts from plain greedy decode on the router's prompt is a
-/// near tie: plain decode's two best logits there lie within
-/// ``MTPChatTokenMatch/nearTieLogitTolerance`` of each other, and MTP took the second.
+/// near tie: the tokens plain decode and MTP wrote there both lie within
+/// ``MTPChatTokenMatch/nearTieLogitTolerance`` of the best logit of plain decode's row, whichever
+/// of the two the replay ranks first.
 ///
 /// Neither decode reports its logits through the executor, thus the logits at the divergence come
 /// from a replay of plain decode over the shared prefix: the render in one forward pass, then one
@@ -155,11 +156,16 @@ struct MTPNearTieDivergenceTests {
             \(path): first divergence at generated token \(step - renderCount) (ledger \
             \(step)): plain wrote \(plainToken), MTP wrote \(mtpToken); plain row top-2 \
             \(rows.plain), gap \(DivergenceRows.gap(rows.plain)); verify row top-2 \
-            \(rows.verify), gap \(DivergenceRows.gap(rows.verify)); replay reproduces plain \
-            \(rows.plain[0].token == plainToken); \(match.summary)
+            \(rows.verify), gap \(DivergenceRows.gap(rows.verify)); replay ranks plain's token \
+            first \(rows.plain[0].token == plainToken); \(match.summary)
             """
         Self.log(report)
-        #expect(match.holds, "Bug, no near tie: \(report)")
+        #expect(
+            match.holds,
+            """
+            Bug: plain's and MTP's tokens do not both lie within \
+            \(MTPChatTokenMatch.nearTieLogitTolerance) of the best logit of plain's row: \(report)
+            """)
     }
 
     /// Replays plain decode over `ledger` up to `step` and reads plain decode's row and the

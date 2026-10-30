@@ -550,9 +550,8 @@ struct MTPSWEBenchScaleTests {
 
     /// How `mtp` compares with `plain` when `candidates` are the two best tokens at `step`.
     ///
-    /// The rule of ``MTPChatTokenMatch`` reads the candidates of one side. Either side may round
-    /// a near tie the other way, thus the match holds when it holds with the candidates on
-    /// either side.
+    /// The rule of ``MTPChatTokenMatch`` does not ask which of the two tokens the reference
+    /// ranks first, thus either side may round a near tie the other way.
     private static func tokenMatch(
         mtp: [Int], plain: [Int], step: Int, candidates: [GenerateTokenLogProbability]
     ) -> MTPChatTokenMatch {
@@ -561,9 +560,7 @@ struct MTPSWEBenchScaleTests {
                 MTPChatToken(token: id, candidates: index == step ? reported : [])
             }
         }
-        let forward = MTPChatTokenMatch(mtp: tokens(mtp, []), plain: tokens(plain, candidates))
-        let swapped = MTPChatTokenMatch(mtp: tokens(plain, []), plain: tokens(mtp, candidates))
-        return [forward, swapped].first(where: \.holds) ?? forward
+        return MTPChatTokenMatch(mtp: tokens(mtp, []), plain: tokens(plain, candidates))
     }
 
     /// The two best tokens, with their log probabilities, after an uncached prefill of `context`
