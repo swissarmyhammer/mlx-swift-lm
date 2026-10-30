@@ -246,8 +246,14 @@ comments:
     - commit: 91b8f357
     - review: not run — needs a human decision: close this card with the guard opt-in (work continues in ^w7cgbhd / ^p2bbykc), or keep iterating here. Also decide whether the sweep's guard-on ≥ 0.97·plain check stays wrapped in withKnownIssue while the guard is opt-in.
   timestamp: 2026-10-30T12:02:29.694526+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m66d3be81ghzq4rd2mw73dff
+  text: |-
+    ### closed — user decision 2026-10-30
+    User: "I don't want that guard at all." The guard is measured not to pay (iteration 4) and will be removed entirely under the new removal task. The remaining goal — MTP ≥ plain under CPU load and at long context — continues in ^1abqd92 (per-round iterator overhead), ^xg07 (multi-row verify cost) and ^qa09 (windowed drafter attention). The withKnownIssue on the sweep's guard-on check goes away with the guard.
+  timestamp: 2026-10-30T12:38:34.184176+00:00
+position_column: done
+position_ordinal: ffff8f80
 title: 'MTP: stay faster than plain under CPU load (adaptive block size / plain fallback, fewer host syncs)'
 ---
 Final verification of stable 148f227e at load average 10–14 showed MTP losing to plain on some turns (ChatSession edit turn 34.6 vs 52.3 tok/s; guided JSON 11.8 vs 14.3) while other turns kept 1.4–1.7x. MTP does host syncs every round (verify readback, plus one per chained step for the pMin gate), so CPU contention costs it more than plain. The ACP SWE-bench run executes CPU-heavy work (django test runs, code-context index, other sessions' builds) next to generation, so this matters in production.

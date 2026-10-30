@@ -88,10 +88,9 @@ package enum PrefillAttentionKernel {
     /// steps, the layout of every key cache. `load_tiles` picks the form.
     ///
     /// MLX writes the kernel signature directly after the header, thus the
-    /// header ends in a line break.
-    private static let header =
+    /// header ends in a line break. ``VerifyAttentionKernel`` shares it.
+    static let header =
         metalSimdWidthDeclaration + metalMatrixLaneDeclaration + """
-            constexpr constant int THREADGROUP_HEADS = \(threadgroupHeads);
             constexpr constant int HEAD_PARTS = \(headParts);
             constexpr constant int LOADER_SIMD_GROUPS = \(loaderSimdGroups);
             constexpr constant int TOKENS = \(tokensPerThreadgroup);
@@ -174,15 +173,18 @@ package enum PrefillAttentionKernel {
 
             """
 
-    /// The kernel body.
+    /// The first part of the kernel body, which ``VerifyAttentionKernel``
+    /// shares: the layout of the threadgroup, the queries of its token rows
+    /// and an empty online softmax.
     ///
     /// SIMD group `g` below `THREADGROUP_HEADS * HEAD_PARTS` holds query head
     /// `g / HEAD_PARTS` of the threadgroup and the head-width part
-    /// `g % HEAD_PARTS`; the SIMD groups above it are loaders. Each tile
-    /// takes two threadgroup barriers on every SIMD group: one after the
-    /// partial scores, when the key tile is free, and one at the end, when
-    /// the next tiles are in place.
-    private static let source = """
+    /// `g % HEAD_PARTS`; the SIMD groups above it are loaders. `keyEnd` is
+    /// the end of the keys the token rows of the threadgroup read.
+    ///
+    /// A key range part follows it, which sets `loopFirst` and `loopEnd`, the
+    /// keys the threadgroup reads, then ``loopSource``.
+    static let setupSource = """
         constexpr int partDim = DIM / HEAD_PARTS;
         constexpr int dimFrags = partDim / matrixSide;
         constexpr int keyFrags = BK / matrixSide;
@@ -216,7 +218,6 @@ package enum PrefillAttentionKernel {
         int firstToken = threadgroup_position_in_grid.x * TOKENS;
         int offset = keyCount - queryCount;
         int keyEnd = CAUSAL ? min(keyCount, offset + firstToken + TOKENS) : keyCount;
-        int openEnd = CAUSAL ? min(keyCount, offset + firstToken + 1) : keyCount;
         short2 at = lane_coordinate(lane);
         int token = firstToken + at.y;
 
@@ -247,12 +248,35 @@ package enum PrefillAttentionKernel {
         float rowSum = 0.0f;
         float factor = scale[0] * M_LOG2E_F;
 
+        """
+
+    /// The key range of a prefill threadgroup: each key its token rows read.
+    private static let prefillRangeSource = """
+        int loopFirst = 0;
+        int loopEnd = keyEnd;
+
+        """
+
+    /// The online softmax of the token rows over the keys
+    /// `loopFirst ..< loopEnd`, which ``VerifyAttentionKernel`` shares. It
+    /// leaves the unnormalized output in `out`, the largest score of each
+    /// token row in `rowMax`, in base 2, and the sum of its weights in
+    /// `rowSum`.
+    ///
+    /// Each tile takes two threadgroup barriers on every SIMD group: one after
+    /// the partial scores, when the key tile is free, and one at the end, when
+    /// the next tiles are in place. Only a tile that reaches past the first
+    /// key the first token row does not read, or past the range, takes the
+    /// mask. A token row that sees no key yet keeps an empty softmax: its
+    /// largest score stays `maskedScore`, and its weights stay zero.
+    static let loopSource = """
+        int openEnd = CAUSAL ? min(loopEnd, offset + firstToken + 1) : loopEnd;
         load_tiles<T, DIM, BK, allThreads>(
-            wide, tiles, tiles + tileSize, keyRows, valueRows, 0, keyCount, threadIndex);
+            wide, tiles, tiles + tileSize, keyRows, valueRows, loopFirst, keyCount, threadIndex);
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         int tile = 0;
-        for (int first = 0; first < keyEnd; first += BK, tile++) {
+        for (int first = loopFirst; first < loopEnd; first += BK, tile++) {
             threadgroup T* keyTile = tiles;
             threadgroup T* valueTile = tiles + (1 + tile % VALUE_TILES) * tileSize;
 
@@ -261,7 +285,7 @@ package enum PrefillAttentionKernel {
             if (loader) {
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 int next = first + BK;
-                if (next < keyEnd) {
+                if (next < loopEnd) {
                     load_tiles<T, DIM, BK, loaderThreads>(
                         wide, keyTile, tiles + (1 + (tile + 1) % VALUE_TILES) * tileSize, keyRows,
                         valueRows, next, keyCount, threadIndex - computeThreads);
@@ -315,7 +339,7 @@ package enum PrefillAttentionKernel {
                     float score = scores[k].thread_elements()[e] * factor;
                     if (masked) {
                         int key = first + k * matrixSide + at.x + e;
-                        bool visible = key < keyCount && (!CAUSAL || key <= offset + token);
+                        bool visible = key < loopEnd && (!CAUSAL || key <= offset + token);
                         score = visible ? score : maskedScore;
                     }
                     scores[k].thread_elements()[e] = score;
@@ -325,13 +349,14 @@ package enum PrefillAttentionKernel {
             tileMax = max(tileMax, simd_shuffle_xor(tileMax, nearRowLane));
             tileMax = max(tileMax, simd_shuffle_xor(tileMax, farRowLane));
             float largest = max(rowMax, tileMax);
-            float correction = fast::exp2(rowMax - largest);
+            bool empty = largest == maskedScore;
+            float correction = empty ? 1.0f : fast::exp2(rowMax - largest);
             rowMax = largest;
             float tileSum = 0.0f;
             simdgroup_matrix<T, matrixSide, matrixSide> weights[keyFrags];
             UNROLL_FULL for (int k = 0; k < keyFrags; k++) {
                 UNROLL_FULL for (int e = 0; e < elementsPerLane; e++) {
-                    float weight = fast::exp2(scores[k].thread_elements()[e] - largest);
+                    float weight = empty ? 0.0f : fast::exp2(scores[k].thread_elements()[e] - largest);
                     weights[k].thread_elements()[e] = T(weight);
                     tileSum += weight;
                 }
@@ -360,6 +385,11 @@ package enum PrefillAttentionKernel {
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
 
+        """
+
+    /// The last part of the kernel body: the normalized output of each token
+    /// row.
+    private static let outputSource = """
         if (!loader && token < queryCount) {
             float inverse = 1.0f / rowSum;
             size_t rowBase = ((size_t(sequence) * queryHeads + queryHead) * queryCount + token) * DIM;
@@ -371,6 +401,9 @@ package enum PrefillAttentionKernel {
             }
         }
         """
+
+    /// The kernel body: each token row reads every key of its causal range.
+    private static let source = setupSource + prefillRangeSource + loopSource + outputSource
 
     /// The kernel. It reads the strides of the queries, the keys and the
     /// values, so a cache slice reaches it with no copy.
@@ -384,9 +417,9 @@ package enum PrefillAttentionKernel {
 
     /// Tells if the kernel runs one attention call: the default device is
     /// the GPU, the call has at least ``fewestQueries`` query tokens, the
-    /// heads are 256 numbers wide, each threadgroup gets a whole head group,
-    /// and the mask is causal over at least as many keys as queries, or
-    /// there is no mask.
+    /// layout holds its shapes (``layoutHolds(queries:keys:values:)``), and
+    /// the mask is causal over at least as many keys as queries, or there is
+    /// no mask.
     ///
     /// - Parameters:
     ///   - queries: The queries, shape `(batch, queryHeads, tokens, headDim)`.
@@ -398,18 +431,35 @@ package enum PrefillAttentionKernel {
         queries: MLXArray, keys: MLXArray, values: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> Bool {
-        guard Device.defaultDevice().deviceType == .gpu,
-            queries.ndim == HeadRowsAxis.count, keys.ndim == HeadRowsAxis.count,
-            values.shape == keys.shape,
-            queries.dim(HeadRowsAxis.row) >= fewestQueries, keys.dim(HeadRowsAxis.row) > 0,
-            queries.dim(HeadRowsAxis.batch) == keys.dim(HeadRowsAxis.batch),
-            queries.dim(HeadRowsAxis.width) == headWidth, keys.dim(HeadRowsAxis.width) == headWidth,
-            floatTypes.contains(queries.dtype),
-            keys.dtype == queries.dtype, values.dtype == queries.dtype,
-            headGroupsFit(queryHeads: queries.dim(HeadRowsAxis.head), kvHeads: keys.dim(HeadRowsAxis.head)),
+        guard layoutHolds(queries: queries, keys: keys, values: values),
+            queries.dim(HeadRowsAxis.row) >= fewestQueries,
             let causal = causalFlag(of: mask)
         else { return false }
         return !causal || keys.dim(HeadRowsAxis.row) >= queries.dim(HeadRowsAxis.row)
+    }
+
+    /// Tells if the threadgroup layout of this kernel, which
+    /// ``VerifyAttentionKernel`` shares, holds the shapes of a call: the
+    /// default device is the GPU, there is at least one key, the heads are
+    /// 256 numbers wide, each threadgroup gets a whole head group, and the
+    /// queries, the keys and the values share one float dtype.
+    ///
+    /// - Parameters:
+    ///   - queries: The queries, shape `(batch, queryHeads, tokens, headDim)`.
+    ///   - keys: The keys, shape `(batch, kvHeads, keys, headDim)`.
+    ///   - values: The values, of the shape of `keys`.
+    /// - Returns: True when the layout holds the shapes.
+    static func layoutHolds(queries: MLXArray, keys: MLXArray, values: MLXArray) -> Bool {
+        guard Device.defaultDevice().deviceType == .gpu,
+            queries.ndim == HeadRowsAxis.count, keys.ndim == HeadRowsAxis.count,
+            values.shape == keys.shape, keys.dim(HeadRowsAxis.row) > 0,
+            queries.dim(HeadRowsAxis.batch) == keys.dim(HeadRowsAxis.batch),
+            queries.dim(HeadRowsAxis.width) == headWidth, keys.dim(HeadRowsAxis.width) == headWidth,
+            floatTypes.contains(queries.dtype),
+            keys.dtype == queries.dtype, values.dtype == queries.dtype
+        else { return false }
+        return headGroupsFit(
+            queryHeads: queries.dim(HeadRowsAxis.head), kvHeads: keys.dim(HeadRowsAxis.head))
     }
 
     /// Tells if the query heads of each KV head make whole threadgroup head
@@ -419,9 +469,10 @@ package enum PrefillAttentionKernel {
         return (queryHeads / kvHeads) % threadgroupHeads == 0
     }
 
-    /// The causal flag of a mask the kernel reads: true for a causal mask,
-    /// false for no mask, and `nil` for a mask the kernel does not read.
-    private static func causalFlag(of mask: MLXFast.ScaledDotProductAttentionMaskMode) -> Bool? {
+    /// The causal flag of a mask this kernel and ``VerifyAttentionKernel``
+    /// read: true for a causal mask, false for no mask, and `nil` for a mask
+    /// they do not read.
+    static func causalFlag(of mask: MLXFast.ScaledDotProductAttentionMaskMode) -> Bool? {
         if case .causal = mask { return true }
         if case .none = mask { return false }
         return nil
@@ -431,6 +482,49 @@ package enum PrefillAttentionKernel {
     /// tile and two value tiles fit in threadgroup memory.
     private static func tileKeys(_ dtype: DType) -> Int {
         dtype == .float32 ? float32TileKeys : halfTileKeys
+    }
+
+    /// Runs a kernel of this threadgroup layout over the queries: one
+    /// threadgroup for each block of token rows, each head group of each KV
+    /// head of each sequence, and each of `keyBlocks` key blocks.
+    ///
+    /// - Parameters:
+    ///   - kernel: A kernel built from ``header``, ``setupSource`` and
+    ///     ``loopSource``.
+    ///   - inputs: The inputs of the kernel, the queries and the keys first.
+    ///   - queries: The queries, shape `(batch, queryHeads, tokens, headDim)`.
+    ///   - keys: The keys, shape `(batch, kvHeads, keys, headDim)`.
+    ///   - causal: The causal flag of the call.
+    ///   - keyBlocks: The number of key blocks.
+    ///   - headsPerThreadgroup: The query heads of one KV head that one
+    ///     threadgroup reads, a multiple of 3 that divides the query heads of
+    ///     each KV head.
+    ///   - outputShapes: The shape of each output.
+    ///   - outputDTypes: The dtype of each output.
+    /// - Returns: The outputs of the kernel.
+    static func run(
+        _ kernel: MLXFast.MLXFastKernel, inputs: [MLXArray], queries: MLXArray, keys: MLXArray,
+        causal: Bool, keyBlocks: Int, headsPerThreadgroup: Int = threadgroupHeads,
+        outputShapes: [[Int]], outputDTypes: [DType]
+    ) -> [MLXArray] {
+        let groupSize = queries.dim(HeadRowsAxis.head) / keys.dim(HeadRowsAxis.head)
+        let threads = (headsPerThreadgroup * headParts + loaderSimdGroups) * metalSimdWidth
+        let tokenBlocks =
+            (queries.dim(HeadRowsAxis.row) + tokensPerThreadgroup - 1) / tokensPerThreadgroup
+        let headBlocks =
+            keys.dim(HeadRowsAxis.batch) * keys.dim(HeadRowsAxis.head)
+            * (groupSize / headsPerThreadgroup)
+        return kernel(
+            inputs,
+            template: [
+                ("T", queries.dtype), ("DIM", headWidth), ("GQA", groupSize),
+                ("BK", tileKeys(queries.dtype)), ("CAUSAL", causal),
+                ("THREADGROUP_HEADS", headsPerThreadgroup),
+            ],
+            grid: (threads * tokenBlocks, headBlocks, keyBlocks),
+            threadGroup: (threads, 1, 1),
+            outputShapes: outputShapes,
+            outputDTypes: outputDTypes)
     }
 
     /// The attention output of each query token over the keys.
@@ -453,28 +547,16 @@ package enum PrefillAttentionKernel {
             canRun(queries: queries, keys: keys, values: values, mask: causal ? .causal : .none),
             "the prefill attention kernel cannot read queries \(queries.shape) "
                 + "over keys \(keys.shape)")
-        let groupSize = queries.dim(HeadRowsAxis.head) / keys.dim(HeadRowsAxis.head)
-        let threads = (threadgroupHeads * headParts + loaderSimdGroups) * metalSimdWidth
-        let tokenBlocks =
-            (queries.dim(HeadRowsAxis.row) + tokensPerThreadgroup - 1) / tokensPerThreadgroup
-        let headBlocks =
-            keys.dim(HeadRowsAxis.batch) * keys.dim(HeadRowsAxis.head) * (groupSize / threadgroupHeads)
-        return kernel(
-            [queries, keys, values, MLXArray([scale])],
-            template: [
-                ("T", queries.dtype), ("DIM", headWidth), ("GQA", groupSize),
-                ("BK", tileKeys(queries.dtype)), ("CAUSAL", causal),
-            ],
-            grid: (threads * tokenBlocks, headBlocks, 1),
-            threadGroup: (threads, 1, 1),
-            outputShapes: [queries.shape],
+        return run(
+            kernel, inputs: [queries, keys, values, MLXArray([scale])], queries: queries,
+            keys: keys, causal: causal, keyBlocks: 1, outputShapes: [queries.shape],
             outputDTypes: [queries.dtype])[0]
     }
 
     /// The scaled dot-product attention of a call: this kernel when it runs
-    /// the call, else the route of ``DecodeAttentionKernel``, which reads a
-    /// decode step over a long cache and keeps the SDPA of MLX for every
-    /// other call.
+    /// the call, else the route of ``VerifyAttentionKernel``, which reads the
+    /// few tokens of a speculative verify over a long cache and gives every
+    /// other call to the route of ``DecodeAttentionKernel``.
     ///
     /// - Parameters:
     ///   - queries: The queries, shape `(batch, queryHeads, tokens, headDim)`.
@@ -491,7 +573,7 @@ package enum PrefillAttentionKernel {
         guard canRun(queries: queries, keys: keys, values: values, mask: mask),
             let causal = causalFlag(of: mask)
         else {
-            return DecodeAttentionKernel.scaledDotProductAttention(
+            return VerifyAttentionKernel.scaledDotProductAttention(
                 queries: queries, keys: keys, values: values, scale: scale, mask: mask)
         }
         return attention(queries: queries, keys: keys, values: values, scale: scale, causal: causal)

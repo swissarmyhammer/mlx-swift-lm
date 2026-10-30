@@ -1,8 +1,15 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '8480'
+comments:
+- actor: claude-code
+  id: 01m66d3c427r3fkgv3m1gd2kb3
+  text: |-
+    ### closed — user decision 2026-10-30
+    User does not want the adaptive guard at all; it is being removed, so reworking it is no longer wanted.
+  timestamp: 2026-10-30T12:38:34.882361+00:00
+position_column: done
+position_ordinal: ffff9080
 title: 'MTP adaptive guard: stop costing more than it saves (pause/probe transitions, short-turn probe, block steps at long context)'
 ---
 The `.enabled` adaptive guard (^tdj3waa iteration 3: window verdicts at rate ± 2·SE) failed its shipping condition in the 2026-10-30 Release measurements, so `MTPAdaptivePolicy.default` stays `.disabled`. Data (router path unless noted; loads 5–38 from other sessions):

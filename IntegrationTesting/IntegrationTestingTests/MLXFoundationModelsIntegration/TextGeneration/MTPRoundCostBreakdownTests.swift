@@ -108,14 +108,8 @@ struct MTPRoundCostBreakdownTests {
     /// The runs of each timed part.
     private static let timedRepeats = 8
 
-    /// The divisor that picks the middle run of the sorted runs.
-    private static let medianDivisor = 2
-
     /// The smallest block of a drafter proposal: the bonus token and one draft.
     private static let smallestBlockSize = 2
-
-    /// The milliseconds of one second.
-    private static let millisecondsPerSecond = 1_000.0
 
     /// Prefix that makes every measurement line greppable in the log.
     private static let measurementPrefix = "MTP ROUND COST:"
@@ -303,17 +297,12 @@ struct MTPRoundCostBreakdownTests {
 
     /// The wall milliseconds of `body`, with a GPU sync before and after it.
     private static func milliseconds<Result>(_ body: () -> Result) -> Double {
-        Stream.gpu.synchronize()
-        let start = Date()
-        _ = body()
-        Stream.gpu.synchronize()
-        return Date().timeIntervalSince(start) * millisecondsPerSecond
+        GPUWallTime.milliseconds(body)
     }
 
     /// The median of ``timedRepeats`` runs of `sample`.
     private static func median(_ sample: () -> Double) -> Double {
-        let samples = (0 ..< timedRepeats).map { _ in sample() }.sorted()
-        return samples[samples.count / medianDivisor]
+        GPUWallTime.median(repeats: timedRepeats, sample)
     }
 
     /// Writes `measurement` under the measurement prefix.
