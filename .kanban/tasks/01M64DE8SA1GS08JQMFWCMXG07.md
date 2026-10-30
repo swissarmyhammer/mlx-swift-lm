@@ -112,6 +112,40 @@ comments:
     - evidence: 2 files — Tests/MLXLMTests/Qwen35AttentionLayerFixture.swift (StepTensor enum replaces magic indices; finding flipped to [x]), Tests/MLXLMTests/VerifyAttentionAccuracyTests.swift (new, 8.7 KB, 2 tests × 30 cases). `swift build --build-tests`: 0 source warnings; the only line is llbuild's "missing creator for mutated node" on mlx-swift_Cmlx.bundle, the same as before. `xcrun xctest` on all 5 bundles, each exit 0: MLXLMTests 920 XCTest 0 failures + 2082 Swift Testing in 198 suites passed; MLXGuidedGenerationTests 72; MLXFoundationModelsTests 457; CXGrammarTests 7; MLXHuggingFaceMacrosTests 7 XCTest; 0 skipped. Kernel RMS error vs fp32 is 0.90–0.95x SDPA at 3–5 rows and 0.48–0.52x at 6–8 rows, so the kernel needed no fix. swiftlint no_magic_numbers is clean on both files.
     - next: /review
   timestamp: 2026-10-30T14:47:10.832228+00:00
+- actor: claude-code
+  id: 01m66mkh7r555wrnpj055586ef
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (cf1b46b7): 1 finding (1 confirmed, 0 refuted) — Tests/MLXLMTests/VerifyAttentionAccuracyTests.swift:60 reuse/reuse. Prior item Qwen35AttentionLayerFixture.swift:223 code-hygiene/magic-numbers-swift is checked and the fix commit drew no new finding there.
+    - next: implement the 2026-10-30 09:47 finding (share relativeRMSError with ParoQuantTests via a common test-target helper), then re-review.
+  timestamp: 2026-10-30T14:49:44.440256+00:00
+- actor: claude-code
+  id: 01m66mmc07ear08pghbrxraj88
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — StepTensor enum; VerifyAttentionAccuracyTests (kernel error 0.48–0.95x MLX SDPA's vs fp32)
+    - test: green — 5 bundles 0 fail/0 skip
+    - commit: cf1b46b7
+    - review: findings — Tests/MLXLMTests/VerifyAttentionAccuracyTests.swift:60
+  timestamp: 2026-10-30T14:50:11.847491+00:00
+- actor: claude-code
+  id: 01m66n6j16hvemmwr8exzpe7ke
+  text: |-
+    Finding `Tests/MLXLMTests/VerifyAttentionAccuracyTests.swift:60` `reuse/reuse` — `relativeError` reimplements the relative RMS error that already exists as `relativeRMSError` in ParoQuantTests.swift. Fixed by moving the metric into one shared file, Tests/MLXLMTests/RelativeRMSError.swift. It defines `relativeRMSError(_ reference:, _ actual:) -> Float`, an internal top-level function in the test target. It computes sqrt(mean((reference − actual)²) / max(mean(reference²), 1e-10)) in float32, and it casts both inputs before subtracting. The argument order is (reference, actual), the same as ParoQuant, so no wrapper is needed.
+
+    Discovery: there was a THIRD copy. KVCacheQuantizationTests.swift also had a private `relativeRMSError(_ actual:, _ expected:)` with the reversed argument order and a 1e-6 floor. I deleted it as well, together with its now-unused `referencePowerFloor`. All 13 of its call sites now use (reference, actual): keys/cachedKeys, before/after, materialized/native, fp16/compressed, and reference/batched. Leaving that copy in place would also have left two module-level functions with the same signature. Deleted: the private copy in ParoQuantTests.swift and `VerifyAttentionAccuracyTests.relativeError`. Its three call sites now call `relativeRMSError(reference, got)`. A grep shows exactly one definition left in Tests/.
+
+    The behavior differences are negligible. ParoQuant used to subtract in the input dtype and then cast, and now it casts first, which is more exact. KVCache's floor drops from 1e-6 to 1e-10, and every reference power in those tests is about 1 or larger. The accuracy suite had no floor before, and its fp32 reference is never zero. The new file needs `import Foundation`. Without it, `sqrt` resolves to MLX's array overload, and the first build failed with "binary operator '/' cannot be applied to two 'Float' operands".
+
+    Subtasks: all 4 description subtasks were already [x]. The unchecked item counted in the 5/6 was this finding. I updated the text of the "<5 ms at 100k" subtask, which was already checked, to name the follow-ups: ^vre4msr (FF/GDN matvec), ^8p0rfxx (router array mask), ^mm16fx2 (leaner verify kernel).
+  timestamp: 2026-10-30T15:00:07.846842+00:00
+- actor: claude-code
+  id: 01m66n6jq1y2vqhbwbg4j60ntf
+  text: |-
+    ### implement — changed
+    - evidence: 4 files — Tests/MLXLMTests/RelativeRMSError.swift (new; the single shared relativeRMSError(reference, actual)), Tests/MLXLMTests/VerifyAttentionAccuracyTests.swift (relativeError deleted, 3 call sites), Tests/MLXLMTests/ParoQuantTests.swift (private copy deleted), Tests/MLXLMTests/KVCacheQuantizationTests.swift (third private copy + referencePowerFloor deleted, 13 call sites switched to (reference, actual)). Card: the 09:47 finding is flipped to [x], and the <5 ms subtask text now names ^vre4msr/^8p0rfxx/^mm16fx2. `swift build --build-tests`: Build complete, 0 source warnings. The only line is the existing llbuild "missing creator for mutated node" on mlx-swift_Cmlx.bundle. `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest`: exit 0, 920 XCTest with 0 failures, 2082 Swift Testing tests in 198 suites passed, 0 ✘, 0 skipped. ParoQuantTests, KVCacheTests and VerifyAttentionAccuracyTests all pass. Other bundles, each exit 0: CXGrammarTests 7 passed; MLXFoundationModelsTests 457 passed; MLXGuidedGenerationTests 72 passed; MLXHuggingFaceMacrosTests 7 XCTest with 0 failures.
+    - next: /review
+  timestamp: 2026-10-30T15:00:08.545059+00:00
 position_column: doing
 position_ordinal: '8280'
 title: 'MTP: cut the per-row cost of the multi-row verify at long context (5-row verify is 2.3–3.0x a plain forward at 32k–100k)'
@@ -124,7 +158,7 @@ The weights are read once per forward (multi-row matvec), so the growth with con
 
 - [x] Profile the verify forward at 32k/100k by layer kind: full attention (SDPA with q_len 2–6 + mask) vs GDN recurrence vs matmuls. Check whether MLX's SDPA uses the vector kernel for small q_len and whether the causal mask for S×L is materialized.
 - [x] Fix the dominant cost (e.g. a small-q_len SDPA vector path, no materialized mask, fused GDN T-token step) with output identical to the current verify up to the bf16 near-tie rule.
-- [x] Re-run MTPRoundCostBreakdownTests and the 2k–100k sweep (MTPSWEBenchScaleTests) before/after; target per-extra-row cost at 100k well under 5 ms. (Re-run done. Target NOT met: text 100k per extra row is 10.6 → 7.4 ms, and the router path stays at ~13 ms. Follow-ups are filed for the FF/GDN matvec, the router array mask and a leaner verify kernel.)
+- [x] Re-run MTPRoundCostBreakdownTests and the 2k–100k sweep (MTPSWEBenchScaleTests) before/after; target per-extra-row cost at 100k well under 5 ms. (Re-run done. Target NOT met: text 100k per extra row is 10.6 → 7.4 ms, and the router path stays at ~13 ms. The gain counts per the perf-gains rule; the remaining work moved to ^vre4msr (FF/GDN matvec), ^8p0rfxx (router array mask) and ^mm16fx2 (leaner verify kernel).)
 - [x] Accuracy: a unit test compares VerifyAttentionKernel and MLX SDPA against an fp32 reference attention (plain MLX ops) for 3–8 rows at 1024/1500/2048/2100/8195 keys in bf16 and fp16, causal and unmasked; the kernel error must be no larger than the SDPA error (5% slack). (Tests/MLXLMTests/VerifyAttentionAccuracyTests.swift; the kernel is not less accurate, so no kernel fix.)
 
 #mtp #perf
@@ -150,3 +184,13 @@ The weights are read once per forward (multi-row matvec), so the growth with con
 > - `.kanban/tasks/01M66K9Z6NHMK6GFECCMM16FX2.md` — no validator matches this file
 
 - [x] `Tests/MLXLMTests/Qwen35AttentionLayerFixture.swift:223` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+
+## Review Findings (2026-10-30 09:47)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 2 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M64DE8SA1GS08JQMFWCMXG07.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M64DE8SA1GS08JQMFWCMXG07.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/VerifyAttentionAccuracyTests.swift:60` `reuse/reuse` — `relativeError` reimplements the relative RMS error that already exists as `relativeRMSError` in ParoQuantTests.swift. Both compute sqrt(mean((a-b)²)) / sqrt(mean(a²)) in float32. Two copies of the metric can drift apart, and the accuracy suite's tolerance then rests on a second definition. Move the helper out of `private` into a shared test-target file, for example AttentionKernelTolerance.swift, and call it from both suites as `relativeRMSError(reference, got)`. If the argument order must stay, add a thin wrapper that delegates to it. Do not keep two independent implementations of the metric.

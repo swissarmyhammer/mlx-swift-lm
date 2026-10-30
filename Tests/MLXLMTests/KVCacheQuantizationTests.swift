@@ -5,18 +5,6 @@ import Testing
 
 @testable import MLXLMCommon
 
-/// The smallest reference power, which keeps an all-zero reference from dividing by zero.
-private let referencePowerFloor: Float = 1e-6
-
-private func relativeRMSError(_ actual: MLXArray, _ expected: MLXArray) -> Float {
-    let actual = actual.asType(.float32)
-    let expected = expected.asType(.float32)
-    let diff = actual - expected
-    let mse = mean(diff * diff).item(Float.self)
-    let ref = max(mean(expected * expected).item(Float.self), referencePowerFloor)
-    return sqrt(mse / ref)
-}
-
 extension KVCacheTests {
     // MARK: - Quantized attention causal masking
     // Regression for the finfo.min mistranslation (masked fill was Float.leastNormalMagnitude ≈ 0).
@@ -132,8 +120,8 @@ extension KVCacheTests {
         #expect(
             cache.metaState == ["32", "40", "4", "4", "2", "1", "8", "1", "float16", "float16"])
         #expect(cache.state.count == 10)
-        #expect(relativeRMSError(cachedKeys, keys) < 0.5)
-        #expect(relativeRMSError(cachedValues, values) < 0.5)
+        #expect(relativeRMSError(keys, cachedKeys) < 0.5)
+        #expect(relativeRMSError(values, cachedValues) < 0.5)
     }
 
     @Test func testVarianceNormalizedKVCacheInnerStateHoldsTheStoredSlabs() throws {
@@ -222,8 +210,8 @@ extension KVCacheTests {
         #expect(
             cache.metaState == ["32", "60", "4", "4", "2", "1", "28", "1", "float16", "float16"])
         #expect(cache.state.count == 10)
-        #expect(relativeRMSError(afterKeys, beforeKeys[.ellipsis, ..<60, 0...]) < 1e-3)
-        #expect(relativeRMSError(afterValues, beforeValues[.ellipsis, ..<60, 0...]) < 1e-3)
+        #expect(relativeRMSError(beforeKeys[.ellipsis, ..<60, 0...], afterKeys) < 1e-3)
+        #expect(relativeRMSError(beforeValues[.ellipsis, ..<60, 0...], afterValues) < 1e-3)
     }
 
     @Test func testVarianceNormalizedKVCacheSupportsAsymmetricKeyValueBits() {
@@ -304,7 +292,7 @@ extension KVCacheTests {
             scale: scale)
         eval(native, materialized)
 
-        #expect(relativeRMSError(native, materialized) < 1.5e-3)
+        #expect(relativeRMSError(materialized, native) < 1.5e-3)
         #expect(nativeCache.offset == 36)
         #expect(
             nativeCache.metaState == [
@@ -337,7 +325,7 @@ extension KVCacheTests {
             scale: scale)
         eval(native, materialized)
 
-        #expect(relativeRMSError(native, materialized) < 1.5e-3)
+        #expect(relativeRMSError(materialized, native) < 1.5e-3)
         #expect(native.shape == [1, 4, 3, 32])
         #expect(
             nativeCache.metaState == [
@@ -371,7 +359,7 @@ extension KVCacheTests {
             scale: scale)
         eval(native, materialized)
 
-        #expect(relativeRMSError(native, materialized) < 1e-3)
+        #expect(relativeRMSError(materialized, native) < 1e-3)
         #expect(
             nativeCache.metaState == [
                 "32", "1056", "4", "4", "2", "33", "0", "1", "float16", "float16",
@@ -403,7 +391,7 @@ extension KVCacheTests {
             scale: scale)
         eval(native, materialized)
 
-        #expect(relativeRMSError(native, materialized) < 1e-3)
+        #expect(relativeRMSError(materialized, native) < 1e-3)
         #expect(native.shape == [1, 4, 2, 32])
         #expect(
             nativeCache.metaState == [
@@ -456,7 +444,7 @@ extension KVCacheTests {
             mask: mask)
         eval(native, materialized)
 
-        #expect(relativeRMSError(native, materialized) < 1e-3)
+        #expect(relativeRMSError(materialized, native) < 1e-3)
     }
 
     @Test func testVarianceNormalizedKVCacheAttentionTracksFP16OverLongDecode() {
@@ -488,7 +476,7 @@ extension KVCacheTests {
                 scale: scale)
             eval(fp16, compressed)
 
-            let error = relativeRMSError(compressed, fp16)
+            let error = relativeRMSError(fp16, compressed)
             totalError += error
             maxError = max(maxError, error)
         }
@@ -570,7 +558,7 @@ extension KVCacheTests {
         // Four-tile base slabs cap the old 31-dispatch cliff at ten partitions while preserving
         // the quantized attention result. The next tile still coalesces to one 32-tile slab.
         #expect(nativeCache.attentionPartitionCount == 10)
-        #expect(relativeRMSError(native, materialized) < 1.5e-3)
+        #expect(relativeRMSError(materialized, native) < 1.5e-3)
     }
 
     @Test func testVarianceNormalizedKVCacheHeadBatchesMatchIndependentHeads() {
@@ -596,8 +584,8 @@ extension KVCacheTests {
         let referenceValues = concatenated(independentValues, axis: 1)
         eval(batchedKeys, batchedValues, referenceKeys, referenceValues)
 
-        #expect(relativeRMSError(batchedKeys, referenceKeys) < 1e-6)
-        #expect(relativeRMSError(batchedValues, referenceValues) < 1e-6)
+        #expect(relativeRMSError(referenceKeys, batchedKeys) < 1e-6)
+        #expect(relativeRMSError(referenceValues, batchedValues) < 1e-6)
     }
 
     @Test func testVarianceNormalizedKVCacheTwoBitMemoryAccountingIsPaperRelevant() {

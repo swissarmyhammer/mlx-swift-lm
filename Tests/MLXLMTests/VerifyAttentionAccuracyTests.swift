@@ -50,23 +50,11 @@ struct VerifyAttentionAccuracyTests {
     private static let random = AttentionKernelRandomOperands(
         queries: 20_261_030, keys: 20_261_031, values: 20_261_032)
 
-    /// The error of an output against a reference: the root mean square of
-    /// their gap, as a part of the root mean square of the reference.
-    ///
-    /// - Parameters:
-    ///   - got: The output of a path, in any float dtype.
-    ///   - reference: The reference output, in float32.
-    /// - Returns: The relative error.
-    static func relativeError(_ got: MLXArray, _ reference: MLXArray) -> Float {
-        let gap = got.asType(.float32) - reference
-        return (sqrt(mean(gap * gap)) / sqrt(mean(reference * reference))).item(Float.self)
-    }
-
     /// Tells if a path is no less accurate than a baseline path, up to
     /// ``slack``.
     ///
     /// - Parameters:
-    ///   - error: The error of the path, from ``relativeError(_:_:)``.
+    ///   - error: The error of the path, from `relativeRMSError(_:_:)`.
     ///   - baseline: The error of the baseline path.
     /// - Returns: True when `error` is at most `baseline` and its slack.
     static func isNoLessAccurate(_ error: Float, than baseline: Float) -> Bool {
@@ -144,8 +132,8 @@ struct VerifyAttentionAccuracyTests {
             let operands = Self.random.qwen38(queries: rows, keys: keys, dtype: dtype)
             for causal in Self.causalMasks {
                 let reference = Self.reference(operands, causal: causal)
-                let kernel = Self.relativeError(
-                    Self.kernelOutput(operands, causal: causal), reference)
+                let kernel = relativeRMSError(
+                    reference, Self.kernelOutput(operands, causal: causal))
                 check(operands, causal, reference, kernel)
             }
         }
@@ -156,7 +144,7 @@ struct VerifyAttentionAccuracyTests {
     @Test(arguments: rowCounts, keyCounts)
     func theKernelIsAsAccurateAsTheSDPA(rows: Int, keys: Int) {
         Self.forEachCall(rows: rows, keys: keys) { operands, causal, reference, kernel in
-            let sdpa = Self.relativeError(Self.sdpaOutput(operands, causal: causal), reference)
+            let sdpa = relativeRMSError(reference, Self.sdpaOutput(operands, causal: causal))
 
             #expect(
                 Self.isNoLessAccurate(kernel, than: sdpa),
@@ -173,9 +161,9 @@ struct VerifyAttentionAccuracyTests {
     func roundedScoresAreLessAccurateThanTheKernel(rows: Int, keys: Int) {
         Self.forEachCall(rows: rows, keys: keys) { operands, causal, reference, kernel in
             let dtype = operands.queries.dtype
-            let rounded = Self.relativeError(
-                Self.attention(operands, causal: causal, roundingScoresTo: dtype).asType(dtype),
-                reference)
+            let rounded = relativeRMSError(
+                reference,
+                Self.attention(operands, causal: causal, roundingScoresTo: dtype).asType(dtype))
 
             #expect(
                 !Self.isNoLessAccurate(rounded, than: kernel),
