@@ -222,11 +222,12 @@ package struct ShiftedMTPDrafter {
 
     /// The cache of each predictor layer in a stream of `parameters`.
     ///
-    /// The drafter holds the entries of the main cache one position earlier, so its cache takes
-    /// the shape of the main full-attention caches:
+    /// The drafter holds the entries of the main cache one position earlier, and attends to the
+    /// window ``GenerateParameters/mtpDrafterAttentionWindow`` names:
     ///
-    /// - When the main caches rotate (`maxKVSize`, or a typed capacity), each drafter layer is a
-    ///   ``RotatingKVCache`` of the same window and kept prefix, with a rewind reserve of
+    /// - When the main caches rotate (`maxKVSize`, or a typed capacity) or the drafter has a
+    ///   window, each drafter layer is a ``RotatingKVCache`` of the narrower of the two windows,
+    ///   with its kept prefix (the main one when the windows are equal), and a rewind reserve of
     ///   ``rewindReserve(maximumBlockSize:)`` rows (or the stream's own reserve when larger). The
     ///   drafter then stays bounded, and each rewind of its state stays exact after its ring
     ///   wraps. Its entries keep counting logical positions, as the main cache does.
@@ -236,19 +237,35 @@ package struct ShiftedMTPDrafter {
     ///
     /// - Parameters:
     ///   - layerCount: The predictor layers.
-    ///   - parameters: The generation parameters of the stream, or `nil` for none.
+    ///   - parameters: The generation parameters of the stream, or `nil` for the default
+    ///     parameters.
     ///   - maximumBlockSize: The most tokens of a round of the drafter.
     /// - Returns: One cache for each predictor layer.
     package static func makeCache(
         layerCount: Int, parameters: GenerateParameters?, maximumBlockSize: Int
     ) -> [KVCache] {
-        guard let capacity = mainCacheCapacity(parameters: parameters) else {
+        let parameters = parameters ?? GenerateParameters()
+        guard let capacity = drafterCacheCapacity(parameters: parameters) else {
             return (0 ..< layerCount).map { _ in KVCacheSimple() }
         }
         let reserve = Swift.max(
             rewindReserve(maximumBlockSize: maximumBlockSize),
-            parameters?.kvCache?.rewind?.maxTokens ?? 0)
+            parameters.kvCache?.rewind?.maxTokens ?? 0)
         return (0 ..< layerCount).map { _ in capacity.makeRotatingCache(rewindCapacity: reserve) }
+    }
+
+    /// The window of the drafter cache of a stream of `parameters`: the narrower of the
+    /// capacity of the main full-attention caches and the drafter's own attention window, the
+    /// main one when the two are equal, or `nil` when neither bounds the drafter.
+    ///
+    /// - Parameter parameters: The generation parameters of the stream.
+    /// - Returns: The capacity, or `nil`.
+    private static func drafterCacheCapacity(
+        parameters: GenerateParameters
+    ) -> KVCacheConfiguration.Capacity? {
+        [mainCacheCapacity(parameters: parameters), parameters.mtpDrafterAttentionWindow]
+            .compactMap { $0 }
+            .min { $0.maxTokens < $1.maxTokens }
     }
 
     /// The capacity of the main full-attention caches of a stream of `parameters`, or `nil`
@@ -258,13 +275,13 @@ package struct ShiftedMTPDrafter {
     /// they refuse never reaches the drafter. Should one reach it, the drafter keeps an unbounded
     /// cache: it then decodes exactly, with more memory.
     ///
-    /// - Parameter parameters: The generation parameters of the stream, or `nil` for none.
+    /// - Parameter parameters: The generation parameters of the stream.
     /// - Returns: The capacity, or `nil`.
     private static func mainCacheCapacity(
-        parameters: GenerateParameters?
+        parameters: GenerateParameters
     ) -> KVCacheConfiguration.Capacity? {
         do {
-            return try parameters?.effectiveKVCacheCapacity()
+            return try parameters.effectiveKVCacheCapacity()
         } catch {
             assertionFailure("MTP drafter cache of invalid KV cache parameters: \(error)")
             qwenMTPLogger.error(

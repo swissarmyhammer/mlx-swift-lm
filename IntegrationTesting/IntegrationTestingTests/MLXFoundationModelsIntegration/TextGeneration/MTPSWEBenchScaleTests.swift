@@ -325,7 +325,7 @@ struct MTPSWEBenchScaleTests {
         subsystem: "com.apple.FoundationModels-MLX", category: "MTPSWEBenchScale")
 
     /// The prompt of the long decode.
-    private static let longDecodePrompt = """
+    static let longDecodePrompt = """
         Now write, directly in your reply and without calling any tool, the complete corrected \
         version of the module that the failing test covers: every import, constant, class and \
         function of the file in full, each function with a detailed docstring and inline \

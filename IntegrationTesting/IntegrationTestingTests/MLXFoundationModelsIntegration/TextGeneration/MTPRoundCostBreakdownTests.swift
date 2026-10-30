@@ -1,13 +1,13 @@
 // Copyright © 2026 Apple Inc.
 //
-// What one MTP round of Qwen3.8-27B-4bit with its 4-bit MTP head costs at 32k and at 100k tokens
-// of context, part by part, on the router's load path and on the text path: the verify forward of
-// the target at each row count, each chained drafter step, one host sync, and the one-token decode
-// forward of plain decode at the same context. The ACP agent's SWE-bench run saw MTP fall from
-// 62.7 tok/s below 20k tokens to 37.5 tok/s at 80k-103k, about plain decode's 38. Two suspects:
-// the drafter's own attention runs over the whole context on each chained step, and the
-// multi-row verify takes a slower attention path than the one-query vector kernel. Run it in
-// Release:
+// What one MTP round of Qwen3.8-27B-4bit with its 4-bit MTP head costs at 32k, 64k and 100k
+// tokens of context, part by part, on the router's load path and on the text path: the verify
+// forward of the target at each row count, each chained drafter step with each drafter attention
+// window of the sweep, one host sync, and the one-token decode forward of plain decode at the same
+// context. The ACP agent's SWE-bench run saw MTP fall from 62.7 tok/s below 20k tokens to 37.5
+// tok/s at 80k-103k, about plain decode's 38. Two suspects: the drafter's own attention runs over
+// the whole context on each chained step, and the multi-row verify takes a slower attention path
+// than the one-query vector kernel. Run it in Release:
 // `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS,arch=arm64' -configuration Release ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES -only-testing:IntegrationTestingTests/MTPRoundCostBreakdownTests`
 //
 // Every measurement line goes to the unified log under the `MTP ROUND COST:` prefix:
@@ -24,20 +24,29 @@ import os
 
 @testable import MLXFoundationModels
 
-/// The time limit of each test, in minutes: two prefills of 32k and 100k tokens, with the
-/// drafter fed chunk by chunk, and a few hundred timed forwards.
-private let roundCostTimeLimitMinutes = 60
+/// The time limit of each test, in minutes: three prefills of 32k, 64k and 100k tokens, with each
+/// drafter state fed chunk by chunk, and a few hundred timed forwards.
+private let roundCostTimeLimitMinutes = 90
 
 /// The MLX language model, apart from the FoundationModels one of the same name.
 private typealias TargetModel = MLXLMCommon.LanguageModel
 
-/// A value the benchmark hands across a `perform` boundary.
-///
-/// The benchmark reads the boxed drafter only inside one `ModelContainer.perform` of the target at
-/// a time, and the test runs serially, thus no two tasks touch the value at once.
-private final class PerformBox<Value>: @unchecked Sendable {
-    let value: Value
-    init(_ value: Value) { self.value = value }
+/// The cost of a drafter proposal with one drafter attention window, in milliseconds.
+private struct DrafterWindowCost: Sendable {
+
+    /// The window of the drafter, or `nil` for the whole context.
+    let window: Int?
+
+    /// The entries the drafter state holds: its chained steps attend over the newest `window`
+    /// of them.
+    let entryCount: Int
+
+    /// A drafter proposal of a block of two tokens and up to the block size: one draft, then one
+    /// more chained step for each block size after it.
+    let draft: [Double]
+
+    /// The cost of each chained drafter step after the first draft.
+    var chainedSteps: [Double] { zip(draft.dropFirst(), draft).map { $0 - $1 } }
 }
 
 /// The cost of the parts of one MTP round at one context length, in milliseconds.
@@ -45,9 +54,6 @@ private struct RoundCost: Sendable {
 
     /// The tokens of context the target and the drafter hold.
     let contextTokenCount: Int
-
-    /// The entries the drafter's own cache holds: its chained steps attend over them.
-    let drafterEntryCount: Int
 
     /// Whether the verify forward keeps the recurrent snapshots of an in-place rewind.
     let keepsSnapshots: Bool
@@ -58,46 +64,50 @@ private struct RoundCost: Sendable {
     /// The verify forward of the target, at one row and up to the block size.
     let verify: [Double]
 
-    /// A drafter proposal of a block of two tokens and up to the block size: one draft, then one
-    /// more chained step for each block size after it.
-    let draft: [Double]
+    /// The drafter proposals with each drafter window of the sweep.
+    let drafts: [DrafterWindowCost]
 
     /// One host sync: a small evaluation read back to the CPU.
     let hostSync: Double
 
-    /// The cost of each chained drafter step after the first draft.
-    var chainedSteps: [Double] { zip(draft.dropFirst(), draft).map { $0 - $1 } }
-
-    /// The parts in a measurement line.
-    var summary: String {
+    /// The parts in measurement lines: one for the target, then one for each drafter window.
+    var summary: [String] {
         let format = { (values: [Double]) in
             values.map { String(format: "%.2f", $0) }.joined(separator: ", ")
         }
-        return """
-            context \(contextTokenCount) tokens, drafter cache \(drafterEntryCount) entries, \
-            verify keeps snapshots \(keepsSnapshots): plain one-token decode \
-            \(String(format: "%.2f", plainDecode)) ms; verify forward by rows 1... [\(format(verify))] \
-            ms; drafter proposal by block size 2... [\(format(draft))] ms, chained steps \
-            [\(format(chainedSteps))] ms; host sync \(String(format: "%.3f", hostSync)) ms
+        let target = """
+            context \(contextTokenCount) tokens, verify keeps snapshots \(keepsSnapshots): \
+            plain one-token decode \(String(format: "%.2f", plainDecode)) ms; verify forward by \
+            rows 1... [\(format(verify))] ms; host sync \(String(format: "%.3f", hostSync)) ms
             """
+        return [target]
+            + drafts.map { cost in
+                """
+                context \(contextTokenCount) tokens, drafter window \
+                \(DrafterWindowSweep.label(of: cost.window)), drafter state \(cost.entryCount) \
+                entries: drafter proposal by block size 2... [\(format(cost.draft))] ms, chained \
+                steps [\(format(cost.chainedSteps))] ms
+                """
+            }
     }
 }
 
-/// Times the parts of one MTP round of Qwen3.8-27B-4bit with its MTP head at 32k and 100k tokens.
+/// Times the parts of one MTP round of Qwen3.8-27B-4bit with its MTP head at 32k, 64k and 100k
+/// tokens, with a drafter of each window of ``DrafterWindowSweep/windowTokenCounts``.
 ///
 /// The parts run outside the MTP iterator, each with a GPU sync before and after it, on a target
-/// cache and a drafter cache that hold the same context: the target prefills it in chunks and
-/// feeds each chunk's hidden rows to the drafter, as the iterator's prefill does. Each part is
-/// the median of ``timedRepeats`` runs. The verify forward and the plain forward append to the
-/// target cache, and a drafter proposal is removed after it, thus the context grows by a few
-/// tokens over the runs, which is noise next to 32k. Comparing the sum of the parts with the
+/// cache and drafter caches that hold the same context: the target prefills it in chunks and
+/// feeds each chunk's hidden rows to each drafter state, as the iterator's prefill does. Each
+/// part is the median of ``timedRepeats`` runs. The verify forward and the plain forward append
+/// to the target cache, and a drafter proposal is removed after it, thus the context grows by a
+/// few tokens over the runs, which is noise next to 32k. Comparing the sum of the parts with the
 /// milliseconds per round of `MTPSWEBenchScaleTests`' sweep at the same context shows what the
 /// iterator adds.
 @Suite(.serialized, .timeLimit(.minutes(roundCostTimeLimitMinutes)))
 struct MTPRoundCostBreakdownTests {
 
     /// The context lengths of the breakdown, in tokens.
-    private static let contextTokenCounts = [32_768, 100_000]
+    private static let contextTokenCounts = DrafterWindowSweep.contextTokenCounts
 
     /// The tokens of each chunk of the prefill.
     private static let prefillChunkTokenCount = 2_048
@@ -122,39 +132,41 @@ struct MTPRoundCostBreakdownTests {
     @Test(
         .enabled(if: Qwen38FourBitMTPModel.isLocal),
         arguments: Qwen38FourBitMTPModel.LoadPath.allCases)
-    func roundCostAtThirtyTwoAndOneHundredThousandTokens(
+    func roundCostFromThirtyTwoToOneHundredThousandTokens(
         path: Qwen38FourBitMTPModel.LoadPath
     ) async throws {
         // Both load paths name one model id, thus one container of the model cache.
         await releaseAllGPUMemory()
-        let mtpModel = try Qwen38FourBitMTPModel.make(
-            speculates: true, reasons: true, path: path)
-        let speculation = try #require(mtpModel.speculativeDecoding)
-        let container = try await mtpModel.loadContainer()
-        let loadDrafter = await container.perform { speculation.drafterLoader(for: $0.model) }
-        let drafterContainer = try await loadDrafter(speculation.drafterConfiguration)
-        let drafter = await drafterContainer.perform { PerformBox($0.model) }
-        let tokenizer = await container.tokenizer
+        let loaded = try await Qwen38FourBitMTPModel.loadWithDrafter(path: path)
+        let tokenizer = await loaded.container.tokenizer
+        let drafter = loaded.drafter
+        let blockSize = loaded.speculation.blockSize
         let historyTokens = (0 ..< Self.maximumHistoryRoundCount).flatMap {
             tokenizer.encode(text: SWEBenchTranscript.exchangeText($0), addSpecialTokens: false)
         }
         for contextTokenCount in Self.contextTokenCounts {
             let context = Array(historyTokens.prefix(contextTokenCount))
             try #require(context.count == contextTokenCount, "\(path): the history is too short")
-            let cost = try await container.perform { modelContext in
+            let cost = try await loaded.container.perform { modelContext in
                 try Self.measureRound(
                     target: modelContext.model, drafter: drafter.value, context: context,
-                    blockSize: speculation.blockSize)
+                    blockSize: blockSize)
             }
-            Self.log("\(path) \(cost.summary)")
-            #expect(cost.drafterEntryCount == contextTokenCount, "\(path) \(contextTokenCount)")
-            #expect(cost.verify.allSatisfy { $0 > 0 } && cost.draft.allSatisfy { $0 > 0 })
+            for line in cost.summary {
+                Self.log("\(path) \(line)")
+            }
+            #expect(cost.verify.allSatisfy { $0 > 0 }, "\(path) \(contextTokenCount)")
+            for drafts in cost.drafts {
+                #expect(drafts.entryCount == contextTokenCount, "\(path) \(contextTokenCount)")
+                #expect(drafts.draft.allSatisfy { $0 > 0 }, "\(path) \(contextTokenCount)")
+            }
         }
-        await mtpModel.evict()
+        await loaded.model.evict()
         await releaseAllGPUMemory()
     }
 
-    /// Prefills `context` into a target cache and a drafter cache, then times each part of a round.
+    /// Prefills `context` into a target cache and a drafter state of each drafter window of the
+    /// sweep, then times each part of a round.
     ///
     /// - Parameters:
     ///   - target: The target.
@@ -169,19 +181,23 @@ struct MTPRoundCostBreakdownTests {
         let drafter = try #require(
             drafter as? any ResumableMTPDrafterModel, "the drafter must keep a resumable state")
         let cache = try target.newCache(parameters: nil)
-        var drafterState = drafter.makeState(parameters: nil)
-        // Zero drafts the whole block on every proposal, so each chained step runs.
-        drafterState.minimumDraftProbability = 0
+        let windows = DrafterWindowSweep.windowTokenCounts
+        var drafterStates = try windows.map { window in
+            var state = drafter.makeState(
+                parameters: try DrafterWindowSweep.parameters(window: window))
+            // Zero drafts the whole block on every proposal, so each chained step runs.
+            state.minimumDraftProbability = 0
+            return state
+        }
         let prefilled = try prefill(
             target: target, drafter: drafter, context: context, cache: cache,
-            drafterState: &drafterState)
+            drafterStates: &drafterStates)
         let rewindDepth = (target as? any SpeculativeCacheRewindModel)?
             .maximumNativeTargetCacheRewind ?? 0
         let keepsSnapshots = rewindDepth >= blockSize - 1
         let blockSizes = Array(smallestBlockSize ... blockSize)
         return RoundCost(
-            contextTokenCount: context.count, drafterEntryCount: drafterState.entryCount,
-            keepsSnapshots: keepsSnapshots,
+            contextTokenCount: context.count, keepsSnapshots: keepsSnapshots,
             plainDecode: median {
                 forwardMilliseconds(
                     target, tokens: [prefilled.bonus], cache: cache,
@@ -195,12 +211,16 @@ struct MTPRoundCostBreakdownTests {
                         state: verifyState(prefilled.state, keepsSnapshots: keepsSnapshots))
                 }
             },
-            draft: blockSizes.map { size in
-                median {
-                    draftMilliseconds(
-                        drafter, target: target, prefilled: prefilled, cache: cache,
-                        blockSize: size, state: &drafterState)
-                }
+            drafts: windows.indices.map { index in
+                DrafterWindowCost(
+                    window: windows[index], entryCount: drafterStates[index].entryCount,
+                    draft: blockSizes.map { size in
+                        median {
+                            draftMilliseconds(
+                                drafter, target: target, prefilled: prefilled, cache: cache,
+                                blockSize: size, state: &drafterStates[index])
+                        }
+                    })
             },
             hostSync: median { milliseconds { (MLXArray(Int32(1)) + 1).item(Int32.self) } })
     }
@@ -212,11 +232,11 @@ struct MTPRoundCostBreakdownTests {
         let state: LMOutput.State?
     }
 
-    /// Prefills `context` into `cache` in chunks and appends each chunk to the drafter, each
-    /// token paired with the hidden row of the position before it.
+    /// Prefills `context` into `cache` in chunks and appends each chunk to each drafter state,
+    /// each token paired with the hidden row of the position before it.
     private static func prefill(
         target: any TargetModel, drafter: any ResumableMTPDrafterModel, context: [Int],
-        cache: [KVCache], drafterState: inout MTPDrafterState
+        cache: [KVCache], drafterStates: inout [MTPDrafterState]
     ) throws -> Prefilled {
         var state: LMOutput.State?
         var bonus = 0
@@ -230,13 +250,15 @@ struct MTPRoundCostBreakdownTests {
                 cache: cache, state: chunkState)
             let hidden = try #require(output.state?[mtpLastHiddenStatesKey])
             bonus = end < context.count ? context[end] : argMax(output.logits[0, -1]).item(Int.self)
-            let shifted = Array(context[(start + 1) ..< end]) + [bonus]
-            let appended = drafter.appendDrafterState(
-                target: target, tokens: MLXArray(shifted.map(Int32.init))[.newAxis],
-                targetHidden: hidden, positionDeltas: output.state?[mtpPositionDeltasKey],
-                state: &drafterState, sampler: ArgMaxSampler())
-            try #require(appended, "the drafter must take chunk \(start) ..< \(end)")
-            eval(cache.flatMap(\.state) + drafterState.cache.flatMap(\.state))
+            let shifted = MLXArray((Array(context[(start + 1) ..< end]) + [bonus]).map(Int32.init))
+            for index in drafterStates.indices {
+                let appended = drafter.appendDrafterState(
+                    target: target, tokens: shifted[.newAxis], targetHidden: hidden,
+                    positionDeltas: output.state?[mtpPositionDeltasKey],
+                    state: &drafterStates[index], sampler: ArgMaxSampler())
+                try #require(appended, "the drafter must take chunk \(start) ..< \(end)")
+            }
+            eval(cache.flatMap(\.state) + drafterStates.flatMap { $0.cache.flatMap(\.state) })
             lastHidden = hidden[0..., (-1)..., 0...]
             state = output.state
         }

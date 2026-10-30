@@ -361,6 +361,14 @@ To save and restore a snapshot without a session, see
 - With `kvBits` (a quantized main cache), the drafter cache stays in full
   precision. It is one layer, so it is small. The tokens are the tokens of plain
   decoding with the same KV setting.
+- ``GenerateParameters/mtpDrafterAttentionWindow`` lets the drafter attend to
+  the newest tokens of the context alone, with a ring of that window, while the
+  model's cache keeps the whole context. The tokens stay the tokens of plain
+  decoding; only the acceptance changes. The default
+  (``SpeculativeDecodingConfig/defaultMTPDrafterAttentionWindow``) is the whole
+  context: on Qwen3.8-27B-4bit, windows of 2k to 16k tokens lowered the
+  acceptance by more than they saved, and decoded slower at 32k, 64k and 100k
+  tokens of context.
 - A drafter state saved with one cache kind or window does not restore into
   another. The drafter cold-starts instead.
 

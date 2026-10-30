@@ -127,6 +127,15 @@ public struct SpeculativeDecodingConfig: Sendable {
     /// (`--spec-draft-p-min 0.75`), and a seed below it drafts alone.
     public static let defaultMTPMinimumDraftProbability: Float = 0.75
 
+    /// The default ``GenerateParameters/mtpDrafterAttentionWindow``: the whole context.
+    ///
+    /// On an M5 Ultra, Qwen3.8-27B-4bit with its MTP head decoded 1024 greedy tokens after 32k,
+    /// 64k and 100k tokens of an agent transcript faster with the whole context than with a
+    /// drafter window of 2k, 4k, 8k or 16k tokens at 29 of 30 measured points, on the text and
+    /// the vision-language load paths: a window cuts a five-token proposal at 100k from about
+    /// 25 ms to 5–7 ms, but the target accepts fewer drafts, and that costs more than it saves.
+    public static let defaultMTPDrafterAttentionWindow: KVCacheConfiguration.Capacity? = nil
+
     /// The probabilities a confidence floor can take.
     private static let minimumDraftProbabilityRange: ClosedRange<Float> = 0 ... 1
 

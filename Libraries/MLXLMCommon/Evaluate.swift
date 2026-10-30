@@ -240,6 +240,19 @@ public struct GenerateParameters: Sendable {
     /// samples. Inert at `temperature == 0`, where the drafts and the verifier are argmax.
     public var mtpSampledVerification: MTPSampledVerification = .sampleAndMatch
 
+    /// The context a stateful MTP drafter (Qwen MTP) attends to on each draft: its newest
+    /// `maxTokens` tokens, with the first `preservedPrefixTokens` kept, or the whole context when
+    /// `nil`.
+    ///
+    /// The drafter only proposes tokens and the target verifies them, so the window changes how
+    /// many drafts the target accepts, never the tokens. Below the window the drafter attends to
+    /// the whole context. A rotating main cache (``maxKVSize``, a ``KVCacheConfiguration``
+    /// capacity) narrower than the window bounds the drafter to the main window. A drafter
+    /// continuation saved with one window resumes only in a stream of the same window; another
+    /// stream starts its drafter at the cached position.
+    public var mtpDrafterAttentionWindow: KVCacheConfiguration.Capacity? =
+        SpeculativeDecodingConfig.defaultMTPDrafterAttentionWindow
+
     /// Penalty factor for repeating tokens
     public var repetitionPenalty: Float?
 

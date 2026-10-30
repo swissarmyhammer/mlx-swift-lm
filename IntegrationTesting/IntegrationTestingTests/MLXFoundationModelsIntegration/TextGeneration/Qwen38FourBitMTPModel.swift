@@ -199,6 +199,54 @@ enum Qwen38FourBitMTPModel {
             weightsLocation: testWeightsLocation(modelID:),
             load: path.containerLoader)
     }
+
+    /// The target of one load path with its MTP head, loaded as the FoundationModels executor
+    /// loads them, for a benchmark that drives the target and the drafter itself.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    struct LoadedWithDrafter {
+
+        /// The model, which a benchmark evicts when it is done.
+        let model: MLXLanguageModel
+
+        /// The speculative decoding of the model: its block size and its confidence floor.
+        let speculation: MLXSpeculativeDecoding
+
+        /// The container of the target.
+        let container: ModelContainer
+
+        /// The MTP head of the target.
+        let drafter: PerformBox<any MTPDrafterModel>
+    }
+
+    /// Loads the target of `path` that reasons, and the MTP head that drafts for it.
+    ///
+    /// - Parameter path: How the target loads.
+    /// - Returns: The model, its container and its drafter.
+    /// - Throws: The error of the speculative decoding configuration or of a load.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    static func loadWithDrafter(path: LoadPath) async throws -> LoadedWithDrafter {
+        let model = try make(speculates: true, reasons: true, path: path)
+        let speculation = try #require(model.speculativeDecoding)
+        let container = try await model.loadContainer()
+        let loadDrafter = await container.perform { speculation.drafterLoader(for: $0.model) }
+        let drafterContainer = try await loadDrafter(speculation.drafterConfiguration)
+        let drafter = await drafterContainer.perform { PerformBox($0.model) }
+        return LoadedWithDrafter(
+            model: model, speculation: speculation, container: container, drafter: drafter)
+    }
+}
+
+/// A value a benchmark hands across a `perform` boundary.
+///
+/// The benchmark reads the boxed value only inside one `ModelContainer.perform` of the target at
+/// a time, and its suite runs serially, thus no two tasks touch the value at once.
+final class PerformBox<Value>: @unchecked Sendable {
+
+    /// The boxed value.
+    let value: Value
+
+    /// Boxes `value`.
+    init(_ value: Value) { self.value = value }
 }
 
 #endif
