@@ -73,8 +73,47 @@ comments:
     - evidence: Libraries/MLXLMCommon/VerifyAttentionKernel.swift (new), Libraries/MLXLMCommon/PrefillAttentionKernel.swift, Libraries/MLXLMCommon/DecodeAttentionKernel.swift, Tests/MLXLMTests/VerifyAttentionKernelTests.swift (new), Tests/MLXLMTests/Qwen35VerifyAttentionTests.swift (new), Tests/MLXLMTests/Qwen35AttentionLayerFixture.swift, Tests/MLXLMTests/Qwen35DecodeAttentionTests.swift, IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPVerifyForwardProfileTests.swift (new), IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/Support/GPUWallTime.swift (new), IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPRoundCostBreakdownTests.swift. swift build --build-tests had 0 warnings from source; the only line is llbuild's "missing creator for mutated node" on mlx-swift_Cmlx.bundle. Release build-for-testing: TEST BUILD SUCCEEDED. All 5 bundles have 0 failures and 0 skipped: CXGrammarTests 7 tests; MLXFoundationModelsTests 457; MLXGuidedGenerationTests 72; MLXHuggingFaceMacrosTests 7 XCTest; MLXLMTests 920 XCTest plus 2080 Swift Testing. Measurements: after-profile (MTPVerifyForwardProfileTests + MTPRoundCostBreakdownTests), after-sweep (decodeRateFromTwoToOneHundredThousandContextTokens(path:), 1 known issue: router 100k guard on 0.96x), after-guards (qwen38FourBitMTPGeneration and qwen38FourBitMTPSystemPromptCache passed). The 100k per-row target was not met (7.4 ms). Follow-ups: ^vre4msr (FF/GDN matvec), ^8p0rfxx (router array mask), ^mm16fx2 (leaner verify kernel).
     - next: /review
   timestamp: 2026-10-30T14:27:17.811493+00:00
+- actor: claude-code
+  id: 01m66kp9t9kq3ef8xzs72d8902
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (b10ff7fd) — counts findings 1, confirmed 1, refuted 2, attempted 7, failed 0; Tests/MLXLMTests/Qwen35AttentionLayerFixture.swift:223 (code-hygiene/magic-numbers-swift). The engine raised no confirmed finding on VerifyAttentionKernel.swift, PrefillAttentionKernel.swift or DecodeAttentionKernel.swift.
+    - next: implement the open finding; the card's 100k per-extra-row target (<5 ms) is recorded as missed (10.6 → 7.4 ms text, ~13 ms router) — a human decides whether that blocks done.
+  timestamp: 2026-10-30T14:33:46.569455+00:00
+- actor: claude-code
+  id: 01m66kq4mn3mknkqt4w6s2xxtr
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — split-K verify attention kernel; text 100k per extra row 10.6 → 7.4 ms (target <5 ms missed; per the perf-gains-add-up rule the gain counts, remaining work in ^8p0rfxx / ^vre4msr / ^mm16fx2)
+    - test: green — build 0 source warnings; 5 bundles 0 fail/0 skip; Release guards pass
+    - commit: b10ff7fd
+    - review: findings — Tests/MLXLMTests/Qwen35AttentionLayerFixture.swift:223
+  timestamp: 2026-10-30T14:34:14.037725+00:00
+- actor: claude-code
+  id: 01m66met59nfa770vrtr155f89
+  text: |-
+    Finding `Tests/MLXLMTests/Qwen35AttentionLayerFixture.swift:223` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants: the cause was `step[2]` (also `step[0]`/`step[1]` as positional indices of the traced step draw). I replaced `stepTensors = 3` with a private `StepTensor: Int, CaseIterable` enum (queries/keys/values). The draw's leading size is now `StepTensor.allCases.count`, and every index is `StepTensor.<case>.rawValue`. swiftlint 0.65.1 `no_magic_numbers` (allowed_numbers [0, 1, -1, 100]) reports nothing on the whole file.
+
+    Accuracy check (new Tests/MLXLMTests/VerifyAttentionAccuracyTests.swift, 8.7 KB). It measures the kernel and MLX SDPA against an fp32 reference built from plain MLX ops (repeated KV heads, matmul, explicit causal `which` mask, precise softmax, matmul; MLXLMTests has TF32 off). It covers 3–8 rows, keys 1024/1500/2048/2100/8195, bf16 and fp16, causal and unmasked. The metric is relative RMS error. Max-abs gap is not used because both paths round the output to the model dtype. That makes the single worst number noisy: it went up to 1.18x either way, and it often equals the pure output-rounding floor.
+
+    Measured relative RMS error, bf16 / fp16. Floor = fp32 reference rounded to dtype ≈ 0.00166 / 0.000208.
+    - kernel: 0.00212–0.00220 / 0.000265–0.000275 at all rows and key counts
+    - SDPA 3–5 rows (vector kernel): 0.00232–0.00236 / 0.000289–0.000296. Kernel/SDPA ratio 0.90–0.95.
+    - SDPA 6–8 rows (unfused SDPA, since rows×GQA 6 > 32): 0.00417–0.00448 / 0.000518–0.000561. Ratio 0.48–0.52.
+
+    So the kernel is not less accurate than MLX SDPA anywhere tested. It is closer to fp32 everywhere, at about 1.3x the output-rounding floor. No kernel fix was needed: accumulation (fp32), the max/sum combine and the scaling are sound. The P-to-dtype rounding in the value product costs less than the SDPA's own error. The lower 2k/8k acceptance after the change is therefore not a systematic accuracy loss. It is near-tie divergence between two different paths that are both at the rounding floor.
+
+    The positive control `roundedScoresAreLessAccurateThanTheKernel` checks an attention with scores rounded to the model dtype before the softmax. It lands past the 5% slack against the kernel in all 60 cases, so the check can tell a less accurate path from the kernel.
+  timestamp: 2026-10-30T14:47:09.737479+00:00
+- actor: claude-code
+  id: 01m66mev7gmf25dw12y7m7jv64
+  text: |-
+    ### implement — changed
+    - evidence: 2 files — Tests/MLXLMTests/Qwen35AttentionLayerFixture.swift (StepTensor enum replaces magic indices; finding flipped to [x]), Tests/MLXLMTests/VerifyAttentionAccuracyTests.swift (new, 8.7 KB, 2 tests × 30 cases). `swift build --build-tests`: 0 source warnings; the only line is llbuild's "missing creator for mutated node" on mlx-swift_Cmlx.bundle, the same as before. `xcrun xctest` on all 5 bundles, each exit 0: MLXLMTests 920 XCTest 0 failures + 2082 Swift Testing in 198 suites passed; MLXGuidedGenerationTests 72; MLXFoundationModelsTests 457; CXGrammarTests 7; MLXHuggingFaceMacrosTests 7 XCTest; 0 skipped. Kernel RMS error vs fp32 is 0.90–0.95x SDPA at 3–5 rows and 0.48–0.52x at 6–8 rows, so the kernel needed no fix. swiftlint no_magic_numbers is clean on both files.
+    - next: /review
+  timestamp: 2026-10-30T14:47:10.832228+00:00
 position_column: doing
-position_ordinal: '8380'
+position_ordinal: '8280'
 title: 'MTP: cut the per-row cost of the multi-row verify at long context (5-row verify is 2.3–3.0x a plain forward at 32k–100k)'
 ---
 Step-4 breakdown (^j2tnzpn, Release, M5 Ultra, Qwen3.8-27B-4bit + MTP-4bit, guard off): a 1-row verify costs about a plain forward, but each extra row adds ~5–7 ms at 32k and ~10–13 ms at 100k context:
@@ -86,5 +125,28 @@ The weights are read once per forward (multi-row matvec), so the growth with con
 - [x] Profile the verify forward at 32k/100k by layer kind: full attention (SDPA with q_len 2–6 + mask) vs GDN recurrence vs matmuls. Check whether MLX's SDPA uses the vector kernel for small q_len and whether the causal mask for S×L is materialized.
 - [x] Fix the dominant cost (e.g. a small-q_len SDPA vector path, no materialized mask, fused GDN T-token step) with output identical to the current verify up to the bf16 near-tie rule.
 - [x] Re-run MTPRoundCostBreakdownTests and the 2k–100k sweep (MTPSWEBenchScaleTests) before/after; target per-extra-row cost at 100k well under 5 ms. (Re-run done. Target NOT met: text 100k per extra row is 10.6 → 7.4 ms, and the router path stays at ~13 ms. Follow-ups are filed for the FF/GDN matvec, the router array mask and a leaner verify kernel.)
+- [x] Accuracy: a unit test compares VerifyAttentionKernel and MLX SDPA against an fp32 reference attention (plain MLX ops) for 3–8 rows at 1024/1500/2048/2100/8195 keys in bf16 and fp16, causal and unmasked; the kernel error must be no larger than the SDPA error (5% slack). (Tests/MLXLMTests/VerifyAttentionAccuracyTests.swift; the kernel is not less accurate, so no kernel fix.)
 
 #mtp #perf
+
+## Review Findings (2026-10-30 09:29)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 10 file(s) reviewed, 14 not reviewed.
+
+> 14 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M642KXE2WG006RAY4TDJ3WAA.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M642KXE2WG006RAY4TDJ3WAA.md` — no validator matches this file
+> - `.kanban/tasks/01M64DE8SA1GS08JQMFWCMXG07.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M64DE8SA1GS08JQMFWCMXG07.md` — no validator matches this file
+> - `.kanban/tasks/01M669B4ZGN288ZYA7EW7CGBHD.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M669B4ZGN288ZYA7EW7CGBHD.md` — no validator matches this file
+> - `.kanban/tasks/01M66D3B55MERXYMSNQ7V4104C.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M66D3B55MERXYMSNQ7V4104C.md` — no validator matches this file
+> - `.kanban/tasks/01M66K9XWTYSKFF8GN8VRE4MSR.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M66K9XWTYSKFF8GN8VRE4MSR.md` — no validator matches this file
+> - `.kanban/tasks/01M66K9YJNDKE1CVA6E8P0RFXX.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M66K9YJNDKE1CVA6E8P0RFXX.md` — no validator matches this file
+> - `.kanban/tasks/01M66K9Z6NHMK6GFECCMM16FX2.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M66K9Z6NHMK6GFECCMM16FX2.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/Qwen35AttentionLayerFixture.swift:223` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.

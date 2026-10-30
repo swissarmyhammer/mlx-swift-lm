@@ -39,9 +39,16 @@ struct Qwen35AttentionLayerFixture {
     /// values.
     private static let keysAndValues = 2
 
-    /// The number of random tensors of a traced step: the queries, the keys
-    /// and the values.
-    private static let stepTensors = 3
+    /// The index of each random tensor of a traced step, along the leading
+    /// axis of the one random draw that holds them all.
+    private enum StepTensor: Int, CaseIterable {
+        /// The queries of the new tokens.
+        case queries
+        /// The keys of the new tokens.
+        case keys
+        /// The values of the new tokens.
+        case values
+    }
 
     /// The width of one attention head.
     let headDim: Int
@@ -212,15 +219,16 @@ struct Qwen35AttentionLayerFixture {
         let attention = try #require(layer.selfAttn, sourceLocation: sourceLocation)
         let cache = filledCache(keys: cachedKeys, dtype: dtype, seed: seeds.cache)
         let step = MLXRandom.normal(
-            [Self.stepTensors, 1, Self.queryHeads, tokens, headDim],
+            [StepTensor.allCases.count, 1, Self.queryHeads, tokens, headDim],
             key: MLXRandom.key(seeds.tokens)
         ).asType(dtype)
-        let rotatedQueries = Self.rotated(step[0], attention: attention, cache: cache)
+        let queries = step[StepTensor.queries.rawValue]
+        let rotatedQueries = Self.rotated(queries, attention: attention, cache: cache)
         let keys = cachedKeys + tokens
 
         let output = layer.attentionCacheStep(
-            queries: step[0], keys: step[1][0..., ..<Self.kvHeads],
-            values: step[2][0..., ..<Self.kvHeads], cache: cache,
+            queries: queries, keys: step[StepTensor.keys.rawValue][0..., ..<Self.kvHeads],
+            values: step[StepTensor.values.rawValue][0..., ..<Self.kvHeads], cache: cache,
             mask: Self.mask(kind, rotatedQueries: rotatedQueries, keys: keys))
         let expected = Self.routeOutput(
             with: kind, picksFrom: kernels, rotatedQueries: rotatedQueries,
