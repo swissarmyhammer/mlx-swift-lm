@@ -22,8 +22,24 @@ comments:
     - evidence: 25 files — deleted Libraries/MLXLMCommon/MTPAdaptiveSpeculation.swift, Tests/MLXLMTests/MTPAdaptive{Controller,Speculation,Replay}Tests.swift, Tests/MLXLMTestSupport/MTPAdaptiveTestPolicy.swift, Tests/MLXLMTests/MTPChatBenchmarkAdaptivePolicyTests.swift; edited MTPSpeculativeTokenIterator, ChatSession, MTPSpeculation, SpeculativeDecoding, MLXSpeculativeDecoding, GuidedSpeculation, GuidedGenerationDiagnosticSink, MTPChatBenchmark, GenerationBenchmarks, GuidedGenerationMTP{Tests,StandDownTests,TestSupport}, GenerationBenchmarkTests, Qwen38FourBitMTPModel, MTPSWEBenchScaleTests, MTPCPULoadTests, MTPRoundCostBreakdownTests, MTPVerifyForwardProfileTests. Build 0 warnings; 5 bundles 0 fail/0 skip; IT Release build-for-testing OK; verify-docs OK. Release run: SystemPromptCache pass (edit turn 123 tok); MTPGeneration failed isNoSlowerThanSingleDraft under external CPU contention.
     - next: rerun qwen38FourBitMTPGeneration on an idle machine to confirm the sweep check, then /review.
   timestamp: 2026-10-30T15:35:30.827568+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m66qapjgrsf4m94npchp7vrp
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (937390bc) — counts findings 0, confirmed 0, refuted 0 (7 validators attempted, 0 failed); 24 files reviewed, 2 .kanban files skipped (no validator). Declined items only for files the commit deleted. Repo-wide grep for MTPAdaptive|adaptivePolicy|invalidMTPAdaptivePolicy|adaptivePause|adaptiveProbe|adaptivePlainToken|adaptiveBlockSize: no matches.
+    - next: none — task moved to done.
+  timestamp: 2026-10-30T15:37:20.720951+00:00
+- actor: claude-code
+  id: 01m66qbcs8wphqn61af8h5aab2
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — guard removed (6 files deleted, 19 edited)
+    - test: green — build 0 warnings; 5 bundles 0 fail/0 skip; IntegrationTesting Release build ok; verify-docs ok; Release qwen38FourBitMTPSystemPromptCache pass (edit turn 123); qwen38FourBitMTPGeneration single-draft check is the pre-existing ^p2bbykc
+    - commit: 937390bc
+    - review: clean — task moved to done
+  timestamp: 2026-10-30T15:37:43.464411+00:00
+position_column: done
+position_ordinal: ffff9280
 title: 'MTP: remove the adaptive guard entirely (user decision)'
 ---
 User decision (2026-10-30): "I don't want that guard at all." Real-model measurement under ^tdj3waa showed the guard never pays (slower than guard-off at 5/10 sweep points, below plain at router 64k/100k and under 50% CPU load). Remove it completely rather than keep it opt-in.
