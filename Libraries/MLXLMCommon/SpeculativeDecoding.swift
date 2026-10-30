@@ -64,24 +64,6 @@ public struct SpeculativeDecodingTelemetry: Sendable, Equatable {
     /// accepted more than `k` drafts, so it describes depth `k + 1`.
     public private(set) var acceptedRoundCountsByDepth: [Int] = []
 
-    /// The times the adaptive guard of an MTP stream paused speculation because its rounds lost
-    /// to plain decode (see ``MTPAdaptivePolicy``).
-    public private(set) var adaptivePauseCount = 0
-
-    /// The times the adaptive guard of an MTP stream probed plain decode to measure it.
-    public private(set) var adaptiveProbeCount = 0
-
-    /// The tokens the adaptive guard of an MTP stream decoded plainly, in its probes and pauses.
-    /// ``emittedTokenCount`` counts them too.
-    public private(set) var adaptivePlainTokenCount = 0
-
-    /// The times the adaptive guard of an MTP stream changed its block size.
-    public private(set) var adaptiveBlockSizeChangeCount = 0
-
-    /// The block size the adaptive guard of an MTP stream last chose, or `nil` for a stream
-    /// without a guard.
-    public private(set) var adaptiveBlockSize: Int?
-
     public init(
         roundCount: Int = 0,
         draftTokenCount: Int = 0,
@@ -172,22 +154,6 @@ public struct SpeculativeDecodingTelemetry: Sendable, Equatable {
 
     package mutating func discardGeneratedToken() {
         emittedTokenCount = max(0, emittedTokenCount - 1)
-    }
-
-    /// Counts one token the adaptive guard decoded plainly.
-    package mutating func recordAdaptivePlainToken() {
-        adaptivePlainTokenCount += 1
-    }
-
-    /// Takes the decisions of an adaptive guard so far: its pauses, its probes, its block size
-    /// changes, and the block size it last chose.
-    ///
-    /// - Parameter controller: The decisions of the guard.
-    package mutating func recordAdaptiveDecisions(of controller: MTPAdaptiveController) {
-        adaptivePauseCount = controller.pauseCount
-        adaptiveProbeCount = controller.probeCount
-        adaptiveBlockSizeChangeCount = controller.blockSizeChangeCount
-        adaptiveBlockSize = controller.blockSize
     }
 }
 

@@ -14,17 +14,12 @@ public enum SpeculativeDecodingConfigurationError: Error, Sendable, Equatable, L
     /// The MTP confidence floor is not a probability from 0 to 1.
     case invalidMTPMinimumDraftProbability(Float)
 
-    /// A setting of the MTP adaptive policy is outside its range; the value names which one.
-    case invalidMTPAdaptivePolicy(String)
-
     public var errorDescription: String? {
         switch self {
         case .invalidMTPBlockSize(let value):
             "MTP verification block size must be at least 2; received \(value)."
         case .invalidMTPMinimumDraftProbability(let value):
             "MTP minimum draft probability must be from 0 to 1; received \(value)."
-        case .invalidMTPAdaptivePolicy(let requirement):
-            "MTP adaptive policy is invalid: \(requirement)."
         }
     }
 }
@@ -202,10 +197,6 @@ public struct SpeculativeDecodingConfig: Sendable {
     /// working set.
     public let memoryPolicy: SpeculativeDecodingMemoryPolicy?
 
-    /// How each MTP turn guards against decoding slower than plain decode; see
-    /// ``MTPAdaptivePolicy``. Draft-model configurations do not read it.
-    public let mtpAdaptivePolicy: MTPAdaptivePolicy
-
     public init(
         draftModel: ModelContainer,
         numDraftTokens: Int = 5,
@@ -214,7 +205,6 @@ public struct SpeculativeDecodingConfig: Sendable {
         self.strategy = .draftModel(.loaded(draftModel))
         self.numDraftTokens = numDraftTokens
         self.memoryPolicy = memoryPolicy
-        self.mtpAdaptivePolicy = .default
     }
 
     /// Initialize speculative decoding with a draft model loader.
@@ -239,7 +229,6 @@ public struct SpeculativeDecodingConfig: Sendable {
             .deferred(bytes: max(0, draftModelBytes), loadDraftModel))
         self.numDraftTokens = numDraftTokens
         self.memoryPolicy = memoryPolicy
-        self.mtpAdaptivePolicy = .default
     }
 
     /// Initialize speculative decoding with an MTP drafter.
@@ -259,24 +248,19 @@ public struct SpeculativeDecodingConfig: Sendable {
     ///   - memoryPolicy: optional memory policy that each turn checks before it speculates.
     ///     The drafter bytes it weighs are the drafter's parameters and the drafter state the
     ///     session carries from the previous turn.
-    ///   - adaptivePolicy: how each turn guards against decoding slower than plain decode.
     /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)``
-    ///   when `blockSize` is smaller than 2,
+    ///   when `blockSize` is smaller than 2, and
     ///   ``SpeculativeDecodingConfigurationError/invalidMTPMinimumDraftProbability(_:)`` when
-    ///   `minimumDraftProbability` is not from 0 to 1, and
-    ///   ``SpeculativeDecodingConfigurationError/invalidMTPAdaptivePolicy(_:)`` when a setting of
-    ///   `adaptivePolicy` is outside its range.
+    ///   `minimumDraftProbability` is not from 0 to 1.
     public init(
         mtpDrafter: MTPDrafterContainer,
         blockSize: Int = defaultMTPBlockSize,
         minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
-        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
-        adaptivePolicy: MTPAdaptivePolicy = .default
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) throws {
         try self.init(
             mtpDrafterSource: .loaded(mtpDrafter), blockSize: blockSize,
-            minimumDraftProbability: minimumDraftProbability, memoryPolicy: memoryPolicy,
-            adaptivePolicy: adaptivePolicy)
+            minimumDraftProbability: minimumDraftProbability, memoryPolicy: memoryPolicy)
     }
 
     /// Initialize speculative decoding with an MTP drafter loader.
@@ -297,29 +281,29 @@ public struct SpeculativeDecodingConfig: Sendable {
     ///   - memoryPolicy: optional memory policy that each turn checks before it speculates: on
     ///     `mtpDrafterBytes` before the drafter loads, then on the loaded drafter's parameters
     ///     and the drafter state the session carries.
-    ///   - adaptivePolicy: how each turn guards against decoding slower than plain decode.
     ///   - loadMTPDrafter: closure that loads the drafter only if speculation is admitted
-    /// - Throws: the errors of
-    ///   ``init(mtpDrafter:blockSize:minimumDraftProbability:memoryPolicy:adaptivePolicy:)``.
+    /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)``
+    ///   when `blockSize` is smaller than 2, and
+    ///   ``SpeculativeDecodingConfigurationError/invalidMTPMinimumDraftProbability(_:)`` when
+    ///   `minimumDraftProbability` is not from 0 to 1.
     public init(
         mtpDrafterBytes: Int,
         blockSize: Int = defaultMTPBlockSize,
         minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
-        adaptivePolicy: MTPAdaptivePolicy = .default,
         loadMTPDrafter: @escaping @Sendable () async throws -> MTPDrafterContainer
     ) throws {
         try self.init(
             mtpDrafterSource: .deferred(bytes: max(0, mtpDrafterBytes), loadMTPDrafter),
             blockSize: blockSize, minimumDraftProbability: minimumDraftProbability,
-            memoryPolicy: memoryPolicy, adaptivePolicy: adaptivePolicy)
+            memoryPolicy: memoryPolicy)
     }
 
     /// Initialize speculative decoding with an MTP drafter that the factory of `registration`
     /// loads from `configuration` on the first turn that speculates.
     ///
     /// The deferred load follows
-    /// ``init(mtpDrafterBytes:blockSize:minimumDraftProbability:memoryPolicy:adaptivePolicy:loadMTPDrafter:)``:
+    /// ``init(mtpDrafterBytes:blockSize:minimumDraftProbability:memoryPolicy:loadMTPDrafter:)``:
     /// ``ChatSession`` loads the drafter only once the memory policy admits `mtpDrafterBytes`.
     /// The load first registers the drafter model types of `registration` with the registry of
     /// its factory. Pass `.qwen35Text` of MLXLLM for a Qwen3.5-family text drafter,
@@ -340,9 +324,10 @@ public struct SpeculativeDecodingConfig: Sendable {
     ///   - minimumDraftProbability: the drafter top-1 probability below which a chaining drafter
     ///     stops a round's chain early; 0 drafts the whole block every round.
     ///   - memoryPolicy: optional memory policy that each turn checks before it speculates
-    ///   - adaptivePolicy: how each turn guards against decoding slower than plain decode.
-    /// - Throws: the errors of
-    ///   ``init(mtpDrafter:blockSize:minimumDraftProbability:memoryPolicy:adaptivePolicy:)``.
+    /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)``
+    ///   when `blockSize` is smaller than 2, and
+    ///   ``SpeculativeDecodingConfigurationError/invalidMTPMinimumDraftProbability(_:)`` when
+    ///   `minimumDraftProbability` is not from 0 to 1.
     public init(
         mtpDrafterConfiguration configuration: ModelConfiguration,
         mtpDrafterBytes: Int,
@@ -351,8 +336,7 @@ public struct SpeculativeDecodingConfig: Sendable {
         registration: MTPDrafterRegistration = MTPDrafterRegistration(),
         blockSize: Int = defaultMTPBlockSize,
         minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
-        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
-        adaptivePolicy: MTPAdaptivePolicy = .default
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) throws {
         try self.init(
             mtpDrafterSource: .deferredMatchingTarget(bytes: max(0, mtpDrafterBytes)) { target in
@@ -361,25 +345,22 @@ public struct SpeculativeDecodingConfig: Sendable {
                 return { try await load(configuration) }
             },
             blockSize: blockSize, minimumDraftProbability: minimumDraftProbability,
-            memoryPolicy: memoryPolicy, adaptivePolicy: adaptivePolicy)
+            memoryPolicy: memoryPolicy)
     }
 
     /// Initialize speculative decoding with the MTP drafter of `source`, after checking the
-    /// block size, the confidence floor and the adaptive policy.
+    /// block size and the confidence floor.
     private init(
         mtpDrafterSource source: MTPDrafterSource, blockSize: Int,
-        minimumDraftProbability: Float, memoryPolicy: SpeculativeDecodingMemoryPolicy?,
-        adaptivePolicy: MTPAdaptivePolicy
+        minimumDraftProbability: Float, memoryPolicy: SpeculativeDecodingMemoryPolicy?
     ) throws {
         try Self.validate(mtpBlockSize: blockSize)
         try Self.validate(minimumDraftProbability: minimumDraftProbability)
-        try adaptivePolicy.validate()
 
         self.strategy = .mtp(
             source, blockSize: blockSize, minimumDraftProbability: minimumDraftProbability)
         self.numDraftTokens = blockSize - 1
         self.memoryPolicy = memoryPolicy
-        self.mtpAdaptivePolicy = adaptivePolicy
     }
 
     /// The byte estimate of a deferred draft model or MTP drafter, which the memory policy
@@ -2212,7 +2193,6 @@ public final class ChatSession {
                                     parameters: generateParameters,
                                     blockSize: blockSize,
                                     minimumDraftProbability: minimumDraftProbability,
-                                    adaptivePolicy: speculativeDecoding.mtpAdaptivePolicy,
                                     components: components
                                 )
                                 generation = finishPrompt(

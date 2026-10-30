@@ -29,7 +29,7 @@ private typealias LoadPath = Qwen38FourBitMTPModel.LoadPath
 
 /// The time limit of each test, in minutes: the session test runs four sessions of about 13k
 /// decoded tokens over a 32k-token prompt, and the sweep of one load path prefills about 208k
-/// tokens and decodes 1024 tokens fifteen times: plain, MTP guard off and MTP guard on.
+/// tokens and decodes 1024 tokens ten times: plain and MTP.
 private let sweBenchScaleTimeLimitMinutes = 150
 
 /// The tool call one pass emitted.
@@ -308,13 +308,8 @@ struct MTPSWEBenchScaleTests {
     /// SWE-bench sessions reach about 103k.
     private static let sweepContextTokenCounts = [2_048, 8_192, 32_768, 65_536, 100_000]
 
-    /// The token budget of each pass of the sweep, which each pass must write: the adaptive guard
-    /// first decides after about 16 rounds, and the rest of the decode shows what it chose.
+    /// The token budget of each pass of the sweep, which each pass must write.
     private static let sweepDecodeTokenCount = 1_024
-
-    /// The least rate of MTP with the adaptive guard on, as a fraction of plain decode's at the
-    /// same point: MTP is never slower than plain decode, to within the noise of one pass.
-    private static let guardedRateFloorOfPlain = 0.97
 
     /// The milliseconds of one second.
     private static let millisecondsPerSecond = 1_000.0
@@ -394,10 +389,8 @@ struct MTPSWEBenchScaleTests {
                 contextTokenCount, runners: runners, countTokens: countTokens)
             Self.log(
                 """
-                \(path) sweep \(contextTokenCount): MTP guard off at \
-                \(point.unguarded / baseline.unguarded), MTP guard on at \
-                \(point.guarded / baseline.guarded) and plain at \
-                \(point.plain / baseline.plain) of their rates at \
+                \(path) sweep \(contextTokenCount): MTP at \(point.mtp / baseline.mtp) and \
+                plain at \(point.plain / baseline.plain) of their rates at \
                 \(Self.sweepContextTokenCounts[0]) tokens
                 """)
         }
@@ -597,28 +590,24 @@ struct MTPSWEBenchScaleTests {
 
     // MARK: - The context-length sweep
 
-    /// The three models of the sweep of one load path.
+    /// The two models of the sweep of one load path.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     struct SweepRunners {
 
         /// Plain decode.
         let plain: SessionRunner
 
-        /// MTP with the adaptive guard off: the raw cost of speculation.
-        let unguarded: SessionRunner
-
-        /// MTP with the opt-in adaptive guard on (`MTPAdaptivePolicy.enabled`).
-        let guarded: SessionRunner
+        /// MTP: the raw cost of speculation.
+        let mtp: SessionRunner
     }
 
     /// The decode rates of one sweep point, in tokens per second.
     struct SweepPoint {
         let plain: Double
-        let unguarded: Double
-        let guarded: Double
+        let mtp: Double
     }
 
-    /// Loads the three models of a sweep on `path`, compiles the kernels of each, and gives
+    /// Loads the two models of a sweep on `path`, compiles the kernels of each, and gives
     /// them with the token counter of their tokenizer.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func makeSweepRunners(
@@ -631,31 +620,27 @@ struct MTPSWEBenchScaleTests {
                 model: try Qwen38FourBitMTPModel.make(
                     speculates: false, reasons: true, path: path),
                 label: "\(path) plain"),
-            unguarded: try SessionRunner(
+            mtp: try SessionRunner(
                 model: try Qwen38FourBitMTPModel.make(
-                    speculates: true, reasons: true, path: path, adaptivePolicy: .disabled),
-                label: "\(path) MTP guard off"),
-            guarded: try SessionRunner(
-                model: try Qwen38FourBitMTPModel.make(
-                    speculates: true, reasons: true, path: path, adaptivePolicy: .enabled),
-                label: "\(path) MTP guard on"))
+                    speculates: true, reasons: true, path: path),
+                label: "\(path) MTP"))
         let container = try await runners.plain.model.loadContainer()
         let tokenizer = await container.tokenizer
-        for runner in [runners.plain, runners.unguarded, runners.guarded] {
+        for runner in [runners.plain, runners.mtp] {
             try await runner.warmUp()
         }
         return (runners, { tokenizer.encode(text: $0, addSpecialTokens: false).count })
     }
 
     /// Decodes ``sweepDecodeTokenCount`` tokens with no tools after a history of
-    /// `contextTokenCount` content tokens with MTP guard off, MTP guard on and plain decode,
-    /// back to back; logs each MTP pass against plain decode; and holds that MTP with the guard
-    /// on speculates and decodes at least ``guardedRateFloorOfPlain`` of plain decode's rate.
-    /// Nothing is held of MTP with the guard off: its numbers show the raw cost.
+    /// `contextTokenCount` content tokens with MTP and plain decode, back to back; logs the MTP
+    /// pass against plain decode; and holds that both passes write the whole budget over the
+    /// whole context, and that MTP speculates. Nothing is held of the MTP rate: its numbers show
+    /// the raw cost.
     ///
-    /// The three passes share one session of a store of their own: MTP guard off prefills the
-    /// history cold, with its drafter, and the two passes after it reuse what of that cache they
-    /// can, which each log line states as cached tokens.
+    /// The two passes share one session of a store of their own: MTP prefills the history cold,
+    /// with its drafter, and the plain pass after it reuses what of that cache it can, which the
+    /// log line states as cached tokens.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func measureSweepPoint(
         _ contextTokenCount: Int, runners: SweepRunners, countTokens: (String) -> Int
@@ -676,54 +661,23 @@ struct MTPSWEBenchScaleTests {
                 try await runner.run(
                     entries, tokenBudget: Self.sweepDecodeTokenCount, declaresTool: false)
             }
-            let unguarded = try await run(runners.unguarded)
-            let guarded = try await run(runners.guarded)
-            return (plain: try await run(runners.plain), unguarded: unguarded, guarded: guarded)
+            let mtp = try await run(runners.mtp)
+            return (plain: try await run(runners.plain), mtp: mtp)
         }
-        let label = "\(runners.guarded.label) vs plain, sweep \(contextTokenCount)"
-        let plain = passes.plain.completion.tokensPerSecond
-        let guarded = passes.guarded.completion
-        Self.log(
-            """
-            \(runners.unguarded.label) vs plain, sweep \(contextTokenCount): \
-            \(Self.describeSweep(mtp: passes.unguarded, plain: passes.plain))
-            """)
-        Self.log(
-            """
-            \(label): \(Self.describeSweep(mtp: passes.guarded, plain: passes.plain)); \
-            \(Self.describeGuard(passes.guarded))
-            """)
-        for pass in [passes.plain, passes.guarded] {
+        let label = "\(runners.mtp.label) vs plain, sweep \(contextTokenCount)"
+        let mtp = passes.mtp.completion
+        Self.log("\(label): \(Self.describeSweep(mtp: passes.mtp, plain: passes.plain))")
+        for pass in [passes.plain, passes.mtp] {
             #expect(pass.events.renderedTokenCount >= contextTokenCount, "\(label)")
             #expect(
                 pass.completion.generationTokenCount >= Self.sweepDecodeTokenCount,
                 "\(label): a pass wrote \(pass.completion.generationTokenCount) tokens")
         }
-        #expect((guarded.proposedDraftTokens ?? 0) > 0, "\(label)")
-        #expect(guarded.passthroughReason == nil, "\(label)")
-        #expect(guarded.speculativeDecodingFallbackReason == nil, "\(label)")
-        // The opt-in guard trails plain decode at some points, by its pauses and probes.
-        withKnownIssue("^w7cgbhd: the guarded mix can trail plain decode", isIntermittent: true) {
-            #expect(
-                guarded.tokensPerSecond >= plain * Self.guardedRateFloorOfPlain,
-                "\(label): MTP guard on \(guarded.tokensPerSecond) tok/s, plain \(plain) tok/s")
-        }
+        #expect((mtp.proposedDraftTokens ?? 0) > 0, "\(label)")
+        #expect(mtp.passthroughReason == nil, "\(label)")
+        #expect(mtp.speculativeDecodingFallbackReason == nil, "\(label)")
         return SweepPoint(
-            plain: plain, unguarded: passes.unguarded.completion.tokensPerSecond,
-            guarded: guarded.tokensPerSecond)
-    }
-
-    /// What the adaptive guard of `pass` did, in a measurement line.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private static func describeGuard(_ pass: Pass) -> String {
-        let telemetry = pass.completion.speculativeDecodingTelemetry
-        return """
-            guard \(telemetry?.adaptivePauseCount ?? 0) pauses, \
-            \(telemetry?.adaptiveProbeCount ?? 0) probes, \
-            \(telemetry?.adaptivePlainTokenCount ?? 0) plain tokens, \
-            \(telemetry?.adaptiveBlockSizeChangeCount ?? 0) block size changes, final block \
-            size \(telemetry?.adaptiveBlockSize.map(String.init) ?? "none")
-            """
+            plain: passes.plain.completion.tokensPerSecond, mtp: mtp.tokensPerSecond)
     }
 
     /// The numbers of one MTP pass of a sweep point against plain decode, in a measurement line.

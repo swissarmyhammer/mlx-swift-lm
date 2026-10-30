@@ -24,74 +24,39 @@ struct GuidedGenerationMTPStandDownTests {
     /// The block sizes of the generations: the shipped single draft, and chains of three drafts.
     private static let blockSizes = [2, 4]
 
-    /// The schemas whose first round verifies several tokens, so the first one-token forward of
-    /// a guarded generation is the probe after it.
-    private static let schemasProbingFirst: [GuidedFixtureSchema] = [.activity, .threeActivities]
-
-    /// Under a guard that probes plain decode after the first round, the probe's one-token
-    /// forwards give no hidden row: the paused decision stands down, and the stand-down reaches
-    /// the sink as an `unavailableContinuation` fallback with its stated reason, once.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    @Test(arguments: Self.schemasProbingFirst, Self.blockSizes)
-    func aPausedForwardWithoutHiddenStateRecordsTheStandDown(
-        schema: GuidedFixtureSchema, blockSize: Int
-    ) throws {
-        let (plain, guarded, target) = try Self.generate(schema: schema, blockSize: blockSize)
-
-        #expect(guarded.sink.draftedTokenCount > 0)
-        #expect(guarded.sink.adaptiveProbeCount > 0)
-        Self.expectOneStandDown(guarded, after: plain, target: target)
-    }
-
-    /// Whichever forward gives no hidden row first, a round's or a paused decision's, the
-    /// generation stands down once and writes the plain output.
+    /// The first verify of a round gives no hidden row: the generation drafts that round, stands
+    /// down once, writes the plain output, and the stand-down reaches the sink as an
+    /// `unavailableContinuation` fallback with its stated reason.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test(arguments: GuidedFixtureSchema.allCases, Self.blockSizes)
     func aForwardWithoutHiddenStateRecordsOneStandDown(
         schema: GuidedFixtureSchema, blockSize: Int
     ) throws {
-        let (plain, guarded, target) = try Self.generate(schema: schema, blockSize: blockSize)
-
-        Self.expectOneStandDown(guarded, after: plain, target: target)
-    }
-
-    /// Generates `schema` plainly on the fixture's target, and with MTP under a guard that
-    /// loses every round on a target whose one-token forwards give no hidden row.
-    private static func generate(
-        schema: GuidedFixtureSchema, blockSize: Int
-    ) throws -> (plain: GuidedFixtureRun, guarded: GuidedFixtureRun, target: Qwen35TextModel) {
         let fixture = try Qwen35MTPFixture()
         let target = try HiddenWithholdingTarget(copying: fixture.target)
         let plain = try GuidedFixtureRun.generate(
-            schema: schema.json, prompt: prompt, fixture: fixture, blockSize: nil)
-        let guarded = try GuidedFixtureRun.generate(
-            schema: schema.json, prompt: prompt, fixture: fixture, blockSize: blockSize,
-            target: target, adaptivePolicy: .losingEveryRound)
-        return (plain, guarded, target)
-    }
+            schema: schema.json, prompt: Self.prompt, fixture: fixture, blockSize: nil)
+        let speculative = try GuidedFixtureRun.generate(
+            schema: schema.json, prompt: Self.prompt, fixture: fixture, blockSize: blockSize,
+            target: target)
 
-    /// Expects `guarded` to write the output of `plain`, and to record one stand-down of
-    /// `target` on its sink.
-    private static func expectOneStandDown(
-        _ guarded: GuidedFixtureRun, after plain: GuidedFixtureRun, target: Qwen35TextModel
-    ) {
-        #expect(guarded.text == plain.text)
-        #expect(guarded.tokenCount == plain.tokenCount)
-        #expect(guarded.incomplete == plain.incomplete)
-        #expect(guarded.sink.speculationFallbacks == [.unavailableContinuation])
+        #expect(speculative.text == plain.text)
+        #expect(speculative.tokenCount == plain.tokenCount)
+        #expect(speculative.incomplete == plain.incomplete)
+        #expect(speculative.sink.draftedTokenCount > 0)
+        #expect(speculative.sink.speculationFallbacks == [.unavailableContinuation])
         #expect(
-            guarded.sink.speculationFallbackReason
+            speculative.sink.speculationFallbackReason
                 == GuidedSpeculation.missingDrafterStateReason(of: target))
         #expect(plain.sink.speculationFallbacks.isEmpty)
     }
 }
 
-/// The fixture's target, whose one-token forwards give no drafter hidden state.
+/// The fixture's target, whose verify forwards of several tokens give no drafter hidden state.
 ///
-/// A paused decision feeds one token per forward, and so does a round whose drafts force more
-/// tokens than one verify holds; the prefill and the other verifies feed several tokens and keep
-/// their state. A subclass of the target, and not a wrapper, because the MTP drafter drafts for
-/// a Qwen 3.5 target only.
+/// The prefill gives its state, so the speculation starts and drafts its first round; the verify
+/// of that round asks to keep its snapshots, and gives no hidden row. A subclass of the target,
+/// and not a wrapper, because the MTP drafter drafts for a Qwen 3.5 target only.
 private final class HiddenWithholdingTarget: Qwen35TextModel {
 
     /// Makes a target with the configuration and the weights of `target`.
@@ -104,7 +69,8 @@ private final class HiddenWithholdingTarget: Qwen35TextModel {
         eval(self)
     }
 
-    /// Runs the target's forward, and drops its hidden state when `input` holds one token.
+    /// Runs the target's forward, and drops its hidden state when the forward is a verify that
+    /// keeps its snapshots.
     ///
     /// - Parameters:
     ///   - input: The tokens of the forward.
@@ -115,7 +81,7 @@ private final class HiddenWithholdingTarget: Qwen35TextModel {
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
         let output = super.callAsFunction(input, cache: cache, state: state)
-        guard input.tokens.size == 1 else { return output }
+        guard state?[mtpVerifyKeepsSnapshotsKey] ?? false else { return output }
         var withheld = output.state
         withheld?[mtpLastHiddenStatesKey] = nil
         return LMOutput(logits: output.logits, state: withheld)

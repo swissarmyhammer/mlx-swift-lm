@@ -151,7 +151,7 @@ struct MTPVerifyForwardProfileTests {
     func verifyForwardByLayerKindAtThirtyTwoAndOneHundredThousandTokens() async throws {
         await releaseAllGPUMemory()
         let mtpModel = try Qwen38FourBitMTPModel.make(
-            speculates: true, path: .text, adaptivePolicy: .disabled)
+            speculates: true, path: .text)
         let blockSize = try #require(mtpModel.speculativeDecoding).blockSize
         let container = try await mtpModel.loadContainer()
         let tokenizer = await container.tokenizer

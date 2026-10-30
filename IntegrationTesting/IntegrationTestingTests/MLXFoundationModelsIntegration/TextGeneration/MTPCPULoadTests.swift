@@ -1,6 +1,6 @@
 // Copyright © 2026 Apple Inc.
 //
-// MTP with the adaptive guard off and on against plain decode of Qwen3.8-27B-4bit while busy
+// MTP against plain decode of Qwen3.8-27B-4bit while busy
 // threads keep a share of the CPU cores loaded, as the CPU-heavy work beside the ACP agent's
 // generation does (test runs, indexing, other sessions' builds). Each round of MTP syncs the host
 // with the GPU more often than plain decode, so CPU contention may cost it more. Run it in
@@ -54,9 +54,9 @@ extension MTPSWEBenchScaleTests {
     /// typical context of the ACP agent's SWE-bench sessions.
     private static let cpuLoadContextTokenCounts = [2_048, 32_768]
 
-    /// Decodes at each context of ``cpuLoadContextTokenCounts`` with MTP guard off, MTP guard
-    /// on and plain decode while `busyCorePercent` percent of the CPU cores spin, and logs each
-    /// MTP rate as a share of plain decode's. Each sweep point holds what
+    /// Decodes at each context of ``cpuLoadContextTokenCounts`` with MTP and plain decode while
+    /// `busyCorePercent` percent of the CPU cores spin, and logs the MTP rate as a share of
+    /// plain decode's. Each sweep point holds what
     /// ``measureSweepPoint(_:runners:countTokens:)`` holds.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test(
@@ -75,9 +75,8 @@ extension MTPSWEBenchScaleTests {
             Self.log(
                 """
                 CPU load \(busyCorePercent)% (\(busyThreadCount) busy threads), sweep \
-                \(contextTokenCount): plain \(point.plain) tok/s, MTP guard off at \
-                \(point.unguarded / point.plain), MTP guard on at \(point.guarded / point.plain) \
-                of plain
+                \(contextTokenCount): plain \(point.plain) tok/s, MTP at \
+                \(point.mtp / point.plain) of plain
                 """)
         }
         await releaseAllGPUMemory()

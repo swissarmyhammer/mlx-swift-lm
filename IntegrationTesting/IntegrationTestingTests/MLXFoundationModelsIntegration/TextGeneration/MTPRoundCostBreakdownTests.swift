@@ -127,9 +127,8 @@ struct MTPRoundCostBreakdownTests {
     ) async throws {
         // Both load paths name one model id, thus one container of the model cache.
         await releaseAllGPUMemory()
-        // The guard off: the breakdown measures the raw cost of each part.
         let mtpModel = try Qwen38FourBitMTPModel.make(
-            speculates: true, reasons: true, path: path, adaptivePolicy: .disabled)
+            speculates: true, reasons: true, path: path)
         let speculation = try #require(mtpModel.speculativeDecoding)
         let container = try await mtpModel.loadContainer()
         let loadDrafter = await container.perform { speculation.drafterLoader(for: $0.model) }

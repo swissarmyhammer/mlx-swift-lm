@@ -331,17 +331,12 @@ struct GenerationBenchmarkTests {
     /// near-tie of plain's two best tokens, and decodes faster than the plain
     /// session. A check the current code fails stands in
     /// ``mtpChatKnownGaps`` with the task that closes it.
-    ///
-    /// The MTP session runs once with its adaptive guard off and once with it on, and each
-    /// run holds every check.
-    @Test(
-        .enabled(if: qwen38FourBitMTPIsLocal),
-        arguments: [MTPAdaptivePolicy.disabled, .enabled])
-    func qwen38FourBitMTPSystemPromptCache(adaptivePolicy: MTPAdaptivePolicy) async throws {
+    @Test(.enabled(if: qwen38FourBitMTPIsLocal))
+    func qwen38FourBitMTPSystemPromptCache() async throws {
         let container = try await qwen38FourBit.container()
         let drafter = MTPDrafterContainer(context: try await loadQwen38FourBitMTPDrafter())
         let results = try await Benchmark.mtpSystemPromptCache(
-            container: container, drafter: drafter, adaptivePolicy: adaptivePolicy)
+            container: container, drafter: drafter)
         #expect(results.count == MTPChatScenario.defaults.count)
         for result in results {
             expectMTPChat(result)

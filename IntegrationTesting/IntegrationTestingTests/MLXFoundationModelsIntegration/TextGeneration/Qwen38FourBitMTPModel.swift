@@ -178,14 +178,11 @@ enum Qwen38FourBitMTPModel {
     ///   - speculates: Whether the model drafts with the MTP head.
     ///   - reasons: Whether the model keeps the reasoning protocol of the target.
     ///   - path: How the target loads.
-    ///   - adaptivePolicy: How a model that speculates guards against decoding slower than plain
-    ///     decode; `.disabled` speculates at the full block size for the whole stream.
     /// - Returns: The model.
     /// - Throws: The error of the speculative decoding configuration.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     static func make(
-        speculates: Bool, reasons: Bool = false, path: LoadPath = .text,
-        adaptivePolicy: MTPAdaptivePolicy = .default
+        speculates: Bool, reasons: Bool = false, path: LoadPath = .text
     ) throws -> MLXLanguageModel {
         let resolver: any ModelConfigurationResolver =
             reasons ? DefaultConfigurationResolver() : PlainPromptResolver()
@@ -197,7 +194,7 @@ enum Qwen38FourBitMTPModel {
                 ? try MLXSpeculativeDecoding(
                     drafterConfiguration: ModelConfiguration(id: drafterID),
                     from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-                    registration: path.drafterRegistration, adaptivePolicy: adaptivePolicy)
+                    registration: path.drafterRegistration)
                 : nil,
             weightsLocation: testWeightsLocation(modelID:),
             load: path.containerLoader)

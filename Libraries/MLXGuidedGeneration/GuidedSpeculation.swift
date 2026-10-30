@@ -26,11 +26,6 @@ typealias GuidedMTPDrafter = ResumableMTPDrafterModel & StatefulMTPDistributionD
 /// Both run on the targets that verify in place only (the Qwen 3.5 hybrids), where a verify
 /// forward of several tokens on a populated cache gives each row the one-token logits; every
 /// other target decodes plainly.
-///
-/// The adaptive guard of ``MTPSpeculation/adaptivePolicy`` lowers the block size while rounds
-/// decode slower than plain decode, and pauses speculation when the smallest block still does.
-/// A paused decision feeds its tokens one forward each, as plain decoding does, and the drafter
-/// takes them in one commit when speculation resumes.
 struct GuidedSpeculation {
 
     /// The drafter.
@@ -51,20 +46,6 @@ struct GuidedSpeculation {
 
     /// Whether the target stopped reporting its drafter state, which ends the speculation.
     private var stoodDown = false
-
-    /// The guard that lowers the block size or pauses speculation while rounds decode slower
-    /// than plain decode, or `nil` when its policy is disabled.
-    private var adaptiveGuard: MTPAdaptiveGuard?
-
-    /// The tokens the paused decisions fed since the last round, which the drafter takes when
-    /// speculation resumes.
-    private var pausedFeed: [Int32] = []
-
-    /// The target hidden row of each token of ``pausedFeed``.
-    private var pausedHidden: [MLXArray] = []
-
-    /// The tokens the paused decisions emitted, which are no drafts.
-    private var pausedTokenCount = 0
 
     /// The test sink that records each round, or `nil`.
     private let diagnosticSink = GuidedGenerationDiagnosticSink.current
@@ -145,8 +126,6 @@ struct GuidedSpeculation {
         self.maximumDrafts = blockSize - 1
         self.lastKeptHidden = segmentHidden[0..., (-1)..., 0...]
         self.positionDeltas = prefill.positionDeltas
-        self.adaptiveGuard = MTPAdaptiveGuard(
-            policy: speculation.adaptivePolicy, blockSize: blockSize)
     }
 
     /// Decodes the rest of the generation from `pending`, the tokens the last decision feeds
@@ -162,7 +141,6 @@ struct GuidedSpeculation {
     mutating func decode(
         from pending: [Int32], decoder: inout GuidedDecoder, target: inout GuidedTarget
     ) throws {
-        defer { reportAdaptiveDecisions() }
         var feed = pending
         while decoder.hasBudget {
             try Task.checkCancellation()
@@ -172,104 +150,22 @@ struct GuidedSpeculation {
                     from: feed, decoder: &decoder, target: &target)
                 return
             }
-            let emittedBefore = decoder.tokenCount
-            let next = try decideNext(
-                after: feed, drafts: drafts, decoder: &decoder, target: &target)
-            adaptiveGuard?.recordEmitted(decoder.tokenCount - emittedBefore)
+            let next =
+                feed.count == 1
+                ? try speculate(after: feed[0], drafts: drafts, decoder: &decoder, target: &target)
+                : try feedForcedTokens(
+                    feed, chunkLength: Self.forcedChunkLength(drafts: drafts, target: target),
+                    decoder: &decoder, target: &target)
             guard let next else { return }
             feed = next
         }
     }
 
-    /// Decides the tokens after `feed` as the adaptive guard asks: a paused decision, or a round
-    /// of `drafts` drafts after the drafter takes the paused decisions since the last round.
-    ///
-    /// - Returns: The tokens the last decision feeds the target, or `nil` when the generation
-    ///   stops.
-    private mutating func decideNext(
-        after feed: [Int32], drafts: Int, decoder: inout GuidedDecoder, target: inout GuidedTarget
-    ) throws -> [Int32]? {
-        if var adaptiveGuard {
-            let step = adaptiveGuard.beginUnit(
-                contextLength: target.cacheStorage.processedTokenCount)
-            self.adaptiveGuard = adaptiveGuard
-            if step == .decodePlainly {
-                let emittedBefore = decoder.tokenCount
-                let next = try decidePaused(after: feed, decoder: &decoder, target: &target)
-                pausedTokenCount += decoder.tokenCount - emittedBefore
-                return next
-            }
-        }
-        catchUpDrafter(next: feed, target: target)
-        guard !stoodDown else { return feed }
-        return feed.count == 1
-            ? try speculate(after: feed[0], drafts: drafts, decoder: &decoder, target: &target)
-            : try feedForcedTokens(
-                feed, chunkLength: Self.forcedChunkLength(drafts: drafts, target: target),
-                decoder: &decoder, target: &target)
-    }
-
-    /// Reports the decisions of the adaptive guard to the diagnostic sink, when both exist.
-    private func reportAdaptiveDecisions() {
-        guard let adaptiveGuard else { return }
-        diagnosticSink?.recordAdaptiveDecisions(
-            of: adaptiveGuard.controller, plainTokens: pausedTokenCount)
-    }
-
     /// The drafts of the next round, or `nil` when the target cannot verify a round in place.
     private func draftsThisRound(decoder: GuidedDecoder, target: GuidedTarget) -> Int? {
-        let guardedDrafts = (adaptiveGuard?.controller.blockSize).map { $0 - 1 } ?? maximumDrafts
-        let drafts = min(guardedDrafts, decoder.rules.maxTokens - decoder.tokenCount)
+        let drafts = min(maximumDrafts, decoder.rules.maxTokens - decoder.tokenCount)
         guard drafts > 0, target.verifiesInPlace(tokens: drafts + 1) else { return nil }
         return drafts
-    }
-
-    /// One paused decision: feeds `feed` one token per forward, as plain decoding does, keeps
-    /// each forward's hidden row for the drafter, and decides the token after them.
-    ///
-    /// - Returns: The tokens the decision feeds the target, or `nil` when the generation stops.
-    private mutating func decidePaused(
-        after feed: [Int32], decoder: inout GuidedDecoder, target: inout GuidedTarget
-    ) throws -> [Int32]? {
-        var lastLogits: MLXArray?
-        for token in feed {
-            discardSpeculativePromptCacheCheckpoints(target.cache)
-            let output = target.verify([token])
-            target.keepVerified(1, of: 1)
-            lastLogits = output.logits
-            recordPausedRow(token: token, output: output, target: target)
-        }
-        guard let lastLogits else {
-            preconditionFailure("A guided feed holds at least one token")
-        }
-        asyncEval(lastLogits)
-        try decoder.advance()
-        return try decoder.decide(from: lastLogits)
-    }
-
-    /// Keeps the hidden row a paused forward of `token` gave, or ends the speculation when the
-    /// forward gave none.
-    private mutating func recordPausedRow(token: Int32, output: LMOutput, target: GuidedTarget) {
-        guard let hidden = output.state?[mtpLastHiddenStatesKey], hidden.dim(1) > 0 else {
-            standDown(target: target)
-            return
-        }
-        pausedFeed.append(token)
-        pausedHidden.append(hidden[0..., (-1)..., 0...])
-        positionDeltas = output.state?[mtpPositionDeltasKey] ?? positionDeltas
-    }
-
-    /// Commits the tokens of the paused decisions since the last round to the drafter in one
-    /// commit, with `next`, the tokens the last decision feeds, after them.
-    private mutating func catchUpDrafter(next: [Int32], target: GuidedTarget) {
-        let fed = pausedFeed
-        let hidden = pausedHidden
-        pausedFeed = []
-        pausedHidden = []
-        guard !stoodDown, !fed.isEmpty else { return }
-        commitDrafter(
-            fed: fed, kept: fed.count, hidden: concatenated(hidden, axis: 1),
-            positionDeltas: positionDeltas, next: next, target: target)
     }
 
     /// One round: drafts after `bonus`, verifies the drafts, emits the drafts the target
