@@ -31,8 +31,24 @@ comments:
     - router path: first divergence at generated token 74 (ledger 148): plain wrote 58614, MTP wrote 16570; plain-row gap 0.0 (both -1.7447); verify-row gap 0.0 (both -1.7460); replay ranks plain's token first false; near-tie at token 148, gap 0.0. Accepted 374 of 399 drafts.
     - next: close ^xrdeqvn.
   timestamp: 2026-10-30T18:14:44.859336+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m670ddq721z875wjbzm904nd
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (cd783b2c) — 0 findings, 0 confirmed, 0 refuted; 7 validator pairs attempted, 0 failed; 4 files reviewed, 2 kanban files had no matching validator
+    - next: task moved to done
+  timestamp: 2026-10-30T18:16:07.143920+00:00
+- actor: claude-code
+  id: 01m670ebe5csna0gdytrebg9qr
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — near tie = both tokens within tolerance of the best logit; MTPChatTokenTieTests; sweep retry removed
+    - test: green — 5 bundles 0 fail/0 skip; Release MTPNearTieDivergenceTests pass on both paths (router exact tie gap 0.0)
+    - commit: cd783b2c
+    - review: clean — task moved to done
+  timestamp: 2026-10-30T18:16:37.573614+00:00
+position_column: done
+position_ordinal: ffff9380
 title: 'Benchmarks: MTPChatTokenMatch must accept an exact top-2 tie (gap 0) whichever token argmax picked'
 ---
 MTPNearTieDivergenceTests (^j2tnzpn phase 2) failed on the router path: first difference at generated token 74, plain 58614 vs MTP 16570, top-2 gap 0.0 on both the plain row and the verify row — an exact tie. The replay ranked 16570 first while plain decode wrote 58614 ("replay reproduces plain false"), so the check failed on tie ordering and printed the misleading "Bug, no near tie". By the near-tie rule this is a tie, not an MTP bug.
