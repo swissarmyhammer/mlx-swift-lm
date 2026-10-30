@@ -214,8 +214,26 @@ enum Qwen38FourBitMTPModel {
         /// The container of the target.
         let container: ModelContainer
 
-        /// The MTP head of the target.
-        let drafter: PerformBox<any MTPDrafterModel>
+        /// The container of the MTP head of the target.
+        let drafter: MTPDrafterContainer
+
+        /// Runs `body` on the target and its MTP head: inside the drafter's `perform`, then
+        /// inside the target's, so the drafter model never leaves its container's isolation.
+        ///
+        /// - Parameter body: The work on the target's context and the drafter model.
+        /// - Returns: The result of `body`.
+        /// - Throws: The error of `body`.
+        func perform<Value: Sendable>(
+            _ body: @Sendable (ModelContext, any MTPDrafterModel) async throws -> Value
+        ) async throws -> Value {
+            let container = container
+            return try await drafter.perform { drafterContext in
+                try await container.perform(nonSendable: drafterContext.model) {
+                    context, drafterModel in
+                    try await body(context, drafterModel)
+                }
+            }
+        }
     }
 
     /// Loads the target of `path` that reasons, and the MTP head that drafts for it.
@@ -229,24 +247,10 @@ enum Qwen38FourBitMTPModel {
         let speculation = try #require(model.speculativeDecoding)
         let container = try await model.loadContainer()
         let loadDrafter = await container.perform { speculation.drafterLoader(for: $0.model) }
-        let drafterContainer = try await loadDrafter(speculation.drafterConfiguration)
-        let drafter = await drafterContainer.perform { PerformBox($0.model) }
+        let drafter = try await loadDrafter(speculation.drafterConfiguration)
         return LoadedWithDrafter(
             model: model, speculation: speculation, container: container, drafter: drafter)
     }
-}
-
-/// A value a benchmark hands across a `perform` boundary.
-///
-/// The benchmark reads the boxed value only inside one `ModelContainer.perform` of the target at
-/// a time, and its suite runs serially, thus no two tasks touch the value at once.
-final class PerformBox<Value>: @unchecked Sendable {
-
-    /// The boxed value.
-    let value: Value
-
-    /// Boxes `value`.
-    init(_ value: Value) { self.value = value }
 }
 
 #endif

@@ -31,11 +31,37 @@ private let drafterWindowSweepTimeLimitMinutes = 240
 /// The drafter attention windows and the context lengths the drafter-window benchmarks sweep.
 enum DrafterWindowSweep {
 
+    /// The shortest context of the sweep, in tokens: 32k.
+    private static let shortContextTokenCount = 32_768
+
+    /// The middle context of the sweep, in tokens: 64k.
+    private static let middleContextTokenCount = 65_536
+
+    /// The longest context of the sweep, in tokens: 100k, the far end of a SWE-bench run.
+    private static let longContextTokenCount = 100_000
+
+    /// The widest drafter window of the sweep, in tokens: 16k.
+    private static let widestWindowTokenCount = 16_384
+
+    /// The second drafter window of the sweep, in tokens: 8k.
+    private static let wideWindowTokenCount = 8_192
+
+    /// The third drafter window of the sweep, in tokens: 4k.
+    private static let narrowWindowTokenCount = 4_096
+
+    /// The narrowest drafter window of the sweep, in tokens: 2k.
+    private static let narrowestWindowTokenCount = 2_048
+
     /// The context lengths of the sweep, in tokens.
-    static let contextTokenCounts = [32_768, 65_536, 100_000]
+    static let contextTokenCounts = [
+        shortContextTokenCount, middleContextTokenCount, longContextTokenCount,
+    ]
 
     /// The drafter windows of the sweep, in tokens; `nil` attends to the whole context.
-    static let windowTokenCounts: [Int?] = [nil, 16_384, 8_192, 4_096, 2_048]
+    static let windowTokenCounts: [Int?] = [
+        nil, widestWindowTokenCount, wideWindowTokenCount, narrowWindowTokenCount,
+        narrowestWindowTokenCount,
+    ]
 
     /// The greedy parameters of a stream whose drafter attends to `window` tokens, with the
     /// prefix `maxKVSize` keeps, or to the whole context when `window` is `nil`.
@@ -128,15 +154,14 @@ struct MTPDrafterWindowSweepTests {
         await releaseAllGPUMemory()
         let loaded = try await Qwen38FourBitMTPModel.loadWithDrafter(path: path)
         let tokenizer = await loaded.container.tokenizer
-        let drafter = loaded.drafter
         let speculation = loaded.speculation
         for contextTokenCount in DrafterWindowSweep.contextTokenCounts {
             let history = try Self.history(
                 minimumTokenCount: contextTokenCount,
                 countTokens: { tokenizer.encode(text: $0, addSpecialTokens: false).count })
-            let point = try await loaded.container.perform { context in
+            let point = try await loaded.perform { context, drafter in
                 try await Self.measurePoint(
-                    history: history, context: context, drafter: drafter.value,
+                    history: history, context: context, drafter: drafter,
                     speculation: speculation)
             }
             try expectPoint(point, label: "\(path) context \(contextTokenCount)")

@@ -77,8 +77,25 @@ comments:
   id: 01m6728dccsar12q0sqd0eqs4g
   text: 'User decision 2026-10-30: keep the opt-in drafter attention window for now (default stays whole context). Proceed with the 4 open review findings (MTPDrafterWindowSweepTests.swift:35, :38, MTPRoundCostBreakdownTests.swift:159, Qwen38FourBitMTPModel.swift:243) after the current ^p2bbykc step.'
   timestamp: 2026-10-30T18:48:20.108534+00:00
-position_column: review
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m678sqrsgqx4ty21y7xammen
+  text: |-
+    Fix pass for the 2026-10-30 12:56 findings (user kept the opt-in window; default whole context):
+    - MTPDrafterWindowSweepTests.swift: the sweep contexts (32_768/65_536/100_000) and windows (16_384/8_192/4_096/2_048) are now private named constants of `DrafterWindowSweep` (short/middle/longContextTokenCount, widest/wide/narrow/narrowestWindowTokenCount); `contextTokenCounts`/`windowTokenCounts` list them. swiftlint no_magic_numbers (allowed [0, 1, -1, 100]) over all three files: 0 violations (was 7, all in the sweep file).
+    - MTPRoundCostBreakdownTests.swift: `for drafts in cost.drafts` -> `for drafterCost in cost.drafts`; the same element-of-`drafts` closure in `RoundCost.summary` (`drafts.map { cost in`, which also reused the RoundCost name) -> `drafterCost`.
+    - Qwen38FourBitMTPModel.swift: deleted `PerformBox<Value>: @unchecked Sendable`. `LoadedWithDrafter.drafter` is now the `MTPDrafterContainer` (Sendable) itself, and `LoadedWithDrafter.perform { context, drafter in ... }` runs the body inside the drafter container's `perform`, handing the drafter model to the target's public `ModelContainer.perform(nonSendable:)`. The drafter model never leaves its container's isolation; both benchmarks call `loaded.perform`. Lock order is always drafter then target, and nothing else in these suites takes them the other way round. (MLXLMCommon's `SendableBox` is `package`, so the integration target cannot use it, and it would be the same unchecked box anyway.)
+    - Block size: both suites read `speculation.blockSize` (the default is now 4 per ^p2bbykc), so nothing was hard-coded to 5.
+    - swift-format lint shows 3 warnings in lines this pass did not touch (sweep log line LineLength, round-cost `rewindDepth` AddLines, round-cost log line LineLength). They were left as they are.
+  timestamp: 2026-10-30T20:42:39.257669+00:00
+- actor: claude-code
+  id: 01m678srf3xk8ex4dtem0c3cn1
+  text: |-
+    ### implement — changed
+    - evidence: 3 files — IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPDrafterWindowSweepTests.swift, MTPRoundCostBreakdownTests.swift, Qwen38FourBitMTPModel.swift; all 4 findings checked. swiftlint no_magic_numbers 0 violations; xcodebuild build-for-testing Release (IntegrationTesting scheme, arm64, ENABLE_TESTABILITY/ONLY_ACTIVE_ARCH) TEST BUILD SUCCEEDED, no warnings in the 3 files (objects rebuilt); `swift build --build-tests` 0 compiler warnings (only the pre-existing SwiftPM "missing creator for mutated node ... mlx-swift_Cmlx.bundle"); xcrun xctest 5 bundles exit 0, 0 failures, 0 skipped: CXGrammarTests 7, MLXGuidedGenerationTests 72, MLXHuggingFaceMacrosTests 7, MLXFoundationModelsTests 457, MLXLMTests 920 XCTest + 2078 Swift Testing. No real-model runs.
+    - next: /review
+  timestamp: 2026-10-30T20:42:39.971044+00:00
+position_column: doing
+position_ordinal: '8280'
 title: 'MTP: cheaper drafting at long context — window the drafter''s attention (drafter steps cost 3–12 ms at 100k)'
 ---
 Step-4 breakdown (^j2tnzpn): the drafter's cache holds the full context (32768 / 100000 entries) and its attention runs over all of it on every chained step. Chained-step cost is ~1.5 ms at 32k but 3–12 ms at 100k (block-5 proposal 22–24 ms vs 6 ms at 32k).
@@ -102,7 +119,7 @@ The drafter only proposes tokens; the target verifies them, so a drafter that at
 > - `.kanban/tasks/01M66XNGB2TY2WY01KP0P5FJWC.md` — no validator matches this file
 > - `Libraries/MLXLMCommon/Documentation.docc/using.md` — no validator matches this file
 
-- [ ] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPDrafterWindowSweepTests.swift:35` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
-- [ ] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPDrafterWindowSweepTests.swift:38` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
-- [ ] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPRoundCostBreakdownTests.swift:159` `swift/naming-clarity` — The loop variable `drafts` names one `DrafterWindowCost` element, but `drafts` is also the name of the collection it iterates (`cost.drafts`). The singular element is named after the plural collection, so the role of each iteration value is unclear at the use site. Rename the loop variable to its role, for example `for drafterCost in cost.drafts {`, and update lines 160-161 to `drafterCost.entryCount` and `drafterCost.draft`.
-- [ ] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/Qwen38FourBitMTPModel.swift:243` `code-hygiene/disallowed-constructs-swift` — no_unchecked_sendable: Instead of @unchecked Sendable, write a plain Sendable conformance or a @preconcurrency import. If the type really must be @unchecked Sendable, write // swiftlint:disable:next no_unchecked_sendable above it with the synchronization invariant that makes the type thread-safe.
+- [x] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPDrafterWindowSweepTests.swift:35` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPDrafterWindowSweepTests.swift:38` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/MTPRoundCostBreakdownTests.swift:159` `swift/naming-clarity` — The loop variable `drafts` names one `DrafterWindowCost` element, but `drafts` is also the name of the collection it iterates (`cost.drafts`). The singular element is named after the plural collection, so the role of each iteration value is unclear at the use site. Rename the loop variable to its role, for example `for drafterCost in cost.drafts {`, and update lines 160-161 to `drafterCost.entryCount` and `drafterCost.draft`.
+- [x] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/Qwen38FourBitMTPModel.swift:243` `code-hygiene/disallowed-constructs-swift` — no_unchecked_sendable: Instead of @unchecked Sendable, write a plain Sendable conformance or a @preconcurrency import. If the type really must be @unchecked Sendable, write // swiftlint:disable:next no_unchecked_sendable above it with the synchronization invariant that makes the type thread-safe.

@@ -81,12 +81,13 @@ private struct RoundCost: Sendable {
             rows 1... [\(format(verify))] ms; host sync \(String(format: "%.3f", hostSync)) ms
             """
         return [target]
-            + drafts.map { cost in
+            + drafts.map { drafterCost in
                 """
                 context \(contextTokenCount) tokens, drafter window \
-                \(DrafterWindowSweep.label(of: cost.window)), drafter state \(cost.entryCount) \
-                entries: drafter proposal by block size 2... [\(format(cost.draft))] ms, chained \
-                steps [\(format(cost.chainedSteps))] ms
+                \(DrafterWindowSweep.label(of: drafterCost.window)), drafter state \
+                \(drafterCost.entryCount) entries: drafter proposal by block size 2... \
+                [\(format(drafterCost.draft))] ms, chained steps \
+                [\(format(drafterCost.chainedSteps))] ms
                 """
             }
     }
@@ -139,7 +140,6 @@ struct MTPRoundCostBreakdownTests {
         await releaseAllGPUMemory()
         let loaded = try await Qwen38FourBitMTPModel.loadWithDrafter(path: path)
         let tokenizer = await loaded.container.tokenizer
-        let drafter = loaded.drafter
         let blockSize = loaded.speculation.blockSize
         let historyTokens = (0 ..< Self.maximumHistoryRoundCount).flatMap {
             tokenizer.encode(text: SWEBenchTranscript.exchangeText($0), addSpecialTokens: false)
@@ -147,18 +147,19 @@ struct MTPRoundCostBreakdownTests {
         for contextTokenCount in Self.contextTokenCounts {
             let context = Array(historyTokens.prefix(contextTokenCount))
             try #require(context.count == contextTokenCount, "\(path): the history is too short")
-            let cost = try await loaded.container.perform { modelContext in
+            let cost = try await loaded.perform { modelContext, drafter in
                 try Self.measureRound(
-                    target: modelContext.model, drafter: drafter.value, context: context,
+                    target: modelContext.model, drafter: drafter, context: context,
                     blockSize: blockSize)
             }
             for line in cost.summary {
                 Self.log("\(path) \(line)")
             }
             #expect(cost.verify.allSatisfy { $0 > 0 }, "\(path) \(contextTokenCount)")
-            for drafts in cost.drafts {
-                #expect(drafts.entryCount == contextTokenCount, "\(path) \(contextTokenCount)")
-                #expect(drafts.draft.allSatisfy { $0 > 0 }, "\(path) \(contextTokenCount)")
+            for drafterCost in cost.drafts {
+                #expect(
+                    drafterCost.entryCount == contextTokenCount, "\(path) \(contextTokenCount)")
+                #expect(drafterCost.draft.allSatisfy { $0 > 0 }, "\(path) \(contextTokenCount)")
             }
         }
         await loaded.model.evict()
