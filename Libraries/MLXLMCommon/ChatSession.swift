@@ -319,7 +319,7 @@ public struct SpeculativeDecodingConfig: Sendable {
     /// loads from `configuration` on the first turn that speculates.
     ///
     /// The deferred load follows
-    /// ``init(mtpDrafterBytes:blockSize:minimumDraftProbability:memoryPolicy:loadMTPDrafter:)``:
+    /// ``init(mtpDrafterBytes:blockSize:minimumDraftProbability:memoryPolicy:adaptivePolicy:loadMTPDrafter:)``:
     /// ``ChatSession`` loads the drafter only once the memory policy admits `mtpDrafterBytes`.
     /// The load first registers the drafter model types of `registration` with the registry of
     /// its factory. Pass `.qwen35Text` of MLXLLM for a Qwen3.5-family text drafter,
