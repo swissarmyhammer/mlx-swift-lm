@@ -237,6 +237,15 @@ comments:
     - evidence: 6 files — Libraries/BenchmarkHelpers/MTPChatBenchmark.swift, Libraries/BenchmarkHelpers/GenerationBenchmarks.swift (DocC link), Tests/MLXLMTests/MTPChatBenchmarkAdaptivePolicyTests.swift (new, RED compile failure → GREEN 2/2), IntegrationTesting/.../GenerationBenchmarkTests.swift, IntegrationTesting/.../TextGeneration/MTPSWEBenchScaleTests.swift, IntegrationTesting/.../TextGeneration/MTPCPULoadTests.swift (new). `swift build --build-tests`: 0 compiler warnings (only the SwiftBuild "missing creator" notice; one full rebuild printed the third-party Cmlx Metal C++17 warnings). xctest: MLXLMTests 2065 Swift Testing + 920 XCTest, MLXGuidedGenerationTests 72, MLXFoundationModelsTests 457, CXGrammarTests 7, MLXHuggingFaceMacrosTests 7 — 0 failures, 0 skipped. IntegrationTesting Release build-for-testing: TEST BUILD SUCCEEDED. Real-model numbers in the two iteration-4 comments; logs in the session scratchpad (tdj3waa-*.xcodebuild.log / *.uptime).
     - next: human decision on closing with the guard opt-in; ^w7cgbhd (guard fix) and ^p2bbykc (shipped vs single-draft at quiet load) carry the open work. Not committed.
   timestamp: 2026-10-30T12:01:30.048427+00:00
+- actor: claude-code
+  id: 01m66b19nysc0fwjgv7sbbdnt7
+  text: |-
+    ### finish iteration 4 — stuck
+    - implement: stuck — real-model measurement: guard fails the shipping condition (router 64k/100k guard on 0.97/0.95 x plain vs guard off 1.24/1.27; 32k at 50% synthetic CPU load guard on 0.83 vs off 0.93); guard stays opt-in (default .disabled). Follow-ups filed: ^w7cgbhd (guard fix), ^p2bbykc (greedy release check flaky at 1.2% noise).
+    - test: green — build 0 warnings; 5 bundles 0 fail/0 skip
+    - commit: 91b8f357
+    - review: not run — needs a human decision: close this card with the guard opt-in (work continues in ^w7cgbhd / ^p2bbykc), or keep iterating here. Also decide whether the sweep's guard-on ≥ 0.97·plain check stays wrapped in withKnownIssue while the guard is opt-in.
+  timestamp: 2026-10-30T12:02:29.694526+00:00
 position_column: doing
 position_ordinal: '8280'
 title: 'MTP: stay faster than plain under CPU load (adaptive block size / plain fallback, fewer host syncs)'
