@@ -251,7 +251,7 @@ enum BenchmarkSystemPrompt {
     /// The preamble of ``Benchmark/systemPromptCache(container:systemPrompt:systemPromptCharacterCount:coldQuestion:warmQuestion:maxTokens:kvCache:additionalContext:runs:)``.
     static let textQuestionsPreamble = "Answer questions about this text."
 
-    /// The preamble of ``Benchmark/mtpSystemPromptCache(container:drafter:scenarios:systemPrompt:systemPromptCharacterCount:blockSize:)``,
+    /// The preamble of ``Benchmark/mtpSystemPromptCache(container:drafter:scenarios:systemPrompt:systemPromptCharacterCount:blockSize:adaptivePolicy:)``,
     /// whose turns ask math questions.
     static let mathTutorPreamble =
         "You are a careful math tutor. Answer the questions concisely and show brief working. "

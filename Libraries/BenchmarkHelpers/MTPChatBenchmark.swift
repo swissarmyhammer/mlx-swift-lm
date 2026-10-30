@@ -21,7 +21,7 @@ public struct MTPChatEdit: Sendable {
     }
 }
 
-/// A scripted chat that ``Benchmark/mtpSystemPromptCache(container:drafter:scenarios:systemPrompt:systemPromptCharacterCount:blockSize:)``
+/// A scripted chat that ``Benchmark/mtpSystemPromptCache(container:drafter:scenarios:systemPrompt:systemPromptCharacterCount:blockSize:adaptivePolicy:)``
 /// runs in a `ChatSession` with MTP speculative decoding and in one without speculation.
 public struct MTPChatScenario: Sendable {
     /// The name of the chat in the result lines.
@@ -122,6 +122,9 @@ public struct MTPChatTurn: Sendable {
     public let proposedDraftTokenCount: Int?
     /// Proposed tokens the target accepted, or `nil` when no MTP iterator ran.
     public let acceptedDraftTokenCount: Int?
+    /// The counters of the speculative pass, among them what its adaptive guard did, or `nil`
+    /// when no speculative iterator ran.
+    public let speculativeDecodingTelemetry: SpeculativeDecodingTelemetry?
     /// The generated text.
     public let text: String
     /// The generated tokens, with the candidates of each step when the session
@@ -144,6 +147,7 @@ public struct MTPChatTurn: Sendable {
         self.passthroughReason = info.passthroughReason
         self.proposedDraftTokenCount = info.proposedDraftTokens
         self.acceptedDraftTokenCount = info.acceptedDraftTokens
+        self.speculativeDecodingTelemetry = info.speculativeDecodingTelemetry
         self.text = text
     }
 
@@ -194,7 +198,19 @@ public struct MTPChatTurn: Sendable {
             + "cached \(cachedPromptTokenCount) tok, prefilled \(promptTokenCount) tok in "
             + "\(BenchmarkLog.decimal(promptTimeMs))ms, drafter prefilled \(drafter), "
             + "speculation \(speculationDescription), decode \(generationTokenCount) tok at "
-            + "\(BenchmarkLog.decimal(decodeTokensPerSecond)) tok/s, acceptance \(acceptance)"
+            + "\(BenchmarkLog.decimal(decodeTokensPerSecond)) tok/s, acceptance \(acceptance), "
+            + "guard \(adaptiveGuardDescription)"
+    }
+
+    /// What the adaptive guard of the turn did, or `off` when no guard ran.
+    var adaptiveGuardDescription: String {
+        guard let telemetry = speculativeDecodingTelemetry,
+            let blockSize = telemetry.adaptiveBlockSize
+        else { return "off" }
+        return "\(telemetry.adaptivePauseCount) pauses, "
+            + "\(telemetry.adaptivePlainTokenCount) plain tokens, "
+            + "\(telemetry.adaptiveBlockSizeChangeCount) block size changes, "
+            + "final block size \(blockSize)"
     }
 }
 
@@ -326,6 +342,8 @@ extension Benchmark {
     ///   - systemPromptCharacterCount: the characters of benchmark text a `nil`
     ///     system prompt reads
     ///   - blockSize: the tokens of each MTP round
+    ///   - adaptivePolicy: how each turn of the MTP session guards against decoding slower
+    ///     than plain decode
     /// - Returns: one result for each scenario
     public static func mtpSystemPromptCache(
         container: ModelContainer,
@@ -333,7 +351,8 @@ extension Benchmark {
         scenarios: [MTPChatScenario] = MTPChatScenario.defaults,
         systemPrompt: String? = nil,
         systemPromptCharacterCount: Int = 8_000,
-        blockSize: Int = SpeculativeDecodingConfig.defaultMTPBlockSize
+        blockSize: Int = SpeculativeDecodingConfig.defaultMTPBlockSize,
+        adaptivePolicy: MTPAdaptivePolicy = .default
     ) async throws -> [MTPChatScenarioResult] {
         let instructions = try await BenchmarkSystemPrompt.load(
             systemPrompt, preamble: BenchmarkSystemPrompt.mathTutorPreamble,
@@ -341,7 +360,7 @@ extension Benchmark {
         let mtp = MTPChatSessionRunner(
             container: container, instructions: instructions,
             speculativeDecoding: try SpeculativeDecodingConfig(
-                mtpDrafter: drafter, blockSize: blockSize))
+                mtpDrafter: drafter, blockSize: blockSize, adaptivePolicy: adaptivePolicy))
         let plain = MTPChatSessionRunner(
             container: container, instructions: instructions, speculativeDecoding: nil)
 
