@@ -13,6 +13,7 @@ import MLX
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
+import MLXVLM
 import Testing
 import Tokenizers
 
@@ -101,6 +102,19 @@ enum Qwen38FourBitMTPModel {
             topLogits: topLogits)
     }
 
+    /// The two best tokens of one row of logits, best first, with their log probabilities: the
+    /// gap of two log probabilities of one row is the gap of their logits.
+    ///
+    /// - Parameter logits: The logits of one row, over the vocabulary.
+    /// - Returns: The two candidates.
+    static func topCandidates(of logits: MLXArray) -> [GenerateTokenLogProbability] {
+        let row = logits.asType(.float32)
+        let logProbabilities = row - logSumExp(row)
+        let order = argSort(-logProbabilities)[..<topCandidateCount]
+        return zip(order.asArray(Int.self), logProbabilities[order].asArray(Float.self))
+            .map { GenerateTokenLogProbability(token: $0, logProbability: $1) }
+    }
+
     /// Drops the reasoning protocol, so that the executor renders the plain prompt a suite can
     /// render again to read the logits of plain decode.
     struct PlainPromptResolver: ModelConfigurationResolver {
@@ -113,11 +127,46 @@ enum Qwen38FourBitMTPModel {
         }
     }
 
+    /// How the target loads, and thus which MTP head drafts for it.
+    enum LoadPath: String, CaseIterable, Sendable {
+
+        /// `LLMModelFactory` loads the text target, and the text MTP head drafts for it.
+        case text
+
+        /// `loadModelContainer` loads the target as the vision-language `Qwen35`, as the
+        /// FoundationModels router of the ACP agent loads it, and
+        /// `.matchingTarget(.qwen35Text, .qwen35VLM)` picks the MTP head of the loaded target.
+        case router
+
+        /// The registration of the MTP head that drafts for the target of this path.
+        var drafterRegistration: MTPDrafterRegistration {
+            switch self {
+            case .text: .qwen35Text
+            case .router: .matchingTarget(.qwen35Text, .qwen35VLM)
+            }
+        }
+
+        /// The loader of the target of this path.
+        @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+        var containerLoader: MLXLanguageModel.ContainerLoader {
+            switch self {
+            case .text:
+                { configuration, progress in
+                    try await LLMModelFactory.shared.loadContainer(
+                        from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+                        configuration: configuration, progressHandler: progress)
+                }
+            case .router: testLoad()
+            }
+        }
+    }
+
     /// The target, with the MTP head or without it. Every model of the target shares the one
-    /// loaded container.
+    /// loaded container, whatever its load path: a suite that loads the target two ways must
+    /// evict the container of one path before it loads the other.
     ///
-    /// `LLMModelFactory` loads the target, as the MTP benchmarks do: the text MTP head drafts
-    /// for the text target, and `loadModelContainer` would load the multimodal one.
+    /// The text path is the default, as the MTP benchmarks load it: the text MTP head drafts
+    /// for the text target, and `loadModelContainer` loads the multimodal one.
     ///
     /// A model that reasons keeps the reasoning protocol of the target and declares `.reasoning`,
     /// thus each turn writes its reasoning apart from its response, and a later turn renders that
@@ -128,10 +177,16 @@ enum Qwen38FourBitMTPModel {
     /// - Parameters:
     ///   - speculates: Whether the model drafts with the MTP head.
     ///   - reasons: Whether the model keeps the reasoning protocol of the target.
+    ///   - path: How the target loads.
+    ///   - adaptivePolicy: How a model that speculates guards against decoding slower than plain
+    ///     decode; `.disabled` speculates at the full block size for the whole stream.
     /// - Returns: The model.
     /// - Throws: The error of the speculative decoding configuration.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    static func make(speculates: Bool, reasons: Bool = false) throws -> MLXLanguageModel {
+    static func make(
+        speculates: Bool, reasons: Bool = false, path: LoadPath = .text,
+        adaptivePolicy: MTPAdaptivePolicy = .default
+    ) throws -> MLXLanguageModel {
         let resolver: any ModelConfigurationResolver =
             reasons ? DefaultConfigurationResolver() : PlainPromptResolver()
         return MLXLanguageModel(
@@ -142,14 +197,10 @@ enum Qwen38FourBitMTPModel {
                 ? try MLXSpeculativeDecoding(
                     drafterConfiguration: ModelConfiguration(id: drafterID),
                     from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-                    registration: .qwen35Text)
+                    registration: path.drafterRegistration, adaptivePolicy: adaptivePolicy)
                 : nil,
             weightsLocation: testWeightsLocation(modelID:),
-            load: { configuration, progress in
-                try await LLMModelFactory.shared.loadContainer(
-                    from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-                    configuration: configuration, progressHandler: progress)
-            })
+            load: path.containerLoader)
     }
 }
 
