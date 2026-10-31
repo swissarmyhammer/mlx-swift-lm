@@ -77,8 +77,12 @@ struct Qwen35VerifyAttentionTests {
         let context = tokens[0..., ..<Self.cachedKeys]
         let draft = tokens[0..., Self.cachedKeys...]
 
-        let verify = Self.verifyLogits(model, draft: draft, cache: try Self.prefilled(model, context))
-        let decode = Self.decodeLogits(model, draft: draft, cache: try Self.prefilled(model, context))
+        let verifyCache = try Self.prefilled(model, context)
+        let decodeCache = try Self.prefilled(model, context)
+        let verify = VerifyForwardLogits.verify(
+            draft, after: nil, forward: Self.forward(model, over: verifyCache))
+        let decode = VerifyForwardLogits.decode(
+            draft, after: nil, forward: Self.forward(model, over: decodeCache))
 
         let gap = AttentionKernelTolerance.worstGap(verify, decode)
         #expect(gap <= AttentionKernelTolerance.bfloat16, "worst gap \(gap)")
@@ -92,27 +96,10 @@ struct Qwen35VerifyAttentionTests {
         return cache
     }
 
-    /// The logits of one verify forward of `draft`: the drafter state asked
-    /// of the target and the recurrent snapshots kept, as the MTP iterator
-    /// asks them.
-    private static func verifyLogits(
-        _ model: Qwen35TextModel, draft: MLXArray, cache: [KVCache]
-    ) -> MLXArray {
-        var state = LMOutput.State()
-        state[mtpEmitFlagKey] = true
-        state[mtpVerifyKeepsSnapshotsKey] = true
-        return model(LMInput.Text(tokens: draft), cache: cache, state: state).logits
-            .asType(.float32)
-    }
-
-    /// The logits of plain decode over `draft`, one token at a time.
-    private static func decodeLogits(
-        _ model: Qwen35TextModel, draft: MLXArray, cache: [KVCache]
-    ) -> MLXArray {
-        let rows = (0 ..< draft.dim(1)).map { row in
-            model(LMInput.Text(tokens: draft[0..., row ..< row + 1]), cache: cache, state: nil)
-                .logits
-        }
-        return concatenated(rows, axis: 1).asType(.float32)
+    /// One forward of `model` over `cache`.
+    private static func forward(
+        _ model: Qwen35TextModel, over cache: [KVCache]
+    ) -> VerifyForwardLogits.Forward {
+        { tokens, state in model(LMInput.Text(tokens: tokens), cache: cache, state: state) }
     }
 }

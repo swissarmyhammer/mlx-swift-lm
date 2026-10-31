@@ -178,8 +178,12 @@ struct Qwen35VLMVerifyAttentionTests {
         let context = tokens[0..., ..<Self.cachedKeys]
         let draft = tokens[0..., Self.cachedKeys...]
 
-        let verify = Self.verifyLogits(model, draft: draft, after: try Self.prefilled(model, context))
-        let decode = Self.decodeLogits(model, draft: draft, after: try Self.prefilled(model, context))
+        let verifyPrompt = try Self.prefilled(model, context)
+        let decodePrompt = try Self.prefilled(model, context)
+        let verify = VerifyForwardLogits.verify(
+            draft, after: verifyPrompt.state, forward: Self.forward(model, over: verifyPrompt))
+        let decode = VerifyForwardLogits.decode(
+            draft, after: decodePrompt.state, forward: Self.forward(model, over: decodePrompt))
 
         let gap = AttentionKernelTolerance.worstGap(verify, decode)
         #expect(gap <= AttentionKernelTolerance.bfloat16, "worst gap \(gap)")
@@ -263,30 +267,11 @@ struct Qwen35VLMVerifyAttentionTests {
         return Prefilled(cache: cache, state: prompt.state ?? LMOutput.State())
     }
 
-    /// The logits of one verify forward of `draft`: the drafter state asked
-    /// of the target and the recurrent snapshots kept, as the MTP iterator
-    /// asks them.
-    private static func verifyLogits(
-        _ model: Qwen35, draft: MLXArray, after prefilled: Prefilled
-    ) -> MLXArray {
-        var state = prefilled.state
-        state[mtpEmitFlagKey] = true
-        state[mtpVerifyKeepsSnapshotsKey] = true
-        return model.languageModel(draft, cache: prefilled.cache, state: state).logits
-            .asType(.float32)
-    }
-
-    /// The logits of plain decode over `draft`, one token at a time.
-    private static func decodeLogits(
-        _ model: Qwen35, draft: MLXArray, after prefilled: Prefilled
-    ) -> MLXArray {
-        var state = prefilled.state
-        let rows = (0 ..< draft.dim(1)).map { row in
-            let output = model.languageModel(
-                draft[0..., row ..< row + 1], cache: prefilled.cache, state: state)
-            state = output.state ?? state
-            return output.logits
-        }
-        return concatenated(rows, axis: 1).asType(.float32)
+    /// One forward of the language model of `model` over the caches of
+    /// `prefilled`.
+    private static func forward(
+        _ model: Qwen35, over prefilled: Prefilled
+    ) -> VerifyForwardLogits.Forward {
+        { tokens, state in model.languageModel(tokens, cache: prefilled.cache, state: state) }
     }
 }

@@ -63,6 +63,39 @@ comments:
     4. MTPGenerationTests: passed (greedySessionWritesThePlainTokensFaster, 9.5 s).
     5. MTPPromptCacheTests: passed (7.7 s). Turn 2 recomputed 26 of 233 (expected 26 of 233), MTP 96.1 tok/s vs plain 59.3; turn 1 95.3 vs 60.0.
   timestamp: 2026-10-31T03:24:43.370551+00:00
+- actor: claude-code
+  id: 01m68010afbjb7nty3f7bzn8b9
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (1b17bca5): 2 findings (2 confirmed, 3 refuted, 14 attempted, 0 failed) — Tests/MLXLMTests/AttentionKernelTolerance.swift:129, Tests/MLXLMTests/Qwen35VLMVerifyAttentionTests.swift:269
+    - next: implement the two unchecked items in `## Review Findings (2026-10-30 22:25)`, then re-review
+  timestamp: 2026-10-31T03:28:34.639700+00:00
+- actor: claude-code
+  id: 01m6801z96vjhq3qqc6ycepg21
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — VLM Qwen35 attention through the shared kernel route with .causal
+    - test: green — 5 bundles 0 fail/0 skip; Release (one suite per invocation, load < 3): router MTP/plain 32k 1.31 → 1.60x; edit turn 123; FM turn 2 26/233
+    - commit: 1b17bca5
+    - review: findings — Tests/MLXLMTests/AttentionKernelTolerance.swift:129, Tests/MLXLMTests/Qwen35VLMVerifyAttentionTests.swift:269
+  timestamp: 2026-10-31T03:29:06.342170+00:00
+- actor: claude-code
+  id: 01m681007w9qcwrgs2h86ejr7v
+  text: |-
+    Review findings (2026-10-30 22:25) worked, tests only, no library change:
+    1. AttentionKernelTolerance.expectTheGreedyTokensUpToANearTie: greedy equality is still the first check. Under a near tie the verify token must now be one of decode's two best tokens (`argSort(decode[0])[row, -2...]`); the gap comes from `takeAlong` on those same indices. Both of the two best are accepted rather than only `[-2]`, because on an exact tie argMax and argSort can name different indices for the greedy token. Any token outside the two best fails. New Tests/MLXLMTests/AttentionKernelToleranceTests.swift: `aNearTieRejectsATokenOutsideTheTwoBest` (uses `withKnownIssue`, the first use in this repo, so it fails if the helper records no issue) and `aNearTieAcceptsTheSecondBestToken`. RED on the old helper: "Known issue was not recorded". GREEN after the change.
+    2. New Tests/MLXLMTests/VerifyForwardLogits.swift: `VerifyForwardLogits.verify/decode(_:after:forward:)` takes a `Forward = (tokens, LMOutput.State?) -> LMOutput` closure. The text and VLM model types do not share a call signature (`model(LMInput.Text, cache:[KVCache], state:)` vs `languageModel(MLXArray, cache:[KVCache?], state:)`). Each suite now has only a small `forward(_:over:)` closure builder, and the copies are deleted. The text behavior is unchanged: its prompt state is nil, verify starts from `State()`, and the text model returns nil state when it is not emitting, so decode still passes nil on every step.
+    - Callers of the near-tie helper (Qwen35VerifyAttentionTests and Qwen35VLMVerifyAttentionTests theVerifyForwardGivesThePlainDecodeLogits) both pass.
+    - Note: the `dump validators` file is 754k chars (it inlines very large rule bodies), too big to read whole in one pass. I read the header and rule structure only and followed the usual rules (doc comments, named constants, no copies).
+    - `swift build` prints a SwiftPM build-system line, "warning: missing creator for mutated node ... mlx-swift_Cmlx.bundle". It is not a compiler warning and was already there on the first build before my edits. swift-format lint flags line 93 of Qwen35VerifyAttentionTests.swift (the `prefilled` signature), which was already in HEAD; I left it alone.
+  timestamp: 2026-10-31T03:45:30.364383+00:00
+- actor: claude-code
+  id: 01m681011k9jphyw96frvfcpw1
+  text: |-
+    ### implement — changed
+    - evidence: 5 files — Tests/MLXLMTests/AttentionKernelTolerance.swift, Tests/MLXLMTests/AttentionKernelToleranceTests.swift (new), Tests/MLXLMTests/VerifyForwardLogits.swift (new), Tests/MLXLMTests/Qwen35VerifyAttentionTests.swift, Tests/MLXLMTests/Qwen35VLMVerifyAttentionTests.swift. `swift build --build-tests`: 0 compiler warnings. xcrun xctest: MLXLMTests 920 XCTest + 2087 Swift Testing passed (1 known issue, the intended withKnownIssue), MLXGuidedGenerationTests 72, MLXFoundationModelsTests 460, CXGrammarTests 7, MLXHuggingFaceMacrosTests 7. 0 fail, 0 skip. Both review findings are checked.
+    - next: /review (re-review HEAD plus the working tree)
+  timestamp: 2026-10-31T03:45:31.187234+00:00
 position_column: doing
 position_ordinal: '8280'
 title: 'MTP: route the router path''s (MLXVLM Qwen35) causal verify mask as .causal so verify reaches the decode/verify attention kernels'
@@ -77,3 +110,14 @@ Found by ^wcmxg07. On the router path, MLXVLM Qwen35 (loadModelContainer → VLM
  - [x] Re-run MTPRoundCostBreakdownTests (router) and the sweep. Router per-row cost should match text. — Done on HEAD 300ca2f3, one suite per xcodebuild; numbers in the "test (Release measurements)" comment. Router rows 1..4 at 100k: 28.47/36.48/47.74/52.26 ms vs text 26.27/33.37/43.38/47.41; router MTP/plain 32k 1.60x, 64k 1.50x, 100k 1.43x.
 
 #mtp #perf
+
+## Review Findings (2026-10-30 22:25)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 8 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M66K9YJNDKE1CVA6E8P0RFXX.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M66K9YJNDKE1CVA6E8P0RFXX.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/AttentionKernelTolerance.swift:129` `completeness/invariant-propagation` — The near-tie check accepts any verify token whenever the decode gap is below `nearTieLogitGap`, not only decode's greedy token or its second-best token. The doc comment (lines 110-112) says a verify may pick "the second one", but the assertion never checks that. A verify that picks a wrong low-ranked token still passes whenever the top-two gap is small. The change relaxes the assertion for the near-tie input instead of enforcing the rule that a verify row must match one of decode's top two candidates. When the gap is below the threshold, assert that `verifyToken` equals the second-best index of `decode[0]` for that row, e.g. by comparing against `argSort(decode[0], axis: -1)[row, -2]`. Keep the greedy-equality branch as the primary check. Add a test that feeds a verify row whose token is outside the top two and confirms the helper rejects it.
+- [x] `Tests/MLXLMTests/Qwen35VLMVerifyAttentionTests.swift:269` `reuse/reuse` — `verifyLogits` reimplements the text suite's `verifyLogits` as a parallel copy. The VLM version sets the same two state flags (`mtpEmitFlagKey`, `mtpVerifyKeepsSnapshotsKey`) and returns the same float32 logits. Only the model type and the cache argument differ. Two copies of the verify-state setup can drift apart, so the shared shape should be extended or parameterized rather than copied. Move `verifyLogits` and `decodeLogits` into `AttentionKernelTolerance` (or a shared test helper) and parameterize them over the model's language-model call, so both suites call one implementation. If the two model types cannot share a signature, make the helper generic over a closure that runs one forward.

@@ -109,7 +109,8 @@ enum AttentionKernelTolerance {
 
     /// Checks that each row of a verify picks plain decode's greedy token, or
     /// the second one when the two best logits of plain decode stand within
-    /// ``nearTieLogitGap``.
+    /// ``nearTieLogitGap``. A token outside the two best of plain decode
+    /// fails, near tie or not.
     ///
     /// - Parameters:
     ///   - verify: The logits of the verify, shape `(1, rows, vocabulary)`.
@@ -122,12 +123,15 @@ enum AttentionKernelTolerance {
     ) {
         let verifyTokens = argMax(verify[0], axis: -1).asType(.int32).asArray(Int32.self)
         let decodeTokens = argMax(decode[0], axis: -1).asType(.int32).asArray(Int32.self)
-        let best = sorted(decode[0], axis: -1)[0..., (-topCandidateCount)...]
-        let gaps = (best[0..., 1] - best[0..., 0]).asArray(Float.self)
+        let bestTokens = argSort(decode[0], axis: -1)[0..., (-topCandidateCount)...]
+        let bestLogits = takeAlong(decode[0], bestTokens, axis: -1)
+        let gaps = (bestLogits[0..., 1] - bestLogits[0..., 0]).asArray(Float.self)
         for (row, (verifyToken, decodeToken)) in zip(verifyTokens, decodeTokens).enumerated() {
+            let twoBest = bestTokens[row].asType(.int32).asArray(Int32.self)
+            let nearTieSecondBest = gaps[row] < nearTieLogitGap && twoBest.contains(verifyToken)
             #expect(
-                verifyToken == decodeToken || gaps[row] < nearTieLogitGap,
-                "row \(row): verify \(verifyToken), decode \(decodeToken), gap \(gaps[row])",
+                verifyToken == decodeToken || nearTieSecondBest,
+                "row \(row): verify \(verifyToken), decode's two best \(twoBest), gap \(gaps[row])",
                 sourceLocation: sourceLocation)
         }
     }
