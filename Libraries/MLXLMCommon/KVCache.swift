@@ -432,8 +432,11 @@ public func createCausalMask(
     windowSize: Int? = nil,
     lengths: MLXArray? = nil
 ) -> MLXArray {
-    var rinds = MLXArray(Int32(0) ..< Int32(offset + n))
-    var linds = offset != 0 ? MLXArray(Int32(offset) ..< Int32(offset + n)) : rinds
+    // The positions come from `arange` on the device: a range turned into an array on the host
+    // walks every key position, one per cached token, and at 100k tokens that costs a verify
+    // pass several milliseconds before the GPU has work.
+    var rinds = MLXArray.arange(0, offset + n, dtype: .int32)
+    var linds = offset != 0 ? MLXArray.arange(offset, offset + n, dtype: .int32) : rinds
     linds = linds[0..., .newAxis]
     rinds = rinds[.newAxis]
     var mask = linds .>= rinds

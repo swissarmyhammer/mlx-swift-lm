@@ -205,19 +205,45 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         return nil
     }
 
-    /// The process-global MLX buffer-reuse pool limit in bytes: 256 binary
-    /// megabytes, written as a shift.
-    private static let gpuCacheLimitBytes = 256 << 20
+    /// The smallest process-global MLX buffer-reuse pool limit in bytes: 256 binary
+    /// megabytes, written as a shift. It holds the activations of a small model's step.
+    private static let minimumGPUCacheLimitBytes = 256 << 20
 
-    /// Sets the process-global MLX buffer-reuse pool limit a single time. A
-    /// `static let` initializer runs lazily and exactly once (thread-safe), so
-    /// repeated model loads don't re-stomp a consumer's own `Memory.cacheLimit`.
+    /// The share of the GPU's recommended working set the MLX buffer-reuse pool may keep, as
+    /// the divisor of that working set: one thirty-second.
     ///
-    /// Higher = less allocator thrash at the cost of slightly higher resident GPU
-    /// memory. 256MB comfortably holds activations and KV cache for a 3B model
-    /// without forcing pool evictions mid-forward-pass.
+    /// A decode step frees buffers that grow with the model and the context, and the next step
+    /// allocates them again. Each buffer the pool cannot keep goes back to the system and comes
+    /// back faulted in: on an M5 Ultra a Qwen3.8-27B MTP round at 100k tokens of context frees
+    /// about 2 GiB (the recurrent snapshot slots of its verify and the attention temporaries over
+    /// the whole context), and a 256 MiB pool slowed MTP from 44 to 38 tok/s and plain decode
+    /// from 36 to 32 tok/s. The pool scales with the working set, so a device that runs larger
+    /// models at longer contexts keeps their steps' buffers, and a small device keeps
+    /// ``minimumGPUCacheLimitBytes``.
+    private static let gpuCacheWorkingSetDivisor = 32
+
+    /// The process-global MLX buffer-reuse pool limit for a GPU that recommends a working set of
+    /// `workingSetBytes`: one ``gpuCacheWorkingSetDivisor``-th of it, and at least
+    /// ``minimumGPUCacheLimitBytes``.
+    ///
+    /// - Parameter workingSetBytes: The GPU's recommended working set in bytes, or `nil` when it
+    ///   recommends none.
+    /// - Returns: The pool limit in bytes.
+    static func gpuCacheLimitBytes(workingSetBytes: Int?) -> Int {
+        guard let workingSetBytes else { return minimumGPUCacheLimitBytes }
+        return max(minimumGPUCacheLimitBytes, workingSetBytes / gpuCacheWorkingSetDivisor)
+    }
+
+    /// Sets the process-global MLX buffer-reuse pool limit a single time, from the GPU's
+    /// recommended working set (``gpuCacheLimitBytes(workingSetBytes:)``). A `static let`
+    /// initializer runs lazily and exactly once (thread-safe), so repeated model loads don't
+    /// re-stomp a consumer's own `Memory.cacheLimit`.
+    ///
+    /// Higher = less allocator thrash at the cost of higher resident GPU memory: the pool only
+    /// keeps buffers that a step freed, and MLX releases them when memory runs short.
     private static let configureGPUCacheOnce: Void = {
-        MLX.Memory.cacheLimit = gpuCacheLimitBytes
+        MLX.Memory.cacheLimit = gpuCacheLimitBytes(
+            workingSetBytes: GPU.maxRecommendedWorkingSetBytes())
     }()
 
     private func makeContainerLoader() -> @Sendable () async throws -> ModelContainer {
