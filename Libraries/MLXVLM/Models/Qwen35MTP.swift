@@ -68,14 +68,7 @@ final class Qwen35VLMNextNPredictor: Module {
             offset: positionOffset, length: hiddenStates.dim(1),
             batchSize: hiddenStates.dim(0), positionDeltas: positionDeltas)
         for (layer, layerCache) in zip(layers, cache) {
-            let maskMode = createAttentionMask(
-                h: hiddenStates, cache: layerCache, returnArray: true)
-            let attentionMask: MLXArray?
-            if case .array(let arrayMask) = maskMode {
-                attentionMask = arrayMask
-            } else {
-                attentionMask = nil
-            }
+            let attentionMask = createAttentionMask(h: hiddenStates, cache: layerCache)
             hiddenStates = layer(
                 hiddenStates,
                 attentionMask: attentionMask,

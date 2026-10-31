@@ -591,11 +591,12 @@ final class Qwen35Attention: Module {
     }
 
     /// The attention of the rotated queries over the cache, after the cache
-    /// takes the new keys and values. A plain key cache gives its keys to
-    /// ``PrefillAttentionKernel``, which reads a prefill block without the
-    /// full score tensor, and to ``DecodeAttentionKernel``, which reads one
-    /// query over a long cache faster than the SDPA of MLX. Every other call
-    /// keeps that SDPA.
+    /// takes the new keys and values, through
+    /// ``PrefillAttentionKernel/attentionWithCacheUpdate(queries:keys:values:cache:scale:mask:)``:
+    /// a plain key cache gives its keys to ``PrefillAttentionKernel``, which
+    /// reads a prefill block without the full score tensor, and to
+    /// ``DecodeAttentionKernel``, which reads one query over a long cache
+    /// faster than the SDPA of MLX. Every other call keeps that SDPA.
     /// A quantized, TurboQuant or cache-native cache keeps its own route.
     ///
     /// - Parameters:
@@ -609,16 +610,8 @@ final class Qwen35Attention: Module {
         queries: MLXArray, keys: MLXArray, values: MLXArray, cache: KVCache?,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
-        guard let cache, usesPlainAttentionCacheRoute(cache),
-            !(cache is KVCacheAttentionProtocol)
-        else {
-            return attentionWithCacheUpdate(
-                queries: queries, keys: keys, values: values, cache: cache, scale: scale,
-                mask: mask)
-        }
-        let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
-        return PrefillAttentionKernel.scaledDotProductAttention(
-            queries: queries, keys: cachedKeys, values: cachedValues, scale: scale, mask: mask)
+        PrefillAttentionKernel.attentionWithCacheUpdate(
+            queries: queries, keys: keys, values: values, cache: cache, scale: scale, mask: mask)
     }
 
     /// Projections up to (not including) rope: `x` → (queries, gate, keys,

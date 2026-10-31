@@ -40,13 +40,6 @@ struct Qwen35VerifyAttentionTests {
     /// The seed of the token ids of the model test.
     private static let tokenSeed: UInt64 = 20_261_222
 
-    /// The largest gap of plain decode's two best logits at which the verify
-    /// may pick the second one: the two paths round a near tie apart.
-    private static let nearTieLogitGap: Float = 1e-3
-
-    /// The number of best logits of one row that the near-tie rule reads.
-    private static let topCandidateCount = 2
-
     /// The traced verify step gives the kernel output with a causal mask and
     /// with no mask, and the SDPA of MLX with a mask array, in each dtype.
     @Test(arguments: AttentionKernelTolerance.dtypes, AttentionMaskKind.allCases)
@@ -89,7 +82,7 @@ struct Qwen35VerifyAttentionTests {
 
         let gap = AttentionKernelTolerance.worstGap(verify, decode)
         #expect(gap <= AttentionKernelTolerance.bfloat16, "worst gap \(gap)")
-        Self.expectTheGreedyTokensUpToANearTie(verify: verify, decode: decode)
+        AttentionKernelTolerance.expectTheGreedyTokensUpToANearTie(verify: verify, decode: decode)
     }
 
     /// A cache of `model` that holds `context`.
@@ -121,20 +114,5 @@ struct Qwen35VerifyAttentionTests {
                 .logits
         }
         return concatenated(rows, axis: 1).asType(.float32)
-    }
-
-    /// Checks that each row of the verify picks plain decode's greedy token,
-    /// or the second one when the two best logits of plain decode stand
-    /// within ``nearTieLogitGap``.
-    private static func expectTheGreedyTokensUpToANearTie(verify: MLXArray, decode: MLXArray) {
-        let verifyTokens = argMax(verify[0], axis: -1).asType(.int32).asArray(Int32.self)
-        let decodeTokens = argMax(decode[0], axis: -1).asType(.int32).asArray(Int32.self)
-        let best = sorted(decode[0], axis: -1)[0..., (-topCandidateCount)...]
-        let gaps = (best[0..., 1] - best[0..., 0]).asArray(Float.self)
-        for (row, (verifyToken, decodeToken)) in zip(verifyTokens, decodeTokens).enumerated() {
-            #expect(
-                verifyToken == decodeToken || gaps[row] < nearTieLogitGap,
-                "row \(row): verify \(verifyToken), decode \(decodeToken), gap \(gaps[row])")
-        }
     }
 }

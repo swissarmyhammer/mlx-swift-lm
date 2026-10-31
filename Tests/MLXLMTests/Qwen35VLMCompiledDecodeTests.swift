@@ -228,7 +228,7 @@ final class Qwen35VLMCompiledDecodeTests: XCTestCase {
         cache[1] = recState
 
         let eager = layer.forward(
-            x, attentionMask: nil, ssmMask: nil, cache: cache, positionIds: nil,
+            x, attentionMask: .none, ssmMask: nil, cache: cache, positionIds: nil,
             keepsSnapshots: false, allowCompiledDecode: false)
         let step = layer.linearLayerBody(x: x, convState: convState, recState: recState)
 

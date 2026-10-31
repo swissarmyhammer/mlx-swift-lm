@@ -99,6 +99,38 @@ enum AttentionKernelTolerance {
             arrayEqual(got, expected, equalNAN: true).item(Bool.self),
             sourceLocation: sourceLocation)
     }
+
+    /// The largest gap of plain decode's two best logits at which a verify
+    /// may pick the second one: the two paths round a near tie apart.
+    private static let nearTieLogitGap: Float = 1e-3
+
+    /// The number of best logits of one row that the near-tie rule reads.
+    private static let topCandidateCount = 2
+
+    /// Checks that each row of a verify picks plain decode's greedy token, or
+    /// the second one when the two best logits of plain decode stand within
+    /// ``nearTieLogitGap``.
+    ///
+    /// - Parameters:
+    ///   - verify: The logits of the verify, shape `(1, rows, vocabulary)`.
+    ///   - decode: The logits of plain decode over the same rows, one at a
+    ///     time, of the shape of `verify`.
+    ///   - sourceLocation: The location that a failure reports.
+    static func expectTheGreedyTokensUpToANearTie(
+        verify: MLXArray, decode: MLXArray,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        let verifyTokens = argMax(verify[0], axis: -1).asType(.int32).asArray(Int32.self)
+        let decodeTokens = argMax(decode[0], axis: -1).asType(.int32).asArray(Int32.self)
+        let best = sorted(decode[0], axis: -1)[0..., (-topCandidateCount)...]
+        let gaps = (best[0..., 1] - best[0..., 0]).asArray(Float.self)
+        for (row, (verifyToken, decodeToken)) in zip(verifyTokens, decodeTokens).enumerated() {
+            #expect(
+                verifyToken == decodeToken || gaps[row] < nearTieLogitGap,
+                "row \(row): verify \(verifyToken), decode \(decodeToken), gap \(gaps[row])",
+                sourceLocation: sourceLocation)
+        }
+    }
 }
 
 /// One attention kernel under test, with the mask of one causal flag. Each

@@ -325,6 +325,16 @@ public enum Qwen35Language {
         return (qOut, kOut)
     }
 
+    /// Tells if an attention mask mode holds no mask: a single-token step,
+    /// which the compiled decode traces run.
+    ///
+    /// - Parameter mask: The attention mask mode of a call.
+    /// - Returns: True for `.none`.
+    static func isUnmasked(_ mask: MLXFast.ScaledDotProductAttentionMaskMode) -> Bool {
+        guard case .none = mask else { return false }
+        return true
+    }
+
     package final class RMSNormGated: Module, GatedDeltaOutputNorm {
         @ParameterInfo(key: "weight") package var weight: MLXArray
         package let eps: Float
@@ -387,7 +397,7 @@ public enum Qwen35Language {
 
         func callAsFunction(
             _ x: MLXArray,
-            mask: MLXArray?,
+            mask: MLXFast.ScaledDotProductAttentionMaskMode,
             cache: KVCache?,
             positionIds: MLXArray?
         ) -> MLXArray {
@@ -424,12 +434,29 @@ public enum Qwen35Language {
             return (queries, gate, keys, values)
         }
 
-        /// Dynamic M-RoPE, cache mutation, and SDPA stay eager.
+        /// Dynamic M-RoPE, cache mutation, and SDPA stay eager. The attention
+        /// takes the route of the text model,
+        /// ``PrefillAttentionKernel/attentionWithCacheUpdate(queries:keys:values:cache:scale:mask:)``:
+        /// over a plain key cache, the causal mask mode or no mask reaches the
+        /// prefill, verify and decode attention kernels, and a mask array
+        /// keeps the SDPA of MLX.
+        ///
+        /// - Parameters:
+        ///   - initialQueries: The queries before M-RoPE, shape
+        ///     `(batch, heads, tokens, headDim)`.
+        ///   - initialKeys: The new keys before M-RoPE, shape
+        ///     `(batch, kvHeads, tokens, headDim)`.
+        ///   - values: The new values, of the shape of `initialKeys`.
+        ///   - mask: The attention mask of the call.
+        ///   - cache: The cache of this layer, or `nil`.
+        ///   - providedPositionIds: The M-RoPE positions of the tokens, or
+        ///     `nil` for the positions after the cache.
+        /// - Returns: The attention output, of the shape of the queries.
         func attend(
             queries initialQueries: MLXArray,
             keys initialKeys: MLXArray,
             values: MLXArray,
-            mask: MLXArray?,
+            mask: MLXFast.ScaledDotProductAttentionMaskMode,
             cache: KVCache?,
             positionIds providedPositionIds: MLXArray?
         ) -> MLXArray {
@@ -457,20 +484,15 @@ public enum Qwen35Language {
                 q: queries, k: keys, cos: cosValues, sin: sinValues)
 
             let attentionMask: MLXFast.ScaledDotProductAttentionMaskMode
-            if let mask {
-                attentionMask = .array(mask[.ellipsis, 0 ..< kvSeqLen])
+            if case .array(let maskArray) = mask {
+                attentionMask = .array(maskArray[.ellipsis, 0 ..< kvSeqLen])
             } else {
-                attentionMask = .none
+                attentionMask = mask
             }
 
-            return attentionWithCacheUpdate(
-                queries: queries,
-                keys: keys,
-                values: values,
-                cache: cache,
-                scale: scale,
-                mask: attentionMask
-            )
+            return PrefillAttentionKernel.attentionWithCacheUpdate(
+                queries: queries, keys: keys, values: values, cache: cache, scale: scale,
+                mask: attentionMask)
         }
 
         func mergeHeadsAndProject(attention: MLXArray, gate: MLXArray) -> MLXArray {
@@ -929,7 +951,7 @@ public enum Qwen35Language {
 
         open func callAsFunction(
             _ x: MLXArray,
-            attentionMask: MLXArray?,
+            attentionMask: MLXFast.ScaledDotProductAttentionMaskMode,
             ssmMask: MLXArray?,
             cache: KVCache?,
             positionIds: MLXArray?,
@@ -947,7 +969,7 @@ public enum Qwen35Language {
 
         func forward(
             _ x: MLXArray,
-            attentionMask: MLXArray?,
+            attentionMask: MLXFast.ScaledDotProductAttentionMaskMode,
             ssmMask: MLXArray?,
             cache: KVCache?,
             positionIds: MLXArray?,
@@ -958,7 +980,7 @@ public enum Qwen35Language {
                 allowCompiledDecode && allowsCompiledDecode && !training
                 && supportsExactCompiledDecode(x.dtype)
                 && x.dim(0) == 1 && x.dim(1) == 1
-                && attentionMask == nil && ssmMask == nil && !keepsSnapshots
+                && Qwen35Language.isUnmasked(attentionMask) && ssmMask == nil && !keepsSnapshots
                 && supportsCompiledDecode
 
             if canCompile, isLinear, let mambaCache = cache as? MambaCache,
@@ -1038,7 +1060,7 @@ public enum Qwen35Language {
                 queries: queries,
                 keys: keys,
                 values: values,
-                mask: nil,
+                mask: .none,
                 cache: cache,
                 positionIds: positionIds)
         }
@@ -1174,18 +1196,10 @@ public enum Qwen35Language {
                 cacheArray = Array(repeating: nil as KVCache?, count: layers.count)
             }
 
-            let faMask: MLXArray?
-            if let faIdx {
-                let faMaskMode = createAttentionMask(
-                    h: hiddenStates, cache: cacheArray?[faIdx], returnArray: true)
-                if case .array(let arrayMask) = faMaskMode {
-                    faMask = arrayMask
-                } else {
-                    faMask = nil
-                }
-            } else {
-                faMask = nil
-            }
+            let faMask =
+                faIdx.map {
+                    createAttentionMask(h: hiddenStates, cache: cacheArray?[$0])
+                } ?? .none
             let ssmMask = ssmIdx.flatMap {
                 createSSMMask(h: hiddenStates, cache: cacheArray?[$0] as? MambaCache)
             }
@@ -1195,7 +1209,7 @@ public enum Qwen35Language {
                 && inputsEmbeds == nil && applyFinalNorm
                 && supportsExactCompiledDecode(hiddenStates.dtype)
                 && hiddenStates.dim(0) == 1 && hiddenStates.dim(1) == 1
-                && faMask == nil && ssmMask == nil && !keepsSnapshots
+                && Qwen35Language.isUnmasked(faMask) && ssmMask == nil && !keepsSnapshots
                 && layers.enumerated().allSatisfy { index, layer in
                     guard layer.supportsCompiledDecode else { return false }
                     if layer.isLinear {

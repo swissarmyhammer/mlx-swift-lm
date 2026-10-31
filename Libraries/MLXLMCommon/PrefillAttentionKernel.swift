@@ -578,4 +578,40 @@ package enum PrefillAttentionKernel {
         }
         return attention(queries: queries, keys: keys, values: values, scale: scale, causal: causal)
     }
+
+    /// The attention of rotated queries over the cache of a layer, after the
+    /// cache takes the new keys and values. A plain key cache gives its keys
+    /// to ``scaledDotProductAttention(queries:keys:values:scale:mask:)``,
+    /// which reads a prefill block with this kernel, the few tokens of a
+    /// speculative verify with ``VerifyAttentionKernel``, and one query over
+    /// a long cache with ``DecodeAttentionKernel``. A quantized, TurboQuant
+    /// or cache-native cache, and a call with no cache, keep the route of
+    /// ``MLXLMCommon/attentionWithCacheUpdate(queries:keys:values:cache:scale:mask:sinks:)``.
+    ///
+    /// The kernels read a causal mask mode or no mask; a mask array keeps the
+    /// SDPA of MLX.
+    ///
+    /// - Parameters:
+    ///   - queries: The rotated queries, shape `(batch, heads, tokens, headDim)`.
+    ///   - keys: The rotated new keys, shape `(batch, kvHeads, tokens, headDim)`.
+    ///   - values: The new values, of the shape of `keys`.
+    ///   - cache: The cache of the layer, or `nil`.
+    ///   - scale: The factor each score takes before the softmax.
+    ///   - mask: The mask of the call.
+    /// - Returns: The attention output, of the shape of `queries`.
+    package static func attentionWithCacheUpdate(
+        queries: MLXArray, keys: MLXArray, values: MLXArray, cache: KVCache?, scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray {
+        guard let cache, usesPlainAttentionCacheRoute(cache),
+            !(cache is KVCacheAttentionProtocol)
+        else {
+            return MLXLMCommon.attentionWithCacheUpdate(
+                queries: queries, keys: keys, values: values, cache: cache, scale: scale,
+                mask: mask)
+        }
+        let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
+        return scaledDotProductAttention(
+            queries: queries, keys: cachedKeys, values: cachedValues, scale: scale, mask: mask)
+    }
 }
