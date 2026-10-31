@@ -47,8 +47,24 @@ comments:
     - evidence: 4 files — Libraries/MLXFoundationModels/MLXLanguageModel.swift, Libraries/MLXLMCommon/KVCache.swift, Tests/MLXFoundationModelsTests/MLXLanguageModelGPUCacheLimitTests.swift (new), Tests/MLXLMTests/CausalMaskTests.swift (new). `swift build --build-tests` 0 compiler warnings; xcrun xctest all 5 bundles 0 fail 0 skip (MLXLMTests 920 XCTest + 2082 Swift Testing, MLXFoundationModelsTests 460, MLXGuidedGenerationTests 72, CXGrammarTests 7, MLXHuggingFaceMacrosTests 7). Release: sweep/cpuload/round cost/qwen38FourBitMTPGeneration/qwen38FourBitMTPSystemPromptCache all passed; router 32k 1.14x -> 1.31x plain, 100k 1.20x -> 1.44x; 50% load 1.088 -> 1.288.
     - next: /review (task left in doing; nothing committed)
   timestamp: 2026-10-31T01:57:02.841754+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m67tyg670tzpwywwqfmee0qz
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (fadf1b16) — 0 findings, 0 confirmed, 0 refuted, 14 validator passes attempted, 0 failed; 4 .kanban files skipped (no validator matches); no prior Review Findings sections
+    - next: none — task moved to done
+  timestamp: 2026-10-31T01:59:49.703147+00:00
+- actor: claude-code
+  id: 01m67tznf6qhgj0rvjg63tm2d6
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — device-sized MLX buffer pool (1/32 working set, ≥256 MiB) + GPU-built causal-mask positions
+    - test: green — build 0 warnings; 5 bundles 0 fail/0 skip; Release sweep/CPU-load/round-cost/gen/prompt-cache pass (router 100k 1.20 → 1.44x; 32k @50% load 1.09 → 1.29x)
+    - commit: fadf1b16
+    - review: clean — task moved to done. Pending user confirmation of the process-wide pool size (2.43 GiB on M5 Ultra).
+  timestamp: 2026-10-31T02:00:27.878602+00:00
+position_column: done
+position_ordinal: ffff9680
 title: 'MTP: remove the ~18 ms per-round iterator overhead at 32k context (55 ms measured vs ~37 ms of verify + draft GPU work)'
 ---
 From ^tdj3waa iteration 4 (Release, M5 Ultra, Qwen3.8-27B-4bit + MTP-4bit, router path): at 32k context an MTP round measures ~55 ms while its GPU work (verify forward + drafter steps, from MTPRoundCostBreakdownTests) is ~37 ms; host syncs are only 0.22–0.25 ms quiet (0.55–1.05 ms fully loaded). The ~18 ms gap is iterator overhead between GPU work, and it is what decides MTP vs plain at long context and under CPU load (unguarded MTP 0.93x plain at 32k with half the cores busy).
