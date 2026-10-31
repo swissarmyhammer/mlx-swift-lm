@@ -96,8 +96,24 @@ comments:
     - evidence: 5 files — Tests/MLXLMTests/AttentionKernelTolerance.swift, Tests/MLXLMTests/AttentionKernelToleranceTests.swift (new), Tests/MLXLMTests/VerifyForwardLogits.swift (new), Tests/MLXLMTests/Qwen35VerifyAttentionTests.swift, Tests/MLXLMTests/Qwen35VLMVerifyAttentionTests.swift. `swift build --build-tests`: 0 compiler warnings. xcrun xctest: MLXLMTests 920 XCTest + 2087 Swift Testing passed (1 known issue, the intended withKnownIssue), MLXGuidedGenerationTests 72, MLXFoundationModelsTests 460, CXGrammarTests 7, MLXHuggingFaceMacrosTests 7. 0 fail, 0 skip. Both review findings are checked.
     - next: /review (re-review HEAD plus the working tree)
   timestamp: 2026-10-31T03:45:31.187234+00:00
-position_column: doing
-position_ordinal: '8280'
+- actor: claude-code
+  id: 01m681457e4ej6p93h047yhnrc
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD — 0 findings (0 confirmed, 3 refuted, 7 attempted, 0 failed); all items in ## Review Findings (2026-10-30 22:25) checked
+    - next: task moved to done
+  timestamp: 2026-10-31T03:47:46.542734+00:00
+- actor: claude-code
+  id: 01m68151cj9rwsaq5sjhd7gah7
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — near-tie helper accepts only decode's two best; shared VerifyForwardLogits
+    - test: green — 5 bundles 0 fail/0 skip
+    - commit: ff03e57c
+    - review: clean — task moved to done
+  timestamp: 2026-10-31T03:48:15.378054+00:00
+position_column: done
+position_ordinal: ffff9780
 title: 'MTP: route the router path''s (MLXVLM Qwen35) causal verify mask as .causal so verify reaches the decode/verify attention kernels'
 ---
 Found by ^wcmxg07. On the router path, MLXVLM Qwen35 (loadModelContainer → VLM Qwen35, the path the SWE-bench ACP agent runs) builds the causal mask with `createAttentionMask(..., returnArray: true)`. So a multi-row verify passes an ARRAY mask and never reaches DecodeAttentionKernel or VerifyAttentionKernel. Both read only `.causal` or no mask.
