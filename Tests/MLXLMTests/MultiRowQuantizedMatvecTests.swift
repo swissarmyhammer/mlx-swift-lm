@@ -14,17 +14,44 @@ import XCTest
 final class MultiRowQuantizedMatvecTests: XCTestCase {
 
     /// One quantization format a checkpoint can carry.
-    private struct Format: CustomStringConvertible {
+    struct Format: CustomStringConvertible {
         let groupSize: Int
         let bits: Int
         let mode: QuantizationMode
 
         var description: String { "\(mode) \(bits)-bit g\(groupSize)" }
+
+        /// Seeded random weights of about `weightScale`.
+        static func makeWeight(
+            inputs: Int, outputs: Int, dtype: DType, seed: UInt64, weightScale: Float
+        ) -> MLXArray {
+            MLXRandom.seed(seed)
+            return (MLXRandom.normal([outputs, inputs]) * weightScale).asType(dtype)
+        }
+
+        /// A layer of this format with seeded random weights of about `weightScale`.
+        func makeLayer(
+            inputs: Int, outputs: Int, dtype: DType, seed: UInt64, weightScale: Float,
+            bias: MLXArray? = nil
+        ) -> QuantizedLinear {
+            let weight = Self.makeWeight(
+                inputs: inputs, outputs: outputs, dtype: dtype, seed: seed,
+                weightScale: weightScale)
+            let layer = QuantizedLinear(
+                weight: weight, bias: bias, groupSize: groupSize, bits: bits, mode: mode)
+            eval(layer)
+            return layer
+        }
+
+        /// The matvec of MLX over each row alone, the rows of a plain decode.
+        static func rowByRowReference(_ x: MLXArray, _ layer: QuantizedLinear) -> MLXArray {
+            concatenated((0 ..< x.dim(0)).map { layer(x[$0 ..< ($0 + 1)]) }, axis: 0)
+        }
     }
 
     /// Every format the kernel reads: affine 4 and 8 bits with groups of 32,
     /// 64 and 128, and mxfp4.
-    private static let formats =
+    static let formats =
         [4, 8].flatMap { bits in
             [32, 64, 128].map { Format(groupSize: $0, bits: bits, mode: .affine) }
         } + [Format(groupSize: 32, bits: 4, mode: .mxfp4)]
@@ -56,15 +83,12 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
     private static let weightScale: Float = 0.02
 
     private func makeLayer(
-        _ format: Format, inputs: Int, outputs: Int, dtype: DType, seed: UInt64
+        _ format: Format, inputs: Int, outputs: Int, dtype: DType, seed: UInt64,
+        bias: MLXArray? = nil
     ) -> QuantizedLinear {
-        MLXRandom.seed(seed)
-        let weight = (MLXRandom.normal([outputs, inputs]) * Self.weightScale).asType(dtype)
-        let layer = QuantizedLinear(
-            weight: weight, bias: nil, groupSize: format.groupSize, bits: format.bits,
-            mode: format.mode)
-        eval(layer)
-        return layer
+        format.makeLayer(
+            inputs: inputs, outputs: outputs, dtype: dtype, seed: seed,
+            weightScale: Self.weightScale, bias: bias)
     }
 
     private func makeRows(_ rows: Int, width: Int, dtype: DType) -> MLXArray {
@@ -73,9 +97,8 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
         return x
     }
 
-    /// The matvec of MLX over each row alone, the rows of a plain decode.
     private func rowByRowReference(_ x: MLXArray, _ layer: QuantizedLinear) -> MLXArray {
-        concatenated((0 ..< x.dim(0)).map { layer(x[$0 ..< ($0 + 1)]) }, axis: 0)
+        Format.rowByRowReference(x, layer)
     }
 
     private func assertEveryRowMatches(
@@ -165,14 +188,12 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
     func testABiasIsAddedToEveryRow() {
         let format = Format(groupSize: 64, bits: 4, mode: .affine)
         let outputs = Self.smallOutputSizes[0]
-        MLXRandom.seed(13)
-        let weight = (MLXRandom.normal([outputs, Self.inputSize]) * Self.weightScale)
-            .asType(.bfloat16)
+        let seed: UInt64 = 13
+        MLXRandom.seed(seed)
         let bias = MLXRandom.normal([outputs]).asType(.bfloat16)
-        let layer = QuantizedLinear(
-            weight: weight, bias: bias, groupSize: format.groupSize, bits: format.bits,
-            mode: format.mode)
-        eval(layer)
+        let layer = makeLayer(
+            format, inputs: Self.inputSize, outputs: outputs, dtype: .bfloat16, seed: seed,
+            bias: bias)
 
         XCTAssertTrue(
             MultiRowQuantizedMatvec.canRun(
@@ -205,10 +226,9 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
                 super.callAsFunction(x) * 2
             }
         }
-        MLXRandom.seed(19)
-        let weight =
-            (MLXRandom.normal([Self.smallOutputSizes[0], Self.inputSize])
-            * Self.weightScale).asType(.bfloat16)
+        let weight = Format.makeWeight(
+            inputs: Self.inputSize, outputs: Self.smallOutputSizes[0], dtype: .bfloat16, seed: 19,
+            weightScale: Self.weightScale)
         let layer = ScaledQuantizedLinear(weight: weight, bias: nil)
         eval(layer)
         let x = makeRows(3, width: Self.inputSize, dtype: .bfloat16)

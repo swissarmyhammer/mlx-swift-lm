@@ -8,7 +8,7 @@ import Testing
 
 /// One quantized projection of a Qwen3.8-27B decode step, and the number of
 /// times one step runs it.
-private struct StepProjection {
+struct StepProjection {
     let inputs: Int
     let outputs: Int
     let count: Int
@@ -61,7 +61,7 @@ private enum Qwen38 {
 /// output projection of each gated delta net layer, the four projections of
 /// each full-attention layer, the three projections of each MLP, and the LM
 /// head.
-private let qwen38StepProjections = [
+let qwen38StepProjections = [
     StepProjection(
         inputs: Qwen38.hiddenSize, outputs: Qwen38.gatedDeltaInputWidth,
         count: Qwen38.gatedDeltaLayers),
@@ -86,7 +86,7 @@ private let qwen38StepProjections = [
 ]
 
 /// A quantization format of the Qwen3.8-27B checkpoints.
-private struct QuantizationFormat {
+struct QuantizationFormat {
     let name: String
     let groupSize: Int
     let bits: Int
@@ -102,7 +102,7 @@ private let affineGroupSize = 64
 /// The group size of mxfp4, fixed by the format.
 private let mxfp4GroupSize = 32
 
-private let qwen38Formats = [
+let qwen38Formats = [
     QuantizationFormat(
         name: "4-bit affine g64", groupSize: affineGroupSize, bits: checkpointBits,
         mode: .affine),
@@ -112,6 +112,12 @@ private let qwen38Formats = [
 
 /// The verify rows a speculative step runs: one plain decode row up to eight.
 private let measuredRows = 1 ... 8
+/// The one measured row count that stays with `qmv_wide` of MLX, whose rows
+/// differ in the last bits from a row alone.
+private let qmvWideRows = 2
+/// The largest difference of the `qmv_wide` rows from the MLX matvec of each row alone, as a
+/// share of the largest output: they round as bfloat16 does, about 2^-7.
+private let qmvWideTolerance: Float = 0.01
 private let warmupRuns = 2
 private let timedRuns = 7
 /// The median of an odd count of samples stands at half the count.
@@ -122,7 +128,7 @@ private let attosecondsPerMillisecond = 1e15
 private let weightRange: Float = 0.02
 
 /// One way to run a quantized projection over a batch of rows.
-private typealias RowProjection = (MLXArray, QuantizedLinear) -> MLXArray
+typealias RowProjection = (MLXArray, QuantizedLinear) -> MLXArray
 
 /// Times the quantized matmuls of one Qwen3.8-27B step for 1 to 8 rows, through
 /// the matvec of MLX and through ``MultiRowQuantizedMatvec``, with distinct
@@ -133,14 +139,17 @@ struct MultiRowQuantizedMatvecBenchmarkTests {
 
     @Test func qwen38StepMatmulCostByRows() {
         for format in qwen38Formats {
-            let layers = makeStepLayers(format)
+            let projections = qwen38StepProjections.map { makeLayers($0, format) }
+            let layers = projections.flatMap { $0 }
             let mlxOneRow = medianStepMilliseconds(layers, rows: 1) { $1($0) }
             for rows in measuredRows {
                 let mlx = medianStepMilliseconds(layers, rows: rows) { $1($0) }
                 let kernel = medianStepMilliseconds(layers, rows: rows) {
                     MultiRowQuantizedMatvec.quantizedMatmulRows($0, $1)
                 }
-                #expect(mismatchedRowValues(layers, rows: rows) == 0)
+                for layer in projections.compactMap(\.first) {
+                    expectRowsMatchTheirOwnMatvec(rows: rows, layer)
+                }
                 report(
                     String(
                         format:
@@ -150,22 +159,23 @@ struct MultiRowQuantizedMatvecBenchmarkTests {
         }
     }
 
-    private func makeStepLayers(_ format: QuantizationFormat) -> [QuantizedLinear] {
-        qwen38StepProjections.flatMap { projection in
-            (0 ..< projection.count).map { _ in
-                let weight = MLXRandom.uniform(
-                    low: -weightRange, high: weightRange, [projection.outputs, projection.inputs]
-                ).asType(.bfloat16)
-                let layer = QuantizedLinear(
-                    weight: weight, bias: nil, groupSize: format.groupSize, bits: format.bits,
-                    mode: format.mode)
-                eval(layer)
-                return layer
-            }
+    /// Every layer of `projection`, each with distinct random weights.
+    func makeLayers(
+        _ projection: StepProjection, _ format: QuantizationFormat
+    ) -> [QuantizedLinear] {
+        (0 ..< projection.count).map { _ in
+            let weight = MLXRandom.uniform(
+                low: -weightRange, high: weightRange, [projection.outputs, projection.inputs]
+            ).asType(.bfloat16)
+            let layer = QuantizedLinear(
+                weight: weight, bias: nil, groupSize: format.groupSize, bits: format.bits,
+                mode: format.mode)
+            eval(layer)
+            return layer
         }
     }
 
-    private func medianStepMilliseconds(
+    func medianStepMilliseconds(
         _ layers: [QuantizedLinear], rows: Int, project: RowProjection
     ) -> Double {
         let inputs = Dictionary(
@@ -193,17 +203,45 @@ struct MultiRowQuantizedMatvecBenchmarkTests {
         return median(samples)
     }
 
-    /// The count of values where the kernel output of the LM head (the last
-    /// layer) differs in bits from the matvec of MLX over each row alone.
-    private func mismatchedRowValues(_ layers: [QuantizedLinear], rows: Int) -> Int {
-        guard let layer = layers.last else { return 0 }
-        let x = MLXRandom.normal([rows, layer.shape.1]).asType(.bfloat16)
+    /// The output of ``MultiRowQuantizedMatvec`` over `x`, and the matvec of MLX
+    /// over each row alone, both as float32.
+    private func kernelAndRowByRowOutputs(
+        _ x: MLXArray, _ layer: QuantizedLinear
+    ) -> (got: [Float], want: [Float]) {
         let got = MultiRowQuantizedMatvec.quantizedMatmulRows(x, layer).asType(.float32)
-        let want = concatenated((0 ..< rows).map { layer(x[$0 ..< ($0 + 1)]) }, axis: 0)
+        let want = concatenated((0 ..< x.dim(0)).map { layer(x[$0 ..< ($0 + 1)]) }, axis: 0)
             .asType(.float32)
-        return zip(got.asArray(Float.self), want.asArray(Float.self))
-            .filter { $0.bitPattern != $1.bitPattern }
-            .count
+        return (got.asArray(Float.self), want.asArray(Float.self))
+    }
+
+    /// Checks `rows` random rows through `layer` against the matvec of MLX over each
+    /// row alone. The rows of `qmv_wide` sum in another order than a row alone, so
+    /// they hold to ``qmvWideTolerance``; every other row count keeps the bits.
+    func expectRowsMatchTheirOwnMatvec(rows: Int, _ layer: QuantizedLinear) {
+        let x = MLXRandom.normal([rows, layer.shape.1]).asType(.bfloat16)
+        if rows == qmvWideRows {
+            #expect(
+                relativeOutputError(x, layer) <= qmvWideTolerance, "\(layer.shape) M=\(rows)")
+        } else {
+            #expect(mismatchedRowValues(x, layer) == 0, "\(layer.shape) M=\(rows)")
+        }
+    }
+
+    /// The count of values where the kernel output differs in bits from the
+    /// matvec of MLX over each row alone.
+    private func mismatchedRowValues(_ x: MLXArray, _ layer: QuantizedLinear) -> Int {
+        let (got, want) = kernelAndRowByRowOutputs(x, layer)
+        return zip(got, want).filter { $0.bitPattern != $1.bitPattern }.count
+    }
+
+    /// The largest difference between the kernel output and the matvec of MLX
+    /// over each row alone, as a share of the largest output, or infinity when
+    /// an output is not finite, which no tolerance accepts.
+    private func relativeOutputError(_ x: MLXArray, _ layer: QuantizedLinear) -> Float {
+        let (got, want) = kernelAndRowByRowOutputs(x, layer)
+        let largest = want.map { abs($0) }.max() ?? 0
+        let difference = zip(got, want).map { abs($0 - $1) }.max() ?? 0
+        return got.allSatisfy { $0.isFinite } ? difference / largest : .infinity
     }
 
     private func median(_ samples: [Double]) -> Double {
@@ -211,7 +249,7 @@ struct MultiRowQuantizedMatvecBenchmarkTests {
         return sorted[sorted.count / medianDivisor]
     }
 
-    private func report(_ line: String) {
+    func report(_ line: String) {
         FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 }

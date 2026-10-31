@@ -10,8 +10,9 @@
 // rows. This kernel gives each lane the input numbers that `qmv_fast` gives
 // it (MLX `quantized.h` and `fp_quantized.h`) and adds them in the same
 // order, so each output row has the same bits as the plain decode of that
-// row. It decodes the weights of each block one time and reuses them for
-// every row; it costs 1.3 times a plain step for 3 rows and 2.6 times for 6.
+// row, in the input range `MultiRowQuantizedMatvec` states. It decodes the
+// weights of each block one time and reuses them for every row; it costs 1.3
+// times a plain step for 3 rows and 2.6 times for 6.
 
 import Foundation
 import MLX
@@ -24,6 +25,15 @@ import MLXNN
 /// the matvec of a plain decode step. Thus a verify that runs its
 /// projections through ``quantizedMatmulRows(_:_:)`` gives the logits of a
 /// plain decode for the quantized matmuls.
+///
+/// That holds in this input range: for bfloat16 each input is 0 or has a
+/// magnitude of at least 2^-114, up to the largest finite number; for float16
+/// every finite input; in both, each sum of four inputs of a pack stays finite
+/// and no output is NaN. The lower edge is the 4-bit affine `qmv_fast`, which
+/// divides an input by up to 4096: a GPU that flushes a subnormal float, as the
+/// M5 Ultra does, drops a smaller input there, and the kernel, which does not
+/// divide, keeps it. An activation of that size next to ordinary numbers rounds
+/// away in both.
 ///
 /// A model runs its projections through `projection(_:by:)`, which takes
 /// the kernel only inside the scope of a speculative verify
@@ -49,6 +59,9 @@ public enum MultiRowQuantizedMatvec {
 
     /// The output rows one SIMD group computes, as in `qmv_fast`.
     private static let resultsPerSimdGroup = 4
+
+    /// The output rows of one threadgroup, the height of an output tile.
+    private static let tileRows = simdGroups * resultsPerSimdGroup
 
     /// The packed words one lane reads from one weight row in each block, as
     /// in `qmv_fast` for 4 and 8 bits.
@@ -92,18 +105,26 @@ public enum MultiRowQuantizedMatvec {
     private static let inputTypes: Set<DType> = [.bfloat16, .float16]
 
     /// The Metal header: the vector load and the dot products of `qmv_fast`
-    /// and `fp_qmv_fast` with their order of operations, and the two kernel
-    /// bodies.
+    /// and `fp_qmv_fast` with their order of operations, and the kernel body
+    /// of both formats.
     ///
     /// `qdot` of MLX multiplies each input number by the masked integer of
-    /// its weight (`ws[i] & 0x00f0` for the second number of a 4-bit pack),
-    /// or by the decoded fp4 value. The `decode_*` functions turn the same
-    /// integers and fp4 values into half precision one time for each block,
-    /// which is exact, and the `*_dot` functions run the sums of `qdot` over
-    /// them.
+    /// its weight (`ws[i] & 0x00f0` for the second number of a 4-bit pack,
+    /// with that input divided by 16), or by the decoded fp4 value. The
+    /// `decode_*` functions turn the same integers and fp4 values into half
+    /// precision one time for each block, which is exact, and the `dot` of
+    /// each format runs the sums of `qdot` over them.
     ///
-    /// Each body decodes one block of its four output rows, then reads the
-    /// input rows one after the other. The SIMD sum closes each row as in
+    /// For 4 bits the kernel reads the nibble and the input as they are, with
+    /// no shift and no division. The product of a nibble and a 16-bit input
+    /// holds at most 15 significant bits, thus it is exact in float and equal
+    /// to the product of `qdot` for an input in the range of the type comment.
+    /// The sum of a pack keeps the form of `qdot`, thus the Metal compiler
+    /// fuses the same adds with the same multiplies, and a product that
+    /// overflows float gives the same result in both.
+    ///
+    /// `project_rows` decodes one block of its four output rows, then reads
+    /// the input rows one after the other. The SIMD sum closes each row as in
     /// `qmv_fast`.
     ///
     /// MLX writes the kernel signature directly after the header, thus the
@@ -121,26 +142,6 @@ public enum MultiRowQuantizedMatvec {
             /// kernels decode is exact in half precision.
             typedef half decoded_weight;
 
-            template <typename T, int VALUES, int BITS>
-            inline float affine_load_vector(const device T* x, thread float (&x_thread)[VALUES]) {
-                float sum = 0;
-                if (BITS == 4) {
-                    UNROLL_FULL for (int i = 0; i < VALUES; i += 4) {
-                        sum += x[i] + x[i + 1] + x[i + 2] + x[i + 3];
-                        x_thread[i] = x[i];
-                        x_thread[i + 1] = x[i + 1] / 16.0f;
-                        x_thread[i + 2] = x[i + 2] / 256.0f;
-                        x_thread[i + 3] = x[i + 3] / 4096.0f;
-                    }
-                } else {
-                    UNROLL_FULL for (int i = 0; i < VALUES; i++) {
-                        sum += x[i];
-                        x_thread[i] = x[i];
-                    }
-                }
-                return sum;
-            }
-
             template <typename T, int VALUES>
             inline void load_vector(const device T* x, thread float (&x_thread)[VALUES]) {
                 UNROLL_FULL for (int i = 0; i < VALUES; i++) {
@@ -148,38 +149,52 @@ public enum MultiRowQuantizedMatvec {
                 }
             }
 
-            /// The masked integers `qdot` multiplies by: for 4 bits each
-            /// 16-bit half of a word gives `half & 0x000f`, `half & 0x00f0`,
-            /// `half & 0x0f00` and `half & 0xf000`; for 8 bits each byte.
-            template <int BITS, int VALUES>
-            inline void decode_affine(const device uint32_t* wl, thread decoded_weight (&w)[VALUES]) {
+            template <typename T, int VALUES, int BITS>
+            inline float affine_load_vector(const device T* x, thread float (&x_thread)[VALUES]) {
+                float sum = 0;
+                if (BITS == 4) {
+                    UNROLL_FULL for (int i = 0; i < VALUES; i += 4) {
+                        sum += x[i] + x[i + 1] + x[i + 2] + x[i + 3];
+                    }
+                } else {
+                    UNROLL_FULL for (int i = 0; i < VALUES; i++) {
+                        sum += x[i];
+                    }
+                }
+                load_vector<T, VALUES>(x, x_thread);
+                return sum;
+            }
+
+            /// The fp4 value `fp_qdot` multiplies by for a nibble.
+            inline decoded_weight fp4_value(uint32_t bits) {
+                half converted = as_type<half>(ushort((bits & 7) << 9));
+                converted *= 16384.0;
+                return bits & 8 ? -converted : converted;
+            }
+
+            /// The eight nibbles of each word, as integers or as fp4 values.
+            template <bool FP4, int VALUES>
+            inline void decode_nibbles(const device uint32_t* wl, thread decoded_weight (&w)[VALUES]) {
                 UNROLL_FULL for (int pack = 0; pack < PACKS; pack++) {
                     const uint32_t word = wl[pack];
-                    if (BITS == 4) {
-                        UNROLL_FULL for (int half_index = 0; half_index < 2; half_index++) {
-                            const uint32_t half_word = (word >> (16 * half_index)) & 0xffff;
-                            UNROLL_FULL for (int j = 0; j < 4; j++) {
-                                w[pack * 8 + half_index * 4 + j] = half_word & (0xfu << (4 * j));
-                            }
-                        }
-                    } else {
-                        UNROLL_FULL for (int j = 0; j < 4; j++) {
-                            w[pack * 4 + j] = (word >> (8 * j)) & 0xff;
-                        }
+                    UNROLL_FULL for (int j = 0; j < 8; j++) {
+                        const uint32_t nibble = (word >> (4 * j)) & 0xf;
+                        w[pack * 8 + j] = FP4 ? fp4_value(nibble) : decoded_weight(nibble);
                     }
                 }
             }
 
-            /// The fp4 values `fp_qdot` multiplies by, nibble by nibble.
-            template <int VALUES>
-            inline void decode_fp4(const device uint32_t* wl, thread decoded_weight (&w)[VALUES]) {
-                UNROLL_FULL for (int pack = 0; pack < PACKS; pack++) {
-                    const uint32_t word = wl[pack];
-                    UNROLL_FULL for (int j = 0; j < 8; j++) {
-                        const uint8_t bits = (word >> (4 * j)) & 0xf;
-                        half converted = as_type<half>(ushort((bits & 7) << 9));
-                        converted *= 16384.0;
-                        w[pack * 8 + j] = bits & 8 ? -converted : converted;
+            /// The integers of the weights: for 4 bits each nibble; for 8 bits each byte.
+            template <int BITS, int VALUES>
+            inline void decode_affine(const device uint32_t* wl, thread decoded_weight (&w)[VALUES]) {
+                if (BITS == 4) {
+                    decode_nibbles<false, VALUES>(wl, w);
+                } else {
+                    UNROLL_FULL for (int pack = 0; pack < PACKS; pack++) {
+                        const uint32_t word = wl[pack];
+                        UNROLL_FULL for (int j = 0; j < 4; j++) {
+                            w[pack * 4 + j] = (word >> (8 * j)) & 0xff;
+                        }
                     }
                 }
             }
@@ -189,40 +204,36 @@ public enum MultiRowQuantizedMatvec {
                 return as_type<float>(out);
             }
 
+            /// The sum of the 4-bit packs of one lane, before any scale. Affine weights add
+            /// their bias term to the scaled sum and fp4 weights have none: a bias of 0 is not
+            /// the same as no bias, as it adds +0 to a result of -0.
+            template <int VALUES>
+            inline float pack_sums(
+                thread const decoded_weight (&w)[VALUES], thread const float (&x_thread)[VALUES]) {
+                float accum = 0;
+                UNROLL_FULL for (int i = 0; i < (VALUES / 4); i++) {
+                    accum +=
+                        (x_thread[4 * i] * float(w[4 * i]) +
+                         x_thread[4 * i + 1] * float(w[4 * i + 1]) +
+                         x_thread[4 * i + 2] * float(w[4 * i + 2]) +
+                         x_thread[4 * i + 3] * float(w[4 * i + 3]));
+                }
+                return accum;
+            }
+
             template <int BITS, int VALUES>
             inline float affine_dot(
                 thread const decoded_weight (&w)[VALUES], thread const float (&x_thread)[VALUES],
                 float scale, float bias, float sum) {
                 float accum = 0;
                 if (BITS == 4) {
-                    UNROLL_FULL for (int i = 0; i < (VALUES / 4); i++) {
-                        accum +=
-                            (x_thread[4 * i] * w[4 * i] +
-                             x_thread[4 * i + 1] * w[4 * i + 1] +
-                             x_thread[4 * i + 2] * w[4 * i + 2] +
-                             x_thread[4 * i + 3] * w[4 * i + 3]);
-                    }
+                    accum = pack_sums<VALUES>(w, x_thread);
                 } else {
                     UNROLL_FULL for (int i = 0; i < VALUES; i++) {
                         accum += x_thread[i] * w[i];
                     }
                 }
                 return scale * accum + sum * bias;
-            }
-
-            template <int VALUES>
-            inline float fp4_dot(
-                thread const decoded_weight (&w)[VALUES], thread const float (&x_thread)[VALUES],
-                float scale) {
-                float accum = 0;
-                UNROLL_FULL for (int i = 0; i < (VALUES / 4); i++) {
-                    accum +=
-                        (x_thread[4 * i] * w[4 * i] +
-                         x_thread[4 * i + 1] * w[4 * i + 1] +
-                         x_thread[4 * i + 2] * w[4 * i + 2] +
-                         x_thread[4 * i + 3] * w[4 * i + 3]);
-                }
-                return scale * accum;
             }
 
             /// The place of one lane in the weights, the inputs and the
@@ -233,6 +244,7 @@ public enum MultiRowQuantizedMatvec {
                 static constexpr constant int values = pack_factor * PACKS;
                 static constexpr constant int block = values * SIMD_WIDTH;
                 static constexpr constant int scale_step = GROUP_SIZE / values;
+                static constexpr constant int groups_per_block = block / GROUP_SIZE;
 
                 int row_bytes;
                 int row_groups;
@@ -267,82 +279,110 @@ public enum MultiRowQuantizedMatvec {
                 }
             }
 
-            template <typename T, int GROUP_SIZE, int BITS, int ROWS>
-            inline void affine_rows(
-                const device T* x, const device uint32_t* w, const device T* scales,
-                const device T* biases, device T* y, int in_vec_size, int out_vec_size,
-                int first_row, int row_count, uint3 tid, uint simd_gid, uint simd_lid) {
+            /// The scale and the bias of one output row in one affine block.
+            struct AffineScale {
+                float scale;
+                float bias;
+            };
+
+            /// The affine weights of `project_rows`.
+            template <typename T, int GROUP_SIZE, int BITS>
+            struct AffineFormat {
                 typedef LaneLayout<BITS, GROUP_SIZE> Layout;
-                const Layout layout(in_vec_size, tid, simd_gid);
-                const device uint8_t* ws = (const device uint8_t*)w + layout.weight_offset(simd_lid);
-                scales += layout.scale_offset(simd_lid);
-                biases += layout.scale_offset(simd_lid);
-                x += first_row * in_vec_size + simd_lid * Layout::values;
-                y += first_row * out_vec_size + layout.out_row;
+                typedef AffineScale Scale;
 
-                float result[ROWS][RESULTS] = {};
-                for (int k = 0; k < in_vec_size; k += Layout::block) {
-                    decoded_weight weights[RESULTS][Layout::values];
-                    float s[RESULTS];
-                    float b[RESULTS];
-                    UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
-                        decode_affine<BITS, Layout::values>(
-                            (const device uint32_t*)(ws + row * layout.row_bytes), weights[row]);
-                        s[row] = scales[row * layout.row_groups];
-                        b[row] = biases[row * layout.row_groups];
-                    }
-                    UNROLL_FULL for (int r = 0; r < ROWS; r++) {
-                        if (r < row_count) {
-                            float x_thread[Layout::values];
-                            const float sum = affine_load_vector<T, Layout::values, BITS>(
-                                x + r * in_vec_size, x_thread);
-                            UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
-                                result[r][row] += affine_dot<BITS, Layout::values>(
-                                    weights[row], x_thread, s[row], b[row], sum);
-                            }
-                        }
-                    }
-                    ws += Layout::block * BYTES_PER_PACK / Layout::pack_factor;
-                    scales += Layout::block / GROUP_SIZE;
-                    biases += Layout::block / GROUP_SIZE;
-                    x += Layout::block;
+                const device T* scales;
+                const device T* biases;
+
+                void advance(int groups) thread {
+                    scales += groups;
+                    biases += groups;
                 }
-                store_rows<T, ROWS>(result, y, out_vec_size, row_count, simd_lid);
-            }
 
-            template <typename T, int GROUP_SIZE, int ROWS>
-            inline void mxfp4_rows(
-                const device T* x, const device uint32_t* w, const device uint8_t* scales,
-                device T* y, int in_vec_size, int out_vec_size, int first_row, int row_count,
-                uint3 tid, uint simd_gid, uint simd_lid) {
+                void decode_row(
+                    const device uint32_t* wl, int group,
+                    thread decoded_weight (&w)[Layout::values], thread Scale& s) const thread {
+                    decode_affine<BITS, Layout::values>(wl, w);
+                    s.scale = scales[group];
+                    s.bias = biases[group];
+                }
+
+                static float load(const device T* x, thread float (&x_thread)[Layout::values]) {
+                    return affine_load_vector<T, Layout::values, BITS>(x, x_thread);
+                }
+
+                static float dot(
+                    thread const decoded_weight (&w)[Layout::values],
+                    thread const float (&x_thread)[Layout::values], thread const Scale& s,
+                    float sum) {
+                    return affine_dot<BITS, Layout::values>(w, x_thread, s.scale, s.bias, sum);
+                }
+            };
+
+            /// The mxfp4 weights of `project_rows`: no bias, thus no sum of the inputs.
+            template <typename T, int GROUP_SIZE>
+            struct Mxfp4Format {
                 typedef LaneLayout<4, GROUP_SIZE> Layout;
+                typedef float Scale;
+
+                const device uint8_t* scales;
+
+                void advance(int groups) thread {
+                    scales += groups;
+                }
+
+                void decode_row(
+                    const device uint32_t* wl, int group,
+                    thread decoded_weight (&w)[Layout::values], thread Scale& s) const thread {
+                    decode_nibbles<true, Layout::values>(wl, w);
+                    s = fp8_e8m0_value(scales[group]);
+                }
+
+                static float load(const device T* x, thread float (&x_thread)[Layout::values]) {
+                    load_vector<T, Layout::values>(x, x_thread);
+                    return 0;
+                }
+
+                static float dot(
+                    thread const decoded_weight (&w)[Layout::values],
+                    thread const float (&x_thread)[Layout::values], thread const Scale& s, float) {
+                    return s * pack_sums<Layout::values>(w, x_thread);
+                }
+            };
+
+            /// Runs the rows of one threadgroup through the weights `format` reads.
+            template <typename T, typename Format, int ROWS>
+            inline void project_rows(
+                Format format, const device T* x, const device uint32_t* w, device T* y,
+                int in_vec_size, int out_vec_size, int first_row, int row_count, uint3 tid,
+                uint simd_gid, uint simd_lid) {
+                typedef typename Format::Layout Layout;
                 const Layout layout(in_vec_size, tid, simd_gid);
                 const device uint8_t* ws = (const device uint8_t*)w + layout.weight_offset(simd_lid);
-                scales += layout.scale_offset(simd_lid);
+                format.advance(layout.scale_offset(simd_lid));
                 x += first_row * in_vec_size + simd_lid * Layout::values;
                 y += first_row * out_vec_size + layout.out_row;
 
                 float result[ROWS][RESULTS] = {};
                 for (int k = 0; k < in_vec_size; k += Layout::block) {
                     decoded_weight weights[RESULTS][Layout::values];
-                    float s[RESULTS];
+                    typename Format::Scale s[RESULTS];
                     UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
-                        decode_fp4<Layout::values>(
-                            (const device uint32_t*)(ws + row * layout.row_bytes), weights[row]);
-                        s[row] = fp8_e8m0_value(scales[row * layout.row_groups]);
+                        format.decode_row(
+                            (const device uint32_t*)(ws + row * layout.row_bytes),
+                            row * layout.row_groups, weights[row], s[row]);
                     }
                     UNROLL_FULL for (int r = 0; r < ROWS; r++) {
                         if (r < row_count) {
                             float x_thread[Layout::values];
-                            load_vector<T, Layout::values>(x + r * in_vec_size, x_thread);
+                            const float sum = Format::load(x + r * in_vec_size, x_thread);
                             UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
-                                result[r][row] += fp4_dot<Layout::values>(
-                                    weights[row], x_thread, s[row]);
+                                result[r][row] += Format::dot(weights[row], x_thread, s[row], sum);
                             }
                         }
                     }
                     ws += Layout::block * BYTES_PER_PACK / Layout::pack_factor;
-                    scales += Layout::block / GROUP_SIZE;
+                    format.advance(Layout::groups_per_block);
                     x += Layout::block;
                 }
                 store_rows<T, ROWS>(result, y, out_vec_size, row_count, simd_lid);
@@ -358,25 +398,25 @@ public enum MultiRowQuantizedMatvec {
 
         """
 
+    /// The end of the kernel bodies: every argument of `project_rows` after the format.
+    private static let projectRowsArguments = """
+        x, w, y, int(x_shape[1]), int(w_shape[0]), first_row, row_count,
+        threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
+        """
+
     /// The kernel body for affine weights. `x` is `(rows, K)`, `w` is
     /// `(N, K * BITS / 32)`, and `scales` and `biases` are `(N, K / GROUP_SIZE)`.
     private static let affineSource =
         rowRangeSource + """
-            affine_rows<T, GROUP_SIZE, BITS, ROWS>(
-                x, w, scales, biases, y, int(x_shape[1]), int(w_shape[0]), first_row, row_count,
-                threadgroup_position_in_grid, simdgroup_index_in_threadgroup,
-                thread_index_in_simdgroup);
-            """
+            project_rows<T, AffineFormat<T, GROUP_SIZE, BITS>, ROWS>({scales, biases},
+            """ + projectRowsArguments
 
     /// The kernel body for mxfp4 weights. `scales` is `(N, K / 32)` of e8m0
     /// bytes.
     private static let mxfp4Source =
         rowRangeSource + """
-            mxfp4_rows<T, GROUP_SIZE, ROWS>(
-                x, w, scales, y, int(x_shape[1]), int(w_shape[0]), first_row, row_count,
-                threadgroup_position_in_grid, simdgroup_index_in_threadgroup,
-                thread_index_in_simdgroup);
-            """
+            project_rows<T, Mxfp4Format<T, GROUP_SIZE>, ROWS>({scales},
+            """ + projectRowsArguments
 
     private static let affineKernel = MLXFast.metalKernel(
         name: "multi_row_affine_qmv",
@@ -393,7 +433,8 @@ public enum MultiRowQuantizedMatvec {
         header: header)
 
     /// The projection of `x` by `layer`, with each output row bit-identical
-    /// to the projection of that row alone.
+    /// to the projection of that row alone in the input range of the type
+    /// comment.
     ///
     /// The kernel runs when ``canRun(_:_:)`` holds: 3 to 8 rows through a
     /// stock `QuantizedLinear` whose single-row matvec is the `qmv_fast` of
@@ -500,7 +541,6 @@ public enum MultiRowQuantizedMatvec {
         let outputs = layer.weight.dim(0)
         let valuesPerLane = (packBits / layer.bits) * packsPerLane
         let blockWidth = valuesPerLane * metalSimdWidth
-        let tileRows = simdGroups * resultsPerSimdGroup
         let groups = width / layer.groupSize
         let scaleType: DType = layer.mode == .affine ? inputType : .uint8
         return layer.weight.ndim == weightAxes && layer.weight.dtype == .uint32
@@ -515,8 +555,13 @@ public enum MultiRowQuantizedMatvec {
     /// The rows each threadgroup holds: the rows split evenly over the
     /// fewest threadgroups that hold at most ``mostRowsPerThreadgroup``.
     static func rowsPerThreadgroup(rows: Int) -> Int {
-        let threadgroups = (rows + mostRowsPerThreadgroup - 1) / mostRowsPerThreadgroup
-        return (rows + threadgroups - 1) / threadgroups
+        let threadgroups = ceilDiv(rows, mostRowsPerThreadgroup)
+        return ceilDiv(rows, threadgroups)
+    }
+
+    /// The quotient of `dividend` and `divisor`, rounded up.
+    private static func ceilDiv(_ dividend: Int, _ divisor: Int) -> Int {
+        (dividend + divisor - 1) / divisor
     }
 
     /// Runs the kernel over `x`, shape `(rows, K)`.
@@ -524,8 +569,7 @@ public enum MultiRowQuantizedMatvec {
         let rows = x.dim(0)
         let outputs = layer.weight.dim(0)
         let rowsPerGroup = rowsPerThreadgroup(rows: rows)
-        let rowGroups = (rows + rowsPerGroup - 1) / rowsPerGroup
-        let tileRows = simdGroups * resultsPerSimdGroup
+        let rowGroups = ceilDiv(rows, rowsPerGroup)
         let grid = (metalSimdWidth * rowGroups, simdGroups * (outputs / tileRows), 1)
         let threadGroup = (metalSimdWidth, simdGroups, 1)
         var template: [(String, any KernelTemplateArg)] = [
