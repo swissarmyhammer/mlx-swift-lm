@@ -245,6 +245,10 @@ public struct Qwen35Configuration: Codable, Sendable {
 /// is built from.
 public enum Qwen35Language {
 
+    /// The M-RoPE rotation of the tokens of a step: the cosines and the sines
+    /// of their positions.
+    typealias RotaryValues = (cos: MLXArray, sin: MLXArray)
+
     final class RotaryEmbedding {
         private let invFreq: MLXArray
         private let mropeIndices: MLXArray
@@ -441,6 +445,10 @@ public enum Qwen35Language {
         /// prefill, verify and decode attention kernels, and a mask array
         /// keeps the SDPA of MLX.
         ///
+        /// The attention layers of a model share their rotation tables, so a
+        /// step can compute the rotation of its tokens once and give it to
+        /// each layer.
+        ///
         /// - Parameters:
         ///   - initialQueries: The queries before M-RoPE, shape
         ///     `(batch, heads, tokens, headDim)`.
@@ -451,6 +459,8 @@ public enum Qwen35Language {
         ///   - cache: The cache of this layer, or `nil`.
         ///   - providedPositionIds: The M-RoPE positions of the tokens, or
         ///     `nil` for the positions after the cache.
+        ///   - rotary: The rotation of `providedPositionIds`, or `nil` to
+        ///     compute it here.
         /// - Returns: The attention output, of the shape of the queries.
         func attend(
             queries initialQueries: MLXArray,
@@ -458,7 +468,8 @@ public enum Qwen35Language {
             values: MLXArray,
             mask: MLXFast.ScaledDotProductAttentionMaskMode,
             cache: KVCache?,
-            positionIds providedPositionIds: MLXArray?
+            positionIds providedPositionIds: MLXArray?,
+            rotary: RotaryValues? = nil
         ) -> MLXArray {
             let B = initialQueries.dim(0)
             let L = initialQueries.dim(2)
@@ -479,7 +490,8 @@ public enum Qwen35Language {
                 kvSeqLen += cache.offset + 1
             }
 
-            let (cosValues, sinValues) = rotaryEmbedding(x: values, positionIds: positionIds!)
+            let (cosValues, sinValues) =
+                rotary ?? rotaryEmbedding(x: values, positionIds: positionIds!)
             (queries, keys) = applyMultimodalRotaryPosEmb(
                 q: queries, k: keys, cos: cosValues, sin: sinValues)
 
@@ -1055,7 +1067,8 @@ public enum Qwen35Language {
             values: MLXArray,
             cache: KVCache,
             mask: MLXFast.ScaledDotProductAttentionMaskMode,
-            positionIds: MLXArray?
+            positionIds: MLXArray?,
+            rotary: RotaryValues? = nil
         ) -> MLXArray {
             fullAttention.attend(
                 queries: queries,
@@ -1063,7 +1076,8 @@ public enum Qwen35Language {
                 values: values,
                 mask: mask,
                 cache: cache,
-                positionIds: positionIds)
+                positionIds: positionIds,
+                rotary: rotary)
         }
 
         // MARK: - Layer blocks
@@ -1381,7 +1395,8 @@ public enum Qwen35Language {
         ///
         /// Each attention layer runs its queries over the cache with the mask of
         /// the general path, so M-RoPE, the KV write and the attention kernels
-        /// stay outside the traces.
+        /// stay outside the traces. The first layer computes the rotation of the
+        /// tokens, and every other layer reuses it.
         private func verifyStep(
             _ inputs: MLXArray, _ cache: [KVCache?], positionIds: MLXArray?,
             shape: CompiledVerifyShape
@@ -1390,23 +1405,33 @@ public enum Qwen35Language {
                 let caches = decodeSchedule.caches(cache, over: embedded)
             else { return nil }
             let mask = decodeSchedule.attentionMask(embedded, cache)
+            var rotary: RotaryValues?
             return decodeSchedule.run(
                 embedded, caches: caches, verify: shape,
                 segment: { index, arguments in
                     compiledVerifySegments(self, key: shape, at: index, arguments)
                 },
-                attention: { attend($0, mask: mask, positionIds: positionIds) })
+                attention: { step in
+                    rotary =
+                        rotary
+                        ?? positionIds.map {
+                            layers[step.layer].fullAttention.rotaryEmbedding(
+                                x: step.values, positionIds: $0)
+                        }
+                    return attend(step, mask: mask, positionIds: positionIds, rotary: rotary)
+                })
         }
 
         /// The attention of a full-attention layer between two segments, through
-        /// ``DecoderLayer/attentionCacheStep(queries:keys:values:cache:mask:positionIds:)``.
+        /// ``DecoderLayer/attentionCacheStep(queries:keys:values:cache:mask:positionIds:rotary:)``.
         private func attend(
             _ step: CompiledDecodeSchedule.AttentionStep,
-            mask: MLXFast.ScaledDotProductAttentionMaskMode, positionIds: MLXArray?
+            mask: MLXFast.ScaledDotProductAttentionMaskMode, positionIds: MLXArray?,
+            rotary: RotaryValues? = nil
         ) -> MLXArray {
             layers[step.layer].attentionCacheStep(
                 queries: step.queries, keys: step.keys, values: step.values, cache: step.cache,
-                mask: mask, positionIds: positionIds)
+                mask: mask, positionIds: positionIds, rotary: rotary)
         }
     }
 
