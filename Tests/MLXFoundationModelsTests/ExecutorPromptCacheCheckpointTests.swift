@@ -150,6 +150,7 @@ struct ExecutorPromptCacheCheckpointTests {
 
     /// The model the plan fixtures make fresh caches with: one attention
     /// layer and one recurrent layer.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func hybridModel() -> ScriptedLanguageModel {
         ScriptedLanguageModel(rounds: [], cacheLayerCount: 1, recurrentLayerCount: 1)
     }
@@ -175,6 +176,7 @@ struct ExecutorPromptCacheCheckpointTests {
 
     /// An entry whose hybrid caches hold ``ledger`` and carry a checkpoint at
     /// the end of ``checkpointTokens``.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func entryWithCheckpoint() throws -> ExecutorPromptCacheEntry {
         let caches = try hybridModel().newCache(parameters: nil)
         feed(caches, tokenCount: Self.checkpointTokens.count)
@@ -187,6 +189,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     /// Plans `render` against `entry`.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func plan(
         render: [Int], reusing entry: ExecutorPromptCacheEntry,
         protocolRules: [any PromptCacheReuseRule] = []
@@ -197,6 +200,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("a render that drops the generated turn goes back to the checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRenderThatDropsTheGeneratedTurnGoesBackToTheCheckpoint() throws {
         let render = Self.checkpointTokens + [9, 9]
 
@@ -209,6 +213,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("the plan line of a restore names the rule and the seam")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func thePlanLineOfARestoreNamesTheRuleAndTheSeam() throws {
         let planned = try plan(
             render: Self.checkpointTokens + [9, 9], reusing: entryWithCheckpoint())
@@ -226,6 +231,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("a render that parts before the checkpoint still rebuilds")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRenderThatPartsBeforeTheCheckpointStillRebuilds() throws {
         let render = [1, 9, 9]
 
@@ -236,6 +242,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("a render that extends the ledger still extends and does not restore")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRenderThatExtendsTheLedgerStillExtendsAndDoesNotRestore() throws {
         let planned = try #require(
             try plan(render: Self.ledger + [7], reusing: entryWithCheckpoint()))
@@ -256,6 +263,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("a protocol rule still splices and does not restore")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aProtocolRuleStillSplicesAndDoesNotRestore() throws {
         let planned = try #require(
             try plan(
@@ -266,6 +274,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("caches that all rewind take no checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func cachesThatAllRewindTakeNoCheckpoint() {
         let caches: [KVCache] = [KVCacheSimple()]
         feed(caches, tokenCount: Self.checkpointTokens.count)
@@ -276,6 +285,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("only a model with a layer that cannot rewind is served by a checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func onlyAModelWithALayerThatCannotRewindIsServedByACheckpoint() {
         #expect(PromptCacheCheckpoint.applies(to: hybridModel()))
         #expect(
@@ -284,6 +294,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("an entry counts the bytes of its checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func anEntryCountsTheBytesOfItsCheckpoint() throws {
         let entry = try entryWithCheckpoint()
         let checkpoint = try #require(entry.checkpoint)
@@ -295,6 +306,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("a boundary before the end of the prompt is fed before generation")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aBoundaryBeforeTheEndOfThePromptIsFedBeforeGeneration() throws {
         let model = hybridModel()
         let render = Self.ledger
@@ -313,6 +325,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("a boundary at the end of the prompt is taken when the prefill ends")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aBoundaryAtTheEndOfThePromptIsTakenWhenThePrefillEnds() throws {
         let model = hybridModel()
         let slot = ExecutorPromptCacheSlot(nil, report: { _ in })
@@ -333,6 +346,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("the commit line names the position of the checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func theCommitLineNamesThePositionOfTheCheckpoint() throws {
         let line = ExecutorPromptCacheReport.commitLine(
             key: ExecutorPromptCacheKey(modelID: "test/checkpoint", sessionID: "s"),

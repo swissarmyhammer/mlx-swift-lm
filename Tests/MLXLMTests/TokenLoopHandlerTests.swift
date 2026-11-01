@@ -29,7 +29,7 @@ final class TokenLoopHandlerTests: XCTestCase {
     private struct ByteTokenizer: Tokenizer {
         var bosToken: String? { nil }
         var eosToken: String? { nil }
-        var unknownToken: String? { nil }
+        var unknownToken: String?
 
         func encode(text: String, addSpecialTokens: Bool) -> [Int] {
             text.utf8.map(Int.init)
@@ -139,6 +139,21 @@ final class TokenLoopHandlerTests: XCTestCase {
                     + (includeStopToken ? ["probability:33"] : [])
                     + ["stop:33", "end", "count:\(includeStopToken ? 2 : 1)"])
         }
+    }
+
+    func testHandlerReceivesTheUnknownTokenThatEndsTheGeneration() async {
+        let (stream, task) = generateLoopTask(
+            promptTokenCount: 1, modelConfiguration: .init(id: "test"),
+            tokenizer: ByteTokenizer(unknownToken: "?"), iterator: Iterator(tokens: [65, 63, 66]),
+            handler: BoundaryHandler())
+
+        var events: [String] = []
+        for await event in stream {
+            events.append(event)
+        }
+        await task.value
+
+        XCTAssertEqual(events, ["token:65", "stop:63", "end", "count:1"])
     }
 
     func testCompositionPreservesTextAndToolCalls() async {

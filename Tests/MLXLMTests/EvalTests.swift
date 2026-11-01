@@ -205,7 +205,7 @@ public class EvalTests: XCTestCase {
         var iterator = try TokenIterator(
             input: LMInput(tokens: prompt), model: model, parameters: parameters)
         let cache = try model.newCache(parameters: parameters)
-        var processor = parameters.processor()
+        var processor = parameters.makeProcessor()
         processor?.prompt(prompt)
         var previous = prompt
 

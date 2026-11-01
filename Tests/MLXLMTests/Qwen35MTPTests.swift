@@ -382,7 +382,7 @@ struct Qwen35MTPMetalTests {
             from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let target = MLXLLM.Qwen35TextModel(cfg)
         let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
-        let sampler = GenerateParameters(temperature: 0).sampler()
+        let sampler = GenerateParameters(temperature: 0).makeSampler()
         let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
 
         var targetState = LMOutput.State()
@@ -432,7 +432,7 @@ struct Qwen35MTPMetalTests {
             from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let target = MLXLLM.Qwen35TextModel(cfg)
         let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
-        let sampler = GenerateParameters(temperature: 0).sampler()
+        let sampler = GenerateParameters(temperature: 0).makeSampler()
         let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
 
         var targetState = LMOutput.State()
@@ -492,7 +492,7 @@ struct Qwen35MTPMetalTests {
             from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
         let target = MLXLLM.Qwen35TextModel(cfg)
         let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
-        let sampler = GenerateParameters(temperature: 0).sampler()
+        let sampler = GenerateParameters(temperature: 0).makeSampler()
         let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
         let hidden = MLXArray.zeros([1, 3, cfg.hiddenSize])
         var state = drafter.makeState(parameters: nil)
@@ -529,7 +529,7 @@ struct Qwen35MTPMetalTests {
             from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
         let target = MLXVLM.Qwen35(cfg)
         let drafter = MLXVLM.Qwen35VLMNextNDraftModel(cfg)
-        let sampler = GenerateParameters(temperature: 0).sampler()
+        let sampler = GenerateParameters(temperature: 0).makeSampler()
         let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
         let hidden = MLXArray.zeros([1, 3, cfg.textConfiguration.hiddenSize])
         let positionDeltas = MLXArray([Int32(2)])
@@ -831,7 +831,7 @@ struct Qwen35MTPDrafterStateTests {
     @Test("trimming entries and appending them again matches a cold prefill")
     func trimAndAppendMatchColdPrefill() throws {
         let fixture = try Qwen35MTPFixture()
-        let sampler = GenerateParameters(temperature: 0).sampler()
+        let sampler = GenerateParameters(temperature: 0).makeSampler()
         let hidden = try targetHidden(fixture, tokens: prompt)
         let cold = preparedState(fixture, hidden: hidden, sampler: sampler)
         var replayed = preparedState(fixture, hidden: hidden, sampler: sampler)
@@ -872,7 +872,7 @@ struct Qwen35MTPDrafterStateTests {
     @Test("finalization drops tentative proposal entries before the target boundary")
     func finalizationDropsTentativeEntries() throws {
         let fixture = try Qwen35MTPFixture()
-        let sampler = GenerateParameters(temperature: 0).sampler()
+        let sampler = GenerateParameters(temperature: 0).makeSampler()
         let hidden = try targetHidden(fixture, tokens: prompt)
         var state = preparedState(fixture, hidden: hidden, sampler: sampler)
         appendTentativeEntry(fixture, hidden: hidden, state: &state, sampler: sampler)
@@ -890,7 +890,7 @@ struct Qwen35MTPDrafterStateTests {
     @Test("a cold start at a cached position resumes as a continuation")
     func coldStartAtCachedPositionResumes() throws {
         let fixture = try Qwen35MTPFixture()
-        let sampler = GenerateParameters(temperature: 0).sampler()
+        let sampler = GenerateParameters(temperature: 0).makeSampler()
         let cache = try fixture.target.newCache(parameters: nil)
         _ = try targetHidden(
             fixture, tokens: Array(prompt.prefix(cachedPrefixLength)), cache: cache)
@@ -939,7 +939,7 @@ struct Qwen35MTPDrafterStateTests {
             from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
         let target = MLXVLM.Qwen35(cfg)
         let drafter = MLXVLM.Qwen35VLMNextNDraftModel(cfg)
-        let sampler = GenerateParameters(temperature: 0).sampler()
+        let sampler = GenerateParameters(temperature: 0).makeSampler()
         let suffix = MLXArray(vlmSuffixTokens)[.newAxis, 0...]
         var state = drafter.makeState(parameters: nil)
 
@@ -999,7 +999,7 @@ struct Qwen35MTPDrafterStateTests {
     private func continuation(
         _ fixture: Qwen35MTPFixture, targetProcessedTokenCount: Int
     ) throws -> MTPDrafterContinuation {
-        let sampler = GenerateParameters(temperature: 0).sampler()
+        let sampler = GenerateParameters(temperature: 0).makeSampler()
         let hidden = try targetHidden(fixture, tokens: prompt)
         return MTPDrafterContinuation(
             state: preparedState(fixture, hidden: hidden, sampler: sampler),

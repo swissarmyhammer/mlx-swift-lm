@@ -61,7 +61,7 @@ struct SamplingConfigurationParameterTests {
                 mode: .topK(40), seed: 7))
 
         #expect(parameters.seed == 7)
-        #expect(parameters.sampler() is ArgMaxSampler)
+        #expect(parameters.makeSampler() is ArgMaxSampler)
     }
 }
 

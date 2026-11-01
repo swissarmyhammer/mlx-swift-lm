@@ -161,7 +161,17 @@ struct TranscriptConverter {
         /// Holds `text` for the next assistant message.
         mutating func hold(_ text: String?) {
             guard let text else { return }
-            pending = pending.map { $0 + "\n" + text } ?? text
+            pending = Self.joined(pending, text)
+        }
+
+        /// Joins consecutive reasoning text with a newline.
+        ///
+        /// - Parameters:
+        ///   - earlier: The text so far, or `nil` when there is none.
+        ///   - later: The text that follows it.
+        /// - Returns: The joined text.
+        private static func joined(_ earlier: String?, _ later: String) -> String {
+            earlier.map { $0 + "\n" + later } ?? later
         }
 
         /// Hands the pending text to `message` when it is an assistant
@@ -171,9 +181,7 @@ struct TranscriptConverter {
         {
             if message.role == .assistant {
                 message.reasoning =
-                    pending.map { pending in
-                        message.reasoning.map { $0 + "\n" + pending } ?? pending
-                    } ?? message.reasoning
+                    pending.map { Self.joined(message.reasoning, $0) } ?? message.reasoning
                 pending = nil
             } else {
                 settle(in: &messages)
@@ -185,8 +193,7 @@ struct TranscriptConverter {
         /// it when no assistant message stands right before it.
         mutating func settle(in messages: inout [Chat.Message]) {
             if let anchor, let pending {
-                messages[anchor].reasoning =
-                    messages[anchor].reasoning.map { $0 + "\n" + pending } ?? pending
+                messages[anchor].reasoning = Self.joined(messages[anchor].reasoning, pending)
             }
             pending = nil
         }
@@ -305,40 +312,51 @@ struct TranscriptConverter {
     private static func extractToolOutputContent(
         from segments: [Transcript.Segment]
     ) -> String {
-        segments.compactMap { segment -> String? in
-            switch segment {
-            case .text(let textSegment):
-                return textSegment.content
-            case .structure(let structuredSegment):
-                return structuredSegment.content.jsonString
-            case .attachment(let attachment):
+        extractText(
+            from: segments,
+            structure: { $0.content.jsonString },
+            attachment: { attachment in
                 logger.warning(
                     "Dropping an attachment in tool output. Tool-output images are not yet forwarded to the model",
                     metadata: ["label": attachment.label ?? "none"])
-                return nil
-            default:
-                logger.debug("Skipping unsupported tool-output segment")
-                return nil
-            }
-        }.joined(separator: "\n")
+            }) ?? ""
     }
 
     /// Extracts text content from transcript segments.
     ///
-    /// Concatenates all text segments with newlines.
-    /// Skips images, structured content, and other non-text segments.
+    /// Concatenates all text segments with newlines. By default it skips images,
+    /// structured content, and other non-text segments.
     ///
-    /// - Parameter segments: Array of transcript segments
+    /// - Parameters:
+    ///   - segments: Array of transcript segments
+    ///   - structure: The text of a structured segment, or nil to skip it
+    ///   - attachment: Observes an attachment, which the text leaves out
     /// - Returns: Concatenated text, or nil if no text content found
-    private static func extractText(from segments: [Transcript.Segment]) -> String? {
+    private static func extractText(
+        from segments: [Transcript.Segment],
+        structure: (Transcript.StructuredSegment) -> String? = { _ in
+            logger.debug("Skipping non-text segment in extractText")
+            return nil
+        },
+        attachment: (Transcript.AttachmentSegment) -> Void = { _ in
+            logger.debug("Skipping non-text segment in extractText")
+        }
+    ) -> String? {
         let texts = segments.compactMap { segment -> String? in
             switch segment {
             case .text(let textSegment):
                 return textSegment.content
 
-            default:
-                // Skip images, structured content, and local attention segment types
-                logger.debug("Skipping non-text segment in extractText")
+            case .structure(let structuredSegment):
+                return structure(structuredSegment)
+
+            case .attachment(let attachmentSegment):
+                attachment(attachmentSegment)
+                return nil
+
+            @unknown default:
+                assertionFailure("segment of an unknown kind reached extractText")
+                logger.warning("Skipping a segment of a kind this SDK adapter predates")
                 return nil
             }
         }
@@ -429,20 +447,16 @@ struct TranscriptConverter {
     static func labeledAttachments(in entries: some Collection<Transcript.Entry>)
         -> [LabeledAttachment]
     {
-        var seen = Set<String>()
-        var ordered: [LabeledAttachment] = []
-        for entry in entries {
-            guard case .prompt(let prompt) = entry else { continue }
-            for segment in prompt.segments {
-                guard case .attachment(let attachment) = segment,
-                    let label = attachment.label
-                else { continue }
-                if seen.insert(label).inserted {
-                    ordered.append(LabeledAttachment(label: label, entry: entry))
-                }
+        let labeled = entries.flatMap { entry -> [LabeledAttachment] in
+            guard case .prompt(let prompt) = entry else { return [] }
+            return prompt.segments.compactMap { segment in
+                guard case .attachment(let attachment) = segment, let label = attachment.label
+                else { return nil }
+                return LabeledAttachment(label: label, entry: entry)
             }
         }
-        return ordered
+        var seen: Set<String> = []
+        return labeled.filter { seen.insert($0.label).inserted }
     }
 
 }

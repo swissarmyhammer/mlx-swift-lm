@@ -15,6 +15,15 @@ public enum TokenLoopDisposition: Sendable {
         if case .more = self { return true }
         return false
     }
+
+    /// The reason the generation loop records for this disposition, or `nil` when it goes on.
+    var stopReason: GenerateStopReason? {
+        switch self {
+        case .more: nil
+        case .stop: .stop
+        case .cancelled: .cancelled
+        }
+    }
 }
 
 /// Converts generated tokens into stream events.

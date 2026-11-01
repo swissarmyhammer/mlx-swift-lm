@@ -45,6 +45,60 @@ final class GenerationExecutionTests: XCTestCase {
         }
     }
 
+    /// Runs the synchronous loop over `iterator`, whose tokens are all 42.
+    private static func runSynchronousLoop(
+        iterator: Iterator, stopTokenIds: Set<Int> = [],
+        didGenerate: (Int, [Int]) -> GenerateDisposition = { _, _ in .more }
+    ) -> SynchronousGenerationLoopResult {
+        SynchronousGenerationLoop.run(
+            promptTokenCount: 1,
+            modelConfiguration: .init(id: "test", eosTokenIds: stopTokenIds),
+            tokenizer: PseudoWordTokenizer(), iterator: iterator, didGenerate: didGenerate)
+    }
+
+    func testSynchronousLoopRecordsTheGeneratedTokens() {
+        let result = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3))
+        XCTAssertEqual(result.generatedTokenIds, [42, 42, 42])
+    }
+
+    func testSynchronousLoopReportsTheTokenLimit() {
+        let result = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3))
+        XCTAssertEqual(result.info.stopReason, .length)
+    }
+
+    func testSynchronousLoopHandsTheVisitorTheTokensSoFar() {
+        var visited: [[Int]] = []
+        _ = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 2)) { _, tokens in
+            visited.append(tokens)
+            return .more
+        }
+        XCTAssertEqual(visited, [[42], [42, 42]])
+    }
+
+    func testSynchronousLoopVisitorStopCancels() {
+        let result = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3)) { _, _ in .stop }
+        XCTAssertEqual(result.info.stopReason, .cancelled)
+    }
+
+    func testSynchronousLoopLeavesTheStopTokenOutOfTheTokens() {
+        let result = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3), stopTokenIds: [42])
+        XCTAssertEqual(result.generatedTokenIds, [])
+    }
+
+    func testSynchronousLoopReportsTheStopToken() {
+        let result = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3), stopTokenIds: [42])
+        XCTAssertEqual(result.info.stopReason, .stop)
+    }
+
+    func testSynchronousLoopRunsInACancelledTask() async {
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3)).generatedTokenIds
+        }
+        let tokens = await task.value
+        XCTAssertEqual(tokens, [42, 42, 42])
+    }
+
     // Run with LIBDISPATCH_COOPERATIVE_POOL_STRICT=1 to expose pool starvation
     // deterministically. The timeout also lets a regressed implementation finish.
     func testBlockingIteratorLeavesCooperativeWorkerAvailable() async {

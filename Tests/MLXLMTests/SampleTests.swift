@@ -111,9 +111,9 @@ public class SampleTests: XCTestCase {
     }
 
     func testGenerateParametersCreatesExpectedSampler() {
-        XCTAssertTrue(GenerateParameters(temperature: 0.7, topK: 40).sampler() is TopPSampler)
-        XCTAssertTrue(GenerateParameters(temperature: 0.7, minP: 0.1).sampler() is TopPSampler)
-        XCTAssertTrue(GenerateParameters(temperature: 0).sampler() is ArgMaxSampler)
+        XCTAssertTrue(GenerateParameters(temperature: 0.7, topK: 40).makeSampler() is TopPSampler)
+        XCTAssertTrue(GenerateParameters(temperature: 0.7, minP: 0.1).makeSampler() is TopPSampler)
+        XCTAssertTrue(GenerateParameters(temperature: 0).makeSampler() is ArgMaxSampler)
     }
 
     func testPresencePenaltyContextPenalizesSeenTokens() {
@@ -145,13 +145,13 @@ public class SampleTests: XCTestCase {
     }
 
     func testGenerateParametersCreatesExpectedPenaltyProcessor() {
-        XCTAssertNotNil(GenerateParameters(repetitionPenalty: 1.1).processor())
-        XCTAssertNotNil(GenerateParameters(presencePenalty: 0.5).processor())
-        XCTAssertNotNil(GenerateParameters(frequencyPenalty: 0.5).processor())
+        XCTAssertNotNil(GenerateParameters(repetitionPenalty: 1.1).makeProcessor())
+        XCTAssertNotNil(GenerateParameters(presencePenalty: 0.5).makeProcessor())
+        XCTAssertNotNil(GenerateParameters(frequencyPenalty: 0.5).makeProcessor())
         XCTAssertNotNil(
             GenerateParameters(
                 repetitionPenalty: 1.1, presencePenalty: 0.5, frequencyPenalty: 0.5
-            ).processor()
+            ).makeProcessor()
         )
     }
 
@@ -211,7 +211,7 @@ public class SampleTests: XCTestCase {
             repetitionPenalty: 1.5, repetitionContextSize: 5,
             presencePenalty: 0.5, presenceContextSize: 5,
             frequencyPenalty: 0.25, frequencyContextSize: 5
-        ).processor()
+        ).makeProcessor()
         XCTAssertNotNil(processor)
 
         processor?.prompt(MLXArray([0, 0, 0, 1, 1]))
@@ -343,7 +343,7 @@ public class SampleTests: XCTestCase {
     func testGenerateParametersThreadsSeedToSampler() {
         let logits = flatLogits()
         func draw() -> [Int] {
-            let sampler = GenerateParameters(temperature: 1.0, topK: 4, seed: 99).sampler()
+            let sampler = GenerateParameters(temperature: 1.0, topK: 4, seed: 99).makeSampler()
             return (0 ..< 24).map { _ in sampler.sample(logits: logits).item(Int.self) }
         }
         // Two independently-built samplers carrying the same seed agree.
@@ -395,19 +395,19 @@ public class SampleTests: XCTestCase {
         XCTAssertNotNil(components.logitProcessor(parameters: penalized) as? ChainedLogitProcessor)
     }
 
-    /// An empty ``GenerationComponents`` must reproduce ``GenerateParameters/processor()``
+    /// An empty ``GenerationComponents`` must reproduce ``GenerateParameters/makeProcessor()``
     /// exactly -- the guarantee that threading `components` everywhere is non-breaking.
     func testEmptyGenerationComponentsMatchesParametersProcessor() {
         let components = GenerationComponents()
 
         // no penalties -> nil, same as processor()
         let plain = GenerateParameters()
-        XCTAssertNil(plain.processor())
+        XCTAssertNil(plain.makeProcessor())
         XCTAssertNil(components.logitProcessor(parameters: plain))
 
         // penalties only -> the penalty processor, unwrapped (no chaining)
         let penalized = GenerateParameters(presencePenalty: 0.5, presenceContextSize: 5)
-        XCTAssertNotNil(penalized.processor() as? PenaltyProcessor)
+        XCTAssertNotNil(penalized.makeProcessor() as? PenaltyProcessor)
         XCTAssertNotNil(components.logitProcessor(parameters: penalized) as? PenaltyProcessor)
     }
 

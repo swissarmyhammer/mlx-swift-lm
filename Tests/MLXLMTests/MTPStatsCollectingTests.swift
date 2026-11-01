@@ -37,7 +37,7 @@ struct MTPStatsCollectingTests {
             passthroughReason: nil
         )
 
-        // Mirror the downcast pattern at Evaluate.swift's info construction
+        // Mirror the downcast pattern at GenerationLoop.swift's info construction
         // site: `iterator as? MTPStatsCollecting`.
         let asAny: Any = mock
         let stats = asAny as? MTPStatsCollecting

@@ -147,6 +147,7 @@ struct CancelledGenerationDrainTests {
     /// passes, cancels the turn, awaits its result, and then asserts
     /// that no forward pass was still running when the turn returned
     /// and that none starts inside ``quiescenceWindow``.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func cancelMidDecodeAndExpectDrain(
         _ turn: Task<Void, any Error>, forwardSteps: ForwardStepCounter
     ) async throws {
@@ -194,6 +195,7 @@ struct CancelledGenerationDrainTests {
     ///   - counter: the counter the model writes.
     /// - Returns: true when the count was reached, false when
     ///   ``generationStartTimeout`` won.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func waitForForwardSteps(
         _ steps: Int, of counter: ForwardStepCounter
     ) async -> Bool {

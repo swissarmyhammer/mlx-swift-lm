@@ -439,6 +439,8 @@ struct TranscriptConverterTests {
         #expect(messages.map(\.role) == [.user, .assistant])
         #expect(messages[1].content == "4")
         #expect(messages[1].reasoning == "Let me add: 2 plus 2 is 4.")
+        let raw = DefaultMessageGenerator().generate(message: messages[1])
+        #expect(raw["reasoning_content"] as? String == "Let me add: 2 plus 2 is 4.")
     }
 
     @Test
@@ -469,6 +471,23 @@ struct TranscriptConverterTests {
         #expect(messages.map(\.role) == [.user, .assistant])
         #expect(messages[1].reasoning == "I need the tool.")
         #expect(messages[1].tool?.calls?.map(\.function.name) == ["get_weather"])
+        let raw = DefaultMessageGenerator().generate(message: messages[1])
+        #expect(raw["reasoning_content"] as? String == "I need the tool.")
+    }
+
+    @Test
+    func toolCallArgumentsThatAreNotAnObjectReplayEmpty() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // `Transcript.ToolCall` is public, and its arguments hold any
+        // `GeneratedContent`, thus a host-built transcript can reach this.
+        let toolCall = Transcript.ToolCall(
+            id: "call_1", toolName: "echo", arguments: GeneratedContent("plain text"))
+
+        let messages = try TranscriptConverter.mlxMessages(
+            for: [.toolCalls(Transcript.ToolCalls(id: "tc_1", [toolCall]))])
+
+        #expect(messages[0].tool?.calls?.first?.function.arguments.isEmpty == true)
     }
 
     @Test

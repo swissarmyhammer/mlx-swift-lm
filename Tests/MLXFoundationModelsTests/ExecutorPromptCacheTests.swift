@@ -435,7 +435,7 @@ struct ExecutorPromptCacheTests {
         let store = makeStore()
         await store.checkIn(sessionKey, entry(tokens: [1, 2, 3]))
 
-        try await respondOnce(inside: store, modelID: modelID, sessionID: "bound-session")
+        try await ScriptedExecutorPass.respondOnce(inside: store, modelID: modelID, sessionID: "bound-session")
 
         // The pass checked the seeded entry out of the bound store. The
         // scripted model holds no key/value cache, thus the pass checked
@@ -660,6 +660,7 @@ struct ExecutorPromptCacheTests {
     ///
     /// The model owns no attention layer, thus a fresh cache is empty, which
     /// is all a plan needs here.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func plan(
         _ input: LMInput, cachedTokens: [Int]? = nil
     ) throws -> ExecutorPromptCachePlan? {
@@ -674,6 +675,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a text-only prompt a VLM processor batched to one row gets a plan")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aTextOnlyPromptAVLMProcessorBatchedToOneRowGetsAPlan() throws {
         let planned = try plan(batchedInput([1, 2, 3]))
 
@@ -682,6 +684,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("that plan reuses the prefix an earlier turn left, in the shape the model expects")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func thatPlanReusesThePrefixAnEarlierTurnLeftInTheShapeTheModelExpects() throws {
         let planned = try #require(
             try plan(batchedInput([1, 2, 3, 4, 5]), cachedTokens: [1, 2, 3]))
@@ -695,11 +698,13 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a mask that holds a zero gets no plan")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aMaskThatHoldsAZeroGetsNoPlan() throws {
         #expect(try plan(batchedInput([1, 2, 3], mask: [1, 1, 0])) == nil)
     }
 
     @Test("a batch of more than one row gets no plan")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aBatchOfMoreThanOneRowGetsNoPlan() throws {
         let twoRows = MLXArray([1, 2, 3, 4, 5, 6]).reshaped([2, 3])
         let input = LMInput(text: .init(tokens: twoRows, mask: ones(like: twoRows)))
@@ -708,6 +713,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("an image keeps a prompt out of the plan")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func anImageKeepsAPromptOutOfThePlan() throws {
         let text = batchedInput([1, 2, 3]).text
         let input = LMInput(text: text, image: .init(pixels: MLXArray.zeros([1, 1])))
@@ -736,6 +742,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a protocol rule splices the render's tail onto the tokens the model wrote")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aProtocolRuleSplicesTheRendersTailOntoTheTokensTheModelWrote() throws {
         // The last pass rendered [1, 2] and the model wrote [70, commit]. The
         // new render writes 71 where the model wrote 70, and a recurrent cache
@@ -757,6 +764,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a spliced pass commits the tokens the model wrote, not the render")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aSplicedPassCommitsTheTokensTheModelWroteNotTheRender() throws {
         let ledger = [1, 2, 70, Self.commit]
         let recurrent = recurrentCache(at: ledger.count)
@@ -811,6 +819,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a plan seeds the model state the entry carries")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aPlanSeedsTheModelStateTheEntryCarries() throws {
         let planned = try #require(
             try ExecutorPromptCachePlan.make(
@@ -822,6 +831,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a carried model state keeps the caches from a rewind")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aCarriedModelStateKeepsTheCachesFromARewind() throws {
         // The state is anchored to the prefill that made it, thus a render
         // that rewrites a cached token gets fresh caches and no state.
@@ -883,6 +893,7 @@ struct ExecutorPromptCacheTests {
     }
 
     /// Plans `render` against `entry` with no protocol rule.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func plan(
         render: [Int], reusing entry: ExecutorPromptCacheEntry?
     ) throws -> ExecutorPromptCachePlan? {
@@ -892,11 +903,13 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a pass with no carried entry names the cold rule")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aPassWithNoCarriedEntryNamesTheColdRule() throws {
         #expect(try plan(render: [1, 2, 3], reusing: nil)?.decision == .cold)
     }
 
     @Test("a render that extends the ledger names the extend rule")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRenderThatExtendsTheLedgerNamesTheExtendRule() throws {
         let planned = try plan(batchedInput([1, 2, 3, 4]), cachedTokens: [1, 2, 3])
 
@@ -904,6 +917,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a protocol rule that splices names the splice rule")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aProtocolRuleThatSplicesNamesTheSpliceRule() throws {
         let ledger = [1, 2, 70, Self.commit]
         let entry = ExecutorPromptCacheEntry(
@@ -918,6 +932,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a rewind names the rewind rule and the seam it rewound to")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRewindNamesTheRewindRuleAndTheSeamItRewoundTo() throws {
         let planned = try plan(batchedInput([1, 2, 9, 9]), cachedTokens: [1, 2, 3, 4, 5])
 
@@ -929,6 +944,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a rebuild names the rebuild rule and the seam the caches could not rewind to")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRebuildNamesTheRebuildRuleAndTheSeamTheCachesCouldNotRewindTo() throws {
         let planned = try plan(
             render: [1, 2, 9, 9], reusing: recurrentEntry(ledger: [1, 2, 3, 4]))
@@ -1041,6 +1057,7 @@ struct ExecutorPromptCacheTests {
         reportedRestoreMilliseconds)
 
     @Test("the plan line of an extension names the counts and the rule")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func thePlanLineOfAnExtensionNamesTheCountsAndTheRule() throws {
         let planned = try plan(batchedInput([1, 2, 3, 4]), cachedTokens: [1, 2, 3])
 
@@ -1054,6 +1071,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("the plan line of a rebuild names the seam and decodes each side")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func thePlanLineOfARebuildNamesTheSeamAndDecodesEachSide() throws {
         let planned = try plan(
             render: [1, 2, 9, 9], reusing: recurrentEntry(ledger: [1, 2, 3, 4]))
@@ -1069,6 +1087,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("the plan line of a rewind names the seam it rewound to")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func thePlanLineOfARewindNamesTheSeamItRewoundTo() throws {
         let planned = try plan(batchedInput([1, 2, 9]), cachedTokens: [1, 2, 3, 4])
 
@@ -1083,6 +1102,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("the plan line of a cold pass names the cold rule")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func thePlanLineOfAColdPassNamesTheColdRule() throws {
         let line = ExecutorPromptCacheReport.planLine(
             key: reportedKey, source: .none, plan: try plan(render: [1, 2, 3], reusing: nil),
@@ -1095,6 +1115,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a carried entry whose caches hold nothing plans as cold")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aCarriedEntryWhoseCachesHoldNothingPlansAsCold() throws {
         let emptyEntry = ExecutorPromptCacheEntry(caches: [KVCacheSimple()], tokens: [])
 
@@ -1111,6 +1132,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("the plan line of a restored pass names the disk and the restore time")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func thePlanLineOfARestoredPassNamesTheDiskAndTheRestoreTime() throws {
         let planned = try plan(batchedInput([1, 2, 3, 4]), cachedTokens: [1, 2, 3])
 
@@ -1179,6 +1201,7 @@ struct ExecutorPromptCacheTests {
     }
 
     @Test("a slot reports one plan line and one commit line for each pass")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aSlotReportsOnePlanLineAndOneCommitLineForEachPass() throws {
         var lines: [String] = []
         let caches: [KVCache] = [KVCacheSimple()]

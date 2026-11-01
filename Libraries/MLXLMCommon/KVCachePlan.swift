@@ -514,3 +514,25 @@ extension GenerateParameters {
         throw KVCacheConfigurationError.unsupportedLegacyScheme(scheme)
     }
 }
+
+extension KVCacheStorage {
+    /// Records the prompt tokens that a model's `prepare` processed.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt `prepare` received.
+    ///   - result: The result of `prepare`.
+    ///   - role: The name of the call in the precondition message.
+    func commitPrefill(of input: LMInput, result: PrepareResult, role: String) {
+        let inputLength = input.text.cacheSequenceLength
+        switch result {
+        case .tokens(let tokens):
+            let remainingLength = tokens.cacheSequenceLength
+            precondition(
+                remainingLength <= inputLength,
+                "\(role) returned more tokens than it received")
+            commitProcessedTokens(inputLength - remainingLength)
+        case .logits:
+            commitProcessedTokens(inputLength)
+        }
+    }
+}

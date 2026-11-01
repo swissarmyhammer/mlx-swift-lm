@@ -112,6 +112,11 @@ enum KVCacheTree {
         return leaves
     }
 
+    /// The most tokens any leaf of `cache` evicted.
+    static func maxEvictedTokenCount(in cache: [KVCache]) -> Int {
+        leaves(in: cache).map(\.cache.evictedTokenCount).max() ?? 0
+    }
+
     static func rewrite(
         _ cache: inout [KVCache],
         using transform: (KVCacheLeaf) -> KVCache

@@ -102,7 +102,7 @@ public struct GenerationComponents: Sendable {
     /// Build the ``LogitProcessor`` for a single generation.
     ///
     /// Composes the built-in penalty processor from
-    /// ``GenerateParameters/processor()`` with the custom processor produced by
+    /// ``GenerateParameters/makeProcessor()`` with the custom processor produced by
     /// ``logitProcessorFactory`` (if any). The custom processor runs *after* the
     /// penalty processor, matching Python mlx-lm where user `logits_processors`
     /// append after `make_logits_processors`.
@@ -110,7 +110,7 @@ public struct GenerationComponents: Sendable {
     /// The factory is invoked here, so a fresh custom processor is produced on
     /// every call and stateful processors do not leak state across generations.
     public func logitProcessor(parameters: GenerateParameters) -> LogitProcessor? {
-        switch (parameters.processor(), logitProcessorFactory?()) {
+        switch (parameters.makeProcessor(), logitProcessorFactory?()) {
         case (nil, nil):
             return nil
         case (let penalty?, nil):

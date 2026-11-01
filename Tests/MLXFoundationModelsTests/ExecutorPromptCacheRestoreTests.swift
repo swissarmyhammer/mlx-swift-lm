@@ -823,11 +823,11 @@ private final class CacheEchoLanguageModel: Module, MLXLMCommon.LanguageModel,
         let cached = write(tokens: inputs, into: cache ?? [])
         let positions = Swift.max(inputs.size, 1)
         var logits = Array(
-            repeating: Self.rejectedLogit, count: positions * ScriptedLanguageModel.vocabularySize)
+            repeating: Self.rejectedLogit, count: positions * ScriptedByteTokenizer.vocabularySize)
         // Only the last row is read as the next-token distribution.
-        logits[(positions - 1) * ScriptedLanguageModel.vocabularySize + nextToken(from: cached)] =
+        logits[(positions - 1) * ScriptedByteTokenizer.vocabularySize + nextToken(from: cached)] =
             Self.selectedLogit
-        return MLXArray(logits, [1, positions, ScriptedLanguageModel.vocabularySize])
+        return MLXArray(logits, [1, positions, ScriptedByteTokenizer.vocabularySize])
     }
 
     /// Writes the token IDs of `tokens` into each of `caches` as keys and values.
@@ -857,7 +857,7 @@ private final class CacheEchoLanguageModel: Module, MLXLMCommon.LanguageModel,
             return ScriptedByteTokenizer.endOfTextByte
         }
         let token = Int(cached[step])
-        guard (0 ..< ScriptedLanguageModel.vocabularySize).contains(token) else {
+        guard (0 ..< ScriptedByteTokenizer.vocabularySize).contains(token) else {
             return ScriptedByteTokenizer.endOfTextByte
         }
         return token

@@ -361,7 +361,7 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
         await store.waitForSpills()
         #expect(try Self.fileNames(in: directory).count == 1)
 
-        try await respondOnce(inside: store, modelID: modelID, sessionID: sessionKey.sessionID)
+        try await ScriptedExecutorPass.respondOnce(inside: store, modelID: modelID, sessionID: sessionKey.sessionID)
 
         #expect(try Self.fileNames(in: directory).isEmpty)
         #expect(await store.checkOut(sessionKey) == .none)

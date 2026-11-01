@@ -31,12 +31,15 @@ struct ScriptedByteTokenizer: MLXLMCommon.Tokenizer {
     /// never stop.
     static let endOfTextByte = 3
 
+    /// One token for each byte value.
+    static let vocabularySize = 256
+
     /// Mask that keeps the low byte of a token ID when decoding.
     private static let tokenByteMask = 0xFF
 
     /// The token IDs that make the model emit `text` and then stop.
     static func tokenIDs(for text: String) -> [Int] {
-        Array(text.utf8).map { Int($0) } + [endOfTextByte]
+        ScriptedByteTokenizer().encode(text: text, addSpecialTokens: false) + [endOfTextByte]
     }
 
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
@@ -55,12 +58,12 @@ struct ScriptedByteTokenizer: MLXLMCommon.Tokenizer {
     }
 
     func convertIdToToken(_ id: Int) -> String? {
-        guard id >= 0, id < ScriptedLanguageModel.vocabularySize else { return nil }
+        guard id >= 0, id < Self.vocabularySize else { return nil }
         return String(UnicodeScalar(UInt8(id)))
     }
 
     var bosToken: String? { nil }
-    var eosToken: String? { String(UnicodeScalar(UInt8(Self.endOfTextByte))) }
+    var eosToken: String? { convertIdToToken(Self.endOfTextByte) }
     var unknownToken: String? { nil }
 
     func applyChatTemplate(
@@ -73,40 +76,31 @@ struct ScriptedByteTokenizer: MLXLMCommon.Tokenizer {
 /// A thread-safe record of the forward passes a scripted model ran.
 ///
 /// The model writes it on the generation thread, and a test reads it from
-/// its own task, thus a lock guards the counts. `begun` and `completed`
+/// its own task, thus a mutex guards the counts. `begun` and `completed`
 /// bracket each pass, so a test can tell a pass that is still running from
 /// a pass that finished.
-final class ForwardStepCounter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var begunCount = 0
-    private var completedCount = 0
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+final class ForwardStepCounter: Sendable {
+    private let counts = Mutex((begun: 0, completed: 0))
 
     /// Records the start of one forward pass.
     func begin() {
-        lock.lock()
-        begunCount += 1
-        lock.unlock()
+        counts.withLock { $0.begun += 1 }
     }
 
     /// Records the end of one forward pass.
     func end() {
-        lock.lock()
-        completedCount += 1
-        lock.unlock()
+        counts.withLock { $0.completed += 1 }
     }
 
     /// The number of forward passes the model started so far.
     var begun: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return begunCount
+        counts.withLock { $0.begun }
     }
 
     /// The number of forward passes that are running right now.
     var inFlight: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return begunCount - completedCount
+        counts.withLock { $0.begun - $0.completed }
     }
 }
 
@@ -114,12 +108,13 @@ final class ForwardStepCounter: @unchecked Sendable {
 ///
 /// Each round starts at ``prepare(_:cache:state:prefill:)``, which the token
 /// iterator calls exactly one time for each generation.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     KVCacheDimensionProvider
 {
 
     /// One token for each byte value.
-    static let vocabularySize = 256
+    static let vocabularySize = ScriptedByteTokenizer.vocabularySize
 
     /// Logit of the scripted token. The value only has to win `argmax`, so any
     /// pair with a clear gap works.
@@ -281,6 +276,12 @@ struct FixedPromptInputProcessor: UserInputProcessor {
     }
 }
 
+/// The model input that renders `text` as its UTF-8 bytes, one token for each byte.
+private func bytesInput(_ text: String) -> LMInput {
+    let tokens = ScriptedByteTokenizer().encode(text: text, addSpecialTokens: false)
+    return LMInput(tokens: MLXArray(tokens.map(Int32.init)))
+}
+
 /// A processor that renders the text of the prompt as its UTF-8 bytes, one
 /// token for each byte.
 ///
@@ -292,9 +293,7 @@ struct PromptBytesInputProcessor: UserInputProcessor {
 
     /// Renders the text of the prompt of `input` as one token for each byte.
     func prepare(input: UserInput) async throws -> LMInput {
-        let tokens = ScriptedByteTokenizer().encode(
-            text: input.prompt.description, addSpecialTokens: false)
-        return LMInput(tokens: MLXArray(tokens.map(Int32.init)))
+        bytesInput(input.prompt.description)
     }
 }
 
@@ -315,9 +314,7 @@ struct GenerationPromptBytesInputProcessor: UserInputProcessor {
     /// Renders the text of the prompt of `input`, a line break and
     /// ``generationPrompt``, as one token for each byte.
     func prepare(input: UserInput) async throws -> LMInput {
-        let tokens = ScriptedByteTokenizer().encode(
-            text: input.prompt.description + "\n" + generationPrompt, addSpecialTokens: false)
-        return LMInput(tokens: MLXArray(tokens.map(Int32.init)))
+        bytesInput(input.prompt.description + "\n" + generationPrompt)
     }
 }
 
@@ -330,6 +327,7 @@ struct GenerationPromptBytesInputProcessor: UserInputProcessor {
 /// `processor` renders the prompt of each pass. The default renders the same
 /// tokens for every prompt. `reasoningConfig` goes into the configuration of
 /// the context. The default of `nil` gives a model that does not reason.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 func makeScriptedContainer(
     modelID: String, rounds: [String], forwardSteps: ForwardStepCounter? = nil,
     forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0, recurrentLayerCount: Int = 0,
@@ -427,7 +425,29 @@ enum ScriptedSessionModel {
         processor: any UserInputProcessor = PromptBytesInputProcessor(),
         reasoningConfig: ReasoningConfig? = nil, recurrentLayerCount: Int = 0
     ) -> MLXLanguageModel {
-        let modelID = "probe/scripted-session-\(UUID().uuidString)"
+        make(
+            modelID: "probe/scripted-session-\(UUID().uuidString)", weights: weights,
+            scripts: scripts, cacheLayerCount: cacheLayerCount, processor: processor,
+            reasoningConfig: reasoningConfig, recurrentLayerCount: recurrentLayerCount)
+    }
+
+    /// Makes the model under `modelID`, with one script for each pass.
+    ///
+    /// - Parameters:
+    ///   - modelID: the identity of the model.
+    ///   - weights: the directory that makes the model available.
+    ///   - scripts: the text that each pass generates, in the order of the passes.
+    ///   - cacheLayerCount: the KV cache layers of the model.
+    ///   - processor: renders the prompt of each pass.
+    ///   - reasoningConfig: the reasoning protocol of the model. When it is set, the model
+    ///     declares `.reasoning`.
+    ///   - recurrentLayerCount: the recurrent layers of the model beside its KV cache layers.
+    /// - Returns: the model.
+    static func make(
+        modelID: String, weights: URL, scripts: [String], cacheLayerCount: Int,
+        processor: any UserInputProcessor, reasoningConfig: ReasoningConfig? = nil,
+        recurrentLayerCount: Int = 0
+    ) -> MLXLanguageModel {
         let capabilities: [LanguageModelCapabilities.Capability] =
             reasoningConfig == nil ? [] : [.reasoning]
         return MLXLanguageModel(
@@ -477,38 +497,36 @@ enum ScriptedSessionModel {
     }
 }
 
-/// Runs one executor pass of a scripted model inside `store`, for a
-/// transcript whose first entry is `sessionID`.
-///
-/// The scripted model holds no key/value cache, thus the pass checks nothing
-/// back in.
-///
-/// - Parameters:
-///   - store: the prompt cache store the pass binds.
-///   - modelID: the model of the pass. A fresh identity keeps the
-///     process-wide model cache and the shared store out of every other test.
-///   - sessionID: the first entry of the transcript, which names the session.
-@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-func respondOnce(
-    inside store: ExecutorPromptCacheStore, modelID: String, sessionID: String
-) async throws {
-    let weights = try makeScriptedWeightsDirectory()
-    defer { try? FileManager.default.removeItem(at: weights) }
-    let model = MLXLanguageModel(
-        configuration: ModelConfiguration(id: modelID),
-        capabilities: [],
-        weightsLocation: { _ in weights },
-        load: { _, _ in makeScriptedContainer(modelID: modelID, rounds: ["A"]) })
-    let prompt = Transcript.Prompt(
-        id: sessionID, segments: [.text(Transcript.TextSegment(content: "first turn"))])
-    try await ScriptedExecutorPass.run(
-        over: Transcript(entries: [.prompt(prompt)]), model: model, inside: store)
-}
-
 /// Runs one executor pass directly, on the task that calls it, the way a host
 /// that binds a task-local around its call to the executor runs it.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 enum ScriptedExecutorPass {
+    /// Reports the failures of a pass that survive a release build.
+    private static let logger = MLXLogger(label: "ScriptedExecutorPass")
+
+    /// Runs one executor pass of a scripted model inside `store`, for a
+    /// transcript whose first entry is `sessionID`.
+    ///
+    /// The scripted model holds no key/value cache, thus the pass checks nothing
+    /// back in.
+    ///
+    /// - Parameters:
+    ///   - store: the prompt cache store the pass binds.
+    ///   - modelID: the model of the pass. A fresh identity keeps the
+    ///     process-wide model cache and the shared store out of every other test.
+    ///   - sessionID: the first entry of the transcript, which names the session.
+    static func respondOnce(
+        inside store: ExecutorPromptCacheStore, modelID: String, sessionID: String
+    ) async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let model = ScriptedSessionModel.make(
+            modelID: modelID, weights: weights, scripts: ["A"], cacheLayerCount: 0,
+            processor: FixedPromptInputProcessor())
+        try await run(
+            over: ScriptedSessionModel.transcript(firstEntryID: sessionID), model: model,
+            inside: store)
+    }
 
     /// Runs one executor pass of `model` over `transcript` inside `store`.
     ///
@@ -574,7 +592,14 @@ enum ScriptedExecutorPass {
         // The channel is a rendezvous, thus a consumer must run beside the
         // executor or every send parks it.
         let consumer = Task<Void, Never> {
-            do { for try await _ in channel {} } catch {}
+            do {
+                for try await _ in channel {}
+            } catch is CancellationError {
+                // The pass ended and took its consumer down with it.
+            } catch {
+                assertionFailure("The channel of a scripted pass failed: \(error)")
+                logger.error("The channel of a scripted pass failed: \(error)")
+            }
         }
         defer { consumer.cancel() }
 

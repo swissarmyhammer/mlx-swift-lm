@@ -3,6 +3,11 @@
 import Foundation
 import MLX
 
+private let mtpIteratorLogger = MLXLogger(label: "mtp-iterator")
+
+/// The axis of a shared K/V entry that counts its token positions.
+private let sharedKVSequenceAxis = -2
+
 enum MTPInitializationError: Error, LocalizedError {
     // Only emitted by the initial staging probe, before target prefill.
     case unsupportedSpeculativeCache
@@ -20,6 +25,108 @@ func batchedGreedyMTPVerification(
 ) -> BatchedMTPVerification.Result {
     BatchedMTPVerification.matching(
         targetTokens: argMax(logits, axis: -1), draftTokens: draftTokens)
+}
+
+/// How a stream of ``MTPSpeculativeTokenIterator`` decodes, and why it stopped speculating.
+enum MTPSpeculationMode: Equatable {
+    /// Rounds draft and verify.
+    case speculating
+
+    /// The rest of the stream decodes one token at a time. Sticky.
+    case passthrough(reason: String)
+
+    /// The stream speculated to its end, and its drafter state could not become a continuation.
+    case continuationDiscarded(reason: String)
+
+    /// Why the stream stopped speculating or lost its continuation, or `nil` when it did neither.
+    var reason: String? {
+        switch self {
+        case .speculating: nil
+        case .passthrough(let reason), .continuationDiscarded(let reason): reason
+        }
+    }
+
+    /// Whether the rest of the stream decodes one token at a time.
+    var decodesPlainly: Bool {
+        if case .passthrough = self { true } else { false }
+    }
+}
+
+/// How the verify pass of one round reaches the main cache.
+private enum MTPVerifyRound {
+    /// The pass writes the main cache, and a hybrid target rewinds its rejected drafts there.
+    case inPlace
+
+    /// The pass writes a staged round, which a commit settles.
+    case staged(KVCacheRound)
+}
+
+/// The inputs every drafter takes for one round. Each call adds only its state, processor and
+/// sampler.
+private struct MTPDraftRequest {
+    let target: any LanguageModel
+    let lastToken: MLXArray
+    let lastHidden: MLXArray
+    let sharedKV: [String: (MLXArray, MLXArray)]
+    let positionDeltas: MLXArray?
+    let queryOffset: Int
+    let blockSize: Int
+
+    /// The token-only drafts of a stateless drafter.
+    func tokens(from drafter: any MTPDrafterModel, sampler: any LogitSampler) -> MLXArray {
+        drafter.draftBlock(
+            target: target, lastToken: lastToken, lastHidden: lastHidden, sharedKV: sharedKV,
+            positionDeltas: positionDeltas, queryOffset: queryOffset, blockSize: blockSize,
+            sampler: sampler)
+    }
+
+    /// The token-only drafts of a stateful drafter.
+    func tokens(
+        from drafter: any StatefulMTPDrafterModel, state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        drafter.draftBlock(
+            target: target, lastToken: lastToken, lastHidden: lastHidden, sharedKV: sharedKV,
+            positionDeltas: positionDeltas, queryOffset: queryOffset, blockSize: blockSize,
+            state: &state, sampler: sampler)
+    }
+
+    /// The drafts of a stateless distribution drafter, with their distribution.
+    func output(
+        from drafter: any MTPDistributionDrafterModel, processor: (any LogitProcessor)?,
+        sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
+        drafter.draftBlockWithLogits(
+            target: target, lastToken: lastToken, lastHidden: lastHidden, sharedKV: sharedKV,
+            positionDeltas: positionDeltas, queryOffset: queryOffset, blockSize: blockSize,
+            processor: processor, sampler: sampler)
+    }
+
+    /// The drafts of a stateful distribution drafter, with their distribution.
+    func output(
+        from drafter: any StatefulMTPDistributionDrafterModel, state: inout MTPDrafterState,
+        processor: (any LogitProcessor)?, sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
+        drafter.draftBlockWithLogits(
+            target: target, lastToken: lastToken, lastHidden: lastHidden, sharedKV: sharedKV,
+            positionDeltas: positionDeltas, queryOffset: queryOffset, blockSize: blockSize,
+            state: &state, processor: processor, sampler: sampler)
+    }
+}
+
+extension MLXArray {
+    /// One position of a `[B, positions, dimensions]` array, which keeps the positions axis.
+    ///
+    /// - Parameter position: The position to read.
+    /// - Returns: The row, shape `[B, 1, dimensions]`.
+    fileprivate func row(at position: Int) -> MLXArray {
+        self[0..., position ..< (position + 1), 0...]
+    }
+
+    /// The last position of a `[B, positions, dimensions]` array, shape `[B, 1, dimensions]`.
+    fileprivate var lastRow: MLXArray {
+        self[0..., (-1)..., 0...]
+    }
 }
 
 /// Generator of tokens using MTP (Multi-Token Prediction) speculative
@@ -56,9 +163,19 @@ func batchedGreedyMTPVerification(
 /// args; drafter holds no target-derived state — the target and optional
 /// per-stream drafter cache are passed as parameters to `draftBlock(...)` so
 /// drafter instances are safe to share across iterators).
-public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
+public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
 
-    var y: LMInput.Text
+    /// The smallest round: one draft and the bonus.
+    private static let minimumBlockSize = 2
+
+    /// Added to the stream seed for the RNG of acceptance and residual draws.
+    private static let speculativeSeedOffset: UInt64 = 0x9E37_79B9_7F4A_7C15
+
+    /// Added to the stream seed for the RNG of draft proposals.
+    private static let draftSeedOffset: UInt64 = 0xD1B5_4A32_D192_ED03
+
+    /// The tokens the next forward pass feeds the target.
+    var pendingInput: LMInput.Text
 
     let mainModel: any LanguageModel
     let drafter: any MTPDrafterModel
@@ -143,19 +260,21 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// `draft_block_size` parameter.
     public let blockSize: Int
 
-    private var pendingTokens = [Int]()
+    private var pendingTokens: [Int] = []
     private var pendingIndex = 0
     /// Number of pending tokens already represented by `mainCache`. The last
     /// verifier sample is not committed until a later forward pass.
     private var committedPendingTokenCount = 0
 
-    /// Set to `true` when the iterator detects that the target can no
-    /// longer emit drafter state (typically due to KV cache quantization
-    /// converting `Gemma4SharedKVState.regular` to `.quantized`). Once set,
-    /// `next()` runs single-token generation against the main model only —
-    /// no further `speculateRound` calls. Sticky: never reverts to `false`.
-    private var passthrough = false
+    /// How the stream decodes. Leaves ``MTPSpeculationMode/speculating`` when the iterator detects
+    /// that the target can no longer emit drafter state (typically due to KV cache quantization
+    /// converting `Gemma4SharedKVState.regular` to `.quantized`), and `next()` then runs
+    /// single-token generation against the main model only — no further `speculateRound` calls.
+    private var speculationMode = MTPSpeculationMode.speculating
     private var passthroughLoggedOnce = false
+
+    /// Whether the rest of the stream decodes one token at a time. Sticky.
+    private var passthrough: Bool { speculationMode.decodesPlainly }
 
     /// Verify-position index in the prior round's emitted hidden that
     /// produced the newly-accepted bonus's logit prediction. Set at the end
@@ -175,15 +294,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     }
 
     public var evictedTokenCount: Int {
-        KVCacheTree.leaves(in: mainCache).map(\.cache.evictedTokenCount).max() ?? 0
-    }
-
-    public var reasoningTokenCount: Int? {
-        (processor as? any GenerationReasoningTokenCounting)?.generationReasoningTokenCount
-    }
-
-    public mutating func recordEmittedToken(_ token: Int) {
-        processor?.didEmit(token: token)
+        KVCacheTree.maxEvictedTokenCount(in: mainCache)
     }
 
     /// Target-owned continuation state with transient MTP exchange values
@@ -208,9 +319,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let drafterState, let targetBoundaryHidden
         else { return nil }
         let promptEnd = mainCacheStorage.processedTokenCount
-        var continuation = MTPDrafterContinuation(
-            state: drafterState, targetBoundaryHidden: targetBoundaryHidden,
-            targetProcessedTokenCount: promptEnd, drafterID: resumableDrafter.drafterID
+        var continuation = continuation(
+            of: resumableDrafter, state: drafterState, boundary: targetBoundaryHidden
         ).copy()
         guard continuation.state.removeLastEntries(1),
             continuation.isAligned(
@@ -233,7 +343,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     // the iterator stayed speculative for the full stream. Surfaced through
     // ``MTPStatsCollecting`` so `generateLoopTask` can include it on the
     // emitted `.info` event.
-    public private(set) var passthroughReason: String?
+    public var passthroughReason: String? { speculationMode.reason }
 
     /// Prefills the main model with `input` and prepares the drafter for the first round.
     ///
@@ -305,7 +415,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     ) throws {
         try drafter.validateCompatibility(with: mainModel)
 
-        guard blockSize >= 2 else {
+        guard blockSize >= Self.minimumBlockSize else {
             throw KVCacheError(
                 message:
                     "MTPSpeculativeTokenIterator requires blockSize >= 2 (1 bonus + K-1 drafted)"
@@ -315,14 +425,14 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let kvCachePlan = mainCacheStorage.plan
         let mainCacheStorage = try kvCachePlan.validated(mainCacheStorage)
         let mainCache = mainCacheStorage.cache
-        self.y = input.text
+        self.pendingInput = input.text
         self.mainModel = mainModel
         self.drafter = drafter
 
         self.mainCacheStorage = mainCacheStorage
         self.mainState = mainState
 
-        let sampler = parameters.sampler()
+        let sampler = parameters.makeSampler()
         // Decided before any prompt work: a stream that cannot speculate gets no
         // drafter state, no emit-flag prefill, and no drafter prefill.
         let standDownReason = Self.standDownReason(
@@ -348,7 +458,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         self.logProbabilityTopK = parameters.logProbabilities.map { Swift.max($0, 0) }
         self.speculativeRandomState =
             parameters.seed.map {
-                MLXRandom.RandomState(seed: $0 &+ 0x9E37_79B9_7F4A_7C15)
+                MLXRandom.RandomState(seed: $0 &+ Self.speculativeSeedOffset)
             } ?? MLXRandom.RandomState()
         self.processor = components.logitProcessor(parameters: parameters, model: mainModel)
 
@@ -358,10 +468,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             && parameters.mtpSampledVerification == .rejectionSampling
         self.verifiesStatefulDraftsByRejection = verifiesStatefulDraftsByRejection
         var draftParameters = parameters
-        draftParameters.seed = parameters.seed.map { $0 &+ 0xD1B5_4A32_D192_ED03 }
+        draftParameters.seed = parameters.seed.map { $0 &+ Self.draftSeedOffset }
         var drafterSampler: LogitSampler =
             drafter is any StatefulMTPDrafterModel && !verifiesStatefulDraftsByRejection
-            ? ArgMaxSampler() : draftParameters.sampler()
+            ? ArgMaxSampler() : draftParameters.makeSampler()
         // Draft proposals bypass the iterator's processor chain, so suppressed
         // ids have to be masked at the drafter's own sampler.
         if let suppressor = makeSuppressTokensProcessor(model: mainModel) {
@@ -386,10 +496,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // rather than duplicating the leaf classification as a predicate that could drift from
         // it. Qwen's hybrid cache is the one typed exception: its target advertises a bounded
         // recurrent checkpoint and performs the round in place.
-        let usesNativeHybridRewind = Self.verifiesInPlace(
-            mainModel: mainModel, mainCache: mainCache, drafts: effectiveBlockSize - 1)
         // A stream that decodes plainly opens no round, so its cache need not stage one.
-        if speculates, !usesNativeHybridRewind {
+        if speculates, !verifiesInPlace(drafts: effectiveBlockSize - 1) {
             guard
                 let probe = self.mainCacheStorage.beginRound(
                     maximumPositions: effectiveBlockSize)
@@ -510,6 +618,15 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             && canRewindSpeculativeVerify(mainCache, positions: drafts + 1)
     }
 
+    /// Whether a round of `drafts` drafts of this stream verifies in place, as the main cache
+    /// stands now: see ``verifiesInPlace(mainModel:mainCache:drafts:)``.
+    ///
+    /// - Parameter drafts: The most drafts of the round.
+    /// - Returns: `true` when the round verifies in place.
+    private func verifiesInPlace(drafts: Int) -> Bool {
+        Self.verifiesInPlace(mainModel: mainModel, mainCache: mainCache, drafts: drafts)
+    }
+
     /// The tightest sliding window among the cache's layers, or `nil` when no layer slides.
     static func narrowestSlidingWindow(in cache: [KVCache]) -> Int? {
         KVCacheTree.leaves(in: cache)
@@ -524,7 +641,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// window's worth of drafts. Unbounded when no layer slides.
     static func maximumBlockSize(for cache: [KVCache]) -> Int {
         guard let narrowest = narrowestSlidingWindow(in: cache) else { return .max }
-        return Swift.max(2, narrowest + 1)
+        return Swift.max(minimumBlockSize, narrowest + 1)
     }
 
     /// Prefill the main model with the prompt. The drafter's own state starts
@@ -534,7 +651,6 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
         processor?.prompt(input.text.tokens)
         prefill.prefix?(mainCacheStorage.processedTokenCount)
-        let inputLength = input.text.cacheSequenceLength
         let cachePositionBeforePrefill = mainCacheStorage.processedTokenCount
         let needsFullPromptHidden =
             !passthrough && (drafter.requiresPromptPrefill || continuationToResume != nil)
@@ -555,34 +671,21 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         var incomingPrefillState: LMOutput.State? =
             needsFullPromptHidden ? prefillState : persistentState
         incomingPrefillState?[mtpPrefillChunkHandlerKey] = feed?.chunkHandler
-        switch try mainModel.prepare(
+        let prepared = try mainModel.prepare(
             input, cache: mainCache, state: incomingPrefillState, prefill: prefill)
-        {
+        mainCacheStorage.commitPrefill(of: input, result: prepared, role: "Main model prepare")
+        switch prepared {
         case .tokens(let tokens):
-            let remainingLength = tokens.cacheSequenceLength
-            precondition(
-                remainingLength <= inputLength,
-                "Main model prepare returned more tokens than it received")
-            mainCacheStorage.commitProcessedTokens(inputLength - remainingLength)
-            y = tokens
+            pendingInput = tokens
             // Final prompt position not yet evaluated -- run one forward to
             // produce the bonus token AND prime drafter state.
-            let result = mainModel(y[text: .newAxis], cache: mainCache, state: bonusState)
-            mainCacheStorage.commitProcessedTokens(y.cacheSequenceLength)
-            let token = sampleToken(from: result.logits)
-            y = .init(tokens: token)
-            mainState = result.state
+            let (_, token) = forwardTarget(pendingInput, state: bonusState)
+            pendingInput = .init(tokens: token)
             // Prefill emits too, and a multi-token prefill presents a sliding layer more than its
             // window just as a verify pass does. Nothing was rejected here, so only the head
             // clamp applies -- but a snapshot that cannot be placed against the entries at all is
             // refused here for the same reason it is mid-stream, and before anything reads it.
-            if !reconcileSharedKVState(
-                &mainState, discarding: 0,
-                lengths: mainCacheStorage.emittedLength(forLeaf:))
-            {
-                switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
-                mainState = nil
-            }
+            reconcilePromptSharedKV()
             // Yield the bonus to the iterator's consumer. Without this,
             // the iterator silently starts 1 position ahead of an
             // equivalent autoregressive run, violating speculative
@@ -594,23 +697,16 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let total = input.text.tokens.size
             prefill.progress?(total, total)
         case .logits(let prefillResult):
-            mainCacheStorage.commitProcessedTokens(inputLength)
             // Some `prepare` implementations evaluate the final position
             // themselves and return logits directly; their `state` here may
             // or may not carry drafter state depending on whether the model
             // override threads it.
             let token = sampleToken(from: prefillResult.logits)
-            y = .init(tokens: token)
+            pendingInput = .init(tokens: token)
             mainState = prefillResult.state
             // The returned state keeps what the prefill was handed, the chunk handler included.
             mainState?[mtpPrefillChunkHandlerKey] = nil
-            let placeable = reconcileSharedKVState(
-                &mainState, discarding: 0,
-                lengths: mainCacheStorage.emittedLength(forLeaf:))
-            if !placeable {
-                switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
-                mainState = nil
-            }
+            reconcilePromptSharedKV()
 
             // If prefill didn't emit drafter state, do one more forward call
             // with the just-sampled bonus token to prime the state. The cost
@@ -624,21 +720,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             if !passthrough, missingRequiredDrafterState {
                 var primeState = mainState ?? prefillState
                 primeState[mtpEmitFlagKey] = true
-                let primed = mainModel(y[text: .newAxis], cache: mainCache, state: primeState)
-                mainCacheStorage.commitProcessedTokens(y.cacheSequenceLength)
-                mainState = primed.state
-                if !reconcileSharedKVState(
-                    &mainState, discarding: 0,
-                    lengths: mainCacheStorage.emittedLength(forLeaf:))
-                {
-                    switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
-                    mainState = nil
-                }
                 // Resample bonus from this forward's logits so the chain stays
                 // coherent at this position (the cache offset moves by 1, so
                 // we must re-pick the bonus from the new step's logits).
-                let newToken = sampleToken(from: primed.logits)
-                y = .init(tokens: newToken)
+                let (_, newToken) = forwardTarget(pendingInput, state: primeState)
+                reconcilePromptSharedKV()
+                pendingInput = .init(tokens: newToken)
                 // Yield BOTH bonuses to the consumer, in sample order.
                 // `token` is the prefill-position-N sample (consumed by the
                 // re-prime forward, now committed in cache); `newToken` is
@@ -678,17 +765,59 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         try kvCachePlan.applyAndValidate(to: mainCacheStorage)
     }
 
-    /// Samples a token from the logits of the last position of `logits`.
+    /// Places the snapshot of the prompt's last forward against the entries it describes, and
+    /// stops speculating when it cannot be placed.
+    private mutating func reconcilePromptSharedKV() {
+        if !reconcileSharedKVState(
+            &mainState, discarding: 0, lengths: mainCacheStorage.emittedLength(forLeaf:))
+        {
+            abandonSharedKVSnapshot()
+        }
+    }
+
+    /// Stops speculating on a shared K/V snapshot that cannot be placed against cache entries.
+    private mutating func abandonSharedKVSnapshot() {
+        switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
+        mainState = nil
+    }
+
+    /// The target logits of one position, as the processor shapes them.
     ///
-    /// The processor shapes the logits first and learns of the sampled token after. When the
-    /// stream asks for log probabilities, they are recorded from the processed logits.
+    /// - Parameters:
+    ///   - targetLogits: Target logits, shape `[B, positions, vocabulary]`.
+    ///   - position: The position to read.
+    /// - Returns: The processed logits, shape `[B, vocabulary]`.
+    private func processedTargetLogits(_ targetLogits: MLXArray, at position: Int) -> MLXArray {
+        let logits = targetLogits[0..., position, 0...]
+        return processor?.process(logits: logits) ?? logits
+    }
+
+    /// Samples a token from the logits of one position with the stream's sampler.
     ///
-    /// - Parameter logits: Target logits, shape `[B, positions, vocabulary]`.
+    /// - Parameters:
+    ///   - logits: Target logits, shape `[B, positions, vocabulary]`.
+    ///   - position: The position to read, by default the last.
     /// - Returns: The sampled token, shape `[B]`.
-    private mutating func sampleToken(from logits: MLXArray) -> MLXArray {
-        var logits = logits[0..., -1, 0...]
-        logits = processor?.process(logits: logits) ?? logits
-        let token = sampler.sample(logits: logits)
+    private mutating func sampleToken(from logits: MLXArray, at position: Int = -1) -> MLXArray {
+        let sampler = sampler
+        return drawToken(from: logits, at: position) { sampler.sample(logits: $0) }
+    }
+
+    /// Draws a token from the logits of one position.
+    ///
+    /// The processor shapes the logits first and learns of the token after. When the stream asks
+    /// for log probabilities, they are recorded from the processed logits.
+    ///
+    /// - Parameters:
+    ///   - targetLogits: Target logits, shape `[B, positions, vocabulary]`.
+    ///   - position: The position to read.
+    ///   - draw: Draws the token from the processed logits.
+    /// - Returns: The token, shape `[B]`.
+    private mutating func drawToken(
+        from targetLogits: MLXArray, at position: Int, draw: (MLXArray) -> MLXArray
+    ) -> MLXArray {
+        let logits = processedTargetLogits(targetLogits, at: position)
+        let token = draw(logits)
         deferredLogProbabilities = logProbabilityTopK.map {
             LogProbabilityDistribution(logits: logits).recording(token: token, topK: $0)
         }
@@ -729,7 +858,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         guard cachePosition > 0 else {
             statefulDrafter.prepareDrafterState(
                 target: mainModel, promptTokens: promptTokens, targetHidden: suffixHidden,
-                firstBonus: y.tokens, positionDeltas: mainState?[mtpPositionDeltasKey],
+                firstBonus: pendingInput.tokens, positionDeltas: mainState?[mtpPositionDeltasKey],
                 state: &state, sampler: mtpDrafterSeedSampler)
             drafterState = state
             return
@@ -771,7 +900,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         if let boundary,
             resumableDrafter.resumeDrafterState(
                 target: mainModel, suffixTokens: segmentTokens, suffixTargetHidden: segmentHidden,
-                targetBoundaryHidden: boundary, firstBonus: y.tokens,
+                targetBoundaryHidden: boundary, firstBonus: pendingInput.tokens,
                 positionDeltas: positionDeltas, state: &state, sampler: mtpDrafterSeedSampler)
         {
             drafterState = state
@@ -780,7 +909,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         guard
             resumableDrafter.coldStartDrafterState(
                 target: mainModel, suffixTokens: segmentTokens, suffixTargetHidden: segmentHidden,
-                firstBonus: y.tokens, position: position, positionDeltas: positionDeltas,
+                firstBonus: pendingInput.tokens, position: position, positionDeltas: positionDeltas,
                 state: &state, sampler: mtpDrafterSeedSampler)
         else {
             switchToPassthrough(reason: Self.coldStartFailedReason)
@@ -826,7 +955,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         }
         guard
             let state = feed.primedState(
-                finalSegment: segmentTokens, segmentHidden: targetHidden, firstBonus: y.tokens,
+                finalSegment: segmentTokens, segmentHidden: targetHidden,
+                firstBonus: pendingInput.tokens,
                 positionDeltas: mainState?[mtpPositionDeltasKey])
         else {
             switchToPassthrough(reason: Self.coldStartFailedReason)
@@ -846,12 +976,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // A speculative round can emit up to `maximumDrafts + 1` tokens: the
         // accepted draft prefix plus the verifier's correction/bonus token.
         // Keep the whole pending buffer within the remaining output budget.
+        guard !isAtTokenLimit else { return }
         let maximumDrafts: Int
         if let maxTokens {
-            let remaining = maxTokens - tokenCount
-            guard remaining > 0 else { return }
-
-            let draftBudget = Swift.min(remaining - 1, blockSize - 1)
+            let draftBudget = Swift.min(maxTokens - tokenCount - 1, blockSize - 1)
             guard draftBudget > 0 else {
                 if let token = passthroughStep(maintainingDrafterState: true) {
                     pendingTokens.append(token)
@@ -879,12 +1007,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // keeps the snapshot slots of its recurrent entries and rewinds them in place by the
         // rejected drafts; the typed capability and
         // cache topology keep that exception fail-closed.
-        let nativeHybridRewind = Self.verifiesInPlace(
-            mainModel: mainModel, mainCache: mainCache, drafts: maximumDrafts)
-        let round =
-            nativeHybridRewind
-            ? nil : mainCacheStorage.beginRound(maximumPositions: maximumDrafts + 1)
-        guard nativeHybridRewind || round != nil else {
+        let round: MTPVerifyRound
+        if verifiesInPlace(drafts: maximumDrafts) {
+            round = .inPlace
+        } else if let staged = mainCacheStorage.beginRound(maximumPositions: maximumDrafts + 1) {
+            round = .staged(staged)
+        } else {
             switchToPassthrough(
                 reason: "main KV cache cannot stage a speculative round; continuing without "
                     + "speculation")
@@ -898,7 +1026,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // `verify.hidden[:, accepted : accepted + 1, :]` semantic.
         let bonusSlotHidden: MLXArray
         if let idx = lastRoundAccepted {
-            bonusSlotHidden = lastHidden[0..., idx ..< (idx + 1), 0...]
+            bonusSlotHidden = lastHidden.row(at: idx)
         } else {
             bonusSlotHidden = lastHidden[0..., (-1)..., 0...]
         }
@@ -916,23 +1044,25 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 guard let sources = state[mtpSharedKVSourceIndicesKey] else { return false }
                 return sharedKV.allSatisfy { key, entry in
                     guard let leaf = sources[key] else { return false }
-                    return entry.0.dim(-2) == mainCacheStorage.emittedLength(forLeaf: leaf)
+                    return entry.0.dim(sharedKVSequenceAxis)
+                        == mainCacheStorage.emittedLength(forLeaf: leaf)
                 }
             }(),
             """
-            stale sharedKV: spans \(sharedKV.mapValues { $0.0.dim(-2) }) do not match the \
-            emitted lengths implied by a timeline of \(mainCacheStorage.processedTokenCount)
+            stale sharedKV: spans \(sharedKV.mapValues { $0.0.dim(sharedKVSequenceAxis) }) do not \
+            match the emitted lengths implied by a timeline of \
+            \(mainCacheStorage.processedTokenCount)
             """
         )
 
-        let bonusToken = y.tokens
+        let bonusToken = pendingInput.tokens
         let (draftTokens, draftOutput) = proposeDrafts(
             bonusToken: bonusToken, bonusSlotHidden: bonusSlotHidden, sharedKV: sharedKV,
             positionDeltas: state[mtpPositionDeltasKey], queryOffset: queryOffset,
             maximumDrafts: maximumDrafts)
         // A drafter's confidence floor can stop a chain before `maximumDrafts`.
-        let numDraft = draftTokens.dim(-1)
-        // draftTokens shape [B, numDraft] -> flatten to [numDraft].
+        let draftCount = draftTokens.dim(-1)
+        // draftTokens shape [B, draftCount] -> flatten to [draftCount].
         let flatDraftTokens = draftTokens.flattened()
 
         // Verify pass: main model evaluates [bonus, draft_1, ..., draft_numDraft]
@@ -941,61 +1071,60 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         verifyState[mtpEmitFlagKey] = true
         let verifyTokens = concatenated([bonusToken, flatDraftTokens])
         let verifyInput = LMInput.Text(tokens: verifyTokens)
-        let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
-        verifyState[mtpVerifyKeepsSnapshotsKey] = nativeHybridRewind ? true : nil
-        let verifyCache = nativeHybridRewind ? mainCache : round!.caches
+        let verifyStart = verifyInput.tokens.dim(0) - (draftCount + 1)
+        let verifyCache: [KVCache]
+        switch round {
+        case .inPlace:
+            verifyState[mtpVerifyKeepsSnapshotsKey] = true
+            verifyCache = mainCache
+        case .staged(let staged):
+            verifyState[mtpVerifyKeepsSnapshotsKey] = nil
+            verifyCache = staged.caches
+        }
         let mainResult = mainModel(
             verifyInput[text: .newAxis], cache: verifyCache, state: verifyState)
         mainState = mainResult.state
 
         let (accepted, emittedFinalToken) = verifyDrafts(
             targetLogits: mainResult.logits, targetStart: verifyStart,
-            draftTokens: flatDraftTokens, draftOutput: draftOutput, numDraft: numDraft)
+            draftTokens: flatDraftTokens, draftOutput: draftOutput, draftCount: draftCount)
         // Lookahead bookkeeping for early finalization: the accepted drafts
         // are the pending tokens whose K/V is already committed.
         committedPendingTokenCount = accepted
 
-        proposedCount += numDraft
+        proposedCount += draftCount
         acceptedCount += accepted
         lastRoundAccepted = accepted
         if let verifyHidden = mainResult.state?[mtpLastHiddenStatesKey] {
             lastVerifyHidden = verifyHidden
             lastVerifyStart = verifyStart
             lastVerifyAccepted = accepted
-            targetBoundaryHidden =
-                verifyHidden[0..., (verifyStart + accepted) ..< (verifyStart + accepted + 1), 0...]
+            targetBoundaryHidden = verifyHidden.row(at: verifyStart + accepted)
         }
         telemetry.recordRound(
-            drafted: numDraft,
+            drafted: draftCount,
             accepted: accepted,
-            targetVerified: numDraft + 1,
+            targetVerified: draftCount + 1,
             draftModelCalls: 1
         )
 
-        if let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
-            var currentDrafterState = drafterState
+        if let committedState = commitDrafterState(
+            targetHidden: mainResult.state?[mtpLastHiddenStatesKey] ?? lastHidden,
+            draftTokens: draftTokens, acceptedCount: accepted, finalToken: emittedFinalToken,
+            positionDeltas: mainResult.state?[mtpPositionDeltasKey])
         {
-            statefulDrafter.commitDrafterState(
-                target: mainModel,
-                targetHidden: mainResult.state?[mtpLastHiddenStatesKey] ?? lastHidden,
-                draftTokens: draftTokens,
-                acceptedCount: accepted,
-                finalToken: emittedFinalToken,
-                positionDeltas: mainResult.state?[mtpPositionDeltasKey],
-                state: &currentDrafterState,
-                sampler: mtpDrafterSeedSampler)
-            drafterState = currentDrafterState
             // The next round's seed gate reads the seed's probability on the host. Starting its
             // computation now overlaps it with the consumer reading this round's tokens.
-            let seedArrays = currentDrafterState.seedArrays
+            let seedArrays = committedState.seedArrays
             if !seedArrays.isEmpty {
                 asyncEval(seedArrays)
             }
         }
 
-        let rejected = numDraft - accepted
+        let rejected = draftCount - accepted
         let snapshotPlaced: Bool
-        if nativeHybridRewind {
+        switch round {
+        case .inPlace:
             if rejected == 0 {
                 mainCacheStorage.commitProcessedTokens(verifyInput.cacheSequenceLength)
             } else {
@@ -1015,18 +1144,18 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             snapshotPlaced = reconcileSharedKVState(
                 &mainState, discarding: rejected,
                 lengths: mainCacheStorage.emittedLength(forLeaf:))
-        } else {
+        case .staged(let staged):
             // Staged layers never held rejected rows; write-through layers clamp back over them.
-            let commit = mainCacheStorage.commit(round!, retaining: accepted + 1)
+            let commit = mainCacheStorage.commit(staged, retaining: accepted + 1)
             snapshotPlaced = reconcileSharedKVState(
                 &mainState, discarding: rejected,
                 lengths: { commit.emittedLengths[$0] })
         }
 
+        pendingInput = .init(tokens: emittedFinalToken)
+
         guard snapshotPlaced else {
-            switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
-            mainState = nil
-            y = .init(tokens: emittedFinalToken)
+            abandonSharedKVSnapshot()
             return
         }
 
@@ -1034,8 +1163,35 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // at which point the target's emit-hook cannot provide full_attention
         // shared K/V and the next round transitions to passthrough.
         kvCachePlan.apply(to: mainCacheStorage)
+    }
 
-        y = .init(tokens: emittedFinalToken)
+    /// Reconciles the state of a stateful drafter with the tokens the target kept, and keeps it.
+    ///
+    /// - Parameters:
+    ///   - targetHidden: The target hidden rows of the forward that fed those tokens.
+    ///   - draftTokens: The drafts of the round.
+    ///   - acceptedCount: The drafts the target accepted.
+    ///   - finalToken: The token the target sampled after them.
+    ///   - positionDeltas: The target position deltas, or `nil`.
+    /// - Returns: The committed state, or `nil` when the stream holds no stateful drafter state.
+    private mutating func commitDrafterState(
+        targetHidden: MLXArray, draftTokens: MLXArray, acceptedCount: Int, finalToken: MLXArray,
+        positionDeltas: MLXArray?
+    ) -> MTPDrafterState? {
+        guard let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
+            var committedState = drafterState
+        else { return nil }
+        statefulDrafter.commitDrafterState(
+            target: mainModel,
+            targetHidden: targetHidden,
+            draftTokens: draftTokens,
+            acceptedCount: acceptedCount,
+            finalToken: finalToken,
+            positionDeltas: positionDeltas,
+            state: &committedState,
+            sampler: mtpDrafterSeedSampler)
+        drafterState = committedState
+        return committedState
     }
 
     /// Proposes the drafts of one round.
@@ -1059,6 +1215,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         sharedKV: [String: (MLXArray, MLXArray)], positionDeltas: MLXArray?, queryOffset: Int,
         maximumDrafts: Int
     ) -> (tokens: MLXArray, output: MTPDraftBlockOutput?) {
+        let request = MTPDraftRequest(
+            target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
+            sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
+            blockSize: maximumDrafts + 1)
         if let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
             var currentDrafterState = drafterState
         {
@@ -1068,25 +1228,19 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             if verifiesStatefulDraftsByRejection,
                 let distributionDrafter = drafter as? any StatefulMTPDistributionDrafterModel
             {
-                let output = distributionDrafter.draftBlockWithLogits(
-                    target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
-                    sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
-                    blockSize: maximumDrafts + 1, state: &currentDrafterState,
+                let output = request.output(
+                    from: distributionDrafter, state: &currentDrafterState,
                     // A copy, discarded with the round: only emitted tokens advance `processor`.
                     processor: processor?.copy(), sampler: draftSampler)
                 return (output.tokens, output)
             }
-            let tokens = statefulDrafter.draftBlock(
-                target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
-                sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
-                blockSize: maximumDrafts + 1, state: &currentDrafterState, sampler: draftSampler)
+            let tokens = request.tokens(
+                from: statefulDrafter, state: &currentDrafterState, sampler: draftSampler)
             return (tokens, nil)
         }
         if let distributionDrafter = drafter as? any MTPDistributionDrafterModel {
-            let output = distributionDrafter.draftBlockWithLogits(
-                target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
-                sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
-                blockSize: maximumDrafts + 1,
+            let output = request.output(
+                from: distributionDrafter,
                 // A copy, discarded with the round: the drafter's processor starts from the
                 // canonical state but must not record the proposals it draws -- only emitted
                 // tokens advance `processor`.
@@ -1096,11 +1250,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // Greedy matching needs tokens only and remains compatible with the original
         // protocol; init already sent sampling runs to passthrough, since without `q`
         // nothing here can preserve the target distribution.
-        let tokens = drafter.draftBlock(
-            target: mainModel, lastToken: bonusToken, lastHidden: bonusSlotHidden,
-            sharedKV: sharedKV, positionDeltas: positionDeltas, queryOffset: queryOffset,
-            blockSize: maximumDrafts + 1, sampler: legacyDraftSampler)
-        return (tokens, nil)
+        return (request.tokens(from: drafter, sampler: legacyDraftSampler), nil)
     }
 
     /// Verifies the drafts of one round against the target logits of its verify pass, and
@@ -1114,13 +1264,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// - Parameters:
     ///   - targetLogits: The logits of the verify pass, shape `[B, positions, vocabulary]`.
     ///   - targetStart: The position of the bonus token in `targetLogits`.
-    ///   - draftTokens: The drafts, shape `[numDraft]`.
+    ///   - draftTokens: The drafts, shape `[draftCount]`.
     ///   - draftOutput: The drafts with their distribution, or `nil`.
-    ///   - numDraft: The drafts of the round.
+    ///   - draftCount: The drafts of the round.
     /// - Returns: The accepted drafts and the final token of the round, shape `[1]`.
     private mutating func verifyDrafts(
         targetLogits: MLXArray, targetStart: Int, draftTokens: MLXArray,
-        draftOutput: MTPDraftBlockOutput?, numDraft: Int
+        draftOutput: MTPDraftBlockOutput?, draftCount: Int
     ) -> (accepted: Int, finalToken: MLXArray) {
         // Other processors can depend on didSample updates between rows.
         let processorIsStateless = processor == nil || processor is SuppressTokensProcessor
@@ -1129,7 +1279,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 selectDistributionPreservingTokens(
                     targetLogits: targetLogits, targetStart: targetStart,
                     draftTokens: draftTokens, draftProcessedLogits: draftOutput.processedLogits,
-                    numDraft: numDraft, sampler: distributionSampler),
+                    draftCount: draftCount, sampler: distributionSampler),
                 draftTokens: draftTokens)
         }
         guard processorIsStateless,
@@ -1138,10 +1288,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             return appendSelection(
                 selectGreedyTokens(
                     targetLogits: targetLogits, targetStart: targetStart,
-                    draftTokens: draftTokens, numDraft: numDraft),
+                    draftTokens: draftTokens, draftCount: draftCount),
                 draftTokens: draftTokens)
         }
-        var logits = targetLogits[0, targetStart ..< (targetStart + numDraft + 1), 0...]
+        var logits = targetLogits[0, targetStart ..< (targetStart + draftCount + 1), 0...]
         logits = processor?.process(logits: logits) ?? logits
         let result =
             sampler is ArgMaxSampler
@@ -1176,7 +1326,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         targetLogits: MLXArray,
         targetStart: Int,
         draftTokens: MLXArray,
-        numDraft: Int
+        draftCount: Int
     ) -> (accepted: Int, emitted: [MLXArray]) {
         // Walk position by position and stop at the first mismatch, so the
         // processor is advanced over emitted tokens only. Sampling the whole
@@ -1184,16 +1334,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // processor record proposals that never reached the consumer.
         eval(draftTokens)
         let draftTokenList = draftTokens.asArray(Int.self)
-        var emitted = [MLXArray]()
-        emitted.reserveCapacity(numDraft + 1)
+        var emitted: [MLXArray] = []
+        emitted.reserveCapacity(draftCount + 1)
 
-        for i in 0 ..< numDraft {
-            var logits = targetLogits[0..., targetStart + i, 0...]
-            logits = processor?.process(logits: logits) ?? logits
-            let token = sampler.sample(logits: logits)
+        for i in 0 ..< draftCount {
+            let token = sampleToken(from: targetLogits, at: targetStart + i)
             eval(token)
             emitted.append(token)
-            processor?.didSample(token: token)
             guard token.item(Int.self) == draftTokenList[i] else {
                 return (i, emitted)
             }
@@ -1201,12 +1348,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         // Every draft matched: the final verifier position predicts one extra
         // target-only bonus token.
-        var bonusLogits = targetLogits[0..., targetStart + numDraft, 0...]
-        bonusLogits = processor?.process(logits: bonusLogits) ?? bonusLogits
-        let bonus = sampler.sample(logits: bonusLogits)
-        emitted.append(bonus)
-        processor?.didSample(token: bonus)
-        return (numDraft, emitted)
+        emitted.append(sampleToken(from: targetLogits, at: targetStart + draftCount))
+        return (draftCount, emitted)
     }
 
     /// Distribution-preserving speculative sampling (Leviathan et al.).
@@ -1221,21 +1364,20 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         targetStart: Int,
         draftTokens: MLXArray,
         draftProcessedLogits: MLXArray,
-        numDraft: Int,
+        draftCount: Int,
         sampler distributionSampler: any DistributionLogitSampler
     ) -> (accepted: Int, emitted: [MLXArray]) {
         // As in the greedy walk, the processor advances over emitted tokens
         // only: accepted candidates here, then the correction or bonus.
         let draftTokenList = draftTokens.asArray(Int.self)
-        var emitted = [MLXArray]()
-        emitted.reserveCapacity(numDraft + 1)
+        var emitted: [MLXArray] = []
+        emitted.reserveCapacity(draftCount + 1)
 
-        for i in 0 ..< numDraft {
+        for i in 0 ..< draftCount {
             let candidateID = draftTokenList[i]
             let candidate = draftTokens[i ..< (i + 1)]
 
-            var pLogits = targetLogits[0..., targetStart + i, 0...]
-            pLogits = processor?.process(logits: pLogits) ?? pLogits
+            let pLogits = processedTargetLogits(targetLogits, at: targetStart + i)
             let pLogProbabilities = distributionSampler.logProbabilities(logits: pLogits)
             let qLogits = draftProcessedLogits[0..., i, 0...]
             let qLogProbabilities = distributionSampler.logProbabilities(logits: qLogits)
@@ -1258,13 +1400,14 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         // Every draft was accepted. The final verifier position predicts one
         // extra target-only bonus token.
-        var bonusLogits = targetLogits[0..., targetStart + numDraft, 0...]
-        bonusLogits = processor?.process(logits: bonusLogits) ?? bonusLogits
-        let bonusLogProbabilities = distributionSampler.logProbabilities(logits: bonusLogits)
-        let bonus = sampleSpeculative(logProbabilities: bonusLogProbabilities)
+        let randomState = speculativeRandomState
+        let bonus = drawToken(from: targetLogits, at: targetStart + draftCount) { bonusLogits in
+            withRandomState(randomState) {
+                categorical(distributionSampler.logProbabilities(logits: bonusLogits))
+            }
+        }
         emitted.append(bonus)
-        processor?.didSample(token: bonus)
-        return (numDraft, emitted)
+        return (draftCount, emitted)
     }
 
     /// Draw acceptance and the possible residual correction in one GPU
@@ -1293,24 +1436,15 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         return (accepted.item(Bool.self), draws.1)
     }
 
-    private func sampleSpeculative(logProbabilities: MLXArray) -> MLXArray {
-        withRandomState(speculativeRandomState) {
-            categorical(logProbabilities)
-        }
-    }
-
     /// Switch to single-token generation for the remainder of the stream.
     /// Sticky — once flipped, `next()` never returns to speculation.
     private mutating func switchToPassthrough(reason: String) {
         if !passthroughLoggedOnce {
             // Log one-time only so a quantization-onset round doesn't spam.
-            // The Swift stdlib `print` is intentional here: the iterator is
-            // a low-level component without access to a logger.
-            print("[MTPSpeculativeTokenIterator] passthrough mode: \(reason)")
+            mtpIteratorLogger.info("passthrough mode: \(reason)")
             passthroughLoggedOnce = true
         }
-        passthroughReason = reason
-        passthrough = true
+        speculationMode = .passthrough(reason: reason)
         discardSpeculativePromptCacheCheckpoints(mainCache)
         mainState?[mtpEmitFlagKey] = false
         mainState?[mtpVerifyKeepsSnapshotsKey] = nil
@@ -1329,44 +1463,34 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     private mutating func passthroughStep(
         maintainingDrafterState: Bool = false
     ) -> Int? {
-        if let maxTokens, tokenCount >= maxTokens { return nil }
+        guard !isAtTokenLimit else { return nil }
 
         var stepState = mainState
         if maintainingDrafterState {
             stepState = stepState ?? LMOutput.State()
             stepState?[mtpEmitFlagKey] = true
         }
-        let (result, token) = forwardTarget(y, state: stepState)
+        let (result, token) = forwardTarget(pendingInput, state: stepState)
         eval(token)
         let tokenInt = token.item(Int.self)
 
-        if maintainingDrafterState,
-            let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
-            var currentDrafterState = drafterState,
-            let targetHidden = result.state?[mtpLastHiddenStatesKey],
-            targetHidden.dim(1) > 0
-        {
-            statefulDrafter.commitDrafterState(
-                target: mainModel,
-                targetHidden: targetHidden,
-                draftTokens: MLXArray.zeros([0], dtype: token.dtype),
-                acceptedCount: 0,
-                finalToken: token,
-                positionDeltas: result.state?[mtpPositionDeltasKey],
-                state: &currentDrafterState,
-                sampler: mtpDrafterSeedSampler)
-            drafterState = currentDrafterState
-            targetBoundaryHidden = targetHidden[0..., (-1)..., 0...]
-        } else if maintainingDrafterState,
-            drafter is any StatefulMTPDrafterModel
-        {
-            switchToPassthrough(
-                reason:
-                    "MTP drafter could not follow the final target-only token; continuation discarded"
-            )
+        if maintainingDrafterState, drafter is any StatefulMTPDrafterModel {
+            if let targetHidden = result.state?[mtpLastHiddenStatesKey], targetHidden.dim(1) > 0,
+                commitDrafterState(
+                    targetHidden: targetHidden,
+                    draftTokens: MLXArray.zeros([0], dtype: token.dtype), acceptedCount: 0,
+                    finalToken: token, positionDeltas: result.state?[mtpPositionDeltasKey]) != nil
+            {
+                targetBoundaryHidden = targetHidden.lastRow
+            } else {
+                switchToPassthrough(
+                    reason:
+                        "MTP drafter could not follow the final target-only token; continuation discarded"
+                )
+            }
         }
 
-        y = .init(tokens: token)
+        pendingInput = .init(tokens: token)
         kvCachePlan.apply(to: mainCacheStorage)
         return tokenInt
     }
@@ -1397,13 +1521,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     }
 
     public mutating func next() -> Int? {
-        if let maxTokens, tokenCount >= maxTokens {
-            return nil
-        }
+        guard !isAtTokenLimit else { return nil }
 
         // Drain the pending buffer first — before the passthrough branch. A
         // stream that stands down in `init` leaves the prepare-time bonus
-        // sitting here, already sampled (`y` holds the token the next forward
+        // sitting here, already sampled (`pendingInput` holds the token the next forward
         // pass feeds). Short-circuiting to `passthroughStep()` would drop it and
         // start the stream one position ahead of an equivalent autoregressive
         // run. Rounds that flip passthrough mid-stream always clear the buffer
@@ -1484,10 +1606,8 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
         let lookahead = committedPendingTokenCount - consumed
         guard lookahead > 0 else { return }
 
-        let usesNativeHybridRewind = Self.verifiesInPlace(
-            mainModel: mainModel, mainCache: mainCache, drafts: blockSize - 1)
         let rewound: Int
-        if usesNativeHybridRewind {
+        if verifiesInPlace(drafts: blockSize - 1) {
             let trimmed = mainCacheStorage.trim(lookahead)
             rewound = trimmed > 0 ? trimmed : mainCacheStorage.rewindSpeculative(lookahead)
         } else {
@@ -1497,13 +1617,7 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
         discardedTargetTokens = rewound
         if rewound == lookahead, let lastVerifyHidden {
             let retainedAccepted = lastVerifyAccepted - lookahead
-            targetBoundaryHidden =
-                lastVerifyHidden[
-                    0...,
-                    (lastVerifyStart + retainedAccepted)
-                        ..< (lastVerifyStart + retainedAccepted + 1),
-                    0...
-                ]
+            targetBoundaryHidden = lastVerifyHidden.row(at: lastVerifyStart + retainedAccepted)
         } else if rewound != lookahead {
             // The target cache itself remains authoritative, but there is no
             // exact hidden-state witness from which a drafter may resume.
@@ -1522,8 +1636,8 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
         guard let resumableDrafter = drafter as? any ResumableMTPDrafterModel else { return }
         guard mainCacheStorage.processedTokenCount > 0 else { return }
         guard var currentDrafterState = drafterState, let targetBoundaryHidden else {
-            passthroughReason =
-                "MTP continuation boundary could not be normalized; continuation discarded"
+            discardContinuation(
+                reason: "MTP continuation boundary could not be normalized; continuation discarded")
             return
         }
 
@@ -1536,22 +1650,48 @@ extension MTPSpeculativeTokenIterator: GenerationFinalizingTokenIterator {
                 positionDeltas: mainState?[mtpPositionDeltasKey],
                 state: &currentDrafterState)
         else {
-            passthroughReason =
-                "MTP drafter state could not be normalized; continuation discarded"
+            discardContinuation(
+                reason: "MTP drafter state could not be normalized; continuation discarded")
             return
         }
 
         drafterState = currentDrafterState
-        let continuation = MTPDrafterContinuation(
-            state: currentDrafterState,
-            targetBoundaryHidden: targetBoundaryHidden,
-            targetProcessedTokenCount: mainCacheStorage.processedTokenCount,
-            drafterID: resumableDrafter.drafterID)
+        let continuation = continuation(
+            of: resumableDrafter, state: currentDrafterState, boundary: targetBoundaryHidden)
 
         // The continuation crosses back from the generation task only after
         // all of its lazy MLX values have been settled.
         eval(continuation.heldArrays)
         finalizedContinuation = continuation
+    }
+
+    /// Records that the stream's drafter state could not become a continuation.
+    ///
+    /// The target cache stays authoritative, thus the next stream starts its drafter cold. A
+    /// stream that speculated to its end leaves its drafter aligned, so this is unexpected.
+    ///
+    /// - Parameter reason: The failed step, which the completion information reports.
+    private mutating func discardContinuation(reason: String) {
+        assertionFailure("\(type(of: drafter)): \(reason)")
+        mtpIteratorLogger.error("\(type(of: drafter)): \(reason)")
+        speculationMode = .continuationDiscarded(reason: reason)
+    }
+
+    /// The continuation of `resumableDrafter` at the main cache's position.
+    ///
+    /// - Parameters:
+    ///   - resumableDrafter: The drafter of the stream.
+    ///   - state: The drafter state.
+    ///   - boundary: The target hidden row of the last token the main cache holds.
+    /// - Returns: The continuation.
+    private func continuation(
+        of resumableDrafter: any ResumableMTPDrafterModel, state: MTPDrafterState,
+        boundary: MLXArray
+    ) -> MTPDrafterContinuation {
+        MTPDrafterContinuation(
+            state: state, targetBoundaryHidden: boundary,
+            targetProcessedTokenCount: mainCacheStorage.processedTokenCount,
+            drafterID: resumableDrafter.drafterID)
     }
 }
 
@@ -1578,6 +1718,9 @@ func speculativeAcceptanceProbability(
     return Foundation.exp(Double(p - q))
 }
 
+/// The residual mass below which `max(p - q, 0)` counts as collapsed.
+private let speculativeResidualMassFloor: Float = 1e-7
+
 /// Normalized residual distribution `max(p - q, 0)` used after a rejected
 /// speculative candidate. When finite-precision arithmetic collapses the
 /// residual mass, `p` is the stable limiting fallback.
@@ -1587,8 +1730,8 @@ func speculativeResidualLogProbabilities(
 ) -> MLXArray {
     let residual = maximum(exp(p) - exp(q), MLXArray(Float(0)))
     let residualMass = residual.sum()
-    let hasResidual = residualMass .> Float(1e-7)
-    let safeMass = maximum(residualMass, MLXArray(Float(1e-7)))
+    let hasResidual = residualMass .> speculativeResidualMassFloor
+    let safeMass = maximum(residualMass, MLXArray(speculativeResidualMassFloor))
     return MLX.where(hasResidual, log(residual / safeMass), p)
 }
 
@@ -1649,23 +1792,23 @@ func reconcileSharedKVState(
     _ state: inout LMOutput.State?, discarding: Int, lengths: (Int) -> Int
 ) -> Bool {
     guard let sharedKV = state?[mtpSharedKVStatesKey] else { return true }
-    guard let sources = state?[mtpSharedKVSourceIndicesKey],
-        sharedKV.keys.allSatisfy({ sources[$0] != nil })
-    else { return false }
+    guard let sources = state?[mtpSharedKVSourceIndicesKey] else { return false }
 
-    state?[mtpSharedKVStatesKey] = sharedKV.reduce(into: [:]) { result, entry in
-        let (key, kv) = entry
-        var length = kv.0.dim(-2)
+    var reconciled: [String: (MLXArray, MLXArray)] = [:]
+    reconciled.reserveCapacity(sharedKV.count)
+    for (key, (keys, values)) in sharedKV {
+        guard let source = sources[key] else { return false }
+        var length = keys.dim(sharedKVSequenceAxis)
         if discarding > 0 {
             length = Swift.max(0, length - discarding)
         }
-        let bound = lengths(sources[key]!)
-        let start = Swift.max(0, length - bound)
-        result[key] = (
-            kv.0[.ellipsis, start ..< length, 0...],
-            kv.1[.ellipsis, start ..< length, 0...]
+        let start = Swift.max(0, length - lengths(source))
+        reconciled[key] = (
+            keys[.ellipsis, start ..< length, 0...],
+            values[.ellipsis, start ..< length, 0...]
         )
     }
+    state?[mtpSharedKVStatesKey] = reconciled
     if discarding > 0, let offsets = state?[mtpSharedKVOffsetsKey] {
         state?[mtpSharedKVOffsetsKey] = offsets.mapValues {
             Swift.max(0, $0 - discarding)

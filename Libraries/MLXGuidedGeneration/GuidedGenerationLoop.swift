@@ -224,37 +224,12 @@ public enum GuidedGenerationLoop {
         [sampled] + fastForward
     }
 
-    /// Build the set of token ids that terminate generation.
-    ///
-    /// Pulls from three sources, all carried by the `ModelConfiguration` and
-    /// tokenizer (all required for chat-tuned models to stop correctly):
-    ///
-    /// 1. `configuration.eosTokenIds` — loaded from `config.json` /
-    ///    `generation_config.json` at model-load time. Chat models like
-    ///    Gemma 3 ship `eos_token_id` as an array (e.g. `[1, 106]` for
-    ///    `<eos>` + `<end_of_turn>`); this source is the only way to pick
-    ///    up the turn-ender when the tokenizer's primary EOS is the
-    ///    completion EOS.
-    /// 2. `tokenizer.eosTokenId` — the tokenizer's single primary EOS.
-    /// 3. `configuration.extraEOSTokens` — hardcoded-by-token-string
-    ///    additions from registry entries (e.g. `["<end_of_turn>"]` on
-    ///    some Gemma variants in `LLMModelFactory`). Callers needing extra
-    ///    stop tokens add them here (via the model configuration), not as a
-    ///    per-call argument.
+    /// The set of token ids that terminate generation: the stop set of every generation path.
     static func buildStopTokenIDs(
         tokenizer: any Tokenizer,
         configuration: ModelConfiguration
     ) -> Set<Int> {
-        var stopTokenIDs = Set(configuration.eosTokenIds)
-        if let eos = tokenizer.eosTokenId {
-            stopTokenIDs.insert(eos)
-        }
-        for token in configuration.extraEOSTokens {
-            if let id = tokenizer.convertTokenToId(token) {
-                stopTokenIDs.insert(id)
-            }
-        }
-        return stopTokenIDs
+        buildStopTokenIds(modelConfiguration: configuration, tokenizer: tokenizer)
     }
 
     /// Apply a *prebuilt* grammar mask and optional bias to logits, then argmax.
@@ -333,10 +308,16 @@ public enum GuidedGenerationLoop {
     static func buildMaskArray(for mask: MaskResult, vocabSize: Int, logitDim: Int) -> MLXArray? {
         guard mask.needsApply else { return nil }
         return mask.mask.withUnsafeBufferPointer { buffer in
-            let ptr = UnsafeRawPointer(buffer.baseAddress!).assumingMemoryBound(to: UInt32.self)
+            guard let words = buffer.baseAddress else {
+                preconditionFailure("A grammar mask that needs applying has no words")
+            }
+            let ptr = UnsafeRawPointer(words).assumingMemoryBound(to: UInt32.self)
             return bitmaskToMLXArray(ptr, maskBitCount: vocabSize, totalCount: logitDim)
         }
     }
+
+    /// The token bits each word of a packed grammar bitmask holds.
+    private static let bitsPerMaskWord = UInt32.bitWidth
 
     /// Convert a packed bitmask (1 bit per token) to an MLXArray of floats.
     /// Allowed tokens get 0.0, disallowed tokens get -inf.
@@ -357,8 +338,8 @@ public enum GuidedGenerationLoop {
         var floats = [Float](repeating: -Float.infinity, count: totalCount)
         let readCount = min(maskBitCount, totalCount)
         for i in 0 ..< readCount {
-            let word = maskPtr[i / 32]
-            let bit = (word >> (UInt32(i) % 32)) & 1
+            let word = maskPtr[i / bitsPerMaskWord]
+            let bit = (word >> (UInt32(i) % UInt32(bitsPerMaskWord))) & 1
             if bit == 1 {
                 floats[i] = 0.0
             }
