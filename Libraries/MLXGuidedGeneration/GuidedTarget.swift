@@ -14,7 +14,8 @@ struct GuidedPrefill {
     /// The logits of the final prefill forward, shape `[B, positions, vocabulary]`.
     let logits: MLXArray
 
-    /// The prompt tokens the final forward evaluated, or `nil` when the prefill fed no drafter.
+    /// The prompt tokens the final forward evaluated, or `nil` when `prepare` evaluated the
+    /// whole prompt itself and the prefill fed no drafter.
     let segmentTokens: MLXArray?
 
     /// One target hidden row for each token of ``segmentTokens``, or `nil` when the forward

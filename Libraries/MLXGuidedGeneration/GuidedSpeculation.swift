@@ -118,13 +118,26 @@ struct GuidedSpeculation {
             fallback.statedReason, reason: fallback.reason)
     }
 
+    /// The words of a fallback: what happened, then what the generation does about it.
+    ///
+    /// - Parameters:
+    ///   - subject: The drafter or the target the fallback is about.
+    ///   - clause: What the subject cannot do, or stopped doing.
+    ///   - scope: The part of the generation that decodes without speculation.
+    /// - Returns: The reason in words.
+    private static func fallbackReason(
+        _ subject: String, _ clause: String, scope: String = "the generation"
+    ) -> String {
+        "\(subject) \(clause), so \(scope) decodes without speculation"
+    }
+
     /// The stated reason of a drafter that cannot draft under a grammar.
     ///
     /// - Parameter drafter: The configured drafter.
     /// - Returns: The reason in words.
     private static func unguidedDrafterReason(of drafter: any MTPDrafterModel) -> String {
-        "the MTP drafter \(type(of: drafter)) cannot draft through a grammar mask, "
-            + "so the generation decodes without speculation"
+        fallbackReason(
+            "the MTP drafter \(type(of: drafter))", "cannot draft through a grammar mask")
     }
 
     /// The stated reason of a target that cannot verify a round in place.
@@ -132,8 +145,7 @@ struct GuidedSpeculation {
     /// - Parameter model: The target model.
     /// - Returns: The reason in words.
     private static func noInPlaceVerifyReason(of model: any LanguageModel) -> String {
-        "the target \(type(of: model)) cannot verify a guided round in place, "
-            + "so the generation decodes without speculation"
+        fallbackReason("the target \(type(of: model))", "cannot verify a guided round in place")
     }
 
     /// The stated reason of a drafter that could not start over the prefilled prompt.
@@ -145,8 +157,9 @@ struct GuidedSpeculation {
     private static func unprimedDrafterReason(
         of drafter: any MTPDrafterModel, on model: any LanguageModel
     ) -> String {
-        "the MTP drafter \(type(of: drafter)) could not start over the prompt of the target "
-            + "\(type(of: model)), so the generation decodes without speculation"
+        fallbackReason(
+            "the MTP drafter \(type(of: drafter))",
+            "could not start over the prompt of the target \(type(of: model))")
     }
 
     /// Primes the drafter over the prompt the target just prefilled, up to the first decided
@@ -369,8 +382,9 @@ struct GuidedSpeculation {
     /// - Parameter model: The target model.
     /// - Returns: The reason in words.
     static func missingDrafterStateReason(of model: any LanguageModel) -> String {
-        "the target \(type(of: model)) gave no drafter hidden state for a guided forward, "
-            + "so the rest of the generation decodes without speculation"
+        fallbackReason(
+            "the target \(type(of: model))", "gave no drafter hidden state for a guided forward",
+            scope: "the rest of the generation")
     }
 
     /// The stated reason of a stand-down: the target stopped verifying rounds in place.
@@ -378,8 +392,9 @@ struct GuidedSpeculation {
     /// - Parameter model: The target model.
     /// - Returns: The reason in words.
     private static func lostInPlaceVerifyReason(of model: any LanguageModel) -> String {
-        "the target \(type(of: model)) stopped verifying guided rounds in place, "
-            + "so the rest of the generation decodes without speculation"
+        fallbackReason(
+            "the target \(type(of: model))", "stopped verifying guided rounds in place",
+            scope: "the rest of the generation")
     }
 
     /// Rolls the matcher back over the drafts from `index` on.
