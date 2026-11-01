@@ -464,6 +464,7 @@ struct ExecutorPromptCacheTests {
         let model = makeStubModel("probe/foreign-evict-\(UUID().uuidString)")
         let sessionKey = key("a", modelID: model.modelID)
         let store = makeStore()
+        await ExecutorPromptCacheStore.shared.checkIn(sessionKey, smallEntry())
 
         await ExecutorPromptCacheStore.$current.withValue(store) {
             await ExecutorPromptCacheStore.current.checkIn(sessionKey, smallEntry())
@@ -471,6 +472,8 @@ struct ExecutorPromptCacheTests {
             await Task.detached { await model.evict() }.value
         }
 
+        // The eviction ran: it released the entry of the shared store, and only that one.
+        #expect(await ExecutorPromptCacheStore.shared.peek(sessionKey) == nil)
         #expect(await store.peek(sessionKey) != nil)
     }
 

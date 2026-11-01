@@ -175,6 +175,8 @@ struct MTPPromptCacheTests {
             .appendingPathComponent("MTPPromptCacheTests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = ExecutorPromptCacheStore(directory: directory)
+        // No entry spills, thus the ledger of each turn stays readable.
+        await store.configure(memoryBudgetBytes: Int.max)
         try await ExecutorPromptCacheStore.$current.withValue(store) {
             try await expectTheSecondTurnToReuseTheFirst()
         }
