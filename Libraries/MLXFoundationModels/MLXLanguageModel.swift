@@ -777,7 +777,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - messages: the messages rendered before the model loaded.
         /// - Returns: the messages to render the prompt from.
         /// - Throws: `LanguageModelError.unsupportedTranscriptContent` if an
-        ///   attachment is not an image.
+        ///   attachment is not an image, or the transcript holds a data entry.
         static func historyMessages(
             of transcript: Transcript, resolved: ModelConfiguration,
             otherwise messages: [Chat.Message]

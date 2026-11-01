@@ -99,6 +99,8 @@ struct TranscriptConverter {
     ///     tokens the prompt cache holds. A response entry with no text and no
     ///     reasoning still gives no message.
     /// - Returns: Array of MLX Chat.Message objects
+    /// - Throws: `LanguageModelError.unsupportedTranscriptContent` if an
+    ///   attachment is not an image, or `entries` holds a data entry.
     static func mlxMessages(
         for entries: some Collection<Transcript.Entry>, reasoning: HistoryReasoning = .dropped
     ) throws -> [Chat.Message] {
@@ -206,7 +208,7 @@ struct TranscriptConverter {
     /// - Parameter entry: the entry to convert.
     /// - Returns: the message, or `nil` for an entry that produces none.
     /// - Throws: `LanguageModelError.unsupportedTranscriptContent` if an
-    ///   attachment is not an image.
+    ///   attachment is not an image, or `entry` is a data entry.
     private static func convert(entry: Transcript.Entry) throws -> Chat.Message? {
         switch entry {
         case .instructions(let instructions):
@@ -252,7 +254,7 @@ struct TranscriptConverter {
             // history (per SKILL.md) unless the caller asks for replay, in
             // which case `mlxMessages` consumes the entry BEFORE dispatching
             // here. Dropped explicitly so a future SDK change is reviewed here
-            // rather than silently absorbed by the catch-all below.
+            // rather than absorbed by the `@unknown default` below.
             logger.debug("Skipping reasoning entry (not replayed into chat history)")
             return nil
 
@@ -293,11 +295,18 @@ struct TranscriptConverter {
             let content = extractToolOutputContent(from: output.segments)
             return Chat.Message.tool(content, id: output.id)
 
-        default:
-            // Skip unsupported entry types. Explicit `return nil` is a
-            // tripwire: a newly added SDK entry type surfaces here for review
-            // rather than being silently coerced into the wrong role.
-            logger.debug("Skipping unsupported entry type")
+        // 2.1.14 is the module version of the 27.2 SDK, the first SDK checked to declare
+        // `.data`. An SDK without the case compiles this switch through `@unknown default`.
+        #if canImport(FoundationModels, _version: 2.1.14)
+        case .data(let dataEntry):
+            throw unsupportedDataEntry(contentType: dataEntry.contentType, in: entry)
+        #endif
+
+        @unknown default:
+            // Each case this SDK declares is named above, so only an entry type
+            // newer than this adapter reaches here. Skipping it keeps it out of
+            // the wrong role, and the warning reports it for review.
+            logger.warning("Skipping a transcript entry of a kind this SDK adapter predates")
             return nil
         }
     }
@@ -393,7 +402,7 @@ struct TranscriptConverter {
                     contentType: dataAttachment.contentType, in: entry)
             #endif
             @unknown default:
-                throw unsupportedAttachment(
+                throw unsupportedContent(
                     described:
                         "This attachment carries content the MLX adapter cannot render. Only image attachments are supported.",
                     in: entry)
@@ -401,13 +410,13 @@ struct TranscriptConverter {
         }
     }
 
-    /// The error for an attachment that the adapter cannot render.
+    /// The error for transcript content that the adapter cannot render.
     ///
     /// - Parameters:
     ///   - description: the debug description of the failure.
-    ///   - entry: the transcript entry that holds the attachment.
+    ///   - entry: the transcript entry that is or holds the content.
     /// - Returns: a `LanguageModelError.unsupportedTranscriptContent` that names `entry`.
-    private static func unsupportedAttachment(
+    private static func unsupportedContent(
         described description: String, in entry: Transcript.Entry
     ) -> LanguageModelError {
         LanguageModelError.unsupportedTranscriptContent(
@@ -431,9 +440,30 @@ struct TranscriptConverter {
     static func unsupportedDataAttachment(
         contentType: UTType, in entry: Transcript.Entry
     ) -> LanguageModelError {
-        unsupportedAttachment(
+        unsupportedContent(
             described:
                 "This data attachment of type \(contentType.identifier) carries content the MLX adapter cannot render. Only image attachments are supported.",
+            in: entry)
+    }
+
+    /// The error for a data entry. The adapter has no renderer for one, and
+    /// ``MLXLanguageModel`` opts into no data entry type, whatever `contentType` says.
+    /// Foundation Models documents this same error for a data entry that a model rejects.
+    ///
+    /// This takes the content type rather than a `Transcript.DataEntry`, so a test can
+    /// call it on an OS older than the 27.2 that the entry type requires.
+    ///
+    /// - Parameters:
+    ///   - contentType: the type of the entry's bytes.
+    ///   - entry: the transcript entry.
+    /// - Returns: a `LanguageModelError.unsupportedTranscriptContent` that names `entry`
+    ///   and `contentType`.
+    static func unsupportedDataEntry(
+        contentType: UTType, in entry: Transcript.Entry
+    ) -> LanguageModelError {
+        unsupportedContent(
+            described:
+                "This data entry of type \(contentType.identifier) carries content the MLX adapter cannot render. No data entry type is supported.",
             in: entry)
     }
     #endif

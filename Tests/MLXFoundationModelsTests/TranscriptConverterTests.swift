@@ -155,7 +155,7 @@ struct TranscriptConverterTests {
 
         // Only supported types here. toolCalls/toolOutput are now mapped (see
         // the tool-calling tests below); genuinely unknown future entry types
-        // still hit the `default:` tripwire and are skipped.
+        // still hit the `@unknown default` warning and are skipped.
         let entries: [Transcript.Entry] = [
             .prompt(
                 Transcript.Prompt(
@@ -993,6 +993,39 @@ struct TranscriptConverterTests {
 
         let error = #expect(throws: LanguageModelError.self) {
             try TranscriptConverter.mlxMessages(for: [.prompt(prompt)])
+        }
+
+        let content = try #require(error.flatMap { Self.unsupportedContent(of: $0) })
+        #expect(content.debugDescription.contains(UTType.json.identifier))
+    }
+
+    // Runs on every OS: the seam takes a `UTType`, so no `Transcript.DataEntry` is built.
+    @Test
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func testUnsupportedDataEntryErrorNamesContentType() throws {
+        let entry = Transcript.Entry.prompt(
+            Transcript.Prompt(
+                segments: [.text(Transcript.TextSegment(content: "Read this"))],
+                responseFormat: nil))
+
+        let error = TranscriptConverter.unsupportedDataEntry(contentType: .json, in: entry)
+
+        let content = try #require(Self.unsupportedContent(of: error))
+        #expect(content.debugDescription.contains(UTType.json.identifier))
+    }
+
+    // `@available` makes Swift Testing report a skip on an older OS, because the
+    // `Transcript.DataEntry` symbols do not exist there. Both modes run, because
+    // `mlxMessages` takes a different path to `convert` when it replays reasoning.
+    @Test(arguments: [TranscriptConverter.HistoryReasoning.dropped, .everyTurn])
+    @available(iOS 27.2, macOS 27.2, visionOS 27.2, *)
+    func testDataEntryThrowsUnsupportedTranscriptContent(
+        reasoning: TranscriptConverter.HistoryReasoning
+    ) throws {
+        let dataEntry = Transcript.DataEntry(contentType: .json, content: Data("{}".utf8))
+
+        let error = #expect(throws: LanguageModelError.self) {
+            try TranscriptConverter.mlxMessages(for: [.data(dataEntry)], reasoning: reasoning)
         }
 
         let content = try #require(error.flatMap { Self.unsupportedContent(of: $0) })
