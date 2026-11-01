@@ -295,8 +295,6 @@ struct TranscriptConverter {
             let content = extractToolOutputContent(from: output.segments)
             return Chat.Message.tool(content, id: output.id)
 
-        // 2.1.14 is the module version of the 27.2 SDK, the first SDK checked to declare
-        // `.data`. An SDK without the case compiles this switch through `@unknown default`.
         #if canImport(FoundationModels, _version: 2.1.14)
         case .data(let dataEntry):
             throw unsupportedDataEntry(contentType: dataEntry.contentType, in: entry)
@@ -394,8 +392,6 @@ struct TranscriptConverter {
                 return .ciImage(
                     imageAttachment.ciImage.oriented(imageAttachment.orientation),
                     label: attachment.label)
-            // 2.1.14 is the module version of the 27.2 SDK, the first SDK checked to declare
-            // `.data`. An SDK without the case compiles this switch through `@unknown default`.
             #if canImport(FoundationModels, _version: 2.1.14)
             case .data(let dataAttachment):
                 throw unsupportedDataAttachment(
@@ -425,46 +421,59 @@ struct TranscriptConverter {
                 debugDescription: description))
     }
 
+    // 2.1.14 is the module version of the 27.2 SDK, the first SDK checked to declare the
+    // `.data` cases. Each `.data` case in this file carries this guard, and an SDK without
+    // the case compiles its switch through `@unknown default`.
     #if canImport(FoundationModels, _version: 2.1.14)
-    /// The error for a data attachment. The adapter has no renderer for one, and
-    /// ``MLXLanguageModel`` opts into no data attachment type, whatever `contentType` says.
+    /// The error for data the adapter has no renderer for. ``MLXLanguageModel`` opts into
+    /// no data type, whatever `contentType` says.
     ///
-    /// This takes the content type rather than a `Transcript.DataAttachment`, so a test can
-    /// call it on an OS older than the 27.2 that the attachment type requires.
+    /// This takes the content type rather than a transcript data type, so a test can call
+    /// it on an OS older than the 27.2 that those types require.
+    ///
+    /// - Parameters:
+    ///   - kind: what holds the bytes, as the description names it.
+    ///   - contentType: the type of the bytes.
+    ///   - supported: what the adapter supports instead, as the description states it.
+    ///   - entry: the transcript entry that is or holds the data.
+    /// - Returns: a `LanguageModelError.unsupportedTranscriptContent` that names `entry`
+    ///   and `contentType`.
+    private static func unsupportedData(
+        _ kind: String, contentType: UTType, supported: String, in entry: Transcript.Entry
+    ) -> LanguageModelError {
+        unsupportedContent(
+            described:
+                "This \(kind) of type \(contentType.identifier) carries content the MLX adapter cannot render. \(supported)",
+            in: entry)
+    }
+
+    /// The error for a data attachment.
     ///
     /// - Parameters:
     ///   - contentType: the type of the attachment's bytes.
     ///   - entry: the transcript entry that holds the attachment.
-    /// - Returns: a `LanguageModelError.unsupportedTranscriptContent` that names `entry`
-    ///   and `contentType`.
+    /// - Returns: the error of ``unsupportedData(_:contentType:supported:in:)``.
     static func unsupportedDataAttachment(
         contentType: UTType, in entry: Transcript.Entry
     ) -> LanguageModelError {
-        unsupportedContent(
-            described:
-                "This data attachment of type \(contentType.identifier) carries content the MLX adapter cannot render. Only image attachments are supported.",
-            in: entry)
+        unsupportedData(
+            "data attachment", contentType: contentType,
+            supported: "Only image attachments are supported.", in: entry)
     }
 
-    /// The error for a data entry. The adapter has no renderer for one, and
-    /// ``MLXLanguageModel`` opts into no data entry type, whatever `contentType` says.
-    /// Foundation Models documents this same error for a data entry that a model rejects.
-    ///
-    /// This takes the content type rather than a `Transcript.DataEntry`, so a test can
-    /// call it on an OS older than the 27.2 that the entry type requires.
+    /// The error for a data entry, the one Foundation Models documents for a data entry
+    /// that a model rejects.
     ///
     /// - Parameters:
     ///   - contentType: the type of the entry's bytes.
     ///   - entry: the transcript entry.
-    /// - Returns: a `LanguageModelError.unsupportedTranscriptContent` that names `entry`
-    ///   and `contentType`.
+    /// - Returns: the error of ``unsupportedData(_:contentType:supported:in:)``.
     static func unsupportedDataEntry(
         contentType: UTType, in entry: Transcript.Entry
     ) -> LanguageModelError {
-        unsupportedContent(
-            described:
-                "This data entry of type \(contentType.identifier) carries content the MLX adapter cannot render. No data entry type is supported.",
-            in: entry)
+        unsupportedData(
+            "data entry", contentType: contentType,
+            supported: "No data entry type is supported.", in: entry)
     }
     #endif
 
