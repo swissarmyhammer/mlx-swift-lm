@@ -1,8 +1,16 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '9280'
+comments:
+- actor: claude-code
+  id: 01m6c734h14f3qhqnqqfc4r8qd
+  text: |-
+    ### review — clean
+    - evidence: `review sha 80b91675~1..80b91675`: 0 findings, 0 confirmed, 0 refuted, 7 attempted, 0 failed, 0 skipped; 3 files reviewed. No builds or tests run in this pass.
+    - next: none on this card. CI follow-up is ^p4r82ye. Commit 80b91675 is on wt-a316yq5 only.
+  timestamp: 2026-11-01T18:49:02.241024+00:00
+position_column: done
+position_ordinal: ffff9d80
 title: MLXFoundationModelsTests fails under swiftpm-testing-helper --filter '.*' while xcrun xctest passes, and no CI job runs these tests on Xcode 27
 ---
 Found in the ^84b33jx review (2026-10-31). Not fixed there. The cause is not established.
@@ -26,8 +34,18 @@ No CI job runs these tests on Xcode 27:
 
 So the two failures above, and every test of this bundle, reach no CI.
 
-- [ ] Establish why the two named tests fail under the helper's whole-bundle run and pass under `xcrun xctest`.
-- [ ] Fix the cause, and show the bundle passes under both runners on repeated runs.
-- [ ] Decide with the user how these tests run in CI once a macOS 27 host exists (GitHub issue 499).
+- [x] Establish why the two named tests fail under the helper's whole-bundle run and pass under `xcrun xctest`.
+- [x] Fix the cause, and show the bundle passes under both runners on repeated runs.
+- [x] Decide with the user how these tests run in CI once a macOS 27 host exists (GitHub issue 499). Decided: see ^p4r82ye. No macOS 27 host exists yet, so nothing can change now.
+
+## Result (commit 80b91675, branch wt-a316yq5)
+
+Cause: a test isolation bug. `evictAll()` is process-wide, and 4 tests ran it in the test process, so a rebuilt scripted model replays its script.
+
+Fix: the 4 tests run in child processes.
+
+- After the fix: helper 5/5, xctest 3/3.
+- Mutants A and B caught.
+- Before the fix: helper failed 2/2.
 
 #foundation-models #test
