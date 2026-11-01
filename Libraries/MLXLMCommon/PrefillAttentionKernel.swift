@@ -14,7 +14,9 @@
 //  1. A threadgroup reads 8 query tokens of 3 query heads that share one KV
 //     head. Two SIMD groups hold each head, each one half of the head width,
 //     and the partial scores of the two halves meet in threadgroup memory.
-//     The scores and the output are 8x8 SIMD-group matrices.
+//     The scores and the output are 8x8 SIMD-group matrices. Each matrix row
+//     is one token of one head, thus a call of fewer than 8 tokens holds
+//     several heads in one matrix (``rowMatrices(heads:tokens:)``).
 //  2. Four more SIMD groups only load the key and value tiles into
 //     threadgroup memory. They load the next tile while the other SIMD groups
 //     read the current one, into a second value tile and into the key tile
@@ -177,10 +179,13 @@ package enum PrefillAttentionKernel {
     /// shares: the layout of the threadgroup, the queries of its token rows
     /// and an empty online softmax.
     ///
-    /// SIMD group `g` below `THREADGROUP_HEADS * HEAD_PARTS` holds query head
+    /// SIMD group `g` below `ROW_MATRICES * HEAD_PARTS` holds matrix
     /// `g / HEAD_PARTS` of the threadgroup and the head-width part
-    /// `g % HEAD_PARTS`; the SIMD groups above it are loaders. `keyEnd` is
-    /// the end of the keys the token rows of the threadgroup read.
+    /// `g % HEAD_PARTS`; the SIMD groups above it are loaders. The matrices
+    /// hold the token rows of the `THREADGROUP_HEADS` query heads one after
+    /// the other, the tokens of one head side by side, and `realRow` is false
+    /// for the rows behind the last token. `keyEnd` is the end of the keys
+    /// the token rows of the threadgroup read.
     ///
     /// A key range part follows it, which sets `loopFirst` and `loopEnd`, the
     /// keys the threadgroup reads, then ``loopSource``.
@@ -189,7 +194,7 @@ package enum PrefillAttentionKernel {
         constexpr int dimFrags = partDim / matrixSide;
         constexpr int keyFrags = BK / matrixSide;
         constexpr int laneScores = keyFrags * elementsPerLane;
-        constexpr int computeGroups = THREADGROUP_HEADS * HEAD_PARTS;
+        constexpr int computeGroups = ROW_MATRICES * HEAD_PARTS;
         constexpr int computeThreads = computeGroups * SIMD_WIDTH;
         constexpr int allThreads = (computeGroups + LOADER_SIMD_GROUPS) * SIMD_WIDTH;
         constexpr int loaderThreads = LOADER_SIMD_GROUPS * SIMD_WIDTH;
@@ -212,14 +217,17 @@ package enum PrefillAttentionKernel {
         uint place = threadgroup_position_in_grid.y;
         uint sequence = place / (kvHeads * headGroups);
         uint kvHead = (place / headGroups) % kvHeads;
-        uint head = min(uint(simdGroup / HEAD_PARTS), uint(THREADGROUP_HEADS - 1));
-        uint queryHead = kvHead * GQA + (place % headGroups) * THREADGROUP_HEADS + head;
         int dimFirst = (simdGroup % HEAD_PARTS) * partDim;
         int firstToken = threadgroup_position_in_grid.x * TOKENS;
         int offset = keyCount - queryCount;
         int keyEnd = CAUSAL ? min(keyCount, offset + firstToken + TOKENS) : keyCount;
         short2 at = lane_coordinate(lane);
-        int token = firstToken + at.y;
+        int headTokens = min(queryCount, TOKENS);
+        int matrixRow = (simdGroup / HEAD_PARTS) * TOKENS + at.y;
+        int head = matrixRow / headTokens;
+        int token = firstToken + matrixRow % headTokens;
+        bool realRow = head < THREADGROUP_HEADS && token < queryCount;
+        uint queryHead = kvHead * GQA + (place % headGroups) * THREADGROUP_HEADS + head;
 
         TileRows<T> keyRows = {
             keys + sequence * keys_strides[SEQUENCE_AXIS] + kvHead * keys_strides[HEAD_AXIS],
@@ -238,7 +246,7 @@ package enum PrefillAttentionKernel {
         UNROLL_FULL for (int d = 0; d < dimFrags; d++) {
             UNROLL_FULL for (int e = 0; e < elementsPerLane; e++) {
                 int column = dimFirst + d * matrixSide + at.x + e;
-                query[d].thread_elements()[e] = token < queryCount
+                query[d].thread_elements()[e] = realRow
                     ? queryRows[token * queries_strides[ROW_AXIS] + column * queries_strides[WIDTH_AXIS]]
                     : T(0);
             }
@@ -390,7 +398,7 @@ package enum PrefillAttentionKernel {
     /// The last part of the kernel body: the normalized output of each token
     /// row.
     private static let outputSource = """
-        if (!loader && token < queryCount) {
+        if (!loader && realRow) {
             float inverse = 1.0f / rowSum;
             size_t rowBase = ((size_t(sequence) * queryHeads + queryHead) * queryCount + token) * DIM;
             UNROLL_FULL for (int d = 0; d < dimFrags; d++) {
@@ -478,6 +486,23 @@ package enum PrefillAttentionKernel {
         return nil
     }
 
+    /// The SIMD-group matrices that hold the token rows of some query heads:
+    /// the fewest matrices of 8 rows for one row of each token of each head.
+    ///
+    /// Each matrix takes ``headParts`` SIMD groups, and each costs its matrix
+    /// products and its softmax for every key tile, used rows or not, thus
+    /// the fewer tokens of a verify fill fewer matrices.
+    ///
+    /// - Parameters:
+    ///   - heads: The query heads of one threadgroup.
+    ///   - tokens: The query tokens of the call. One threadgroup reads
+    ///     ``tokensPerThreadgroup`` of them at most.
+    /// - Returns: The matrices of one threadgroup.
+    static func rowMatrices(heads: Int, tokens: Int) -> Int {
+        let rows = heads * min(tokens, tokensPerThreadgroup)
+        return (rows + tokensPerThreadgroup - 1) / tokensPerThreadgroup
+    }
+
     /// The number of keys of one tile for a dtype: the most keys whose key
     /// tile and two value tiles fit in threadgroup memory.
     private static func tileKeys(_ dtype: DType) -> Int {
@@ -508,7 +533,9 @@ package enum PrefillAttentionKernel {
         outputShapes: [[Int]], outputDTypes: [DType]
     ) -> [MLXArray] {
         let groupSize = queries.dim(HeadRowsAxis.head) / keys.dim(HeadRowsAxis.head)
-        let threads = (headsPerThreadgroup * headParts + loaderSimdGroups) * metalSimdWidth
+        let matrices = rowMatrices(
+            heads: headsPerThreadgroup, tokens: queries.dim(HeadRowsAxis.row))
+        let threads = (matrices * headParts + loaderSimdGroups) * metalSimdWidth
         let tokenBlocks =
             (queries.dim(HeadRowsAxis.row) + tokensPerThreadgroup - 1) / tokensPerThreadgroup
         let headBlocks =
@@ -519,7 +546,7 @@ package enum PrefillAttentionKernel {
             template: [
                 ("T", queries.dtype), ("DIM", headWidth), ("GQA", groupSize),
                 ("BK", tileKeys(queries.dtype)), ("CAUSAL", causal),
-                ("THREADGROUP_HEADS", headsPerThreadgroup),
+                ("THREADGROUP_HEADS", headsPerThreadgroup), ("ROW_MATRICES", matrices),
             ],
             grid: (threads * tokenBlocks, headBlocks, keyBlocks),
             threadGroup: (threads, 1, 1),

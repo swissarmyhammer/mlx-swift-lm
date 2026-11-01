@@ -10,17 +10,17 @@
 // the tokens times the keys: at a 100k context each token past the first adds
 // about 6 ms over the 16 full-attention layers of Qwen3.8, one more read of the
 // whole cache. These kernels read each key tile once for every token and
-// every query head of one KV head, as 8x8 SIMD-group matrices, thus the cost
-// of a verify of 3 to 8 tokens does not grow with its tokens. At 32k and 100k
-// keys they cost about 2.4 times one decode step over the same cache, which a
-// verify of 3 tokens or more makes up for; a verify of 2 tokens keeps the SDPA
-// of MLX.
+// every query head of one KV head, as 8x8 SIMD-group matrices. Each row of a
+// matrix is one token of one query head, thus a verify takes only the matrices
+// its rows fill, and a short verify costs less than a long one. At 32k and
+// 100k keys a verify of 2 tokens costs about one decode step over the same
+// cache, and a verify of 3 or 4 tokens about 1.4 times one.
 //
 //  1. The block pass. ``PrefillAttentionKernel`` shares its threadgroup layout
-//     and its online softmax: a threadgroup reads one block of the keys for 8
-//     token rows and the query heads of one KV head, and gives, for each token
-//     row of each head, the largest score, the sum of the weights, and the
-//     weighted sum of the values, in float32.
+//     and its online softmax: a threadgroup reads one block of the keys for
+//     the token rows of the query heads of one KV head, and gives, for each
+//     token row of each head, the largest score, the sum of the weights, and
+//     the weighted sum of the values, in float32.
 //  2. The combine pass of ``DecodeAttentionKernel``. Each threadgroup reads the
 //     blocks of one token row of one query head and gives its attention
 //     output.
@@ -39,9 +39,8 @@ import MLX
 package enum VerifyAttentionKernel {
 
     /// The fewest query tokens the kernel reads. One token keeps the route of
-    /// ``DecodeAttentionKernel``, and the SDPA of MLX reads two tokens faster
-    /// than this kernel.
-    static let fewestQueries = 3
+    /// ``DecodeAttentionKernel``.
+    static let fewestQueries = 2
 
     /// The most query tokens the kernel reads: the token rows of one
     /// SIMD-group matrix.
@@ -49,7 +48,7 @@ package enum VerifyAttentionKernel {
 
     /// The number of keys one block holds when the block count is not at a
     /// limit.
-    private static let targetKeysPerBlock = 512
+    private static let targetKeysPerBlock = 2048
 
     /// The fewest blocks of one KV head.
     private static let fewestBlocks = 4
@@ -57,11 +56,11 @@ package enum VerifyAttentionKernel {
     /// The most blocks of one KV head. More blocks write more block results
     /// for the combine pass to read, one row of `headDim` numbers for each
     /// token row of each query head.
-    private static let mostBlocks = 64
+    private static let mostBlocks = 16
 
     /// The query heads of one KV head of Qwen3.8, which one threadgroup reads
-    /// whole: 12 SIMD groups hold them, and their key tiles and the score
-    /// exchange still fit in 32 KB of threadgroup memory.
+    /// whole: at most 12 SIMD groups hold them, and their key tiles and the
+    /// score exchange still fit in 32 KB of threadgroup memory.
     private static let wholeKVHeadGroup = 6
 
     /// The query heads one threadgroup of ``PrefillAttentionKernel`` reads.
@@ -75,7 +74,7 @@ package enum VerifyAttentionKernel {
     /// online softmax keeps scores in base 2; the combine pass reads them in
     /// natural-log units.
     private static let resultSource = """
-        if (!loader && token < queryCount) {
+        if (!loader && realRow) {
             uint block = threadgroup_position_in_grid.z;
             size_t row = ((size_t(sequence) * queryHeads + queryHead) * queryCount + token)
                 * threadgroups_per_grid.z + block;
@@ -135,7 +134,7 @@ package enum VerifyAttentionKernel {
     }
 
     /// The number of blocks the keys of one KV head make: the power of two
-    /// at or below `keys / 512`, from 4 to 64 blocks. More, shorter blocks
+    /// at or below `keys / 2048`, from 4 to 16 blocks. More, shorter blocks
     /// measured slower: each writes block results for the combine pass.
     ///
     /// - Parameter keys: The number of cached keys, 1 or more.

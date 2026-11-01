@@ -22,16 +22,26 @@ struct VerifyAttentionKernelTests {
     ///
     /// 1. The Qwen3.8 attention shape at the fewest queries and the fewest
     ///    keys the kernel reads.
-    /// 2. The Qwen3.8 shape of a verify of five tokens, with a last block
-    ///    shorter than the others.
-    /// 3. The Qwen3.8 shape at the most queries the kernel reads, over many
+    /// 2. The Qwen3.8 shape of a verify of three tokens, whose matrices end
+    ///    in rows of no query head.
+    /// 3. The Qwen3.8 shape of a verify of four tokens, whose rows fill one
+    ///    matrix with two query heads.
+    /// 4. The Qwen3.8 shape of a verify of five tokens, whose rows split a
+    ///    query head over two matrices, with a last block shorter than the
+    ///    others.
+    /// 5. The Qwen3.8 shape of a verify of six tokens, whose matrices end in
+    ///    rows of no query head.
+    /// 6. The Qwen3.8 shape at the most queries the kernel reads, over many
     ///    blocks.
-    /// 4. Two sequences of 3 query heads for each KV head.
+    /// 7. Two sequences of 3 query heads for each KV head.
     static let attentionCases = [
         AttentionKernelCase.qwen38(
             queries: VerifyAttentionKernel.fewestQueries, keys: DecodeAttentionKernel.fewestKeys,
             capacity: 1280),
+        AttentionKernelCase.qwen38(queries: 3, keys: 1500, capacity: 1536),
+        AttentionKernelCase.qwen38(queries: 4, keys: 2100, capacity: 2304),
         AttentionKernelCase.qwen38(queries: 5, keys: 3001, capacity: 3072),
+        AttentionKernelCase.qwen38(queries: 6, keys: 2100, capacity: 2304),
         AttentionKernelCase.qwen38(
             queries: VerifyAttentionKernel.mostQueries, keys: 16_500, capacity: 16_640),
         AttentionKernelCase(
@@ -106,9 +116,8 @@ struct VerifyAttentionKernelTests {
 
     /// The kernel reads only the few query tokens of a verify, in each dtype
     /// and with each mask it reads: one query keeps the route of
-    /// ``DecodeAttentionKernel``, two queries keep the SDPA of MLX, which is
-    /// faster for them, and more queries than one SIMD-group matrix holds
-    /// keep the other routes.
+    /// ``DecodeAttentionKernel``, and more queries than one SIMD-group matrix
+    /// holds keep the other routes.
     @Test(arguments: AttentionKernelTolerance.dtypes, causalMasks)
     func theKernelReadsOnlyTheQueryCountsOfAVerify(dtype: DType, causal: Bool) {
         let keys = DecodeAttentionKernel.fewestKeys
@@ -136,6 +145,34 @@ struct VerifyAttentionKernelTests {
         let short = Self.random.qwen38(queries: Self.routedTokens, keys: fewest - 1, dtype: dtype)
 
         Self.call(causal: causal).expectReads([enough], skips: [short])
+    }
+
+    /// The matrices of the query heads of one threadgroup at each query
+    /// count, with the 6 query heads of one KV head of Qwen3.8. The queries
+    /// of 6 heads make 6 rows for each token, and one matrix holds 8 rows.
+    static let matrixRuleTokens = Array(1 ... VerifyAttentionKernel.mostQueries)
+
+    /// The matrices of each query count of ``matrixRuleTokens``.
+    static let matrixRuleMatrices = [1, 2, 3, 3, 4, 5, 6, 6]
+
+    /// The query heads of one KV head of Qwen3.8.
+    static let qwen38KVHeadGroup = 6
+
+    /// The rows of 6 query heads fill the fewest matrices that hold them.
+    @Test(arguments: zip(matrixRuleTokens, matrixRuleMatrices))
+    func theRowsOfTheQueryHeadsFillTheFewestMatrices(tokens: Int, matrices: Int) {
+        #expect(
+            PrefillAttentionKernel.rowMatrices(heads: Self.qwen38KVHeadGroup, tokens: tokens)
+                == matrices)
+    }
+
+    /// A prefill block holds 8 tokens in each matrix, thus one matrix for
+    /// each query head.
+    @Test func aPrefillBlockTakesOneMatrixForEachQueryHead() {
+        #expect(
+            PrefillAttentionKernel.rowMatrices(
+                heads: Self.qwen38KVHeadGroup, tokens: PrefillAttentionKernel.fewestQueries)
+                == Self.qwen38KVHeadGroup)
     }
 
     /// The kernel reads only the head shapes it holds, in each dtype and with
@@ -186,13 +223,13 @@ struct VerifyAttentionKernelTests {
     }
 
     /// Key counts at each edge of the block count rule.
-    static let blockRuleKeys = [1024, 4095, 4096, 8192, 16_384, 32_767, 32_768, 131_072]
+    static let blockRuleKeys = [1024, 8192, 16_383, 16_384, 32_767, 32_768, 65_536, 131_072]
 
     /// The block count of each key count of ``blockRuleKeys``.
-    static let blockRuleBlocks = [4, 4, 8, 16, 32, 32, 64, 64]
+    static let blockRuleBlocks = [4, 4, 4, 8, 8, 16, 16, 16]
 
     /// The block count grows with the keys, as the power of two at or below
-    /// `keys / 512`, from 4 to 64 blocks.
+    /// `keys / 2048`, from 4 to 16 blocks.
     @Test(arguments: zip(blockRuleKeys, blockRuleBlocks))
     func theBlockCountFollowsTheKeys(keys: Int, blocks: Int) {
         #expect(VerifyAttentionKernel.blockCount(keys: keys) == blocks)
@@ -205,6 +242,20 @@ struct VerifyAttentionKernelTests {
     func aVerifyCallGivesTheKernelOutputOrTheSDPA(dtype: DType, mask: AttentionMaskKind) {
         let operands = Self.random.qwen38(
             queries: Self.routedTokens, keys: DecodeAttentionKernel.fewestKeys + 77, dtype: dtype)
+
+        operands.expectTheRoute(
+            PrefillAttentionKernel.scaledDotProductAttention, with: mask, picksFrom: Self.kernels)
+    }
+
+    /// A verify call of the fewest tokens takes the kernel too, bit for bit
+    /// with a causal mask and with no mask, in each dtype.
+    @Test(arguments: AttentionKernelTolerance.dtypes, AttentionMaskKind.allCases)
+    func aVerifyCallOfTheFewestTokensGivesTheKernelOutputOrTheSDPA(
+        dtype: DType, mask: AttentionMaskKind
+    ) {
+        let operands = Self.random.qwen38(
+            queries: VerifyAttentionKernel.fewestQueries,
+            keys: DecodeAttentionKernel.fewestKeys + 77, dtype: dtype)
 
         operands.expectTheRoute(
             PrefillAttentionKernel.scaledDotProductAttention, with: mask, picksFrom: Self.kernels)
