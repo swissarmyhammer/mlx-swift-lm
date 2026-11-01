@@ -6,6 +6,7 @@ import FoundationModels
 import ImageIO
 import MLXLMCommon
 import Testing
+import UniformTypeIdentifiers
 
 @testable import MLXFoundationModels
 
@@ -922,6 +923,64 @@ struct TranscriptConverterTests {
             TranscriptConverter.labeledAttachments(in: entries).map(\.label)
                 == ["Photo_A1B2C3", "Photo_D4E5F6"])
     }
+
+    #if canImport(FoundationModels, _version: 2.1.14)
+
+    /// Reads the `.unsupportedTranscriptContent` payload out of a thrown error.
+    ///
+    /// - Parameter error: the error to read.
+    /// - Returns: the payload, or `nil` for any other error.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func unsupportedContent(
+        of error: any Error
+    ) -> LanguageModelError.UnsupportedTranscriptContent? {
+        if case LanguageModelError.unsupportedTranscriptContent(let content) = error {
+            return content
+        }
+        return nil
+    }
+
+    // Runs on every OS: the seam takes a `UTType`, so no `Transcript.DataAttachment` is built.
+    @Test
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func testUnsupportedDataAttachmentErrorNamesContentType() throws {
+        let entry = Transcript.Entry.prompt(
+            Transcript.Prompt(
+                segments: [.text(Transcript.TextSegment(content: "Read this"))],
+                responseFormat: nil))
+
+        let error = TranscriptConverter.unsupportedDataAttachment(
+            contentType: .json, in: entry)
+
+        let content = try #require(Self.unsupportedContent(of: error))
+        #expect(content.debugDescription.contains(UTType.json.identifier))
+    }
+
+    // `@available` makes Swift Testing report a skip on an older OS, because the
+    // `Transcript.DataAttachment` symbols do not exist there.
+    @Test
+    @available(iOS 27.2, macOS 27.2, visionOS 27.2, *)
+    func testPromptDataAttachmentThrowsUnsupportedTranscriptContent() throws {
+        let attachment = Transcript.AttachmentSegment(
+            content: .data(
+                Transcript.DataAttachment(contentType: .json, content: Data("{}".utf8))),
+            label: "payload")
+        let prompt = Transcript.Prompt(
+            segments: [
+                .text(Transcript.TextSegment(content: "Read this")),
+                .attachment(attachment),
+            ],
+            responseFormat: nil)
+
+        let error = #expect(throws: LanguageModelError.self) {
+            try TranscriptConverter.mlxMessages(for: [.prompt(prompt)])
+        }
+
+        let content = try #require(error.flatMap { Self.unsupportedContent(of: $0) })
+        #expect(content.debugDescription.contains(UTType.json.identifier))
+    }
+
+    #endif  // canImport(FoundationModels, _version: 2.1.14)
 
 }
 

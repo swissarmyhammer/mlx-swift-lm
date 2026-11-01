@@ -8,6 +8,7 @@ import Foundation
 import FoundationModels
 import MLX
 import MLXLMCommon
+import UniformTypeIdentifiers
 
 /// Converts FoundationModels transcript entries to MLX chat message format.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -366,16 +367,58 @@ struct TranscriptConverter {
                 return .ciImage(
                     imageAttachment.ciImage.oriented(imageAttachment.orientation),
                     label: attachment.label)
+            // 2.1.14 is the module version of the 27.2 SDK, the first SDK checked to declare
+            // `.data`. An SDK without the case compiles this switch through `@unknown default`.
+            #if canImport(FoundationModels, _version: 2.1.14)
+            case .data(let dataAttachment):
+                throw unsupportedDataAttachment(
+                    contentType: dataAttachment.contentType, in: entry)
+            #endif
             @unknown default:
-                throw LanguageModelError.unsupportedTranscriptContent(
-                    LanguageModelError.UnsupportedTranscriptContent(
-                        unsupportedContent: [entry],
-                        debugDescription:
-                            "This attachment carries content the MLX adapter cannot render. Only image attachments are supported."
-                    ))
+                throw unsupportedAttachment(
+                    described:
+                        "This attachment carries content the MLX adapter cannot render. Only image attachments are supported.",
+                    in: entry)
             }
         }
     }
+
+    /// The error for an attachment that the adapter cannot render.
+    ///
+    /// - Parameters:
+    ///   - description: the debug description of the failure.
+    ///   - entry: the transcript entry that holds the attachment.
+    /// - Returns: a `LanguageModelError.unsupportedTranscriptContent` that names `entry`.
+    private static func unsupportedAttachment(
+        described description: String, in entry: Transcript.Entry
+    ) -> LanguageModelError {
+        LanguageModelError.unsupportedTranscriptContent(
+            LanguageModelError.UnsupportedTranscriptContent(
+                unsupportedContent: [entry],
+                debugDescription: description))
+    }
+
+    #if canImport(FoundationModels, _version: 2.1.14)
+    /// The error for a data attachment. The adapter has no renderer for one, and
+    /// ``MLXLanguageModel`` opts into no data attachment type, whatever `contentType` says.
+    ///
+    /// This takes the content type rather than a `Transcript.DataAttachment`, so a test can
+    /// call it on an OS older than the 27.2 that the attachment type requires.
+    ///
+    /// - Parameters:
+    ///   - contentType: the type of the attachment's bytes.
+    ///   - entry: the transcript entry that holds the attachment.
+    /// - Returns: a `LanguageModelError.unsupportedTranscriptContent` that names `entry`
+    ///   and `contentType`.
+    static func unsupportedDataAttachment(
+        contentType: UTType, in entry: Transcript.Entry
+    ) -> LanguageModelError {
+        unsupportedAttachment(
+            described:
+                "This data attachment of type \(contentType.identifier) carries content the MLX adapter cannot render. Only image attachments are supported.",
+            in: entry)
+    }
+    #endif
 
     struct LabeledAttachment: Sendable {
         let label: String
