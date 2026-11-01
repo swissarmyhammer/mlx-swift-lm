@@ -62,8 +62,12 @@ public struct Qwen35VLMMTPFixture {
     ///     vision tower then has other weights, which changes the weights the seed gives the
     ///     language model, so a target that reads images decodes other tokens than one that
     ///     does not.
+    ///   - dtype: The dtype of the weights of both models, or nil for the dtype they start in.
     /// - Throws: The error of the configuration decoder.
-    public init(seed: UInt64 = Qwen35MTPFixture.defaultSeed, readsImages: Bool = false) throws {
+    public init(
+        seed: UInt64 = Qwen35MTPFixture.defaultSeed, readsImages: Bool = false,
+        dtype: DType? = nil
+    ) throws {
         let textConfigJSON = Qwen35FixtureJSON.text(
             mtpLayers: Qwen35MTPFixture.mtpLayers,
             hiddenLayers: Qwen35MTPFixture.hiddenLayers,
@@ -86,6 +90,10 @@ public struct Qwen35VLMMTPFixture {
             MLXRandom.RandomState(seed: seed &+ Qwen35MTPFixture.drafterSeedOffset)
         ) {
             Qwen35VLMNextNDraftModel(configuration)
+        }
+        if let dtype {
+            target.update(parameters: target.parameters().mapValues { $0.asType(dtype) })
+            drafter.update(parameters: drafter.parameters().mapValues { $0.asType(dtype) })
         }
         eval(target, drafter)
         self.target = target

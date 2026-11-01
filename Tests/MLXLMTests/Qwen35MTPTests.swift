@@ -2018,16 +2018,6 @@ struct Qwen35CompiledVerifyTests {
     /// The tokens each greedy decode of these tests generates.
     private static let generatedTokenCount = 48
 
-    /// What one verify leaves: its logits and hidden rows, the cache after its rollback, and
-    /// the snapshot slots each GDN cache kept before the rollback.
-    private struct Verify {
-        let logits: MLXArray
-        let hidden: MLXArray
-        let states: [MLXArray]
-        let offsets: [Int]
-        let slotCounts: [Int]
-    }
-
     /// A text target whose GDN layers the kernel runs, on seeded weights, in ``dtype``.
     static func kernelModel() throws -> Qwen35TextModel {
         let configuration = try GDNDecodeKernelFixture.configuration(
@@ -2051,7 +2041,7 @@ struct Qwen35CompiledVerifyTests {
     /// general path, then rolls the verify back by `rollback` tokens as a rejected round does.
     private func verify(
         _ model: Qwen35TextModel, tokenCount: Int, rollingBack rollback: Int, compiled: Bool
-    ) throws -> Verify {
+    ) throws -> CompiledVerifyOutcome {
         let cache = try model.newCache(parameters: nil)
         let prompt = tokens(Self.promptLength, of: model, seed: Self.promptSeed)
         eval(model(LMInput.Text(tokens: prompt[.newAxis]), cache: cache, state: nil).logits)
@@ -2062,33 +2052,9 @@ struct Qwen35CompiledVerifyTests {
         let output = model.forward(
             LMInput.Text(tokens: tokens(tokenCount, of: model, seed: Self.verifySeed)[.newAxis]),
             cache: cache, state: state, lastTokenOnly: false, useCompiledDecode: compiled)
-        let hidden = try #require(output.state?[mtpLastHiddenStatesKey])
-        let slotCounts = cache.compactMap { ($0 as? MambaCache)?.speculativeSlotCount }
-
-        if rollback > 0 {
-            for entry in cache {
-                if let mamba = entry as? MambaCache {
-                    #expect(mamba.selectSpeculativeSlot(rollingBack: rollback))
-                } else {
-                    #expect(entry.trim(rollback) == rollback)
-                }
-            }
-        }
-        let states = cache.flatMap(\.state)
-        eval(output.logits, hidden, states)
-        return Verify(
-            logits: output.logits, hidden: hidden, states: states, offsets: cache.map(\.offset),
-            slotCounts: slotCounts)
-    }
-
-    /// Checks that `got` stays within `tolerance` of `expected`.
-    private func expectWithin(
-        _ got: MLXArray, _ expected: MLXArray, _ tolerance: Float, _ what: String,
-        sourceLocation: SourceLocation = #_sourceLocation
-    ) {
-        #expect(got.shape == expected.shape, "\(what)", sourceLocation: sourceLocation)
-        let gap = AttentionKernelTolerance.worstGap(got, expected)
-        #expect(gap <= tolerance, "\(what): worst gap \(gap)", sourceLocation: sourceLocation)
+        return CompiledVerifyOutcome(
+            logits: output.logits, hidden: try #require(output.state?[mtpLastHiddenStatesKey]),
+            cache: cache, rollingBack: rollback)
     }
 
     @Test(
@@ -2103,17 +2069,8 @@ struct Qwen35CompiledVerifyTests {
                 model, tokenCount: tokenCount, rollingBack: rollback, compiled: false)
             let compiled = try verify(
                 model, tokenCount: tokenCount, rollingBack: rollback, compiled: true)
-            let round = "\(tokenCount) tokens, rollback \(rollback)"
-
-            #expect(compiled.slotCounts.allSatisfy { $0 == tokenCount }, "\(round)")
-            #expect(compiled.slotCounts == general.slotCounts, "\(round)")
-            #expect(compiled.offsets == general.offsets, "\(round)")
-            expectWithin(compiled.logits, general.logits, tolerance, "\(round) logits")
-            expectWithin(compiled.hidden, general.hidden, tolerance, "\(round) hidden rows")
-            try #require(compiled.states.count == general.states.count)
-            for (index, (got, expected)) in zip(compiled.states, general.states).enumerated() {
-                expectWithin(got, expected, tolerance, "\(round) cache state \(index)")
-            }
+            try compiled.expectMatches(
+                general, tolerance: tolerance, tokenCount: tokenCount, rollback: rollback)
         }
         #expect(model.model.compiledVerifySegmentCount > 0)
     }
@@ -2182,9 +2139,17 @@ struct Qwen35CompiledVerifyTests {
 
     @Test("greedy MTP decode of the VLM target equals plain decode")
     func visionLanguageTargetMTPEqualsPlainDecode() throws {
-        let fixture = try Qwen35VLMMTPFixture()
-        let input = LMInput(tokens: MLXArray(Self.prompt.map(Int32.init)))
-        let parameters = GenerateParameters(maxTokens: Self.generatedTokenCount, temperature: 0)
+        try Self.expectGreedyMTPEqualsPlainDecode(on: Qwen35VLMMTPFixture())
+    }
+
+    /// Decodes greedily with the target of `fixture`, then with MTP over the same target, and
+    /// holds that the two give the same tokens and that MTP speculates.
+    ///
+    /// - Parameter fixture: The target and its drafter.
+    /// - Throws: The error of an iterator.
+    static func expectGreedyMTPEqualsPlainDecode(on fixture: Qwen35VLMMTPFixture) throws {
+        let input = LMInput(tokens: MLXArray(prompt.map(Int32.init)))
+        let parameters = GenerateParameters(maxTokens: generatedTokenCount, temperature: 0)
 
         var plain = try TokenIterator(input: input, model: fixture.target, parameters: parameters)
         var speculative = try MTPSpeculativeTokenIterator(
@@ -2199,7 +2164,7 @@ struct Qwen35CompiledVerifyTests {
             speculativeTokens.append(token)
         }
 
-        #expect(plainTokens.count == Self.generatedTokenCount)
+        #expect(plainTokens.count == generatedTokenCount)
         #expect(speculativeTokens == plainTokens)
         #expect(speculative.passthroughReason == nil)
         #expect(speculative.proposedCount > 0)

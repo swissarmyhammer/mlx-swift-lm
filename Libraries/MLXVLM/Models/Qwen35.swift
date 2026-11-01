@@ -1054,13 +1054,14 @@ public enum Qwen35Language {
             keys: MLXArray,
             values: MLXArray,
             cache: KVCache,
+            mask: MLXFast.ScaledDotProductAttentionMaskMode,
             positionIds: MLXArray?
         ) -> MLXArray {
             fullAttention.attend(
                 queries: queries,
                 keys: keys,
                 values: values,
-                mask: .none,
+                mask: mask,
                 cache: cache,
                 positionIds: positionIds)
         }
@@ -1119,6 +1120,13 @@ public enum Qwen35Language {
         private let decodeSchedule: CompiledDecodeSchedule
         private let compiledSegments: CompiledDecodeSegmentCache<Model>
 
+        /// The same segments for a speculative verify, one schedule for each
+        /// ``CompiledVerifyShape``: the segments run every token of the verify,
+        /// and each GDN layer also gives back the states it keeps for a
+        /// rollback.
+        private let compiledVerifySegments:
+            KeyedCompiledDecodeSegmentCaches<Model, CompiledVerifyShape>
+
         public init(_ args: Qwen35Configuration.TextConfiguration) {
             precondition(args.vocabularySize > 0)
             _embedTokens.wrappedValue = Embedding(
@@ -1133,22 +1141,44 @@ public enum Qwen35Language {
             self.ssmIdx = decodeSchedule.firstLinearLayer
             self.faIdx = decodeSchedule.firstAttentionLayer
 
-            let segments = decodeSchedule.segments
+            let segmentCount = decodeSchedule.segments.count
             self.compiledSegments = CompiledDecodeSegmentCache(
-                count: segments.count,
+                count: segmentCount,
                 state: { model, index in
-                    var modules = model.traceState(forLayers: segments[index].layerIndices)
-                    if index == segments.count - 1 {
-                        modules.append(model.norm)
-                    }
-                    return modules
+                    model.segmentTraceState(at: index, of: model.compiledSegments)
                 },
                 body: { model, index, arguments in
-                    model.segmentBody(at: index, arguments)
+                    model.segmentBody(at: index, arguments, verify: nil)
+                })
+            self.compiledVerifySegments = KeyedCompiledDecodeSegmentCaches(
+                count: segmentCount,
+                state: { model, index in
+                    model.segmentTraceState(at: index, of: model.compiledVerifySegments)
+                },
+                body: { model, shape, index, arguments in
+                    model.segmentBody(at: index, arguments, verify: shape)
                 })
             super.init()
         }
 
+        /// The hidden states of the tokens, with optional final normalization.
+        ///
+        /// A decode step with the final norm, and a speculative verify of
+        /// ``CompiledVerifyShape/tokenRange`` tokens that keeps its snapshots,
+        /// run through a compiled schedule; every other call takes the general
+        /// path of the layers.
+        ///
+        /// - Parameters:
+        ///   - inputs: The token ids, shape `(batch, tokens)`.
+        ///   - inputsEmbeds: The embedded tokens, in place of the embedding of
+        ///     `inputs`.
+        ///   - cache: The cache of each layer, or nil.
+        ///   - positionIds: The M-RoPE positions of the tokens, or nil for the
+        ///     positions after the cache.
+        ///   - applyFinalNorm: True to apply the final norm to the hidden states.
+        ///   - keepsSnapshots: For a verify, true to have the GDN layers keep
+        ///     the states after each token for a rollback.
+        /// - Returns: The hidden states, shape `(batch, tokens, hiddenSize)`.
         open func callAsFunction(
             _ inputs: MLXArray,
             inputsEmbeds: MLXArray? = nil,
@@ -1167,6 +1197,9 @@ public enum Qwen35Language {
                 useCompiledDecode: true)
         }
 
+        /// ``callAsFunction(_:inputsEmbeds:cache:positionIds:applyFinalNorm:keepsSnapshots:)``,
+        /// where `useCompiledDecode` false takes the general path of the layers
+        /// for every call, as a test of the compiled schedules compares the two.
         func forward(
             _ inputs: MLXArray,
             inputsEmbeds: MLXArray? = nil,
@@ -1177,11 +1210,12 @@ public enum Qwen35Language {
             useCompiledDecode: Bool = true
         ) -> MLXArray {
             if useCompiledDecode, type(of: self) == Model.self, !training,
-                inputsEmbeds == nil, applyFinalNorm, !keepsSnapshots,
-                inputs.dim(0) == 1, inputs.dim(1) == 1, let cache,
-                let step = decodeStep(inputs, cache, positionIds: positionIds)
+                inputsEmbeds == nil, inputs.dim(0) == 1, let cache,
+                let hiddenStates = compiledStep(
+                    inputs, cache, positionIds: positionIds, applyFinalNorm: applyFinalNorm,
+                    keepsSnapshots: keepsSnapshots)
             {
-                return step
+                return hiddenStates
             }
 
             var hiddenStates: MLXArray
@@ -1250,6 +1284,9 @@ public enum Qwen35Language {
 
         var compiledDecodeSegmentCount: Int { compiledSegments.compiledCount }
 
+        /// The compiled segment traces of every verify shape a step has run.
+        var compiledVerifySegmentCount: Int { compiledVerifySegments.compiledCount }
+
         var compiledGDNTraceCount: Int {
             layers.filter(\.compiledGDNIsCompiled).count
         }
@@ -1259,42 +1296,117 @@ public enum Qwen35Language {
                 .filter(\.compiledDecodeIsCompiled).count
         }
 
-        private func traceState(forLayers indices: [Int]) -> [Module] {
-            indices.flatMap { index in
-                let layer = layers[index]
-                layer.linearAttn?.registerFusedProjectionTrace(compiledSegments)
+        /// The compile state of segment `index`: everything its body reads,
+        /// the layers it runs (with a GDN layer's fused projection) and the
+        /// final norm it ends with. Each GDN layer drops `trace` when its fused
+        /// projection goes stale.
+        ///
+        /// - Parameters:
+        ///   - index: The segment.
+        ///   - trace: The traces that read this state.
+        /// - Returns: The modules whose weights the segment reads.
+        private func segmentTraceState(
+            at index: Int, of trace: any CompiledTraceInvalidating
+        ) -> [Module] {
+            let segments = decodeSchedule.segments
+            var modules = segments[index].layerIndices.flatMap { layerIndex -> [Module] in
+                let layer = layers[layerIndex]
+                layer.linearAttn?.registerFusedProjectionTrace(trace)
                 return [layer] + (layer.linearAttn?.fusedProjectionTraceState ?? [])
             }
+            if index == segments.count - 1 {
+                modules.append(norm)
+            }
+            return modules
         }
 
-        /// Runs segment `index` of a decode step through the shared
+        /// Runs segment `index` of a step through the shared
         /// ``CompiledDecodeSegment/body(_:arguments:layers:finalNorm:verify:)``.
         /// The embedding runs outside the trace, so every segment starts from
-        /// its first argument.
-        private func segmentBody(at index: Int, _ arguments: [MLXArray]) -> [MLXArray] {
+        /// its first argument. A decode step ends with the final norm; a verify
+        /// leaves it to its caller, which emits the rows before it.
+        private func segmentBody(
+            at index: Int, _ arguments: [MLXArray], verify: CompiledVerifyShape?
+        ) -> [MLXArray] {
             decodeSchedule.segments[index].body(
-                arguments[0], arguments: arguments, layers: layers, finalNorm: norm, verify: nil)
+                arguments[0], arguments: arguments, layers: layers, finalNorm: norm,
+                verify: verify)
         }
 
-        /// One decode step through the compiled segments, or nil when the step
-        /// takes the general path: a dtype the traces do not hold exactly, a
-        /// layer that does not support compiled decode, or a step the schedule
-        /// refuses (``CompiledDecodeSchedule/decode(_:cache:segments:of:attention:)``).
-        private func decodeStep(
-            _ inputs: MLXArray, _ cache: [KVCache?], positionIds: MLXArray?
+        /// One step through a compiled schedule, or nil when the step takes the
+        /// general path. The schedules read a decode step with the final norm
+        /// and a speculative verify of ``CompiledVerifyShape/tokenRange`` tokens
+        /// that keeps its snapshots.
+        private func compiledStep(
+            _ inputs: MLXArray, _ cache: [KVCache?], positionIds: MLXArray?,
+            applyFinalNorm: Bool, keepsSnapshots: Bool
         ) -> MLXArray? {
+            if inputs.dim(1) == 1 {
+                guard applyFinalNorm, !keepsSnapshots else { return nil }
+                return decodeStep(inputs, cache, positionIds: positionIds)
+            }
+            guard keepsSnapshots, let shape = CompiledVerifyShape(tokens: inputs.dim(1)),
+                let hiddenStates = verifyStep(inputs, cache, positionIds: positionIds, shape: shape)
+            else { return nil }
+            return applyFinalNorm ? norm(hiddenStates) : hiddenStates
+        }
+
+        /// The embedded tokens of a compiled step, or nil when the step takes
+        /// the general path: a dtype the traces do not hold exactly, or a layer
+        /// that does not support compiled decode.
+        private func compiledStepInput(_ inputs: MLXArray) -> MLXArray? {
             let embedded = embedTokens(inputs)
             guard supportsExactCompiledDecode(embedded.dtype),
                 layers.allSatisfy(\.supportsCompiledDecode)
             else { return nil }
+            return embedded
+        }
 
+        /// One decode step through the compiled segments, or nil when the step
+        /// takes the general path: ``compiledStepInput(_:)`` or the schedule
+        /// refuses it (``CompiledDecodeSchedule/decode(_:cache:segments:of:attention:)``).
+        private func decodeStep(
+            _ inputs: MLXArray, _ cache: [KVCache?], positionIds: MLXArray?
+        ) -> MLXArray? {
+            guard let embedded = compiledStepInput(inputs) else { return nil }
             return decodeSchedule.decode(
                 embedded, cache: cache, segments: compiledSegments, of: self,
-                attention: { step in
-                    layers[step.layer].attentionCacheStep(
-                        queries: step.queries, keys: step.keys, values: step.values,
-                        cache: step.cache, positionIds: positionIds)
-                })
+                attention: { attend($0, mask: .none, positionIds: positionIds) })
+        }
+
+        /// One speculative verify through the compiled segments of its shape, or
+        /// nil when the step takes the general path: ``compiledStepInput(_:)`` or
+        /// ``CompiledDecodeSchedule/caches(_:over:)`` refuses it. The hidden rows
+        /// come back before the final norm.
+        ///
+        /// Each attention layer runs its queries over the cache with the mask of
+        /// the general path, so M-RoPE, the KV write and the attention kernels
+        /// stay outside the traces.
+        private func verifyStep(
+            _ inputs: MLXArray, _ cache: [KVCache?], positionIds: MLXArray?,
+            shape: CompiledVerifyShape
+        ) -> MLXArray? {
+            guard let embedded = compiledStepInput(inputs),
+                let caches = decodeSchedule.caches(cache, over: embedded)
+            else { return nil }
+            let mask = decodeSchedule.attentionMask(embedded, cache)
+            return decodeSchedule.run(
+                embedded, caches: caches, verify: shape,
+                segment: { index, arguments in
+                    compiledVerifySegments(self, key: shape, at: index, arguments)
+                },
+                attention: { attend($0, mask: mask, positionIds: positionIds) })
+        }
+
+        /// The attention of a full-attention layer between two segments, through
+        /// ``DecoderLayer/attentionCacheStep(queries:keys:values:cache:mask:positionIds:)``.
+        private func attend(
+            _ step: CompiledDecodeSchedule.AttentionStep,
+            mask: MLXFast.ScaledDotProductAttentionMaskMode, positionIds: MLXArray?
+        ) -> MLXArray {
+            layers[step.layer].attentionCacheStep(
+                queries: step.queries, keys: step.keys, values: step.values, cache: step.cache,
+                mask: mask, positionIds: positionIds)
         }
     }
 
