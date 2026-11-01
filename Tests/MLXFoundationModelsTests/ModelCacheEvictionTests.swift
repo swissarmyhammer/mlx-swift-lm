@@ -24,13 +24,14 @@ let registerModelFactoryOnce: Void = {
     ModelFactoryRegistry.shared.addTrampoline { LLMModelFactory.shared }
 }()
 
-// Serialized parent so the cache-touching suites below never run concurrently.
-// `MLXLanguageModel` holds one process-global `static let cache`; `evictAll()` is
-// key-agnostic, so an eviction in one suite would wipe the parked-load windows the
-// sibling availability suite asserts against. `.serialized` on a single suite only
-// orders that suite's own tests — it does NOT order two top-level suites against
-// each other — so both cache-touching suites are nested under this one serialized
-// parent. AvailabilityTests extends this same type from its own file.
+// `MLXLanguageModel` holds one process-global `static let cache`, and `evictAll()` is
+// key-agnostic. It drops the container of each test that runs at that moment, in any suite, and
+// the next pass of that test loads a new model. A scripted model then replays its script from
+// the first round, so an eviction fails a test that has no relation to the cache.
+//
+// `.serialized` cannot prevent that: it only orders the tests under this parent, and every other
+// suite of the bundle still runs beside them. So a test that calls `evictAll()` runs its body in
+// a process of its own, with `#expect(processExitsWith:)`. Do not call it in the test process.
 @Suite(.serialized)
 struct FoundationModelsCacheTests {}
 
@@ -41,40 +42,47 @@ extension FoundationModelsCacheTests {
 
         init() { _ = registerModelFactoryOnce }
 
+        #if os(macOS)
+        /// The body runs in a process of its own: `evictAll()` drops the state of every
+        /// test that runs beside it. See ``FoundationModelsCacheTests``.
+        @available(macOS 27.0, *)
         @Test("evictAll() clears a failed load's cached lastError")
-        func evictAllClearsLastError() async throws {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        func evictAllClearsLastError() async {
+            await #expect(processExitsWith: .success) {
+                _ = registerModelFactoryOnce
 
-            let id = "org/evictall-\(UUID().uuidString)"
-            let gate = LoadGate()
-            let model = MLXLanguageModel(
-                configuration: ModelConfiguration(id: id),
-                capabilities: [],
-                weightsLocation: { _ in
-                    URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
-                },
-                load: { configuration, progress in
-                    try await loadModelContainer(
-                        from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
-                        configuration: configuration, progressHandler: progress)
-                })
+                let id = "org/evictall-\(UUID().uuidString)"
+                let gate = LoadGate()
+                let model = MLXLanguageModel(
+                    configuration: ModelConfiguration(id: id),
+                    capabilities: [],
+                    weightsLocation: { _ in
+                        URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
+                    },
+                    load: { configuration, progress in
+                        try await loadModelContainer(
+                            from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
+                            configuration: configuration, progressHandler: progress)
+                    })
 
-            // Drive a load that parks, then fails — populating lastErrors[id].
-            let loadTask = Task { try await model.preload() }
-            await gate.waitUntilStarted()
-            await gate.release()
-            await #expect(throws: BlockingDownloaderReleased.self) {
-                try await loadTask.value
+                // Drive a load that parks, then fails — populating lastErrors[id].
+                let loadTask = Task { try await model.preload() }
+                await gate.waitUntilStarted()
+                await gate.release()
+                await #expect(throws: BlockingDownloaderReleased.self) {
+                    try await loadTask.value
+                }
+
+                let before = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
+                #expect(before != nil, "a failed load should record a cached lastError")
+
+                await MLXLanguageModel.evictAll()
+
+                let after = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
+                #expect(after == nil, "evictAll() must clear the cached lastError")
             }
-
-            let before = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
-            #expect(before != nil, "a failed load should record a cached lastError")
-
-            await MLXLanguageModel.evictAll()
-
-            let after = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
-            #expect(after == nil, "evictAll() must clear the cached lastError")
         }
+        #endif
 
         @Test("evict() clears only this model's state, leaving other models cached")
         func evictIsPerModel() async throws {
@@ -122,49 +130,56 @@ extension FoundationModelsCacheTests {
                 "evict() must NOT clear other models' cached state")
         }
 
+        #if os(macOS)
+        /// The body runs in a process of its own: `evictAll()` drops the state of every
+        /// test that runs beside it. See ``FoundationModelsCacheTests``.
+        @available(macOS 27.0, *)
         @Test("a load evicted mid-flight does not re-populate the cache on completion")
-        func evictedInFlightLoadDoesNotRepopulate() async throws {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        func evictedInFlightLoadDoesNotRepopulate() async {
+            await #expect(processExitsWith: .success) {
+                _ = registerModelFactoryOnce
 
-            let id = "org/superseded-\(UUID().uuidString)"
-            let gate = LoadGate()
-            let model = MLXLanguageModel(
-                configuration: ModelConfiguration(id: id),
-                capabilities: [],
-                weightsLocation: { _ in
-                    URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
-                },
-                load: { configuration, progress in
-                    try await loadModelContainer(
-                        from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
-                        configuration: configuration, progressHandler: progress)
-                })
+                let id = "org/superseded-\(UUID().uuidString)"
+                let gate = LoadGate()
+                let model = MLXLanguageModel(
+                    configuration: ModelConfiguration(id: id),
+                    capabilities: [],
+                    weightsLocation: { _ in
+                        URL(fileURLWithPath: "/no/such/path/\(UUID().uuidString)")
+                    },
+                    load: { configuration, progress in
+                        try await loadModelContainer(
+                            from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
+                            configuration: configuration, progressHandler: progress)
+                    })
 
-            // Park a genuine (non-warmup) load in flight.
-            let loadTask = Task { try await model.preload() }
-            await gate.waitUntilStarted()
+                // Park a genuine (non-warmup) load in flight.
+                let loadTask = Task { try await model.preload() }
+                await gate.waitUntilStarted()
 
-            // In-flight load is registered and reported.
-            let downloadingDuring = await MLXLanguageModel.isDownloadingInCache(modelID: id)
-            #expect(downloadingDuring, "a parked load should report as downloading")
+                // In-flight load is registered and reported.
+                let downloadingDuring = await MLXLanguageModel.isDownloadingInCache(modelID: id)
+                #expect(downloadingDuring, "a parked load should report as downloading")
 
-            // Evict while the load is suspended — removes loadingTasks[id].
-            await MLXLanguageModel.evictAll()
+                // Evict while the load is suspended — removes loadingTasks[id].
+                await MLXLanguageModel.evictAll()
 
-            let downloadingAfterEvict = await MLXLanguageModel.isDownloadingInCache(modelID: id)
-            #expect(
-                !downloadingAfterEvict, "evictAll() must drop the in-flight load registration")
+                let downloadingAfterEvict = await MLXLanguageModel.isDownloadingInCache(modelID: id)
+                #expect(
+                    !downloadingAfterEvict, "evictAll() must drop the in-flight load registration")
 
-            // Let the parked load fail. The catch-path guard must NOT re-add lastError
-            // for the now-superseded task.
-            await gate.release()
-            await #expect(throws: BlockingDownloaderReleased.self) {
-                try await loadTask.value
+                // Let the parked load fail. The catch-path guard must NOT re-add lastError
+                // for the now-superseded task.
+                await gate.release()
+                await #expect(throws: BlockingDownloaderReleased.self) {
+                    try await loadTask.value
+                }
+
+                let lastError = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
+                #expect(lastError == nil, "a superseded load must not re-populate cache state")
             }
-
-            let lastError = await MLXLanguageModel.lastLoadErrorInCache(modelID: id)
-            #expect(lastError == nil, "a superseded load must not re-populate cache state")
         }
+        #endif
 
         @Test(
             "evict() cancels the model's registered load task",
@@ -190,29 +205,35 @@ extension FoundationModelsCacheTests {
             #expect(await probe.wasCancelled)
         }
 
+        #if os(macOS)
+        /// The body runs in a process of its own: `evictAll()` drops the state of every
+        /// test that runs beside it. See ``FoundationModelsCacheTests``.
+        @available(macOS 27.0, *)
         @Test(
             "evictAll() cancels every registered load task",
             .timeLimit(.minutes(1)))
-        func evictAllCancelsRegisteredLoads() async throws {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        func evictAllCancelsRegisteredLoads() async {
+            await #expect(processExitsWith: .success) {
+                let probe = CancellationProbe()
+                let model = MLXLanguageModel(
+                    configuration: ModelConfiguration(
+                        id: "org/cancel-evictall-\(UUID().uuidString)"),
+                    capabilities: [],
+                    weightsLocation: { _ in URL(fileURLWithPath: "/no/such/path") },
+                    load: makeCancellationProbingLoader(probe: probe))
 
-            let probe = CancellationProbe()
-            let model = MLXLanguageModel(
-                configuration: ModelConfiguration(id: "org/cancel-evictall-\(UUID().uuidString)"),
-                capabilities: [],
-                weightsLocation: { _ in URL(fileURLWithPath: "/no/such/path") },
-                load: makeCancellationProbingLoader(probe: probe))
+                let loadTask = Task { try await model.preload() }
+                await probe.waitUntilParked()
 
-            let loadTask = Task { try await model.preload() }
-            await probe.waitUntilParked()
+                await MLXLanguageModel.evictAll()
 
-            await MLXLanguageModel.evictAll()
-
-            await #expect(throws: CancellationError.self) {
-                try await loadTask.value
+                await #expect(throws: CancellationError.self) {
+                    try await loadTask.value
+                }
+                #expect(await probe.wasCancelled)
             }
-            #expect(await probe.wasCancelled)
         }
+        #endif
     }
 }
 
