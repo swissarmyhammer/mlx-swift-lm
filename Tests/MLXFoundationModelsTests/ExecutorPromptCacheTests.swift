@@ -458,6 +458,22 @@ struct ExecutorPromptCacheTests {
         #expect(await store.retainedSessionCount == 0)
     }
 
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("an eviction in another task leaves the caches of a store this task binds")
+    func anEvictionInAnotherTaskLeavesTheCachesOfABoundStore() async {
+        let model = makeStubModel("probe/foreign-evict-\(UUID().uuidString)")
+        let sessionKey = key("a", modelID: model.modelID)
+        let store = makeStore()
+
+        await ExecutorPromptCacheStore.$current.withValue(store) {
+            await ExecutorPromptCacheStore.current.checkIn(sessionKey, smallEntry())
+            // A detached task does not inherit the binding, as a parallel suite does not.
+            await Task.detached { await model.evict() }.value
+        }
+
+        #expect(await store.peek(sessionKey) != nil)
+    }
+
     // MARK: - The slot
 
     @Test("a slot reports no reuse until a pass plans one")

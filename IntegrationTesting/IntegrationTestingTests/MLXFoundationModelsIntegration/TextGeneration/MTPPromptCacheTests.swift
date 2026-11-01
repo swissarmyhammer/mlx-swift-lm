@@ -24,6 +24,10 @@ import Testing
 /// does, thus the render of the second turn writes the reasoning of the first turn inside its
 /// think block and reuses the whole ledger of the first turn: the second turn feeds only the
 /// close of that turn and the new prompt.
+///
+/// The test binds a store of its own. Swift Testing runs suites in parallel, and `.serialized`
+/// orders only the tests of one suite, thus an `evict()` or `evictAll()` in another suite would
+/// otherwise remove the entries of these sessions from the shared store between their turns.
 @Suite(.serialized, .timeLimit(.minutes(30)))
 struct MTPPromptCacheTests {
 
@@ -133,7 +137,7 @@ struct MTPPromptCacheTests {
             }
             // The first transcript entry names the session of the cache.
             let sessionID = try #require(session.transcript.first?.id)
-            entry = await ExecutorPromptCacheStore.shared.peek(
+            entry = await ExecutorPromptCacheStore.current.peek(
                 ExecutorPromptCacheKey(modelID: model.modelID, sessionID: sessionID))
             let ledger = try #require(entry?.tokens, "The turn must check its cache in.")
             turns.append(try log.turn(text: text, ledger: ledger))
@@ -167,6 +171,21 @@ struct MTPPromptCacheTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
     func aSecondTurnReusesThePromptCacheAndTheDrafterState() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MTPPromptCacheTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ExecutorPromptCacheStore(directory: directory)
+        try await ExecutorPromptCacheStore.$current.withValue(store) {
+            try await expectTheSecondTurnToReuseTheFirst()
+        }
+    }
+
+    /// Runs a session with MTP and one without it in the bound store, and expects the second
+    /// turn of each to reuse the first.
+    ///
+    /// - Throws: The error of a turn.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectTheSecondTurnToReuseTheFirst() async throws {
         let plainModel = try Qwen38FourBitMTPModel.make(speculates: false, reasons: true)
         let mtpModel = try Qwen38FourBitMTPModel.make(speculates: true, reasons: true)
 
@@ -184,7 +203,8 @@ struct MTPPromptCacheTests {
         // passes rounded the other way, or at a near tie.
         let divergentTurn = mtp.turns.indices.first { mtp.turns[$0].text != plain.turns[$0].text }
         for index in 0 ... (divergentTurn ?? mtp.turns.count - 1) {
-            #expect(mtp.turns[index].recomputedTokenCount == plain.turns[index].recomputedTokenCount)
+            #expect(
+                mtp.turns[index].recomputedTokenCount == plain.turns[index].recomputedTokenCount)
         }
         if let divergentTurn,
             let divergence = try await Qwen38FourBitMTPModel.divergence(
