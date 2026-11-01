@@ -34,9 +34,13 @@ struct GenerationBufferPoolClearingTests {
     private static let disagreeingToken: Int32 = 9
 
     /// The block size of a speculating iterator. A round that accepts its drafts emits this many
-    /// tokens after the prefill token, and this size does not divide an interval. Thus 256 is the
-    /// first token of its round and 512 the middle one, and a clear checked only at one end of a
-    /// round misses a multiple.
+    /// tokens, and this size does not divide an interval. Thus a clear checked only at one end of
+    /// a round misses a multiple.
+    ///
+    /// The place of a multiple in its round differs between the iterators. In the MTP tests a
+    /// prefill token comes before the first round, thus 256 is the first token of its round and
+    /// 512 the middle one. In the draft-model test the first round takes the prompt and starts at
+    /// token 0, thus 256 is the middle token of its round and 512 the last one.
     private static let blockSize = 3
 
     /// The input of each test: a prompt of three tokens.
