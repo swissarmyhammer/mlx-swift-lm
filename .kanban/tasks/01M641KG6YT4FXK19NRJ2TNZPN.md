@@ -154,6 +154,21 @@ comments:
     - (e) qwen38FourBitMTPSystemPromptCache, follow-ups: tokens exact on every turn, but turn 1 is MTP 51.8 vs plain 56.0 tok/s (0.92x, 102 tokens) and turn 2 is 46.0 vs 55.9 (0.82x, 117 tokens). Turn 0 was 1.60x. The edit and thinking scenarios ran 1.44–1.77x.
     - Plain never reused the MTP cache in the sweep (cached 0 at every point), so it prefilled cold; decode rates are unaffected. promptTime in the sweep lines is not a prefill time.
   timestamp: 2026-10-29T18:04:42.506922+00:00
+- actor: claude-code
+  id: 01m6avaydbz42cvep0y3yh539s
+  text: |-
+    mtp24 acceptance telemetry from the ACP session, the baseline for this final benchmark. 24 SWE-bench django instances, Qwen3.8-27B-4bit + MTP-4bit, mlx-swift-lm d4bab584 (blockSize 5, pMin 0.75), Extras a23cd80, Router 9d708e9e, VLM load path through Router, 2026-10-29 13:10 to 10-30 03:06. Rates are decode tokens / decode ms from generation_call spans of the standard slot, out >= 200, summed per band.
+
+    | context | calls | speculated | accepted / drafted | accept % | decode tok/s |
+    |---|---|---|---|---|---|
+    | 0-20k | 362 | 362 | 174269 / 206215 | 85 | 62.1 |
+    | 20-40k | 485 | 485 | 350998 / 413241 | 85 | 56.8 |
+    | 40-60k | 405 | 405 | 261308 / 311695 | 84 | 49.5 |
+    | 60-80k | 367 | 367 | 204067 / 242192 | 84 | 41.6 |
+    | 80k+ | 406 | 406 | 193059 / 229178 | 84 | 34.2 |
+
+    2025 calls, 0 fallbacks, 1,183,701 of 1,401,521 drafts accepted (84.5%), overall 47.6 tok/s, load average about 4 to 15. Acceptance is flat with context, so the fall in tok/s is round cost, not draft quality. Raw data: FoundationModelsACPAgent bench/preds.mtp24.telemetry.jsonl. That run predates bs4 and the pool work, so compare with the context mix and load in mind.
+  timestamp: 2026-11-01T06:04:20.779441+00:00
 position_column: doing
 position_ordinal: '8180'
 title: 'MTP: measure Qwen3.8 MTP at SWE-bench scale (tens of thousands of context tokens, ~16k-token decodes, tool turns)'
