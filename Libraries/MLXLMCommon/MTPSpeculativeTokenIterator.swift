@@ -47,6 +47,10 @@ func batchedGreedyMTPVerification(
 /// single-token "passthrough" mode for the remainder of generation —
 /// a mid-generation capability loss never crashes or corrupts the stream.
 ///
+/// Like ``TokenIterator``, the iterator returns the freed buffers of the MLX pool to the system
+/// every 256 emitted tokens, and on the first one. A speculation round emits many tokens, and the
+/// cadence counts the tokens, not the rounds.
+///
 /// Port of `_speculative_walk` from mlx-vlm/generate.py at SHA `d49d428`,
 /// with no-mutation-during-eval idioms (state is threaded through method
 /// args; drafter holds no target-derived state — the target and optional
@@ -129,6 +133,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     let legacyDraftSampler: LogitSampler
 
     public var tokenCount: Int { telemetry.emittedTokenCount }
+
+    /// The cadence that returns the freed buffers of the MLX pool to the system.
+    var bufferPoolClearing = GenerationBufferPoolClearing()
+
     public let maxTokens: Int?
     /// Total tokens proposed per round (`blockSize - 1` drafted, plus the
     /// bonus token from the previous verify). Mirrors mlx-vlm's
@@ -1427,11 +1435,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// after them waits for the next forward pass.
     private mutating func nextPendingToken() -> Int {
         let token = pendingTokens[pendingIndex]
-        hasCachedLastToken = pendingIndex < committedPendingTokenCount
-        lastLogProbabilities = deferredLogProbabilities
+        let isCached = pendingIndex < committedPendingTokenCount
         pendingIndex += 1
-        telemetry.recordGeneratedToken()
-        return token
+        return emit(token, isCached: isCached)
     }
 
     /// Decodes one token without speculation, or returns `nil` at the token limit.
@@ -1440,8 +1446,23 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// pass has fed it yet.
     private mutating func nextPlainToken() -> Int? {
         guard let token = passthroughStep() else { return nil }
-        hasCachedLastToken = false
+        return emit(token, isCached: false)
+    }
+
+    /// Hands out one token and counts it, on the cadence that keeps a long decode from filling the
+    /// MLX pool.
+    ///
+    /// A round emits many tokens from the pending buffer, thus the cadence reads tokens, as
+    /// ``TokenIterator`` does, and not rounds.
+    ///
+    /// - Parameters:
+    ///   - token: The token to emit.
+    ///   - isCached: Whether a forward pass has fed the token to the main cache.
+    /// - Returns: The token.
+    private mutating func emit(_ token: Int, isCached: Bool) -> Int {
+        hasCachedLastToken = isCached
         lastLogProbabilities = deferredLogProbabilities
+        bufferPoolClearing.clearPoolIfDue(tokenCount: tokenCount)
         telemetry.recordGeneratedToken()
         return token
     }

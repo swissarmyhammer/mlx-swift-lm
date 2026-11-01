@@ -1011,6 +1011,9 @@ public struct TokenIterator: TokenIteratorProtocol {
     /// The number of tokens generated so far.
     public var tokenCount = 0
 
+    /// The cadence that returns the freed buffers of the MLX pool to the system.
+    var bufferPoolClearing = GenerationBufferPoolClearing()
+
     /// The maximum number of tokens to generate, or `nil` for no limit.
     public let maxTokens: Int?
 
@@ -1286,12 +1289,7 @@ public struct TokenIterator: TokenIteratorProtocol {
             // cache already holds, thus this adds no operation to the step.
             evaluateTokenAndLogProbabilities(token)
 
-            // Periodically return freed buffers that cannot be reused (odd or
-            // monotonically growing sizes accumulate in the pool otherwise).
-            // Matches mlx-lm, which also clears on the first token, after prefill.
-            if tokenCount % 256 == 0 {
-                MLX.Memory.clearCache()
-            }
+            bufferPoolClearing.clearPoolIfDue(tokenCount: tokenCount)
 
             tokenCount += 1
 
