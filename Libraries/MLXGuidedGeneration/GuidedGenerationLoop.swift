@@ -111,6 +111,7 @@ public enum GuidedGenerationLoop {
     ///
     /// - Parameters:
     ///   - speculation: The MTP drafter of the generation, or `nil` for plain decoding.
+    ///   - bufferPoolClearing: The cadence that clears the MLX pool as tokens are emitted.
     ///   - Other parameters: As ``run(input:context:constraint:maxTokens:vocabSize:kvCache:kvBits:kvGroupSize:quantizedKVStart:completionReserve:hardReserve:closingBias:whitespaceBias:whitespaceTokenIDs:diagnosticLog:prefill:emit:)``
     ///     takes them.
     /// - Returns: Total number of tokens generated (including FF tokens).
@@ -134,6 +135,7 @@ public enum GuidedGenerationLoop {
         diagnosticLog: Bool = false,
         prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
         speculation: MTPSpeculation?,
+        bufferPoolClearing: GenerationBufferPoolClearing = GenerationBufferPoolClearing(),
         emit: (String) -> Bool
     ) throws -> Int {
         let parameters = GenerateParameters(
@@ -162,7 +164,7 @@ public enum GuidedGenerationLoop {
         return try withoutActuallyEscaping(emit) { emit in
             var decoder = try GuidedDecoder(
                 rules: rules, tokenizer: context.tokenizer, diagnosticLog: diagnosticLog,
-                emit: emit)
+                bufferPoolClearing: bufferPoolClearing, emit: emit)
             guard decoder.hasBudget, let first = try decoder.decide(from: prefilled.logits)
             else { return try decoder.finish() }
             if let speculation, let drafter, let feed,

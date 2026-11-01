@@ -1372,6 +1372,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     /// The number of tokens accepted (emitted) so far, sourced from `telemetry`.
     public var tokenCount: Int { telemetry.emittedTokenCount }
 
+    /// The cadence that returns the freed buffers of the MLX pool to the system.
+    var bufferPoolClearing = GenerationBufferPoolClearing()
+
     /// The maximum number of tokens to generate, or `nil` for no limit.
     public let maxTokens: Int?
     let numDraftTokens: Int
@@ -1819,10 +1822,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
         // Drain the pending buffer first
         if pendingIndex < pendingTokens.count {
-            let token = pendingTokens[pendingIndex]
-            pendingIndex += 1
-            telemetry.recordGeneratedToken()
-            return token
+            return emitPendingToken()
         }
 
         // Run a new speculation round. Pooled: a round runs draft + verify
@@ -1838,8 +1838,17 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             return nil
         }
 
+        return emitPendingToken()
+    }
+
+    /// Hands out the next pending token and counts it, on the cadence that keeps a long decode
+    /// from filling the MLX pool.
+    ///
+    /// - Returns: The token.
+    private mutating func emitPendingToken() -> Int {
         let token = pendingTokens[pendingIndex]
         pendingIndex += 1
+        bufferPoolClearing.clearPoolIfDue(tokenCount: tokenCount)
         telemetry.recordGeneratedToken()
         return token
     }

@@ -1,6 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
 import MLX
+import MLXLLM
 import MLXLMTestSupport
 import Testing
 import os
@@ -77,6 +78,17 @@ struct GenerationBufferPoolClearingTests {
         }
     }
 
+    /// A small model that drafts for itself, thus every round accepts its drafts and emits more
+    /// than one token.
+    private static func makeSelfDraftingModel() -> LlamaModel {
+        let model = LlamaModel(
+            LlamaConfiguration(
+                hiddenSize: 32, hiddenLayers: 1, intermediateSize: 32, attentionHeads: 4,
+                rmsNormEps: 1e-5, vocabularySize: 32, kvHeads: 4))
+        eval(model)
+        return model
+    }
+
     private static func makeCountingClearing(log: ClearLog) -> GenerationBufferPoolClearing {
         GenerationBufferPoolClearing(clearPool: { log.recordClear() })
     }
@@ -129,6 +141,22 @@ struct GenerationBufferPoolClearingTests {
         let indices = Self.clearedTokenIndices(log: log) { iterator.next() }
 
         #expect(iterator.passthroughReason != nil)
+        #expect(indices == [0, 256, 512])
+    }
+
+    @Test func draftModelIteratorClearsEveryIntervalOfEmittedTokens() throws {
+        let model = Self.makeSelfDraftingModel()
+        var iterator = try SpeculativeTokenIterator(
+            input: Self.makeInput(),
+            mainModel: model,
+            draftModel: model,
+            parameters: Self.parameters(),
+            numDraftTokens: Self.blockSize - 1)
+        let log = ClearLog()
+        iterator.bufferPoolClearing = Self.makeCountingClearing(log: log)
+
+        let indices = Self.clearedTokenIndices(log: log) { iterator.next() }
+
         #expect(indices == [0, 256, 512])
     }
 

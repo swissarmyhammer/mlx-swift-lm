@@ -149,6 +149,7 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     private let forwardDelay: TimeInterval
     private let cacheLayerCount: Int
     private let recurrentLayerCount: Int
+    private let weights: MLXArray?
     private var roundIndex = -1
     private var step = 0
 
@@ -169,16 +170,21 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     /// model sit beside its attention layers. A recurrent layer cannot
     /// rewind, thus a model with one is a hybrid model. The default of zero
     /// gives the model no recurrent layer.
+    ///
+    /// `weights` is an array the model holds for as long as it lives, the way
+    /// a real model holds its parameters. No forward pass reads it. The
+    /// default of `nil` gives the model no weights.
     init(
         rounds: [[Int]], forwardSteps: ForwardStepCounter? = nil,
         forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0,
-        recurrentLayerCount: Int = 0
+        recurrentLayerCount: Int = 0, weights: MLXArray? = nil
     ) {
         self.rounds = rounds
         self.forwardSteps = forwardSteps
         self.forwardDelay = forwardDelay
         self.cacheLayerCount = cacheLayerCount
         self.recurrentLayerCount = recurrentLayerCount
+        self.weights = weights
         super.init()
     }
 
@@ -315,17 +321,19 @@ struct GenerationPromptBytesInputProcessor: UserInputProcessor {
     }
 }
 
-/// Builds a container over the scripted doubles. No download, no weights.
+/// Builds a container over the scripted doubles. No download, and no weights
+/// unless `weights` gives an array.
 ///
-/// `forwardSteps`, `forwardDelay`, `cacheLayerCount` and
-/// `recurrentLayerCount` pass through to
-/// ``ScriptedLanguageModel/init(rounds:forwardSteps:forwardDelay:cacheLayerCount:recurrentLayerCount:)``.
+/// `forwardSteps`, `forwardDelay`, `cacheLayerCount`, `recurrentLayerCount` and
+/// `weights` pass through to
+/// ``ScriptedLanguageModel/init(rounds:forwardSteps:forwardDelay:cacheLayerCount:recurrentLayerCount:weights:)``.
 /// `processor` renders the prompt of each pass. The default renders the same
 /// tokens for every prompt. `reasoningConfig` goes into the configuration of
 /// the context. The default of `nil` gives a model that does not reason.
 func makeScriptedContainer(
     modelID: String, rounds: [String], forwardSteps: ForwardStepCounter? = nil,
     forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0, recurrentLayerCount: Int = 0,
+    weights: MLXArray? = nil,
     processor: any UserInputProcessor = FixedPromptInputProcessor(),
     reasoningConfig: ReasoningConfig? = nil
 ) -> ModelContainer {
@@ -336,7 +344,8 @@ func makeScriptedContainer(
             forwardSteps: forwardSteps,
             forwardDelay: forwardDelay,
             cacheLayerCount: cacheLayerCount,
-            recurrentLayerCount: recurrentLayerCount),
+            recurrentLayerCount: recurrentLayerCount,
+            weights: weights),
         processor: processor,
         tokenizer: ScriptedByteTokenizer())
     return ModelContainer(context: context)

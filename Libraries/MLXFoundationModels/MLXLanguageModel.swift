@@ -205,54 +205,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         return nil
     }
 
-    /// The smallest process-global MLX buffer-reuse pool limit in bytes: 256 binary
-    /// megabytes, written as a shift. It holds the activations of a small model's step.
-    private static let minimumGPUCacheLimitBytes = 256 << 20
-
-    /// The share of the GPU's recommended working set the MLX buffer-reuse pool may keep, as
-    /// the divisor of that working set: one thirty-second.
-    ///
-    /// A decode step frees buffers that grow with the model and the context, and the next step
-    /// allocates them again. Each buffer the pool cannot keep goes back to the system and comes
-    /// back faulted in: on an M5 Ultra a Qwen3.8-27B MTP round at 100k tokens of context frees
-    /// about 2 GiB (the recurrent snapshot slots of its verify and the attention temporaries over
-    /// the whole context), and a 256 MiB pool slowed MTP from 44 to 38 tok/s and plain decode
-    /// from 36 to 32 tok/s. The pool scales with the working set, so a device that runs larger
-    /// models at longer contexts keeps their steps' buffers, and a small device keeps
-    /// ``minimumGPUCacheLimitBytes``.
-    private static let gpuCacheWorkingSetDivisor = 32
-
-    /// The process-global MLX buffer-reuse pool limit for a GPU that recommends a working set of
-    /// `workingSetBytes`: one ``gpuCacheWorkingSetDivisor``-th of it, and at least
-    /// ``minimumGPUCacheLimitBytes``.
-    ///
-    /// - Parameter workingSetBytes: The GPU's recommended working set in bytes, or `nil` when it
-    ///   recommends none.
-    /// - Returns: The pool limit in bytes.
-    static func gpuCacheLimitBytes(workingSetBytes: Int?) -> Int {
-        guard let workingSetBytes else { return minimumGPUCacheLimitBytes }
-        return max(minimumGPUCacheLimitBytes, workingSetBytes / gpuCacheWorkingSetDivisor)
-    }
-
-    /// Sets the process-global MLX buffer-reuse pool limit a single time, from the GPU's
-    /// recommended working set (``gpuCacheLimitBytes(workingSetBytes:)``). A `static let`
-    /// initializer runs lazily and exactly once (thread-safe), so repeated model loads don't
-    /// re-stomp a consumer's own `Memory.cacheLimit`.
-    ///
-    /// Higher = less allocator thrash at the cost of higher resident GPU memory: the pool only
-    /// keeps buffers that a step freed, and MLX releases them when memory runs short.
-    private static let configureGPUCacheOnce: Void = {
-        MLX.Memory.cacheLimit = gpuCacheLimitBytes(
-            workingSetBytes: GPU.maxRecommendedWorkingSetBytes())
-    }()
-
     private func makeContainerLoader() -> @Sendable () async throws -> ModelContainer {
         let configuration = self.configuration
         let load = self.load
         return {
-            // Configure the buffer pool once per process rather than on every
-            // load, so a consumer's own `Memory.cacheLimit` survives our loads.
-            _ = Self.configureGPUCacheOnce
             // One identifier per load attempt. Eviction cancels a load and
             // forgets it at once, so a replacement can start while this one is
             // still unwinding, and the progress observable needs to tell them
@@ -311,14 +267,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     }
 
     /// Evicts every cached model, tokenizer, constraint template, and per-model
-    /// tokenizer bias, freeing the GPU memory held by model weights. Subsequent
-    /// requests reload from the on-disk cache. Cancels every registered
+    /// tokenizer bias, and every prompt cache entry, then clears the MLX buffer
+    /// pool so the GPU memory of the weights and caches returns to the system.
+    /// Subsequent requests reload from the on-disk cache. Cancels every registered
     /// in-flight load task, the same way ``evict()`` does for one model.
     ///
     /// Safe to call during in-flight `respond()`/`warmUp()` work that already holds
     /// a `ModelContainer`: that work keeps its own strong reference and synchronizes
     /// the GPU on exit, so dropping the cache's reference cannot free weights out
-    /// from under a live kernel — the weights free via ARC once that work returns.
+    /// from under a live kernel. Those weights free via ARC once that work returns,
+    /// which is after this clear, so they stay in the pool until a later clear.
+    ///
+    /// A prompt cache entry in a running or queued spill is the same case: the spill
+    /// job holds its buffers until its write ends, which is after this clear, so they
+    /// too stay in the pool until a later clear. The clear can wait for a running
+    /// spill write, because a safetensors save holds the MLX eval lock for its run.
     ///
     /// Work still inside its load phase is the other case. This call cancels every
     /// registered load task, so if the loader honors cancellation, an awaiting
@@ -330,21 +293,35 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     public static func evictAll() async {
         await cache.evictAll()
         await ExecutorPromptCacheStore.current.evict(modelID: nil)
+        // Last, and outside both actors: the released buffers reach the pool only when the last
+        // reference above drops, and this call waits for any eval that holds the MLX eval lock.
+        MLX.Memory.clearCache()
     }
 
-    /// Drops this model from the shared cache, freeing the GPU memory held by its
-    /// weights. A subsequent `respond()`/`preload()` triggers a fresh load
-    /// (reusing the on-disk snapshot if the model was previously downloaded).
+    /// Drops this model and its prompt cache entries from the shared caches, then
+    /// clears the MLX buffer pool so the GPU memory of its weights and caches returns
+    /// to the system. The pool is process-wide, so the clear also returns the freed
+    /// buffers of every other model. A subsequent `respond()`/`preload()` triggers a
+    /// fresh load (reusing the on-disk snapshot if the model was previously downloaded).
     ///
     /// Safe to call during an in-flight `respond()`: that call retains its own
     /// `ModelContainer` and finishes normally; the weights free via ARC once it
-    /// returns. Evicting a model with an in-flight load cancels that load's task.
+    /// returns, which is after this clear, so they stay in the pool until a later
+    /// clear. A prompt cache entry in a running or queued spill is the same case: the
+    /// spill job holds its buffers until its write ends, so they too stay in the pool
+    /// until a later clear, and the clear can wait for a running spill write, because
+    /// a safetensors save holds the MLX eval lock for its run.
+    ///
+    /// Evicting a model with an in-flight load cancels that load's task.
     /// If the loader honors cancellation, the awaiting `preload()` or `respond()`
     /// call fails instead of completing. The loader decides the error type, so it
     /// may not be `CancellationError`.
     public func evict() async {
         await Self.cache.remove(modelID: modelID)
         await ExecutorPromptCacheStore.current.evict(modelID: modelID)
+        // Last, and outside both actors: the released buffers reach the pool only when the last
+        // reference above drops, and this call waits for any eval that holds the MLX eval lock.
+        MLX.Memory.clearCache()
     }
 
     // MARK: - Prompt Cache Budgets and Release

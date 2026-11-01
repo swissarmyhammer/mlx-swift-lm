@@ -203,11 +203,17 @@ struct GuidedFixtureRun {
     ///   - drafter: The drafter of the MTP rounds, or `nil` for the fixture's own.
     ///   - target: The model that decodes in place of the fixture's target, or `nil` for the
     ///     fixture's target.
+    ///   - tokenBudget: The token budget of the generation.
+    ///   - sink: The sink the generation records on.
+    ///   - bufferPoolClearing: The cadence that clears the MLX pool as tokens are emitted.
     /// - Returns: What the generation wrote.
     /// - Throws: An error of the generation other than running out of budget.
     static func generate(
         schema: String, prompt: [Int], fixture: Qwen35MTPFixture, blockSize: Int?,
-        drafter: (any MTPDrafterModel)? = nil, target: (any MLXLMCommon.LanguageModel)? = nil
+        drafter: (any MTPDrafterModel)? = nil, target: (any MLXLMCommon.LanguageModel)? = nil,
+        tokenBudget: Int = maxTokens,
+        sink: GuidedGenerationDiagnosticSink = GuidedGenerationDiagnosticSink(),
+        bufferPoolClearing: GenerationBufferPoolClearing = GenerationBufferPoolClearing()
     ) throws -> GuidedFixtureRun {
         let tokenizer = ToolCallAlphabetTokenizer()
         var context = fixture.makeModelContext()
@@ -220,7 +226,6 @@ struct GuidedFixtureRun {
             MTPSpeculation(
                 drafter: drafter ?? fixture.drafter, blockSize: $0, minimumDraftProbability: 0)
         }
-        let sink = GuidedGenerationDiagnosticSink()
         var text = ""
         var tokenCount: Int?
         var incomplete = false
@@ -228,11 +233,12 @@ struct GuidedFixtureRun {
             tokenCount = try GuidedGenerationDiagnosticSink.$current.withValue(sink) {
                 try GuidedGenerationLoop.run(
                     input: LMInput(tokens: MLXArray(prompt.map(Int32.init))), context: context,
-                    constraint: grammar.constraint, maxTokens: maxTokens,
+                    constraint: grammar.constraint, maxTokens: tokenBudget,
                     vocabSize: grammar.vocabSize, completionReserve: completionReserve,
                     hardReserve: hardReserve, closingBias: grammar.closingBias,
                     whitespaceBias: grammar.whitespaceBias,
-                    whitespaceTokenIDs: grammar.whitespaceTokenIDs, speculation: speculation
+                    whitespaceTokenIDs: grammar.whitespaceTokenIDs, speculation: speculation,
+                    bufferPoolClearing: bufferPoolClearing
                 ) { delta in
                     text += delta
                     return true

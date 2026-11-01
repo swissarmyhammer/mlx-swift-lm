@@ -57,6 +57,9 @@ struct GuidedDecoder {
     /// Takes each piece of text; `false` stops the generation.
     private let emit: (String) -> Bool
 
+    /// The cadence that returns the freed buffers of the MLX pool to the system.
+    private let bufferPoolClearing: GenerationBufferPoolClearing
+
     /// Whether the generation writes the diagnostic log.
     private let diagnosticLog: Bool
 
@@ -77,17 +80,19 @@ struct GuidedDecoder {
     ///   - rules: The rules of the generation.
     ///   - tokenizer: The tokenizer that decodes the output.
     ///   - diagnosticLog: Whether the generation writes the diagnostic log.
+    ///   - bufferPoolClearing: The cadence that clears the MLX pool as tokens are emitted.
     ///   - emit: Takes each piece of text; `false` stops the generation.
     /// - Throws: The error of the matcher.
     init(
         rules: GuidedDecisionRules, tokenizer: any Tokenizer, diagnosticLog: Bool,
-        emit: @escaping (String) -> Bool
+        bufferPoolClearing: GenerationBufferPoolClearing, emit: @escaping (String) -> Bool
     ) throws {
         self.rules = rules
         self.position = try rules.startPosition()
         self.whitespace = position.whitespace
         self.detokenizer = tokenizer.makeStreamingDetokenizer()
         self.emit = emit
+        self.bufferPoolClearing = bufferPoolClearing
         self.diagnosticLog = diagnosticLog
         self.diagnosticSink = GuidedGenerationDiagnosticSink.current.flatMap {
             $0.recordsDecoding ? $0 : nil
@@ -227,8 +232,12 @@ struct GuidedDecoder {
 
     /// Emits one token: its text, when the detokenizer has some, then counts it.
     ///
+    /// Every token of both decode paths comes here, decided, accepted or forced, thus the pool
+    /// clears on the cadence of the emitted tokens, as it does in ``TokenIterator``.
+    ///
     /// - Returns: `false` when the consumer stopped the generation, before the token counted.
     private mutating func append(_ token: Int) -> Bool {
+        bufferPoolClearing.clearPoolIfDue(tokenCount: tokenCount)
         detokenizer.append(token: token)
         if let text = detokenizer.next() {
             emittedText += text

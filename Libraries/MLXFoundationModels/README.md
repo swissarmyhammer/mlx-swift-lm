@@ -140,6 +140,14 @@ A cold drafter start can lower the acceptance; it does not change the output.
 
 On an M5 Ultra, Qwen3.8-27B-4bit with its 4-bit MTP head decoded a text turn at 90.4 tokens per second against 58.5 without MTP, the second turn of a cached session at 80.9 against 57.5, and guided JSON at 68.2 against 50.8. See "Multi-token prediction (MTP)" in the MLXLMCommon `using` article for the full numbers.
 
+## Memory
+
+`MLXLanguageModel` does not set `Memory.cacheLimit`, so the MLX buffer pool follows MLX's default, as it does under `ChatSession`. Plain, MTP and guided decode (schema output and required-tool calls) clear the pool on the first token and every 256 emitted tokens after it, and the pool can still hold several GiB between clears on a long context: 16.0 GiB at most in a guided Qwen3.8-27B-4bit decode of 9,502 tokens at 110,647 rendered tokens of context on an M5 Ultra.
+
+No clear runs when a decode ends. The pool keeps what the decode freed until the next generation clears it, whatever kind of decode that generation runs. A prompt, or a suffix past its cached tokens, long enough to prefill in chunks clears it after the first chunk, and a shorter one clears it on the first token. The pool held 9.7 GiB after a Qwen3.8-27B-4bit MTP decode at 110,737 rendered tokens of context on an M5 Ultra, with the KV cache still held by its prompt cache entry. A released KV cache joins the pool too: 17.86 GiB once that entry was dropped. A guided decode keeps no prompt cache entry, so its KV cache joins the pool when it ends: 9.3 to 18.4 GiB after decodes of 8,323 to 20,894 tokens at 110,647 to 110,648 rendered tokens of context. `evict()` and `evictAll()` release the pool without a generation: each one clears it after it drops the weights and prompt cache entries. The clear covers the whole process, so it also empties freed buffers another loaded model would have reused. Weights that an in-flight `respond()` still holds, and a prompt cache entry in a running or queued spill, reach the pool after that clear, and the next generation clears them. The clear can wait for a spill write, because a safetensors save holds the MLX eval lock for its run.
+
+An iOS or visionOS host that runs under a jetsam limit may want to set `Memory.cacheLimit` itself before the first load; the adapter leaves that value in place.
+
 ## Availability
 
 `MLXLanguageModel` exposes an `availability` property — `.available`, `.downloading`, `.unavailable(...)` — for gating on model and download state.
