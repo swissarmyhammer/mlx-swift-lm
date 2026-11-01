@@ -41,7 +41,7 @@ package final class MTPDrafterPrefillFeed {
     private let startPosition: Int
 
     /// The prompt tokens the chunks fed.
-    private(set) var fedTokenCount = 0
+    package private(set) var fedTokenCount = 0
 
     /// Whether each chunk reached the drafter state. Once an append is refused, the chunks after it
     /// are only counted.
@@ -125,6 +125,15 @@ package final class MTPDrafterPrefillFeed {
             targetProcessedTokenCount: position, drafterID: drafter.drafterID)
         return continuation.isAligned(withMainTokenCount: position, drafterID: drafter.drafterID)
             ? continuation : nil
+    }
+
+    /// The tokens of `prompt` the chunks did not feed: the segment the target's last forward
+    /// evaluated, when `prepare` evaluated the whole prompt and returned logits.
+    ///
+    /// - Parameter prompt: The prompt tokens the target prefilled, shape `[B, n]` or `[n]`.
+    /// - Returns: The tokens after the fed chunks, which ``primedState`` takes.
+    package func finalSegment(of prompt: MLXArray) -> MLXArray {
+        prompt[.ellipsis, fedTokenCount...]
     }
 
     /// The drafter state after the whole prompt: the state the chunks left, extended over the

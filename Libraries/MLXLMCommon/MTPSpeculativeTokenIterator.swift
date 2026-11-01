@@ -945,7 +945,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
     private mutating func primeDrafterState(
         after feed: MTPDrafterPrefillFeed, promptTokens: MLXArray
     ) {
-        let segmentTokens = promptTokens[.ellipsis, feed.fedTokenCount...]
+        let segmentTokens = feed.finalSegment(of: promptTokens)
         let segmentLength = segmentTokens.dim(-1)
         guard let targetHidden = mainState?[mtpLastHiddenStatesKey],
             segmentLength > 0, targetHidden.dim(1) >= segmentLength

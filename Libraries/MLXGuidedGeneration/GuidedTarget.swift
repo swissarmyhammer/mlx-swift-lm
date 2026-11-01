@@ -6,13 +6,15 @@ import MLXLMCommon
 /// What the prefill of a guided generation gives: the logits of the last prompt position and,
 /// when the prefill fed an MTP drafter, the prompt segment the final forward evaluated with one
 /// target hidden row for each of its tokens.
+///
+/// A target whose `prepare` evaluates the prompt itself, as the vision-language Qwen 3.5 does,
+/// gives the same segment as one whose `prepare` leaves the final forward to the caller.
 struct GuidedPrefill {
 
     /// The logits of the final prefill forward, shape `[B, positions, vocabulary]`.
     let logits: MLXArray
 
-    /// The prompt tokens the final forward evaluated, or `nil` when `prepare` evaluated the
-    /// whole prompt itself.
+    /// The prompt tokens the final forward evaluated, or `nil` when the prefill fed no drafter.
     let segmentTokens: MLXArray?
 
     /// One target hidden row for each token of ``segmentTokens``, or `nil` when the forward
@@ -58,22 +60,24 @@ struct GuidedTarget {
     /// Prefills the prompt.
     ///
     /// With a drafter feed, `prepare` hands the feed the hidden rows of each prompt chunk, and
-    /// the final forward emits the hidden rows of the segment after the chunks.
+    /// the final forward emits the hidden rows of the segment after the chunks, whether the
+    /// caller runs that forward or `prepare` runs it and returns logits.
     ///
     /// - Parameters:
     ///   - input: The prompt.
     ///   - parameters: The prefill parameters.
-    ///   - drafterFeed: The handler of each prefill chunk's hidden rows, or `nil`.
+    ///   - drafterFeed: The feed that takes each prefill chunk's hidden rows, or `nil`.
     /// - Returns: The logits of the prompt and the segment the final forward evaluated.
     /// - Throws: The error of the prefill or of the cache plan.
     mutating func prefill(
-        _ input: LMInput, parameters: PrefillParameters, drafterFeed: MTPPrefillChunkHandler?
+        _ input: LMInput, parameters: PrefillParameters, drafterFeed: MTPDrafterPrefillFeed?
     ) throws -> GuidedPrefill {
         let inputLength = input.text.cacheSequenceLength
         let output: LMOutput
         let segment: MLXArray?
         switch try model.prepare(
-            input, cache: cache, state: drafterFeed.map { LMOutput.State().feeding($0) },
+            input, cache: cache,
+            state: drafterFeed.map { LMOutput.State().feeding($0.chunkHandler) },
             prefill: parameters)
         {
         case .tokens(let tokens):
@@ -90,7 +94,7 @@ struct GuidedTarget {
         case .logits(let result):
             cacheStorage.commitProcessedTokens(inputLength)
             output = result
-            segment = nil
+            segment = drafterFeed?.finalSegment(of: input.text.tokens)
         }
         try cacheStorage.plan.applyAndValidate(to: cacheStorage)
         state = drafterFeed == nil ? output.state : output.state?.withoutMTPExchange

@@ -70,8 +70,9 @@ struct GuidedSpeculation {
 
     /// The drafter of `speculation`, when guided generation can speculate with it on `target`.
     ///
-    /// A drafter that cannot draft for the target is logged once and recorded on the
-    /// diagnostic sink with its stated reason.
+    /// A drafter that cannot draft under a grammar for the target, or a target that cannot
+    /// verify in place, is logged once and recorded on the diagnostic sink with its stated
+    /// reason.
     ///
     /// - Parameters:
     ///   - speculation: The speculation of the generation, or `nil`.
@@ -84,15 +85,68 @@ struct GuidedSpeculation {
         if let fallback = MTPDrafterFallback.incompatibility(
             of: speculation.drafter, with: target.model)
         {
-            GuidedGenerationDiagnosticSink.current?.recordSpeculationFallback(
-                fallback.statedReason, reason: fallback.reason)
+            report(fallback)
             return nil
         }
         guard let drafter = speculation.drafter as? any GuidedMTPDrafter,
-            !drafter.requiresSharedTargetKV,
-            target.verifiesInPlace(tokens: MTPDraftBlockOutput.minimumChainedMTPBlockSize)
-        else { return nil }
+            !drafter.requiresSharedTargetKV
+        else {
+            report(
+                MTPDrafterFallback(
+                    reason: .incompatibleDrafter,
+                    statedReason: unguidedDrafterReason(of: speculation.drafter)))
+            return nil
+        }
+        guard target.verifiesInPlace(tokens: MTPDraftBlockOutput.minimumChainedMTPBlockSize) else {
+            report(
+                MTPDrafterFallback(
+                    reason: .unsupportedCache,
+                    statedReason: noInPlaceVerifyReason(of: target.model)))
+            return nil
+        }
         return drafter
+    }
+
+    /// Reports why a generation decodes without speculation: the generation records the fallback
+    /// on its diagnostic sink, which the response metadata reads, and
+    /// ``MTPDrafterFallbackLog/shared`` logs the stated reason once.
+    ///
+    /// - Parameter fallback: The fallback of the generation.
+    private static func report(_ fallback: MTPDrafterFallback) {
+        MTPDrafterFallbackLog.shared.report(fallback)
+        GuidedGenerationDiagnosticSink.current?.recordSpeculationFallback(
+            fallback.statedReason, reason: fallback.reason)
+    }
+
+    /// The stated reason of a drafter that cannot draft under a grammar.
+    ///
+    /// - Parameter drafter: The configured drafter.
+    /// - Returns: The reason in words.
+    private static func unguidedDrafterReason(of drafter: any MTPDrafterModel) -> String {
+        "the MTP drafter \(type(of: drafter)) cannot draft through a grammar mask, "
+            + "so the generation decodes without speculation"
+    }
+
+    /// The stated reason of a target that cannot verify a round in place.
+    ///
+    /// - Parameter model: The target model.
+    /// - Returns: The reason in words.
+    private static func noInPlaceVerifyReason(of model: any LanguageModel) -> String {
+        "the target \(type(of: model)) cannot verify a guided round in place, "
+            + "so the generation decodes without speculation"
+    }
+
+    /// The stated reason of a drafter that could not start over the prefilled prompt.
+    ///
+    /// - Parameters:
+    ///   - drafter: The drafter.
+    ///   - model: The target model.
+    /// - Returns: The reason in words.
+    private static func unprimedDrafterReason(
+        of drafter: any MTPDrafterModel, on model: any LanguageModel
+    ) -> String {
+        "the MTP drafter \(type(of: drafter)) could not start over the prompt of the target "
+            + "\(type(of: model)), so the generation decodes without speculation"
     }
 
     /// Primes the drafter over the prompt the target just prefilled, up to the first decided
@@ -101,25 +155,32 @@ struct GuidedSpeculation {
     /// - Parameters:
     ///   - speculation: The speculation of the generation.
     ///   - drafter: The drafter of `speculation`.
-    ///   - feed: The feed the prefill chunks went through.
+    ///   - feed: The feed the prefill chunks went through, or `nil` when the drafter gave none.
     ///   - prefill: What the prefill gave.
     ///   - firstFeed: The tokens the first decision feeds the target.
     ///   - target: The target.
-    /// - Returns: The speculation, or `nil` when the drafter cannot start, and the generation
-    ///   decodes plainly.
+    /// - Returns: The speculation, or `nil` when the drafter cannot start: the generation then
+    ///   decodes plainly, and reports an
+    ///   ``SpeculativeDecodingFallbackReason/unavailableContinuation`` fallback.
     init?(
-        speculation: MTPSpeculation, drafter: any GuidedMTPDrafter, feed: MTPDrafterPrefillFeed,
+        speculation: MTPSpeculation, drafter: any GuidedMTPDrafter, feed: MTPDrafterPrefillFeed?,
         prefill: GuidedPrefill, firstFeed: [Int32], target: GuidedTarget
     ) {
         let blockSize = min(
             speculation.blockSize, drafter.maximumBlockSize ?? speculation.blockSize,
             target.mostVerifiedTokens)
-        guard let first = firstFeed.first, blockSize > 1,
+        guard let feed, let first = firstFeed.first, blockSize > 1,
             let segmentTokens = prefill.segmentTokens, let segmentHidden = prefill.segmentHidden,
             var state = feed.primedState(
                 finalSegment: segmentTokens, segmentHidden: segmentHidden,
                 firstBonus: MLXArray([first]), positionDeltas: prefill.positionDeltas)
-        else { return nil }
+        else {
+            Self.report(
+                MTPDrafterFallback(
+                    reason: .unavailableContinuation,
+                    statedReason: Self.unprimedDrafterReason(of: drafter, on: target.model)))
+            return nil
+        }
         state.minimumDraftProbability = speculation.minimumDraftProbability
         self.drafter = drafter
         self.drafterState = state
@@ -131,7 +192,8 @@ struct GuidedSpeculation {
     /// Decodes the rest of the generation from `pending`, the tokens the last decision feeds
     /// the target.
     ///
-    /// A round that cannot verify in place hands the rest of the generation to plain decoding.
+    /// A round that cannot verify in place hands the rest of the generation to plain decoding,
+    /// and reports it. A generation whose budget leaves no draft has nothing to report.
     ///
     /// - Parameters:
     ///   - pending: The tokens of the last decision, which no forward fed yet.
@@ -161,10 +223,15 @@ struct GuidedSpeculation {
         }
     }
 
-    /// The drafts of the next round, or `nil` when the target cannot verify a round in place.
-    private func draftsThisRound(decoder: GuidedDecoder, target: GuidedTarget) -> Int? {
+    /// The drafts of the next round, or `nil` when the budget leaves no draft, or when the target
+    /// cannot verify a round in place, which ends the speculation.
+    private mutating func draftsThisRound(decoder: GuidedDecoder, target: GuidedTarget) -> Int? {
         let drafts = min(maximumDrafts, decoder.rules.maxTokens - decoder.tokenCount)
-        guard drafts > 0, target.verifiesInPlace(tokens: drafts + 1) else { return nil }
+        guard drafts > 0 else { return nil }
+        guard target.verifiesInPlace(tokens: drafts + 1) else {
+            standDown(reason: Self.lostInPlaceVerifyReason(of: target.model))
+            return nil
+        }
         return drafts
     }
 
@@ -275,7 +342,7 @@ struct GuidedSpeculation {
         target: GuidedTarget
     ) {
         guard let hidden, let first = next.first else {
-            standDown(target: target)
+            standDown(reason: Self.missingDrafterStateReason(of: target.model))
             return
         }
         self.positionDeltas = positionDeltas ?? self.positionDeltas
@@ -287,21 +354,14 @@ struct GuidedSpeculation {
         lastKeptHidden = hidden[0..., (kept - 1) ..< kept, 0...]
     }
 
-    /// Ends the speculation of the generation because a forward of `target` gave no drafter
-    /// state, and reports it once: the generation records the
-    /// ``SpeculativeDecodingFallbackReason/unavailableContinuation`` fallback on its diagnostic
-    /// sink, which the response metadata reads, and ``MTPDrafterFallbackLog/shared`` logs the
-    /// stated reason once for each target.
+    /// Ends the speculation of the generation, and reports the
+    /// ``SpeculativeDecodingFallbackReason/unavailableContinuation`` fallback once.
     ///
-    /// - Parameter target: The target whose forward gave no drafter state.
-    private mutating func standDown(target: GuidedTarget) {
+    /// - Parameter reason: The stated reason.
+    private mutating func standDown(reason: String) {
         guard !stoodDown else { return }
         stoodDown = true
-        let fallback = MTPDrafterFallback(
-            reason: .unavailableContinuation,
-            statedReason: Self.missingDrafterStateReason(of: target.model))
-        MTPDrafterFallbackLog.shared.report(fallback)
-        diagnosticSink?.recordSpeculationFallback(fallback.statedReason, reason: fallback.reason)
+        Self.report(MTPDrafterFallback(reason: .unavailableContinuation, statedReason: reason))
     }
 
     /// The stated reason of a stand-down: the target and the drafter state it did not give.
@@ -310,6 +370,15 @@ struct GuidedSpeculation {
     /// - Returns: The reason in words.
     static func missingDrafterStateReason(of model: any LanguageModel) -> String {
         "the target \(type(of: model)) gave no drafter hidden state for a guided forward, "
+            + "so the rest of the generation decodes without speculation"
+    }
+
+    /// The stated reason of a stand-down: the target stopped verifying rounds in place.
+    ///
+    /// - Parameter model: The target model.
+    /// - Returns: The reason in words.
+    private static func lostInPlaceVerifyReason(of model: any LanguageModel) -> String {
+        "the target \(type(of: model)) stopped verifying guided rounds in place, "
             + "so the rest of the generation decodes without speculation"
     }
 

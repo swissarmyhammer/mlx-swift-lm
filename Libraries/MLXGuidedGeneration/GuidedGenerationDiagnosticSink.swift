@@ -80,13 +80,12 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     public private(set) var rollbacks: [GuidedRollbackRecord] = []
 
     /// Why the configured MTP drafter did not speculate, or stopped speculating, in words: it
-    /// cannot draft for the target, or a forward of the target gave no drafter state; `nil`
-    /// otherwise.
+    /// cannot draft for the target, it could not start over the prompt, or the target stopped
+    /// giving drafter state or verifying in place; `nil` otherwise.
     public private(set) var speculationFallbackReason: String?
 
-    /// Why each guided generation whose configured MTP drafter cannot draft for the target, or
-    /// whose target stopped giving drafter state, decoded plainly, one reason for each such
-    /// generation, in order.
+    /// Why each guided generation with a configured MTP drafter decoded plainly, or stopped
+    /// speculating, one reason for each such generation, in order.
     public private(set) var speculationFallbacks: [SpeculativeDecodingFallbackReason] = []
 
     private let cancelAfterEmitCount: Int?

@@ -107,7 +107,8 @@ public enum GuidedGenerationLoop {
     /// The prefill feeds the drafter the hidden rows of each prompt chunk, so a new drafter
     /// state covers the whole prompt; this loop keeps no prompt cache. The output is the output
     /// of plain guided decoding: see ``GuidedSpeculation``. A drafter that cannot draft for the
-    /// target, or a target that cannot verify in place, leaves the generation to plain decoding.
+    /// target, or a target that cannot verify in place, leaves the generation to plain decoding,
+    /// and the generation records why on its diagnostic sink, which the response metadata reads.
     ///
     /// - Parameters:
     ///   - speculation: The MTP drafter of the generation, or `nil` for plain decoding.
@@ -149,7 +150,7 @@ public enum GuidedGenerationLoop {
                 continuation: nil)
         }
         let prefilled = try target.prefill(
-            input, parameters: prefill, drafterFeed: feed?.chunkHandler)
+            input, parameters: prefill, drafterFeed: feed)
         let logitDim = prefilled.logits.shape[prefilled.logits.ndim - 1]
         let rules = GuidedDecisionRules(
             constraint: constraint, maxTokens: maxTokens, vocabSize: vocabSize,
@@ -167,7 +168,7 @@ public enum GuidedGenerationLoop {
                 bufferPoolClearing: bufferPoolClearing, emit: emit)
             guard decoder.hasBudget, let first = try decoder.decide(from: prefilled.logits)
             else { return try decoder.finish() }
-            if let speculation, let drafter, let feed,
+            if let speculation, let drafter,
                 var speculating = GuidedSpeculation(
                     speculation: speculation, drafter: drafter, feed: feed, prefill: prefilled,
                     firstFeed: first, target: target)

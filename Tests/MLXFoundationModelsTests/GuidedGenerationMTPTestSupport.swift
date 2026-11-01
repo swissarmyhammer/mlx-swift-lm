@@ -206,6 +206,8 @@ struct GuidedFixtureRun {
     ///   - tokenBudget: The token budget of the generation.
     ///   - sink: The sink the generation records on.
     ///   - bufferPoolClearing: The cadence that clears the MLX pool as tokens are emitted.
+    ///   - prefill: The prompt prefill parameters.
+    ///   - image: The image the prompt marks, or `nil`.
     /// - Returns: What the generation wrote.
     /// - Throws: An error of the generation other than running out of budget.
     static func generate(
@@ -213,7 +215,9 @@ struct GuidedFixtureRun {
         drafter: (any MTPDrafterModel)? = nil, target: (any MLXLMCommon.LanguageModel)? = nil,
         tokenBudget: Int = maxTokens,
         sink: GuidedGenerationDiagnosticSink = GuidedGenerationDiagnosticSink(),
-        bufferPoolClearing: GenerationBufferPoolClearing = GenerationBufferPoolClearing()
+        bufferPoolClearing: GenerationBufferPoolClearing = GenerationBufferPoolClearing(),
+        prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
+        image: LMInput.ProcessedImage? = nil
     ) throws -> GuidedFixtureRun {
         let tokenizer = ToolCallAlphabetTokenizer()
         var context = fixture.makeModelContext()
@@ -222,6 +226,7 @@ struct GuidedFixtureRun {
             context.model = target
         }
         let grammar = try Grammar(schema: schema, tokenizer: tokenizer)
+        let promptTokens = MLXArray(prompt.map(Int32.init))
         let speculation = blockSize.map {
             MTPSpeculation(
                 drafter: drafter ?? fixture.drafter, blockSize: $0, minimumDraftProbability: 0)
@@ -232,13 +237,15 @@ struct GuidedFixtureRun {
         do {
             tokenCount = try GuidedGenerationDiagnosticSink.$current.withValue(sink) {
                 try GuidedGenerationLoop.run(
-                    input: LMInput(tokens: MLXArray(prompt.map(Int32.init))), context: context,
-                    constraint: grammar.constraint, maxTokens: tokenBudget,
+                    input: LMInput(
+                        text: .init(tokens: image == nil ? promptTokens : promptTokens[.newAxis]),
+                        image: image),
+                    context: context, constraint: grammar.constraint, maxTokens: tokenBudget,
                     vocabSize: grammar.vocabSize, completionReserve: completionReserve,
                     hardReserve: hardReserve, closingBias: grammar.closingBias,
                     whitespaceBias: grammar.whitespaceBias,
-                    whitespaceTokenIDs: grammar.whitespaceTokenIDs, speculation: speculation,
-                    bufferPoolClearing: bufferPoolClearing
+                    whitespaceTokenIDs: grammar.whitespaceTokenIDs, prefill: prefill,
+                    speculation: speculation, bufferPoolClearing: bufferPoolClearing
                 ) { delta in
                     text += delta
                     return true
