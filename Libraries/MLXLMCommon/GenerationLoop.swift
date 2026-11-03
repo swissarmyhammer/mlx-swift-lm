@@ -207,26 +207,35 @@ struct RecordingGeneratedTokenList: GeneratedTokenCollector {
     }
 
     consuming func result(iterator: any TokenIteratorProtocol) -> [Int] {
-        receiveDrafterContinuation(Self.drafterContinuation(leftBy: iterator))
+        handOff(Self.drafterContinuation(leftBy: iterator))
+    }
+
+    /// Hands `continuation` to the callback and answers the recorded tokens.
+    fileprivate consuming func handOff(_ continuation: MTPDrafterContinuation?) -> [Int] {
+        receiveDrafterContinuation(continuation)
         return tokens
     }
 }
 
+/// Records the generated tokens as ``RecordingGeneratedTokenList`` does, and answers them with
+/// the model state and the drafter continuation the iterator left, for ``ChatSession``, which
+/// keeps all three beside its cache.
 struct RecordingGeneratedTokens: GeneratedTokenCollector {
-    private var tokens: [Int] = []
+    private var tokens = RecordingGeneratedTokenList()
 
     mutating func record(_ token: Int) {
-        tokens.append(token)
+        tokens.record(token)
     }
 
     consuming func result(
         iterator: any TokenIteratorProtocol
     ) -> SendableBox<RecordedGenerationResult> {
-        SendableBox(
+        let continuation = Self.drafterContinuation(leftBy: iterator)
+        return SendableBox(
             RecordedGenerationResult(
-                generatedTokens: tokens,
+                generatedTokens: tokens.handOff(continuation),
                 state: iterator.state,
-                mtpDrafterContinuation: Self.drafterContinuation(leftBy: iterator)))
+                mtpDrafterContinuation: continuation))
     }
 }
 
@@ -452,10 +461,12 @@ private func runTokenLoop<Handler: TokenLoopHandler, Collector: GeneratedTokenCo
         }
     }
 
-    if stopReason == nil {
-        stopReason = inferredStopReason(
-            isAtTokenLimit: iterator.isAtTokenLimit, isCancelled: isCancelled())
-    }
+    // The loop sets `stopReason` when a stop token or the handler ends it; else the
+    // iterator ended or the loop was cancelled, and the reason is inferred. From here
+    // on the reason is always known, thus the info below needs no fallback.
+    var finalStopReason =
+        stopReason
+        ?? inferredStopReason(isAtTokenLimit: iterator.isAtTokenLimit, isCancelled: isCancelled())
 
     // Speculative iterators verify several candidates at once. A stop
     // token, consumer termination, or token limit can leave verified
@@ -473,9 +484,9 @@ private func runTokenLoop<Handler: TokenLoopHandler, Collector: GeneratedTokenCo
     case .more:
         break
     case .stop:
-        if stopReason != .cancelled { stopReason = .stop }
+        if finalStopReason != .cancelled { finalStopReason = .stop }
     case .cancelled:
-        stopReason = .cancelled
+        finalStopReason = .cancelled
     }
 
     let generateTime = timing.generateTime
@@ -494,7 +505,7 @@ private func runTokenLoop<Handler: TokenLoopHandler, Collector: GeneratedTokenCo
             generated: tokenCount, reasoning: reasoningTokenCount),
         promptTime: timing.promptTime + iterator.promptPrefillTime,
         generationTime: generateTime,
-        stopReason: stopReason ?? .cancelled,
+        stopReason: finalStopReason,
         stopTokenFedToCache: stopTokenFedToCache,
         discardedStopToken: discardedStopToken,
         proposedDraftTokens: mtpStats?.proposedDraftTokens,
