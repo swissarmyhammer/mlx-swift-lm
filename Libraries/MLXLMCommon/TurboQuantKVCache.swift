@@ -1767,7 +1767,8 @@ public func maybeTurboQuantizeKVCache(
             // realized shape remains in full precision.
             guard
                 let quantized = try? simple.toQuantized(
-                    groupSize: KVCacheTree.boundaryProtectionGroupSize, bits: 8)
+                    groupSize: KVCacheTree.boundaryProtectionGroupSize,
+                    bits: KVCacheTree.boundaryProtectionBits)
             else {
                 return simple
             }

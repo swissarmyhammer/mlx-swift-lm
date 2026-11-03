@@ -129,6 +129,9 @@ enum KVCacheTree {
     /// The affine group size of the boundary layers that TurboQuant protects with 8-bit affine.
     static let boundaryProtectionGroupSize = 64
 
+    /// The affine bit width of the boundary layers that TurboQuant protects.
+    static let boundaryProtectionBits = 8
+
     /// Key bit widths below this make a TurboQuant scheme fragile at its boundary layers.
     private static let fragileKeyBitsBound = 8
 
