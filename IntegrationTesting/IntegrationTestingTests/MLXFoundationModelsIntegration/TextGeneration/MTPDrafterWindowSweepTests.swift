@@ -3,17 +3,16 @@
 // Qwen3.8-27B-4bit with its 4-bit MTP head decoding after 32k, 64k and 100k tokens of an agent
 // transcript, with the drafter attending to the whole context and to each window of
 // `DrafterWindowSweep.windowTokenCounts` (`GenerateParameters.mtpDrafterAttentionWindow`), on the
-// router's load path and on the text path, beside plain decode of the same prompt. Each line
+// router's load path and on the text path, beside plain decode of the same prompt. Each test
+// decodes one load path at one context, so each fits one hold of a shared GPU, and at 100k the
+// windows split in two tests, each with the whole-context drafter as the reference. Each line
 // states the acceptance, the tokens of each verify, the milliseconds of each round and the decode
 // rate, so the fastest window at each context picks the default. The drafter only proposes, so
 // every window writes plain decode's tokens up to a near tie. Run it in Release:
 // `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS,arch=arm64' -configuration Release ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES -only-testing:IntegrationTestingTests/MTPDrafterWindowSweepTests`
 //
-// To run part of the sweep, `MTP_DRAFTER_WINDOW_SWEEP_CONTEXTS` names the contexts (comma
-// separated token counts of the sweep) and `MTP_DRAFTER_WINDOW_SWEEP_PATHS` the load paths
-// (`text`, `router`), and `MTP_DRAFTER_WINDOW_SWEEP_WINDOWS` the drafter windows (token counts
-// of the sweep, or `full`); the whole-context drafter always runs first, as the reference of each
-// ratio. `xcodebuild` passes them to the test runner with the `TEST_RUNNER_` prefix.
+// Run one point with `-only-testing:IntegrationTestingTests/MTPDrafterWindowSweepTests/textAt32k()`
+// (or another test of the suite).
 //
 // Every measurement line goes to the unified log under the `MTP DRAFTER WINDOW:` prefix:
 // `log show --info --start <time> --predicate 'subsystem == "com.apple.FoundationModels-MLX" AND category == "MTPDrafterWindow"'`
@@ -30,21 +29,21 @@ import os
 
 @testable import MLXFoundationModels
 
-/// The time limit of each test, in minutes: for each of three contexts, six prefills of up to
-/// 100k tokens (plain decode, and MTP with each drafter window) and six decodes of 1024 tokens.
-private let drafterWindowSweepTimeLimitMinutes = 240
+/// The time limit of each test, in minutes: up to six prefills of up to 100k tokens (plain
+/// decode, and MTP with each drafter window) and six decodes of 1024 tokens.
+private let drafterWindowSweepTimeLimitMinutes = 60
 
 /// The drafter attention windows and the context lengths the drafter-window benchmarks sweep.
 enum DrafterWindowSweep {
 
     /// The shortest context of the sweep, in tokens: 32k.
-    private static let shortContextTokenCount = 32_768
+    static let shortContextTokenCount = 32_768
 
     /// The middle context of the sweep, in tokens: 64k.
-    private static let middleContextTokenCount = 65_536
+    static let middleContextTokenCount = 65_536
 
     /// The longest context of the sweep, in tokens: 100k, the far end of a SWE-bench run.
-    private static let longContextTokenCount = 100_000
+    static let longContextTokenCount = 100_000
 
     /// The widest drafter window of the sweep, in tokens: 16k.
     private static let widestWindowTokenCount = 16_384
@@ -67,6 +66,16 @@ enum DrafterWindowSweep {
     static let windowTokenCounts: [Int?] = [
         nil, widestWindowTokenCount, wideWindowTokenCount, narrowWindowTokenCount,
         narrowestWindowTokenCount,
+    ]
+
+    /// The whole context, then the two widest windows of the sweep: the first half of a point
+    /// that runs in two tests.
+    static let wideWindowTokenCounts: [Int?] = [nil, widestWindowTokenCount, wideWindowTokenCount]
+
+    /// The whole context, then the two narrowest windows of the sweep: the second half of a point
+    /// that runs in two tests.
+    static let narrowWindowTokenCounts: [Int?] = [
+        nil, narrowWindowTokenCount, narrowestWindowTokenCount,
     ]
 
     /// The greedy parameters of a stream whose drafter attends to `window` tokens, with the
@@ -123,57 +132,18 @@ private struct SweepPoint: Sendable {
     /// Plain decode, which reports the two best candidates of each step.
     let plain: SweepDecode
 
-    /// MTP with each window of ``DrafterWindowSweep/windowTokenCounts``, in order.
+    /// MTP with each window of the point, in order; the whole-context drafter first.
     let mtp: [SweepDecode]
 }
 
 /// Decodes after 32k, 64k and 100k tokens with plain decode and with MTP over each drafter window,
-/// on the router's load path and on the text path.
+/// on the router's load path and on the text path: one test for each load path and context, and
+/// two at 100k, each with half of the windows.
 @Suite(.serialized, .timeLimit(.minutes(drafterWindowSweepTimeLimitMinutes)))
 struct MTPDrafterWindowSweepTests {
 
     /// The milliseconds of one second.
     static let millisecondsPerSecond = 1_000.0
-
-    /// The variable that names the contexts of a partial sweep, comma separated.
-    private static let contextsVariable = "MTP_DRAFTER_WINDOW_SWEEP_CONTEXTS"
-
-    /// The variable that names the load paths of a partial sweep, comma separated.
-    private static let pathsVariable = "MTP_DRAFTER_WINDOW_SWEEP_PATHS"
-
-    /// The comma-separated values of the environment variable `name`, or `nil` when it is unset.
-    private static func environmentList(_ name: String) -> [String]? {
-        ProcessInfo.processInfo.environment[name].map {
-            $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        }
-    }
-
-    /// The contexts this run sweeps: those ``contextsVariable`` names, or all of them.
-    private static var sweptContextTokenCounts: [Int] {
-        guard let names = environmentList(contextsVariable) else {
-            return DrafterWindowSweep.contextTokenCounts
-        }
-        return DrafterWindowSweep.contextTokenCounts.filter { names.contains("\($0)") }
-    }
-
-    /// The variable that names the drafter windows of a partial sweep, comma separated.
-    private static let windowsVariable = "MTP_DRAFTER_WINDOW_SWEEP_WINDOWS"
-
-    /// The drafter windows this run sweeps: the whole context, then the windows
-    /// ``windowsVariable`` names, or all of them.
-    private static var sweptWindowTokenCounts: [Int?] {
-        guard let names = environmentList(windowsVariable) else {
-            return DrafterWindowSweep.windowTokenCounts
-        }
-        return DrafterWindowSweep.windowTokenCounts.filter {
-            $0 == nil || names.contains(DrafterWindowSweep.label(of: $0))
-        }
-    }
-
-    /// Whether this run sweeps `path`: when ``pathsVariable`` names it, or is unset.
-    private static func sweeps(_ path: Qwen38FourBitMTPModel.LoadPath) -> Bool {
-        environmentList(pathsVariable)?.contains(path.rawValue) ?? true
-    }
 
     /// The tokens each decode writes at most.
     private static let decodeTokenCount = 1_024
@@ -192,27 +162,97 @@ struct MTPDrafterWindowSweepTests {
         subsystem: "com.apple.FoundationModels-MLX", category: "MTPDrafterWindow")
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    @Test(
-        .enabled(if: Qwen38FourBitMTPModel.isLocal),
-        arguments: Qwen38FourBitMTPModel.LoadPath.allCases)
-    func decodeRateByDrafterWindow(path: Qwen38FourBitMTPModel.LoadPath) async throws {
-        guard Self.sweeps(path) else { return }
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func textAt32k() async throws {
+        try await sweep(
+            path: .text, contextTokenCount: DrafterWindowSweep.shortContextTokenCount,
+            windows: DrafterWindowSweep.windowTokenCounts)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func routerAt32k() async throws {
+        try await sweep(
+            path: .router, contextTokenCount: DrafterWindowSweep.shortContextTokenCount,
+            windows: DrafterWindowSweep.windowTokenCounts)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func textAt64k() async throws {
+        try await sweep(
+            path: .text, contextTokenCount: DrafterWindowSweep.middleContextTokenCount,
+            windows: DrafterWindowSweep.windowTokenCounts)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func routerAt64k() async throws {
+        try await sweep(
+            path: .router, contextTokenCount: DrafterWindowSweep.middleContextTokenCount,
+            windows: DrafterWindowSweep.windowTokenCounts)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func textAt100kWideWindows() async throws {
+        try await sweep(
+            path: .text, contextTokenCount: DrafterWindowSweep.longContextTokenCount,
+            windows: DrafterWindowSweep.wideWindowTokenCounts)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func textAt100kNarrowWindows() async throws {
+        try await sweep(
+            path: .text, contextTokenCount: DrafterWindowSweep.longContextTokenCount,
+            windows: DrafterWindowSweep.narrowWindowTokenCounts)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func routerAt100kWideWindows() async throws {
+        try await sweep(
+            path: .router, contextTokenCount: DrafterWindowSweep.longContextTokenCount,
+            windows: DrafterWindowSweep.wideWindowTokenCounts)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func routerAt100kNarrowWindows() async throws {
+        try await sweep(
+            path: .router, contextTokenCount: DrafterWindowSweep.longContextTokenCount,
+            windows: DrafterWindowSweep.narrowWindowTokenCounts)
+    }
+
+    /// Decodes after `contextTokenCount` tokens on `path`, plainly and with MTP over each of
+    /// `windows`, and holds each MTP decode to plain decode.
+    ///
+    /// - Parameters:
+    ///   - path: The load path of the target and its drafter.
+    ///   - contextTokenCount: The tokens of history the prompt holds at least.
+    ///   - windows: The drafter windows, the whole-context drafter (`nil`) first: the reference
+    ///     of each ratio.
+    /// - Throws: When the model does not load, or a decode fails.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func sweep(
+        path: Qwen38FourBitMTPModel.LoadPath, contextTokenCount: Int, windows: [Int?]
+    ) async throws {
+        try #require(windows.first == .some(nil), "the whole-context drafter must run first")
         // Both load paths name one model id, thus one container of the model cache.
         await releaseAllGPUMemory()
         let loaded = try await Qwen38FourBitMTPModel.loadWithDrafter(path: path)
         let tokenizer = await loaded.container.tokenizer
         let speculation = loaded.speculation
-        for contextTokenCount in Self.sweptContextTokenCounts {
-            let history = try Self.history(
-                minimumTokenCount: contextTokenCount,
-                countTokens: { tokenizer.encode(text: $0, addSpecialTokens: false).count })
-            let point = try await loaded.perform { context, drafter in
-                try await Self.measurePoint(
-                    history: history, context: context, drafter: drafter,
-                    speculation: speculation)
-            }
-            try expectPoint(point, label: "\(path) context \(contextTokenCount)")
+        let history = try Self.history(
+            minimumTokenCount: contextTokenCount,
+            countTokens: { tokenizer.encode(text: $0, addSpecialTokens: false).count })
+        let point = try await loaded.perform { context, drafter in
+            try await Self.measurePoint(
+                history: history, context: context, drafter: drafter,
+                speculation: speculation, windows: windows)
         }
+        try expectPoint(point, windows: windows, label: "\(path) context \(contextTokenCount)")
         await loaded.model.evict()
         await releaseAllGPUMemory()
     }
@@ -240,11 +280,11 @@ struct MTPDrafterWindowSweepTests {
     }
 
     /// Renders the agent prompt over `history`, then decodes it plainly and with MTP over each
-    /// drafter window, each from a new cache.
+    /// of `windows`, each from a new cache.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func measurePoint(
         history: String, context: ModelContext, drafter: any MTPDrafterModel,
-        speculation: MLXSpeculativeDecoding
+        speculation: MLXSpeculativeDecoding, windows: [Int?]
     ) async throws -> SweepPoint {
         let input = try await context.processor.prepare(
             input: UserInput(chat: [
@@ -254,7 +294,7 @@ struct MTPDrafterWindowSweepTests {
         let stopTokens = context.configuration.eosTokenIds.union(
             [context.tokenizer.eosTokenId].compactMap { $0 })
         let plain = try decodePlainly(input: input, context: context, stopTokens: stopTokens)
-        let mtp = try sweptWindowTokenCounts.map { window in
+        let mtp = try windows.map { window in
             try decodeWithMTP(
                 input: input, context: context, drafter: drafter, speculation: speculation,
                 parameters: try DrafterWindowSweep.parameters(window: window),
@@ -324,14 +364,14 @@ struct MTPDrafterWindowSweepTests {
 
     /// Logs each MTP decode of `point` against plain decode and against the whole-context drafter,
     /// and holds that each one speculated and wrote plain decode's tokens up to a near tie.
-    private func expectPoint(_ point: SweepPoint, label: String) throws {
+    private func expectPoint(_ point: SweepPoint, windows: [Int?], label: String) throws {
         let full = try #require(point.mtp.first)
         Self.log(
             """
             \(label): prompt \(point.promptTokenCount) tokens, plain \(point.plain.tokens.count) \
             tokens at \(point.plain.tokensPerSecond) tok/s
             """)
-        for (window, decode) in zip(Self.sweptWindowTokenCounts, point.mtp) {
+        for (window, decode) in zip(windows, point.mtp) {
             let windowLabel = "\(label) drafter window \(DrafterWindowSweep.label(of: window))"
             let match = MTPChatTokenMatch(mtp: decode.tokens, plain: point.plain.tokens)
             Self.log(
