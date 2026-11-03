@@ -82,7 +82,8 @@ struct CancelledGenerationDrainTests {
                 options: GenerationOptions(
                     maximumResponseTokens: Self.responseTokenBudget))
         }
-        try await Self.cancelMidDecodeAndExpectDrain(turn, forwardSteps: forwardSteps)
+        try await Self.cancelMidDecodeAndExpectDrain(
+            turn, forwardSteps: forwardSteps, mayEndNormally: false)
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -115,7 +116,11 @@ struct CancelledGenerationDrainTests {
         let turn = Task {
             try await executor.respond(to: request, model: model, streamingInto: channel)
         }
-        try await Self.cancelMidDecodeAndExpectDrain(turn, forwardSteps: forwardSteps)
+        // The cancellation stops the generation task, thus its stream can
+        // end before the loop reads the cancellation again, and the executor
+        // then returns the text it streamed so far.
+        try await Self.cancelMidDecodeAndExpectDrain(
+            turn, forwardSteps: forwardSteps, mayEndNormally: true)
     }
 
     /// Builds the model the drain probes cancel.
@@ -147,11 +152,22 @@ struct CancelledGenerationDrainTests {
     /// passes, cancels the turn, awaits its result, and then asserts
     /// that no forward pass was still running when the turn returned
     /// and that none starts inside ``quiescenceWindow``.
+    ///
+    /// The turn must end with the cancellation. An error of any other
+    /// kind fails the test, because the drain assertions would then run
+    /// on a turn that failed for an unrelated reason.
+    ///
+    /// - Parameters:
+    ///   - turn: the turn to cancel.
+    ///   - forwardSteps: the counter the model writes.
+    ///   - mayEndNormally: whether the turn may also return normally
+    ///     once cancelled, rather than throw the cancellation.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func cancelMidDecodeAndExpectDrain(
-        _ turn: Task<Void, any Error>, forwardSteps: ForwardStepCounter
+        _ turn: Task<Void, any Error>, forwardSteps: ForwardStepCounter,
+        mayEndNormally: Bool
     ) async throws {
-        let started = await waitForForwardSteps(stepsBeforeCancel, of: forwardSteps)
+        let started = try await waitForForwardSteps(stepsBeforeCancel, of: forwardSteps)
         guard started else {
             turn.cancel()
             _ = await turn.result
@@ -165,7 +181,16 @@ struct CancelledGenerationDrainTests {
         }
 
         turn.cancel()
-        _ = await turn.result
+        switch await turn.result {
+        case .success:
+            if !mayEndNormally {
+                Issue.record("The respond finished without the cancellation.")
+            }
+        case .failure(let error):
+            #expect(
+                error is CancellationError,
+                "The respond failed with \(error), which is not the cancellation.")
+        }
 
         let inFlightAtReturn = forwardSteps.inFlight
         let begunAtReturn = forwardSteps.begun
@@ -195,14 +220,16 @@ struct CancelledGenerationDrainTests {
     ///   - counter: the counter the model writes.
     /// - Returns: true when the count was reached, false when
     ///   ``generationStartTimeout`` won.
+    /// - Throws: `CancellationError` when the test task is cancelled.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func waitForForwardSteps(
         _ steps: Int, of counter: ForwardStepCounter
-    ) async -> Bool {
+    ) async throws -> Bool {
         let deadline = ContinuousClock.now.advanced(by: generationStartTimeout)
         while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
             if counter.begun >= steps { return true }
-            try? await Task.sleep(for: pollInterval)
+            try await Task.sleep(for: pollInterval)
         }
         return counter.begun >= steps
     }

@@ -10,9 +10,9 @@ import MLXLMCommon
 
 @Suite("Sampling configuration parameter construction")
 struct SamplingConfigurationParameterTests {
-    @Test func seededTopKPreservesSeedAndFilter() {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-
+    @Test
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func seededTopKPreservesSeedAndFilter() {
         let parameters = MLXLanguageModel.Executor.makeParameters(
             maxTokens: 32,
             requestedTemperature: nil,
@@ -23,9 +23,9 @@ struct SamplingConfigurationParameterTests {
         #expect(parameters.topK == 40)
     }
 
-    @Test func seededNucleusPreservesSeedAndFilter() {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-
+    @Test
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func seededNucleusPreservesSeedAndFilter() {
         let parameters = MLXLanguageModel.Executor.makeParameters(
             maxTokens: 32,
             requestedTemperature: 0.7,
@@ -37,9 +37,9 @@ struct SamplingConfigurationParameterTests {
         #expect(parameters.temperature == Float(0.7))
     }
 
-    @Test func nilConfigurationLeavesSeedAndSamplingDefaultsUnchanged() {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-
+    @Test
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func nilConfigurationLeavesSeedAndSamplingDefaultsUnchanged() {
         let parameters = MLXLanguageModel.Executor.makeParameters(
             maxTokens: 32,
             requestedTemperature: nil,
@@ -51,9 +51,9 @@ struct SamplingConfigurationParameterTests {
         #expect(parameters.topK == 0)
     }
 
-    @Test func explicitZeroTemperatureKeepsSeedButSelectsArgmax() {
-        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-
+    @Test
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func explicitZeroTemperatureKeepsSeedButSelectsArgmax() {
         let parameters = MLXLanguageModel.Executor.makeParameters(
             maxTokens: 32,
             requestedTemperature: 0,
