@@ -1385,7 +1385,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // The empty model type is the named default for a model whose
             // config is missing or undecodable; the resolver then matches no
             // model-type rule. The failure is logged rather than asserted,
-            // because a test model loaded from a bare directory has no config.
+            // because a scripted test model loads from a directory whose
+            // config is empty.
             let modelType: String
             if let configData {
                 do {
