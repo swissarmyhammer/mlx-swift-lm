@@ -991,13 +991,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
             maximumDrafts = blockSize - 1
         }
 
-        guard let state = mainState,
+        guard var state = mainState,
             let lastHidden = state[mtpLastHiddenStatesKey]
         else {
             switchToPassthrough(reason: "main model did not emit drafter state")
             return
         }
-        let sharedKV = state[mtpSharedKVStatesKey] ?? [:]
+        var sharedKV = state[mtpSharedKVStatesKey] ?? [:]
         if drafter.requiresSharedTargetKV, sharedKV["full_attention"] == nil {
             switchToPassthrough(reason: "main model did not emit shared target K/V")
             return
@@ -1081,6 +1081,15 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
             verifyState[mtpVerifyKeepsSnapshotsKey] = nil
             verifyCache = staged.caches
         }
+        // The shared K/V of the round are views of the K/V buffers of the target. While any view
+        // lives, the verify's write into those buffers copies each whole buffer instead of
+        // writing in place: at 100k context tokens about 0.4 GiB for each round. The drafts are
+        // drawn, no target reads the shared K/V it is given, and the verify emits the shared K/V
+        // of the next round, thus the round drops every view it holds before the verify.
+        verifyState[mtpSharedKVStatesKey] = nil
+        state = LMOutput.State()
+        sharedKV = [:]
+        mainState = nil
         let mainResult = mainModel(
             verifyInput[text: .newAxis], cache: verifyCache, state: verifyState)
         mainState = mainResult.state
