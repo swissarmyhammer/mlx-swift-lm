@@ -45,6 +45,27 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         wrappedFlag ?? (idx < (keys?.dim(HeadRowsAxis.row) ?? 0) && offset > idx)
     }
 
+    /// The ring slots a rewind freed. In ring layout the `vacantRows` slots from `idx` on, in
+    /// ring order over `keep ..< storageCapacity`, hold no live row, and the next writes fill
+    /// them first. Zero in temporal layout.
+    private var vacantRows = 0
+
+    /// Whether a ring with a rewind reserve writes a short run of rows in place and rewinds by
+    /// moving its write position back. `false` keeps the linearizing path: a write of several
+    /// rows puts the ring in temporal order and concatenates, and a rewind of a wrapped ring
+    /// linearizes it, so the next write regrows it. Both paths present the same rows and masks
+    /// at the same offsets; tests compare them. Right after a write of `count` rows the
+    /// linearizing path holds up to `count - 1` older rows more, until its next single-row
+    /// write drops them, so its ``maxTrimCount`` reads that much higher meanwhile; the in-place
+    /// ring always holds the window and the reserve.
+    package var writesRingInPlace = true
+
+    /// The rows that hold live entries: in temporal layout the first `idx` rows, in ring layout
+    /// every row but the vacant ones.
+    private var liveRows: Int {
+        wrapped ? (keys?.dim(HeadRowsAxis.row) ?? 0) - vacantRows : idx
+    }
+
     /// Model-native sliding-window caches deliberately keep their architectural
     /// window and do not participate in requested-capacity validation.
     package var capacityOrigin = CapacityOrigin.modelNative
@@ -54,8 +75,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     public override var maxSize: Int? { maxCacheSize }
 
     public override var evictedTokenCount: Int {
-        let retained = wrapped ? (keys?.dim(HeadRowsAxis.row) ?? 0) : idx
-        return Swift.max(0, offset - retained)
+        Swift.max(0, offset - liveRows)
     }
 
     /// Number of leading tokens that are never rotated out of the window.
@@ -92,20 +112,48 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
     private func temporalOrder(_ array: MLXArray) -> MLXArray {
         // Rearrange the cache into temporal order, slicing off the end if unused.
-        // `idx` bounds the live rows: after a post-wrap trim the logical `offset`
+        // `liveRows` bounds the live rows: after a post-wrap trim the logical `offset`
         // exceeds the rows actually held, so the layout question is `wrapped`,
-        // never an `idx`/`offset` comparison.
-        if idx == array.dim(HeadRowsAxis.row) {
-            return array
-        } else if wrapped {
-            return concatenated(
-                [
-                    array[.ellipsis, ..<keep, 0...],
-                    array[.ellipsis, idx..., 0...],
-                    array[.ellipsis, keep ..< idx, 0...],
-                ], axis: HeadRowsAxis.row)
+        // never an `idx`/`offset` comparison. The rows come from `array` itself, so the
+        // buffers reorder one after the other.
+        let end = array.dim(HeadRowsAxis.row)
+        let live = wrapped ? end - vacantRows : idx
+        let prefix = Swift.min(keep, live)
+        return rows(
+            of: array, in: rowRanges(prefix: prefix, recent: live - prefix, end: end))
+    }
+
+    /// The buffer rows, in temporal order, of the first `prefix` rows and the newest `recent`
+    /// live rows after them, with adjacent ranges merged.
+    ///
+    /// In temporal layout the newest rows end at `idx`. In ring layout they end at `idx` too,
+    /// and continue back from `end`, the end of the buffer, once they pass `keep`.
+    private func rowRanges(prefix: Int, recent: Int, end: Int) -> [Range<Int>] {
+        var ranges = [0 ..< prefix]
+        if wrapped {
+            let beforeIndex = Swift.min(recent, idx - keep)
+            let fromEnd = recent - beforeIndex
+            ranges.append((end - fromEnd) ..< end)
+            ranges.append((idx - beforeIndex) ..< idx)
         } else {
-            return array[.ellipsis, ..<idx, 0...]
+            ranges.append((idx - recent) ..< idx)
+        }
+        return ranges.filter { !$0.isEmpty }.reduce(into: []) { merged, range in
+            if let last = merged.last, last.upperBound == range.lowerBound {
+                merged[merged.count - 1] = last.lowerBound ..< range.upperBound
+            } else {
+                merged.append(range)
+            }
+        }
+    }
+
+    /// The rows of `array` in `ranges`, in order: a slice when they are one range.
+    private func rows(of array: MLXArray, in ranges: [Range<Int>]) -> MLXArray {
+        let parts = ranges.map { array[.ellipsis, $0, 0...] }
+        switch parts.count {
+        case 0: return array[.ellipsis, 0 ..< 0, 0...]
+        case 1: return parts[0]
+        default: return concatenated(parts, axis: HeadRowsAxis.row)
         }
     }
 
@@ -139,34 +187,13 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     private func retainedView(tail: Int) -> (MLXArray, MLXArray)? {
         guard let keys = self.keys, let values = self.values else { return nil }
 
-        let available = wrapped ? keys.dim(HeadRowsAxis.row) : idx
+        let available = liveRows
         let prefix = Swift.min(keep, available)
         let requested = Swift.min(Swift.max(tail, 0), available)
         let bound = Swift.max(requested, prefix)
-
-        if !wrapped || idx == available {
-            if prefix == 0 || bound == available {
-                return (
-                    keys[.ellipsis, (available - bound) ..< available, 0...],
-                    values[.ellipsis, (available - bound) ..< available, 0...]
-                )
-            }
-        } else if prefix == 0 && bound <= idx {
-            return (
-                keys[.ellipsis, (idx - bound) ..< idx, 0...],
-                values[.ellipsis, (idx - bound) ..< idx, 0...]
-            )
-        }
-
-        let recent = Swift.min(bound - prefix, idx - prefix)
-        let older = bound - prefix - recent
-        let ranges = [0 ..< prefix, (available - older) ..< available, (idx - recent) ..< idx]
-            .filter { !$0.isEmpty }
-        func view(_ array: MLXArray) -> MLXArray {
-            let parts = ranges.map { array[.ellipsis, $0, 0...] }
-            return parts.count == 1 ? parts[0] : concatenated(parts, axis: HeadRowsAxis.row)
-        }
-        return (view(keys), view(values))
+        let ranges = rowRanges(
+            prefix: prefix, recent: bound - prefix, end: keys.dim(HeadRowsAxis.row))
+        return (rows(of: keys, in: ranges), rows(of: values, in: ranges))
     }
 
     private func updateConcat(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
@@ -189,6 +216,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         offset += keys.dim(HeadRowsAxis.row)
         idx = self.keys!.dim(HeadRowsAxis.row)
         wrappedFlag = false
+        vacantRows = 0
 
         return (self.keys!, self.values!)
     }
@@ -240,6 +268,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         self.values![.ellipsis, idx ..< (idx + S), 0...] = values
         offset += S
         idx += S
+        vacantRows = Swift.max(0, vacantRows - S)
 
         // Return the appropriate cache slice: live rows are bounded by `idx` in
         // temporal layout, while a wrapped ring is fully live.
@@ -252,13 +281,83 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         return (self.keys!, self.values!)
     }
 
+    /// Whether a write of `count` rows goes into the buffer in place.
+    ///
+    /// A ring with a rewind reserve of at least `count - 1` rows holds every row such a write
+    /// presents: the window before it and its own rows. A longer write, as a prefill chunk,
+    /// concatenates, because each of its queries needs a window of its own. So does the first
+    /// wrap of a cache that holds its whole history, so that every row an exact rewind can
+    /// reach stays.
+    private func writesInPlace(count: Int) -> Bool {
+        guard writesRingInPlace, rewindCapacity > 0, count > 1, let keys = self.keys,
+            count <= rewindCapacity + 1, count <= storageCapacity - keep
+        else { return false }
+        if wrapped { return keys.dim(HeadRowsAxis.row) == storageCapacity }
+        return idx + count <= storageCapacity || offset > idx
+    }
+
+    /// Writes several rows into the buffer in place, split at the end of the ring.
+    ///
+    /// A temporal buffer first drops the rows past its live ones and past the capacity, and
+    /// grows to hold the write, up to the capacity. A write that reaches the end of the buffer
+    /// then wraps after the kept prefix, as single-row writes do, and fills vacant slots first.
+    private func updateRingInPlace(keys: MLXArray, values: MLXArray) {
+        let count = keys.dim(HeadRowsAxis.row)
+        if !wrapped {
+            self.keys = temporalBuffer(self.keys!, toWrite: keys)
+            self.values = temporalBuffer(self.values!, toWrite: values)
+            idx = Swift.min(idx, storageCapacity)
+        }
+
+        let end = self.keys!.dim(HeadRowsAxis.row)
+        var written = 0
+        while written < count {
+            if idx == end {
+                idx = keep
+                wrappedFlag = true
+            }
+            let run = Swift.min(count - written, end - idx)
+            self.keys![.ellipsis, idx ..< (idx + run), 0...] =
+                keys[.ellipsis, written ..< (written + run), 0...]
+            self.values![.ellipsis, idx ..< (idx + run), 0...] =
+                values[.ellipsis, written ..< (written + run), 0...]
+            idx += run
+            written += run
+        }
+        offset += count
+        vacantRows = Swift.max(0, vacantRows - count)
+    }
+
+    /// The temporal-layout `buffer` ready for an in-place write of `rows`: an oversized
+    /// prefill buffer keeps its prefix and newest live rows up to the capacity, and a short
+    /// buffer grows by at least `step` rows to hold the write, up to the capacity.
+    private func temporalBuffer(_ buffer: MLXArray, toWrite rows: MLXArray) -> MLXArray {
+        var buffer = buffer
+        if buffer.dim(HeadRowsAxis.row) > storageCapacity {
+            buffer = trim(trimSize: idx - storageCapacity, buffer[.ellipsis, ..<idx, 0...])
+        }
+        let filled = buffer.dim(HeadRowsAxis.row)
+        let position = Swift.min(idx, storageCapacity)
+        let needed = position + rows.dim(HeadRowsAxis.row)
+        guard needed > filled, filled < storageCapacity else { return buffer }
+        let newSize = Swift.min(storageCapacity, Swift.max(needed, filled + step)) - filled
+        let zeros = MLXArray.zeros(
+            [buffer.dim(0), buffer.dim(1), newSize, rows.dim(HeadRowsAxis.width)],
+            dtype: rows.dtype)
+        return concatenated([buffer, zeros], axis: HeadRowsAxis.row)
+    }
+
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         wrappedFlag = wrapped
         let count = keys.dim(HeadRowsAxis.row)
         if rewindCapacity > 0, count == 0 {
             return logicalView(tail: maxCacheSize) ?? (keys, values)
         }
-        let live = wrapped ? (self.keys?.dim(HeadRowsAxis.row) ?? 0) : idx
+        let live = liveRows
+        if writesInPlace(count: count) {
+            updateRingInPlace(keys: keys, values: values)
+            return retainedView(tail: Swift.min(live, maxCacheSize - 1) + count)!
+        }
         let result =
             if count == 1 {
                 updateInPlace(keys: keys, values: values)
@@ -275,7 +374,10 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     public override var state: [MLXArray] {
         get {
             guard let keys = self.keys, let values = self.values else { return [] }
-            if !wrapped, idx < keys.dim(HeadRowsAxis.row) {
+            if wrapped, vacantRows > 0 {
+                // A rewound ring saves the temporal layout a linearizing rewind leaves.
+                return [temporalOrder(keys), temporalOrder(values)]
+            } else if !wrapped, idx < keys.dim(HeadRowsAxis.row) {
                 return [
                     keys[.ellipsis, ..<idx, 0...],
                     values[.ellipsis, ..<idx, 0...],
@@ -297,9 +399,12 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
     public override var metaState: [String] {
         get {
+            // A rewound ring saves as the temporal layout its state holds.
+            let linearized = wrapped && vacantRows > 0
             var metadata = [
-                String(keep), String(maxCacheSize), String(step), String(offset), String(idx),
-                capacityOrigin.rawValue, String(wrapped),
+                String(keep), String(maxCacheSize), String(step), String(offset),
+                String(linearized ? liveRows : idx), capacityOrigin.rawValue,
+                String(wrapped && !linearized),
             ]
             if rewindCapacity > 0 { metadata.append(String(rewindCapacity)) }
             return metadata
@@ -338,6 +443,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             self.step = stepVal
             self.offset = offsetVal
             self.idx = idxVal
+            self.vacantRows = 0
             if newValue.count > SavedMetaStateIndex.rotatingCapacityOrigin {
                 let originValue = newValue[SavedMetaStateIndex.rotatingCapacityOrigin]
                 guard let origin = CapacityOrigin(rawValue: originValue) else {
@@ -366,7 +472,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     }
 
     public override var maxTrimCount: Int {
-        let live = wrapped ? (keys?.dim(HeadRowsAxis.row) ?? 0) : idx
+        let live = liveRows
         guard live <= offset else { return 0 }
         return live == offset ? offset : Swift.max(0, live - maxCacheSize)
     }
@@ -374,7 +480,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     public override func isTrimmable(after positions: Int) -> Bool {
         // This conservative predicate requires the whole prefix. Counted rewinds
         // can also use the limited history described by `maxTrimCount`.
-        let live = wrapped ? (keys?.dim(HeadRowsAxis.row) ?? 0) : idx
+        let live = liveRows
         guard keys == nil || live == offset else { return false }
         return positions >= 0 && offset >= 0 && offset < storageCapacity
             && positions < storageCapacity - offset
@@ -382,24 +488,38 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
     /// Rewind the newest `n` positions.
     ///
-    /// Before the ring wraps this is exact bookkeeping. After it wraps, the ring is
-    /// linearized and the newest rows are cut: the cache stays consistent and the
-    /// logical offset rewinds, but rows the rewound writes overwrote at the old edge
-    /// of the window cannot come back, so the window is up to `n` rows short until
-    /// it refills. An exact rewind requires `n <= maxTrimCount`; a configured
-    /// reserve extends that limit beyond rotation.
+    /// Before the ring wraps this is exact bookkeeping. After it wraps, a ring with a rewind
+    /// reserve moves its write position back, across the wrap when it must, and its next
+    /// writes fill the freed slots first; a ring without one is linearized and its newest
+    /// rows are cut. Either way the cache stays consistent and the logical offset rewinds,
+    /// but rows the rewound writes overwrote at the old edge of the window cannot come back,
+    /// so the window is up to `n` rows short until it refills. An exact rewind requires
+    /// `n <= maxTrimCount`; a configured reserve extends that limit beyond rotation.
     /// Once older rows have been evicted, trimming stops at the pinned `keep` prefix.
     @discardableResult
     public override func trim(_ n: Int) -> Int {
         guard n > 0, let keys, let values else { return 0 }
         wrappedFlag = wrapped
-        let live = wrapped ? keys.dim(HeadRowsAxis.row) : idx
+        let live = liveRows
         // A gap between history and live rows means eviction has occurred. Preserve
         // the pinned prefix regardless of layout, including after repeated trims.
         // Without a gap, an exact rewind can still remove any of the original rows.
         let minimum = offset > live ? Swift.min(keep, live) : 0
         let trimmed = Swift.min(n, live - minimum)
         guard trimmed > 0 else { return 0 }
+        if wrapped, writesRingInPlace, rewindCapacity > 0,
+            keys.dim(HeadRowsAxis.row) == storageCapacity
+        {
+            // The newest rows end at `idx`, and continue back from the end of the ring once
+            // they pass `keep`.
+            let beforeIndex = idx - keep
+            idx =
+                trimmed <= beforeIndex
+                ? idx - trimmed : storageCapacity - (trimmed - beforeIndex)
+            vacantRows += trimmed
+            offset -= trimmed
+            return trimmed
+        }
         let bound = live - trimmed
 
         if wrapped || keys.dim(HeadRowsAxis.row) > storageCapacity {
@@ -412,6 +532,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         idx = bound
         offset -= trimmed
         wrappedFlag = false
+        vacantRows = 0
         return trimmed
     }
 
@@ -429,8 +550,8 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             // in temporal layout that is the live rows (`idx`), which fall below the
             // logical offset after a post-wrap trim.
             let actualWindowSize = windowSize ?? maxCacheSize
-            let liveRows = wrapped ? maxCacheSize : idx
-            let cappedOffset = min(maxCacheSize - 1, liveRows)
+            let presented = wrapped && vacantRows == 0 ? maxCacheSize : liveRows
+            let cappedOffset = min(maxCacheSize - 1, presented)
 
             // Decide if we need an array mask
             if cappedOffset + n > actualWindowSize || returnArray {
@@ -448,7 +569,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             }
 
             if rewindCapacity > 0 {
-                let live = wrapped ? storageCapacity : idx
+                let live = wrapped && vacantRows == 0 ? storageCapacity : liveRows
                 let count = Swift.min(maxCacheSize - 1, live) + 1
                 guard count > windowSize else { return .none }
                 return .array(MLXArray(0 ..< count) .>= (count - windowSize))
@@ -498,6 +619,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
     public override func copy() -> any KVCache {
         let new = RotatingKVCache(maxSize: maxCacheSize, keep: keep, step: step)
+        new.writesRingInPlace = writesRingInPlace
         let s = self.state
         if !s.isEmpty {
             new.state = s.map { $0[.ellipsis] }

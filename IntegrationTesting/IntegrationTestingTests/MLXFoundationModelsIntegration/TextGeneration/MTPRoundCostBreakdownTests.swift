@@ -45,8 +45,18 @@ private struct DrafterWindowCost: Sendable {
     /// more chained step for each block size after it.
     let draft: [Double]
 
+    /// A drafter round of the whole block for each accepted draft count from zero: the
+    /// proposal, then the commit that rewinds its tentative entries and appends the accepted
+    /// drafts and the final token, as the iterator's round does.
+    let round: [Double]
+
     /// The cost of each chained drafter step after the first draft.
     var chainedSteps: [Double] { zip(draft.dropFirst(), draft).map { $0 - $1 } }
+
+    /// The commit of each round of ``round``: the round less the proposal of the whole block.
+    /// It holds the rewind of the proposal, the drafter forward over the committed rows, and,
+    /// with a window, each copy of the drafter ring.
+    var commit: [Double] { round.map { $0 - (draft.last ?? 0) } }
 }
 
 /// The cost of the parts of one MTP round at one context length, in milliseconds.
@@ -87,7 +97,9 @@ private struct RoundCost: Sendable {
                 \(DrafterWindowSweep.label(of: drafterCost.window)), drafter state \
                 \(drafterCost.entryCount) entries: drafter proposal by block size 2... \
                 [\(format(drafterCost.draft))] ms, chained steps \
-                [\(format(drafterCost.chainedSteps))] ms
+                [\(format(drafterCost.chainedSteps))] ms; drafter round of the whole block by \
+                accepted drafts 0... [\(format(drafterCost.round))] ms, its commit and rewind \
+                [\(format(drafterCost.commit))] ms
                 """
             }
     }
@@ -193,7 +205,8 @@ struct MTPRoundCostBreakdownTests {
         let prefilled = try prefill(
             target: target, drafter: drafter, context: context, cache: cache,
             drafterStates: &drafterStates)
-        let rewindDepth = (target as? any SpeculativeCacheRewindModel)?
+        let rewindDepth =
+            (target as? any SpeculativeCacheRewindModel)?
             .maximumNativeTargetCacheRewind ?? 0
         let keepsSnapshots = rewindDepth >= blockSize - 1
         let blockSizes = Array(smallestBlockSize ... blockSize)
@@ -220,6 +233,14 @@ struct MTPRoundCostBreakdownTests {
                             draftMilliseconds(
                                 drafter, target: target, prefilled: prefilled, cache: cache,
                                 blockSize: size, state: &drafterStates[index])
+                        }
+                    },
+                    round: (0 ..< blockSize).map { acceptedCount in
+                        median {
+                            roundMilliseconds(
+                                drafter, target: target, prefilled: prefilled, cache: cache,
+                                blockSize: blockSize, acceptedCount: acceptedCount,
+                                state: &drafterStates[index])
                         }
                     })
             },
@@ -317,6 +338,38 @@ struct MTPRoundCostBreakdownTests {
         return elapsed
     }
 
+    /// The milliseconds of one drafter round of a block of `blockSize` tokens: the proposal, then
+    /// the commit of `acceptedCount` drafts and the final token, the drafter cache evaluated.
+    ///
+    /// The committed rows stay, so the drafter state grows by `acceptedCount + 1` entries each
+    /// round, as it does in decode; a few hundred entries are noise next to the context.
+    private static func roundMilliseconds(
+        _ drafter: any ResumableMTPDrafterModel, target: any TargetModel, prefilled: Prefilled,
+        cache: [KVCache], blockSize: Int, acceptedCount: Int, state: inout MTPDrafterState
+    ) -> Double {
+        let queryOffset = cache.map(\.offset).max() ?? 0
+        let finalToken = MLXArray([Int32(prefilled.bonus)])
+        let targetHidden = repeated(prefilled.lastHidden, count: acceptedCount + 1, axis: 1)
+        let positionDeltas = prefilled.state?[mtpPositionDeltasKey]
+        eval(targetHidden)
+        return milliseconds {
+            let drafts = drafter.draftBlock(
+                target: target, lastToken: finalToken, lastHidden: prefilled.lastHidden,
+                sharedKV: [:], positionDeltas: positionDeltas, queryOffset: queryOffset,
+                blockSize: blockSize, state: &state, sampler: ArgMaxSampler())
+            drafter.commitDrafterState(
+                target: target, targetHidden: targetHidden, draftTokens: drafts,
+                acceptedCount: acceptedCount, finalToken: finalToken,
+                positionDeltas: positionDeltas, state: &state, sampler: ArgMaxSampler())
+            // The buffers themselves: a saved state of a rewound ring would copy it.
+            eval(
+                state.cache.flatMap { $0.innerState() }
+                    + [state.seedToken, state.seedHidden, state.seedTopProbability].compactMap {
+                        $0
+                    })
+        }
+    }
+
     /// The wall milliseconds of `body`, with a GPU sync before and after it.
     private static func milliseconds<Result>(_ body: () -> Result) -> Double {
         GPUWallTime.milliseconds(body)
@@ -329,7 +382,8 @@ struct MTPRoundCostBreakdownTests {
 
     /// Writes `measurement` under the measurement prefix.
     private static func log(_ measurement: String) {
-        measurementLog.info("\(measurementPrefix, privacy: .public) \(measurement, privacy: .public)")
+        measurementLog.info(
+            "\(measurementPrefix, privacy: .public) \(measurement, privacy: .public)")
     }
 }
 
