@@ -381,7 +381,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         try self.init(
             input: input,
             mainModel: mainModel,
-            drafter: drafter,
+            compatibleDrafter: drafter,
             mainCacheStorage: KVCacheStorage(
                 mainCache ?? (try mainModel.newCache(parameters: parameters)), plan: kvCachePlan),
             mainState: mainState,
@@ -414,7 +414,38 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         components: GenerationComponents = .init()
     ) throws {
         try drafter.validateCompatibility(with: mainModel)
+        try self.init(
+            input: input,
+            mainModel: mainModel,
+            compatibleDrafter: drafter,
+            mainCacheStorage: mainCacheStorage,
+            mainState: mainState,
+            mtpContinuation: mtpContinuation,
+            parameters: parameters,
+            blockSize: blockSize,
+            minimumDraftProbability: minimumDraftProbability,
+            components: components)
+    }
 
+    /// The initializer the two other initializers delegate to, after each has checked
+    /// that `compatibleDrafter` can draft for `mainModel`, so the check runs once.
+    ///
+    /// - Parameters: As
+    ///   ``init(input:mainModel:drafter:mainCacheStorage:mainState:mtpContinuation:parameters:blockSize:minimumDraftProbability:components:)``
+    ///   takes them, the drafter as `compatibleDrafter`.
+    /// - Throws: As that initializer throws, apart from the compatibility check.
+    private init(
+        input: LMInput,
+        mainModel: any LanguageModel,
+        compatibleDrafter drafter: any MTPDrafterModel,
+        mainCacheStorage: KVCacheStorage,
+        mainState: LMOutput.State?,
+        mtpContinuation: MTPDrafterContinuation?,
+        parameters: GenerateParameters,
+        blockSize: Int,
+        minimumDraftProbability: Float,
+        components: GenerationComponents
+    ) throws {
         guard blockSize >= Self.minimumBlockSize else {
             throw KVCacheError(
                 message:
@@ -742,7 +773,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         }
 
         if let targetHidden = mainState?[mtpLastHiddenStatesKey], targetHidden.dim(1) > 0 {
-            targetBoundaryHidden = targetHidden[0..., (-1)..., 0...]
+            targetBoundaryHidden = targetHidden.lastRow
         }
 
         let continuation = continuationToResume
@@ -1028,7 +1059,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         if let idx = lastRoundAccepted {
             bonusSlotHidden = lastHidden.row(at: idx)
         } else {
-            bonusSlotHidden = lastHidden[0..., (-1)..., 0...]
+            bonusSlotHidden = lastHidden.lastRow
         }
 
         let queryOffset =
