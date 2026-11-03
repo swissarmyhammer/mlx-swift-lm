@@ -11,7 +11,9 @@
 //
 // To run part of the sweep, `MTP_DRAFTER_WINDOW_SWEEP_CONTEXTS` names the contexts (comma
 // separated token counts of the sweep) and `MTP_DRAFTER_WINDOW_SWEEP_PATHS` the load paths
-// (`text`, `router`); `xcodebuild` passes them to the test runner with the `TEST_RUNNER_` prefix.
+// (`text`, `router`), and `MTP_DRAFTER_WINDOW_SWEEP_WINDOWS` the drafter windows (token counts
+// of the sweep, or `full`); the whole-context drafter always runs first, as the reference of each
+// ratio. `xcodebuild` passes them to the test runner with the `TEST_RUNNER_` prefix.
 //
 // Every measurement line goes to the unified log under the `MTP DRAFTER WINDOW:` prefix:
 // `log show --info --start <time> --predicate 'subsystem == "com.apple.FoundationModels-MLX" AND category == "MTPDrafterWindow"'`
@@ -154,6 +156,20 @@ struct MTPDrafterWindowSweepTests {
         return DrafterWindowSweep.contextTokenCounts.filter { names.contains("\($0)") }
     }
 
+    /// The variable that names the drafter windows of a partial sweep, comma separated.
+    private static let windowsVariable = "MTP_DRAFTER_WINDOW_SWEEP_WINDOWS"
+
+    /// The drafter windows this run sweeps: the whole context, then the windows
+    /// ``windowsVariable`` names, or all of them.
+    private static var sweptWindowTokenCounts: [Int?] {
+        guard let names = environmentList(windowsVariable) else {
+            return DrafterWindowSweep.windowTokenCounts
+        }
+        return DrafterWindowSweep.windowTokenCounts.filter {
+            $0 == nil || names.contains(DrafterWindowSweep.label(of: $0))
+        }
+    }
+
     /// Whether this run sweeps `path`: when ``pathsVariable`` names it, or is unset.
     private static func sweeps(_ path: Qwen38FourBitMTPModel.LoadPath) -> Bool {
         environmentList(pathsVariable)?.contains(path.rawValue) ?? true
@@ -238,7 +254,7 @@ struct MTPDrafterWindowSweepTests {
         let stopTokens = context.configuration.eosTokenIds.union(
             [context.tokenizer.eosTokenId].compactMap { $0 })
         let plain = try decodePlainly(input: input, context: context, stopTokens: stopTokens)
-        let mtp = try DrafterWindowSweep.windowTokenCounts.map { window in
+        let mtp = try sweptWindowTokenCounts.map { window in
             try decodeWithMTP(
                 input: input, context: context, drafter: drafter, speculation: speculation,
                 parameters: try DrafterWindowSweep.parameters(window: window),
@@ -315,7 +331,7 @@ struct MTPDrafterWindowSweepTests {
             \(label): prompt \(point.promptTokenCount) tokens, plain \(point.plain.tokens.count) \
             tokens at \(point.plain.tokensPerSecond) tok/s
             """)
-        for (window, decode) in zip(DrafterWindowSweep.windowTokenCounts, point.mtp) {
+        for (window, decode) in zip(Self.sweptWindowTokenCounts, point.mtp) {
             let windowLabel = "\(label) drafter window \(DrafterWindowSweep.label(of: window))"
             let match = MTPChatTokenMatch(mtp: decode.tokens, plain: point.plain.tokens)
             Self.log(
