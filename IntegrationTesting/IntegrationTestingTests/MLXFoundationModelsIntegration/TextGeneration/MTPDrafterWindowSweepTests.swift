@@ -9,6 +9,10 @@
 // every window writes plain decode's tokens up to a near tie. Run it in Release:
 // `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS,arch=arm64' -configuration Release ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES -only-testing:IntegrationTestingTests/MTPDrafterWindowSweepTests`
 //
+// To run part of the sweep, `MTP_DRAFTER_WINDOW_SWEEP_CONTEXTS` names the contexts (comma
+// separated token counts of the sweep) and `MTP_DRAFTER_WINDOW_SWEEP_PATHS` the load paths
+// (`text`, `router`); `xcodebuild` passes them to the test runner with the `TEST_RUNNER_` prefix.
+//
 // Every measurement line goes to the unified log under the `MTP DRAFTER WINDOW:` prefix:
 // `log show --info --start <time> --predicate 'subsystem == "com.apple.FoundationModels-MLX" AND category == "MTPDrafterWindow"'`
 
@@ -129,6 +133,32 @@ struct MTPDrafterWindowSweepTests {
     /// The milliseconds of one second.
     static let millisecondsPerSecond = 1_000.0
 
+    /// The variable that names the contexts of a partial sweep, comma separated.
+    private static let contextsVariable = "MTP_DRAFTER_WINDOW_SWEEP_CONTEXTS"
+
+    /// The variable that names the load paths of a partial sweep, comma separated.
+    private static let pathsVariable = "MTP_DRAFTER_WINDOW_SWEEP_PATHS"
+
+    /// The comma-separated values of the environment variable `name`, or `nil` when it is unset.
+    private static func environmentList(_ name: String) -> [String]? {
+        ProcessInfo.processInfo.environment[name].map {
+            $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+    }
+
+    /// The contexts this run sweeps: those ``contextsVariable`` names, or all of them.
+    private static var sweptContextTokenCounts: [Int] {
+        guard let names = environmentList(contextsVariable) else {
+            return DrafterWindowSweep.contextTokenCounts
+        }
+        return DrafterWindowSweep.contextTokenCounts.filter { names.contains("\($0)") }
+    }
+
+    /// Whether this run sweeps `path`: when ``pathsVariable`` names it, or is unset.
+    private static func sweeps(_ path: Qwen38FourBitMTPModel.LoadPath) -> Bool {
+        environmentList(pathsVariable)?.contains(path.rawValue) ?? true
+    }
+
     /// The tokens each decode writes at most.
     private static let decodeTokenCount = 1_024
 
@@ -150,12 +180,13 @@ struct MTPDrafterWindowSweepTests {
         .enabled(if: Qwen38FourBitMTPModel.isLocal),
         arguments: Qwen38FourBitMTPModel.LoadPath.allCases)
     func decodeRateByDrafterWindow(path: Qwen38FourBitMTPModel.LoadPath) async throws {
+        guard Self.sweeps(path) else { return }
         // Both load paths name one model id, thus one container of the model cache.
         await releaseAllGPUMemory()
         let loaded = try await Qwen38FourBitMTPModel.loadWithDrafter(path: path)
         let tokenizer = await loaded.container.tokenizer
         let speculation = loaded.speculation
-        for contextTokenCount in DrafterWindowSweep.contextTokenCounts {
+        for contextTokenCount in Self.sweptContextTokenCounts {
             let history = try Self.history(
                 minimumTokenCount: contextTokenCount,
                 countTokens: { tokenizer.encode(text: $0, addSpecialTokens: false).count })
@@ -313,7 +344,8 @@ struct MTPDrafterWindowSweepTests {
 
     /// Writes `measurement` under the measurement prefix.
     private static func log(_ measurement: String) {
-        measurementLog.info("\(measurementPrefix, privacy: .public) \(measurement, privacy: .public)")
+        measurementLog.info(
+            "\(measurementPrefix, privacy: .public) \(measurement, privacy: .public)")
     }
 }
 
