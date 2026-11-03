@@ -1,10 +1,12 @@
 // Copyright © 2026 Apple Inc.
 //
 // One schema turn of Qwen3.8-27B-4bit with its 4-bit MTP head after 8k tokens of an agent
-// transcript, on the FoundationModels router's load path, beside the same turn without the head.
-// The turn speculates, reports no fallback, and writes the plain tokens up to a near tie. The text
-// path's turn of this prompt parts from plain at a gap of 0.125, past the near tie this suite
-// allows, so ``MTPGuidedRouterPathTests`` holds the router path only. Run it in Release:
+// transcript, on the text load path and on the FoundationModels router's load path, beside the
+// same turn without the head. The turn speculates, reports no fallback, and writes the plain tokens
+// up to a near tie: plain's two best constrained logits lie within
+// ``MTPChatTokenMatch/nearTieLogitTolerance`` of each other where the two first part. A batched
+// verify row and a one-token forward over the same cache round the bf16 logits apart by such gaps,
+// under the same grammar mask. Run it in Release:
 // `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS,arch=arm64' -configuration Release ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES -only-testing:IntegrationTestingTests/MTPGuidedRouterPathTests`
 //
 // The measurement line goes to the unified log under the `MTP GUIDED ROUTER:` prefix:
@@ -12,6 +14,7 @@
 
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
+import BenchmarkHelpers
 import Foundation
 import FoundationModels
 import MLX
@@ -51,7 +54,7 @@ private struct GuidedRouterInventory {
     var items: [GuidedRouterItem]
 }
 
-/// A schema turn on the router's load path speculates, and writes the plain tokens.
+/// A schema turn on each load path speculates, and writes the plain tokens up to a near tie.
 @Suite(.serialized, .timeLimit(.minutes(guidedRouterTimeLimitMinutes)))
 struct MTPGuidedRouterPathTests {
 
@@ -63,10 +66,6 @@ struct MTPGuidedRouterPathTests {
 
     /// The most history rounds the context may draw on.
     private static let maximumHistoryRoundCount = 256
-
-    /// The widest gap between the two best constrained logits of plain decoding at which the MTP
-    /// output may first part from the plain output.
-    private static let nearTieLogitGap: Float = 1e-3
 
     /// The request after the transcript.
     private static let request = """
@@ -96,7 +95,7 @@ struct MTPGuidedRouterPathTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test(
         .enabled(if: Qwen38FourBitMTPModel.isLocal),
-        arguments: [Qwen38FourBitMTPModel.LoadPath.router])
+        arguments: Qwen38FourBitMTPModel.LoadPath.allCases)
     func aSchemaTurnSpeculatesToThePlainTokens(path: Qwen38FourBitMTPModel.LoadPath) async throws {
         await releaseAllGPUMemory()
         let plainModel = try Qwen38FourBitMTPModel.make(speculates: false, guides: true, path: path)
@@ -117,7 +116,8 @@ struct MTPGuidedRouterPathTests {
         #expect(speculative.sink.draftedTokenCount > 0)
         #expect(speculative.sink.speculationFallbacks.isEmpty)
         #expect(
-            divergence.map { ($0.margin ?? .infinity) < Self.nearTieLogitGap } ?? true,
+            divergence.map { ($0.margin ?? .infinity) <= MTPChatTokenMatch.nearTieLogitTolerance }
+                ?? true,
             "MTP parted from plain away from a near tie: \(String(describing: divergence))")
 
         await speculativeModel.evict()
@@ -182,7 +182,9 @@ struct MTPGuidedRouterPathTests {
         path: Qwen38FourBitMTPModel.LoadPath, plain: Turn, speculative: Turn,
         divergence: (index: Int, margin: Float?)?
     ) {
-        let nearTies = plain.sink.decisionMargins.filter { $0 < nearTieLogitGap }.count
+        let nearTies = plain.sink.decisionMargins.filter {
+            $0 <= MTPChatTokenMatch.nearTieLogitTolerance
+        }.count
         let line = """
             \(measurementPrefix) \(path) plain \(plain.sink.generatedTokenCount) tokens in \
             \(plain.seconds) s (\(plain.tokensPerSecond) tok/s); MTP \
