@@ -24,6 +24,9 @@ extension MLXLanguageModel.Executor {
     /// The identifier of one transcript entry of a turn. `Kind` names which
     /// entry it is, thus a response, a reasoning and a tool-calls entry
     /// identifier cannot be swapped without a compile error.
+    ///
+    /// `Kind` is a phantom type: no value of it is held, so periphery sees it unused.
+    // periphery:ignore
     struct EntryID<Kind>: Sendable {
         /// The identifier the channel events carry.
         let rawValue: String
