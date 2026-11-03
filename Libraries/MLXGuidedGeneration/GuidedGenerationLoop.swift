@@ -240,7 +240,7 @@ public enum GuidedGenerationLoop {
     /// work on the sampling critical path.
     ///
     /// - Parameters:
-    ///   - logits: Raw model output logits (shape: [batch, seq, vocab]).
+    ///   - rawLogits: Raw model output logits (shape: [batch, seq, vocab]).
     ///   - maskArray: Prebuilt additive grammar mask (length == logit dim;
     ///     0.0 allowed, -inf disallowed), or nil when the grammar forces all
     ///     tokens (no mask to apply).
