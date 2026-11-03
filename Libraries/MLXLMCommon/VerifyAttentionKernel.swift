@@ -169,21 +169,49 @@ package enum VerifyAttentionKernel {
     ///   - scale: The factor each score takes before the softmax.
     ///   - causal: True when query `t` reads only the keys up to key
     ///     `keys - tokens + t`, the causal mask of MLX.
+    ///   - blocks: The block count; ``blockCount(keys:)`` when it is not
+    ///     given.
     /// - Returns: The attention output, of the shape and the dtype of
     ///   `queries`.
     static func attention(
-        queries: MLXArray, keys: MLXArray, values: MLXArray, scale: Float, causal: Bool
+        queries: MLXArray, keys: MLXArray, values: MLXArray, scale: Float, causal: Bool,
+        blocks: Int? = nil
     ) -> MLXArray {
+        DecodeAttentionKernel.combine(
+            blockResults(
+                queries: queries, keys: keys, values: values, scale: scale, causal: causal,
+                blocks: blocks),
+            like: queries)
+    }
+
+    /// The block pass alone: the block results that the combine pass of
+    /// ``DecodeAttentionKernel`` reads.
+    ///
+    /// - Parameters:
+    ///   - queries: The queries, shape `(batch, queryHeads, tokens, headDim)`.
+    ///   - keys: The keys, shape `(batch, kvHeads, keys, headDim)`.
+    ///   - values: The values, of the shape of `keys`.
+    ///   - scale: The factor each score takes before the softmax.
+    ///   - causal: True for the causal mask of MLX.
+    ///   - blocks: The block count; ``blockCount(keys:)`` when it is not
+    ///     given.
+    /// - Returns: The weighted values, shape `(rows, blocks, headDim)`, the
+    ///   largest scores and the weight sums, shape `(rows, blocks)`, in
+    ///   float32.
+    static func blockResults(
+        queries: MLXArray, keys: MLXArray, values: MLXArray, scale: Float, causal: Bool,
+        blocks: Int? = nil
+    ) -> [MLXArray] {
         precondition(
             canRun(queries: queries, keys: keys, values: values, mask: causal ? .causal : .none),
             "the verify attention kernel cannot read queries \(queries.shape) "
                 + "over keys \(keys.shape)")
         let keyCount = keys.dim(HeadRowsAxis.row)
-        let blocks = blockCount(keys: keyCount)
+        let blocks = blocks ?? blockCount(keys: keyCount)
         let rows =
             queries.dim(HeadRowsAxis.batch) * queries.dim(HeadRowsAxis.head)
             * queries.dim(HeadRowsAxis.row)
-        let results = PrefillAttentionKernel.run(
+        return PrefillAttentionKernel.run(
             blockKernel,
             inputs: [
                 queries, keys, values, MLXArray([scale]),
@@ -198,7 +226,6 @@ package enum VerifyAttentionKernel {
                 [rows, blocks, queries.dim(HeadRowsAxis.width)], [rows, blocks], [rows, blocks],
             ],
             outputDTypes: [.float32, .float32, .float32])
-        return DecodeAttentionKernel.combine(results, like: queries)
     }
 
     /// The scaled dot-product attention of a call: these kernels when they
