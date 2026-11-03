@@ -4,6 +4,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MLXLMTestSupport
 import MLXNN
 import MLXOptimizers
 import MLXScriptedLM
@@ -573,13 +574,12 @@ public class EvalTests: XCTestCase {
         @Sendable func draws(seed: UInt64, ambientSeed: ((Int) -> UInt64)?) -> [Int] {
             let logits = MLXArray.ones([1, 50])
             let sampler = CategoricalSampler(temperature: 1.0, seed: seed)
-            return (0 ..< samplesPerTask).map { sampleId in
-                guard let ambientSeed else {
-                    return sampler.sample(logits: logits).item(Int.self)
-                }
-                return withRandomState(MLXRandom.RandomState(seed: ambientSeed(sampleId))) {
-                    sampler.sample(logits: logits)
-                }.item(Int.self)
+            guard let ambientSeed else {
+                return sampledTokens(sampler, logits: logits, count: samplesPerTask)
+            }
+            return sampledTokens(sampler, logits: logits, count: samplesPerTask) {
+                sampleId, sample in
+                withRandomState(MLXRandom.RandomState(seed: ambientSeed(sampleId))) { sample() }
             }
         }
 

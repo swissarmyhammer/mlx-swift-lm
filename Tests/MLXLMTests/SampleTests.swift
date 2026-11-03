@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXLMTestSupport
 import XCTest
 import os
 
@@ -323,13 +324,8 @@ public class SampleTests: XCTestCase {
         log(MLXArray([0.25, 0.25, 0.25, 0.25] as [Float]))[.newAxis, .ellipsis]
     }
 
-    /// The tokens of `count` successive draws of `sampler` from `logits`.
-    private func draws(_ sampler: any LogitSampler, logits: MLXArray, count: Int) -> [Int] {
-        (0 ..< count).map { _ in sampler.sample(logits: logits).item(Int.self) }
-    }
-
     private func drawTopP(seed: UInt64?, draws count: Int) -> [Int] {
-        draws(TopPSampler(temperature: 1.0, seed: seed), logits: flatLogits(), count: count)
+        sampledTokens(TopPSampler(temperature: 1.0, seed: seed), logits: flatLogits(), count: count)
     }
 
     func testTopPSamplerSameSeedIsReproducible() {
@@ -345,7 +341,8 @@ public class SampleTests: XCTestCase {
     func testCategoricalSamplerSameSeedIsReproducible() {
         let logits = flatLogits()
         func draw(seed: UInt64) -> [Int] {
-            draws(CategoricalSampler(temperature: 1.0, seed: seed), logits: logits, count: 24)
+            sampledTokens(
+                CategoricalSampler(temperature: 1.0, seed: seed), logits: logits, count: 24)
         }
         XCTAssertEqual(draw(seed: 7), draw(seed: 7))
     }
@@ -353,7 +350,7 @@ public class SampleTests: XCTestCase {
     func testGenerateParametersThreadsSeedToSampler() {
         let logits = flatLogits()
         func draw() -> [Int] {
-            draws(
+            sampledTokens(
                 GenerateParameters(temperature: 1.0, topK: 4, seed: 99).makeSampler(),
                 logits: logits, count: 24)
         }
