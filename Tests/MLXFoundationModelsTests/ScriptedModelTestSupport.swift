@@ -104,6 +104,70 @@ final class ForwardStepCounter: Sendable {
     }
 }
 
+/// The shape of what the scripted models and the prompt-cache fixtures write
+/// into a cache.
+enum ScriptedCacheShape {
+
+    /// The key/value heads of each cache layer. One head is enough: the
+    /// caches only have to count the positions the model saw.
+    static let headCount = 1
+
+    /// The width of each key and value written into a cache.
+    static let headDimension = 1
+
+    /// The shape of the state written into each recurrent layer. One value is
+    /// enough: the caches only have to count the positions the model saw.
+    static let recurrentStateShape = [1, 1]
+}
+
+/// Writes `keyValues` as the keys and the values of each attention cache of
+/// `caches`, and a new zero state into each recurrent cache, thus the offset of
+/// each cache moves past the tokens of `keyValues`.
+///
+/// - Parameters:
+///   - keyValues: the keys and values, of shape
+///     `(1, ScriptedCacheShape.headCount, tokenCount, ScriptedCacheShape.headDimension)`.
+///   - caches: the caches to write into.
+/// - Returns: all the keys that the first attention cache holds after the
+///   write, or nil when `caches` holds no attention cache.
+@discardableResult
+func writeScriptedCaches(keyValues: MLXArray, into caches: [KVCache]) -> MLXArray? {
+    let tokenCount = keyValues.dim(2)
+    var firstKeys: MLXArray?
+    for cache in caches {
+        if let recurrent = cache as? MambaCache {
+            // A linear layer puts new state arrays in its slots and does
+            // not write into the old ones, as Qwen 3.5 does.
+            recurrent[0] = MLXArray.zeros(ScriptedCacheShape.recurrentStateShape)
+            recurrent[1] = MLXArray.zeros(ScriptedCacheShape.recurrentStateShape)
+            recurrent.advance(tokenCount)
+        } else {
+            let keys = cache.update(keys: keyValues, values: keyValues).0
+            firstKeys = firstKeys ?? keys
+        }
+    }
+    return firstKeys
+}
+
+/// Moves each cache of `caches` past `tokenCount` more tokens, the way a
+/// forward pass does: one zero key and one zero value for each token into each
+/// attention cache, and a new zero state into each recurrent cache.
+///
+/// A ledger reads the POSITION of a cache and nothing else, thus a key of the
+/// right shape moves that position exactly as a prompt of the same length does.
+///
+/// - Parameters:
+///   - caches: the caches to feed.
+///   - tokenCount: the number of tokens to feed.
+func feed(_ caches: [KVCache], tokenCount: Int) {
+    guard tokenCount > 0 else { return }
+    writeScriptedCaches(
+        keyValues: MLXArray.zeros([
+            1, ScriptedCacheShape.headCount, tokenCount, ScriptedCacheShape.headDimension,
+        ]),
+        into: caches)
+}
+
 /// A model that replays one scripted token sequence for each generation round.
 ///
 /// Each round starts at ``prepare(_:cache:state:prefill:)``, which the token
@@ -123,21 +187,11 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     /// Logit of every token the script does not select.
     private static let rejectedLogit: Float = -100
 
-    /// The key/value heads of each cache layer. One head is enough: the
-    /// caches only have to count the positions the model saw.
-    private static let cacheHeadCount = 1
-
-    /// The width of each key and value the model writes into its caches.
-    private static let cacheHeadDimension = 1
-
     /// One key/value head for each cache layer. A model with no cache layers
     /// allocates no KV cache.
-    var kvHeads: [Int] { Array(repeating: Self.cacheHeadCount, count: cacheLayerCount) }
-
-    /// The shape of the state that the model writes into each recurrent
-    /// layer. One value is enough: the caches only have to count the
-    /// positions the model saw.
-    private static let recurrentStateShape = [1, 1]
+    var kvHeads: [Int] {
+        Array(repeating: ScriptedCacheShape.headCount, count: cacheLayerCount)
+    }
 
     private let rounds: [[Int]]
     private let forwardSteps: ForwardStepCounter?
@@ -208,7 +262,7 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
             // Blocks the generation thread the way a real forward pass does.
             Thread.sleep(forTimeInterval: forwardDelay)
         }
-        write(tokenCount: inputs.size, into: cache ?? [])
+        feed(cache ?? [], tokenCount: inputs.size)
         let positions = Swift.max(inputs.size, 1)
         var logits = Array(
             repeating: Self.rejectedLogit,
@@ -216,32 +270,6 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
         // Only the last row is read as the next-token distribution.
         logits[(positions - 1) * Self.vocabularySize + nextToken()] = Self.selectedLogit
         return MLXArray(logits, [1, positions, Self.vocabularySize])
-    }
-
-    /// Writes one zero key and one zero value for each of `tokenCount` tokens
-    /// into each attention cache of `caches`, and a new zero state into each
-    /// recurrent cache, thus the offset of each cache counts the tokens the
-    /// model saw.
-    ///
-    /// - Parameters:
-    ///   - tokenCount: the number of tokens in the input of the forward pass.
-    ///   - caches: the caches of the forward pass.
-    private func write(tokenCount: Int, into caches: [KVCache]) {
-        guard tokenCount > 0 else { return }
-        let keyValues = MLXArray.zeros([
-            1, Self.cacheHeadCount, tokenCount, Self.cacheHeadDimension,
-        ])
-        for cache in caches {
-            if let recurrent = cache as? MambaCache {
-                // A linear layer puts new state arrays in its slots and does
-                // not write into the old ones, as Qwen 3.5 does.
-                recurrent[0] = MLXArray.zeros(Self.recurrentStateShape)
-                recurrent[1] = MLXArray.zeros(Self.recurrentStateShape)
-                recurrent.advance(tokenCount)
-            } else {
-                _ = cache.update(keys: keyValues, values: keyValues)
-            }
-        }
     }
 
     /// The token this round emits next, or end-of-text once the script is spent.

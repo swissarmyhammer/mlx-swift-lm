@@ -140,6 +140,115 @@ extension PromptCacheSpoolFixtures {
     }
 }
 
+/// A suite whose prompt cache keys name one model, unless a key names another.
+///
+/// A suite conforms to get the key builders as static and as instance members.
+protocol PromptCacheKeyFixtures {
+
+    /// The model that each key of the suite names, unless the key names another.
+    static var modelID: String { get }
+}
+
+extension PromptCacheKeyFixtures {
+
+    /// The key of `sessionID` under `modelID`.
+    ///
+    /// - Parameters:
+    ///   - sessionID: The session of the key.
+    ///   - modelID: The model of the key.
+    /// - Returns: The key.
+    static func key(_ sessionID: String, modelID: String) -> ExecutorPromptCacheKey {
+        ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID)
+    }
+
+    /// The key of `sessionID` under ``modelID``.
+    ///
+    /// - Parameter sessionID: The session of the key.
+    /// - Returns: The key.
+    static func key(_ sessionID: String) -> ExecutorPromptCacheKey {
+        key(sessionID, modelID: modelID)
+    }
+
+    /// The key of `sessionID` under `modelID`.
+    ///
+    /// - Parameters:
+    ///   - sessionID: The session of the key.
+    ///   - modelID: The model of the key.
+    /// - Returns: The key.
+    func key(_ sessionID: String, modelID: String) -> ExecutorPromptCacheKey {
+        Self.key(sessionID, modelID: modelID)
+    }
+
+    /// The key of `sessionID` under ``modelID``.
+    ///
+    /// - Parameter sessionID: The session of the key.
+    /// - Returns: The key.
+    func key(_ sessionID: String) -> ExecutorPromptCacheKey {
+        Self.key(sessionID)
+    }
+}
+
+/// A scripted session whose first turn ran inside a spool store of its own.
+///
+/// The session fixtures of the spool suites build on it: they share the folders, the store,
+/// the model, the key and the clean-up.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+struct ScriptedSpoolSession: PromptCacheSpoolFixtures {
+
+    /// The spool folder of the store.
+    let directory: URL
+
+    /// The folder that makes the model available.
+    let weights: URL
+
+    /// The store of the session.
+    let store: ExecutorPromptCacheStore
+
+    /// The scripted model of the session.
+    let model: MLXLanguageModel
+
+    /// The first entry of the session, which names it.
+    let sessionID: String
+
+    /// The key of the session.
+    var key: ExecutorPromptCacheKey {
+        ExecutorPromptCacheKey(modelID: model.modelID, sessionID: sessionID)
+    }
+
+    /// Runs the first turn of a new session, and waits until its cache is in the store.
+    ///
+    /// - Parameters:
+    ///   - sessionID: The first entry of the session.
+    ///   - budget: The memory budget of the store in bytes. Zero spills the cache of the
+    ///     first turn to disk.
+    ///   - makeModel: Makes the model of the session from its weights folder.
+    /// - Returns: The session.
+    /// - Throws: The error of the weights folder or of the first turn.
+    static func make(
+        sessionID: String, budget: Int = 0,
+        model makeModel: (_ weights: URL) -> MLXLanguageModel
+    ) async throws -> ScriptedSpoolSession {
+        let directory = temporaryDirectory()
+        let weights = try makeScriptedWeightsDirectory()
+        let model = makeModel(weights)
+        let store = await store(in: directory, budget: budget)
+
+        try await ScriptedExecutorPass.run(
+            over: ScriptedSessionModel.transcript(firstEntryID: sessionID), model: model,
+            inside: store)
+        await store.waitForSpills()
+        return ScriptedSpoolSession(
+            directory: directory, weights: weights, store: store, model: model,
+            sessionID: sessionID)
+    }
+
+    /// Removes the spool folder and the weights folder.
+    func remove() {
+        try? FileManager.default.removeItem(at: directory)
+        try? FileManager.default.removeItem(at: weights)
+    }
+}
+
 /// A spill writer that holds each write until the test releases it, and keeps a copy of each
 /// file that it writes.
 ///

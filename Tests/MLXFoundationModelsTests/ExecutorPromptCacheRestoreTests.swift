@@ -493,17 +493,9 @@ private enum SpilledSessionValues {
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 private struct SpilledSession: PromptCacheSpoolFixtures {
 
-    /// The spool folder of the store.
-    let directory: URL
-
-    /// The folder that makes the model available.
-    let weights: URL
-
-    /// The store of the session. Its memory budget is zero.
-    let store: ExecutorPromptCacheStore
-
-    /// The scripted model of the session.
-    let model: MLXLanguageModel
+    /// The folders, the store and the model of the session. The memory budget of the store
+    /// is zero.
+    let session: ScriptedSpoolSession
 
     /// Decides what the next render of the model does.
     let gate: ScriptedRenderGate
@@ -511,10 +503,17 @@ private struct SpilledSession: PromptCacheSpoolFixtures {
     /// The name of the file that the first turn spilled.
     let spilledFileName: String
 
+    /// The spool folder of the store.
+    var directory: URL { session.directory }
+
+    /// The store of the session.
+    var store: ExecutorPromptCacheStore { session.store }
+
+    /// The scripted model of the session.
+    var model: MLXLanguageModel { session.model }
+
     /// The key of the session.
-    var key: ExecutorPromptCacheKey {
-        ExecutorPromptCacheKey(modelID: model.modelID, sessionID: SpilledSessionValues.sessionID)
-    }
+    var key: ExecutorPromptCacheKey { session.key }
 
     /// The URL of the file that the first turn spilled.
     var spilledFileURL: URL { directory.appendingPathComponent(spilledFileName) }
@@ -526,25 +525,19 @@ private struct SpilledSession: PromptCacheSpoolFixtures {
     /// - Returns: the session.
     /// - Throws: the error of the turn, or an issue when the turn spilled no file.
     static func make(reasoningConfig: ReasoningConfig? = nil) async throws -> SpilledSession {
-        let directory = temporaryDirectory()
-        let weights = try makeScriptedWeightsDirectory()
         let gate = ScriptedRenderGate()
-        let model = ScriptedSessionModel.make(
-            weights: weights, processor: GatedPromptBytesInputProcessor(gate: gate),
-            reasoningConfig: reasoningConfig)
-        let store = await store(in: directory)
+        let session = try await ScriptedSpoolSession.make(
+            sessionID: SpilledSessionValues.sessionID
+        ) { weights in
+            ScriptedSessionModel.make(
+                weights: weights, processor: GatedPromptBytesInputProcessor(gate: gate),
+                reasoningConfig: reasoningConfig)
+        }
 
-        try await ScriptedExecutorPass.run(
-            over: ScriptedSessionModel.transcript(firstEntryID: SpilledSessionValues.sessionID),
-            model: model,
-            inside: store)
-        await store.waitForSpills()
-
-        let files = try fileNames(in: directory)
+        let files = try fileNames(in: session.directory)
         #expect(files.count == 1, "The first turn must spill one file.")
         return SpilledSession(
-            directory: directory, weights: weights, store: store, model: model, gate: gate,
-            spilledFileName: try #require(files.first))
+            session: session, gate: gate, spilledFileName: try #require(files.first))
     }
 
     /// Runs one later turn over a transcript whose first entry is `firstEntryID`.
@@ -561,8 +554,7 @@ private struct SpilledSession: PromptCacheSpoolFixtures {
 
     /// Removes the spool folder and the weights folder.
     func remove() {
-        try? FileManager.default.removeItem(at: directory)
-        try? FileManager.default.removeItem(at: weights)
+        session.remove()
     }
 }
 
@@ -771,12 +763,6 @@ private final class CacheEchoLanguageModel: Module, MLXLMCommon.LanguageModel,
     /// The number of tokens that each round emits before it stops.
     static let responseTokenCount = 4
 
-    /// The key/value heads of the one cache layer.
-    private static let cacheHeadCount = 1
-
-    /// The width of each key and value that the model writes into its cache.
-    private static let cacheHeadDimension = 1
-
     /// The logit of the token that the model emits.
     private static let selectedLogit: Float = 100
 
@@ -784,7 +770,7 @@ private final class CacheEchoLanguageModel: Module, MLXLMCommon.LanguageModel,
     private static let rejectedLogit: Float = -100
 
     /// One key/value head for the one cache layer.
-    var kvHeads: [Int] { [Self.cacheHeadCount] }
+    var kvHeads: [Int] { [ScriptedCacheShape.headCount] }
 
     /// The number of forward passes of the round so far.
     private var step = 0
@@ -840,10 +826,10 @@ private final class CacheEchoLanguageModel: Module, MLXLMCommon.LanguageModel,
         let tokenCount = tokens.size
         guard tokenCount > 0 else { return [] }
         let keyValues = tokens.asType(.float32).reshaped([
-            1, Self.cacheHeadCount, tokenCount, Self.cacheHeadDimension,
+            1, ScriptedCacheShape.headCount, tokenCount, ScriptedCacheShape.headDimension,
         ])
-        let allKeys = caches.map { $0.update(keys: keyValues, values: keyValues).0 }
-        return allKeys.first?.asType(.float32).asArray(Float.self) ?? []
+        let keys = writeScriptedCaches(keyValues: keyValues, into: caches)
+        return keys?.asType(.float32).asArray(Float.self) ?? []
     }
 
     /// The token that the pass emits: the cached token at the position of ``step``, or
