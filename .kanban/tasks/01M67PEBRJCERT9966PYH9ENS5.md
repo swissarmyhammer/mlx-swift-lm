@@ -9,8 +9,19 @@ comments:
     - evidence: review sha 75a36b26..b7177dec — 4 findings (4 confirmed, 4 refuted): MTPVerifyGraphBuildTests.swift:177, Libraries/MLXVLM/Models/Qwen35.swift:1170, :1370, :1416. Hand check passed: verify traces keyed per CompiledVerifyShape and dropped on fused GDN projection change (KeyedCompiledDecodeSegmentCaches.invalidate drops every key); M-RoPE, KV write and attention run outside the traces with the call's positionIds; the shared rotary is local to one verifyStep call and computed only when positionIds is non-nil, so it is the same ids for every layer and does not outlive a rollback; decode and non-verify steps keep their previous paths; no runtime MTP on/off heuristic.
     - next: implementer resolves the 4 findings; subtask 3 re-measure pending; card stays in review.
   timestamp: 2026-11-03T10:50:35.981313+00:00
-position_column: review
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m6gvk3tg0zm8c4e1wfmnyr6b
+  text: |-
+    ### implement + test + review — clean
+    - commits (cherry-picked onto mtp): 42dad4b9, ec4d7e8e, b74297a1 (worktree eb56804d, b7177dec, e09e3872)
+    - worktree: swift build --build-tests clean; 5 bundles 0 failures (CXGrammar 7, Macros 7, Guided 72, FM 471, MLXLMTests 930 XCTest + 2116 Swift Testing, 1 known issue)
+    - Release guards on e09e3872: qwen38FourBitMTPGeneration pass (bs4 pMin0.75 89.8 tok/s vs best bs5 90.7, allowance 3.3%); qwen38FourBitMTPSystemPromptCache pass (edit turn cached 2169, prefilled 123, exact plain tokens, 97.8 tok/s = 1.77x plain)
+    - ABBA router, 4 runs/arm, base 75a36b26 vs e09e3872: verify graph build 32k 2.9 -> 1.6 ms, 100k 3.3 -> 1.5 ms; verify forward 100k 3.4–8% faster (4/4); MTP tok/s 32k 75.65 -> 79.08 (+2.5–8.9%, 4/4 pairs), 100k 52.16 -> 52.73 (+3.2–5.1% in 3 pairs, one pair −7.9% with normal forward); plain decode within ±2.5% (noise floor)
+    - review sha b7177dec..e09e3872: 7 items, none apply — Qwen35.swift:254–262 are the named constants the change introduces; :1307–1308 (modelType/kvHeads assign-only) are lines this change did not touch. Earlier commits were reviewed in the worktree pass.
+    - full sweep and MTPCPULoadTests left to ^j2tnzpn
+  timestamp: 2026-11-03T14:04:15.056848+00:00
+position_column: done
+position_ordinal: ffffa280
 title: 'MTP router path: compile the MLXVLM Qwen35 verify forward (2.0–2.4 ms of host graph build per round while the GPU idles; the text path''s compiled verify builds in 1.0 ms)'
 ---
 From ^1abqd92's round profile (Release, M5 Ultra, Qwen3.8-27B-4bit + MTP-4bit, bs4 pMin0.75, after the buffer-pool and device-side causal-mask fixes): on the router load path (MLXVLM `Qwen35`, VLM drafter) the verify forward still takes the general per-layer path, and building its graph costs 2.03 ms per round at 32k and 2.44 ms at 100k, against 1.02-1.03 ms for the text path's compiled verify schedule (`Qwen35TextModelInner.verifyStep` + `KeyedCompiledDecodeSegmentCaches`). The GPU is idle during that build: the drafter chain's last confidence read has just drained it. That is the largest host-only piece left in a router round (36.6 ms at 32k: pre 0.19, chain build 0.39, verify build 2.03, commit 0.40, book 0.18).
