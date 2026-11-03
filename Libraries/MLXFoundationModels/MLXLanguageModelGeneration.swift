@@ -21,35 +21,24 @@ import MLXGuidedGeneration
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 extension MLXLanguageModel.Executor {
-    /// The identifier of one transcript entry of a turn. `Kind` names which
-    /// entry it is, thus a response, a reasoning and a tool-calls entry
+    /// The identifier of one transcript entry of a turn. Each entry kind has
+    /// a type of its own, thus a response, a reasoning and a tool-calls entry
     /// identifier cannot be swapped without a compile error.
-    ///
-    /// `Kind` is a phantom type: no value of it is held, so periphery sees it unused.
-    // periphery:ignore
-    struct EntryID<Kind>: Sendable {
+    protocol EntryID: Sendable {
         /// The identifier the channel events carry.
-        let rawValue: String
+        var rawValue: String { get }
 
-        /// - Parameter rawValue: The identifier; a fresh UUID by default.
-        init(rawValue: String = UUID().uuidString) { self.rawValue = rawValue }
+        /// - Parameter rawValue: The identifier.
+        init(rawValue: String)
     }
-
-    /// The kind of the entry that the response text, the metadata and the
-    /// usage of one turn go to.
-    enum ResponseEntry {}
-    /// The kind of the entry that the reasoning text of one turn goes to.
-    enum ReasoningEntry {}
-    /// The kind of the entry that the tool calls of one turn go to.
-    enum ToolCallsEntry {}
 
     /// The transcript entry that the response text, the metadata and the
     /// usage of one turn go to.
-    typealias ResponseEntryID = EntryID<ResponseEntry>
+    struct ResponseEntryID: EntryID { let rawValue: String }
     /// The transcript entry that the reasoning text of one turn goes to.
-    typealias ReasoningEntryID = EntryID<ReasoningEntry>
+    struct ReasoningEntryID: EntryID { let rawValue: String }
     /// The transcript entry that the tool calls of one turn go to.
-    typealias ToolCallsEntryID = EntryID<ToolCallsEntry>
+    struct ToolCallsEntryID: EntryID { let rawValue: String }
 
     /// Appends response text to the response entry.
     ///
@@ -1812,3 +1801,9 @@ extension MLXLanguageModel.Executor {
 
 #endif  // canImport(FoundationModels)
 #endif  // FoundationModelsIntegration
+
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+extension MLXLanguageModel.Executor.EntryID {
+    /// An identifier for a new entry: a fresh UUID.
+    init() { self.init(rawValue: UUID().uuidString) }
+}
