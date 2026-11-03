@@ -263,10 +263,7 @@ public class EvalTests: XCTestCase {
     }
 
     func testLlamaVarianceNormalizedKVCacheGenerationPath() throws {
-        let config = LlamaConfiguration(
-            hiddenSize: 64, hiddenLayers: 2, intermediateSize: 128, attentionHeads: 2,
-            rmsNormEps: 0.00001, vocabularySize: 100, kvHeads: 1)
-        let model = LlamaModel(config)
+        let model = makeQualityGateLlamaModel()
         let parameters = GenerateParameters(
             kvCache: .init(
                 strategy: .varianceNormalized(
@@ -304,13 +301,12 @@ public class EvalTests: XCTestCase {
 
         let affineDrift = abs(affineLoss - fp16Loss)
         let varianceNormalizedDrift = abs(varianceNormalizedLoss - fp16Loss)
-        print(
+        let losses =
             "KV perplexity gate: fp16=\(fp16Loss), affine4=\(affineLoss), "
-                + "varianceNormalized4/value2=\(varianceNormalizedLoss)"
-        )
+            + "varianceNormalized4/value2=\(varianceNormalizedLoss)"
 
-        XCTAssertLessThan(affineDrift, 0.20)
-        XCTAssertLessThan(varianceNormalizedDrift, 0.20)
+        XCTAssertLessThan(affineDrift, 0.20, losses)
+        XCTAssertLessThan(varianceNormalizedDrift, 0.20, losses)
     }
 
     func testLlamaVarianceNormalizedKVCacheGreedyDecodeTracksFP16ForOneHundredTokens() throws {
@@ -324,15 +320,14 @@ public class EvalTests: XCTestCase {
 
         let affineAgreement = tokenAgreement(affine.tokens, fp16.tokens)
         let varianceNormalizedAgreement = tokenAgreement(varianceNormalized.tokens, fp16.tokens)
-        print(
+        let agreement =
             "KV token agreement: affine4=\(affineAgreement) "
-                + "(first mismatch: \(firstTokenMismatch(affine.tokens, fp16.tokens))), "
-                + "varianceNormalized4/value2=\(varianceNormalizedAgreement) "
-                + "(first mismatch: \(firstTokenMismatch(varianceNormalized.tokens, fp16.tokens)))"
-        )
+            + "(first mismatch: \(firstTokenMismatch(affine.tokens, fp16.tokens))), "
+            + "varianceNormalized4/value2=\(varianceNormalizedAgreement) "
+            + "(first mismatch: \(firstTokenMismatch(varianceNormalized.tokens, fp16.tokens)))"
 
-        XCTAssertGreaterThanOrEqual(affineAgreement, 0.95)
-        XCTAssertGreaterThanOrEqual(varianceNormalizedAgreement, 0.95)
+        XCTAssertGreaterThanOrEqual(affineAgreement, 0.95, agreement)
+        XCTAssertGreaterThanOrEqual(varianceNormalizedAgreement, 0.95, agreement)
     }
 
     func testLlamaVarianceNormalizedKVCacheAppleSiliconDecodePerformanceSmoke() throws {
@@ -350,23 +345,22 @@ public class EvalTests: XCTestCase {
         let varianceNormalized = try generateTokens(
             model: model, prompt: prompt, maxTokens: 96, mode: .varianceNormalized4Value2)
 
-        print(
+        let measurements =
             "KV decode smoke: fp16=\(fp16.tokensPerSecond) tok/s "
-                + "(\(fp16.cacheBytes) bytes), affine4=\(affine.tokensPerSecond) tok/s "
-                + "(\(affine.cacheBytes) bytes), varianceNormalized4/value2="
-                + "\(varianceNormalized.tokensPerSecond) tok/s "
-                + "(\(varianceNormalized.cacheBytes) bytes)"
-        )
+            + "(\(fp16.cacheBytes) bytes), affine4=\(affine.tokensPerSecond) tok/s "
+            + "(\(affine.cacheBytes) bytes), varianceNormalized4/value2="
+            + "\(varianceNormalized.tokensPerSecond) tok/s "
+            + "(\(varianceNormalized.cacheBytes) bytes)"
 
-        XCTAssertGreaterThan(fp16.tokensPerSecond, 0)
-        XCTAssertGreaterThan(affine.tokensPerSecond, 0)
-        XCTAssertGreaterThan(varianceNormalized.tokensPerSecond, 0)
-        XCTAssertLessThan(affine.cacheBytes, fp16.cacheBytes)
-        XCTAssertLessThan(varianceNormalized.cacheBytes, fp16.cacheBytes)
+        XCTAssertGreaterThan(fp16.tokensPerSecond, 0, measurements)
+        XCTAssertGreaterThan(affine.tokensPerSecond, 0, measurements)
+        XCTAssertGreaterThan(varianceNormalized.tokensPerSecond, 0, measurements)
+        XCTAssertLessThan(affine.cacheBytes, fp16.cacheBytes, measurements)
+        XCTAssertLessThan(varianceNormalized.cacheBytes, fp16.cacheBytes, measurements)
 
         // This is a smoke threshold for Apple Silicon CI variance, not a benchmark claim.
-        XCTAssertLessThan(varianceNormalized.elapsed, fp16.elapsed * 10)
-        XCTAssertLessThan(varianceNormalized.elapsed, affine.elapsed * 10)
+        XCTAssertLessThan(varianceNormalized.elapsed, fp16.elapsed * 10, measurements)
+        XCTAssertLessThan(varianceNormalized.elapsed, affine.elapsed * 10, measurements)
         #else
         throw XCTSkip("Apple Silicon decode performance smoke test requires arm64 macOS.")
         #endif
@@ -411,20 +405,20 @@ public class EvalTests: XCTestCase {
         eval(decodeOutput)
         let decodeElapsed = Date.timeIntervalSinceReferenceDate - decodeStart
 
-        print(
+        let measurements =
             "KVarN 32K ingest/decode smoke: elapsed=\(elapsed)s, raw=\(rawKVBytes) bytes, "
-                + "compact=\(compactBytes) bytes, peak workspace=\(peakWorkspaceBytes) bytes, "
-                + "one-layer decode=\(decodeElapsed)s")
+            + "compact=\(compactBytes) bytes, peak workspace=\(peakWorkspaceBytes) bytes, "
+            + "one-layer decode=\(decodeElapsed)s"
 
         XCTAssertEqual(output.shape, [1, 32, 1, 128])
-        XCTAssertLessThan(compactBytes, rawKVBytes)
+        XCTAssertLessThan(compactBytes, rawKVBytes, measurements)
         // A regression guard against retaining prompt-sized geometric spare capacity or an
         // unbounded normalization graph. This is deliberately loose for different Apple GPUs.
-        XCTAssertLessThan(peakWorkspaceBytes, 768 * 1_024 * 1_024)
+        XCTAssertLessThan(peakWorkspaceBytes, 768 * 1_024 * 1_024, measurements)
         // The full MLXLMTests run executes the Swift Testing tests at the same time on the
         // same GPU. Under that load one decode step took 0.29 s, thus the limit is 1 s. Alone,
         // the decode step takes approximately 0.005 s.
-        XCTAssertLessThan(decodeElapsed, 1.0)
+        XCTAssertLessThan(decodeElapsed, 1.0, measurements)
         #else
         throw XCTSkip("Metal memory instrumentation requires arm64 macOS.")
         #endif
@@ -445,14 +439,38 @@ public class EvalTests: XCTestCase {
         let tokenizer = PseudoWordTokenizer()
         let parameters = LoRATrain.Parameters(iterations: 5)
 
+        // The values on the host: the optimizer updates the arrays of the model in place.
+        func trainableValues() -> [String: [Float]] {
+            Dictionary(
+                uniqueKeysWithValues: model.trainableParameters().flattened().map {
+                    ($0.0, $0.1.asType(.float32).asArray(Float.self))
+                })
+        }
+        let trainableBefore = trainableValues()
+        XCTAssertFalse(trainableBefore.isEmpty)
+
+        var validationLosses: [Float] = []
         try LoRATrain.train(
             model: model, train: train, validate: valid, optimizer: optimizer,
             tokenizer: tokenizer,
             parameters: parameters
         ) { progress in
-            print(progress)
+            if case .validation(_, let validationLoss, _) = progress {
+                validationLosses.append(validationLoss)
+            }
             return .more
         }
+
+        // Five iterations report no training loss (one report every 10 steps) and one
+        // validation loss, after the first iteration.
+        XCTAssertEqual(validationLosses.count, 1)
+        XCTAssertTrue(validationLosses.allSatisfy(\.isFinite), "\(validationLosses)")
+
+        // The optimizer moved the trainable parameters.
+        let trainableAfter = trainableValues()
+        XCTAssertEqual(Set(trainableAfter.keys), Set(trainableBefore.keys))
+        let changed = trainableAfter.filter { name, value in trainableBefore[name] != value }
+        XCTAssertFalse(changed.isEmpty, "training changed no trainable parameter")
 
         let input = MLXArray([1, 2, 3, 4, 5])[.newAxis, .ellipsis]
         let output = model.callAsFunction(input, cache: nil)
@@ -546,46 +564,52 @@ public class EvalTests: XCTestCase {
     }
 
     func testRandomStateIsolation() async throws {
-        // the logit sampler will not use shared random state
+        // the logit sampler will not use shared random state: a seeded sampler draws the
+        // same sequence in concurrent tasks, under an ambient random state of their own, as
+        // it draws alone
         let numSamplers = 5
         let samplesPerTask = 10
 
-        let allResults = try await withThrowingTaskGroup(of: [Int].self) { group in
-            var results: [[Int]] = []
+        @Sendable func draws(seed: UInt64, ambientSeed: ((Int) -> UInt64)?) -> [Int] {
+            let logits = MLXArray.ones([1, 50])
+            let sampler = CategoricalSampler(temperature: 1.0, seed: seed)
+            return (0 ..< samplesPerTask).map { sampleId in
+                guard let ambientSeed else {
+                    return sampler.sample(logits: logits).item(Int.self)
+                }
+                return withRandomState(MLXRandom.RandomState(seed: ambientSeed(sampleId))) {
+                    sampler.sample(logits: logits)
+                }.item(Int.self)
+            }
+        }
+
+        let concurrent = try await withThrowingTaskGroup(of: (Int, [Int]).self) { group in
+            var results: [Int: [Int]] = [:]
 
             for samplerId in 0 ..< numSamplers {
                 group.addTask {
-                    let logits = MLXArray.ones([1, 50])
-                    var taskResults: [Int] = []
-                    let sampler = CategoricalSampler(temperature: 1.0)
-
-                    for sampleId in 0 ..< samplesPerTask {
-                        let token = withRandomState(
-                            MLXRandom.RandomState(seed: UInt64(samplerId * 1000 + sampleId))
-                        ) {
-                            return sampler.sample(logits: logits)
-                        }
-                        taskResults.append(token.item(Int.self))
-                    }
-
-                    return taskResults
+                    let tokens = draws(
+                        seed: UInt64(samplerId),
+                        ambientSeed: { UInt64(samplerId * 1000 + $0) })
+                    return (samplerId, tokens)
                 }
             }
 
-            for try await result in group {
-                results.append(result)
+            for try await (samplerId, tokens) in group {
+                results[samplerId] = tokens
             }
 
             return results
         }
 
-        XCTAssertEqual(allResults.count, numSamplers)
-
-        for samplerResults in allResults {
-            XCTAssertEqual(samplerResults.count, samplesPerTask)
+        XCTAssertEqual(concurrent.count, numSamplers)
+        for samplerId in 0 ..< numSamplers {
+            XCTAssertEqual(
+                concurrent[samplerId], draws(seed: UInt64(samplerId), ambientSeed: nil),
+                "sampler \(samplerId)")
         }
 
-        let uniqueSequences = Set(allResults.map { $0.description })
-        XCTAssertGreaterThan(uniqueSequences.count, 0)
+        // Distinct seeds draw distinct sequences: 10 draws of 50 equiprobable tokens.
+        XCTAssertEqual(Set(concurrent.values).count, numSamplers)
     }
 }
