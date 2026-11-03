@@ -25,15 +25,13 @@ extension MLXLanguageModel.Executor {
     /// a type of its own, thus a response, a reasoning and a tool-calls entry
     /// identifier cannot be swapped without a compile error.
     protocol EntryID: Sendable {
-        /// The identifier the channel events carry.
-        var rawValue: String { get }
-
-        /// - Parameter rawValue: The identifier.
+        /// - Parameter rawValue: The identifier the channel events carry.
         init(rawValue: String)
     }
 
     /// The transcript entry that the response text, the metadata and the
-    /// usage of one turn go to.
+    /// usage of one turn go to; `rawValue` is the identifier the channel
+    /// events carry.
     struct ResponseEntryID: EntryID { let rawValue: String }
     /// The transcript entry that the reasoning text of one turn goes to.
     struct ReasoningEntryID: EntryID { let rawValue: String }
