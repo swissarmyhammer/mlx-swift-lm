@@ -114,7 +114,7 @@ public class CacheList: BaseKVCache {
                 list.rewriteLeaves(path: childPath, using: transform)
                 return list
             }
-            if child is any AuxiliaryKVCache {
+            guard KVCacheTree.isLeaf(child) else {
                 return child
             }
             let leaf = KVCacheLeaf(path: childPath, cache: child)
