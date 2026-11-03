@@ -243,6 +243,24 @@ func seededTokens(_ count: Int, vocabularySize: Int, seed: UInt64) -> MLXArray {
     MLXRandom.randInt(Int32(0) ..< Int32(vocabularySize), [count], key: MLXRandom.key(seed))
 }
 
+/// The hidden rows `target` emits for `tokens` when the MTP iterator asks it to, evaluated.
+///
+/// - Parameters:
+///   - target: The target model.
+///   - tokens: The tokens, shape `[1, length]`.
+///   - cache: The cache of the target, or `nil` for a forward without one.
+/// - Throws: When the output state of the target holds no hidden rows.
+func targetHiddenStates(
+    _ target: any LanguageModel, tokens: MLXArray, cache: [KVCache]? = nil
+) throws -> MLXArray {
+    var state = LMOutput.State()
+    state[mtpEmitFlagKey] = true
+    let output = target(LMInput.Text(tokens: tokens), cache: cache, state: state)
+    let hidden = try #require(output.state?[mtpLastHiddenStatesKey])
+    eval(hidden)
+    return hidden
+}
+
 @Suite(.serialized)
 struct Qwen35MTPMetalTests {
     @Test
@@ -340,11 +358,8 @@ struct Qwen35MTPMetalTests {
         let tokens = MLXArray([Int32(1), 2, 3, 4]).reshaped([1, 4])
         let expected = model.model.forward(tokens, applyFinalNorm: false)
         let normalized = model.model.norm(expected)
-        var state = LMOutput.State()
-        state[mtpEmitFlagKey] = true
 
-        let output = model(LMInput.Text(tokens: tokens), cache: nil, state: state)
-        let emitted = try #require(output.state?[mtpLastHiddenStatesKey])
+        let emitted = try targetHiddenStates(model, tokens: tokens)
         eval(expected, normalized, emitted)
 
         #expect(allClose(emitted, normalized, rtol: 0, atol: 0).item(Bool.self))
@@ -385,10 +400,7 @@ struct Qwen35MTPMetalTests {
         let sampler = GenerateParameters(temperature: 0).makeSampler()
         let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
 
-        var targetState = LMOutput.State()
-        targetState[mtpEmitFlagKey] = true
-        let targetOutput = target(LMInput.Text(tokens: prompt), cache: nil, state: targetState)
-        let promptHidden = try #require(targetOutput.state?[mtpLastHiddenStatesKey])
+        let promptHidden = try targetHiddenStates(target, tokens: prompt)
 
         for pattern in [[0, 0], [0, 1], [1, 0], [1, 1]] {
             var state = drafter.makeState(parameters: nil)
@@ -435,10 +447,7 @@ struct Qwen35MTPMetalTests {
         let sampler = GenerateParameters(temperature: 0).makeSampler()
         let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
 
-        var targetState = LMOutput.State()
-        targetState[mtpEmitFlagKey] = true
-        let targetOutput = target(LMInput.Text(tokens: prompt), cache: nil, state: targetState)
-        let promptHidden = try #require(targetOutput.state?[mtpLastHiddenStatesKey])
+        let promptHidden = try targetHiddenStates(target, tokens: prompt)
 
         var state = drafter.makeState(parameters: nil)
         var bonus = MLXArray([Int32(4)])
@@ -747,6 +756,29 @@ struct Qwen35MTPMetalTests {
 private let drafterCacheTolerance = MatmulPrecision.tolerance(
     float32: ieeeFloat32Tolerance, reduced: tf32ReshapedMatmulTolerance)
 
+/// Expects `actual` drafter cache arrays to match `expected` pair by pair: the same count, the
+/// same shapes, and values within ``drafterCacheTolerance``.
+///
+/// - Parameters:
+///   - actual: The drafter cache arrays under test.
+///   - expected: The drafter cache arrays of the reference.
+///   - sourceLocation: The caller of the expectations.
+/// - Throws: When the counts or the shapes differ.
+private func expectDrafterCachesMatch(
+    _ actual: [MLXArray], _ expected: [MLXArray],
+    sourceLocation: SourceLocation = #_sourceLocation
+) throws {
+    try #require(actual.count == expected.count, sourceLocation: sourceLocation)
+    for (actual, expected) in zip(actual, expected) {
+        eval(actual, expected)
+        try #require(actual.shape == expected.shape, sourceLocation: sourceLocation)
+        #expect(
+            allClose(
+                actual, expected, rtol: drafterCacheTolerance, atol: drafterCacheTolerance
+            ).item(Bool.self), sourceLocation: sourceLocation)
+    }
+}
+
 /// The drafter state API beyond a cold prefill at position zero: a cold start at a position
 /// the target cache already holds, and trimming and appending entries.
 @Suite(.serialized)
@@ -789,14 +821,9 @@ struct Qwen35MTPDrafterStateTests {
     private func targetHidden(
         _ fixture: Qwen35MTPFixture, tokens: [Int], cache: [KVCache]? = nil
     ) throws -> MLXArray {
-        var state = LMOutput.State()
-        state[mtpEmitFlagKey] = true
-        let output = fixture.target(
-            LMInput.Text(tokens: MLXArray(tokens.map(Int32.init))[.newAxis, 0...]),
-            cache: cache, state: state)
-        let hidden = try #require(output.state?[mtpLastHiddenStatesKey])
-        eval(hidden)
-        return hidden
+        try targetHiddenStates(
+            fixture.target, tokens: MLXArray(tokens.map(Int32.init))[.newAxis, 0...],
+            cache: cache)
     }
 
     /// A drafter state prefilled over ``prompt`` from position zero.
@@ -853,17 +880,8 @@ struct Qwen35MTPDrafterStateTests {
 
         #expect(replayed.nextPosition == cold.nextPosition)
         #expect(replayed.isAligned)
-        let replayedArrays = replayed.cache.flatMap(\.state)
-        let coldArrays = cold.cache.flatMap(\.state)
-        #expect(replayedArrays.count == coldArrays.count)
-        for (actual, expected) in zip(replayedArrays, coldArrays) {
-            eval(actual, expected)
-            try #require(actual.shape == expected.shape)
-            #expect(
-                allClose(
-                    actual, expected, rtol: drafterCacheTolerance, atol: drafterCacheTolerance
-                ).item(Bool.self))
-        }
+        try expectDrafterCachesMatch(
+            replayed.cache.flatMap(\.state), cold.cache.flatMap(\.state))
         let replayedSeed = try #require(replayed.seedToken)
         let coldSeed = try #require(cold.seedToken)
         #expect(replayedSeed.asArray(Int32.self) == coldSeed.asArray(Int32.self))
@@ -1196,14 +1214,7 @@ struct Qwen35MTPChunkedPrefillTests {
         #expect(chunked.tokens == unchunked.tokens)
         #expect(chunked.passthroughReason == nil)
         #expect(chunked.proposedCount > 0)
-        try #require(chunked.drafterCache.count == unchunked.drafterCache.count)
-        for (actual, expected) in zip(chunked.drafterCache, unchunked.drafterCache) {
-            try #require(actual.shape == expected.shape)
-            #expect(
-                allClose(
-                    actual, expected, rtol: drafterCacheTolerance, atol: drafterCacheTolerance
-                ).item(Bool.self))
-        }
+        try expectDrafterCachesMatch(chunked.drafterCache, unchunked.drafterCache)
     }
 
     @Test(
