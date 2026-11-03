@@ -388,7 +388,7 @@ public enum Generation: Sendable {
     /// Reducer that can be used with `throttle()` to gather elements into a batch
     @Sendable
     public static func collect(_ batch: [Generation]?, _ element: Generation) -> [Generation] {
-        (batch ?? []) + [element]
+        appendingToBatch(batch, element)
     }
 
     /// Attributes `count` prompt tokens to a reused KV-cache prefix on a `.info`
@@ -434,6 +434,12 @@ public enum TokenGeneration: Sendable {
     public static func collect(_ batch: [TokenGeneration]?, _ element: TokenGeneration)
         -> [TokenGeneration]
     {
-        (batch ?? []) + [element]
+        appendingToBatch(batch, element)
     }
+}
+
+/// The batch reducer behind ``Generation/collect(_:_:)`` and
+/// ``TokenGeneration/collect(_:_:)``: `batch` (empty when `nil`) with `element` appended.
+private func appendingToBatch<Element>(_ batch: [Element]?, _ element: Element) -> [Element] {
+    (batch ?? []) + [element]
 }

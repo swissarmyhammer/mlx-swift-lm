@@ -178,7 +178,10 @@ public struct GenerateParameters: Sendable {
     ///
     /// When set, this is the canonical cache configuration. Do not combine it
     /// with `maxKVSize`, `kvBits`, `kvGroupSize`, `quantizedKVStart`, or
-    /// `kvScheme`.
+    /// `kvScheme`: generation and cache construction throw
+    /// ``KVCacheConfigurationError/conflictingLegacyConfiguration`` when one of
+    /// them is also set (`kvGroupSize` and `quantizedKVStart` count as set when
+    /// they differ from their defaults).
     public var kvCache: KVCacheConfiguration?
 
     /// Number of bits to use for KV cache quantization. nil implies no cache quantization.
@@ -374,7 +377,7 @@ public struct GenerateParameters: Sendable {
 
     /// Builds the ``LogitSampler`` the temperature and the probability filters imply.
     public func makeSampler() -> LogitSampler {
-        let usesTopP = topP > 0 && topP < 1
+        let usesTopP = TopPSampler.isActive(topP: topP)
         let usesTopK = topK > 0
         let usesMinP = minP > 0
 
@@ -434,6 +437,12 @@ private func scaledByTemperature(_ logits: MLXArray, temperature: MLXArray) -> M
     logits * (1 / temperature)
 }
 
+/// The RNG of a sampler: seeded with `seed` when it is set, which makes sampling
+/// reproducible, and else seeded from system entropy, the prior behavior.
+private func makeRandomState(seed: UInt64?) -> MLXRandom.RandomState {
+    seed.map { MLXRandom.RandomState(seed: $0) } ?? MLXRandom.RandomState()
+}
+
 /// Sampler that uses `argMax` (most likely) to sample the logits.
 public struct ArgMaxSampler: LogitSampler {
     /// Creates a sampler; stateless (no seed or configuration is needed for argmax).
@@ -467,7 +476,7 @@ public struct TopPSampler: DistributionLogitSampler {
         seed: UInt64? = nil
     ) {
         self.temperature = MLXArray(temperature)
-        if topP > 0 && topP < 1 {
+        if Self.isActive(topP: topP) {
             self.topP = MLXArray(topP)
         } else {
             self.topP = nil
@@ -475,9 +484,16 @@ public struct TopPSampler: DistributionLogitSampler {
         self.topK = topK > 0 ? topK : nil
         self.minP = minP > 0 ? MLXArray(minP) : nil
         self.negInf = MLXArray(-Float.infinity)
-        // A seed makes sampling reproducible; nil keeps the prior
-        // entropy-seeded behavior.
-        self.randomState = seed.map { MLXRandom.RandomState(seed: $0) } ?? MLXRandom.RandomState()
+        self.randomState = makeRandomState(seed: seed)
+    }
+
+    /// Whether `topP` turns the nucleus filter on: a value in `(0, 1)` keeps a
+    /// strict subset of the vocabulary, and any other value keeps all of it.
+    ///
+    /// ``GenerateParameters/makeSampler()`` and the initializer decide with this
+    /// predicate, thus the two agree on when the filter is active.
+    static func isActive(topP: Float) -> Bool {
+        topP > 0 && topP < 1
     }
 
     /// Samples a token from `logits` after applying the configured top-p/top-k/min-p
@@ -558,9 +574,7 @@ public struct CategoricalSampler: DistributionLogitSampler {
     /// sampling reproducible, otherwise the RNG is seeded from system entropy.
     public init(temperature: Float, seed: UInt64? = nil) {
         self.temperature = MLXArray(temperature)
-        // A seed makes sampling reproducible; nil keeps the prior
-        // entropy-seeded behavior.
-        self.randomState = seed.map { MLXRandom.RandomState(seed: $0) } ?? MLXRandom.RandomState()
+        self.randomState = makeRandomState(seed: seed)
     }
 
     /// Samples a token from `logits` by scaling by `temperature` and drawing from the
