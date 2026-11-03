@@ -228,6 +228,14 @@ actor ModelCache {
         return grammarTokenizer
     }
 
+    /// Whether an `GrammarTokenizer` is already cached for the given model.
+    /// Used by `MLXLanguageModel.hasCachedGrammarTokenizer` so tests can assert
+    /// that `warmUp()` pre-created it (a genuine cache hit) rather than only
+    /// that a later guided respond happens to succeed.
+    func hasCachedGrammarTokenizer(modelID: String) -> Bool {
+        grammarTokenizers[modelID] != nil
+    }
+
     /// Gets or creates the cached tokenizer-derived logit biases for a model.
     func makeTokenizerBias(
         modelID: String,

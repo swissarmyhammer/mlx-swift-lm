@@ -259,6 +259,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         )
     }
 
+    /// Whether the shared cache already holds an `GrammarTokenizer` for the model.
+    /// Internal test seam (not public API): lets `PrewarmGrammarTests` in the
+    /// IntegrationTesting project confirm `warmUp()` pre-created the tokenizer.
+    /// Periphery sees no caller, because that project is outside the package.
+    // periphery:ignore
+    static func hasCachedGrammarTokenizer(modelID: String) async -> Bool {
+        await cache.hasCachedGrammarTokenizer(modelID: modelID)
+    }
+
     /// Evicts every cached model, tokenizer, constraint template, and per-model
     /// tokenizer bias, and every prompt cache entry, then clears the MLX buffer
     /// pool so the GPU memory of the weights and caches returns to the system.
