@@ -74,7 +74,8 @@ There are five test bundles:
 - `CXGrammarTests`
 - `MLXHuggingFaceMacrosTests`
 
-CI runs only `MLXLMTests`. Run all five before you say that the tests are green.
+CI runs `MLXLMTests` and `MLXFoundationModelsTests`. Run all five before you say
+that the tests are green.
 A full run is approximately 1520 tests: 1040 with Swift Testing and 480 with
 XCTest.
 
