@@ -340,29 +340,50 @@ public func generate(
         numDraftTokens: numDraftTokens,
         components: components
     )
-    return generateSpeculativeStream(
-        iterator: iterator, input: input, context: context,
-        wiredMemoryTicket: wiredMemoryTicket, tokenCollector: IgnoringGeneratedTokens(),
-        handler: TextToolTokenLoopHandler(
-            tokenizer: context.tokenizer, modelConfiguration: context.configuration,
-            tools: tools, toolCallPolicy: parameters.toolCallPolicy)
+    return generateTextStream(
+        iterator: iterator, input: input, parameters: parameters, context: context,
+        wiredMemoryTicket: wiredMemoryTicket, tools: tools,
+        tokenCollector: IgnoringGeneratedTokens()
     ).0
 }
 
-/// Runs a speculative-decoding iterator through `handler`, the stream wiring shared by the
-/// speculative entry points of both output shapes: the text/tool-call
-/// ``generate(input:cache:state:parameters:context:draftModel:draftCache:numDraftTokens:components:wiredMemoryTicket:tools:)``
-/// and ``generateTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:tools:)``,
-/// and the raw-token
-/// ``generateTokens(input:cache:state:parameters:context:draftModel:draftCache:numDraftTokens:components:wiredMemoryTicket:)``
-/// and ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:)``.
-/// Each constructs its own iterator (the drafter differs) and handler (the output differs).
+/// Runs `iterator` through the text/tool-call handler of `context`: the wiring of the
+/// `AsyncStream<Generation>` entry points that differ only in their iterator and collector.
+///
+/// - Parameters:
+///   - tools: optional tool schemas used to parse tool-call arguments.
+///   - tokenCollector: what the task answers when the generation ends.
+///   - The other parameters are those of
+///     ``generateStream(iterator:input:context:wiredMemoryTicket:tokenCollector:handler:)``.
+/// - Returns: the stream, and the task that generates it.
+private func generateTextStream<Collector: GeneratedTokenCollector>(
+    iterator: consuming any TokenIteratorProtocol,
+    input: LMInput,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    wiredMemoryTicket: WiredMemoryTicket?,
+    tools: [[String: any Sendable]]?,
+    tokenCollector: Collector
+) -> (AsyncStream<Generation>, Task<Collector.Result, Never>) {
+    generateStream(
+        iterator: iterator, input: input, context: context,
+        wiredMemoryTicket: wiredMemoryTicket, tokenCollector: tokenCollector,
+        handler: textToolHandler(
+            tokenizer: context.tokenizer, modelConfiguration: context.configuration,
+            tools: tools, toolCallPolicy: parameters.toolCallPolicy))
+}
+
+/// Runs `iterator` for `input` through `handler`, the stream wiring shared by the entry points
+/// that build an iterator from an ``LMInput`` and a ``ModelContext``: the text/tool-call
+/// streams (through `generateTextStream`) and the raw-token speculative streams (through
+/// `generateRawTokenStream`). Each constructs its own iterator and collector; the handler
+/// decides the output.
 ///
 /// - Parameters:
 ///   - tokenCollector: what the task answers when the generation ends.
 ///   - handler: turns the tokens into the output of the stream.
 /// - Returns: the stream, and the task that generates it.
-func generateSpeculativeStream<Handler: TokenLoopHandler, Collector: GeneratedTokenCollector>(
+func generateStream<Handler: TokenLoopHandler, Collector: GeneratedTokenCollector>(
     iterator: consuming any TokenIteratorProtocol,
     input: LMInput,
     context: ModelContext,
@@ -436,7 +457,7 @@ public func generateTask<Iterator: TokenIteratorProtocol>(
         tokenizer: tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
-        handler: TextToolTokenLoopHandler(
+        handler: textToolHandler(
             tokenizer: tokenizer, modelConfiguration: modelConfiguration, tools: tools,
             toolCallPolicy: toolCallPolicy)
     )
@@ -530,17 +551,10 @@ package func generateTaskRecordingTokens(
         input: input, cache: cache, state: state, parameters: parameters, context: context,
         speculation: speculation, mtpContinuation: mtpContinuation, components: components,
         preparedState: preparedState)
-    return generateLoopTask(
-        promptTokenCount: input.text.tokens.size,
-        modelConfiguration: context.configuration,
-        tokenizer: context.tokenizer,
-        iterator: iterator,
-        wiredMemoryTicket: wiredMemoryTicket,
-        tokenCollector: RecordingGeneratedTokenList(drafterContinuation: drafterContinuation),
-        handler: TextToolTokenLoopHandler(
-            tokenizer: context.tokenizer, modelConfiguration: context.configuration,
-            tools: tools, toolCallPolicy: parameters.toolCallPolicy)
-    )
+    return generateTextStream(
+        iterator: iterator, input: input, parameters: parameters, context: context,
+        wiredMemoryTicket: wiredMemoryTicket, tools: tools,
+        tokenCollector: RecordingGeneratedTokenList(drafterContinuation: drafterContinuation))
 }
 
 /// Internal variant used by `ChatSession` to keep its token-prefix record in
@@ -569,7 +583,7 @@ func generateTaskRecordingTokens<Iterator: TokenIteratorProtocol>(
         tokenizer: tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
-        handler: TextToolTokenLoopHandler(
+        handler: textToolHandler(
             tokenizer: tokenizer, modelConfiguration: modelConfiguration, tools: tools,
             toolCallPolicy: toolCallPolicy))
 }
@@ -703,10 +717,8 @@ public func generateTask(
         minimumDraftProbability: minimumDraftProbability,
         components: components
     )
-    return generateSpeculativeStream(
-        iterator: iterator, input: input, context: context,
-        wiredMemoryTicket: wiredMemoryTicket, tokenCollector: MTPContinuationCollector(),
-        handler: TextToolTokenLoopHandler(
-            tokenizer: context.tokenizer, modelConfiguration: context.configuration,
-            tools: tools, toolCallPolicy: parameters.toolCallPolicy))
+    return generateTextStream(
+        iterator: iterator, input: input, parameters: parameters, context: context,
+        wiredMemoryTicket: wiredMemoryTicket, tools: tools,
+        tokenCollector: MTPContinuationCollector())
 }

@@ -88,6 +88,19 @@ private func emitOrCancel<Output>(
     emit(output) ? .more : .cancelled
 }
 
+/// The text/tool-call handler of a generation: the stop strings and the tool-call format of
+/// `modelConfiguration` (JSON when the configuration names none), with `tools` and
+/// `toolCallPolicy`. Every text/tool-call entry point builds its handler here.
+func textToolHandler(
+    tokenizer: Tokenizer, modelConfiguration: ModelConfiguration,
+    tools: [[String: any Sendable]]?, toolCallPolicy: ToolCallPolicy
+) -> TextToolTokenLoopHandler {
+    TextToolTokenLoopHandler(
+        tokenizer: tokenizer, stopStrings: modelConfiguration.effectiveStopStrings,
+        format: modelConfiguration.toolCallFormat ?? .json, tools: tools,
+        toolCallPolicy: toolCallPolicy)
+}
+
 /// Decodes response text and tool calls into ``Generation`` events.
 public struct TextToolTokenLoopHandler: TokenLoopHandler {
     public typealias Output = Generation
@@ -104,18 +117,6 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
     ) {
         self.decoder = format.makeTokenStreamDecoder(
             tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
-            toolCallPolicy: toolCallPolicy)
-    }
-
-    /// Creates a handler with the stop strings and the tool-call format of
-    /// `modelConfiguration` (JSON when the configuration names none).
-    init(
-        tokenizer: Tokenizer, modelConfiguration: ModelConfiguration,
-        tools: [[String: any Sendable]]?, toolCallPolicy: ToolCallPolicy
-    ) {
-        self.init(
-            tokenizer: tokenizer, stopStrings: modelConfiguration.effectiveStopStrings,
-            format: modelConfiguration.toolCallFormat ?? .json, tools: tools,
             toolCallPolicy: toolCallPolicy)
     }
 

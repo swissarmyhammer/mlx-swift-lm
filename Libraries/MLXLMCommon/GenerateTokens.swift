@@ -93,10 +93,27 @@ public func generateTokens(
         numDraftTokens: numDraftTokens,
         components: components
     )
-    return generateSpeculativeStream(
+    return generateRawTokenStream(
         iterator: iterator, input: input, context: context, wiredMemoryTicket: wiredMemoryTicket,
-        tokenCollector: IgnoringGeneratedTokens(), handler: RawTokenLoopHandler()
+        tokenCollector: IgnoringGeneratedTokens()
     ).0
+}
+
+/// Runs a speculative-decoding iterator through a ``RawTokenLoopHandler``: the wiring of the
+/// raw-token speculative entry points, which differ only in their iterator and collector.
+///
+/// - Parameter tokenCollector: what the task answers when the generation ends.
+/// - Returns: the stream, and the task that generates it.
+private func generateRawTokenStream<Collector: GeneratedTokenCollector>(
+    iterator: consuming any TokenIteratorProtocol,
+    input: LMInput,
+    context: ModelContext,
+    wiredMemoryTicket: WiredMemoryTicket?,
+    tokenCollector: Collector
+) -> (AsyncStream<TokenGeneration>, Task<Collector.Result, Never>) {
+    generateStream(
+        iterator: iterator, input: input, context: context, wiredMemoryTicket: wiredMemoryTicket,
+        tokenCollector: tokenCollector, handler: RawTokenLoopHandler())
 }
 
 /// Generates raw token IDs asynchronously using MTP speculative decoding.
@@ -183,9 +200,9 @@ public func generateTokensTask(
         minimumDraftProbability: minimumDraftProbability,
         components: components
     )
-    return generateSpeculativeStream(
+    return generateRawTokenStream(
         iterator: iterator, input: input, context: context, wiredMemoryTicket: wiredMemoryTicket,
-        tokenCollector: MTPContinuationCollector(), handler: RawTokenLoopHandler())
+        tokenCollector: MTPContinuationCollector())
 }
 
 /// Generates raw token IDs asynchronously and returns the stream plus a `Task`.
