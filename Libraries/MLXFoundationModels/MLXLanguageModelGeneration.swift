@@ -21,37 +21,32 @@ import MLXGuidedGeneration
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 extension MLXLanguageModel.Executor {
+    /// The identifier of one transcript entry of a turn. `Kind` names which
+    /// entry it is, thus a response, a reasoning and a tool-calls entry
+    /// identifier cannot be swapped without a compile error.
+    struct EntryID<Kind>: Sendable {
+        /// The identifier the channel events carry.
+        let rawValue: String
+
+        /// - Parameter rawValue: The identifier; a fresh UUID by default.
+        init(rawValue: String = UUID().uuidString) { self.rawValue = rawValue }
+    }
+
+    /// The kind of the entry that the response text, the metadata and the
+    /// usage of one turn go to.
+    enum ResponseEntry {}
+    /// The kind of the entry that the reasoning text of one turn goes to.
+    enum ReasoningEntry {}
+    /// The kind of the entry that the tool calls of one turn go to.
+    enum ToolCallsEntry {}
+
     /// The transcript entry that the response text, the metadata and the
     /// usage of one turn go to.
-    ///
-    /// Each entry kind has a wrapper type of its own, thus a response, a
-    /// reasoning and a tool-calls entry identifier cannot be swapped
-    /// without a compile error.
-    struct ResponseEntryID: Sendable {
-        /// The identifier the channel events carry.
-        let rawValue: String
-
-        /// - Parameter rawValue: The identifier; a fresh UUID by default.
-        init(rawValue: String = UUID().uuidString) { self.rawValue = rawValue }
-    }
-
+    typealias ResponseEntryID = EntryID<ResponseEntry>
     /// The transcript entry that the reasoning text of one turn goes to.
-    struct ReasoningEntryID: Sendable {
-        /// The identifier the channel events carry.
-        let rawValue: String
-
-        /// - Parameter rawValue: The identifier; a fresh UUID by default.
-        init(rawValue: String = UUID().uuidString) { self.rawValue = rawValue }
-    }
-
+    typealias ReasoningEntryID = EntryID<ReasoningEntry>
     /// The transcript entry that the tool calls of one turn go to.
-    struct ToolCallsEntryID: Sendable {
-        /// The identifier the channel events carry.
-        let rawValue: String
-
-        /// - Parameter rawValue: The identifier; a fresh UUID by default.
-        init(rawValue: String = UUID().uuidString) { self.rawValue = rawValue }
-    }
+    typealias ToolCallsEntryID = EntryID<ToolCallsEntry>
 
     /// Appends response text to the response entry.
     ///

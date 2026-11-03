@@ -118,6 +118,9 @@ enum ScriptedCacheShape {
     /// The shape of the state written into each recurrent layer. One value is
     /// enough: the caches only have to count the positions the model saw.
     static let recurrentStateShape = [1, 1]
+
+    /// The axis of the tokens of the keys and values written into a cache.
+    static let tokenAxis = 2
 }
 
 /// Writes `keyValues` as the keys and the values of each attention cache of
@@ -132,7 +135,7 @@ enum ScriptedCacheShape {
 ///   write, or nil when `caches` holds no attention cache.
 @discardableResult
 func writeScriptedCaches(keyValues: MLXArray, into caches: [KVCache]) -> MLXArray? {
-    let tokenCount = keyValues.dim(2)
+    let tokenCount = keyValues.dim(ScriptedCacheShape.tokenAxis)
     var firstKeys: MLXArray?
     for cache in caches {
         if let recurrent = cache as? MambaCache {
