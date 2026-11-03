@@ -10,22 +10,22 @@ import Testing
 
 @Test
 func testQwen35TextConfigurationDecodesMTPFields() throws {
-    let cfg = try JSONDecoder().decode(
+    let configuration = try JSONDecoder().decode(
         MLXLLM.Qwen35TextConfiguration.self,
         from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
 
-    #expect(cfg.mtpNumHiddenLayers == 1)
-    #expect(cfg.mtpUseDedicatedEmbeddings == false)
+    #expect(configuration.mtpNumHiddenLayers == 1)
+    #expect(configuration.mtpUseDedicatedEmbeddings == false)
 }
 
 @Test
 func testQwen35VLMTextConfigurationDecodesMTPFields() throws {
-    let cfg = try JSONDecoder().decode(
+    let configuration = try JSONDecoder().decode(
         MLXVLM.Qwen35Configuration.TextConfiguration.self,
         from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
 
-    #expect(cfg.mtpNumHiddenLayers == 1)
-    #expect(cfg.mtpUseDedicatedEmbeddings == false)
+    #expect(configuration.mtpNumHiddenLayers == 1)
+    #expect(configuration.mtpUseDedicatedEmbeddings == false)
 }
 
 @Suite
@@ -114,10 +114,10 @@ struct Qwen35MTPCompatibilityTests {
 
 @Test
 func testQwen35MTPDraftSanitizeKeepsAndShiftsMTPNorms() throws {
-    let cfg = try JSONDecoder().decode(
+    let configuration = try JSONDecoder().decode(
         MLXLLM.Qwen35TextConfiguration.self,
         from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
-    let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
+    let drafter = MLXLLM.Qwen35MTPDraftModel(configuration)
 
     let sanitized = try drafter.sanitize(weights: [
         "mtp.norm.weight": MLXArray.zeros([16]),
@@ -136,10 +136,10 @@ func testQwen35MTPDraftSanitizeKeepsAndShiftsMTPNorms() throws {
     #expect(sanitized["mtp.layers.0.mlp.switch_mlp.up_proj.weight"]?.shape == [2, 16, 16])
     #expect(sanitized["mtp.layers.0.mlp.switch_mlp.down_proj.weight"]?.shape == [2, 16, 16])
     let norm = try #require(sanitized["mtp.norm.weight"])
-    let pre = try #require(sanitized["mtp.pre_fc_norm_embedding.weight"])
-    eval(norm, pre)
+    let embeddingNorm = try #require(sanitized["mtp.pre_fc_norm_embedding.weight"])
+    eval(norm, embeddingNorm)
     #expect(allClose(norm, MLXArray.ones([16]), rtol: 0, atol: 0).item(Bool.self))
-    #expect(allClose(pre, MLXArray.ones([16]), rtol: 0, atol: 0).item(Bool.self))
+    #expect(allClose(embeddingNorm, MLXArray.ones([16]), rtol: 0, atol: 0).item(Bool.self))
 }
 
 @Test(arguments: [false, true])
@@ -167,10 +167,10 @@ func testQwen35MTPDraftSanitizeRejectsCompetingComponents(vision: Bool) throws {
 
 @Test
 func testQwen35StandaloneMTPDoesNotDoubleShiftConvertedNorms() throws {
-    let cfg = try JSONDecoder().decode(
+    let configuration = try JSONDecoder().decode(
         MLXLLM.Qwen35Configuration.self,
         from: Data(Qwen35FixtureJSON.standaloneMTP().utf8))
-    let drafter = MLXLLM.Qwen35MTPDraftModel(cfg, preconvertedNorms: true)
+    let drafter = MLXLLM.Qwen35MTPDraftModel(configuration, preconvertedNorms: true)
 
     let weight = MLXArray.zeros([16])
     let sanitized = try drafter.sanitize(weights: ["mtp.norm.weight": weight])
@@ -181,10 +181,10 @@ func testQwen35StandaloneMTPDoesNotDoubleShiftConvertedNorms() throws {
 
 @Test
 func testQwen35MTPDraftSanitizeStacksPerExpertMoEWeights() throws {
-    let cfg = try JSONDecoder().decode(
+    let configuration = try JSONDecoder().decode(
         MLXLLM.Qwen35TextConfiguration.self,
         from: Data(Qwen35FixtureJSON.text(mtpLayers: 1, numExperts: 2).utf8))
-    let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
+    let drafter = MLXLLM.Qwen35MTPDraftModel(configuration)
 
     let weights: [String: MLXArray] = [
         "mtp.layers.0.mlp.experts.0.gate_proj.weight": MLXArray.zeros([16, 16]),
@@ -205,11 +205,11 @@ func testQwen35MTPDraftSanitizeStacksPerExpertMoEWeights() throws {
 
 @Test
 func testQwen35MTPDraftInstantiatesDedicatedEmbeddingWhenConfigured() throws {
-    let cfg = try JSONDecoder().decode(
+    let configuration = try JSONDecoder().decode(
         MLXLLM.Qwen35TextConfiguration.self,
         from: Data(
             Qwen35FixtureJSON.text(mtpLayers: 1, mtpUseDedicatedEmbeddings: true).utf8))
-    let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
+    let drafter = MLXLLM.Qwen35MTPDraftModel(configuration)
 
     #expect(drafter.mtp.embedTokens != nil)
     let sanitized = try drafter.sanitize(weights: [
@@ -247,23 +247,23 @@ func seededTokens(_ count: Int, vocabularySize: Int, seed: UInt64) -> MLXArray {
 struct Qwen35MTPMetalTests {
     @Test
     func testQwen35MTPPredictorAdvancesEveryLayerCachePerToken() throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
             from: Data(Qwen35FixtureJSON.text(mtpLayers: 2).utf8))
-        let predictor = MLXLLM.Qwen35MTPPredictor(cfg)
+        let predictor = MLXLLM.Qwen35MTPPredictor(configuration)
         let cache = predictor.newCache()
-        let embeds = MLXArray.zeros([1, 1, 16])
+        let embeddings = MLXArray.zeros([1, 1, 16])
         let hidden = MLXArray.zeros([1, 1, 16])
 
         let first = predictor(
-            inputsEmbeds: embeds, hiddenStates: hidden, cache: cache,
+            inputsEmbeds: embeddings, hiddenStates: hidden, cache: cache,
             positionOffset: 128)
         eval(first)
         #expect(cache[0].offset == 1)
         #expect(cache[1].offset == 1)
 
         let second = predictor(
-            inputsEmbeds: embeds, hiddenStates: first, cache: cache,
+            inputsEmbeds: embeddings, hiddenStates: first, cache: cache,
             positionOffset: 129)
         eval(second)
         #expect(cache[0].offset == 2)
@@ -306,22 +306,22 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35TextModelEmitDrafterStateBySynthetic() throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
             from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
-        let model = MLXLLM.Qwen35TextModel(cfg)
+        let model = MLXLLM.Qwen35TextModel(configuration)
         let cache = try model.newCache(parameters: nil as GenerateParameters?)
         var state = LMOutput.State()
         state[mtpEmitFlagKey] = true
 
         let input = LMInput.Text(tokens: MLXArray([Int32(1), 2, 3, 4]).reshaped([1, 4]))
-        let out = model(input, cache: cache, state: state)
+        let output = model(input, cache: cache, state: state)
 
-        let hidden = try #require(out.state?[mtpLastHiddenStatesKey])
-        let sharedKV = try #require(out.state?[mtpSharedKVStatesKey])
-        let sharedKVOffsets = try #require(out.state?[mtpSharedKVOffsetsKey])
-        eval(out.logits, hidden)
-        #expect(out.logits.shape == [1, 4, 16])
+        let hidden = try #require(output.state?[mtpLastHiddenStatesKey])
+        let sharedKV = try #require(output.state?[mtpSharedKVStatesKey])
+        let sharedKVOffsets = try #require(output.state?[mtpSharedKVOffsetsKey])
+        eval(output.logits, hidden)
+        #expect(output.logits.shape == [1, 4, 16])
         #expect(hidden.shape == [1, 4, 16])
         #expect(Set(sharedKV.keys) == ["full_attention"])
         #expect(sharedKVOffsets == ["full_attention": 4])
@@ -333,10 +333,10 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35TextModelEmitsPostFinalNormHiddenState() throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
             from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
-        let model = MLXLLM.Qwen35TextModel(cfg)
+        let model = MLXLLM.Qwen35TextModel(configuration)
         let tokens = MLXArray([Int32(1), 2, 3, 4]).reshaped([1, 4])
         let expected = model.model.forward(tokens, applyFinalNorm: false)
         let normalized = model.model.norm(expected)
@@ -353,10 +353,10 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35VLMEmitsPostFinalNormHiddenState() throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
             from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
-        let model = MLXVLM.Qwen35(cfg)
+        let model = MLXVLM.Qwen35(configuration)
         let tokens = MLXArray([Int32(1), 2, 3, 4]).reshaped([1, 4])
         let base = MLXArray(0 ..< 4).asType(.int32).reshaped([1, 1, 4])
         let positionIds = broadcast(base, to: [3, 1, 4])
@@ -377,11 +377,11 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35DrafterCacheTracksVerifiedSequenceAcrossAcceptRejectPatterns() throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
             from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
-        let target = MLXLLM.Qwen35TextModel(cfg)
-        let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
+        let target = MLXLLM.Qwen35TextModel(configuration)
+        let drafter = MLXLLM.Qwen35MTPDraftModel(configuration)
         let sampler = GenerateParameters(temperature: 0).makeSampler()
         let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
 
@@ -410,7 +410,7 @@ struct Qwen35MTPMetalTests {
                 eval(proposal)
                 #expect(state.cache.allSatisfy { $0.offset == expectedPosition })
 
-                let verifyHidden = MLXArray.zeros([1, 2, cfg.hiddenSize])
+                let verifyHidden = MLXArray.zeros([1, 2, configuration.hiddenSize])
                 let finalToken = MLXArray([Int32(8 + accepted)])
                 drafter.commitDrafterState(
                     target: target, targetHidden: verifyHidden, draftTokens: proposal,
@@ -427,11 +427,11 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35TextDrafterFinalizesAndResumesCanonicalBoundary() throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
             from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
-        let target = MLXLLM.Qwen35TextModel(cfg)
-        let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
+        let target = MLXLLM.Qwen35TextModel(configuration)
+        let drafter = MLXLLM.Qwen35MTPDraftModel(configuration)
         let sampler = GenerateParameters(temperature: 0).makeSampler()
         let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
 
@@ -450,7 +450,7 @@ struct Qwen35MTPMetalTests {
             lastHidden: promptHidden[0..., (-1)..., 0...], sharedKV: [:],
             positionDeltas: nil, queryOffset: 3, blockSize: 2,
             state: &state, sampler: sampler)
-        let verifyHidden = MLXArray.zeros([1, 2, cfg.hiddenSize])
+        let verifyHidden = MLXArray.zeros([1, 2, configuration.hiddenSize])
         bonus = MLXArray([Int32(5)])
         drafter.commitDrafterState(
             target: target, targetHidden: verifyHidden, draftTokens: proposal,
@@ -472,7 +472,7 @@ struct Qwen35MTPMetalTests {
         #expect(state.seedHidden == nil)
 
         let suffix = MLXArray([Int32(6), 7]).reshaped([1, 2])
-        let suffixHidden = MLXArray.zeros([1, 2, cfg.hiddenSize])
+        let suffixHidden = MLXArray.zeros([1, 2, configuration.hiddenSize])
         #expect(
             drafter.resumeDrafterState(
                 target: target, suffixTokens: suffix,
@@ -487,14 +487,14 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35TextDrafterFinalizationAlsoDiscardsTargetLookahead() throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
             from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
-        let target = MLXLLM.Qwen35TextModel(cfg)
-        let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
+        let target = MLXLLM.Qwen35TextModel(configuration)
+        let drafter = MLXLLM.Qwen35MTPDraftModel(configuration)
         let sampler = GenerateParameters(temperature: 0).makeSampler()
         let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
-        let hidden = MLXArray.zeros([1, 3, cfg.hiddenSize])
+        let hidden = MLXArray.zeros([1, 3, configuration.hiddenSize])
         var state = drafter.makeState(parameters: nil)
         drafter.prepareDrafterState(
             target: target, promptTokens: prompt, targetHidden: hidden,
@@ -505,7 +505,7 @@ struct Qwen35MTPMetalTests {
             lastHidden: hidden[0..., (-1)..., 0...], sharedKV: [:],
             positionDeltas: nil, queryOffset: 3, blockSize: 2,
             state: &state, sampler: sampler)
-        let verifyHidden = MLXArray.zeros([1, 2, cfg.hiddenSize])
+        let verifyHidden = MLXArray.zeros([1, 2, configuration.hiddenSize])
         drafter.commitDrafterState(
             target: target, targetHidden: verifyHidden, draftTokens: proposal,
             acceptedCount: 1, finalToken: MLXArray([Int32(5)]),
@@ -524,14 +524,14 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35VLMDrafterResumeKeepsPositionDeltaAlignment() throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
             from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
-        let target = MLXVLM.Qwen35(cfg)
-        let drafter = MLXVLM.Qwen35VLMNextNDraftModel(cfg)
+        let target = MLXVLM.Qwen35(configuration)
+        let drafter = MLXVLM.Qwen35VLMNextNDraftModel(configuration)
         let sampler = GenerateParameters(temperature: 0).makeSampler()
         let prompt = MLXArray([Int32(1), 2, 3]).reshaped([1, 3])
-        let hidden = MLXArray.zeros([1, 3, cfg.textConfiguration.hiddenSize])
+        let hidden = MLXArray.zeros([1, 3, configuration.textConfiguration.hiddenSize])
         let positionDeltas = MLXArray([Int32(2)])
         var state = drafter.makeState(parameters: nil)
 
@@ -553,7 +553,7 @@ struct Qwen35MTPMetalTests {
                 target: target,
                 suffixTokens: MLXArray([Int32(5), 6]).reshaped([1, 2]),
                 suffixTargetHidden: MLXArray.zeros(
-                    [1, 2, cfg.textConfiguration.hiddenSize]),
+                    [1, 2, configuration.textConfiguration.hiddenSize]),
                 targetBoundaryHidden: hidden[0..., (-1)..., 0...],
                 firstBonus: MLXArray([Int32(7)]),
                 positionDeltas: positionDeltas, state: &state, sampler: sampler))
@@ -597,10 +597,10 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35VLMChatSessionResumesActualDrafterState() async throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
             from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
-        let target = MLXVLM.Qwen35(cfg)
+        let target = MLXVLM.Qwen35(configuration)
         let tokenizer = ScalarTokenizer(vocabularySize: Qwen35FixtureJSON.defaultVocabularySize)
         let processor = ScalarTokenizerInputProcessor(
             tokenizer: tokenizer,
@@ -613,7 +613,7 @@ struct Qwen35MTPMetalTests {
         let drafterContainer = MTPDrafterContainer(
             context: MTPDrafterContext(
                 configuration: processor.configuration,
-                model: MLXVLM.Qwen35VLMNextNDraftModel(cfg)))
+                model: MLXVLM.Qwen35VLMNextNDraftModel(configuration)))
         let speculative = ChatSession(
             context,
             speculativeDecoding: try SpeculativeDecodingConfig(
@@ -644,10 +644,10 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35GDNCheckpointMatchesPrefixWithoutReplayingProjections() throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
             from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
-        let layer = MLXLLM.Qwen35GatedDeltaNet(cfg)
+        let layer = MLXLLM.Qwen35GatedDeltaNet(configuration)
         let input = MLXRandom.normal([1, 2, 16])
         let fullCache = MambaCache()
         let speculativeCache = MambaCache()
@@ -682,10 +682,10 @@ struct Qwen35MTPMetalTests {
 
     @Test
     func testQwen35VLMGDNCheckpointMatchesPrefix() throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.TextConfiguration.self,
             from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
-        let layer = MLXVLM.Qwen35Language.GatedDeltaNet(cfg)
+        let layer = MLXVLM.Qwen35Language.GatedDeltaNet(configuration)
         let input = MLXRandom.normal([1, 2, 16])
         let fullCache = MambaCache()
         let speculativeCache = MambaCache()
@@ -934,11 +934,11 @@ struct Qwen35MTPDrafterStateTests {
 
     @Test("the VLM drafter cold-starts at a cached position with its position deltas")
     func vlmColdStartAtCachedPosition() throws {
-        let cfg = try JSONDecoder().decode(
+        let configuration = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
             from: Data(Qwen35FixtureJSON.visionLanguage(mtpLayers: 1).utf8))
-        let target = MLXVLM.Qwen35(cfg)
-        let drafter = MLXVLM.Qwen35VLMNextNDraftModel(cfg)
+        let target = MLXVLM.Qwen35(configuration)
+        let drafter = MLXVLM.Qwen35VLMNextNDraftModel(configuration)
         let sampler = GenerateParameters(temperature: 0).makeSampler()
         let suffix = MLXArray(vlmSuffixTokens)[.newAxis, 0...]
         var state = drafter.makeState(parameters: nil)
@@ -947,7 +947,7 @@ struct Qwen35MTPDrafterStateTests {
             drafter.coldStartDrafterState(
                 target: target, suffixTokens: suffix,
                 suffixTargetHidden: MLXArray.zeros(
-                    [1, suffix.dim(1), cfg.textConfiguration.hiddenSize]),
+                    [1, suffix.dim(1), configuration.textConfiguration.hiddenSize]),
                 firstBonus: MLXArray([vlmBonusToken]), position: cachedPrefixLength,
                 positionDeltas: MLXArray([vlmPositionDelta]), state: &state, sampler: sampler))
         let seed = try #require(state.seedToken)
@@ -1375,10 +1375,10 @@ struct Qwen35CheckpointLoadingTests {
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let context = try await fixture.factory.load(
             from: fixture.directory, using: UnusedTokenizerLoader())
-        let fc = try #require(
+        let fusionProjection = try #require(
             (context.model as? MLXLLM.Qwen35MTPDraftModel)?.mtp.fc as? QuantizedLinear
                 ?? (context.model as? MLXVLM.Qwen35VLMNextNDraftModel)?.mtp.fc as? QuantizedLinear)
-        #expect(fc.bits == 8)
+        #expect(fusionProjection.bits == 8)
         #expect(
             context.model.modules().compactMap { $0 as? QuantizedLinear }.contains { $0.bits == 4 })
     }
@@ -1464,7 +1464,7 @@ struct Qwen35CheckpointLoadingTests {
     func expertParametersAndSettingsAreTransformedTogether() throws {
         let policy = Qwen35CheckpointPolicy(layout: .embedded, preconvertedNorms: false)
         let prefix = "mtp.layers.0.mlp"
-        var weights = [String: MLXArray]()
+        var weights: [String: MLXArray] = [:]
         for expert in 0 ..< 2 {
             for (parameter, shape) in [
                 ("weight", [64, 8]), ("scales", [64, 2]), ("biases", [64, 2]),
@@ -1503,10 +1503,10 @@ struct Qwen35CheckpointLoadingTests {
         #expect(parameters.count == 31)
         let norm = try #require(parameters.first { $0.0 == "mtp.norm.weight" }?.1)
         #expect(norm.asArray(Float.self) == Array(repeating: 1, count: 64))
-        let fc = try #require(
+        let fusionProjection = try #require(
             (context.model as? MLXLLM.Qwen35MTPDraftModel)?.mtp.fc as? QuantizedLinear
                 ?? (context.model as? MLXVLM.Qwen35VLMNextNDraftModel)?.mtp.fc as? QuantizedLinear)
-        #expect(fc.bits == 8)
+        #expect(fusionProjection.bits == 8)
         let projections = context.model.modules().compactMap { $0 as? MLXNN.QuantizedLinear }
         #expect(projections.contains { $0.bits == bits })
     }
@@ -1526,10 +1526,10 @@ struct Qwen35CheckpointLoadingTests {
         #expect(parameters.count == 31)
         let norm = try #require(parameters.first { $0.0 == "mtp.norm.weight" }?.1)
         #expect(norm.asArray(Float.self) == Array(repeating: 1, count: 64))
-        let fc = try #require(
+        let fusionProjection = try #require(
             (context.model as? MLXLLM.Qwen35MTPDraftModel)?.mtp.fc as? QuantizedLinear
                 ?? (context.model as? MLXVLM.Qwen35VLMNextNDraftModel)?.mtp.fc as? QuantizedLinear)
-        #expect(fc.bits == 8)
+        #expect(fusionProjection.bits == 8)
         #expect(
             context.model.modules().compactMap { $0 as? QuantizedLinear }.contains { $0.bits == 4 })
     }
