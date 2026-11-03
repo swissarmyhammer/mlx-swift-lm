@@ -21,6 +21,109 @@ import MLXGuidedGeneration
 
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 extension MLXLanguageModel.Executor {
+    /// The transcript entry that the response text, the metadata and the
+    /// usage of one turn go to.
+    ///
+    /// Each entry kind has a wrapper type of its own, thus a response, a
+    /// reasoning and a tool-calls entry identifier cannot be swapped
+    /// without a compile error.
+    struct ResponseEntryID: Sendable {
+        /// The identifier the channel events carry.
+        let rawValue: String
+
+        /// - Parameter rawValue: The identifier; a fresh UUID by default.
+        init(rawValue: String = UUID().uuidString) { self.rawValue = rawValue }
+    }
+
+    /// The transcript entry that the reasoning text of one turn goes to.
+    struct ReasoningEntryID: Sendable {
+        /// The identifier the channel events carry.
+        let rawValue: String
+
+        /// - Parameter rawValue: The identifier; a fresh UUID by default.
+        init(rawValue: String = UUID().uuidString) { self.rawValue = rawValue }
+    }
+
+    /// The transcript entry that the tool calls of one turn go to.
+    struct ToolCallsEntryID: Sendable {
+        /// The identifier the channel events carry.
+        let rawValue: String
+
+        /// - Parameter rawValue: The identifier; a fresh UUID by default.
+        init(rawValue: String = UUID().uuidString) { self.rawValue = rawValue }
+    }
+
+    /// Appends response text to the response entry.
+    ///
+    /// - Parameters:
+    ///   - text: The text to append.
+    ///   - entryID: The response entry.
+    ///   - channel: The channel to send the event into.
+    static func emitResponse(
+        _ text: String, entryID: ResponseEntryID,
+        into channel: LanguageModelExecutorGenerationChannel
+    ) async {
+        await emit(text: text, entryID: entryID.rawValue, destination: .response, into: channel)
+    }
+
+    /// Appends reasoning text to the reasoning entry.
+    ///
+    /// - Parameters:
+    ///   - text: The text to append.
+    ///   - entryID: The reasoning entry.
+    ///   - channel: The channel to send the event into.
+    static func emitReasoning(
+        _ text: String, entryID: ReasoningEntryID,
+        into channel: LanguageModelExecutorGenerationChannel
+    ) async {
+        await emit(text: text, entryID: entryID.rawValue, destination: .reasoning, into: channel)
+    }
+
+    /// Marks the response entry as incomplete output: the generation was
+    /// cut off, or its output was dropped, before the answer completed.
+    ///
+    /// - Parameters:
+    ///   - entryID: The response entry.
+    ///   - channel: The channel to send the metadata into.
+    static func emitIncompleteOutput(
+        entryID: ResponseEntryID, into channel: LanguageModelExecutorGenerationChannel
+    ) async {
+        await emitMetadata(["incompleteOutput": true], entryID: entryID.rawValue, into: channel)
+    }
+
+    /// Sends the usage of one pass to the response entry.
+    ///
+    /// - Parameters:
+    ///   - input: The input half of the usage.
+    ///   - output: The output half of the usage.
+    ///   - entryID: The response entry.
+    ///   - channel: The channel to send the usage into.
+    static func emitUsage(
+        input: LanguageModelExecutorGenerationChannel.Usage.Input,
+        output: LanguageModelExecutorGenerationChannel.Usage.Output,
+        entryID: ResponseEntryID,
+        into channel: LanguageModelExecutorGenerationChannel
+    ) async {
+        await emitUsage(input: input, output: output, entryID: entryID.rawValue, into: channel)
+    }
+
+    /// Sends one tool call to the tool-calls entry.
+    ///
+    /// - Parameters:
+    ///   - id: The tool-call identifier.
+    ///   - name: The name of the tool.
+    ///   - arguments: The arguments JSON of the call.
+    ///   - entryID: The tool-calls entry.
+    ///   - channel: The channel to send the tool call into.
+    static func emitToolCall(
+        id: String, name: String, arguments: String, entryID: ToolCallsEntryID,
+        into channel: LanguageModelExecutorGenerationChannel
+    ) async {
+        await emitToolCall(
+            id: id, name: name, arguments: arguments, entryID: entryID.rawValue,
+            into: channel)
+    }
+
     /// Runs the tool path of one generation turn — fresh turns and
     /// continuations alike.
     ///
@@ -68,9 +171,9 @@ extension MLXLanguageModel.Executor {
         modelID: String,
         requestedMaxTokens: Int?,
         samplingConfiguration: MLXSamplingConfiguration?,
-        entryID: String,
-        toolCallsEntryID: String,
-        reasoningEntryID: String,
+        entryID: ResponseEntryID,
+        toolCallsEntryID: ToolCallsEntryID,
+        reasoningEntryID: ReasoningEntryID,
         promptCache: ExecutorPromptCacheSlot,
         speculation: MTPSpeculation?,
         context: ModelContext,
@@ -211,9 +314,9 @@ extension MLXLanguageModel.Executor {
         modelID: String,
         requestedMaxTokens: Int?,
         samplingConfiguration: MLXSamplingConfiguration?,
-        entryID: String,
-        toolCallsEntryID: String,
-        reasoningEntryID: String,
+        entryID: ResponseEntryID,
+        toolCallsEntryID: ToolCallsEntryID,
+        reasoningEntryID: ReasoningEntryID,
         promptCache: ExecutorPromptCacheSlot,
         speculation: MTPSpeculation?,
         context: ModelContext,
@@ -249,8 +352,7 @@ extension MLXLanguageModel.Executor {
             channel: channel)
 
         if result.endedInsideReasoning {
-            await Self.emitMetadata(
-                ["incompleteOutput": true], entryID: entryID, into: channel)
+            await Self.emitIncompleteOutput(entryID: entryID, into: channel)
         } else if !result.toolCalls.isEmpty {
             for call in result.toolCalls {
                 let argumentsData = try JSONEncoder().encode(
@@ -276,11 +378,8 @@ extension MLXLanguageModel.Executor {
                 context: context,
                 channel: channel)
         } else {
-            await Self.emit(
-                text: result.responseText,
-                entryID: entryID,
-                destination: .response,
-                into: channel)
+            await Self.emitResponse(
+                result.responseText, entryID: entryID, into: channel)
         }
         if schemaJSON == nil || !result.toolCalls.isEmpty
             || result.endedInsideReasoning
@@ -327,9 +426,9 @@ extension MLXLanguageModel.Executor {
         modelID: String,
         requestedMaxTokens: Int?,
         samplingConfiguration: MLXSamplingConfiguration?,
-        entryID: String,
-        toolCallsEntryID: String,
-        reasoningEntryID: String,
+        entryID: ResponseEntryID,
+        toolCallsEntryID: ToolCallsEntryID,
+        reasoningEntryID: ReasoningEntryID,
         promptCache: ExecutorPromptCacheSlot,
         speculation: MTPSpeculation?,
         context: ModelContext,
@@ -356,19 +455,6 @@ extension MLXLanguageModel.Executor {
                 tools: requiredToolDefinitions
             )
 
-        let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
-            modelID: modelID,
-            tokenizer: context.tokenizer
-        )
-        let constraint = try await MLXLanguageModel.makeConstraint(
-            modelID: modelID,
-            kind: .structuralTag,
-            source: toolCallingGrammar,
-            tokenizer: grammarTokenizer,
-            hostTokenizer: context.tokenizer,
-            fastForward: true
-        )
-
         // Always partition into zones -- the grammar has
         // wiggle room (JSON whitespace before the outer
         // `}`, whitespace before `\n</tool_call>`) that
@@ -377,23 +463,13 @@ extension MLXLanguageModel.Executor {
         // Use the caller's budget when set, otherwise the
         // Executor's default.
         let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
-        let bias = await MLXLanguageModel.makeTokenizerBias(
+        let grammar = try await Self.guidedGrammar(
+            kind: .structuralTag,
+            source: toolCallingGrammar,
+            reserveSchemaJSON: toolCallingEnvelopeJSON,
+            maxTokens: maxTokens,
             modelID: modelID,
-            tokenizer: context.tokenizer
-        )
-        let closingBias = bias.closing
-        let structuralReserve = CompletionReserve.estimate(
-            schemaJSON: toolCallingEnvelopeJSON,
-            tokenizer: context.tokenizer
-        )
-        let completionReserve = Swift.max(
-            structuralReserve * Self.completionReserveStructuralMultiplier,
-            maxTokens / Self.completionReserveBudgetDivisor)
-        let hardReserve =
-            structuralReserve * Self.hardReserveStructuralMultiplier
-
-        let whitespaceBias = bias.whitespace
-        let whitespaceTokenIDs = bias.whitespaceTokenIDs
+            context: context)
 
         // PHASE 1 (think-then-call): reason unconstrained until
         // `</think>`, retaining the token IDs to prefill into the
@@ -419,8 +495,7 @@ extension MLXLanguageModel.Executor {
                 // `</think>`). Don't prefill a truncated thought
                 // into the grammar — signal and finish. Phase 1
                 // already synchronized the GPU on its way out.
-                await Self.emitMetadata(
-                    ["incompleteOutput": true], entryID: entryID, into: channel)
+                await Self.emitIncompleteOutput(entryID: entryID, into: channel)
                 return
             }
         }
@@ -441,34 +516,13 @@ extension MLXLanguageModel.Executor {
             reasoningTokenIDs.isEmpty
             ? maxTokens
             : Swift.max(
-                maxTokens - reasoningTokenIDs.count, completionReserve)
+                maxTokens - reasoningTokenIDs.count, grammar.completionReserve)
 
         var outputBuffer = ""
-        var incomplete = false
-        var generatedTokenCount: Int?
-        do {
-            generatedTokenCount = try Self.withGuidedGenerationSection {
-                try GuidedGenerationLoop.run(
-                    input: phase2Input,
-                    context: context,
-                    constraint: constraint,
-                    maxTokens: phase2MaxTokens,
-                    vocabSize: Int(grammarTokenizer.vocabSize),
-                    completionReserve: completionReserve,
-                    hardReserve: hardReserve,
-                    closingBias: closingBias,
-                    whitespaceBias: whitespaceBias,
-                    whitespaceTokenIDs: whitespaceTokenIDs,
-                    speculation: speculation
-                ) { text in
-                    outputBuffer += text
-                    GuidedGenerationDiagnosticSink.current?.recordEmit()
-                    return !Task.isCancelled
-                }
-            }
-        } catch GuidedGenerationError.incompleteOutput {
-            incomplete = true
-        }
+        let (generatedTokenCount, incomplete) = try Self.runGuidedLoop(
+            input: phase2Input, grammar: grammar, maxTokens: phase2MaxTokens,
+            speculation: speculation, context: context
+        ) { outputBuffer += $0 }
         try Task.checkCancellation()
 
         GuidedGenerationDiagnosticSink.current?.recordBuffer(
@@ -497,8 +551,7 @@ extension MLXLanguageModel.Executor {
         }
 
         if incomplete || !emittedToolCall {
-            await Self.emitMetadata(
-                ["incompleteOutput": true], entryID: entryID, into: channel)
+            await Self.emitIncompleteOutput(entryID: entryID, into: channel)
         }
     }
 
@@ -771,7 +824,7 @@ extension MLXLanguageModel.Executor {
         requestedMaxTokens: Int?,
         requestedTemperature: Double?,
         samplingConfiguration: MLXSamplingConfiguration?,
-        reasoningEntryID: String,
+        reasoningEntryID: ReasoningEntryID,
         promptCache: ExecutorPromptCacheSlot,
         speculation: MTPSpeculation?,
         context: ModelContext,
@@ -833,11 +886,8 @@ extension MLXLanguageModel.Executor {
                         }
                         protocolDecoder = decoder
                         if !reasoningText.isEmpty {
-                            await Self.emit(
-                                text: reasoningText,
-                                entryID: reasoningEntryID,
-                                destination: .reasoning,
-                                into: channel)
+                            await Self.emitReasoning(
+                                reasoningText, entryID: reasoningEntryID, into: channel)
                             try Task.checkCancellation()
                         }
                         if !decoderContinues || !shouldContinue {
@@ -853,11 +903,8 @@ extension MLXLanguageModel.Executor {
                             let reasoningChunks = consumeAllowedEvents(
                                 router.process(chunk), result: &result)
                             for text in reasoningChunks {
-                                await Self.emit(
-                                    text: text,
-                                    entryID: reasoningEntryID,
-                                    destination: .reasoning,
-                                    into: channel)
+                                await Self.emitReasoning(
+                                    text, entryID: reasoningEntryID, into: channel)
                                 try Task.checkCancellation()
                             }
                         }
@@ -886,11 +933,8 @@ extension MLXLanguageModel.Executor {
             result.endedInsideReasoning = router.isInsideReasoning
         }
         if !finalReasoningText.isEmpty {
-            await Self.emit(
-                text: finalReasoningText,
-                entryID: reasoningEntryID,
-                destination: .reasoning,
-                into: channel)
+            await Self.emitReasoning(
+                finalReasoningText, entryID: reasoningEntryID, into: channel)
         }
         if let rejection = result.rejectedToolCalls.first {
             throw RejectedToolCallError(rejection)
@@ -936,7 +980,7 @@ extension MLXLanguageModel.Executor {
 
     func emitAllowedUsage(
         _ result: AllowedToolGenerationResult,
-        entryID: String,
+        entryID: ResponseEntryID,
         promptCache: ExecutorPromptCacheSlot,
         channel: LanguageModelExecutorGenerationChannel
     ) async {
@@ -951,6 +995,115 @@ extension MLXLanguageModel.Executor {
                     info.generationTokenCount)),
             entryID: entryID,
             into: channel)
+    }
+
+    /// The grammar, the biases and the zone reserves of one guided pass.
+    struct GuidedGrammar {
+        /// The grammar tokenizer of the model.
+        let grammarTokenizer: GrammarTokenizer
+        /// The constraint the pass generates under.
+        let constraint: GrammarConstraint
+        /// The closing and whitespace biases of the model.
+        let bias: TokenizerBias
+        /// The reserve the closing zone of the pass starts at.
+        let completionReserve: Int
+        /// The reserve the hard closing zone of the pass starts at.
+        let hardReserve: Int
+    }
+
+    /// Builds the grammar of one guided pass and sizes its reserves.
+    ///
+    /// Schema output and required tool calls build the same setup; they
+    /// differ only in the constraint kind, its source, and the JSON the
+    /// structural reserve is estimated from.
+    ///
+    /// - Parameters:
+    ///   - kind: The kind of the constraint
+    ///   - source: The grammar source of the constraint
+    ///   - reserveSchemaJSON: The JSON schema the structural reserve is estimated from
+    ///   - maxTokens: The token budget of the pass
+    ///   - modelID: The model identifier the caches key on
+    ///   - context: The loaded model context
+    /// - Returns: The grammar and reserves of the pass.
+    /// - Throws: The error of the grammar tokenizer or of the constraint.
+    static func guidedGrammar(
+        kind: ConstraintKind,
+        source: String,
+        reserveSchemaJSON: String,
+        maxTokens: Int,
+        modelID: String,
+        context: ModelContext
+    ) async throws -> GuidedGrammar {
+        let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
+            modelID: modelID,
+            tokenizer: context.tokenizer)
+        let constraint = try await MLXLanguageModel.makeConstraint(
+            modelID: modelID,
+            kind: kind,
+            source: source,
+            tokenizer: grammarTokenizer,
+            hostTokenizer: context.tokenizer,
+            fastForward: true)
+        let bias = await MLXLanguageModel.makeTokenizerBias(
+            modelID: modelID,
+            tokenizer: context.tokenizer)
+        let structuralReserve = CompletionReserve.estimate(
+            schemaJSON: reserveSchemaJSON,
+            tokenizer: context.tokenizer)
+        return GuidedGrammar(
+            grammarTokenizer: grammarTokenizer,
+            constraint: constraint,
+            bias: bias,
+            completionReserve: Swift.max(
+                structuralReserve * completionReserveStructuralMultiplier,
+                maxTokens / completionReserveBudgetDivisor),
+            hardReserve: structuralReserve * hardReserveStructuralMultiplier)
+    }
+
+    /// Runs one guided pass inside the guided-generation section.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt of the pass
+    ///   - grammar: The grammar and reserves of the pass
+    ///   - maxTokens: The token budget of the pass
+    ///   - speculation: The MTP drafter the pass speculates with, or nil
+    ///   - context: The loaded model context
+    ///   - onText: Receives each piece of text the pass emits
+    /// - Returns: The generated token count, nil when the output is
+    ///   incomplete, and whether it is.
+    /// - Throws: The errors of the loop other than incomplete output.
+    static func runGuidedLoop(
+        input: LMInput,
+        grammar: GuidedGrammar,
+        maxTokens: Int,
+        speculation: MTPSpeculation?,
+        context: ModelContext,
+        onText: (String) -> Void
+    ) throws -> (generatedTokenCount: Int?, incomplete: Bool) {
+        do {
+            let generatedTokenCount = try withGuidedGenerationSection {
+                try GuidedGenerationLoop.run(
+                    input: input,
+                    context: context,
+                    constraint: grammar.constraint,
+                    maxTokens: maxTokens,
+                    vocabSize: Int(grammar.grammarTokenizer.vocabSize),
+                    completionReserve: grammar.completionReserve,
+                    hardReserve: grammar.hardReserve,
+                    closingBias: grammar.bias.closing,
+                    whitespaceBias: grammar.bias.whitespace,
+                    whitespaceTokenIDs: grammar.bias.whitespaceTokenIDs,
+                    speculation: speculation
+                ) { text in
+                    onText(text)
+                    GuidedGenerationDiagnosticSink.current?.recordEmit()
+                    return !Task.isCancelled
+                }
+            }
+            return (generatedTokenCount, false)
+        } catch GuidedGenerationError.incompleteOutput {
+            return (nil, true)
+        }
     }
 
     /// Runs schema output: guided generation constrained to the JSON schema of the request.
@@ -970,7 +1123,7 @@ extension MLXLanguageModel.Executor {
         input: LMInput,
         modelID: String,
         requestedMaxTokens: Int?,
-        entryID: String,
+        entryID: ResponseEntryID,
         promptCache: ExecutorPromptCacheSlot,
         speculation: MTPSpeculation?,
         context: ModelContext,
@@ -980,65 +1133,27 @@ extension MLXLanguageModel.Executor {
         // accepts none from a caller, thus this pass carries nothing from an
         // earlier turn and reports nothing.
         promptCache.carriesNoCache()
-        let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
-            modelID: modelID,
-            tokenizer: context.tokenizer)
-        let constraint = try await MLXLanguageModel.makeConstraint(
-            modelID: modelID,
+        let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
+        let grammar = try await Self.guidedGrammar(
             kind: .json,
             source: schemaJSON,
-            tokenizer: grammarTokenizer,
-            hostTokenizer: context.tokenizer,
-            fastForward: true)
-        let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
-        let bias = await MLXLanguageModel.makeTokenizerBias(
+            reserveSchemaJSON: schemaJSON,
+            maxTokens: maxTokens,
             modelID: modelID,
-            tokenizer: context.tokenizer)
-        let structuralReserve = CompletionReserve.estimate(
-            schemaJSON: schemaJSON,
-            tokenizer: context.tokenizer)
-        let completionReserve = Swift.max(
-            structuralReserve * Self.completionReserveStructuralMultiplier,
-            maxTokens / Self.completionReserveBudgetDivisor)
-        let hardReserve =
-            structuralReserve * Self.hardReserveStructuralMultiplier
+            context: context)
 
         let (textStream, textContinuation) = AsyncStream<String>.makeStream()
         async let forwarder: Void = {
             for await text in textStream {
-                await Self.emit(
-                    text: text,
-                    entryID: entryID,
-                    destination: .response,
-                    into: channel)
+                await Self.emitResponse(
+                    text, entryID: entryID, into: channel)
             }
         }()
 
-        var incomplete = false
-        var generatedTokenCount: Int?
-        do {
-            generatedTokenCount = try Self.withGuidedGenerationSection {
-                try GuidedGenerationLoop.run(
-                    input: input,
-                    context: context,
-                    constraint: constraint,
-                    maxTokens: maxTokens,
-                    vocabSize: Int(grammarTokenizer.vocabSize),
-                    completionReserve: completionReserve,
-                    hardReserve: hardReserve,
-                    closingBias: bias.closing,
-                    whitespaceBias: bias.whitespace,
-                    whitespaceTokenIDs: bias.whitespaceTokenIDs,
-                    speculation: speculation
-                ) { text in
-                    textContinuation.yield(text)
-                    GuidedGenerationDiagnosticSink.current?.recordEmit()
-                    return !Task.isCancelled
-                }
-            }
-        } catch GuidedGenerationError.incompleteOutput {
-            incomplete = true
-        }
+        let (generatedTokenCount, incomplete) = try Self.runGuidedLoop(
+            input: input, grammar: grammar, maxTokens: maxTokens,
+            speculation: speculation, context: context
+        ) { textContinuation.yield($0) }
 
         let cancellationError: Error?
         do {
@@ -1064,8 +1179,7 @@ extension MLXLanguageModel.Executor {
                 into: channel)
         }
         if incomplete {
-            await Self.emitMetadata(
-                ["incompleteOutput": true], entryID: entryID, into: channel)
+            await Self.emitIncompleteOutput(entryID: entryID, into: channel)
         }
     }
 
@@ -1077,7 +1191,7 @@ extension MLXLanguageModel.Executor {
         requestedMaxTokens: Int?,
         requestedTemperature: Double?,
         samplingConfiguration: MLXSamplingConfiguration?,
-        entryID: String,
+        entryID: ResponseEntryID,
         promptCache: ExecutorPromptCacheSlot,
         speculation: MTPSpeculation?,
         context: ModelContext,
@@ -1122,8 +1236,7 @@ extension MLXLanguageModel.Executor {
                 try Task.checkCancellation()
                 switch generation {
                 case .chunk(let text):
-                    await Self.emit(
-                        text: text, entryID: entryID, destination: .response, into: channel)
+                    await Self.emitResponse(text, entryID: entryID, into: channel)
                 case .info(let info):
                     // MLX-LM emits one .info event at end-of-generation with
                     // authoritative scalar token counts (`promptTokenCount`
@@ -1160,8 +1273,8 @@ extension MLXLanguageModel.Executor {
         requestedMaxTokens: Int?,
         requestedTemperature: Double?,
         samplingConfiguration: MLXSamplingConfiguration?,
-        responseEntryID: String,
-        reasoningEntryID: String,
+        responseEntryID: ResponseEntryID,
+        reasoningEntryID: ReasoningEntryID,
         promptCache: ExecutorPromptCacheSlot,
         speculation: MTPSpeculation?,
         context: ModelContext,
@@ -1212,8 +1325,8 @@ extension MLXLanguageModel.Executor {
         requestedMaxTokens: Int?,
         requestedTemperature: Double?,
         samplingConfiguration: MLXSamplingConfiguration?,
-        responseEntryID: String,
-        reasoningEntryID: String,
+        responseEntryID: ResponseEntryID,
+        reasoningEntryID: ReasoningEntryID,
         promptCache: ExecutorPromptCacheSlot,
         speculation: MTPSpeculation?,
         context: ModelContext,
@@ -1343,8 +1456,7 @@ extension MLXLanguageModel.Executor {
         // empty or partial answer for the model's chosen response — mirrors
         // the guided path's `incompleteOutput` convention.
         if endedInsideReasoning {
-            await Self.emitMetadata(
-                ["incompleteOutput": true], entryID: responseEntryID, into: channel)
+            await Self.emitIncompleteOutput(entryID: responseEntryID, into: channel)
         }
 
         if let info = completionInfo {
@@ -1365,17 +1477,15 @@ extension MLXLanguageModel.Executor {
     /// Routes one scanned segment to the appropriate channel entry.
     static func send(
         _ segment: ReasoningEventEmitter.Segment,
-        responseEntryID: String,
-        reasoningEntryID: String,
+        responseEntryID: ResponseEntryID,
+        reasoningEntryID: ReasoningEntryID,
         channel: LanguageModelExecutorGenerationChannel
     ) async {
         switch segment {
         case .reasoning(let text):
-            await Self.emit(
-                text: text, entryID: reasoningEntryID, destination: .reasoning, into: channel)
+            await Self.emitReasoning(text, entryID: reasoningEntryID, into: channel)
         case .response(let text):
-            await Self.emit(
-                text: text, entryID: responseEntryID, destination: .response, into: channel)
+            await Self.emitResponse(text, entryID: responseEntryID, into: channel)
         }
     }
 
@@ -1543,8 +1653,8 @@ extension MLXLanguageModel.Executor {
         maxTokens: Int,
         requestedTemperature: Double?,
         samplingConfiguration: MLXSamplingConfiguration?,
-        reasoningEntryID: String,
-        responseEntryID: String,
+        reasoningEntryID: ReasoningEntryID,
+        responseEntryID: ResponseEntryID,
         speculation: MTPSpeculation?,
         context: ModelContext,
         channel: LanguageModelExecutorGenerationChannel
@@ -1632,7 +1742,7 @@ extension MLXLanguageModel.Executor {
     ///   dropped, so the caller can mark the entry as incomplete output.
     func emitRequiredToolCallEvent(
         outputBuffer: String,
-        toolCallsEntryID: String,
+        toolCallsEntryID: ToolCallsEntryID,
         channel: LanguageModelExecutorGenerationChannel
     ) async -> Bool {
         let unwrapped = Self.unwrapToolCallMarkers(outputBuffer)

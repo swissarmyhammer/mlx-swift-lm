@@ -22,7 +22,8 @@ struct RequiredToolCallEnvelopeTests {
         }
         defer { consumer.cancel() }
         return await executor.emitRequiredToolCallEvent(
-            outputBuffer: outputBuffer, toolCallsEntryID: "entry", channel: channel)
+            outputBuffer: outputBuffer, toolCallsEntryID: .init(rawValue: "entry"), channel: channel
+        )
     }
 
     @Test("an envelope with a name reports an emitted tool call")

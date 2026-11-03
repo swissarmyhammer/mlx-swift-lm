@@ -259,13 +259,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         )
     }
 
-    /// Whether the shared cache already holds an `GrammarTokenizer` for the model.
-    /// Internal test seam (not public API): lets `PrewarmGrammarTests` confirm
-    /// `warmUp()` pre-created the tokenizer.
-    static func hasCachedGrammarTokenizer(modelID: String) async -> Bool {
-        await cache.hasCachedGrammarTokenizer(modelID: modelID)
-    }
-
     /// Evicts every cached model, tokenizer, constraint template, and per-model
     /// tokenizer bias, and every prompt cache entry, then clears the MLX buffer
     /// pool so the GPU memory of the weights and caches returns to the system.
@@ -658,10 +651,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - entryID: the response entry of the call.
         ///   - channel: the channel to send the metadata into.
         static func emitSpeculativeDecodingOutcome(
-            entryID: String, into channel: LanguageModelExecutorGenerationChannel
+            entryID: ResponseEntryID, into channel: LanguageModelExecutorGenerationChannel
         ) async {
             guard let outcome = SpeculativeDecodingOutcome.current else { return }
-            await emitMetadata(outcome.metadata, entryID: entryID, into: channel)
+            await emitMetadata(outcome.metadata, entryID: entryID.rawValue, into: channel)
         }
 
         static func emit(
@@ -1054,6 +1047,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - transcript: Accepted per protocol; the shader warmup uses a
         ///     fixed dummy prompt and does not depend on it.
         public func prewarm(model: MLXLanguageModel, transcript: Transcript) {
+            // Unstructured by design, with no stored handle: the executor is a
+            // `Sendable` value with no teardown hook and the protocol offers no
+            // way to cancel a prewarm, so no owner could cancel or await it.
             Task {
                 do {
                     try await model.warmUp()
@@ -1141,9 +1137,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             // The SDK's vision check does not cover `.attachment` segments, so the adapter
             // must enforce `.vision` for image attachments itself.
-            if !model.capabilities.contains(.vision),
-                messages.contains(where: { !$0.images.isEmpty })
-            {
+            guard
+                model.capabilities.contains(.vision)
+                    || !messages.contains(where: { !$0.images.isEmpty })
+            else {
                 throw LanguageModelError.unsupportedCapability(
                     LanguageModelError.UnsupportedCapability(
                         capability: .vision,
@@ -1182,9 +1179,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // UUID — they live in separate transcript entries. We preserve the
             // framework-supplied `request.id` for tracing by stamping it into
             // the response metadata below, rather than reusing it as an entry id.
-            let entryID = UUID().uuidString
-            let toolCallsEntryID = UUID().uuidString
-            let reasoningEntryID = UUID().uuidString
+            let entryID = ResponseEntryID()
+            let toolCallsEntryID = ToolCallsEntryID()
+            let reasoningEntryID = ReasoningEntryID()
             // Captured before the actor hop so the perform closure doesn't
             // capture `model`. Reasoning is gated strictly on the declared
             // capability; the resolver-patched configuration supplies the
@@ -1215,7 +1212,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // Send metadata first
                 await Self.emitMetadata(
                     ["modelID": modelID, "requestID": request.id.uuidString],
-                    entryID: entryID, into: channel)
+                    entryID: entryID.rawValue, into: channel)
 
                 // Generate tokens inside actor isolation. `messages` carries
                 // non-Sendable `Chat.Message` instances (UserInput.Image and
@@ -1375,16 +1372,34 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             modelID: String,
             configurationResolver: any ModelConfigurationResolver
         ) -> ModelConfiguration {
-            let configData = try? Data(
-                contentsOf:
-                    context.configuration.modelDirectory
-                    .appendingPathComponent("config.json"))
-            let modelType =
-                configData.flatMap {
-                    try? JSONDecoder.json5().decode(
-                        BaseConfiguration.self, from: $0
+            let configData: Data?
+            do {
+                configData = try Data(
+                    contentsOf: context.configuration.modelDirectory
+                        .appendingPathComponent("config.json"))
+            } catch {
+                Self.logger.error(
+                    "config.json unreadable for \(modelID): \(error.localizedDescription)")
+                configData = nil
+            }
+            // The empty model type is the named default for a model whose
+            // config is missing or undecodable; the resolver then matches no
+            // model-type rule. The failure is logged rather than asserted,
+            // because a test model loaded from a bare directory has no config.
+            let modelType: String
+            if let configData {
+                do {
+                    modelType = try JSONDecoder.json5().decode(
+                        BaseConfiguration.self, from: configData
                     ).modelType
-                } ?? ""
+                } catch {
+                    Self.logger.error(
+                        "config.json undecodable for \(modelID): \(error.localizedDescription)")
+                    modelType = ""
+                }
+            } else {
+                modelType = ""
+            }
             let descriptor = ModelDescriptor(
                 modelType: modelType,
                 modelId: modelID,
