@@ -1958,8 +1958,11 @@ struct Qwen35MTPGenerateLoopContractTests {
         let error = #expect(throws: LMOutput.State.SerializationError.self) {
             try preparePromptCacheSave(cache: cache, state: iterator.mainState)
         }
-        if case .unsupportedValue(let key, _) = error {
+        switch error {
+        case .unsupportedValue(let key, _):
             #expect(key.hasPrefix("mtp."), "\(key) is not an MTP exchange value")
+        default:
+            Issue.record("unexpected serialization error: \(String(describing: error))")
         }
         _ = try preparePromptCacheSave(cache: cache, state: iterator.state)
     }
