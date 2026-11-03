@@ -16,7 +16,7 @@
 // counts:
 //
 //     MLX_VERIFY_ATTENTION_PROFILE=1 xcrun xctest \
-//         -XCTest VerifyAttentionBlockPassProfileTests \
+//         -XCTest MLXLMTests.VerifyAttentionBlockPassProfileTests \
 //         .build/out/Products/Debug/MLXLMTests.xctest
 //
 // Each measurement line starts with `VERIFY BLOCK PASS PROFILE:`.
@@ -110,6 +110,7 @@ struct VerifyAttentionBlockPassProfileTests {
                         queries: decode, keys: $0.keys, values: $0.values, scale: scale)
                 }
             }
+            // swiftlint:disable:next no_direct_standard_out_logs — an opt-in profile; its output is the measurement.
             print(
                 Self.prefix,
                 "keys \(keyCount) decode step \(String(format: "%.2f", decodeTime)) ms",
@@ -145,6 +146,7 @@ struct VerifyAttentionBlockPassProfileTests {
                         ", b\(blocks) \(String(format: "%.2f", whole))"
                         + " (block \(String(format: "%.2f", blockPass)))"
                 }
+                // swiftlint:disable:next no_direct_standard_out_logs — an opt-in profile; its output is the measurement.
                 print(Self.prefix, line, "ms")
             }
         }
