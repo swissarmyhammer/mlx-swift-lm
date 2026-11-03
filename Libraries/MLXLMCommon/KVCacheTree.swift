@@ -1,5 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
+import MLX
+
 /// A classified leaf in a potentially nested cache topology.
 struct KVCacheLeaf {
     enum Kind {
@@ -71,25 +73,18 @@ struct KVCacheLeaf {
             case .fullPrecision:
                 return true
             case .affine(let affine):
-                guard state.count >= 2 else { return true }
-                return resolvedKVQuantizationGroupSize(
-                    requested: affine.groupSize,
-                    keyHeadDim: state[0].dim(3),
-                    valueHeadDim: state[1].dim(3)) != nil
+                return Self.supportsGroupQuantization(state, requested: affine.groupSize)
             case .turboQuant(let turbo):
                 guard protectedPaths.contains(path) || turbo.keyPrecision == .affineEightBit
                 else { return true }
-                guard state.count >= 2 else { return true }
-                return resolvedKVQuantizationGroupSize(
-                    requested: 64,
-                    keyHeadDim: state[0].dim(3),
-                    valueHeadDim: state[1].dim(3)) != nil
-            case .varianceNormalized(let varn):
-                guard state.count >= 2 else { return true }
+                return Self.supportsGroupQuantization(
+                    state, requested: KVCacheTree.boundaryProtectionGroupSize)
+            case .varianceNormalized(let varianceNormalized):
+                guard let headDims = Self.headDims(of: state) else { return true }
                 return supportsVarianceNormalizedKVCache(
-                    keyHeadDim: state[0].dim(3),
-                    valueHeadDim: state[1].dim(3),
-                    tileSize: varn.tileSize)
+                    keyHeadDim: headDims.key,
+                    valueHeadDim: headDims.value,
+                    tileSize: varianceNormalized.tileSize)
             }
         case .affine:
             return strategy == .affine
@@ -100,12 +95,60 @@ struct KVCacheLeaf {
             return strategy == .varianceNormalized
         }
     }
+
+    /// The position of the keys in the inner state of a simple cache.
+    private static let keyStateIndex = 0
+
+    /// The position of the values in the inner state of a simple cache.
+    private static let valueStateIndex = 1
+
+    /// The axis of the head dimension in a `[batch, heads, tokens, headDim]` state array.
+    private static let headDimAxis = 3
+
+    /// The key and value head dimensions of a simple cache's inner state, or `nil` while the
+    /// cache has not seen a token yet.
+    private static func headDims(of state: [MLXArray]) -> (key: Int, value: Int)? {
+        guard state.indices.contains(keyStateIndex), state.indices.contains(valueStateIndex)
+        else { return nil }
+        return (state[keyStateIndex].dim(headDimAxis), state[valueStateIndex].dim(headDimAxis))
+    }
+
+    /// Whether group quantization with the `requested` group size fits the head dimensions of
+    /// `state`. An empty state has no shape yet and is accepted.
+    private static func supportsGroupQuantization(_ state: [MLXArray], requested: Int) -> Bool {
+        guard let headDims = headDims(of: state) else { return true }
+        return resolvedKVQuantizationGroupSize(
+            requested: requested,
+            keyHeadDim: headDims.key,
+            valueHeadDim: headDims.value) != nil
+    }
 }
 
 /// The sole traversal and mutation boundary for nested cache topologies.
 enum KVCacheTree {
+    /// The affine group size of the boundary layers that TurboQuant protects with 8-bit affine.
+    static let boundaryProtectionGroupSize = 64
+
+    /// Key bit widths below this make a TurboQuant scheme fragile at its boundary layers.
+    private static let fragileKeyBitsBound = 8
+
+    /// Value bit widths at or below this make a TurboQuant scheme fragile at its boundary layers.
+    private static let fragileValueBitsLimit = 2
+
+    /// The most layers TurboQuant protects at each end of the eligible layers.
+    private static let maximumProtectedLayersPerEnd = 2
+
+    /// The ends of the eligible layers that TurboQuant protects: the first and the last.
+    private static let protectedEndCount = 2
+
+    /// Whether `cache` is a leaf: neither a ``CacheList`` of further caches nor an
+    /// ``AuxiliaryKVCache``, which appends and trims alongside the leaves but is not one.
+    static func isLeaf(_ cache: KVCache) -> Bool {
+        !(cache is CacheList) && !(cache is any AuxiliaryKVCache)
+    }
+
     static func leaves(in cache: [KVCache]) -> [KVCacheLeaf] {
-        var leaves = [KVCacheLeaf]()
+        var leaves: [KVCacheLeaf] = []
         for (index, entry) in cache.enumerated() {
             appendLeaves(from: entry, path: [index], to: &leaves)
         }
@@ -124,7 +167,7 @@ enum KVCacheTree {
         for index in cache.indices {
             if let list = cache[index] as? CacheList {
                 list.rewriteLeaves(path: [index], using: transform)
-            } else if !(cache[index] is any AuxiliaryKVCache) {
+            } else if isLeaf(cache[index]) {
                 let leaf = KVCacheLeaf(path: [index], cache: cache[index])
                 cache[index] = transform(leaf)
             }
@@ -136,14 +179,16 @@ enum KVCacheTree {
         keyBits: Int,
         valueBits: Int
     ) -> Set<[Int]> {
-        let fragile = (keyBits > 0 && keyBits < 8) || valueBits <= 2
+        let fragile =
+            (keyBits > 0 && keyBits < fragileKeyBitsBound) || valueBits <= fragileValueBitsLimit
         guard fragile else { return [] }
 
         let eligiblePaths =
             leaves
             .filter(\.participatesInTurboQuantBoundaryProtection)
             .map(\.path)
-        let boundaryCount = min(2, eligiblePaths.count / 2)
+        let boundaryCount = min(
+            maximumProtectedLayersPerEnd, eligiblePaths.count / protectedEndCount)
         guard boundaryCount > 0 else { return [] }
         return Set(eligiblePaths.prefix(boundaryCount))
             .union(eligiblePaths.suffix(boundaryCount))
@@ -158,7 +203,7 @@ enum KVCacheTree {
             for (index, child) in list.children.enumerated() {
                 appendLeaves(from: child, path: path + [index], to: &leaves)
             }
-        } else if !(cache is any AuxiliaryKVCache) {
+        } else if isLeaf(cache) {
             leaves.append(KVCacheLeaf(path: path, cache: cache))
         }
     }
