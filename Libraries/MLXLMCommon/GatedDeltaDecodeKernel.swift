@@ -177,17 +177,22 @@ package enum GatedDeltaDecodeKernel {
         package let snapshots: Snapshots?
     }
 
-    /// The states after each token of a speculative verify: one snapshot slot
-    /// of the recurrent state for each token, and the conv input window that
-    /// holds the conv state after each token.
+    /// The states after each token of a speculative verify that a rollback
+    /// selects: one snapshot slot of the recurrent state for each token but the
+    /// last, and the conv input window that holds the conv state after each
+    /// token.
     ///
     /// A rollback of `r` tokens of a verify of `T` tokens selects the states
-    /// after token `T - r`. The slot of the recurrent state is a view of one
-    /// `(tokens, …)` buffer, and the conv state is a view of the window: a
+    /// after token `T - r`. No rollback rejects the head token of a verify, so
+    /// `r` is at least one and no rollback selects the states after token `T`:
+    /// those are the states the verify gives back as the states after its last
+    /// token, and no slot holds them twice. A verify of `T` tokens thus writes
+    /// `T - 1` slots. The slot of the recurrent state is a view of one
+    /// `(tokens - 1, …)` buffer, and the conv state is a view of the window: a
     /// holder that keeps a selected state copies it, so that the buffer can go.
     package struct Snapshots {
-        /// The recurrent state after each token, shape
-        /// `(tokens, batch, valueHeads, valueHeadDim, keyHeadDim)`, in
+        /// The recurrent state after each token but the last, shape
+        /// `(tokens - 1, batch, valueHeads, valueHeadDim, keyHeadDim)`, in
         /// float32: slot `t` holds the state after token `t + 1`.
         package let recurrent: MLXArray
         /// The conv input window, shape
@@ -198,8 +203,8 @@ package enum GatedDeltaDecodeKernel {
         /// Collects the states after each token of a verify.
         ///
         /// - Parameters:
-        ///   - recurrent: The recurrent state after each token, shape
-        ///     `(tokens, batch, valueHeads, valueHeadDim, keyHeadDim)`.
+        ///   - recurrent: The recurrent state after each token but the last,
+        ///     shape `(tokens - 1, batch, valueHeads, valueHeadDim, keyHeadDim)`.
         ///   - convWindow: The conv input window, shape
         ///     `(batch, taps - 1 + tokens, convChannels)`.
         package init(recurrent: MLXArray, convWindow: MLXArray) {
@@ -207,20 +212,27 @@ package enum GatedDeltaDecodeKernel {
             self.convWindow = convWindow
         }
 
-        /// The number of tokens of the verify: the number of slots.
-        package var tokenCount: Int { recurrent.dim(SnapshotAxis.token) }
+        /// The number of tokens of the verify: one more than the slots.
+        package var tokenCount: Int { slotCount + Self.unslottedTokenCount }
+
+        /// The number of recurrent snapshot slots: the tokens of the verify but the last.
+        package var slotCount: Int { recurrent.dim(SnapshotAxis.token) }
+
+        /// The tokens at the end of a verify that no slot holds: its last token, whose states
+        /// the verify gives back as the states after its last token.
+        package static let unslottedTokenCount = 1
 
         /// The number of rows of one conv state: the conv taps less one.
         private var convStateRows: Int { convWindow.dim(GatedDeltaAxis.step) - tokenCount }
 
         /// The recurrent state after a token of the verify: a view of its slot.
         ///
-        /// - Parameter token: The token, from 1 to ``tokenCount``.
+        /// - Parameter token: The token, from 1 to ``slotCount``: the tokens before the last.
         /// - Returns: The recurrent state, shape
         ///   `(batch, valueHeads, valueHeadDim, keyHeadDim)`.
         package func recurrentState(afterToken token: Int) -> MLXArray {
             precondition(
-                (1 ... tokenCount).contains(token),
+                (1 ... slotCount).contains(token),
                 "a verify of \(tokenCount) tokens has no slot after token \(token)")
             return recurrent[token - 1]
         }
@@ -491,11 +503,14 @@ package enum GatedDeltaDecodeKernel {
 
     /// The Metal statements of a run that takes snapshots: they write the rows
     /// of the SIMD group after token `t` into slot `t` of `snapshots`, shape
-    /// `(tokens, batch * valueHeads, valueHeadDim, keyHeadDim)`.
+    /// `(tokens - 1, batch * valueHeads, valueHeadDim, keyHeadDim)`. The rows
+    /// after the last token go to `state_out` only (``Snapshots``).
     private static let snapshotWrite = """
-        size_t slot_at = ((size_t(t) * heads + n) * Dv + value_row) * Dk + lane * NUMBERS;
-                    for (int i = 0; i < NUMBERS; ++i) {
-                      snapshots[slot_at + i] = static_cast<StT>(rows[r][i]);
+        if (t < TOKENS - 1) {
+                      size_t slot_at = ((size_t(t) * heads + n) * Dv + value_row) * Dk + lane * NUMBERS;
+                      for (int i = 0; i < NUMBERS; ++i) {
+                        snapshots[slot_at + i] = static_cast<StT>(rows[r][i]);
+                      }
                     }
         """
 
@@ -667,7 +682,8 @@ package enum GatedDeltaDecodeKernel {
         ]
         var outputDTypes = [inputs.qkv.dtype, recurrentState.dtype, convState.dtype]
         if takesSnapshots {
-            outputShapes.append([tokens] + recurrentState.shape)
+            outputShapes.append(
+                [tokens - Snapshots.unslottedTokenCount] + recurrentState.shape)
             outputDTypes.append(recurrentState.dtype)
         }
         let outputs = (takesSnapshots ? snapshotKernel : kernel)(
@@ -736,8 +752,8 @@ extension GatedDeltaDecodeKernel.Snapshots {
     /// The gated delta rule of the op path over the tokens of a speculative
     /// verify, one token at a time, with the snapshot slots the kernel would
     /// keep: each token runs ``gatedDeltaUpdate(q:k:v:a:b:aLog:dtBias:state:mask:useKernel:)``
-    /// from the state after the token before it, and its state is its slot.
-    /// A verify of two tokens thus runs the two one-token updates that a
+    /// from the state after the token before it, and the state of each token
+    /// but the last is its slot (``unslottedTokenCount``). A verify of two tokens thus runs the two one-token updates that a
     /// split after its first token runs.
     ///
     /// - Parameters:
@@ -775,7 +791,9 @@ extension GatedDeltaDecodeKernel.Snapshots {
         }
         return (
             concatenated(steps.map(\.0), axis: GatedDeltaAxis.step), last.1,
-            Self(recurrent: stacked(steps.map(\.1)), convWindow: convWindow)
+            Self(
+                recurrent: stacked(steps.dropLast(unslottedTokenCount).map(\.1)),
+                convWindow: convWindow)
         )
     }
 }

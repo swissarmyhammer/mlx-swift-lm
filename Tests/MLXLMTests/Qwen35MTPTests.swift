@@ -718,10 +718,10 @@ struct Qwen35MTPMetalTests {
         let recurrent = MambaCache()
         let checkpointConv = MLXArray.ones([1, 1, 4])
         let checkpointState = MLXArray.ones([1, 2, 2, 2])
-        // The slots of a two-token verify: the states after its first token are the checkpoint.
+        // The slot of a two-token verify: the states after its first token are the checkpoint.
         recurrent.saveSpeculativeSnapshots(
             GatedDeltaDecodeKernel.Snapshots(
-                recurrent: stacked([checkpointState, zeros(like: checkpointState)]),
+                recurrent: stacked([checkpointState]),
                 convWindow: concatenated(
                     [zeros(like: checkpointConv), checkpointConv, zeros(like: checkpointConv)],
                     axis: 1)))

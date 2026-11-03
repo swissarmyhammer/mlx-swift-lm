@@ -31,18 +31,18 @@ private func headOffset(_ place: Int) -> Float {
 }
 
 /// The snapshot slots ``ArithmeticHybridLayer`` keeps for a verify over `x`: the slot after
-/// token `t` holds the recurrent state plus `t` state steps, and the conv window holds the
-/// conv state, then the mixer input of each token.
+/// token `t`, for each token but the last, holds the recurrent state plus `t` state steps, and
+/// the conv window holds the conv state, then the mixer input of each token.
 ///
 /// - Parameters:
 ///   - x: The mixer input, shape `(batch, tokens, hiddenWidth)`.
 ///   - convState: The conv state before the first token.
 ///   - recState: The recurrent state before the first token.
-/// - Returns: The slots, recurrent shape `(tokens,)` plus the recurrent state shape.
+/// - Returns: The slots, recurrent shape `(tokens - 1,)` plus the recurrent state shape.
 private func arithmeticSnapshots(
     _ x: MLXArray, convState: MLXArray, recState: MLXArray
 ) -> GatedDeltaDecodeKernel.Snapshots {
-    let slots = (1 ... x.dim(1)).map { recState + stateStep * Float($0) }
+    let slots = (1 ..< x.dim(1)).map { recState + stateStep * Float($0) }
     return GatedDeltaDecodeKernel.Snapshots(
         recurrent: stacked(slots), convWindow: concatenated([convState, x], axis: 1))
 }

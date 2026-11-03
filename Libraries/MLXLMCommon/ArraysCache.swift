@@ -251,7 +251,8 @@ public class MambaCache: ArraysCache {
     }
 
     /// The snapshot slots of the last verify pass: the states after each of
-    /// its tokens, from the position before the pass.
+    /// its tokens but the last, which no rollback selects, from the position
+    /// before the pass.
     private struct SpeculativeSlots {
         var snapshots: GatedDeltaDecodeKernel.Snapshots
         /// The position before the verify pass.

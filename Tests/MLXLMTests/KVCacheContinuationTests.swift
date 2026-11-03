@@ -194,17 +194,29 @@ enum SnapshotSlotFixture {
     static let recurrentSalt = 1
     static let windowSalt = 2
 
-    /// The snapshot slots of a verify of `tokens` tokens.
+    /// The salt of the recurrent state after the last token of the verify, which no slot holds.
+    static let lastStateSalt = 3
+
+    /// The snapshot slots of a verify of `tokens` tokens: one for each token but the last.
     ///
     /// - Parameter tokens: The tokens of the verify.
     /// - Returns: The slots.
     static func snapshots(tokens: Int = tokenCount) -> GatedDeltaDecodeKernel.Snapshots {
-        let recurrent = deterministicTensor(shape: [tokens] + stateShape, salt: recurrentSalt)
-            .asType(.float32)
+        let recurrent = deterministicTensor(
+            shape: [tokens - GatedDeltaDecodeKernel.Snapshots.unslottedTokenCount] + stateShape,
+            salt: recurrentSalt
+        )
+        .asType(.float32)
         let window = deterministicTensor(
             shape: [batch, stateRows + tokens, channels], salt: windowSalt)
         eval(recurrent, window)
         return GatedDeltaDecodeKernel.Snapshots(recurrent: recurrent, convWindow: window)
+    }
+
+    /// The recurrent state after the last token of a verify: the state the verify gives back,
+    /// which no slot holds.
+    static func lastRecurrentState() -> MLXArray {
+        deterministicTensor(shape: stateShape, salt: lastStateSalt).asType(.float32)
     }
 
     /// A cache after a verify, the way a layer leaves it: the states after the
@@ -216,7 +228,7 @@ enum SnapshotSlotFixture {
         let cache = MambaCache(leftPadding: leftPadding)
         cache.offset = startOffset
         cache[0] = snapshots.convState(afterToken: snapshots.tokenCount)
-        cache[1] = snapshots.recurrentState(afterToken: snapshots.tokenCount)
+        cache[1] = lastRecurrentState()
         cache.saveSpeculativeSnapshots(snapshots)
         cache.advance(snapshots.tokenCount)
         return cache
@@ -249,11 +261,14 @@ enum SnapshotSlotFixture {
         _ cache: MambaCache, of snapshots: GatedDeltaDecodeKernel.Snapshots, accepted: Int
     ) -> Bool {
         guard let conv = cache[0], let recurrent = cache[1] else { return false }
+        let expectedRecurrent =
+            accepted < snapshots.tokenCount
+            ? snapshots.recurrentState(afterToken: accepted) : lastRecurrentState()
         return cache.offset == startOffset + accepted
             && cache.leftPaddingValues == leftPadding.map { $0 - accepted }
             && arrayEqual(conv, snapshots.convWindow[0..., accepted ..< accepted + stateRows])
                 .item(Bool.self)
-            && arrayEqual(recurrent, snapshots.recurrent[accepted - 1]).item(Bool.self)
+            && arrayEqual(recurrent, expectedRecurrent).item(Bool.self)
     }
 }
 

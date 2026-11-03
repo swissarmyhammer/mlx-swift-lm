@@ -236,16 +236,19 @@ struct Qwen35GDNDecodeKernelTests {
             let run = try #require(Self.speculativeStep(operands))
             let snapshots = try #require(run.snapshots)
             #expect(snapshots.tokenCount == tokens)
+            #expect(snapshots.slotCount == tokens - 1)
 
             for token in 1 ... tokens {
                 let reference = Self.opPath(
                     operands.prefix(token), convState: operands.convState,
                     recurrentState: operands.recurrentState)
-                let slotGap = Fixture.worstGap(
-                    snapshots.recurrentState(afterToken: token), reference.recurrentState)
-                #expect(
-                    slotGap <= Fixture.tolerance(dtype),
-                    "slot after token \(token) of \(tokens): worst gap \(slotGap)")
+                if token < tokens {
+                    let slotGap = Fixture.worstGap(
+                        snapshots.recurrentState(afterToken: token), reference.recurrentState)
+                    #expect(
+                        slotGap <= Fixture.tolerance(dtype),
+                        "slot after token \(token) of \(tokens): worst gap \(slotGap)")
+                }
                 #expect(
                     Self.sameBits(snapshots.convState(afterToken: token), reference.convState),
                     "conv state after token \(token) of \(tokens)")
@@ -284,9 +287,11 @@ struct Qwen35GDNDecodeKernelTests {
                     operands.tokens(
                         token ..< token + 1, convState: convState, recurrentState: recurrentState)))
             #expect(Self.sameBits(run.output[0..., token ..< token + 1], single.output))
-            #expect(
-                Self.sameBits(
-                    snapshots.recurrentState(afterToken: token + 1), single.recurrentState))
+            if token + 1 < tokens {
+                #expect(
+                    Self.sameBits(
+                        snapshots.recurrentState(afterToken: token + 1), single.recurrentState))
+            }
             #expect(Self.sameBits(snapshots.convState(afterToken: token + 1), single.convState))
             convState = single.convState
             recurrentState = single.recurrentState
@@ -319,6 +324,38 @@ struct Qwen35GDNDecodeKernelTests {
                 #expect(cache.speculativeSlotCount == SnapshotSlotFixture.slotCount(keeping: kept))
                 #expect(Self.sameBits(try #require(cache[0]), accepted.convState))
                 #expect(Self.sameBits(try #require(cache[1]), accepted.recurrentState))
+            }
+        }
+    }
+
+    /// A verify keeps one slot fewer than its tokens, on the kernel and on the
+    /// op path: no rollback selects the states after its last token, which the
+    /// verify gives back as the states after the verify. The slots of both
+    /// paths agree.
+    @Test(arguments: Fixture.dtypes)
+    func aVerifyKeepsNoSlotForItsLastToken(dtype: DType) throws {
+        for tokens in Self.verifyTokenCounts {
+            let operands = try Self.operands(Fixture.smallHeadCase, dtype: dtype, tokens: tokens)
+            let kernelSlots = try #require(Self.speculativeStep(operands)?.snapshots)
+            let opSlots = try #require(
+                operands.layer.recurrentBody(
+                    qkv: operands.qkv, z: operands.z, b: operands.b, a: operands.a,
+                    convState: operands.convState, recState: operands.recurrentState, mask: nil,
+                    keepsSnapshots: true
+                ).snapshots)
+
+            for slots in [kernelSlots, opSlots] {
+                #expect(slots.recurrent.shape == [tokens - 1] + operands.recurrentState.shape)
+                #expect(slots.slotCount == tokens - 1)
+                #expect(slots.tokenCount == tokens)
+            }
+            for token in 1 ..< tokens {
+                let gap = Fixture.worstGap(
+                    kernelSlots.recurrentState(afterToken: token),
+                    opSlots.recurrentState(afterToken: token))
+                #expect(
+                    gap <= Fixture.tolerance(dtype),
+                    "slot after token \(token) of \(tokens): worst gap \(gap)")
             }
         }
     }
