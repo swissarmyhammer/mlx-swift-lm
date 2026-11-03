@@ -93,36 +93,10 @@ public func generateTokens(
         numDraftTokens: numDraftTokens,
         components: components
     )
-    return generateSpeculativeTokenStream(
+    return generateSpeculativeStream(
         iterator: iterator, input: input, context: context, wiredMemoryTicket: wiredMemoryTicket,
-        tokenCollector: IgnoringGeneratedTokens()
+        tokenCollector: IgnoringGeneratedTokens(), handler: RawTokenLoopHandler()
     ).0
-}
-
-/// Builds the raw-token `AsyncStream<TokenGeneration>` shared by
-/// ``generateTokens(input:cache:state:parameters:context:draftModel:draftCache:numDraftTokens:components:wiredMemoryTicket:)``
-/// and ``generateTokensTask(input:cache:state:parameters:context:mtpDrafter:mtpContinuation:blockSize:minimumDraftProbability:components:wiredMemoryTicket:)`` -- both
-/// construct their own speculative-decoding iterator (drafter differs) and then delegate here for
-/// identical `generateLoopTask`/handler wiring.
-///
-/// - Parameter tokenCollector: what the task answers when the generation ends.
-/// - Returns: the stream, and the task that generates it.
-private func generateSpeculativeTokenStream<Collector: GeneratedTokenCollector>(
-    iterator: consuming any TokenIteratorProtocol,
-    input: LMInput,
-    context: ModelContext,
-    wiredMemoryTicket: WiredMemoryTicket?,
-    tokenCollector: Collector
-) -> (AsyncStream<TokenGeneration>, Task<Collector.Result, Never>) {
-    generateLoopTask(
-        promptTokenCount: input.text.tokens.size,
-        modelConfiguration: context.configuration,
-        tokenizer: context.tokenizer,
-        iterator: iterator,
-        wiredMemoryTicket: wiredMemoryTicket,
-        tokenCollector: tokenCollector,
-        handler: RawTokenLoopHandler()
-    )
 }
 
 /// Generates raw token IDs asynchronously using MTP speculative decoding.
@@ -209,9 +183,9 @@ public func generateTokensTask(
         minimumDraftProbability: minimumDraftProbability,
         components: components
     )
-    return generateSpeculativeTokenStream(
+    return generateSpeculativeStream(
         iterator: iterator, input: input, context: context, wiredMemoryTicket: wiredMemoryTicket,
-        tokenCollector: MTPContinuationCollector())
+        tokenCollector: MTPContinuationCollector(), handler: RawTokenLoopHandler())
 }
 
 /// Generates raw token IDs asynchronously and returns the stream plus a `Task`.

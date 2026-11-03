@@ -69,8 +69,23 @@ public protocol TokenLoopHandler: SendableMetatype {
 }
 
 extension TokenLoopHandler {
+    /// No semantic boundary: the generation stops only on the model's own stop tokens.
     public var additionalStopTokenIDs: Set<Int> { [] }
+
+    /// The handler does not observe the stop tokens that stay out of the output.
     public var receivesStopTokens: Bool { false }
+}
+
+/// Emits `output`, and answers `.cancelled` when the consumer has ended the stream, else `.more`.
+///
+/// - Parameters:
+///   - output: the event to emit.
+///   - emit: the emit closure of the generation loop.
+/// - Returns: the disposition the emit implies.
+private func emitOrCancel<Output>(
+    _ output: sending Output, emit: (sending Output) -> Bool
+) -> TokenLoopDisposition {
+    emit(output) ? .more : .cancelled
 }
 
 /// Decodes response text and tool calls into ``Generation`` events.
@@ -89,6 +104,18 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
     ) {
         self.decoder = format.makeTokenStreamDecoder(
             tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
+            toolCallPolicy: toolCallPolicy)
+    }
+
+    /// Creates a handler with the stop strings and the tool-call format of
+    /// `modelConfiguration` (JSON when the configuration names none).
+    init(
+        tokenizer: Tokenizer, modelConfiguration: ModelConfiguration,
+        tools: [[String: any Sendable]]?, toolCallPolicy: ToolCallPolicy
+    ) {
+        self.init(
+            tokenizer: tokenizer, stopStrings: modelConfiguration.effectiveStopStrings,
+            format: modelConfiguration.toolCallFormat ?? .json, tools: tools,
             toolCallPolicy: toolCallPolicy)
     }
 
@@ -115,14 +142,7 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
     public mutating func onGenerationEnd(
         emit: (sending Generation) -> Bool
     ) -> TokenLoopDisposition {
-        var decoder = self.decoder
-        var disposition = TokenLoopDisposition.more
-        _ = decoder.finish { event in
-            disposition = process(event, emit: emit)
-            return disposition.shouldContinue
-        }
-        self.decoder = decoder
-        return disposition
+        drive(.finish, emit: emit).disposition
     }
 
     public func infoEvent(_ info: GenerateCompletionInfo) -> Generation {
@@ -139,18 +159,49 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
         _ token: Int,
         emit: (sending Generation) -> Bool
     ) -> TokenLoopDisposition {
-        var decoder = self.decoder
-        var disposition = TokenLoopDisposition.more
-        let completed = decoder.push(token) { event in
-            disposition = process(event, emit: emit)
-            return disposition.shouldContinue
-        }
-        self.decoder = decoder
-
+        let (completed, disposition) = drive(.push(token), emit: emit)
         if disposition.shouldContinue {
             return completed ? .more : .cancelled
         }
         return disposition
+    }
+
+    /// What ``drive(_:emit:)`` feeds the decoder.
+    private enum DecoderStep {
+        /// A generated token.
+        case push(Int)
+        /// The end of the generation.
+        case finish
+    }
+
+    /// Feeds the decoder `step`, handling each event it emits until an event stops the
+    /// generation.
+    ///
+    /// The decoder is copied out of `self` for the run, so the event handler can mutate
+    /// `self`, and is written back after it.
+    ///
+    /// - Parameters:
+    ///   - step: what the decoder receives.
+    ///   - emit: the emit closure of the generation loop.
+    /// - Returns: what the decoder answered, and the disposition of the last handled event
+    ///   (`.more` when the decoder emitted none).
+    private mutating func drive(
+        _ step: DecoderStep,
+        emit: (sending Generation) -> Bool
+    ) -> (completed: Bool, disposition: TokenLoopDisposition) {
+        var decoder = self.decoder
+        var disposition = TokenLoopDisposition.more
+        func handle(_ event: TokenStreamEvent) -> Bool {
+            disposition = process(event, emit: emit)
+            return disposition.shouldContinue
+        }
+        let completed =
+            switch step {
+            case .push(let token): decoder.push(token, emit: handle)
+            case .finish: decoder.finish(emit: handle)
+            }
+        self.decoder = decoder
+        return (completed, disposition)
     }
 
     private mutating func process(
@@ -165,26 +216,17 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
             return .more
 
         case .response(let response):
-            if !emit(.chunk(response)) {
-                return .cancelled
-            }
-            return .more
+            return emitOrCancel(.chunk(response), emit: emit)
 
         case .toolCall(let toolCall):
-            if !emit(.toolCall(toolCall)) {
-                return .cancelled
-            }
-            return .more
+            return emitOrCancel(.toolCall(toolCall), emit: emit)
 
         case .protocolError(let message):
             Self.logger.error("\(message)")
             return .more
 
         case .rejectedToolCall(let rejection):
-            if !emit(.rejectedToolCall(rejection)) {
-                return .cancelled
-            }
-            return .more
+            return emitOrCancel(.rejectedToolCall(rejection), emit: emit)
 
         case .stop:
             return .stop
@@ -209,21 +251,17 @@ public struct RawTokenLoopHandler: TokenLoopHandler {
         logProbabilities: DeferredTokenLogProbabilities?,
         emit: (sending TokenGeneration) -> Bool
     ) -> TokenLoopDisposition {
-        if !emit(.token(token)) {
-            return .cancelled
-        }
-        return .more
+        emitOrCancel(.token(token), emit: emit)
     }
 
+    /// Emits the stop token the same way ``onToken(_:logProbabilities:emit:)`` emits an
+    /// ordinary token.
     public mutating func onStopToken(
         _ token: Int,
         logProbabilities: DeferredTokenLogProbabilities?,
         emit: (sending TokenGeneration) -> Bool
     ) -> TokenLoopDisposition {
-        if !emit(.token(token)) {
-            return .cancelled
-        }
-        return .more
+        onToken(token, logProbabilities: logProbabilities, emit: emit)
     }
 
     public mutating func onGenerationEnd(
