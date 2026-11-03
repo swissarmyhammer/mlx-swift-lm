@@ -249,6 +249,23 @@ public enum Qwen35Language {
     /// of their positions.
     typealias RotaryValues = (cos: MLXArray, sin: MLXArray)
 
+    /// The axis of the sequences of a batch of hidden states or token ids.
+    private static let batchAxis = 0
+
+    /// The axis of the tokens of a sequence of hidden states or token ids.
+    private static let tokenAxis = 1
+
+    /// The sequences of the one batch a compiled trace runs.
+    private static let compiledBatchSize = 1
+
+    /// The places of the two states of a GDN layer in its `MambaCache`.
+    private enum LinearCacheSlot {
+        /// The conv state.
+        static let convState = 0
+        /// The recurrent state.
+        static let recurrentState = 1
+    }
+
     final class RotaryEmbedding {
         private let invFreq: MLXArray
         private let mropeIndices: MLXArray
@@ -726,15 +743,17 @@ public enum Qwen35Language {
             keepsSnapshots: Bool = false
         ) -> MLXArray {
             let convState =
-                cache?[0] ?? zeroStates(batch: inputs.dim(0), dtype: inputs.dtype).conv
+                cache?[LinearCacheSlot.convState]
+                ?? zeroStates(batch: inputs.dim(0), dtype: inputs.dtype).conv
             let result = forward(
-                inputs, convState: convState, recState: cache?[1], mask: mask,
+                inputs, convState: convState, recState: cache?[LinearCacheSlot.recurrentState],
+                mask: mask,
                 keepsSnapshots: keepsSnapshots)
             if let cache {
                 if convKernelSize > 1 {
-                    cache[0] = result.convState
+                    cache[LinearCacheSlot.convState] = result.convState
                 }
-                cache[1] = result.recurrentState
+                cache[LinearCacheSlot.recurrentState] = result.recurrentState
                 if let snapshots = result.snapshots {
                     cache.saveSpeculativeSnapshots(snapshots)
                 }
@@ -878,7 +897,8 @@ public enum Qwen35Language {
         }
 
         open func callAsFunction(_ x: MLXArray) -> MLXArray {
-            guard x.dim(1) == 1, !training, supportsExactCompiledDecode(x.dtype),
+            guard x.dim(Qwen35Language.tokenAxis) == GatedDeltaDecodeKernel.decodeTokens,
+                !training, supportsExactCompiledDecode(x.dtype),
                 supportsCompiledDecode
             else {
                 return forward(x)
@@ -887,8 +907,11 @@ public enum Qwen35Language {
         }
 
         private let compiledForward = CompiledTrace<SparseMoeBlock> { block, arguments in
-            [block.forward(arguments[0])]
+            [block.forward(arguments[SparseMoeBlock.inputArgument])]
         }
+
+        /// The argument of the compiled forward that holds the block input.
+        private static let inputArgument = 0
 
         var compiledDecodeIsCompiled: Bool { compiledForward.isCompiled }
 
@@ -991,12 +1014,14 @@ public enum Qwen35Language {
             let canCompile =
                 allowCompiledDecode && allowsCompiledDecode && !training
                 && supportsExactCompiledDecode(x.dtype)
-                && x.dim(0) == 1 && x.dim(1) == 1
+                && x.dim(Qwen35Language.batchAxis) == Qwen35Language.compiledBatchSize
+                && x.dim(Qwen35Language.tokenAxis) == GatedDeltaDecodeKernel.decodeTokens
                 && Qwen35Language.isUnmasked(attentionMask) && ssmMask == nil && !keepsSnapshots
                 && supportsCompiledDecode
 
             if canCompile, isLinear, let mambaCache = cache as? MambaCache,
-                let convState = mambaCache[0], let recState = mambaCache[1]
+                let convState = mambaCache[LinearCacheSlot.convState],
+                let recState = mambaCache[LinearCacheSlot.recurrentState]
             {
                 return decodeLinearLayer(
                     x, convState: convState, recState: recState, cache: mambaCache)
@@ -1025,9 +1050,22 @@ public enum Qwen35Language {
             },
             body: { layer, arguments in
                 let result = layer.linearLayerBody(
-                    x: arguments[0], convState: arguments[1], recState: arguments[2])
+                    x: arguments[LinearTraceSlot.hidden],
+                    convState: arguments[LinearTraceSlot.convState],
+                    recState: arguments[LinearTraceSlot.recurrentState])
                 return [result.output, result.convState, result.recurrentState]
             })
+
+        /// The places of the hidden states and the two states of a GDN layer
+        /// among the arguments and among the results of its compiled trace.
+        private enum LinearTraceSlot {
+            /// The layer input, then the layer output.
+            static let hidden = 0
+            /// The conv state.
+            static let convState = 1
+            /// The recurrent state.
+            static let recurrentState = 2
+        }
 
         var compiledGDNIsCompiled: Bool { compiledLinearLayer.isCompiled }
 
@@ -1055,10 +1093,10 @@ public enum Qwen35Language {
             _ x: MLXArray, convState: MLXArray, recState: MLXArray, cache: MambaCache
         ) -> MLXArray {
             let outputs = compiledLinearLayer(self, [x, convState, recState])
-            cache[0] = outputs[1]
-            cache[1] = outputs[2]
-            cache.advance(1)
-            return outputs[0]
+            cache[LinearCacheSlot.convState] = outputs[LinearTraceSlot.convState]
+            cache[LinearCacheSlot.recurrentState] = outputs[LinearTraceSlot.recurrentState]
+            cache.advance(GatedDeltaDecodeKernel.decodeTokens)
+            return outputs[LinearTraceSlot.hidden]
         }
 
         func attentionCacheStep(
@@ -1141,6 +1179,9 @@ public enum Qwen35Language {
         private let compiledVerifySegments:
             KeyedCompiledDecodeSegmentCaches<Model, CompiledVerifyShape>
 
+        /// The argument of a segment that carries the hidden states.
+        private static let carryArgument = 0
+
         public init(_ args: Qwen35Configuration.TextConfiguration) {
             precondition(args.vocabularySize > 0)
             _embedTokens.wrappedValue = Embedding(
@@ -1158,17 +1199,13 @@ public enum Qwen35Language {
             let segmentCount = decodeSchedule.segments.count
             self.compiledSegments = CompiledDecodeSegmentCache(
                 count: segmentCount,
-                state: { model, index in
-                    model.segmentTraceState(at: index, of: model.compiledSegments)
-                },
+                state: Model.segmentTraceState(of: { $0.compiledSegments }),
                 body: { model, index, arguments in
                     model.segmentBody(at: index, arguments, verify: nil)
                 })
             self.compiledVerifySegments = KeyedCompiledDecodeSegmentCaches(
                 count: segmentCount,
-                state: { model, index in
-                    model.segmentTraceState(at: index, of: model.compiledVerifySegments)
-                },
+                state: Model.segmentTraceState(of: { $0.compiledVerifySegments }),
                 body: { model, shape, index, arguments in
                     model.segmentBody(at: index, arguments, verify: shape)
                 })
@@ -1224,7 +1261,9 @@ public enum Qwen35Language {
             useCompiledDecode: Bool = true
         ) -> MLXArray {
             if useCompiledDecode, type(of: self) == Model.self, !training,
-                inputsEmbeds == nil, inputs.dim(0) == 1, let cache,
+                inputsEmbeds == nil,
+                inputs.dim(Qwen35Language.batchAxis) == Qwen35Language.compiledBatchSize,
+                let cache,
                 let hiddenStates = compiledStep(
                     inputs, cache, positionIds: positionIds, applyFinalNorm: applyFinalNorm,
                     keepsSnapshots: keepsSnapshots)
@@ -1256,7 +1295,8 @@ public enum Qwen35Language {
                 useCompiledDecode && type(of: self) == Model.self && !training
                 && inputsEmbeds == nil && applyFinalNorm
                 && supportsExactCompiledDecode(hiddenStates.dtype)
-                && hiddenStates.dim(0) == 1 && hiddenStates.dim(1) == 1
+                && hiddenStates.dim(Qwen35Language.batchAxis) == Qwen35Language.compiledBatchSize
+                && hiddenStates.dim(Qwen35Language.tokenAxis) == GatedDeltaDecodeKernel.decodeTokens
                 && Qwen35Language.isUnmasked(faMask) && ssmMask == nil && !keepsSnapshots
                 && layers.enumerated().allSatisfy { index, layer in
                     guard layer.supportsCompiledDecode else { return false }
@@ -1264,7 +1304,8 @@ public enum Qwen35Language {
                         guard let mambaCache = cacheArray?[index] as? MambaCache else {
                             return false
                         }
-                        return mambaCache[0] != nil && mambaCache[1] != nil
+                        return mambaCache[LinearCacheSlot.convState] != nil
+                            && mambaCache[LinearCacheSlot.recurrentState] != nil
                     }
                     guard let kvCache = cacheArray?[index] else { return false }
                     return kvCache is QuantizedKVCacheProtocol
@@ -1310,6 +1351,17 @@ public enum Qwen35Language {
                 .filter(\.compiledDecodeIsCompiled).count
         }
 
+        /// The compile state provider of the segment traces `traces` gives:
+        /// ``segmentTraceState(at:of:)`` for each segment, with those traces.
+        ///
+        /// - Parameter traces: The traces of a model that read the state.
+        /// - Returns: The state provider of those traces.
+        private static func segmentTraceState(
+            of traces: @escaping @Sendable (Model) -> any CompiledTraceInvalidating
+        ) -> CompiledDecodeSegmentCache<Model>.StateProvider {
+            { model, index in model.segmentTraceState(at: index, of: traces(model)) }
+        }
+
         /// The compile state of segment `index`: everything its body reads,
         /// the layers it runs (with a GDN layer's fused projection) and the
         /// final norm it ends with. Each GDN layer drops `trace` when its fused
@@ -1328,7 +1380,7 @@ public enum Qwen35Language {
                 layer.linearAttn?.registerFusedProjectionTrace(trace)
                 return [layer] + (layer.linearAttn?.fusedProjectionTraceState ?? [])
             }
-            if index == segments.count - 1 {
+            if index == segments.indices.last {
                 modules.append(norm)
             }
             return modules
@@ -1343,8 +1395,8 @@ public enum Qwen35Language {
             at index: Int, _ arguments: [MLXArray], verify: CompiledVerifyShape?
         ) -> [MLXArray] {
             decodeSchedule.segments[index].body(
-                arguments[0], arguments: arguments, layers: layers, finalNorm: norm,
-                verify: verify)
+                arguments[Self.carryArgument], arguments: arguments, layers: layers,
+                finalNorm: norm, verify: verify)
         }
 
         /// One step through a compiled schedule, or nil when the step takes the
@@ -1355,11 +1407,12 @@ public enum Qwen35Language {
             _ inputs: MLXArray, _ cache: [KVCache?], positionIds: MLXArray?,
             applyFinalNorm: Bool, keepsSnapshots: Bool
         ) -> MLXArray? {
-            if inputs.dim(1) == 1 {
+            let tokens = inputs.dim(Qwen35Language.tokenAxis)
+            if tokens == GatedDeltaDecodeKernel.decodeTokens {
                 guard applyFinalNorm, !keepsSnapshots else { return nil }
                 return decodeStep(inputs, cache, positionIds: positionIds)
             }
-            guard keepsSnapshots, let shape = CompiledVerifyShape(tokens: inputs.dim(1)),
+            guard keepsSnapshots, let shape = CompiledVerifyShape(tokens: tokens),
                 let hiddenStates = verifyStep(inputs, cache, positionIds: positionIds, shape: shape)
             else { return nil }
             return applyFinalNorm ? norm(hiddenStates) : hiddenStates

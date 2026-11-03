@@ -62,6 +62,7 @@ struct CompiledVerifyOutcome {
     ///   - tolerance: The largest relative gap of any array.
     ///   - tokenCount: The tokens of the verify.
     ///   - rollback: The tokens the verify rolled back.
+    ///   - sourceLocation: Where a failed expectation is reported.
     /// - Throws: When the two caches hold other numbers of states.
     func expectMatches(
         _ general: Self, tolerance: Float, tokenCount: Int, rollback: Int,

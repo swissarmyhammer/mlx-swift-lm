@@ -120,8 +120,6 @@ private let qmvWideRows = 2
 private let qmvWideTolerance: Float = 0.01
 private let warmupRuns = 2
 private let timedRuns = 7
-/// The median of an odd count of samples stands at half the count.
-private let medianDivisor = 2
 private let millisecondsPerSecond = 1e3
 private let attosecondsPerMillisecond = 1e15
 /// The bound of the random weights, about the scale of a trained projection.
@@ -200,7 +198,7 @@ struct MultiRowQuantizedMatvecBenchmarkTests {
                         + Double(elapsed.components.seconds) * millisecondsPerSecond)
             }
         }
-        return median(samples)
+        return SampleMedian.of(samples)
     }
 
     /// The output of ``MultiRowQuantizedMatvec`` over `x`, and the matvec of MLX
@@ -242,11 +240,6 @@ struct MultiRowQuantizedMatvecBenchmarkTests {
         let largest = want.map { abs($0) }.max() ?? 0
         let difference = zip(got, want).map { abs($0 - $1) }.max() ?? 0
         return got.allSatisfy { $0.isFinite } ? difference / largest : .infinity
-    }
-
-    private func median(_ samples: [Double]) -> Double {
-        let sorted = samples.sorted()
-        return sorted[sorted.count / medianDivisor]
     }
 
     func report(_ line: String) {

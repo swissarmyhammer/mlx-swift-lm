@@ -67,11 +67,11 @@ struct MTPVerifyGraphBuildTests {
     /// The fewest rows of a verify: the bonus token and one draft.
     private static let fewestRows = 2
 
+    /// The token of each row of a timed verify: its value does not change the work.
+    private static let verifyToken: Int32 = 0
+
     /// The milliseconds of one second.
     private static let millisecondsPerSecond = 1_000.0
-
-    /// The divisor that picks the middle sample of the sorted samples.
-    private static let medianDivisor = 2
 
     /// Prefix that makes every measurement line greppable in the log.
     private static let measurementPrefix = "MTP VERIFY BUILD:"
@@ -122,19 +122,56 @@ struct MTPVerifyGraphBuildTests {
         _ target: any TargetModel, context: [Int], blockSize: Int
     ) throws -> [VerifyBuildCost] {
         let cache = try target.newCache(parameters: nil)
+        var state = try prefill(target, context: context, cache: cache)
+        state[mtpVerifyKeepsSnapshotsKey] = true
+        let rowCounts = Array(fewestRows ... blockSize)
+        let samples = sampleVerifies(target, rowCounts: rowCounts, cache: cache, state: state)
+        return zip(rowCounts, samples).map { rows, samples in
+            VerifyBuildCost(
+                rows: rows, graphBuild: SampleMedian.of(samples.map(\.graphBuild)),
+                forward: SampleMedian.of(samples.map(\.forward)))
+        }
+    }
+
+    /// Prefills `context` into `cache` in chunks, with the drafter state asked of the target, as
+    /// the iterator's prefill does.
+    ///
+    /// - Parameters:
+    ///   - target: The target.
+    ///   - context: The tokens of the context.
+    ///   - cache: The cache of the target.
+    /// - Returns: The state the last chunk gave.
+    /// - Throws: When the target has no state to give.
+    private static func prefill(
+        _ target: any TargetModel, context: [Int], cache: [KVCache]
+    ) throws -> LMOutput.State {
         var state = LMOutput.State()
-        for start in stride(from: 0, to: context.count, by: prefillChunkTokenCount) {
+        for start in stride(
+            from: context.startIndex, to: context.endIndex, by: prefillChunkTokenCount)
+        {
             state[mtpEmitFlagKey] = true
-            let chunk = context[start ..< min(start + prefillChunkTokenCount, context.count)]
+            let chunk = context[start ..< min(start + prefillChunkTokenCount, context.endIndex)]
             let output = target(
                 LMInput.Text(tokens: MLXArray(chunk.map(Int32.init))[.newAxis]), cache: cache,
                 state: state)
             eval(output.logits, cache.flatMap(\.state))
             state = try #require(output.state)
         }
-        state[mtpVerifyKeepsSnapshotsKey] = true
+        return state
+    }
 
-        let rowCounts = Array(fewestRows ... blockSize)
+    /// Runs ``warmUpForwards`` untimed verifies of each row count, then ``timedForwards`` timed
+    /// rounds that cycle through the row counts.
+    ///
+    /// - Parameters:
+    ///   - target: The target.
+    ///   - rowCounts: The rows of each verify of a round.
+    ///   - cache: The cache of the target, which each verify appends to.
+    ///   - state: The state of a verify.
+    /// - Returns: For each row count, the samples of its timed verifies.
+    private static func sampleVerifies(
+        _ target: any TargetModel, rowCounts: [Int], cache: [KVCache], state: LMOutput.State
+    ) -> [[(graphBuild: Double, forward: Double)]] {
         for rows in rowCounts {
             for _ in 0 ..< warmUpForwards {
                 _ = timedVerify(target, rows: rows, cache: cache, state: state)
@@ -146,11 +183,7 @@ struct MTPVerifyGraphBuildTests {
                 samples[index].append(timedVerify(target, rows: rows, cache: cache, state: state))
             }
         }
-        return zip(rowCounts, samples).map { rows, samples in
-            VerifyBuildCost(
-                rows: rows, graphBuild: median(samples.map(\.graphBuild)),
-                forward: median(samples.map(\.forward)))
-        }
+        return samples
     }
 
     /// One verify forward of `rows` tokens, from an idle GPU.
@@ -159,7 +192,7 @@ struct MTPVerifyGraphBuildTests {
     private static func timedVerify(
         _ target: any TargetModel, rows: Int, cache: [KVCache], state: LMOutput.State
     ) -> (graphBuild: Double, forward: Double) {
-        let tokens = MLXArray(Array(repeating: Int32(0), count: rows))[.newAxis]
+        let tokens = MLXArray(Array(repeating: verifyToken, count: rows))[.newAxis]
         eval(tokens)
         Stream.gpu.synchronize()
         let start = Date()
@@ -171,11 +204,6 @@ struct MTPVerifyGraphBuildTests {
             graphBuild: built.timeIntervalSince(start) * millisecondsPerSecond,
             forward: Date().timeIntervalSince(start) * millisecondsPerSecond
         )
-    }
-
-    /// The middle sample of the sorted `samples`.
-    private static func median(_ samples: [Double]) -> Double {
-        samples.sorted()[samples.count / medianDivisor]
     }
 
     /// Writes `measurement` under the measurement prefix.

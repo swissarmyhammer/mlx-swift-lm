@@ -12,9 +12,6 @@ enum GPUWallTime {
     /// The milliseconds of one second.
     private static let millisecondsPerSecond = 1_000.0
 
-    /// The divisor that picks the middle run of the sorted runs.
-    private static let medianDivisor = 2
-
     /// The wall milliseconds of `body`, with a GPU sync before and after it.
     ///
     /// - Parameter body: The work; it evaluates what it times.
@@ -34,7 +31,6 @@ enum GPUWallTime {
     ///   - sample: One run, which gives its milliseconds.
     /// - Returns: The middle run of the sorted runs.
     static func median(repeats: Int, _ sample: () -> Double) -> Double {
-        let samples = (0 ..< repeats).map { _ in sample() }.sorted()
-        return samples[samples.count / medianDivisor]
+        SampleMedian.of((0 ..< repeats).map { _ in sample() })
     }
 }

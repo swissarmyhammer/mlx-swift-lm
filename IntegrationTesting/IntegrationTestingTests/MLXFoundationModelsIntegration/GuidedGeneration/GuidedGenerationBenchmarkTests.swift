@@ -118,11 +118,11 @@ struct GuidedGenerationBenchmarkTests {
             constrainedRuns.append(result)
         }
 
-        let uMedianTime = median(unconstrainedRuns.map(\.seconds))
-        let cMedianTime = median(constrainedRuns.map(\.seconds))
-        let uMedianChars = median(unconstrainedRuns.map { Double($0.characterCount) })
-        let cMedianChars = median(constrainedRuns.map { Double($0.characterCount) })
-        let uMedianEvents = median(unconstrainedRuns.map { Double($0.textDeltaCount) })
+        let uMedianTime = SampleMedian.of(unconstrainedRuns.map(\.seconds))
+        let cMedianTime = SampleMedian.of(constrainedRuns.map(\.seconds))
+        let uMedianChars = SampleMedian.of(unconstrainedRuns.map { Double($0.characterCount) })
+        let cMedianChars = SampleMedian.of(constrainedRuns.map { Double($0.characterCount) })
+        let uMedianEvents = SampleMedian.of(unconstrainedRuns.map { Double($0.textDeltaCount) })
 
         let uCharsPerSec = uMedianChars / uMedianTime
         let cCharsPerSec = cMedianChars / cMedianTime
@@ -174,8 +174,8 @@ struct GuidedGenerationBenchmarkTests {
         for _ in 0 ..< Self.iterations {
             runs.append(try await measureConstrained(container: container, modelID: modelID))
         }
-        let medianSeconds = median(runs.map(\.seconds))
-        let medianChars = median(runs.map { Double($0.characterCount) })
+        let medianSeconds = SampleMedian.of(runs.map(\.seconds))
+        let medianChars = SampleMedian.of(runs.map { Double($0.characterCount) })
         let perCharMs = medianSeconds / max(medianChars, 1.0) * 1000.0
 
         print(
@@ -206,11 +206,11 @@ struct GuidedGenerationBenchmarkTests {
             unconstrainedRuns.append(u)
         }
 
-        let cMedianTime = median(constrainedRuns.map(\.seconds))
-        let cMedianChars = median(constrainedRuns.map { Double($0.characterCount) })
-        let uMedianTime = median(unconstrainedRuns.map(\.seconds))
-        let uMedianEvents = median(unconstrainedRuns.map { Double($0.textDeltaCount) })
-        let uMedianChars = median(unconstrainedRuns.map { Double($0.characterCount) })
+        let cMedianTime = SampleMedian.of(constrainedRuns.map(\.seconds))
+        let cMedianChars = SampleMedian.of(constrainedRuns.map { Double($0.characterCount) })
+        let uMedianTime = SampleMedian.of(unconstrainedRuns.map(\.seconds))
+        let uMedianEvents = SampleMedian.of(unconstrainedRuns.map { Double($0.textDeltaCount) })
+        let uMedianChars = SampleMedian.of(unconstrainedRuns.map { Double($0.characterCount) })
 
         let cCharsPerSec = cMedianChars / cMedianTime
         let uCharsPerSec = uMedianChars / uMedianTime
@@ -297,8 +297,8 @@ struct GuidedGenerationBenchmarkTests {
             runs.append(result)
         }
 
-        let medianSeconds = median(runs.map(\.seconds))
-        let medianChars = median(runs.map { Double($0.characterCount) })
+        let medianSeconds = SampleMedian.of(runs.map(\.seconds))
+        let medianChars = SampleMedian.of(runs.map { Double($0.characterCount) })
         let perCharSeconds = medianSeconds / max(medianChars, 1.0)
 
         print("")
@@ -417,7 +417,7 @@ struct GuidedGenerationBenchmarkTests {
             _ = constraint
         }
 
-        let medianMs = median(durations.map { $0.seconds * 1000.0 })
+        let medianMs = SampleMedian.of(durations.map { $0.seconds * 1000.0 })
 
         print("")
         print("=== Grammar Compilation Time ===")
@@ -478,8 +478,8 @@ struct GuidedGenerationBenchmarkTests {
             mtpRates.append(try await tokensPerSecond(model: speculative))
         }
 
-        let plainRate = median(plainRates)
-        let mtpRate = median(mtpRates)
+        let plainRate = SampleMedian.of(plainRates)
+        let mtpRate = SampleMedian.of(mtpRates)
         let divergence = firstDivergence(of: mtpTrace, from: plainTrace)
         // swiftlint:disable:next no_direct_standard_out_logs  the benchmark's result line
         print(
@@ -667,17 +667,6 @@ struct GuidedGenerationBenchmarkTests {
                 textDeltaCount: deltaCount
             )
         }
-    }
-
-    /// Median of an array.
-    private func median(_ values: [Double]) -> Double {
-        let sorted = values.sorted()
-        let n = sorted.count
-        guard n > 0 else { return 0 }
-        if n % 2 == 0 {
-            return (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-        }
-        return sorted[n / 2]
     }
 
     /// Format a Double to 2 decimal places.

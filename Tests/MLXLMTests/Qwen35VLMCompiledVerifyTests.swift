@@ -48,6 +48,31 @@ struct Qwen35VLMCompiledVerifyTests {
     /// The prompt tokens the cache holds before the verify.
     private static let promptLength = 8
 
+    /// The position of the first prompt token.
+    private static let promptOffset = 0
+
+    /// The sequences of the batch of each forward.
+    private static let batchSize = 1
+
+    /// The decoder layers of each group of the test model: GDN layers, then one attention
+    /// layer.
+    private static let fullAttentionInterval = 2
+
+    /// The rollback of a verify that keeps every token.
+    private static let noRollback = 0
+
+    /// The verify token counts just outside ``CompiledVerifyShape/tokenRange``: one decode
+    /// token, and one more than the most a GDN kernel run holds.
+    static let tokenCountsOutsideTheRange = [
+        GatedDeltaDecodeKernel.decodeTokens, GatedDeltaDecodeKernel.mostTokens + 1,
+    ]
+
+    /// The group size of a quantized key cache.
+    private static let quantizedCacheGroupSize = 32
+
+    /// The bits of a quantized key cache.
+    private static let quantizedCacheBits = 8
+
     /// The positions an image moved each token after it: nonzero, so a verify that took the
     /// positions after the cache offset would not match.
     private static let positionDelta: Int32 = 3
@@ -78,9 +103,10 @@ struct Qwen35VLMCompiledVerifyTests {
         return model
     }
 
-    /// Whether decoder layer `index` is a GDN layer: each second layer is an attention layer.
+    /// Whether decoder layer `index` is a GDN layer: the last layer of each group of
+    /// ``fullAttentionInterval`` layers is an attention layer.
     private static func isLinearLayer(_ index: Int) -> Bool {
-        index.isMultiple(of: 2)
+        (index + 1) % fullAttentionInterval != 0
     }
 
     /// The caches of the test model, with one plain key cache for each attention layer.
@@ -92,7 +118,7 @@ struct Qwen35VLMCompiledVerifyTests {
     /// ``positionDelta``.
     private static func positions(offset: Int, length: Int) -> MLXArray {
         qwen35MTPPositionIds(
-            offset: offset, length: length, batchSize: 1,
+            offset: offset, length: length, batchSize: batchSize,
             positionDeltas: MLXArray([positionDelta]))
     }
 
@@ -107,11 +133,21 @@ struct Qwen35VLMCompiledVerifyTests {
         eval(
             model.forward(
                 tokens(promptLength, seed: promptSeed), cache: cache,
-                positionIds: positions(offset: 0, length: promptLength), useCompiledDecode: false))
+                positionIds: positions(offset: promptOffset, length: promptLength),
+                useCompiledDecode: false))
         return cache
     }
 
     /// The hidden rows of one verify forward of `tokenCount` tokens after the prompt.
+    ///
+    /// - Parameters:
+    ///   - model: The test model.
+    ///   - tokenCount: The tokens of the verify.
+    ///   - cache: The caches the forward reads and writes.
+    ///   - compiled: False to take the general path of the layers.
+    ///   - applyFinalNorm: True to apply the final norm to the rows.
+    ///   - keepsSnapshots: True for a verify whose GDN layers keep their states.
+    /// - Returns: The hidden rows, shape `(1, tokenCount, hiddenSize)`.
     private static func forward(
         _ model: Qwen35Language.Model, tokenCount: Int, cache: [KVCache], compiled: Bool,
         applyFinalNorm: Bool = false, keepsSnapshots: Bool = true
@@ -127,6 +163,13 @@ struct Qwen35VLMCompiledVerifyTests {
 
     /// Prefills the prompt, runs one verify of `tokenCount` tokens on the compiled or the
     /// general path, then rolls the verify back by `rollback` tokens as a rejected round does.
+    ///
+    /// - Parameters:
+    ///   - model: The test model.
+    ///   - tokenCount: The tokens of the verify.
+    ///   - rollback: The tokens of the verify to roll back.
+    ///   - compiled: False to take the general path of the layers.
+    /// - Returns: What the verify leaves.
     private func verify(
         _ model: Qwen35Language.Model, tokenCount: Int, rollingBack rollback: Int, compiled: Bool
     ) -> CompiledVerifyOutcome {
@@ -161,7 +204,7 @@ struct Qwen35VLMCompiledVerifyTests {
     func compiledVerifyMatchesGeneralPath(tokenCount: Int) throws {
         let model = try Self.kernelModel()
 
-        for rollback in 0 ..< tokenCount {
+        for rollback in Self.noRollback ..< tokenCount {
             let general = verify(
                 model, tokenCount: tokenCount, rollingBack: rollback, compiled: false)
             let compiled = verify(
@@ -192,13 +235,16 @@ struct Qwen35VLMCompiledVerifyTests {
     func compiledVerifyReadsUpdatedWeights() throws {
         let model = try Self.kernelModel()
         let tokenCount = CompiledVerifyShape.fewestTokens
-        let before = verify(model, tokenCount: tokenCount, rollingBack: 0, compiled: true)
+        let before = verify(
+            model, tokenCount: tokenCount, rollingBack: Self.noRollback, compiled: true)
 
         model.update(
             parameters: model.parameters().mapValues { $0 * Self.weightUpdateFactor })
         eval(model)
-        let compiled = verify(model, tokenCount: tokenCount, rollingBack: 0, compiled: true)
-        let general = verify(model, tokenCount: tokenCount, rollingBack: 0, compiled: false)
+        let compiled = verify(
+            model, tokenCount: tokenCount, rollingBack: Self.noRollback, compiled: true)
+        let general = verify(
+            model, tokenCount: tokenCount, rollingBack: Self.noRollback, compiled: false)
 
         #expect(AttentionKernelTolerance.worstGap(compiled.logits, before.logits) > Self.tolerance)
         let gap = AttentionKernelTolerance.worstGap(compiled.logits, general.logits)
@@ -221,7 +267,8 @@ struct Qwen35VLMCompiledVerifyTests {
     func invalidationDropsVerifySegments() throws {
         let model = try Self.kernelModel()
         _ = verify(
-            model, tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: 0, compiled: true)
+            model, tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: Self.noRollback,
+            compiled: true)
         #expect(model.compiledVerifySegmentCount > 0)
 
         model.invalidateCompiledTraces()
@@ -237,7 +284,8 @@ struct Qwen35VLMCompiledVerifyTests {
         try quantizeProjections(of: gdn)
         #expect(try gdn.prepareFusedInputProjection())
         _ = verify(
-            model, tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: 0, compiled: true)
+            model, tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: Self.noRollback,
+            compiled: true)
         #expect(model.compiledVerifySegmentCount > 0)
 
         try gdn.update(
@@ -251,7 +299,8 @@ struct Qwen35VLMCompiledVerifyTests {
     func modelDeallocatesAfterACompiledVerify() throws {
         var model: Qwen35Language.Model? = try Self.kernelModel()
         _ = verify(
-            try #require(model), tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: 0,
+            try #require(model), tokenCount: CompiledVerifyShape.fewestTokens,
+            rollingBack: Self.noRollback,
             compiled: true)
         weak let released = model
 
@@ -266,7 +315,8 @@ struct Qwen35VLMCompiledVerifyTests {
     func generalPathCompilesNoVerifySegment() throws {
         let model = try Self.kernelModel()
         _ = verify(
-            model, tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: 0, compiled: false)
+            model, tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: Self.noRollback,
+            compiled: false)
         #expect(model.compiledVerifySegmentCount == 0)
     }
 
@@ -282,9 +332,7 @@ struct Qwen35VLMCompiledVerifyTests {
 
     @Test(
         "a verify outside the token range of a compiled schedule takes the general path",
-        arguments: [
-            GatedDeltaDecodeKernel.decodeTokens, GatedDeltaDecodeKernel.mostTokens + 1,
-        ])
+        arguments: tokenCountsOutsideTheRange)
     func verifyOutsideTheTokenRangeCompilesNoVerifySegment(tokenCount: Int) throws {
         let model = try Self.kernelModel()
         eval(
@@ -322,7 +370,8 @@ struct Qwen35VLMCompiledVerifyTests {
         let cache = prefilled.indices.map { index -> KVCache in
             Self.isLinearLayer(index)
                 ? prefilled[index]
-                : QuantizedKVCache(groupSize: Self.projectionGroupSize, bits: Self.projectionBits)
+                : QuantizedKVCache(
+                    groupSize: Self.quantizedCacheGroupSize, bits: Self.quantizedCacheBits)
         }
         eval(
             Self.forward(
