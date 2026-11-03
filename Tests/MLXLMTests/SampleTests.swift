@@ -10,12 +10,8 @@ import os
 public class SampleTests: XCTestCase {
 
     private func sampleCounts(sampler: TopPSampler, logits: MLXArray, draws: Int) -> [Int: Int] {
-        var counts: [Int: Int] = [:]
-        for _ in 0 ..< draws {
-            let token = sampler.sample(logits: logits).item(Int.self)
-            counts[token, default: 0] += 1
-        }
-        return counts
+        Dictionary(grouping: sampledTokens(sampler, logits: logits, count: draws), by: { $0 })
+            .mapValues(\.count)
     }
 
     private func frequency(_ counts: [Int: Int], token: Int, draws: Int) -> Float {
