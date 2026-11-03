@@ -27,17 +27,10 @@ struct MTPRoundBufferReuseTests {
     /// buffers, so that no round grows them.
     private static let generatedTokenCount = 40
 
-    /// The address of the first byte of the buffer of `array`.
-    private static func bufferAddress(_ array: MLXArray) -> UInt {
-        array.asData(access: .noCopy).data.withUnsafeBytes {
-            UInt(bitPattern: $0.baseAddress)
-        }
-    }
-
     /// The buffer addresses of the keys and the values of every attention layer of `cache`.
-    private static func keyValueBufferAddresses(_ cache: [KVCache]) -> [UInt] {
-        cache.compactMap { $0 as? KVCacheSimple }.flatMap { layer -> [UInt] in
-            [layer.keys, layer.values].compactMap { $0 }.map(bufferAddress)
+    private static func keyValueBufferAddresses(_ cache: [KVCache]) -> [Int?] {
+        cache.compactMap { $0 as? KVCacheSimple }.flatMap { layer -> [Int?] in
+            [layer.keys, layer.values].compactMap { $0 }.map(BufferAddress.of)
         }
     }
 

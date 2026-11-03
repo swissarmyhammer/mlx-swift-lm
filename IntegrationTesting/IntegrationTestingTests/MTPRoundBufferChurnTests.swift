@@ -43,6 +43,13 @@ private let churnPairIsLocal =
 
 private let bytesPerMebibyte = 1_048_576.0
 
+/// The arrays of a gated delta net layer's `MambaCache`: its conv state, then its recurrent state.
+private enum GatedDeltaStateSlot {
+    static let conv = 0
+    static let recurrent = 1
+    static let count = 2
+}
+
 /// The bytes of one step of the iterator, from the MLX memory counters.
 private struct StepBytes {
     /// The highest active memory of the step, above the active memory before it.
@@ -74,9 +81,9 @@ private struct PredictedBytes {
                 let arrays = mamba.innerState()
                 let stateBytes = arrays.reduce(0) { $0 + $1.nbytes }
                 states += stateBytes
-                if arrays.count == 2 {
-                    let conv = arrays[0]
-                    let recurrent = arrays[1]
+                if arrays.count == GatedDeltaStateSlot.count {
+                    let conv = arrays[GatedDeltaStateSlot.conv]
+                    let recurrent = arrays[GatedDeltaStateSlot.recurrent]
                     let convRowBytes = conv.nbytes / max(conv.dim(1), 1)
                     snapshots +=
                         verifyTokens * recurrent.nbytes
@@ -99,12 +106,13 @@ private func mebibytes(_ bytes: Int) -> String {
     String(format: "%.1f", Double(bytes) / bytesPerMebibyte)
 }
 
+/// The median of `values` as ``SampleMedian`` takes it, or 0 when no round of that kind ran.
 private func median(_ values: [Int]) -> Int {
-    guard !values.isEmpty else { return 0 }
-    return values.sorted()[values.count / 2]
+    values.isEmpty ? 0 : Int(SampleMedian.of(values.map(Double.init)))
 }
 
 private func log(_ line: String) {
+    // swiftlint:disable:next no_direct_standard_out_logs — a measurement line, read from the test output.
     print("\(churnPrefix) \(line)")
     churnLog.info("\(churnPrefix, privacy: .public) \(line, privacy: .public)")
 }

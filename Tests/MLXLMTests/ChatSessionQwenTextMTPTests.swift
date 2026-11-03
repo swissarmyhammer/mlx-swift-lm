@@ -761,7 +761,7 @@ struct ChatSessionQwenTextMTPTests {
             ]
         #expect(storedArrays.count == liveArrays.count)
         for (storedArray, liveArray) in zip(storedArrays, liveArrays) {
-            #expect(bufferAddress(of: storedArray) != bufferAddress(of: liveArray))
+            #expect(BufferAddress.of(storedArray) != BufferAddress.of(liveArray))
         }
     }
 
@@ -1186,13 +1186,6 @@ struct ChatSessionQwenTextMTPTests {
         let heldByteCount =
             keysAndValues * drafterRows.nbytes + chunkHidden.nbytes / liveChunkRows
         return (mainCache, tokens, continuation, heldByteCount)
-    }
-
-    /// The address of the first byte of `array`, to tell whether two arrays share a buffer.
-    private func bufferAddress(of array: MLXArray) -> Int? {
-        array.asData(access: .noCopy).data.withUnsafeBytes { bytes in
-            bytes.baseAddress.map { Int(bitPattern: $0) }
-        }
     }
 
     private func makeModelContext(probe: MTPStagingProbe? = nil) -> ModelContext {
