@@ -1676,9 +1676,19 @@ struct Qwen35CheckpointLoadingTests {
                 weights["unexpected.weight"] = MLXArray(1)
             }
             try save(arrays: weights, metadata: ["format": "mlx"], url: url)
-            await #expect(throws: (any Error).self) {
+            let error = await #expect(throws: UpdateError.self) {
                 try await fixture.factory.load(
                     from: fixture.directory, using: UnusedTokenizerLoader())
+            }
+            // The strict update names the tensor it rejects: a missing required one, or one
+            // the drafter has no parameter for.
+            switch error {
+            case .keyNotFound(let path, _) where missing:
+                #expect(path == ["mtp", "norm", "weight"], "\(String(describing: error))")
+            case .unhandledKeys(_, _, let keys) where !missing:
+                #expect(keys.contains("unexpected"), "\(String(describing: error))")
+            default:
+                Issue.record("unexpected loading error: \(String(describing: error))")
             }
         }
     }
@@ -1945,8 +1955,11 @@ struct Qwen35MTPGenerateLoopContractTests {
         // The exchange values the target hands the drafter are not arrays, so a prompt cache
         // cannot carry them; the exported state leaves them out.
         #expect(iterator.mainState?[mtpSharedKVStatesKey] != nil)
-        #expect(throws: (any Error).self) {
+        let error = #expect(throws: LMOutput.State.SerializationError.self) {
             try preparePromptCacheSave(cache: cache, state: iterator.mainState)
+        }
+        if case .unsupportedValue(let key, _) = error {
+            #expect(key.hasPrefix("mtp."), "\(key) is not an MTP exchange value")
         }
         _ = try preparePromptCacheSave(cache: cache, state: iterator.state)
     }
