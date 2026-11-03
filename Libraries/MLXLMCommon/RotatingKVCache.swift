@@ -63,8 +63,21 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     /// The rows that hold live entries: in temporal layout the first `idx` rows, in ring layout
     /// every row but the vacant ones.
     private var liveRows: Int {
-        wrapped ? (keys?.dim(HeadRowsAxis.row) ?? 0) - vacantRows : idx
+        liveRows(rowCount: keys?.dim(HeadRowsAxis.row) ?? 0)
     }
+
+    /// The live rows of a buffer of `rowCount` rows in the current layout.
+    ///
+    /// - Parameter rowCount: The rows of the buffer.
+    /// - Returns: The first `idx` rows in temporal layout, every row but the vacant ones in ring
+    ///   layout.
+    private func liveRows(rowCount: Int) -> Int {
+        wrapped ? rowCount - vacantRows : idx
+    }
+
+    /// Whether the saved state is the temporal layout of the live rows: a rewound ring saves the
+    /// layout a linearizing rewind leaves, so its snapshot reads back as that one does.
+    private var savesLinearized: Bool { wrapped && vacantRows > 0 }
 
     /// Model-native sliding-window caches deliberately keep their architectural
     /// window and do not participate in requested-capacity validation.
@@ -117,7 +130,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         // never an `idx`/`offset` comparison. The rows come from `array` itself, so the
         // buffers reorder one after the other.
         let end = array.dim(HeadRowsAxis.row)
-        let live = wrapped ? end - vacantRows : idx
+        let live = liveRows(rowCount: end)
         let prefix = Swift.min(keep, live)
         return rows(
             of: array, in: rowRanges(prefix: prefix, recent: live - prefix, end: end))
@@ -302,14 +315,17 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     /// grows to hold the write, up to the capacity. A write that reaches the end of the buffer
     /// then wraps after the kept prefix, as single-row writes do, and fills vacant slots first.
     private func updateRingInPlace(keys: MLXArray, values: MLXArray) {
+        guard var bufferKeys = self.keys, var bufferValues = self.values else {
+            preconditionFailure("An in-place RotatingKVCache write needs its buffers")
+        }
         let count = keys.dim(HeadRowsAxis.row)
         if !wrapped {
-            self.keys = temporalBuffer(self.keys!, toWrite: keys)
-            self.values = temporalBuffer(self.values!, toWrite: values)
+            bufferKeys = temporalBuffer(bufferKeys, toWrite: keys)
+            bufferValues = temporalBuffer(bufferValues, toWrite: values)
             idx = Swift.min(idx, storageCapacity)
         }
 
-        let end = self.keys!.dim(HeadRowsAxis.row)
+        let end = bufferKeys.dim(HeadRowsAxis.row)
         var written = 0
         while written < count {
             if idx == end {
@@ -317,13 +333,15 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
                 wrappedFlag = true
             }
             let run = Swift.min(count - written, end - idx)
-            self.keys![.ellipsis, idx ..< (idx + run), 0...] =
+            bufferKeys[.ellipsis, idx ..< (idx + run), 0...] =
                 keys[.ellipsis, written ..< (written + run), 0...]
-            self.values![.ellipsis, idx ..< (idx + run), 0...] =
+            bufferValues[.ellipsis, idx ..< (idx + run), 0...] =
                 values[.ellipsis, written ..< (written + run), 0...]
             idx += run
             written += run
         }
+        self.keys = bufferKeys
+        self.values = bufferValues
         offset += count
         vacantRows = Swift.max(0, vacantRows - count)
     }
@@ -354,19 +372,22 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             return logicalView(tail: maxCacheSize) ?? (keys, values)
         }
         let live = liveRows
+        var result: (MLXArray, MLXArray)?
         if writesInPlace(count: count) {
             updateRingInPlace(keys: keys, values: values)
-            return retainedView(tail: Swift.min(live, maxCacheSize - 1) + count)!
+        } else if count == 1 {
+            result = updateInPlace(keys: keys, values: values)
+        } else {
+            result = updateConcat(keys: keys, values: values)
         }
-        let result =
-            if count == 1 {
-                updateInPlace(keys: keys, values: values)
-            } else {
-                updateConcat(keys: keys, values: values)
-            }
-        if rewindCapacity > 0 {
+        if rewindCapacity > 0,
+            let view = retainedView(tail: Swift.min(live, maxCacheSize - 1) + count)
+        {
             // Historical reserve rows never participate in attention.
-            return retainedView(tail: Swift.min(live, maxCacheSize - 1) + count)!
+            return view
+        }
+        guard let result else {
+            preconditionFailure("An in-place RotatingKVCache write leaves its buffers")
         }
         return result
     }
@@ -374,8 +395,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     public override var state: [MLXArray] {
         get {
             guard let keys = self.keys, let values = self.values else { return [] }
-            if wrapped, vacantRows > 0 {
-                // A rewound ring saves the temporal layout a linearizing rewind leaves.
+            if savesLinearized {
                 return [temporalOrder(keys), temporalOrder(values)]
             } else if !wrapped, idx < keys.dim(HeadRowsAxis.row) {
                 return [
@@ -399,8 +419,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
     public override var metaState: [String] {
         get {
-            // A rewound ring saves as the temporal layout its state holds.
-            let linearized = wrapped && vacantRows > 0
+            let linearized = savesLinearized
             var metadata = [
                 String(keep), String(maxCacheSize), String(step), String(offset),
                 String(linearized ? liveRows : idx), capacityOrigin.rawValue,

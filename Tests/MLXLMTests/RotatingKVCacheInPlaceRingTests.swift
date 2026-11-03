@@ -63,13 +63,16 @@ final class RotatingKVCacheInPlaceRingTests: XCTestCase {
     }
 
     /// The saved rows of `cache` in temporal order, read from its state and metadata alone.
-    private func savedTemporalRows(_ cache: RotatingKVCache) -> [Float] {
-        let state = cache.state
-        guard let saved = state.first else { return [] }
+    ///
+    /// - Throws: When the cache saves no keys, or its metadata does not read back.
+    private func savedTemporalRows(
+        _ cache: RotatingKVCache, file: StaticString = #filePath, line: UInt = #line
+    ) throws -> [Float] {
+        let saved = try XCTUnwrap(cache.state.first, "no saved keys", file: file, line: line)
         let meta = cache.metaState
-        let keep = Int(meta[0])!
-        let idx = Int(meta[4])!
-        let wrapped = Bool(meta[6])!
+        let keep = try XCTUnwrap(Int(meta[0]), "keep", file: file, line: line)
+        let idx = try XCTUnwrap(Int(meta[4]), "idx", file: file, line: line)
+        let wrapped = try XCTUnwrap(Bool(meta[6]), "wrapped", file: file, line: line)
         let rows = floats(saved)
         guard wrapped else { return Array(rows.prefix(idx)) }
         return Array(rows[0 ..< keep]) + Array(rows[idx...]) + Array(rows[keep ..< idx])
@@ -78,7 +81,7 @@ final class RotatingKVCacheInPlaceRingTests: XCTestCase {
     private func assertSameObservables(
         _ pair: Pair, _ context: @autoclosure () -> String, file: StaticString = #filePath,
         line: UInt = #line
-    ) {
+    ) throws {
         let message = context()
         XCTAssertEqual(pair.inPlace.offset, pair.reference.offset, message, file: file, line: line)
         // The linearizing path keeps up to `count - 1` more rows right after a write of
@@ -108,8 +111,8 @@ final class RotatingKVCacheInPlaceRingTests: XCTestCase {
                 actual.map { floats($0.1) }, expected.map { floats($0.1) }, message, file: file,
                 line: line)
         }
-        let inPlaceRows = savedTemporalRows(pair.inPlace)
-        let referenceRows = savedTemporalRows(pair.reference)
+        let inPlaceRows = try savedTemporalRows(pair.inPlace, file: file, line: line)
+        let referenceRows = try savedTemporalRows(pair.reference, file: file, line: line)
         // The reference may hold older rows past the reserve right after a long write; the
         // newest rows that the in-place ring saves are the same rows.
         XCTAssertEqual(
@@ -172,7 +175,7 @@ final class RotatingKVCacheInPlaceRingTests: XCTestCase {
                     state: pair.inPlace.state, metaState: pair.inPlace.metaState)
                 pair.inPlace = try XCTUnwrap(restored as? RotatingKVCache, context)
             }
-            assertSameObservables(pair, context, file: file, line: line)
+            try assertSameObservables(pair, context, file: file, line: line)
         }
     }
 
