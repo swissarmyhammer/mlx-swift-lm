@@ -879,15 +879,6 @@ private func referenceRotate(
     return MLXArray(out).reshaped(batch, dim).asType(x.dtype)
 }
 
-/// Relative RMS error between two arrays: sqrt(mean((a-b)²) / mean(a²)).
-private func relativeRMSError(_ a: MLXArray, _ b: MLXArray) -> Float {
-    let diff = (a - b).asType(.float32)
-    let ref = a.asType(.float32)
-    let mse = mean(diff * diff).item(Float.self)
-    let refVar = mean(ref * ref).item(Float.self)
-    return sqrt(mse / max(refVar, 1e-10))
-}
-
 /// Mirrors `unpackAndReorder` from ParoQuantLoader.swift (file-private in production).
 private func unpackAndReorderForTesting(_ packed: MLXArray) -> MLXArray {
     let rows = packed.dim(0)

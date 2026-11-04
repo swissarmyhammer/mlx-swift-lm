@@ -328,7 +328,7 @@ extension DeepSeekV4Configuration {
     /// Tells whether a layer has an indexer.
     ///
     /// An indexer sits beside the compressor of a layer whose compress ratio is
-    /// ``indexerCompressRatio``, and nowhere else. The set of indexer layers is
+    /// `indexerCompressRatio`, and nowhere else. The set of indexer layers is
     /// thus narrower than the set of compressor layers.
     ///
     /// - Parameter layer: The index of the decoder layer.

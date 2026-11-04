@@ -14,7 +14,11 @@ The KV (Key-Value) cache stores attention key and value tensors from previous to
 | `ChunkedKVCache` | Large prompt processing | Controlled | Chunked |
 | `MambaCache` | Mamba/SSM models | Fixed state | N/A |
 
-**File:** `Libraries/MLXLMCommon/KVCache.swift`
+**Files:** `Libraries/MLXLMCommon/KVCache.swift` holds the `KVCache` protocol, `BaseKVCache`,
+the mask helpers and the prompt cache utilities. Each cache class has its own file:
+`KVCacheSimple.swift` (`KVCacheSimple`, `ChunkedKVCache`), `RotatingKVCache.swift`,
+`QuantizedKVCache.swift` (with the quantized attention helpers), `ArraysCache.swift`
+(`ArraysCache`, `MambaCache`) and `CacheList.swift`.
 
 ## Cache Types
 
@@ -198,7 +202,42 @@ try savePromptCache(
 let (loadedCache, metadata) = try loadPromptCache(url: fileURL)
 ```
 
-Cache files are `.safetensors` format with metadata.
+Cache files are `.safetensors` format with metadata. The save and load functions
+live in `Libraries/MLXLMCommon/PromptCacheFile.swift`, and the per-class restore
+and its checks in `Libraries/MLXLMCommon/PromptCacheRestore.swift`.
+
+An MTP generation leaves an `MTPDrafterContinuation` that stands where the main
+cache ends. Save it beside the cache so a restored session resumes the drafter
+instead of cold-starting it. `ChatSession.saveCache(to:)` does this for you, and
+the `promptCache:` initializers pick it up:
+
+```swift
+try savePromptCache(
+    url: fileURL, cache: cache, state: state,
+    drafterContinuation: try SerializedMTPDrafterContinuation(continuation))
+
+let snapshot = try loadPromptCacheSnapshot(url: fileURL)
+// nil for a file saved without one. The restore throws for another drafter,
+// drafter caches of another class or window than `parameters` give, or damaged
+// values; the drafter then cold-starts at the cached position.
+let resumed = try snapshot.drafterContinuation?.restored(
+    by: drafter, parameters: parameters)
+```
+
+The Qwen MTP drafter cache follows the main attention caches: with
+`maxKVSize` (or a typed capacity) it is a `RotatingKVCache` of the same window
+with a small rewind reserve, so pass the stream's `GenerateParameters` to the
+restore. A quantized main cache (`kvBits`) leaves the drafter cache in full
+precision. MTP keeps speculating past the window of every ring, including one
+that keeps a prefix (as `maxKVSize` makes it).
+
+A write of several rows into a `RotatingKVCache` that keeps a prefix masks each
+query as a write of one row would: the query sees the kept prefix and the
+newest rows that fill the rest of the window. A chunked prefill and a
+multi-token MTP verify thus attend as plain one-token decode does, and give its
+tokens; how a stream batches its tokens does not change them. (Python mlx-lm
+masks a plain window over such a write, which drops the kept prefix first for
+each query past the window.)
 
 ## Attention Masks
 

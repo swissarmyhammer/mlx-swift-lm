@@ -13,12 +13,12 @@ import Testing
 /// Each test binds its own store with `ExecutorPromptCacheStore.$current.withValue(store)`, and
 /// never touches the shared store. The fixtures come from ``PromptCacheSpoolFixtures``.
 @Suite("The public prompt cache API sets the budgets and releases one session")
-struct PromptCachePublicAPITests: PromptCacheSpoolFixtures {
+struct PromptCachePublicAPITests: PromptCacheSpoolFixtures, PromptCacheKeyFixtures {
 
     // MARK: - Fixture values
 
     /// The model whose sessions the tests release. It holds a `/`, as a real model ID does.
-    private static let modelID = "test-org/prompt-cache-public-api"
+    static let modelID = "test-org/prompt-cache-public-api"
 
     /// A second model. Its sessions must stay when the first model releases a session.
     private static let otherModelID = "test-org/prompt-cache-public-api-other"
@@ -41,14 +41,9 @@ struct PromptCachePublicAPITests: PromptCacheSpoolFixtures {
         makeStubModel(modelID)
     }
 
-    /// The key of `sessionID` under ``modelID``.
-    private static func key(_ sessionID: String) -> ExecutorPromptCacheKey {
-        ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID)
-    }
-
     /// The key of the released session under ``otherModelID``.
     private static var otherModelKey: ExecutorPromptCacheKey {
-        ExecutorPromptCacheKey(modelID: otherModelID, sessionID: releasedSessionID)
+        key(releasedSessionID, modelID: otherModelID)
     }
 
     /// Checks in one entry for the released session, one for the kept session, and one for the

@@ -1,0 +1,1 @@
+{"id":"01M5SJR74BQHWF0SY7JJC3CZ2N","timestamp":"2026-10-25T13:07:13.163443Z","op":"create","item_id":"01M5SJR74B2QT1S19ZZZHJKHMF","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: '5319e7'\n+tag_name: guided-generation\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: '5319e7'\n-tag_name: guided-generation\n","transaction_id":null}

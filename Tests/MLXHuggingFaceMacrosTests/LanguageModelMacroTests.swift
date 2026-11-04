@@ -126,6 +126,36 @@ final class LanguageModelMacroTests: XCTestCase {
             macros: testMacros)
     }
 
+    func testExplicitSpeculativeDecoding() {
+        assertMacroExpansion(
+            "let model = #huggingFaceLanguageModel(configuration: config, configurationResolver: MyResolver(), speculativeDecoding: drafter)",
+            expandedSource: """
+                let model = MLXLanguageModel(
+                    configuration: config,
+                    configurationResolver: MyResolver(),
+                    speculativeDecoding: drafter,
+                    weightsLocation: { id in
+                        let cache = HuggingFace.HubCache.default
+                        guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                            return cache.cacheDirectory
+                        }
+                        if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+                            let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: commit) {
+                            return snapshot
+                        }
+                        return cache.repoDirectory(repo: repo, kind: .model)
+                    },
+                    load: { configuration, progressHandler in
+                        try await loadModelContainer(
+                            from: #hubDownloader(),
+                            using: #huggingFaceTokenizerLoader(),
+                            configuration: configuration,
+                            progressHandler: progressHandler)
+                    })
+                """,
+            macros: testMacros)
+    }
+
     func testMissingConfigurationDiagnoses() {
         assertMacroExpansion(
             "let model = #huggingFaceLanguageModel()",

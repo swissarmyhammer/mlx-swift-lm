@@ -79,6 +79,46 @@ use scales; `mtp.*` uses offsets unless its own file declares `format=mlx` or th
 caller sets `preconvertedNorms`. Metadata from a target shard does not classify
 a separate MTP shard. Conflicting norm declarations fail before model update.
 
+## Multi-Token Prediction Drafters
+
+A ``ChatSession`` with an MTP ``SpeculativeDecodingConfig`` and an
+`MLXLanguageModel` with an `MLXSpeculativeDecoding` speculate with the MTP head
+of these targets (see <doc:using> for how to turn MTP on):
+
+| Target | `model_type` of the target | Loaded by | Drafter registration |
+|---|---|---|---|
+| Qwen3.5, Qwen3.6 and Qwen3.8 text | `qwen3_5`, `qwen3_5_moe`, `qwen3_5_text`, `qwen3_8`, `qwen3_8_moe`, `qwen3_8_text` | `LLMModelFactory` | `.qwen35Text` (MLXLLM) |
+| Qwen3.5, Qwen3.6 and Qwen3.8 vision-language | `qwen3_5`, `qwen3_5_moe`, `qwen3_8`, `qwen3_8_moe` | `VLMModelFactory` | `.qwen35VLM` (MLXVLM) |
+
+The drafter is the MTP head of the same checkpoint, either embedded in it
+(`mtp.*`, `language_model.mtp.*`) or a standalone head such as
+`mlx-community/Qwen3.8-27B-MTP-4bit` (`MTPDrafterRegistry.qwen3_8_27b_mtp_4bit`),
+whose `model_type` is `qwen3_5_mtp` or `qwen3_8_mtp`. A standalone head does not
+say whether its target is a text or a vision-language model, so the
+registration that loads it must match how the target loaded:
+``MTPDrafterRegistration/matchingTarget(_:_:)`` with both families picks the
+right one. `loadModelContainer` loads a Qwen3.5-family model as a
+vision-language model whenever MLXVLM is linked. A drafter of the other family
+does not speculate, and the generation reports
+``SpeculativeDecodingFallbackReason/incompatibleDrafter``.
+
+The Qwen drafters cap a round at 6 tokens (``MTPDrafterModel/maximumBlockSize``)
+and speculate at any temperature. Their cache follows the main KV cache:
+
+- With `maxKVSize` or a typed capacity, the drafter cache is a
+  ``RotatingKVCache`` of the same window with a small rewind reserve. MTP keeps
+  speculating past the window, and writes the tokens of plain decoding with the
+  same window.
+- With `kvBits` (a quantized main cache), the drafter cache stays in full
+  precision, and MTP writes the tokens of plain decoding with the same KV
+  setting.
+- A saved drafter state records its cache kind and window, and does not restore
+  into another kind or window. The drafter then starts cold at the cached
+  position.
+
+A cache that the first MTP check refuses makes the turn decode without
+speculation with ``SpeculativeDecodingFallbackReason/unsupportedCache``.
+
 ## Components That Load On First Use
 
 Some models have large parts that many sessions never use, such as the vision

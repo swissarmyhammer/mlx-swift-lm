@@ -108,7 +108,7 @@ extension KVCacheSimple {
 ///
 /// This is intentionally implemented as a regular ``KVCache`` so model attention code can
 /// use it without changes. When called through
-/// ``attentionWithCacheUpdate(queries:keys:values:cache:scale:mask:)``, completed tiles stay
+/// `attentionWithCacheUpdate(queries:keys:values:cache:scale:mask:)`, completed tiles stay
 /// quantized on the hot path: attention scores and value products are computed with `quantizedMM`
 /// in the rotated domain, and only the final output is inverse-rotated. The tile normalization uses
 /// clipped log-domain dual-axis scale balancing with best-imbalance tracking, matching the central
@@ -407,7 +407,7 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
             + pendingTiles.reduce(0) { $0 + byteCount($1) }
     }
 
-    /// The compact tiles (``compactStorageByteCount``) plus the raw tail.
+    /// The compact tiles (`compactStorageByteCount`) plus the raw tail.
     ///
     /// This reads the slabs directly, thus it does not build the tile views
     /// that ``state`` builds. It evaluates nothing.

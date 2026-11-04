@@ -587,7 +587,7 @@ public final class DeepSeekV4Model: Module, LLMModel, KVCacheDimensionProvider, 
     }
 
     /// The prompt path of DeepSeek-V4: the loaded tokenizer wrapped by
-    /// ``DeepSeekV4EncodingTokenizer``.
+    /// `DeepSeekV4EncodingTokenizer`.
     ///
     /// The `deepseek_v4` entry of the type registry is the detection rule
     /// that routes a checkpoint to this model, and this hook is where that
@@ -846,7 +846,7 @@ extension DeepSeekV4Model {
     public var toolCallFormat: ToolCallFormat? { .dsml }
 
     /// The reasoning protocol of DeepSeek-V4:
-    /// ``DeepSeekV4EncodingTokenizer/reasoningConfig``.
+    /// `DeepSeekV4EncodingTokenizer/reasoningConfig`.
     ///
     /// DeepSeek-V4 controls its thinking through the thinking mode of the
     /// encoder, which the `thinking` chat-template flag selects. The protocol

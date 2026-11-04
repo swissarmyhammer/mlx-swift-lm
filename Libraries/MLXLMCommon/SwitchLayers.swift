@@ -26,7 +26,7 @@ public let weightedExpertSum: @Sendable (MLXArray, MLXArray) -> MLXArray = compi
 ///   - indices: per-token expert indices, shape `[..., m]`.
 /// - Returns: a tuple of `(sortedX, sortedIndices, inverseOrder)`, where
 ///   `inverseOrder` is the permutation that undoes the sort (consumed by
-///   ``scatterUnsort``).
+///   `scatterUnsort`).
 public func gatherSort(x: MLXArray, indices: MLXArray) -> (MLXArray, MLXArray, MLXArray) {
     let m = indices.dim(-1)
     let indices = indices.flattened()
@@ -40,11 +40,11 @@ public func gatherSort(x: MLXArray, indices: MLXArray) -> (MLXArray, MLXArray, M
     )
 }
 
-/// Inverse of ``gatherSort``: restores `x` to its original token order using the `invOrder` permutation produced by the matching `gatherSort` call.
+/// Inverse of `gatherSort`: restores `x` to its original token order using the `invOrder` permutation produced by the matching `gatherSort` call.
 ///
 /// - Parameters:
 ///   - x: expert outputs in sorted-by-expert order.
-///   - invOrder: the inverse permutation returned by ``gatherSort``.
+///   - invOrder: the inverse permutation returned by `gatherSort`.
 ///   - shape: if provided, the sorted-order result is unflattened back to this
 ///     shape (typically the original `indices` shape) after unsorting.
 /// - Returns: `x` restored to original token order, reshaped to `shape` when given.
@@ -531,7 +531,7 @@ open class SwitchLinear: Module, Quantizable {
     ///   - x: input activations, shape `[..., inputDims]`.
     ///   - indices: per-token expert indices selecting which weight row to use.
     ///   - sortedIndices: pass `true` when `indices` is already sorted by
-    ///     expert (as produced by ``gatherSort``), enabling a faster gather-matmul.
+    ///     expert (as produced by `gatherSort`), enabling a faster gather-matmul.
     /// - Returns: per-token outputs, shape `[..., outputDims]`.
     open func callAsFunction(
         _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false
@@ -603,7 +603,7 @@ open class QuantizedSwitchLinear: SwitchLinear, Quantized {
     ///   - x: input activations, shape `[..., inputDims]`.
     ///   - indices: per-token expert indices selecting which weight row to use.
     ///   - sortedIndices: pass `true` when `indices` is already sorted by
-    ///     expert (as produced by ``gatherSort``), enabling a faster gather-matmul.
+    ///     expert (as produced by `gatherSort`), enabling a faster gather-matmul.
     /// - Returns: per-token outputs, shape `[..., outputDims]`.
     override open func callAsFunction(
         _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false

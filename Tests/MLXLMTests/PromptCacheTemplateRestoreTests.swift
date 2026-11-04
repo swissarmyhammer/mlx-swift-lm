@@ -3,6 +3,7 @@
 import Cmlx
 import Foundation
 import MLX
+import MLXLMTestSupport
 import Testing
 
 @testable import MLXLLM
@@ -231,15 +232,6 @@ struct PromptCacheTemplateRestoreTests {
         tensor([batchSize, headCount, tokenCount, headDim], seed: seed)
     }
 
-    /// Makes a temporary file URL for one prompt cache file.
-    ///
-    /// - Returns: The URL, in the temporary directory.
-    static func temporaryURL() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
-    }
-
     /// Decodes the DeepSeek-V4 configuration that the test bundle holds.
     ///
     /// - Returns: The configuration.
@@ -348,12 +340,12 @@ struct PromptCacheTemplateRestoreTests {
         state: LMOutput.State? = nil,
         edit: (inout [String: MLXArray], inout [String: String]) -> Void
     ) throws -> URL {
-        let savedURL = temporaryURL()
+        let savedURL = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: savedURL) }
         try savePromptCache(url: savedURL, cache: caches, state: state)
         var (arrays, metadata) = try loadArraysAndMetadata(url: savedURL)
         edit(&arrays, &metadata)
-        let tamperedURL = temporaryURL()
+        let tamperedURL = TemporaryPromptCacheFile.makeURL()
         try save(arrays: arrays, metadata: metadata, url: tamperedURL)
         return tamperedURL
     }
@@ -532,7 +524,7 @@ struct PromptCacheTemplateRestoreTests {
         arguments: CacheKind.allCases)
     func roundTripRestoresIntoTemplate(kind: CacheKind) throws {
         let source = try kind.makeFilled()
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [source])
 
@@ -553,7 +545,7 @@ struct PromptCacheTemplateRestoreTests {
         arguments: [CacheKind.quantized, .turboQuant])
     func convertedLayerRestoresIntoSimpleTemplate(kind: CacheKind) throws {
         let source = try kind.makeFilled()
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [source])
 
@@ -570,7 +562,7 @@ struct PromptCacheTemplateRestoreTests {
         let quantized = try CacheKind.quantized.makeFilled()
         let mamba = try CacheKind.mamba.makeFilled()
         let source = CacheList(quantized, mamba)
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [source])
 
@@ -595,7 +587,7 @@ struct PromptCacheTemplateRestoreTests {
         var state = LMOutput.State()
         state[key] = ropeDeltas
         let metadata = ["source": "template-restore"]
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [source], metadata: metadata, state: state)
 
@@ -613,7 +605,8 @@ struct PromptCacheTemplateRestoreTests {
         let key = Self.positionsStateKey
         var state = LMOutput.State()
         state[key] = Self.tensor([Self.batchSize, Self.headCount], seed: Self.firstSeed)
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: sources, state: state)
 
         let templates = try kinds.map { try $0.makeTemplate() }
@@ -646,7 +639,7 @@ struct PromptCacheTemplateRestoreTests {
             (.simple, .miniMaxWithIndex),
         ])
     func classMismatchThrows(saved: CacheKind, template: CacheKind) throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [try saved.makeFilled()])
         let templates = [try template.makeTemplate()]
@@ -660,7 +653,7 @@ struct PromptCacheTemplateRestoreTests {
         "A ring does not restore into a ring of another configuration",
         arguments: RingConfigurationMismatch.allCases)
     func ringConfigurationMismatchThrows(mismatch: RingConfigurationMismatch) throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [try CacheKind.rotatingAfterWrap.makeFilled()])
         let template = mismatch.makeTemplate()
@@ -678,7 +671,7 @@ struct PromptCacheTemplateRestoreTests {
         "A quantized cache does not restore into a quantized cache of another configuration",
         arguments: QuantizedConfigurationMismatch.allCases)
     func quantizedConfigurationMismatchThrows(mismatch: QuantizedConfigurationMismatch) throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [try CacheKind.quantized.makeFilled()])
         let template = mismatch.makeTemplate()
@@ -694,7 +687,7 @@ struct PromptCacheTemplateRestoreTests {
 
     @Test("A DeepSeek-V4 layer with indexer data does not restore into a layer with no indexer")
     func deepSeekIndexerMismatchThrows() throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [try CacheKind.deepSeekWithIndexer.makeFilled()])
         let templates = [try CacheKind.deepSeekWithoutIndexer.makeTemplate()]
@@ -706,7 +699,7 @@ struct PromptCacheTemplateRestoreTests {
 
     @Test("A layer-count mismatch throws KVCacheError")
     func layerCountMismatchThrows() throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         let sources = [try CacheKind.simple.makeFilled(), try CacheKind.simple.makeFilled()]
         try savePromptCache(url: url, cache: sources)
@@ -722,7 +715,7 @@ struct PromptCacheTemplateRestoreTests {
 
     @Test("A bad later layer throws before any setter writes an earlier template")
     func badLaterLayerLeavesEarlierTemplatesEmpty() throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         let sources = [
             try CacheKind.simple.makeFilled(), try CacheKind.rotatingBeforeWrap.makeFilled(),
@@ -822,7 +815,7 @@ struct PromptCacheTemplateRestoreTests {
         "A saved CacheList does not restore into a template list of another child count",
         arguments: [[CacheKind.simple], [.simple, .mamba, .simple]])
     func cacheListChildCountMismatchThrows(templateKinds: [CacheKind]) throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         let source = try Self.makeFilledCacheList()
         try savePromptCache(url: url, cache: [source])
@@ -960,7 +953,7 @@ struct PromptCacheTemplateRestoreTests {
 
     @Test("A registered cache class saves under its registered name and loads back")
     func registeredClassRoundTrips() throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         let source = Self.filled(RegisteredSlotCache())
 
@@ -975,7 +968,7 @@ struct PromptCacheTemplateRestoreTests {
 
     @Test("A cache class with no serialized class name throws KVCacheError on the save")
     func unnamedClassDoesNotSave() throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         let error = #expect(throws: KVCacheError.self) {
@@ -1015,7 +1008,7 @@ struct PromptCacheTemplateRestoreTests {
         ]
 
         for (saved, template) in cases {
-            let url = Self.temporaryURL()
+            let url = TemporaryPromptCacheFile.makeURL()
             defer { try? FileManager.default.removeItem(at: url) }
             try savePromptCache(url: url, cache: [saved])
 
@@ -1065,7 +1058,7 @@ struct PromptCacheTemplateRestoreTests {
         arguments: OffsetCacheKind.allCases)
     func offsetComesBackThroughEachLoad(kind: OffsetCacheKind) throws {
         let source = try kind.makeFilled()
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [source])
 
@@ -1124,7 +1117,7 @@ struct PromptCacheTemplateRestoreTests {
     func offsetRecordStaysOutOfUserMetadata() throws {
         let source = try OffsetCacheKind.mamba.makeFilled()
         let metadata = ["source": "offset-record"]
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
         try savePromptCache(url: url, cache: [source], metadata: metadata)
 
@@ -1138,7 +1131,7 @@ struct PromptCacheTemplateRestoreTests {
     @Test("savePromptCache refuses user metadata that uses the reserved offset prefix")
     func reservedOffsetPrefixThrows() throws {
         let source = try CacheKind.simple.makeFilled()
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         #expect(throws: KVCacheError.self) {

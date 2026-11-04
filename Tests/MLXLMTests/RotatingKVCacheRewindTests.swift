@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLLM
+import MLXLMTestSupport
 import XCTest
 
 @testable import MLXLMCommon
@@ -207,8 +208,7 @@ final class RotatingKVCacheRewindTests: XCTestCase {
                 let cache = RotatingKVCache(maxSize: 8, keep: keep, rewindCapacity: 4)
                 fill([cache], positions: 0 ..< 30)
                 XCTAssertEqual(trimPromptCache([cache], numTokens: trim), trim)
-                let url = FileManager.default.temporaryDirectory.appendingPathComponent(
-                    UUID().uuidString + ".safetensors")
+                let url = TemporaryPromptCacheFile.makeURL()
                 defer { try? FileManager.default.removeItem(at: url) }
                 try savePromptCache(url: url, cache: [cache])
                 let (loaded, _) = try loadPromptCache(url: url)
@@ -379,8 +379,7 @@ final class RotatingKVCacheRewindTests: XCTestCase {
 
     func testMalformedRewindMetadataThrowsWithoutRestoring() throws {
         for reserve in ["-1", "invalid", String(Int.max)] {
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent(
-                UUID().uuidString + ".safetensors")
+            let url = TemporaryPromptCacheFile.makeURL()
             defer { try? FileManager.default.removeItem(at: url) }
             let metadata = ["0", "8", "256", "0", "0", "modelNative", "false", reserve]
             var entries = Dictionary(

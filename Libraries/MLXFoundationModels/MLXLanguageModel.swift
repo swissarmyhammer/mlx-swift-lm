@@ -118,8 +118,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// On-disk resolution (`weightsLocation`) and download progress use
     /// `configuration.name`, not this value: both want a path-shaped id.
     public var modelID: String {
+        Self.cacheIdentity(of: configuration)
+    }
+
+    /// The identity of a checkpoint in the model cache: `"\(id)@\(revision)"` for a Hub
+    /// checkpoint at a revision other than ``defaultRevision``, else `configuration.name`.
+    ///
+    /// ``modelID`` names the model with it, and an MTP drafter
+    /// (``MLXSpeculativeDecoding``) names its drafter checkpoint with it.
+    ///
+    /// - Parameter configuration: the checkpoint.
+    /// - Returns: the identity.
+    static func cacheIdentity(of configuration: ModelConfiguration) -> String {
         switch configuration.id {
-        case .id(let id, let revision) where revision != Self.defaultRevision:
+        case .id(let id, let revision) where revision != defaultRevision:
             return "\(id)@\(revision)"
         case .id, .directory:
             return configuration.name
@@ -143,28 +155,60 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             loader: makeContainerLoader())
     }
 
-    /// The process-global MLX buffer-reuse pool limit in bytes: 256 binary
-    /// megabytes, written as a shift.
-    private static let gpuCacheLimitBytes = 256 << 20
-
-    /// Sets the process-global MLX buffer-reuse pool limit a single time. A
-    /// `static let` initializer runs lazily and exactly once (thread-safe), so
-    /// repeated model loads don't re-stomp a consumer's own `Memory.cacheLimit`.
+    /// The speculation of the generations of one response: the MTP drafter of
+    /// ``speculativeDecoding``, which the shared model cache loads one time beside
+    /// this model, or `nil` when the model has none.
     ///
-    /// Higher = less allocator thrash at the cost of slightly higher resident GPU
-    /// memory. 256MB comfortably holds activations and KV cache for a 3B model
-    /// without forcing pool evictions mid-forward-pass.
-    private static let configureGPUCacheOnce: Void = {
-        MLX.Memory.cacheLimit = gpuCacheLimitBytes
-    }()
+    /// The drafter model leaves its container here, before the response enters the
+    /// target's `ModelContainer.perform`, thus no generation nests a second lock. The
+    /// loaded target picks the drafter loader, so a registration that matches the target
+    /// loads the drafter family of the target as it loaded.
+    ///
+    /// The memory policy of ``speculativeDecoding`` weighs the drafter beside the loaded
+    /// target first: on its byte estimate before the load, else on the loaded drafter. A
+    /// drafter it does not admit gives `nil`, and the call reports
+    /// `SpeculativeDecodingFallbackReason.memoryBudgetExceeded`; a drafter the estimate does
+    /// not admit never loads.
+    ///
+    /// - Parameter container: the loaded target, from ``loadContainer()``.
+    /// - Returns: the speculation, or `nil`.
+    /// - Throws: the error of the drafter load, and `SpeculativeDecodingMemoryError` when the
+    ///   memory policy does not admit the drafter and its action is `.fail`.
+    func loadMTPSpeculation(for container: ModelContainer) async throws -> MTPSpeculation? {
+        guard let speculativeDecoding else { return nil }
+        let (loadDrafter, admitsDrafter) = try await container.perform { context in
+            (
+                speculativeDecoding.drafterLoader(for: context.model),
+                try speculativeDecoding.admitsDrafterBeforeLoading(beside: context.model)
+            )
+        }
+        guard admitsDrafter else { return Self.memoryBudgetFallback() }
+        let drafter = try await Self.cache.loadDrafter(
+            ModelCache.DrafterKey(modelID: modelID, drafterID: speculativeDecoding.drafterID)
+        ) {
+            try await loadDrafter(speculativeDecoding.drafterConfiguration)
+        }
+        let speculation = await speculativeDecoding.speculation(with: drafter)
+        let admitsLoadedDrafter = try await container.perform(nonSendable: speculation) {
+            context, speculation in
+            try speculativeDecoding.admitsLoadedDrafter(speculation.drafter, beside: context.model)
+        }
+        return admitsLoadedDrafter ? speculation : Self.memoryBudgetFallback()
+    }
+
+    /// The speculation of a call whose memory policy did not admit the drafter: none. The
+    /// call reports `SpeculativeDecodingFallbackReason.memoryBudgetExceeded`.
+    ///
+    /// - Returns: `nil`.
+    private static func memoryBudgetFallback() -> MTPSpeculation? {
+        SpeculativeDecodingOutcome.current?.record(fallbackReason: .memoryBudgetExceeded)
+        return nil
+    }
 
     private func makeContainerLoader() -> @Sendable () async throws -> ModelContainer {
         let configuration = self.configuration
         let load = self.load
         return {
-            // Configure the buffer pool once per process rather than on every
-            // load, so a consumer's own `Memory.cacheLimit` survives our loads.
-            _ = Self.configureGPUCacheOnce
             // One identifier per load attempt. Eviction cancels a load and
             // forgets it at once, so a replacement can start while this one is
             // still unwinding, and the progress observable needs to tell them
@@ -216,21 +260,30 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     }
 
     /// Whether the shared cache already holds an `GrammarTokenizer` for the model.
-    /// Internal test seam (not public API): lets `PrewarmGrammarTests` confirm
-    /// `warmUp()` pre-created the tokenizer.
+    /// Internal test seam (not public API): lets `PrewarmGrammarTests` in the
+    /// IntegrationTesting project confirm `warmUp()` pre-created the tokenizer.
+    /// Periphery sees no caller, because that project is outside the package.
+    // periphery:ignore
     static func hasCachedGrammarTokenizer(modelID: String) async -> Bool {
         await cache.hasCachedGrammarTokenizer(modelID: modelID)
     }
 
     /// Evicts every cached model, tokenizer, constraint template, and per-model
-    /// tokenizer bias, freeing the GPU memory held by model weights. Subsequent
-    /// requests reload from the on-disk cache. Cancels every registered
+    /// tokenizer bias, and every prompt cache entry, then clears the MLX buffer
+    /// pool so the GPU memory of the weights and caches returns to the system.
+    /// Subsequent requests reload from the on-disk cache. Cancels every registered
     /// in-flight load task, the same way ``evict()`` does for one model.
     ///
     /// Safe to call during in-flight `respond()`/`warmUp()` work that already holds
     /// a `ModelContainer`: that work keeps its own strong reference and synchronizes
     /// the GPU on exit, so dropping the cache's reference cannot free weights out
-    /// from under a live kernel — the weights free via ARC once that work returns.
+    /// from under a live kernel. Those weights free via ARC once that work returns,
+    /// which is after this clear, so they stay in the pool until a later clear.
+    ///
+    /// A prompt cache entry in a running or queued spill is the same case: the spill
+    /// job holds its buffers until its write ends, which is after this clear, so they
+    /// too stay in the pool until a later clear. The clear can wait for a running
+    /// spill write, because a safetensors save holds the MLX eval lock for its run.
     ///
     /// Work still inside its load phase is the other case. This call cancels every
     /// registered load task, so if the loader honors cancellation, an awaiting
@@ -242,21 +295,35 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     public static func evictAll() async {
         await cache.evictAll()
         await ExecutorPromptCacheStore.current.evict(modelID: nil)
+        // Last, and outside both actors: the released buffers reach the pool only when the last
+        // reference above drops, and this call waits for any eval that holds the MLX eval lock.
+        MLX.Memory.clearCache()
     }
 
-    /// Drops this model from the shared cache, freeing the GPU memory held by its
-    /// weights. A subsequent `respond()`/`preload()` triggers a fresh load
-    /// (reusing the on-disk snapshot if the model was previously downloaded).
+    /// Drops this model and its prompt cache entries from the shared caches, then
+    /// clears the MLX buffer pool so the GPU memory of its weights and caches returns
+    /// to the system. The pool is process-wide, so the clear also returns the freed
+    /// buffers of every other model. A subsequent `respond()`/`preload()` triggers a
+    /// fresh load (reusing the on-disk snapshot if the model was previously downloaded).
     ///
     /// Safe to call during an in-flight `respond()`: that call retains its own
     /// `ModelContainer` and finishes normally; the weights free via ARC once it
-    /// returns. Evicting a model with an in-flight load cancels that load's task.
+    /// returns, which is after this clear, so they stay in the pool until a later
+    /// clear. A prompt cache entry in a running or queued spill is the same case: the
+    /// spill job holds its buffers until its write ends, so they too stay in the pool
+    /// until a later clear, and the clear can wait for a running spill write, because
+    /// a safetensors save holds the MLX eval lock for its run.
+    ///
+    /// Evicting a model with an in-flight load cancels that load's task.
     /// If the loader honors cancellation, the awaiting `preload()` or `respond()`
     /// call fails instead of completing. The loader decides the error type, so it
     /// may not be `CancellationError`.
     public func evict() async {
         await Self.cache.remove(modelID: modelID)
         await ExecutorPromptCacheStore.current.evict(modelID: modelID)
+        // Last, and outside both actors: the released buffers reach the pool only when the last
+        // reference above drops, and this call waits for any eval that holds the MLX eval lock.
+        MLX.Memory.clearCache()
     }
 
     // MARK: - Prompt Cache Budgets and Release
@@ -338,7 +405,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// `.allowed` tool routing, guided `.required` developer tool calls,
     /// and reasoning (chain-of-thought) routing.
     ///
-    /// Capabilities are declared explicitly by the caller at ``init(configuration:capabilities:configurationResolver:weightsLocation:load:)``
+    /// Capabilities are declared explicitly by the caller at ``init(configuration:capabilities:configurationResolver:speculativeDecoding:weightsLocation:load:)``
     /// and stored verbatim. The caller includes
     /// `.guidedGeneration`/`.toolCalling`/`.reasoning` as appropriate; the
     /// adapter does not consult ``ReasoningHeuristics`` (which remains a
@@ -355,6 +422,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// for this instance. Defaults to ``DefaultConfigurationResolver`` when
     /// omitted.
     public let configurationResolver: any ModelConfigurationResolver
+
+    /// The MTP drafter the text, reasoning and tool turns of this model speculate
+    /// with, or `nil` for plain decode.
+    public let speculativeDecoding: MLXSpeculativeDecoding?
 
     /// Configuration the framework uses to create and cache executors.
     public var executorConfiguration: Executor.Configuration {
@@ -374,6 +445,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///     Stored verbatim; the adapter never infers or expands the set.
     ///   - configurationResolver: Patches a per-call ``ModelConfiguration``
     ///     (reasoning config, extra stop tokens) for this instance.
+    ///   - speculativeDecoding: The MTP drafter the text, reasoning and tool
+    ///     turns speculate with, or `nil` for plain decode.
     ///   - weightsLocation: Resolves a model identifier to its on-disk weights
     ///     directory, for the availability checks.
     ///   - load: Loads the model container for a configuration.
@@ -390,12 +463,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
         configurationResolver: any ModelConfigurationResolver =
             DefaultConfigurationResolver(),
+        speculativeDecoding: MLXSpeculativeDecoding? = nil,
         weightsLocation: @Sendable @escaping (String) -> URL,
         load: @escaping ContainerLoader
     ) {
         self.configuration = configuration
         self.capabilities = LanguageModelCapabilities(capabilities)
         self.configurationResolver = configurationResolver
+        self.speculativeDecoding = speculativeDecoding
         self.weightsLocation = weightsLocation
         self.load = load
     }
@@ -471,25 +546,59 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         _ = try await Self.makeGrammarTokenizer(
             modelID: modelID, tokenizer: tokenizer)
 
+        // The MTP drafter loads here too, once, into the same model cache a
+        // later `respond` reads.
+        let speculation = try await loadMTPSpeculation(for: container)
+
         // Force Metal shader JIT with a minimal 1-token generate, run inside
         // `perform` so the forward pass + synchronize serialize against any
         // concurrent `respond`. `maxTokens: 1` makes the stream end on
         // its own; we consume it fully (no early break) so generation runs to
         // completion and leaves no dangling GPU work to race the teardown sync.
-        try await container.perform { context in
+        try await container.perform(nonSendable: speculation) { context, speculation in
             // Exactly one synchronize on every exit path (success or throw),
             // per the Metal teardown invariant. `prepare` is CPU-only, so on a
             // pre-forward-pass throw this just synchronizes an idle stream.
             defer { Stream.gpu.synchronize() }
             let input = try await context.processor.prepare(
                 input: UserInput(chat: [.user("warmup")]))
-            let params = GenerateParameters(maxTokens: 1)
+            let parameters = GenerateParameters(maxTokens: 1)
             for await _ in try MLXLMCommon.generate(
-                input: input, parameters: params, context: context
+                input: input, parameters: parameters, context: context
             ) {
                 // Drain to completion.
             }
+            if let speculation {
+                try await Self.warmUp(speculation, input: input, context: context)
+            }
         }
+    }
+
+    /// The token the prefill of an MTP stream samples before its first round.
+    private static let prefillBonusTokenCount = 1
+
+    /// Runs one short greedy MTP stream, so the first speculating `respond` pays
+    /// no shader-JIT cost for the drafter and verify kernels.
+    ///
+    /// The stream runs the prefill bonus and one full round, and is drained to its
+    /// end, as the plain warm-up generate is.
+    ///
+    /// - Parameters:
+    ///   - speculation: the drafter of the model.
+    ///   - input: the warm-up prompt.
+    ///   - context: the loaded model context.
+    /// - Throws: the error of the iterator.
+    private static func warmUp(
+        _ speculation: MTPSpeculation, input: LMInput, context: ModelContext
+    ) async throws {
+        let parameters = GenerateParameters(
+            maxTokens: prefillBonusTokenCount + speculation.blockSize, temperature: 0)
+        let (stream, task) = try generateTokensTask(
+            input: input, parameters: parameters, context: context, speculation: speculation)
+        for await _ in stream {
+            // Drain to completion.
+        }
+        await task.value
     }
 
     // MARK: - Executor
@@ -534,12 +643,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// the guided-generation text forwarder).
         @TaskLocal static var generationObserver: (@Sendable (GenerationEvent) -> Void)?
 
-        /// Shows the test observer what one generation pass reported when it
-        /// ended.
+        /// Takes what one generation pass reported when it ended: into the MTP
+        /// outcome of the call, when the model speculates, and to the test
+        /// observer.
         ///
         /// - Parameter info: the completion report of the pass.
         static func observeCompletion(_ info: GenerateCompletionInfo) {
+            SpeculativeDecodingOutcome.current?.record(info)
             generationObserver?(.completion(info))
+        }
+
+        /// Sends the MTP outcome of the call to its response entry, when the
+        /// model speculates. A call of a model with no drafter sends nothing.
+        ///
+        /// - Parameters:
+        ///   - entryID: the response entry of the call.
+        ///   - channel: the channel to send the metadata into.
+        static func emitSpeculativeDecodingOutcome(
+            entryID: ResponseEntryID, into channel: LanguageModelExecutorGenerationChannel
+        ) async {
+            guard let outcome = SpeculativeDecodingOutcome.current else { return }
+            await emitMetadata(outcome.metadata, entryID: entryID.rawValue, into: channel)
         }
 
         static func emit(
@@ -580,7 +704,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// that count plus the prefix the cache already held, and the held part
         /// is the cached part. A pass that takes a checkpoint of a hybrid model
         /// feeds part of the prompt before its generation starts; the
-        /// generation does not count that part, thus it is added back.
+        /// generation does not count that part, thus it is added back. A pass
+        /// that splices after an MTP turn also feeds the last token of that
+        /// turn, which no forward pass fed: it ends the previous answer and is
+        /// no prompt token, thus it is taken out.
         ///
         /// - Parameters:
         ///   - fedTokenCount: the prompt tokens the generation of the pass fed
@@ -595,25 +722,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) -> LanguageModelExecutorGenerationChannel.Usage.Input {
             .init(
                 totalTokenCount: fedTokenCount + promptCache.prefilledTokenCount
-                    + promptCache.reusedTokenCount,
+                    + promptCache.reusedTokenCount - promptCache.uncommittedTokenCount,
                 cachedTokenCount: promptCache.reusedTokenCount)
         }
 
-        /// Every token a pass generated and its caches hold, the stop token
-        /// included.
+        /// Every token a pass generated, the stop token included.
         ///
         /// The generation loop leaves the stop token out of
         /// `generationTokenCount` when it suppresses that token from the
-        /// output, and names it in `stopTokenFedToCache` instead: its forward
-        /// pass already advanced the caches. The prompt-cache ledger holds it,
-        /// thus the output count a turn reports adds it back, and the prompt
-        /// count plus the output count of a turn reaches every token the next
-        /// turn can reuse.
+        /// output, and names it in `discardedStopToken` instead, thus the
+        /// output count a turn reports adds it back. Plain decode feeds the
+        /// stop token to the caches before it returns it; MTP decode can
+        /// return it as the last token of a round, which no forward pass fed.
+        /// Both report the same count, because both generated the token. The
+        /// prompt-cache ledger follows the caches alone
+        /// (`ExecutorPromptCachePlan.commitOutcome`), thus the next turn
+        /// reuses what the caches hold either way.
         ///
         /// - Parameter info: the completion report of the pass.
-        /// - Returns: the generated token count, with the fed stop token.
+        /// - Returns: the generated token count, with the stop token.
         static func generatedTokenCount(of info: GenerateCompletionInfo) -> Int {
-            info.generationTokenCount + (info.stopTokenFedToCache == nil ? 0 : 1)
+            info.generationTokenCount + (info.discardedStopToken == nil ? 0 : 1)
         }
 
         /// The cache-reuse rules of the model's response protocol.
@@ -635,8 +764,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///
         /// A protocol that replays reasoning into history renders the
         /// transcript again with each `.reasoning` entry attached to the
-        /// assistant entry after it. Every other protocol keeps `messages`,
-        /// the render taken before the model loaded, which drops the reasoning.
+        /// assistant entry of its turn. A protocol that replays only a turn
+        /// that stopped inside its reasoning
+        /// (`ReasoningConfig.replaysUnclosedReasoningIntoHistory`,
+        /// DeepSeek-V4) renders it again with the reasoning of each turn whose
+        /// response is empty, as `ChatSession` records such a turn, thus the
+        /// render of the next turn extends the tokens the cache holds instead
+        /// of omitting the turn. Every other protocol keeps `messages`, the
+        /// render taken before the model loaded, which drops the reasoning.
         ///
         /// - Parameters:
         ///   - transcript: the transcript of the request.
@@ -644,16 +779,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - messages: the messages rendered before the model loaded.
         /// - Returns: the messages to render the prompt from.
         /// - Throws: `LanguageModelError.unsupportedTranscriptContent` if an
-        ///   attachment is not an image.
+        ///   attachment is not an image, or the transcript holds a data entry.
         static func historyMessages(
             of transcript: Transcript, resolved: ModelConfiguration,
             otherwise messages: [Chat.Message]
         ) throws -> [Chat.Message] {
-            guard resolved.reasoningConfig?.replaysReasoningIntoHistory == true else {
+            let reasoning = TranscriptConverter.HistoryReasoning(for: resolved.reasoningConfig)
+            guard reasoning != .dropped else {
                 return messages
             }
             let replayed = try TranscriptConverter.mlxMessages(
-                for: transcript, replayReasoning: true)
+                for: transcript, reasoning: reasoning)
             return replayed.isEmpty ? messages : replayed
         }
 
@@ -720,20 +856,20 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// structural close. 4096 is generous for typical tool calls and
         /// structured outputs. Consumers can override via
         /// `GenerationOptions(maximumResponseTokens:)`.
-        private static let defaultMaxTokens = 4096
+        static let defaultMaxTokens = 4096
 
         /// Multiplier on the structural completion reserve. It gives the
         /// guided loop room for more than one attempt to reach structural
         /// close before the budget runs out.
-        private static let completionReserveStructuralMultiplier = 3
+        static let completionReserveStructuralMultiplier = 3
 
         /// Divisor on the token budget. The completion reserve keeps at
         /// least this fraction (one quarter) of the budget.
-        private static let completionReserveBudgetDivisor = 4
+        static let completionReserveBudgetDivisor = 4
 
         /// Multiplier on the structural reserve that sets the hard reserve,
         /// the point where the guided loop forces structural close.
-        private static let hardReserveStructuralMultiplier = 8
+        static let hardReserveStructuralMultiplier = 8
 
         /// Names the session a request belongs to, for the prompt cache that
         /// session carries between its turns.
@@ -796,7 +932,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// Negative sampling temperatures land in `CategoricalSampler` and
         /// produce inverted distributions; we clamp at 0 so the worst the
         /// caller can get is greedy. `0` itself is honored unchanged because
-        /// MLXLMCommon's `GenerateParameters.sampler()` routes
+        /// MLXLMCommon's `GenerateParameters.makeSampler()` routes
         /// `temperature == 0` to `ArgMaxSampler` (greedy) -- no division-by-
         /// zero hazard.
         static func clampedTemperature(_ value: Double?) -> Float? {
@@ -892,8 +1028,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// prewarm (bad id, network gone, OOM). Note it cannot intercept a
         /// Metal command-buffer assertion abort — that is a process crash, not
         /// a catchable Swift error.
-        private static let logger = MLXLogger(label: "Prewarm")
-        private static let protocolLogger = MLXLogger(label: "TokenStreamProtocol")
+        static let logger = MLXLogger(label: "Prewarm")
+        static let protocolLogger = MLXLogger(label: "TokenStreamProtocol")
 
         /// Prewarms the model: loads weights and pre-compiles Metal shaders so
         /// the first `respond()` pays no cold-start shader-JIT cost.
@@ -910,13 +1046,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// framework's own `session.prewarm()`: the method is synchronous and
         /// non-throwing, so it spawns a detached warmup `Task` and returns
         /// immediately. The `Task` is best-effort — a failure is logged, never
-        /// surfaced to or crashed on the caller.
+        /// surfaced to or crashed on the caller. No handle is kept, because
+        /// nothing could use it: the executor is a `Sendable` value with no
+        /// teardown, the protocol offers no way to cancel a prewarm, and a
+        /// warmup that outlives its caller only leaves the model cache warm.
         ///
         /// - Parameters:
         ///   - model: The live model instance to warm.
         ///   - transcript: Accepted per protocol; the shader warmup uses a
         ///     fixed dummy prompt and does not depend on it.
         public func prewarm(model: MLXLanguageModel, transcript: Transcript) {
+            // Unstructured by design, with no stored handle: the executor is a
+            // `Sendable` value with no teardown hook and the protocol offers no
+            // way to cancel a prewarm, so no owner could cancel or await it.
             Task {
                 do {
                     try await model.warmUp()
@@ -935,7 +1077,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// parameter through every call. Nil outside `respond`, which makes
         /// the tracking helpers a no-op for any other caller of the
         /// generation functions.
-        @TaskLocal private static var drainCoordinator: GenerationDrainCoordinator?
+        @TaskLocal static var drainCoordinator: GenerationDrainCoordinator?
 
         /// Generates a response for the given request, streaming events into the channel.
         ///
@@ -961,9 +1103,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             streamingInto channel: LanguageModelExecutorGenerationChannel
         ) async throws {
             let coordinator = GenerationDrainCoordinator()
+            // Each pass of a call of a model that speculates reports its MTP
+            // outcome here, and the response entry reports the whole call.
+            let speculationOutcome = model.speculativeDecoding.map { _ in
+                SpeculativeDecodingOutcome()
+            }
             try await withTaskCancellationHandler {
                 try await Self.$drainCoordinator.withValue(coordinator) {
-                    try await runRespond(to: request, model: model, streamingInto: channel)
+                    try await SpeculativeDecodingOutcome.$current.withValue(speculationOutcome) {
+                        try await runRespond(to: request, model: model, streamingInto: channel)
+                    }
                 }
             } onCancel: {
                 coordinator.cancelActiveAndAwaitQuiescence()
@@ -983,7 +1132,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - request: The generation request containing transcript, tools, and options
         ///   - model: The model instance for this request
         ///   - channel: The channel to send response events into
-        private func runRespond(
+        func runRespond(
             to request: LanguageModelExecutorGenerationRequest,
             model: MLXLanguageModel,
             streamingInto channel: LanguageModelExecutorGenerationChannel
@@ -997,9 +1146,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
             // The SDK's vision check does not cover `.attachment` segments, so the adapter
             // must enforce `.vision` for image attachments itself.
-            if !model.capabilities.contains(.vision),
-                messages.contains(where: { !$0.images.isEmpty })
-            {
+            guard
+                model.capabilities.contains(.vision)
+                    || !messages.contains(where: { !$0.images.isEmpty })
+            else {
                 throw LanguageModelError.unsupportedCapability(
                     LanguageModelError.UnsupportedCapability(
                         capability: .vision,
@@ -1015,6 +1165,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 from: request.enabledToolDefinitions)
 
             let container = try await model.loadContainer()
+            // The MTP drafter of the model, taken out of its own container here,
+            // before the target's `perform` below, thus no lock nests.
+            let speculation = try await model.loadMTPSpeculation(for: container)
 
             // Encode schema to JSON if present
             let schemaJSON: String?
@@ -1035,9 +1188,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // UUID — they live in separate transcript entries. We preserve the
             // framework-supplied `request.id` for tracing by stamping it into
             // the response metadata below, rather than reusing it as an entry id.
-            let entryID = UUID().uuidString
-            let toolCallsEntryID = UUID().uuidString
-            let reasoningEntryID = UUID().uuidString
+            let entryID = ResponseEntryID()
+            let toolCallsEntryID = ToolCallsEntryID()
+            let reasoningEntryID = ReasoningEntryID()
             // Captured before the actor hop so the perform closure doesn't
             // capture `model`. Reasoning is gated strictly on the declared
             // capability; the resolver-patched configuration supplies the
@@ -1068,13 +1221,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 // Send metadata first
                 await Self.emitMetadata(
                     ["modelID": modelID, "requestID": request.id.uuidString],
-                    entryID: entryID, into: channel)
+                    entryID: entryID.rawValue, into: channel)
 
                 // Generate tokens inside actor isolation. `messages` carries
                 // non-Sendable `Chat.Message` instances (UserInput.Image and
-                // .Video are not Sendable), so route the array through
-                // perform(nonSendable:_:) which boxes it across the actor hop.
-                try await container.perform(nonSendable: messages) { context, messages in
+                // .Video are not Sendable), and the drafter model is not
+                // Sendable either, so route both through
+                // perform(nonSendable:_:) which boxes them across the actor hop.
+                try await container.perform(nonSendable: (messages, speculation)) {
+                    context, values in
+                    let (renderedMessages, speculation) = values
                     try AttachmentLabelValidator.default.validate(
                         labeledAttachments, with: context.tokenizer)
 
@@ -1086,7 +1242,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     // the transcript again with the reasoning attached, which
                     // the render taken before the model loaded could not do.
                     let messages = try Self.historyMessages(
-                        of: request.transcript, resolved: resolved, otherwise: messages)
+                        of: request.transcript, resolved: resolved,
+                        otherwise: renderedMessages)
 
                     // Render the prompt through the model's UserInputProcessor.
                     let userInput = UserInput(chat: messages)
@@ -1140,6 +1297,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             toolCallsEntryID: toolCallsEntryID,
                             reasoningEntryID: reasoningEntryID,
                             promptCache: promptCache,
+                            speculation: speculation,
                             context: context,
                             channel: channel)
                     } else if let schemaJSON {
@@ -1150,6 +1308,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             requestedMaxTokens: requestedMaxTokens,
                             entryID: entryID,
                             promptCache: promptCache,
+                            speculation: speculation,
                             context: context,
                             channel: channel)
                     } else {
@@ -1163,6 +1322,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             responseEntryID: entryID,
                             reasoningEntryID: reasoningEntryID,
                             promptCache: promptCache,
+                            speculation: speculation,
                             context: context,
                             channel: channel
                         )
@@ -1196,6 +1356,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if let promptCacheKey {
                 await ExecutorPromptCacheStore.current.checkIn(promptCacheKey, promptCache.entry)
             }
+            // The `do` block opened the response entry with its first metadata, thus the entry
+            // reports the MTP outcome of the call whatever the outcome: a call that was cancelled
+            // or threw reports what its passes recorded before they stopped.
+            await Self.emitSpeculativeDecodingOutcome(entryID: entryID, into: channel)
             try outcome.get()
         }
 
@@ -1212,21 +1376,40 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - context: The loaded model context whose configuration is resolved
         ///   - modelID: The model identifier the descriptor carries
         ///   - configurationResolver: The per-instance resolver to apply
-        private func resolveConfiguration(
+        func resolveConfiguration(
             context: ModelContext,
             modelID: String,
             configurationResolver: any ModelConfigurationResolver
         ) -> ModelConfiguration {
-            let configData = try? Data(
-                contentsOf:
-                    context.configuration.modelDirectory
-                    .appendingPathComponent("config.json"))
-            let modelType =
-                configData.flatMap {
-                    try? JSONDecoder.json5().decode(
-                        BaseConfiguration.self, from: $0
+            let configData: Data?
+            do {
+                configData = try Data(
+                    contentsOf: context.configuration.modelDirectory
+                        .appendingPathComponent("config.json"))
+            } catch {
+                Self.logger.error(
+                    "config.json unreadable for \(modelID): \(error.localizedDescription)")
+                configData = nil
+            }
+            // The empty model type is the named default for a model whose
+            // config is missing or undecodable; the resolver then matches no
+            // model-type rule. The failure is logged rather than asserted,
+            // because a scripted test model loads from a directory whose
+            // config is empty.
+            let modelType: String
+            if let configData {
+                do {
+                    modelType = try JSONDecoder.json5().decode(
+                        BaseConfiguration.self, from: configData
                     ).modelType
-                } ?? ""
+                } catch {
+                    Self.logger.error(
+                        "config.json undecodable for \(modelID): \(error.localizedDescription)")
+                    modelType = ""
+                }
+            } else {
+                modelType = ""
+            }
             let descriptor = ModelDescriptor(
                 modelType: modelType,
                 modelId: modelID,
@@ -1237,7 +1420,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         }
 
         /// The reasoning inputs one generation turn carries.
-        private struct ReasoningPlan {
+        struct ReasoningPlan {
             /// The prompt re-rendered with thinking forced off, or nil when
             /// no suppression applies to this turn.
             let suppressedInput: LMInput?
@@ -1278,7 +1461,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - baselineInput: The prompt rendered with no thinking state, which
         ///     the unconstrained path feeds when no other prompt applies
         ///   - context: The loaded model context whose processor renders the prompts
-        private func makeReasoningPlan(
+        func makeReasoningPlan(
             request: LanguageModelExecutorGenerationRequest,
             messages: [Chat.Message],
             resolved: ModelConfiguration,
@@ -1358,1548 +1541,6 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             return ReasoningPlan(
                 suppressedInput: suppressed?.input, reasoningSetup: reasoningSetup,
                 transcriptBoundary: transcriptBoundary)
-        }
-
-        /// Runs the tool path of one generation turn — fresh turns and
-        /// continuations alike.
-        ///
-        /// Allowed mode uses native generation so the model can answer or
-        /// call a tool; required mode constrains generation to a real tool
-        /// call.
-        ///
-        /// A tool body can start a second generation on this same model.
-        /// This executor releases the model container BEFORE the SDK runs a
-        /// tool body: the caller's `perform` closure sends the tool-call
-        /// delta, then it returns, and each continuation round opens its
-        /// own `perform`. Thus the container lock covers one generation. It
-        /// does not cover a complete turn with the tool rounds of that
-        /// turn. `ToolBodyContainerReentryTests` and
-        /// `ToolBodyContainerReentryRealModelTests` guard this guarantee.
-        ///
-        /// - Parameters:
-        ///   - request: The generation request for this turn
-        ///   - messages: The chat messages the tool-aware prompt renders from
-        ///   - enabledToolDefinitions: The tool definitions this turn exposes
-        ///   - toolCallingMode: The resolved tool-calling mode
-        ///   - schemaJSON: The encoded response schema, when the request carries one
-        ///   - baselineInput: The prompt rendered without tool awareness
-        ///   - resolved: The resolver-patched configuration
-        ///   - declaresReasoning: Whether `.reasoning` was declared at init
-        ///   - modelID: The model identifier the constraint caches key on
-        ///   - requestedMaxTokens: The caller's token budget, when set
-        ///   - samplingConfiguration: The translated sampling mode
-        ///   - entryID: The transcript entry id for response events
-        ///   - toolCallsEntryID: The transcript entry id for tool-call events
-        ///   - reasoningEntryID: The transcript entry id for reasoning events
-        ///   - promptCache: The session's prompt-cache slot
-        ///   - context: The loaded model context
-        ///   - channel: The channel to send response events into
-        private func runToolGeneration(
-            request: LanguageModelExecutorGenerationRequest,
-            messages: [Chat.Message],
-            enabledToolDefinitions: [Transcript.ToolDefinition],
-            toolCallingMode: GenerationOptions.ToolCallingMode,
-            schemaJSON: String?,
-            baselineInput: LMInput,
-            resolved: ModelConfiguration,
-            declaresReasoning: Bool,
-            modelID: String,
-            requestedMaxTokens: Int?,
-            samplingConfiguration: MLXSamplingConfiguration?,
-            entryID: String,
-            toolCallsEntryID: String,
-            reasoningEntryID: String,
-            promptCache: ExecutorPromptCacheSlot,
-            context: ModelContext,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async throws {
-            // Re-render using the model's native tool-aware chat
-            // template (Qwen/Llama/Phi/Gemma all ship one in their
-            // tokenizer_config.json). This is what teaches the model
-            // *what* tools exist and how to decide between them; the
-            // grammar constraint below only enforces the *shape* of
-            // whatever tool call it emits.
-            // Think-then-call is gated to the enable_thinking
-            // family (Qwen3/QwQ): their template both renders the tool
-            // block AND honors `enable_thinking`. R1-style `.alwaysOn`
-            // models are tool-blind (template ignores `tools:`), so
-            // they fall through to the single-phase path unchanged;
-            // thinking-disabled requests stay single-phase too.
-            let thinkThenCallConfig: ReasoningConfig? = {
-                guard declaresReasoning,
-                    let cfg = resolved.reasoningConfig,
-                    case .templateFlag = cfg.promptStrategy,
-                    Self.thinkingEnabled(
-                        for: request.contextOptions.reasoningLevel) != false
-                else { return nil }
-                return cfg
-            }()
-            // Thread `enable_thinking` through the tool-aware template
-            // so the prompt's thinking state matches how we drive
-            // generation. For a toggleable model (`.templateFlag`, e.g.
-            // Qwen3 whose `enable_thinking` defaults ON) the effective
-            // value is:
-            //   - reasoning declared: honor the requested level
-            //     (default ON), and the think-then-call phase below
-            //     lets the model reason before the grammar constrains it;
-            //   - reasoning NOT declared: force thinking OFF, mirroring
-            //     the unconstrained path's suppression (see
-            //     `ReasoningPlan.suppressedInput`).
-            // Forcing OFF here is load-bearing for both modes. Native
-            // `.allowed` generation would otherwise surface undeclared
-            // reasoning through response/tool parsing. In `.required`,
-            // the grammar forces tool-call JSON from the first token, so
-            // a thinking-primed model cannot emit its `<think>` block and
-            // greedy decoding of unconstrained developer tool string
-            // arguments can degenerate (Qwen: "1234567890...").
-            // `.alwaysOn` models with reasoning undeclared were already
-            // rejected by the capability gate above; `.none`/no-config
-            // models take no context. A strategy that renders thinking off
-            // as a closed block (Qwen 3.5) keeps the flag on and closes the
-            // block after the render (`ThinkingRender`).
-            let toolAwareRender: ThinkingRender
-            if let config = resolved.reasoningConfig,
-                case .templateFlag = config.promptStrategy
-            {
-                let enabled =
-                    declaresReasoning
-                    ? Self.thinkingEnabled(for: request.contextOptions.reasoningLevel)
-                    : false
-                toolAwareRender = try ThinkingRender(config: config, thinkingEnabled: enabled)
-            } else {
-                toolAwareRender = ThinkingRender()
-            }
-            if ToolCallingModeResolution.usesAllowedBehavior(toolCallingMode) {
-                try await runAllowedToolTurn(
-                    request: request,
-                    messages: messages,
-                    enabledToolDefinitions: enabledToolDefinitions,
-                    toolAwareRender: toolAwareRender,
-                    thinkThenCallConfig: thinkThenCallConfig,
-                    schemaJSON: schemaJSON,
-                    baselineInput: baselineInput,
-                    modelID: modelID,
-                    requestedMaxTokens: requestedMaxTokens,
-                    samplingConfiguration: samplingConfiguration,
-                    entryID: entryID,
-                    toolCallsEntryID: toolCallsEntryID,
-                    reasoningEntryID: reasoningEntryID,
-                    promptCache: promptCache,
-                    context: context,
-                    channel: channel)
-                return
-            }
-            try await runRequiredToolTurn(
-                request: request,
-                messages: messages,
-                enabledToolDefinitions: enabledToolDefinitions,
-                toolAwareRender: toolAwareRender,
-                thinkThenCallConfig: thinkThenCallConfig,
-                modelID: modelID,
-                requestedMaxTokens: requestedMaxTokens,
-                samplingConfiguration: samplingConfiguration,
-                entryID: entryID,
-                toolCallsEntryID: toolCallsEntryID,
-                reasoningEntryID: reasoningEntryID,
-                promptCache: promptCache,
-                context: context,
-                channel: channel)
-        }
-
-        /// Runs allowed tool mode: native generation over the tool-aware
-        /// prompt, so the model can answer in text or call a tool.
-        ///
-        /// The prompt goes through the model's UserInputProcessor (like the
-        /// unconstrained and guided paths) instead of hand-building an
-        /// LMInput from raw applyChatTemplate output: processors produce
-        /// the token rank their model family requires (LLM processors emit
-        /// [N]; VLM processors emit [1, N], and VLM `prepare` fatally
-        /// aborts on 1-D input), and they carry image/video content through
-        /// to the model.
-        ///
-        /// - Parameters:
-        ///   - request: The generation request for this turn
-        ///   - messages: The chat messages the tool-aware prompt renders from
-        ///   - enabledToolDefinitions: The tool definitions this turn exposes
-        ///   - toolAwareRender: The thinking state the tool-aware render carries
-        ///   - thinkThenCallConfig: The reasoning config of the think-then-call phase, when active
-        ///   - schemaJSON: The encoded response schema, when the request carries one
-        ///   - baselineInput: The prompt rendered without tool awareness
-        ///   - modelID: The model identifier the schema fallback keys on
-        ///   - requestedMaxTokens: The caller's token budget, when set
-        ///   - samplingConfiguration: The translated sampling mode
-        ///   - entryID: The transcript entry id for response events
-        ///   - toolCallsEntryID: The transcript entry id for tool-call events
-        ///   - reasoningEntryID: The transcript entry id for reasoning events
-        ///   - promptCache: The session's prompt-cache slot
-        ///   - context: The loaded model context
-        ///   - channel: The channel to send response events into
-        private func runAllowedToolTurn(
-            request: LanguageModelExecutorGenerationRequest,
-            messages: [Chat.Message],
-            enabledToolDefinitions: [Transcript.ToolDefinition],
-            toolAwareRender: ThinkingRender,
-            thinkThenCallConfig: ReasoningConfig?,
-            schemaJSON: String?,
-            baselineInput: LMInput,
-            modelID: String,
-            requestedMaxTokens: Int?,
-            samplingConfiguration: MLXSamplingConfiguration?,
-            entryID: String,
-            toolCallsEntryID: String,
-            reasoningEntryID: String,
-            promptCache: ExecutorPromptCacheSlot,
-            context: ModelContext,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async throws {
-            let toolSpecs = try ToolCallingConversions.makeToolSpecs(
-                from: enabledToolDefinitions)
-            let toolAwareInput = try await toolAwareRender.prepare(
-                messages: messages, tools: toolSpecs, context: context)
-            let transcriptBoundary = await toolAwareRender.transcriptBoundary(
-                of: toolAwareInput, messages: messages, tools: toolSpecs, context: context)
-            let reasoning = thinkThenCallConfig.map {
-                (
-                    config: $0,
-                    primedInside: Self.reasoningPrimedInside(
-                        input: toolAwareInput,
-                        config: $0,
-                        tokenizer: context.tokenizer)
-                )
-            }
-            let result = try await runAllowedToolGeneration(
-                input: toolAwareInput,
-                transcriptBoundary: transcriptBoundary,
-                toolSpecs: toolSpecs,
-                reasoning: reasoning,
-                requestedMaxTokens: requestedMaxTokens,
-                requestedTemperature: request.generationOptions.temperature,
-                samplingConfiguration: samplingConfiguration,
-                reasoningEntryID: reasoningEntryID,
-                promptCache: promptCache,
-                context: context,
-                channel: channel)
-
-            if result.endedInsideReasoning {
-                await Self.emitMetadata(
-                    ["incompleteOutput": true], entryID: entryID, into: channel)
-            } else if !result.toolCalls.isEmpty {
-                for call in result.toolCalls {
-                    let argumentsData = try JSONEncoder().encode(
-                        call.function.arguments)
-                    let arguments = String(
-                        decoding: argumentsData, as: UTF8.self)
-                    await Self.emitToolCall(
-                        id: call.id ?? UUID().uuidString,
-                        name: call.function.name,
-                        arguments: arguments,
-                        entryID: toolCallsEntryID,
-                        into: channel)
-                }
-            } else if let schemaJSON {
-                try await runSchemaGeneration(
-                    schemaJSON: schemaJSON,
-                    input: baselineInput,
-                    modelID: modelID,
-                    requestedMaxTokens: requestedMaxTokens,
-                    entryID: entryID,
-                    promptCache: promptCache,
-                    context: context,
-                    channel: channel)
-            } else {
-                await Self.emit(
-                    text: result.responseText,
-                    entryID: entryID,
-                    destination: .response,
-                    into: channel)
-            }
-            if schemaJSON == nil || !result.toolCalls.isEmpty
-                || result.endedInsideReasoning
-            {
-                await emitAllowedUsage(
-                    result, entryID: entryID, promptCache: promptCache,
-                    channel: channel)
-            }
-            Stream.gpu.synchronize()
-        }
-
-        /// Runs required tool mode: guided generation constrained to a real
-        /// tool call.
-        ///
-        /// Required mode is the only mode that reaches guided tool
-        /// generation, and it uses developer definitions only.
-        /// `GuidedGenerationLoop.run` builds its own key/value cache and
-        /// accepts none from a caller, thus this pass carries nothing from
-        /// an earlier turn.
-        ///
-        /// - Parameters:
-        ///   - request: The generation request for this turn
-        ///   - messages: The chat messages the tool-aware prompt renders from
-        ///   - enabledToolDefinitions: The tool definitions the grammar constrains to
-        ///   - toolAwareRender: The thinking state the tool-aware render carries
-        ///   - thinkThenCallConfig: The reasoning config of the think-then-call phase, when active
-        ///   - modelID: The model identifier the constraint caches key on
-        ///   - requestedMaxTokens: The caller's token budget, when set
-        ///   - samplingConfiguration: The translated sampling mode
-        ///   - entryID: The transcript entry id for response events
-        ///   - toolCallsEntryID: The transcript entry id for tool-call events
-        ///   - reasoningEntryID: The transcript entry id for reasoning events
-        ///   - promptCache: The session's prompt-cache slot
-        ///   - context: The loaded model context
-        ///   - channel: The channel to send response events into
-        private func runRequiredToolTurn(
-            request: LanguageModelExecutorGenerationRequest,
-            messages: [Chat.Message],
-            enabledToolDefinitions: [Transcript.ToolDefinition],
-            toolAwareRender: ThinkingRender,
-            thinkThenCallConfig: ReasoningConfig?,
-            modelID: String,
-            requestedMaxTokens: Int?,
-            samplingConfiguration: MLXSamplingConfiguration?,
-            entryID: String,
-            toolCallsEntryID: String,
-            reasoningEntryID: String,
-            promptCache: ExecutorPromptCacheSlot,
-            context: ModelContext,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async throws {
-            promptCache.carriesNoCache()
-            let requiredToolDefinitions = enabledToolDefinitions
-            let toolSpecs = try ToolCallingConversions.makeToolSpecs(
-                from: requiredToolDefinitions)
-            let toolAwareInput = try await toolAwareRender.prepare(
-                messages: messages, tools: toolSpecs, context: context)
-
-            let toolCallingGrammar =
-                try SchemaConverter.encodeToolCallingGrammar(
-                    tools: requiredToolDefinitions
-                )
-            // The inner JSON envelope is still needed separately to
-            // seed `CompletionReserve` -- the wrapper tokens
-            // (`<tool_call>`, two `\n`s, `</tool_call>`) are small
-            // and fixed, so padding the reserve with their
-            // tokenized size adds noise rather than accuracy.
-            let toolCallingEnvelopeJSON =
-                try SchemaConverter.encodeToolCallingEnvelopeJSON(
-                    tools: requiredToolDefinitions
-                )
-
-            let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
-                modelID: modelID,
-                tokenizer: context.tokenizer
-            )
-            let constraint = try await MLXLanguageModel.makeConstraint(
-                modelID: modelID,
-                kind: .structuralTag,
-                source: toolCallingGrammar,
-                tokenizer: grammarTokenizer,
-                hostTokenizer: context.tokenizer,
-                fastForward: true
-            )
-
-            // Always partition into zones -- the grammar has
-            // wiggle room (JSON whitespace before the outer
-            // `}`, whitespace before `\n</tool_call>`) that
-            // open-source models tend to exploit into infinite
-            // loops when not pushed toward structural close.
-            // Use the caller's budget when set, otherwise the
-            // Executor's default.
-            let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
-            let bias = await MLXLanguageModel.makeTokenizerBias(
-                modelID: modelID,
-                tokenizer: context.tokenizer
-            )
-            let closingBias = bias.closing
-            let structuralReserve = CompletionReserve.estimate(
-                schemaJSON: toolCallingEnvelopeJSON,
-                tokenizer: context.tokenizer
-            )
-            let completionReserve = Swift.max(
-                structuralReserve * Self.completionReserveStructuralMultiplier,
-                maxTokens / Self.completionReserveBudgetDivisor)
-            let hardReserve =
-                structuralReserve * Self.hardReserveStructuralMultiplier
-
-            let whitespaceBias = bias.whitespace
-            let whitespaceTokenIDs = bias.whitespaceTokenIDs
-
-            // PHASE 1 (think-then-call): reason unconstrained until
-            // `</think>`, retaining the token IDs to prefill into the
-            // constrained phase below. Empty on the single-phase path.
-            var reasoningTokenIDs: [Int] = []
-            if let cfg = thinkThenCallConfig {
-                let primedInside = Self.reasoningPrimedInside(
-                    input: toolAwareInput, config: cfg,
-                    tokenizer: context.tokenizer)
-                let phase1 = try await runToolCallReasoningPhase(
-                    input: toolAwareInput, config: cfg,
-                    primedInside: primedInside, maxTokens: maxTokens,
-                    requestedTemperature: request.generationOptions
-                        .temperature,
-                    samplingConfiguration: samplingConfiguration,
-                    reasoningEntryID: reasoningEntryID,
-                    responseEntryID: entryID,
-                    context: context, channel: channel)
-                reasoningTokenIDs = phase1.tokenIDs
-                if !phase1.closed {
-                    // Cut off mid-thought (budget exhausted before
-                    // `</think>`). Don't prefill a truncated thought
-                    // into the grammar — signal and finish. Phase 1
-                    // already synchronized the GPU on its way out.
-                    await Self.emitMetadata(
-                        ["incompleteOutput": true], entryID: entryID, into: channel)
-                    return
-                }
-            }
-
-            // Phase 2 continues from the model's completed reasoning;
-            // carry the raw IDs (no decode/re-encode) so the grammar
-            // starts from the exact post-`</think>` state.
-            let phase2Input =
-                reasoningTokenIDs.isEmpty
-                ? toolAwareInput
-                : Self.continuationInput(
-                    from: toolAwareInput, appending: reasoningTokenIDs)
-            // Shared budget (match the unconstrained path): the
-            // envelope continues under the remaining budget, floored
-            // at the completion reserve so it always has room to close
-            // the tool call.
-            let phase2MaxTokens =
-                reasoningTokenIDs.isEmpty
-                ? maxTokens
-                : Swift.max(
-                    maxTokens - reasoningTokenIDs.count, completionReserve)
-
-            var outputBuffer = ""
-            var incomplete = false
-            var generatedTokenCount: Int?
-            do {
-                generatedTokenCount = try Self.withGuidedGenerationSection {
-                    try GuidedGenerationLoop.run(
-                        input: phase2Input,
-                        context: context,
-                        constraint: constraint,
-                        maxTokens: phase2MaxTokens,
-                        vocabSize: Int(grammarTokenizer.vocabSize),
-                        completionReserve: completionReserve,
-                        hardReserve: hardReserve,
-                        closingBias: closingBias,
-                        whitespaceBias: whitespaceBias,
-                        whitespaceTokenIDs: whitespaceTokenIDs
-                    ) { text in
-                        outputBuffer += text
-                        GuidedGenerationDiagnosticSink.current?.recordEmit()
-                        return !Task.isCancelled
-                    }
-                }
-            } catch GuidedGenerationError.incompleteOutput {
-                incomplete = true
-            }
-            try Task.checkCancellation()
-
-            GuidedGenerationDiagnosticSink.current?.recordBuffer(
-                outputBuffer, incompleteOutput: incomplete)
-
-            await emitRequiredToolCallEvent(
-                outputBuffer: outputBuffer,
-                toolCallsEntryID: toolCallsEntryID,
-                channel: channel
-            )
-
-            if let generatedTokenCount {
-                // Output total spans both phases (reasoning + envelope);
-                // the reasoning subset is the Phase-1 token count,
-                // clamped ≤ total.
-                let reasoningCount = reasoningTokenIDs.count
-                let totalOutput = generatedTokenCount + reasoningCount
-                await Self.emitUsage(
-                    input: Self.usageInput(
-                        fedTokenCount: toolAwareInput.text.tokens.size,
-                        promptCache: promptCache),
-                    output: .init(
-                        totalTokenCount: totalOutput,
-                        reasoningTokenCount: Swift.min(reasoningCount, totalOutput)),
-                    entryID: entryID, into: channel)
-            }
-
-            if incomplete {
-                await Self.emitMetadata(
-                    ["incompleteOutput": true], entryID: entryID, into: channel)
-            }
-        }
-
-        private struct AllowedToolGenerationResult {
-            var responseText = ""
-            var toolCalls: [MLXLMCommon.ToolCall] = []
-            var rejectedToolCalls: [RejectedToolCall] = []
-            var completionInfo: GenerateCompletionInfo?
-            var reasoningTokenCount = 0
-            var endedInsideReasoning = false
-        }
-
-        /// Drains the active generations of one `respond` at cancellation.
-        ///
-        /// The framework resumes a cancelled `LanguageModelSession.respond`
-        /// before this executor's own teardown completes, so the caller
-        /// could otherwise see its `CancellationError` while a forward pass
-        /// still runs on the GPU — and a process exit in that window aborts
-        /// on signal 6 or 11. The coordinator closes that window from the
-        /// cancellation side: each generation registers as one section, and
-        /// the cancellation handler cancels every registered generation and
-        /// waits until every section left.
-        ///
-        /// The wait must not depend on the respond task making progress —
-        /// a cancellation handler runs BEFORE the runtime resumes that
-        /// task's suspended continuations, so a wait on the whole `respond`
-        /// deadlocks against its own delivery. Every section therefore
-        /// leaves through a path that needs no cancellation delivery: a
-        /// token-producer task polls its own flag, which the direct
-        /// `cancel()` here sets, and a watcher task reports its end; a
-        /// guided-generation loop polls the respond task's flag, which the
-        /// runtime sets before it runs this handler, and leaves on its own
-        /// thread.
-        ///
-        /// An `NSCondition` guards the state; every access takes the lock,
-        /// which is the synchronization invariant behind
-        /// `@unchecked Sendable`. A condition rather than an actor, because
-        /// a cancellation handler is synchronous and cannot await.
-        private final class GenerationDrainCoordinator: @unchecked Sendable {
-
-            /// Longest the canceller waits for quiescence.
-            ///
-            /// An active section ends within one forward pass plus a stream
-            /// synchronize — under a second on a 1B model and within
-            /// seconds on a 30B model. The bound stands far above both so a
-            /// pathological hang cannot block the canceller forever.
-            private static let quiescenceTimeout: TimeInterval = 60
-
-            private let condition = NSCondition()
-            private var activeSections = 0
-            private var cancellationRequested = false
-            private var pendingCancels: [() -> Void] = []
-
-            /// Enters one generation section.
-            ///
-            /// Throws `CancellationError` when the respond task is already
-            /// cancelled, so an abandoned `respond` can start no new GPU
-            /// work after the canceller was released.
-            func enterSection() throws {
-                try Task.checkCancellation()
-                condition.lock()
-                activeSections += 1
-                condition.unlock()
-            }
-
-            /// Registers the closure that cancels the section's generation.
-            ///
-            /// When the cancellation already ran, the closure runs at once,
-            /// so a generation that started inside the cancellation race is
-            /// still cancelled and its section still leaves.
-            func attachCancel(_ cancel: @escaping @Sendable () -> Void) {
-                condition.lock()
-                let requested = cancellationRequested
-                if !requested {
-                    pendingCancels.append(cancel)
-                }
-                condition.unlock()
-                if requested {
-                    cancel()
-                }
-            }
-
-            /// Leaves one generation section and wakes the canceller.
-            func leaveSection() {
-                condition.lock()
-                activeSections -= 1
-                condition.broadcast()
-                condition.unlock()
-            }
-
-            /// Cancels every registered generation and waits for quiescence.
-            ///
-            /// Runs on the canceller's thread, inside the `cancel()` call
-            /// that cancels the respond task, thus that call does not return
-            /// — and the framework does not resume the caller — until every
-            /// active section left or ``quiescenceTimeout`` passed.
-            func cancelActiveAndAwaitQuiescence() {
-                condition.lock()
-                cancellationRequested = true
-                let cancels = pendingCancels
-                pendingCancels.removeAll()
-                condition.unlock()
-                for cancel in cancels {
-                    cancel()
-                }
-                let deadline = Date(timeIntervalSinceNow: Self.quiescenceTimeout)
-                condition.lock()
-                while activeSections > 0 {
-                    guard condition.wait(until: deadline) else { break }
-                }
-                condition.unlock()
-            }
-        }
-
-        /// Starts a token-producer task inside a drain-coordinator section.
-        ///
-        /// The section is entered BEFORE `make` runs, so a cancellation that
-        /// strikes between the two finds the section active and waits for
-        /// it; ``GenerationDrainCoordinator/attachCancel(_:)`` then cancels
-        /// the fresh producer at registration. The watcher `Task` is
-        /// deliberately unstructured: it must outlive a `respond` the
-        /// framework abandoned, it only awaits the producer and reports its
-        /// end, and it ends the moment the producer does.
-        ///
-        /// - Parameter make: builds the stream and its producer task.
-        /// - Returns: what `make` returned.
-        /// - Throws: `CancellationError` when the respond task is already
-        ///   cancelled, and whatever `make` throws.
-        private static func startTrackedGeneration<Element: Sendable, Value: Sendable>(
-            _ make: () throws -> (AsyncStream<Element>, Task<Value, Never>)
-        ) throws -> (AsyncStream<Element>, Task<Value, Never>) {
-            guard let coordinator = drainCoordinator else { return try make() }
-            try coordinator.enterSection()
-            do {
-                let (stream, task) = try make()
-                coordinator.attachCancel { task.cancel() }
-                Task {
-                    _ = await task.value
-                    coordinator.leaveSection()
-                }
-                return (stream, task)
-            } catch {
-                coordinator.leaveSection()
-                throw error
-            }
-        }
-
-        /// Runs one guided-generation pass inside a drain-coordinator section.
-        ///
-        /// A guided loop runs synchronously on the respond task and polls
-        /// `Task.isCancelled` per token, so it leaves its section on its own
-        /// thread with no cancellation delivery needed. The GPU stream is
-        /// synchronized before the section leaves, thus a canceller that the
-        /// coordinator releases finds the GPU quiet.
-        ///
-        /// - Parameter body: the guided-generation pass.
-        /// - Returns: what `body` returned.
-        /// - Throws: `CancellationError` when the respond task is already
-        ///   cancelled, and whatever `body` throws.
-        private static func withGuidedGenerationSection<Value>(
-            _ body: () throws -> Value
-        ) throws -> Value {
-            guard let coordinator = drainCoordinator else { return try body() }
-            try coordinator.enterSection()
-            defer {
-                Stream.gpu.synchronize()
-                coordinator.leaveSection()
-            }
-            return try body()
-        }
-
-        /// Stops the generation task and waits until it stops.
-        ///
-        /// The task holds the GPU loop. A caller that leaves the token stream
-        /// before its end must stop the task and then wait for it. A caller that
-        /// does not wait leaves the loop in operation, and the next pass then
-        /// shares the GPU with it.
-        ///
-        /// - Parameter task: the generation task to stop.
-        private func cancelAndDrain<Success>(_ task: Task<Success, Never>) async {
-            task.cancel()
-            _ = await task.value
-        }
-
-        /// Reads a generation stream and keeps its cache for the next turn.
-        ///
-        /// Both exits wait for the generation task, thus the GPU loop never
-        /// stays in operation. A good exit gives the prompt cache the tokens
-        /// that the task fed into the caches. The ledger of that cache is then
-        /// the render plus those tokens, thus the next turn reuses the cache
-        /// with no rewind. An error exit stops the task first, sends the error
-        /// on, and keeps no cache.
-        ///
-        /// - Parameters:
-        ///   - task: the generation task that feeds the caches.
-        ///   - plan: the plan that the pass ran, or nil when the pass had no
-        ///     plan.
-        ///   - state: the model state the prefill of the pass left, which the
-        ///     next turn seeds its iterator with.
-        ///   - promptCache: the slot that keeps the cache for the next turn.
-        ///   - body: reads the token stream of the same generation.
-        /// - Throws: the error that `body` throws.
-        private func withPromptCacheCommit(
-            task: Task<[Int], Never>,
-            plan: ExecutorPromptCachePlan?,
-            state: LMOutput.State?,
-            promptCache: ExecutorPromptCacheSlot,
-            body: () async throws -> Void
-        ) async rethrows {
-            do {
-                try await body()
-            } catch {
-                await cancelAndDrain(task)
-                throw error
-            }
-            promptCache.commit(plan, generatedTokens: await task.value, state: state)
-        }
-
-        private func runAllowedToolGeneration(
-            input: LMInput,
-            transcriptBoundary: Int?,
-            toolSpecs: [[String: any Sendable]],
-            reasoning: (config: ReasoningConfig, primedInside: Bool)?,
-            requestedMaxTokens: Int?,
-            requestedTemperature: Double?,
-            samplingConfiguration: MLXSamplingConfiguration?,
-            reasoningEntryID: String,
-            promptCache: ExecutorPromptCacheSlot,
-            context: ModelContext,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async throws -> AllowedToolGenerationResult {
-            let params = Self.makeParameters(
-                maxTokens: requestedMaxTokens ?? Self.defaultMaxTokens,
-                requestedTemperature: requestedTemperature,
-                samplingConfiguration: samplingConfiguration)
-            promptCache.restoreIfPending(model: context.model, parameters: params)
-            let plan = try promptCache.plan(
-                input: input, model: context.model, parameters: params,
-                protocolRules: Self.promptCacheReuseRules(of: context),
-                transcriptBoundary: transcriptBoundary,
-                decodeTokens: context.tokenizer.decode(tokenIds:))
-            let format = context.configuration.toolCallFormat ?? .json
-            var router = AllowedToolOutputRouter(
-                format: format,
-                tools: toolSpecs,
-                reasoning: reasoning)
-            var protocolDecoder = format.makeProtocolTokenStreamDecoder(
-                tokenizer: context.tokenizer,
-                tools: toolSpecs,
-                stopStrings: context.configuration.effectiveStopStrings)
-            var detokenizer = context.tokenizer.makeStreamingDetokenizer()
-            var result = AllowedToolGenerationResult()
-            var preparedState: LMOutput.State?
-            let (stream, task) = try Self.startTrackedGeneration {
-                try generateProtocolTokensTask(
-                    input: plan?.input ?? input,
-                    cache: plan?.caches,
-                    state: plan?.state,
-                    parameters: params,
-                    context: context,
-                    decoder: protocolDecoder,
-                    preparedState: {
-                        preparedState = $0
-                        promptCache.prefillDidEnd(state: $0)
-                    })
-            }
-
-            try await withPromptCacheCommit(
-                task: task, plan: plan, state: preparedState, promptCache: promptCache
-            ) {
-                generationLoop: for await generation in stream {
-                    try Task.checkCancellation()
-                    switch generation {
-                    case .token(let token):
-                        if var decoder = protocolDecoder {
-                            if decoder.isInsideReasoning {
-                                result.reasoningTokenCount += 1
-                            }
-                            var reasoningText = ""
-                            var shouldContinue = true
-                            let decoderContinues = decoder.push(token) { event in
-                                shouldContinue = consumeProtocolEvent(
-                                    event, result: &result, reasoningText: &reasoningText)
-                                return shouldContinue
-                            }
-                            protocolDecoder = decoder
-                            if !reasoningText.isEmpty {
-                                await Self.emit(
-                                    text: reasoningText,
-                                    entryID: reasoningEntryID,
-                                    destination: .reasoning,
-                                    into: channel)
-                                try Task.checkCancellation()
-                            }
-                            if !decoderContinues || !shouldContinue {
-                                task.cancel()
-                                break generationLoop
-                            }
-                        } else {
-                            if router.isInsideReasoning {
-                                result.reasoningTokenCount += 1
-                            }
-                            detokenizer.append(token: token)
-                            if let chunk = detokenizer.next() {
-                                let reasoningChunks = consumeAllowedEvents(
-                                    router.process(chunk), result: &result)
-                                for text in reasoningChunks {
-                                    await Self.emit(
-                                        text: text,
-                                        entryID: reasoningEntryID,
-                                        destination: .reasoning,
-                                        into: channel)
-                                    try Task.checkCancellation()
-                                }
-                            }
-                        }
-                    case .info(let info):
-                        Self.observeCompletion(info)
-                        result.completionInfo = info
-                    }
-                }
-            }
-
-            let finalReasoningText: String
-            if var decoder = protocolDecoder {
-                result.endedInsideReasoning = decoder.isInsideReasoning
-                var reasoningText = ""
-                _ = decoder.finish { event in
-                    consumeProtocolEvent(
-                        event, result: &result, reasoningText: &reasoningText)
-                }
-                protocolDecoder = decoder
-                finalReasoningText = reasoningText
-            } else {
-                let pending = detokenizer.finish().map { router.process($0) } ?? []
-                let chunks = consumeAllowedEvents(pending + router.finish(), result: &result)
-                finalReasoningText = chunks.joined()
-                result.endedInsideReasoning = router.isInsideReasoning
-            }
-            if !finalReasoningText.isEmpty {
-                await Self.emit(
-                    text: finalReasoningText,
-                    entryID: reasoningEntryID,
-                    destination: .reasoning,
-                    into: channel)
-            }
-            if let rejection = result.rejectedToolCalls.first {
-                throw RejectedToolCallError(rejection)
-            }
-            return result
-        }
-
-        private func consumeProtocolEvent(
-            _ event: TokenStreamEvent,
-            result: inout AllowedToolGenerationResult,
-            reasoningText: inout String
-        ) -> Bool {
-            switch event {
-            case .reasoning(let text): reasoningText += text
-            case .response(let text): result.responseText += text
-            case .toolCall(let call): result.toolCalls.append(call)
-            case .rejectedToolCall(let rejection): result.rejectedToolCalls.append(rejection)
-            case .protocolError(let message): Self.protocolLogger.error("\(message)")
-            case .stop: return false
-            }
-            return true
-        }
-
-        private func consumeAllowedEvents(
-            _ events: [AllowedToolOutputRouter.Event],
-            result: inout AllowedToolGenerationResult
-        ) -> [String] {
-            var reasoningChunks: [String] = []
-            for event in events {
-                switch event {
-                case .reasoning(let text):
-                    reasoningChunks.append(text)
-                case .response(let text):
-                    result.responseText += text
-                case .toolCall(let call):
-                    result.toolCalls.append(call)
-                case .rejectedToolCall(let rejection):
-                    result.rejectedToolCalls.append(rejection)
-                }
-            }
-            return reasoningChunks
-        }
-
-        private func emitAllowedUsage(
-            _ result: AllowedToolGenerationResult,
-            entryID: String,
-            promptCache: ExecutorPromptCacheSlot,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async {
-            guard let info = result.completionInfo else { return }
-            await Self.emitUsage(
-                input: Self.usageInput(
-                    fedTokenCount: info.promptTokenCount, promptCache: promptCache),
-                output: .init(
-                    totalTokenCount: Self.generatedTokenCount(of: info),
-                    reasoningTokenCount: min(
-                        result.reasoningTokenCount,
-                        info.generationTokenCount)),
-                entryID: entryID,
-                into: channel)
-        }
-
-        private func runSchemaGeneration(
-            schemaJSON: String,
-            input: LMInput,
-            modelID: String,
-            requestedMaxTokens: Int?,
-            entryID: String,
-            promptCache: ExecutorPromptCacheSlot,
-            context: ModelContext,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async throws {
-            // `GuidedGenerationLoop.run` builds its own key/value cache and
-            // accepts none from a caller, thus this pass carries nothing from an
-            // earlier turn and reports nothing.
-            promptCache.carriesNoCache()
-            let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
-                modelID: modelID,
-                tokenizer: context.tokenizer)
-            let constraint = try await MLXLanguageModel.makeConstraint(
-                modelID: modelID,
-                kind: .json,
-                source: schemaJSON,
-                tokenizer: grammarTokenizer,
-                hostTokenizer: context.tokenizer,
-                fastForward: true)
-            let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
-            let bias = await MLXLanguageModel.makeTokenizerBias(
-                modelID: modelID,
-                tokenizer: context.tokenizer)
-            let structuralReserve = CompletionReserve.estimate(
-                schemaJSON: schemaJSON,
-                tokenizer: context.tokenizer)
-            let completionReserve = Swift.max(
-                structuralReserve * Self.completionReserveStructuralMultiplier,
-                maxTokens / Self.completionReserveBudgetDivisor)
-            let hardReserve =
-                structuralReserve * Self.hardReserveStructuralMultiplier
-
-            let (textStream, textContinuation) = AsyncStream<String>.makeStream()
-            async let forwarder: Void = {
-                for await text in textStream {
-                    await Self.emit(
-                        text: text,
-                        entryID: entryID,
-                        destination: .response,
-                        into: channel)
-                }
-            }()
-
-            var incomplete = false
-            var generatedTokenCount: Int?
-            do {
-                generatedTokenCount = try Self.withGuidedGenerationSection {
-                    try GuidedGenerationLoop.run(
-                        input: input,
-                        context: context,
-                        constraint: constraint,
-                        maxTokens: maxTokens,
-                        vocabSize: Int(grammarTokenizer.vocabSize),
-                        completionReserve: completionReserve,
-                        hardReserve: hardReserve,
-                        closingBias: bias.closing,
-                        whitespaceBias: bias.whitespace,
-                        whitespaceTokenIDs: bias.whitespaceTokenIDs
-                    ) { text in
-                        textContinuation.yield(text)
-                        GuidedGenerationDiagnosticSink.current?.recordEmit()
-                        return !Task.isCancelled
-                    }
-                }
-            } catch GuidedGenerationError.incompleteOutput {
-                incomplete = true
-            }
-
-            let cancellationError: Error?
-            do {
-                try Task.checkCancellation()
-                cancellationError = nil
-            } catch {
-                cancellationError = error
-            }
-            textContinuation.finish()
-            await forwarder
-            if let cancellationError {
-                throw cancellationError
-            }
-
-            if let generatedTokenCount {
-                await Self.emitUsage(
-                    input: Self.usageInput(
-                        fedTokenCount: input.text.tokens.size, promptCache: promptCache),
-                    output: .init(
-                        totalTokenCount: generatedTokenCount,
-                        reasoningTokenCount: 0),
-                    entryID: entryID,
-                    into: channel)
-            }
-            if incomplete {
-                await Self.emitMetadata(
-                    ["incompleteOutput": true], entryID: entryID, into: channel)
-            }
-        }
-
-        /// Unconstrained text generation. Used on the no-tools/no-schema
-        /// path when the model has no reasoning config to route through.
-        private func runUnconstrained(
-            input: LMInput,
-            transcriptBoundary: Int?,
-            requestedMaxTokens: Int?,
-            requestedTemperature: Double?,
-            samplingConfiguration: MLXSamplingConfiguration?,
-            entryID: String,
-            promptCache: ExecutorPromptCacheSlot,
-            context: ModelContext,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async throws {
-            // Use a finite default when the framework doesn't specify a
-            // token limit; there's no grammar to stop the model naturally.
-            let params = Self.makeParameters(
-                maxTokens: requestedMaxTokens ?? Self.defaultMaxTokens,
-                requestedTemperature: requestedTemperature,
-                samplingConfiguration: samplingConfiguration
-            )
-            promptCache.restoreIfPending(model: context.model, parameters: params)
-            let plan = try promptCache.plan(
-                input: input, model: context.model, parameters: params,
-                protocolRules: Self.promptCacheReuseRules(of: context),
-                transcriptBoundary: transcriptBoundary,
-                decodeTokens: context.tokenizer.decode(tokenIds:))
-
-            // The token-recording form is what lets this pass leave a prompt
-            // cache behind: the ledger of that cache names the render plus the
-            // tokens generation fed into it, and the text stream alone does not
-            // carry those token identifiers.
-            var preparedState: LMOutput.State?
-            let (stream, task) = try Self.startTrackedGeneration {
-                try generateTaskRecordingTokens(
-                    input: plan?.input ?? input,
-                    cache: plan?.caches,
-                    state: plan?.state,
-                    parameters: params,
-                    context: context,
-                    preparedState: {
-                        preparedState = $0
-                        promptCache.prefillDidEnd(state: $0)
-                    })
-            }
-
-            try await withPromptCacheCommit(
-                task: task, plan: plan, state: preparedState, promptCache: promptCache
-            ) {
-                for await generation in stream {
-                    try Task.checkCancellation()
-                    switch generation {
-                    case .chunk(let text):
-                        await Self.emit(
-                            text: text, entryID: entryID, destination: .response, into: channel)
-                    case .info(let info):
-                        // MLX-LM emits one .info event at end-of-generation with
-                        // authoritative scalar token counts (`promptTokenCount`
-                        // is the prompt; `generationTokenCount` is the
-                        // model-generated completion -- see Evaluate.swift's
-                        // `GenerateCompletionInfo` definition).
-                        Self.observeCompletion(info)
-                        await Self.emitUsage(
-                            input: Self.usageInput(
-                                fedTokenCount: info.promptTokenCount, promptCache: promptCache),
-                            output: .init(
-                                totalTokenCount: Self.generatedTokenCount(of: info),
-                                reasoningTokenCount: 0),
-                            entryID: entryID, into: channel)
-                    case .toolCall(_):
-                        break
-                    case .rejectedToolCall(let rejection):
-                        throw RejectedToolCallError(rejection)
-                    }
-                }
-            }
-        }
-
-        /// Dispatches the no-tools/no-schema path: reasoning routing when a
-        /// config resolved, otherwise plain unconstrained text.
-        ///
-        /// `transcriptBoundary` is the checkpoint position of the input this
-        /// method feeds: the reasoning input when `reasoningSetup` is set,
-        /// and `fallbackInput` otherwise.
-        private func runTextGeneration(
-            reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?,
-            fallbackInput: LMInput,
-            transcriptBoundary: Int?,
-            requestedMaxTokens: Int?,
-            requestedTemperature: Double?,
-            samplingConfiguration: MLXSamplingConfiguration?,
-            responseEntryID: String,
-            reasoningEntryID: String,
-            promptCache: ExecutorPromptCacheSlot,
-            context: ModelContext,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async throws {
-            if let reasoning = reasoningSetup {
-                try await runReasoning(
-                    input: reasoning.input,
-                    transcriptBoundary: transcriptBoundary,
-                    reasoningConfig: reasoning.config,
-                    primedInside: reasoning.primedInside,
-                    requestedMaxTokens: requestedMaxTokens,
-                    requestedTemperature: requestedTemperature,
-                    samplingConfiguration: samplingConfiguration,
-                    responseEntryID: responseEntryID,
-                    reasoningEntryID: reasoningEntryID,
-                    promptCache: promptCache,
-                    context: context,
-                    channel: channel)
-            } else {
-                try await runUnconstrained(
-                    input: fallbackInput,
-                    transcriptBoundary: transcriptBoundary,
-                    requestedMaxTokens: requestedMaxTokens,
-                    requestedTemperature: requestedTemperature,
-                    samplingConfiguration: samplingConfiguration,
-                    entryID: responseEntryID,
-                    promptCache: promptCache,
-                    context: context,
-                    channel: channel)
-            }
-        }
-
-        /// Reasoning-aware unconstrained generation.
-        ///
-        /// Routes thinking delimited by the model's reasoning markers to
-        /// `.reasoning` events and the rest to `.response`, using a raw
-        /// protocol-neutral token decoder when the format owns framing, or a
-        /// self-owned `StreamingDetokenizer` for ordinary formats. The loop
-        /// sees real token IDs for an accurate reasoning token count.
-        private func runReasoning(
-            input: LMInput,
-            transcriptBoundary: Int?,
-            reasoningConfig: ReasoningConfig,
-            primedInside: Bool,
-            requestedMaxTokens: Int?,
-            requestedTemperature: Double?,
-            samplingConfiguration: MLXSamplingConfiguration?,
-            responseEntryID: String,
-            reasoningEntryID: String,
-            promptCache: ExecutorPromptCacheSlot,
-            context: ModelContext,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async throws {
-            let params = Self.makeParameters(
-                maxTokens: requestedMaxTokens ?? Self.defaultMaxTokens,
-                requestedTemperature: requestedTemperature,
-                samplingConfiguration: samplingConfiguration
-            )
-            promptCache.restoreIfPending(model: context.model, parameters: params)
-            let plan = try promptCache.plan(
-                input: input, model: context.model, parameters: params,
-                protocolRules: Self.promptCacheReuseRules(of: context),
-                transcriptBoundary: transcriptBoundary,
-                decodeTokens: context.tokenizer.decode(tokenIds:))
-
-            var emitter = ReasoningEventEmitter(
-                config: reasoningConfig, primedInside: primedInside)
-            let format = context.configuration.toolCallFormat ?? .json
-            var protocolDecoder = format.makeProtocolTokenStreamDecoder(
-                tokenizer: context.tokenizer,
-                tools: nil,
-                stopStrings: context.configuration.effectiveStopStrings)
-            var detokenizer = context.tokenizer.makeStreamingDetokenizer()
-            var reasoningTokenCount = 0
-            var completionInfo: GenerateCompletionInfo?
-            // Surfaced as a thrown error, as on the schema and allowed-tool
-            // paths: this path passes no tools, so a tool-call-shaped output is
-            // never executable.
-            var rejectedToolCall: RejectedToolCall?
-            var preparedState: LMOutput.State?
-            let (stream, task) = try Self.startTrackedGeneration {
-                try generateProtocolTokensTask(
-                    input: plan?.input ?? input,
-                    cache: plan?.caches,
-                    state: plan?.state,
-                    parameters: params,
-                    context: context,
-                    decoder: protocolDecoder,
-                    preparedState: {
-                        preparedState = $0
-                        promptCache.prefillDidEnd(state: $0)
-                    })
-            }
-
-            try await withPromptCacheCommit(
-                task: task, plan: plan, state: preparedState, promptCache: promptCache
-            ) {
-                generationLoop: for await generation in stream {
-                    try Task.checkCancellation()
-                    switch generation {
-                    case .token(let token):
-                        if var decoder = protocolDecoder {
-                            if decoder.isInsideReasoning {
-                                reasoningTokenCount += 1
-                            }
-                            var segments: [ReasoningEventEmitter.Segment] = []
-                            var shouldContinue = true
-                            let decoderContinues = decoder.push(token) { event in
-                                switch event {
-                                case .reasoning(let text): segments.append(.reasoning(text))
-                                case .response(let text): segments.append(.response(text))
-                                case .toolCall: break
-                                case .rejectedToolCall(let rejection):
-                                    rejectedToolCall = rejection
-                                    shouldContinue = false
-                                case .protocolError(let message):
-                                    Self.protocolLogger.error("\(message)")
-                                case .stop: shouldContinue = false
-                                }
-                                return shouldContinue
-                            }
-                            protocolDecoder = decoder
-                            for segment in segments {
-                                await Self.send(
-                                    segment, responseEntryID: responseEntryID,
-                                    reasoningEntryID: reasoningEntryID, channel: channel)
-                            }
-                            if let rejection = rejectedToolCall {
-                                throw RejectedToolCallError(rejection)
-                            }
-                            if !decoderContinues || !shouldContinue {
-                                task.cancel()
-                                break generationLoop
-                            }
-                        } else {
-                            // One `.token` == one real token, so this is a true
-                            // token count. Closing delimiters are deliberately
-                            // attributed to reasoning until the emitter consumes
-                            // them, then the final usage count is clamped.
-                            if emitter.isInsideReasoning {
-                                reasoningTokenCount += 1
-                            }
-                            detokenizer.append(token: token)
-                            if let chunk = detokenizer.next() {
-                                for segment in emitter.process(chunk) {
-                                    await Self.send(
-                                        segment, responseEntryID: responseEntryID,
-                                        reasoningEntryID: reasoningEntryID, channel: channel)
-                                }
-                            }
-                        }
-                    case .info(let info):
-                        Self.observeCompletion(info)
-                        completionInfo = info
-                    }
-                }
-            }
-
-            let endedInsideReasoning: Bool
-            if var decoder = protocolDecoder {
-                endedInsideReasoning = decoder.isInsideReasoning
-                var segments: [ReasoningEventEmitter.Segment] = []
-                _ = decoder.finish { event in
-                    switch event {
-                    case .reasoning(let text): segments.append(.reasoning(text))
-                    case .response(let text): segments.append(.response(text))
-                    case .toolCall, .stop: break
-                    case .rejectedToolCall(let rejection):
-                        rejectedToolCall = rejection
-                    case .protocolError(let message):
-                        Self.protocolLogger.error("\(message)")
-                    }
-                    return true
-                }
-                for segment in segments {
-                    await Self.send(
-                        segment, responseEntryID: responseEntryID,
-                        reasoningEntryID: reasoningEntryID, channel: channel)
-                }
-                protocolDecoder = decoder
-                if let rejection = rejectedToolCall {
-                    throw RejectedToolCallError(rejection)
-                }
-            } else {
-                let pending = detokenizer.finish().map { emitter.process($0) } ?? []
-                for segment in pending + emitter.finalize() {
-                    await Self.send(
-                        segment, responseEntryID: responseEntryID,
-                        reasoningEntryID: reasoningEntryID, channel: channel)
-                }
-                endedInsideReasoning = emitter.isInsideReasoning
-            }
-
-            // If generation ended while still inside a thinking block, the model
-            // was cut off mid-thought (e.g. it exhausted the token budget before
-            // emitting `</think>`). Signal it so a consumer doesn't mistake an
-            // empty or partial answer for the model's chosen response — mirrors
-            // the guided path's `incompleteOutput` convention.
-            if endedInsideReasoning {
-                await Self.emitMetadata(
-                    ["incompleteOutput": true], entryID: responseEntryID, into: channel)
-            }
-
-            if let info = completionInfo {
-                // Single source of truth for usage: one authoritative
-                // `.updateUsage` (the framework's aggregator replaces wholesale,
-                // so we must not also rely on per-delta auto-summing). The
-                // reasoning count is clamped to never exceed the total.
-                await Self.emitUsage(
-                    input: Self.usageInput(
-                        fedTokenCount: info.promptTokenCount, promptCache: promptCache),
-                    output: .init(
-                        totalTokenCount: Self.generatedTokenCount(of: info),
-                        reasoningTokenCount: min(reasoningTokenCount, info.generationTokenCount)),
-                    entryID: responseEntryID, into: channel)
-            }
-        }
-
-        /// Routes one scanned segment to the appropriate channel entry.
-        private static func send(
-            _ segment: ReasoningEventEmitter.Segment,
-            responseEntryID: String,
-            reasoningEntryID: String,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async {
-            switch segment {
-            case .reasoning(let text):
-                await Self.emit(
-                    text: text, entryID: reasoningEntryID, destination: .reasoning, into: channel)
-            case .response(let text):
-                await Self.emit(
-                    text: text, entryID: responseEntryID, destination: .response, into: channel)
-            }
-        }
-
-        /// Prepares an `LMInput` for the unconstrained reasoning path with
-        /// thinking explicitly on, off, or unspecified. Maps the package-
-        /// internal `cannotDisableReasoning` to the framework's
-        /// `unsupportedCapability` so always-on models surface a typed error
-        /// before generation rather than leaking `<think>` into `.response`.
-        ///
-        /// - Parameters:
-        ///   - messages: The chat messages the prompt renders from
-        ///   - config: The reasoning protocol of the model
-        ///   - thinkingEnabled: `true` / `false` to force thinking on / off, `nil` for the default
-        ///   - context: The loaded model context whose processor renders the prompt
-        ///   - cannotDisableMessage: The description of the error for a model that always reasons
-        /// - Returns: The render that made the prompt, and the prepared prompt
-        /// - Throws: `unsupportedCapability` when thinking cannot go off, or the error of the processor
-        private static func preparedInput(
-            messages: [Chat.Message],
-            config: ReasoningConfig,
-            thinkingEnabled: Bool?,
-            context: ModelContext,
-            cannotDisableMessage: String
-        ) async throws -> (render: ThinkingRender, input: LMInput) {
-            let render: ThinkingRender
-            do {
-                render = try ThinkingRender(config: config, thinkingEnabled: thinkingEnabled)
-            } catch ReasoningError.cannotDisableReasoning {
-                throw LanguageModelError.unsupportedCapability(
-                    LanguageModelError.UnsupportedCapability(
-                        capability: .reasoning,
-                        debugDescription: cannotDisableMessage))
-            }
-            return (
-                render, try await render.prepare(messages: messages, tools: nil, context: context)
-            )
-        }
-
-        /// Maps a requested reasoning level to a thinking on/off/unspecified
-        /// flag. `nil` (no opinion) defers to the strategy's default; any
-        /// concrete level means "think" (v1 does not modulate depth); only the
-        /// package convention `.custom("no_think")` means "off".
-        static func thinkingEnabled(for level: ContextOptions.ReasoningLevel?) -> Bool? {
-            guard let level else { return nil }
-            switch level {
-            case .light, .moderate, .deep:
-                return true
-            case .custom(let value):
-                let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased()
-                return normalized == "no_think" ? false : true
-            @unknown default:
-                // A future level we don't recognize → default to thinking on.
-                return true
-            }
-        }
-
-        /// Decodes the rendered prompt's tail and asks whether it ends inside an
-        /// open reasoning block (some model families prefill the opening
-        /// delimiter).
-        /// Build the Phase-2 continuation input: the tool-aware prompt with the
-        /// completed reasoning token IDs appended along the sequence axis.
-        ///
-        /// The prompt tokens keep whatever rank the model's processor produced
-        /// ([N] from LLM processors, [1, N] from VLM processors — VLM `prepare`
-        /// requires the batched form), and processed image/video content is
-        /// carried through so a VLM's Phase-2 prefill still sees its pixels.
-        static func continuationInput(
-            from input: LMInput, appending tokenIDs: [Int]
-        ) -> LMInput {
-            let promptTokens = input.text.tokens
-            var appended = MLXArray(tokenIDs.map { Int32($0) })
-                .asType(promptTokens.dtype)
-            if promptTokens.ndim == LMInput.Text.batchedTokenRank {
-                appended = appended[.newAxis, 0...]
-            }
-            return LMInput(
-                text: .init(tokens: concatenated([promptTokens, appended], axis: -1)),
-                image: input.image,
-                video: input.video)
-        }
-
-        private static func reasoningPrimedInside(
-            input: LMInput, config: ReasoningConfig, tokenizer: any Tokenizer
-        ) -> Bool {
-            ReasoningEventEmitter.promptEndsInsideReasoning(
-                promptTokens: input.text.tokens.asArray(Int.self), config: config,
-                tokenizer: tokenizer)
-        }
-
-        /// Think-then-call Phase 1: generate reasoning unconstrained until
-        /// the model closes its thinking block, routing reasoning text to
-        /// `.reasoning` events and retaining the raw token IDs to prefill into the
-        /// constrained Phase 2.
-        ///
-        /// Uses the `Task`-returning `generateTokensTask` so the GPU loop is
-        /// cancelled and drained at the phase boundary — without that, Phase 2's
-        /// prefill could overlap Phase 1's in-flight forward pass on the shared
-        /// `Stream` and trip a Metal command-buffer assertion.
-        ///
-        /// Returns the accumulated token IDs and whether `</think>` actually
-        /// closed. If it did not (budget exhausted mid-thought), the caller must
-        /// skip Phase 2 rather than prefill a truncated thought into the grammar.
-        private func runToolCallReasoningPhase(
-            input: LMInput,
-            config: ReasoningConfig,
-            primedInside: Bool,
-            maxTokens: Int,
-            requestedTemperature: Double?,
-            samplingConfiguration: MLXSamplingConfiguration?,
-            reasoningEntryID: String,
-            responseEntryID: String,
-            context: ModelContext,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async throws -> (tokenIDs: [Int], closed: Bool) {
-            let params = Self.makeParameters(
-                maxTokens: maxTokens,
-                requestedTemperature: requestedTemperature,
-                samplingConfiguration: samplingConfiguration
-            )
-            var collector = ReasoningTokenCollector(
-                config: config, primedInside: primedInside, tokenizer: context.tokenizer
-            )
-
-            let (stream, task) = try Self.startTrackedGeneration {
-                try generateTokensTask(
-                    input: input, parameters: params, context: context)
-            }
-            var closed = false
-            do {
-                for await generation in stream {
-                    try Task.checkCancellation()
-                    guard case .token(let token) = generation else { continue }
-                    for segment in collector.ingest(token) {
-                        await Self.send(
-                            segment, responseEntryID: responseEntryID,
-                            reasoningEntryID: reasoningEntryID, channel: channel)
-                    }
-                    if collector.shouldStopAfterReasoning {
-                        GuidedGenerationDiagnosticSink.current?.recordToolReasoningClose()
-                        closed = true
-                        break
-                    }
-                }
-            } catch {
-                // Drain the generation task before propagating, but do NOT sync
-                // here: respond's outer `catch` is the single GPU-sync point for
-                // this exit path. Keep one clean GPU sync per exit path —
-                // cascading syncs across nested catches can race the Metal
-                // command-buffer state during teardown.
-                await cancelAndDrain(task)
-                throw error
-            }
-            // Drain the generation task before Phase 2 reuses the Stream.
-            await cancelAndDrain(task)
-            Stream.gpu.synchronize()
-
-            for segment in collector.finalize() {
-                await Self.send(
-                    segment, responseEntryID: responseEntryID,
-                    reasoningEntryID: reasoningEntryID, channel: channel)
-            }
-            return (collector.reasoningTokenIDs, closed)
-        }
-
-        /// Parses a required-mode tool-calling envelope JSON object and emits
-        /// its developer tool call.
-        ///
-        /// The output buffer is expected to be a JSON object matching the
-        /// shape `{"name": <tool-name>, "arguments": <args>}`. Grammars from
-        /// `SchemaConverter.encodeToolCallingGrammar` guarantee either that
-        /// shape directly (bare JSON) or that shape wrapped in Qwen's
-        /// `<tool_call>\n...\n</tool_call>` special-token delimiters --
-        /// `unwrapToolCallMarkers` below strips the wrapper if present. The
-        /// guided path emits a single `.toolCallDelta` with the arguments JSON
-        /// and a freshly minted toolCallID.
-        ///
-        /// Required mode never degrades malformed or partial output into a
-        /// response event.
-        private func emitRequiredToolCallEvent(
-            outputBuffer: String,
-            toolCallsEntryID: String,
-            channel: LanguageModelExecutorGenerationChannel
-        ) async {
-            let unwrapped = Self.unwrapToolCallMarkers(outputBuffer)
-            let data = Data(unwrapped.utf8)
-            guard
-                let obj = try? JSONSerialization.jsonObject(with: data)
-                    as? [String: Any],
-                let name = obj["name"] as? String
-            else {
-                GuidedGenerationDiagnosticSink.current?.recordParse(
-                    parsedAsToolCall: false, parsedName: nil)
-                return
-            }
-
-            GuidedGenerationDiagnosticSink.current?.recordParse(
-                parsedAsToolCall: true, parsedName: name)
-
-            // The arguments of a tool whose schema is a scalar -- a string, a
-            // number, a Boolean -- are not an object. Without
-            // `.fragmentsAllowed`, `JSONSerialization` raises an Objective-C
-            // exception for such a value, which `try?` cannot catch, and the
-            // process stops.
-            guard
-                let arguments = obj["arguments"],
-                let argumentsData = try? JSONSerialization.data(
-                    withJSONObject: arguments, options: [.fragmentsAllowed]),
-                let argumentsJSON = String(data: argumentsData, encoding: .utf8)
-            else {
-                return
-            }
-            await Self.emitToolCall(
-                id: UUID().uuidString,
-                name: name,
-                arguments: argumentsJSON,
-                entryID: toolCallsEntryID,
-                into: channel)
-        }
-
-        /// Strips Qwen-style `<tool_call>\n...\n</tool_call>` wrapper markers
-        /// if present, returning the inner JSON text. Untouched if the buffer
-        /// doesn't start with a wrapper -- the `bare_call` grammar alternative
-        /// is valid output and parses directly.
-        ///
-        /// The inner newlines around the JSON come from the Qwen training
-        /// format; we're tolerant of whitespace on either side of the markers
-        /// so that tokenizer decoding quirks (extra spaces, missing newlines)
-        /// don't cause the JSON parse to fail.
-        private static func unwrapToolCallMarkers(_ buffer: String) -> String {
-            let trimmed = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
-            let openMarker = "<tool_call>"
-            let closeMarker = "</tool_call>"
-            guard trimmed.hasPrefix(openMarker) else { return buffer }
-            let afterOpen = trimmed.dropFirst(openMarker.count)
-            let inner: Substring
-            if let closeRange = afterOpen.range(of: closeMarker, options: .backwards) {
-                inner = afterOpen[afterOpen.startIndex ..< closeRange.lowerBound]
-            } else {
-                inner = afterOpen
-            }
-            return inner.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 }

@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXLMTestSupport
 import Testing
 
 @testable import MLXLLM
@@ -24,8 +25,11 @@ struct Qwen35RecurrentCachePositionTests {
     /// The number of tokens fed after the prompt, one decode step.
     private static let decodedTokenCount = 1
 
-    /// Where the speculative checkpoint stands inside a two-token input.
-    private static let checkpointTokenCount = 1
+    /// The tokens of the verify whose snapshot slots a rollback selects.
+    private static let verifyTokenCount = 2
+
+    /// The tokens of the verify the rollback rejects.
+    private static let rejectedTokenCount = 1
 
     /// The number of layers of the small hybrid model.
     private static let hybridLayerCount = 2
@@ -38,7 +42,7 @@ struct Qwen35RecurrentCachePositionTests {
     private func textConfiguration() throws -> MLXLLM.Qwen35TextConfiguration {
         try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
     }
 
     /// The text configuration of a hybrid model: ``hybridLayerCount`` layers,
@@ -52,7 +56,7 @@ struct Qwen35RecurrentCachePositionTests {
         try JSONDecoder().decode(
             MLXLLM.Qwen35TextConfiguration.self,
             from: Data(
-                qwen35TextConfigJSON(
+                Qwen35FixtureJSON.text(
                     mtpLayers: 1, hiddenLayers: Self.hybridLayerCount,
                     fullAttentionInterval: Self.hybridFullAttentionInterval
                 ).utf8))
@@ -65,7 +69,7 @@ struct Qwen35RecurrentCachePositionTests {
     {
         try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.TextConfiguration.self,
-            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            from: Data(Qwen35FixtureJSON.text(mtpLayers: 1).utf8))
     }
 
     /// A random hidden-state input of `tokenCount` tokens.
@@ -107,34 +111,32 @@ struct Qwen35RecurrentCachePositionTests {
         #expect(cache.offset == Self.promptTokenCount + Self.decodedTokenCount)
     }
 
-    @Test("a speculative checkpoint restores the position of its token")
-    func aSpeculativeCheckpointRestoresThePositionOfItsToken() throws {
+    @Test("a speculative snapshot slot restores the position of its token")
+    func aSpeculativeSnapshotSlotRestoresThePositionOfItsToken() throws {
         let configuration = try textConfiguration()
         let layer = MLXLLM.Qwen35GatedDeltaNet(configuration)
         let cache = MambaCache()
-        let input = hiddenStates(
-            tokenCount: Self.checkpointTokenCount + 1, width: configuration.hiddenSize)
+        let input = hiddenStates(tokenCount: Self.verifyTokenCount, width: configuration.hiddenSize)
 
-        eval(layer(input, cache: cache, checkpointAfter: Self.checkpointTokenCount))
-        #expect(cache.offset == Self.checkpointTokenCount + 1)
+        eval(layer(input, cache: cache, keepsSnapshots: true))
+        #expect(cache.offset == Self.verifyTokenCount)
 
-        #expect(cache.restoreSpeculativeCheckpoint())
-        #expect(cache.offset == Self.checkpointTokenCount)
+        #expect(cache.selectSpeculativeSlot(rollingBack: Self.rejectedTokenCount))
+        #expect(cache.offset == Self.verifyTokenCount - Self.rejectedTokenCount)
     }
 
-    @Test("the vision-language speculative checkpoint restores the position of its token")
-    func theVisionLanguageSpeculativeCheckpointRestoresThePositionOfItsToken() throws {
+    @Test("the vision-language speculative snapshot slot restores the position of its token")
+    func theVisionLanguageSpeculativeSnapshotSlotRestoresThePositionOfItsToken() throws {
         let configuration = try visionTextConfiguration()
         let layer = MLXVLM.Qwen35Language.GatedDeltaNet(configuration)
         let cache = MambaCache()
-        let input = hiddenStates(
-            tokenCount: Self.checkpointTokenCount + 1, width: configuration.hiddenSize)
+        let input = hiddenStates(tokenCount: Self.verifyTokenCount, width: configuration.hiddenSize)
 
-        eval(layer(input, cache: cache, checkpointAfter: Self.checkpointTokenCount))
-        #expect(cache.offset == Self.checkpointTokenCount + 1)
+        eval(layer(input, cache: cache, keepsSnapshots: true))
+        #expect(cache.offset == Self.verifyTokenCount)
 
-        #expect(cache.restoreSpeculativeCheckpoint())
-        #expect(cache.offset == Self.checkpointTokenCount)
+        #expect(cache.selectSpeculativeSlot(rollingBack: Self.rejectedTokenCount))
+        #expect(cache.offset == Self.verifyTokenCount - Self.rejectedTokenCount)
     }
 
     @Test("the compiled decode of a linear layer advances its cache by one")

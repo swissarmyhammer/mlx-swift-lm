@@ -3,12 +3,14 @@
 import CryptoKit
 import Foundation
 import MLX
+import MLXLMTestSupport
 import Testing
 
 @testable import MLXLMCommon
 
-/// Tests for the two-step save of a prompt cache: `preparePromptCacheSave(cache:metadata:state:)`
-/// reads the caches, and `writePromptCache(_:url:)` writes the file.
+/// Tests for the two-step save of a prompt cache:
+/// `preparePromptCacheSave(cache:metadata:state:drafterContinuation:)` reads the caches, and
+/// `writePromptCache(_:url:)` writes the file.
 struct PromptCacheSaveInputTests {
 
     // MARK: - Fixture sizes
@@ -133,15 +135,6 @@ struct PromptCacheSaveInputTests {
         }
     }
 
-    /// Makes a temporary file URL for one prompt cache file.
-    ///
-    /// - Returns: The URL, in the temporary directory.
-    fileprivate static func temporaryURL() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
-    }
-
     /// Gives the lowercase hexadecimal SHA-256 digest of the content of a safetensors file:
     /// each metadata entry, and the name, the type, the shape and the bytes of each array, in
     /// the order of the names.
@@ -169,7 +162,7 @@ struct PromptCacheSaveInputTests {
 
     @Test("savePromptCache writes the same content as before the save became two steps")
     func saveWritesTheSameContentAsBefore() throws {
-        let url = Self.temporaryURL()
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(
@@ -181,8 +174,8 @@ struct PromptCacheSaveInputTests {
 
     @Test("prepare and then write gives the content of savePromptCache")
     func prepareAndWriteGiveTheContentOfSave() throws {
-        let savedURL = Self.temporaryURL()
-        let writtenURL = Self.temporaryURL()
+        let savedURL = TemporaryPromptCacheFile.makeURL()
+        let writtenURL = TemporaryPromptCacheFile.makeURL()
         defer {
             try? FileManager.default.removeItem(at: savedURL)
             try? FileManager.default.removeItem(at: writtenURL)
@@ -207,8 +200,8 @@ struct PromptCacheSaveInputTests {
 
     @Test("an update after prepare does not change what write puts in the file")
     func anUpdateAfterPrepareDoesNotChangeTheWrittenFile() throws {
-        let beforeURL = Self.temporaryURL()
-        let afterURL = Self.temporaryURL()
+        let beforeURL = TemporaryPromptCacheFile.makeURL()
+        let afterURL = TemporaryPromptCacheFile.makeURL()
         defer {
             try? FileManager.default.removeItem(at: beforeURL)
             try? FileManager.default.removeItem(at: afterURL)
@@ -245,5 +238,20 @@ struct PromptCacheSaveInputTests {
             try preparePromptCacheSave(cache: [], state: state)
         }
         #expect(error?.message == "Model state requires at least one prompt cache")
+    }
+
+    @Test("prepare refuses an MTP drafter continuation with no cache")
+    func prepareRefusesADrafterContinuationWithNoCache() throws {
+        let drafterContinuation = SerializedMTPDrafterContinuation(
+            arrays: [
+                MTPDrafterContinuation.SerializedKey.boundaryHidden: Self.ramp(
+                    Self.recurrentSlotShape, start: Self.start(of: .simpleKeys))
+            ],
+            metadata: [:])
+
+        let error = #expect(throws: KVCacheError.self) {
+            try preparePromptCacheSave(cache: [], drafterContinuation: drafterContinuation)
+        }
+        #expect(error?.message == "An MTP drafter continuation requires at least one prompt cache")
     }
 }

@@ -147,6 +147,29 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
         }
     }
 
+    func testLinearLayerSharedHybridBodyMatchesGeneralLayerExactly() throws {
+        MLXRandom.seed(43)
+        let config = try Self.configuration()
+        let layer = Qwen3NextDecoderLayer(config, layerIdx: 0)
+        layer.update(parameters: layer.parameters().mapValues { $0.asType(.float16) })
+        let gatedDeltaNet = try XCTUnwrap(layer.linearAttn)
+        let zero = gatedDeltaNet.zeroStates(batch: 1, dtype: .float16)
+        let x = MLXRandom.normal([1, 1, config.hiddenSize]).asType(.float16)
+        let convState = MLXRandom.normal(zero.conv.shape).asType(.float16)
+        let recState = MLXRandom.normal(zero.rec.shape)
+        let cache = MambaCache()
+        cache[0] = convState
+        cache[1] = recState
+
+        let general = layer(x, attentionMask: .none, ssmMask: nil, cache: cache)
+        let step = layer.linearLayerBody(x: x, convState: convState, recState: recState)
+
+        XCTAssertEqual(Snapshot(step.output), Snapshot(general))
+        XCTAssertEqual(Snapshot(step.convState), Snapshot(try XCTUnwrap(cache[0])))
+        XCTAssertEqual(Snapshot(step.recurrentState), Snapshot(try XCTUnwrap(cache[1])))
+        XCTAssertNil(step.snapshots)
+    }
+
     func testQuantizedCacheKeepsExactGeneralFallback() throws {
         MLXRandom.seed(37)
         let model = Qwen3NextModel(try Self.configuration(headDim: 32))

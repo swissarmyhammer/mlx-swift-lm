@@ -8,6 +8,7 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import Testing
 
@@ -202,8 +203,12 @@ enum GDNDecodeKernelFixture {
     /// configuration.
     private static let attentionHeadDim = 32
 
-    /// The vocabulary size of the test configuration.
-    private static let vocabularySize = 32
+    /// The vocabulary size of the test configuration: the vocabulary of the
+    /// Qwen 3.5 MTP fixtures, so each decode prompt of the Qwen 3.5 suites is a
+    /// token of a whole model of this configuration too. An id past the
+    /// vocabulary would make the embedding read past its table, and a decode
+    /// would then change from one process to the next.
+    private static let vocabularySize = Qwen35MTPFixture.vocabularySize
 
     /// The layer interval of the full-attention layers of the test
     /// configuration.
@@ -251,16 +256,19 @@ enum GDNDecodeKernelFixture {
     /// - Parameters:
     ///   - type: The configuration type of the layer kind.
     ///   - headCase: The head shape.
+    ///   - hiddenLayers: The decoder layers of a whole model: one
+    ///     full-attention layer in each ``fullAttentionInterval``, the others
+    ///     GDN layers.
     /// - Returns: The configuration.
     /// - Throws: The error of the decoder.
     static func configuration<Configuration: Decodable>(
-        _ type: Configuration.Type, _ headCase: HeadCase
+        _ type: Configuration.Type, _ headCase: HeadCase, hiddenLayers: Int = 1
     ) throws -> Configuration {
         let json = """
             {
                 "model_type": "qwen3_5",
                 "hidden_size": \(hiddenSize),
-                "num_hidden_layers": 1,
+                "num_hidden_layers": \(hiddenLayers),
                 "intermediate_size": \(hiddenSize),
                 "num_attention_heads": \(attentionHeads),
                 "num_key_value_heads": 1,

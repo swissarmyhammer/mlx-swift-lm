@@ -29,41 +29,15 @@ struct Qwen35DecodeAttentionTests {
     private static let seeds = Qwen35AttentionLayerFixture.Seeds(
         cache: 20_261_020, tokens: 20_261_021)
 
-    /// The number of random tensors of a traced step: the queries, the keys
-    /// and the values.
-    private static let stepTensors = 3
-
     /// The traced decode step gives the kernel output with no mask, and the
     /// SDPA of MLX with a causal mask or a mask array, in each dtype.
     @Test(arguments: AttentionKernelTolerance.dtypes, AttentionMaskKind.allCases)
     func theTracedDecodeStepGivesTheKernelOutputOrTheSDPA(
         dtype: DType, mask: AttentionMaskKind
     ) throws {
-        let layer = try Self.fixture.layer(dtype: dtype)
-        let attention = try #require(layer.selfAttn)
-        let cache = Self.fixture.filledCache(
-            keys: Self.cachedKeys, dtype: dtype, seed: Self.seeds.cache)
-        let step = MLXRandom.normal(
-            [Self.stepTensors, 1, Qwen35AttentionLayerFixture.queryHeads, 1, Self.fixture.headDim],
-            key: MLXRandom.key(Self.seeds.tokens)
-        ).asType(dtype)
-        let queries = step[0]
-        let keys = step[1][0..., ..<Qwen35AttentionLayerFixture.kvHeads]
-        let values = step[2][0..., ..<Qwen35AttentionLayerFixture.kvHeads]
-        let rotatedQueries = Qwen35AttentionLayerFixture.rotated(
-            queries, attention: attention, cache: cache)
-        let stepKeys = Self.cachedKeys + 1
-
-        let output = layer.attentionCacheStep(
-            queries: queries, keys: keys, values: values, cache: cache,
-            mask: Qwen35AttentionLayerFixture.mask(
-                mask, rotatedQueries: rotatedQueries, keys: stepKeys))
-        let expected = Qwen35AttentionLayerFixture.routeOutput(
-            with: mask, picksFrom: DecodeAttentionKernelTests.kernels,
-            rotatedQueries: rotatedQueries, attention: attention, cache: cache)
-
-        Qwen35AttentionLayerFixture.expectTheStep(
-            output, gives: expected, cache: cache, keys: stepKeys)
+        try Self.fixture.expectTheTracedStepGivesTheRouteOutput(
+            cachedKeys: Self.cachedKeys, tokens: 1, dtype: dtype, mask: mask,
+            picksFrom: DecodeAttentionKernelTests.kernels, seeds: Self.seeds)
     }
 
     /// The general attention body of one token gives the kernel output with

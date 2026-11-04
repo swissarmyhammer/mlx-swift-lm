@@ -8,44 +8,57 @@ import Testing
 
 @testable import MLXFoundationModels
 
-/// The output count a pass reports must name every token the model wrote
-/// and the caches hold, the stop token included.
+/// The output count a pass reports must name every token the model wrote,
+/// the stop token included.
 ///
 /// `GenerateCompletionInfo.generationTokenCount` leaves the stop token out
-/// when the loop suppresses it, and names it in `stopTokenFedToCache`. The
-/// ledger of the prompt cache holds that token, thus a consumer that adds the
-/// prompt count and the output count of a turn must reach the tokens the next
-/// turn can reuse. `FoundationModelsRouter` reads the two counts that way.
+/// when the loop suppresses it, and names it in `discardedStopToken`. Plain
+/// decode feeds that token to the caches before it returns it, and names it in
+/// `stopTokenFedToCache` too; MTP decode can return it as the last token of a
+/// round, which no forward pass fed. The model wrote the token either way, thus
+/// a turn reports the same output count with MTP and without it.
 @Suite("The output count of a pass")
 struct ExecutorUsageOutputTests {
 
     /// Tokens the fixture generated before the stop token.
     private static let generatedTokenCount = 27
 
-    /// The stop token the fixture fed into the caches.
+    /// The stop token that ended the fixture's generation.
     private static let stopToken = 248_046
 
-    /// A completion report with `generatedTokenCount` tokens and the stop
-    /// token `stopToken`, or no stop token when it is nil.
-    private func info(stopToken: Int?) -> GenerateCompletionInfo {
+    /// A completion report with `generatedTokenCount` tokens, the stop token
+    /// `discarded` the loop left out of the output, and the stop token `fed`
+    /// the caches hold.
+    private func info(discarded: Int?, fed: Int?) -> GenerateCompletionInfo {
         GenerateCompletionInfo(
             promptTokenCount: 1, generationTokenCount: Self.generatedTokenCount,
-            promptTime: 0, generationTime: 0, stopTokenFedToCache: stopToken)
+            promptTime: 0, generationTime: 0, stopTokenFedToCache: fed,
+            discardedStopToken: discarded)
     }
 
     @Test("counts the stop token the caches hold")
     func countsTheStopTokenTheCachesHold() {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         #expect(
-            MLXLanguageModel.Executor.generatedTokenCount(of: info(stopToken: Self.stopToken))
+            MLXLanguageModel.Executor.generatedTokenCount(
+                of: info(discarded: Self.stopToken, fed: Self.stopToken))
                 == Self.generatedTokenCount + 1)
     }
 
-    @Test("counts no stop token when the pass fed none")
-    func countsNoStopTokenWhenThePassFedNone() {
+    @Test("counts the stop token no forward pass fed")
+    func countsTheStopTokenNoForwardPassFed() {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         #expect(
-            MLXLanguageModel.Executor.generatedTokenCount(of: info(stopToken: nil))
+            MLXLanguageModel.Executor.generatedTokenCount(
+                of: info(discarded: Self.stopToken, fed: nil))
+                == Self.generatedTokenCount + 1)
+    }
+
+    @Test("counts no stop token when the pass ended without one")
+    func countsNoStopTokenWhenThePassEndedWithoutOne() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        #expect(
+            MLXLanguageModel.Executor.generatedTokenCount(of: info(discarded: nil, fed: nil))
                 == Self.generatedTokenCount)
     }
 }

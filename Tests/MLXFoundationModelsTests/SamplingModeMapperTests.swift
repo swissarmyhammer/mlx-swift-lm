@@ -8,7 +8,7 @@ import MLXFoundationModels
 
 /// Coverage for the `samplingMode` → `GenerateParameters` resolver. Mirrors
 /// `SampleTests.testGenerateParametersCreatesExpectedSampler` by asserting both
-/// the resolved triple and the resulting `.sampler()` type: a parameter-only
+/// the resolved triple and the resulting `.makeSampler()` type: a parameter-only
 /// assertion would miss that e.g. `topK == 0` is inert.
 @Suite
 struct SamplingModeMapperTests {
@@ -21,7 +21,7 @@ struct SamplingModeMapperTests {
         var params = GenerateParameters()
         resolveSamplingParameters(mode: mode, clampedTemperature: clampedTemperature)
             .apply(to: &params)
-        return params.sampler()
+        return params.makeSampler()
     }
 
     private func resolve(

@@ -1,0 +1,123 @@
+---
+assignees:
+- claude-code
+comments:
+- actor: claude-code
+  id: 01m635e014vmjdjdhesmmcz7jb
+  text: |-
+    Picked up. Research:
+    - Seed is drawn at commit in `appendDrafterState` (MLXLLM + MLXVLM Qwen35MTP.swift) via `sampleMTPSeed` -> `MTPDraftBlockOutput.seededMTPDraft` (QwenMTP.swift), which already builds the seed's logits; the gate can keep `exp(max - logSumExp)` of those lazily.
+    - The chain after the seed runs in `ShiftedMTPDrafter.chainAfterSeed` -> `chainedMTPDrafts`; its first step's `topProbability(...).item` is the per-step sync. bs2 never chains (`chainBlockSize < 2`), so a gate placed after that guard leaves bs2 untouched.
+    - Seed is cleared in `removeLastEntries`, `takeSeed`, and the prefill feed; `finalizeDrafterState` removes the last entry, so a finalized (ChatSession) continuation never holds a seed — resume recomputes it via `appendDrafterState`. Serialized continuations therefore do not need the value; restored ones without it chain as today (card requirement).
+    - The iterator's finalize evaluates the seed arrays before the continuation crosses tasks; the new lazy scalar must be cleared/settled with them.
+    - Reading the seed probability forces the commit's MTP forward to evaluate before the next verify (an extra sync vs today only on confident rounds with floor > 0 and bs > 2); low-confidence rounds save the chained MTP step + LM head.
+  timestamp: 2026-10-29T06:26:51.044754+00:00
+- actor: claude-code
+  id: 01m635rkr5tya41qhn08g8dvjz
+  text: |-
+    Seed gate landed (TDD: RED 13 issues in new Tests/MLXLMTests/Qwen35MTPSeedGateTests.swift, then GREEN 9 tests). Shape:
+    - `MTPDrafterState.seedTopProbability: MLXArray?` (lazy scalar), set by new `MTPDrafterState.drawSeed(hidden:targetEmbedTokens:lmHead:sampler:)` (replaces `sampleMTPSeed`; LLM + VLM `appendDrafterState` call it) from the logits `seededMTPDraft` already builds.
+    - `ShiftedMTPDrafter.chainAfterSeed` checks `state.chainsAfterSeed(of:)` after the bs2 guard: floor > 0 and a known seed probability below it -> no chained step, proposalAppended 0. Nil probability (restored continuation) chains as before. Applies to draftTokens and draftsWithLogits (both sampled modes).
+    - `dropSeed()` / `seedArrays` on MTPDrafterState: removeLastEntries, takeSeed, prefill feed, iterator finalize eval, continuation heldArrays/byteCount all carry the probability with the seed. Not serialized: finalized continuations never hold a seed.
+    - Fixture note: tiny copying drafter's seed top-1 probs are 0.036-0.075 (vocab 64), so the mixed-round test uses floor 0.045.
+    Next: Release sweep (load avg 4.9 before; Activity Monitor at ~99% CPU, user process).
+  timestamp: 2026-10-29T06:32:38.917160+00:00
+- actor: claude-code
+  id: 01m6391paqszyd0rejmaj48zc3
+  text: |-
+    Measurements (M5 Ultra, Release, qwen38FourBitMTPGeneration sweep, MTP tok/s math/code/prose (mean); plain 59.3-59.7 every row):
+    Sweep #1, seed gate + per-step floor check (load 3.84 -> 3.30, noise 0.4%, thermal 1): bs2 92.8/83.2/80.8 (85.6); bs3 p.75 93.5/81.7/78.7 (84.6); bs4 p.75 98.6/86.4/83.6 (89.5); bs5 p.75 100.1/87.4/83.4 (90.3); bs6 p.75 97.9/87.9/79.9 (88.6). p0 rows unchanged vs ^hcfzyem (no floor, no gate). Fastest no slower than one draft on any prompt: bs5 pMin 0.75 -> the gate turned prose from -8.4% (73.9) into +3.2% (83.4) vs bs2.
+    Sweep #2, batched floor check (whole chain drafted lazily, all top-1 probs read in one sync; load 4.23 -> 3.36, noise 0.4%): bs3 p.75 94.1/82.2/79.1 (85.1); bs4 p.75 99.7/86.5/83.6 (89.9); bs5 p.75 101.2/86.9/82.1 (90.1); bs6 p.75 98.9/86.3/77.4 (87.5). Batched wins math by ~1 tok/s but loses prose (wasted chained steps the floor would have stopped) and loses the bs5 combined (90.1 vs 90.3) and bs6 (87.5 vs 88.6). Kept the per-step check; batched variant reverted, not shipped.
+    Default changed per DEFAULT RULE: SpeculativeDecodingConfig.defaultMTPBlockSize 2 -> 5, defaultMTPMinimumDraftProbability 0 -> 0.75; Qwen35MTPFixture.blockSize = the shipped default.
+    Sweep #3 at the new default (load 5.99 -> 4.32, noise 0.6%): bs2 92.8/83.3/81.0 (85.7); shipped bs5 p.75 100.5/87.5/83.5 (90.5, +5.6% combined; +8.3/+5.0/+3.1% per prompt); TEST SUCCEEDED (default rule check, token match: math/code exact, prose near-tie at 120 gap 0.125).
+    qwen38FourBitMTPSystemPromptCache: TEST SUCCEEDED, no known issues; edit turn prefilled 123 tok (cached 2169), drafter prefilled 123, 104.0 tok/s MTP vs 56.2 plain; follow-ups/thinking turns prefilled 24-29 tok.
+    qwen38FourBitMTPSampledGeneration: TEST SUCCEEDED; default mode 92.5/77.1/79.8 vs plain 58.4, other mode 85.0/76.3/72.8.
+    Fixture-constant fallout: 2 pre-existing drafter-level tests (Qwen35MTPDrafterStateTests.appendTentativeEntry helper, QwenMTPDistributionDraftTests.seedDraftWithLogitsMatchesArgmaxSeed) meant a one-draft round through Qwen35MTPFixture.blockSize; they now name MTPDraftBlockOutput.minimumChainedMTPBlockSize.
+    Idea not done (out of card scope): asyncEval the seed probability right after commit to hide the gate's sync; could shave the confident-round sync further.
+  timestamp: 2026-10-29T07:30:02.199052+00:00
+- actor: claude-code
+  id: 01m63926k7hy88m1pyg6yvyjs9
+  text: |-
+    ### implement — changed
+    - evidence: 14 files — Libraries/MLXLMCommon/{QwenMTP,MTPDrafterModel,MTPDrafterContinuation,MTPDrafterPrefillFeed,MTPSpeculativeTokenIterator,ChatSession}.swift, Libraries/MLXLLM/Models/Qwen35MTP.swift, Libraries/MLXVLM/Models/Qwen35MTP.swift, Tests/MLXLMTestSupport/Qwen35MTPFixture.swift, Tests/MLXLMTests/{Qwen35MTPSeedGateTests (new, 8.5 KB), Qwen35MTPSamplingTests, Qwen35MTPTests}.swift. `swift build --build-tests` 0 compiler warnings (only the swift-build "missing creator for mutated node" note on the Cmlx bundle). xctest: MLXLMTests 920 XCTest + 2000 Swift Testing pass, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 404, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6; 0 failures, 0 skipped. Release: qwen38FourBitMTPGeneration SUCCEEDED (shipped bs5 pMin 0.75 100.5/87.5/83.5 vs bs2 92.8/83.3/81.0, plain 59.5), qwen38FourBitMTPSystemPromptCache SUCCEEDED (edit turn 123 tok, no known issues), qwen38FourBitMTPSampledGeneration SUCCEEDED.
+    - next: /review
+  timestamp: 2026-10-29T07:30:18.855300+00:00
+- actor: claude-code
+  id: 01m6398hvt1ynnv91gxet6dx3c
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (7b8c7896) — 2 findings (2 confirmed, 3 refuted) — Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:1530, Tests/MLXLMTests/Qwen35MTPSeedGateTests.swift:89
+    - next: implement the 2 open items in the 2026-10-29 02:30 Review Findings section
+  timestamp: 2026-10-29T07:33:47.002413+00:00
+- actor: claude-code
+  id: 01m63990b6e9wpc611p80wdh4a
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 12 files (seed gate, default bs5 pMin 0.75)
+    - test: green — 5 bundles 0 failures 0 skipped; Release bs5/0.75 100.5/87.5/83.5 vs bs2 92.8/83.3/81.0, plain 59.5; edit turn 123 tokens
+    - commit: 7b8c7896
+    - review: findings — MTPSpeculativeTokenIterator.swift:1530, Qwen35MTPSeedGateTests.swift:89
+  timestamp: 2026-10-29T07:34:01.830120+00:00
+- actor: claude-code
+  id: 01m63akmqdm8dqds25d3tvtzyc
+  text: |-
+    Worked the 2 findings of Review Findings (2026-10-29 02:30):
+    1. duplication — `MTPDrafterContinuation.heldArrays` is now `package`; `finalizeDrafterContinuation` builds the continuation first and evals `continuation.heldArrays`, so the inline rebuild is gone. Same file: `byteCount` repeated `[targetBoundaryHidden] + state.seedArrays`; both now share a private `boundaryAndSeedArrays`. Left alone: `MTPDrafterContinuationSerialization` deserializing init evals boundary + seed token/hidden before `self` exists (different file, not covered by the finding).
+    2. no-test-cheating — the VLM fixture does expose the logits (`fixture.target.languageModel.lmHead`, untied embeddings, internal via @testable), so I used the real check, not the bounds-check fallback. A shared `expectedSeedProbability(_:lmHead:)` helper now computes softmax max of `lmHead(seedHidden)` for both the LLM and VLM tests (it replaced the copied block), and each test asserts within `probabilityTolerance`.
+    Gotcha: `try #require(lmHead)(seedHidden)` crashes swift-frontend (Xcode 27.1, assertion `inserted` in ConstraintSystem::recordArgumentList). Bind the #require result to a local first.
+    Note: `dump validators` wrote a 754K-char rules file, too large to read whole. I followed the duplication, test-integrity, swift and code-hygiene rules named in the findings.
+    Release (load 3.0-4.5, noise 0.4%, thermal 1): qwen38FourBitMTPGeneration SUCCEEDED. Shipped bs5 pMin 0.75 ran 100.4/87.4/83.4 (mean 90.4), bs2 92.9/83.2/80.7, plain 59.5, and was still the fastest and the default-rule winner. qwen38FourBitMTPSystemPromptCache SUCCEEDED with no known issues: edit turn prefilled 123 tok (cached 2169), drafter prefilled 123, 98.4 tok/s MTP vs 56.3 plain, tokens exact.
+  timestamp: 2026-10-29T07:57:18.957494+00:00
+- actor: claude-code
+  id: 01m63akt46jt21rj490rtr31r9
+  text: |-
+    ### implement — changed
+    - evidence: 3 files — Libraries/MLXLMCommon/MTPDrafterContinuation.swift, Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift, Tests/MLXLMTests/Qwen35MTPSeedGateTests.swift. `swift build --build-tests` 0 compiler warnings (only the known swift-build "missing creator" note on the Cmlx bundle). xctest: MLXLMTests 920 XCTest + 2000 Swift Testing, MLXGuidedGenerationTests 70, MLXFoundationModelsTests 404, CXGrammarTests 7, MLXHuggingFaceMacrosTests 6; 0 failures, 0 skipped. Release qwen38FourBitMTPGeneration SUCCEEDED (bs5 pMin 0.75 100.4/87.4/83.4), qwen38FourBitMTPSystemPromptCache SUCCEEDED (edit turn 123 tok, no known issues). Both 02:30 findings checked.
+    - next: /review
+  timestamp: 2026-10-29T07:57:24.486002+00:00
+- actor: claude-code
+  id: 01m63anw4y0f0ybg3yt90gz9z0
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (51f0f585) — 0 findings, 0 confirmed, 0 refuted (7 attempted, 0 failed); 3 files reviewed, 2 .kanban files skipped (no validator). Both items in ## Review Findings (2026-10-29 02:30) checked.
+    - next: task moved to done
+  timestamp: 2026-10-29T07:58:32.094935+00:00
+- actor: claude-code
+  id: 01m63ap92fc11h1ecdmh4sks1z
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 3 files (shared heldArrays accessor, exact VLM seed probability test)
+    - test: green — 5 bundles 0 failures 0 skipped; Release default 100.4/87.4/83.4 vs bs2 92.9/83.2/80.7; edit turn 123 tokens
+    - commit: 51f0f585
+    - review: clean — task moved to done
+  timestamp: 2026-10-29T07:58:45.327457+00:00
+position_column: done
+position_ordinal: fffe80
+title: 'MTP: gate chained Qwen drafts on the seed''s confidence so deeper blocks stop costing prose and code'
+---
+## What
+^hcfzyem added chained Qwen MTP drafts (blockSize up to 6) and a confidence floor (`MTPDrafterState.minimumDraftProbability`, llama.cpp's p_min). On the M5 Ultra no deeper setting beats blockSize 2 on every category: with pMin 0.75, math gains (+7-8% at bs4/bs5) but prose loses 4-8% beyond noise, so the default stayed blockSize 2 (numbers on ^hcfzyem).
+
+Measured cause: every chained round pays one chained MTP step (MTP layer + full-vocabulary LM head) plus one host sync before the floor can stop it, even when the seed itself was unsure. In prose most chains stop at that first gated step, so the step and the sync are pure cost (~1.5-2 ms of a ~21 ms round).
+
+- [x] At commit, keep the seed's top-1 probability (lazily, from the logits `sampleMTPSeed` already computes) in `MTPDrafterState`, and skip the chain when it is below the floor, so a low-confidence round costs exactly a blockSize-2 round. A restored continuation without the value chains as today.
+- [x] Measure batching the floor check: draft the whole chain lazily and read all top-1 probabilities in one sync, against the per-step sync.
+- [x] Re-run `qwen38FourBitMTPGeneration()` (Release sweep); if a setting now wins under the DEFAULT RULE of ^hcfzyem, change `SpeculativeDecodingConfig.defaultMTPBlockSize` / `defaultMTPMinimumDraftProbability` and `Qwen35MTPFixture.blockSize`.
+
+## Acceptance Criteria
+- [x] Greedy output equals plain decode on the shared fixture with the seed gate, blockSize 3..6.
+- [x] Release sweep printed; default follows the DEFAULT RULE (fastest combined, no category slower than blockSize 2 beyond noise).
+
+## Workflow
+- Use `/tdd`. #mtp #qwen38 #perf
+
+## Review Findings (2026-10-29 02:30)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 12 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M62C57EC6FHXX6CBWHBQ0F3N.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M62C57EC6FHXX6CBWHBQ0F3N.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/MTPSpeculativeTokenIterator.swift:1530` `duplication/duplication` — The eval list built in `finalizeDrafterContinuation` repeats the held-arrays list that `MTPDrafterContinuation.heldArrays` already defines: the boundary hidden row, the drafter cache arrays, and the seed arrays. Both lists must include the same arrays. If one gains or loses an array, the eval and the continuation's held arrays can silently disagree. Expose one shared accessor, such as a package-level `heldArrays` on `MTPDrafterContinuation` or a helper taking the boundary row and `MTPDrafterState`, and use it both for the `eval` call here and for the continuation. Remove the inline rebuild.
+- [x] `Tests/MLXLMTests/Qwen35MTPSeedGateTests.swift:89` `test-integrity/no-test-cheating` — The VLM test is named 'a VLM commit keeps the top-1 probability of the seed it draws', but its only assertion is `probability > 0 && probability <= 1`. Any value in (0, 1] passes, so a broken probability computation (for example a constant 0.5, or the wrong reduction) would still pass. The sibling LLM test `commitKeepsTheSeedProbability` checks the value against an independently computed softmax max, so this one is a weakened version of that check. Compute the expected top-1 probability from the VLM drafter's seed logits, as `commitKeepsTheSeedProbability` does with `lmHead(seedHidden)`, and assert it is within `probabilityTolerance`. If the VLM fixture cannot expose its logits, keep the range check but add a comment that it is a bounds check only, and rely on the LLM test for the value.

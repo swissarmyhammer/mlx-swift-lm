@@ -37,6 +37,18 @@ public enum Qwen35VLMMTPRegistration {
     }
 }
 
+extension MTPDrafterRegistration {
+
+    /// The Qwen3.5-family multimodal MTP drafters: a deferred `SpeculativeDecodingConfig` that
+    /// takes this registers ``Qwen35VLMMTPRegistration`` and loads its drafter through
+    /// `MTPDrafterModelFactory.visionLanguage`, for a target that `VLMModelFactory` loaded.
+    /// `matchingTarget(_:_:)` with `qwen35Text` of MLXLLM covers a target that loaded as a text
+    /// model too.
+    public static let qwen35VLM = MTPDrafterRegistration(
+        factory: .visionLanguage, registerDrafterTypes: Qwen35VLMMTPRegistration.register,
+        draftsForTarget: { $0 is Qwen35 })
+}
+
 private struct Qwen35MTPTextConfiguration: Decodable {
     let modelType: String
     let textConfiguration: Qwen35Configuration.TextConfiguration

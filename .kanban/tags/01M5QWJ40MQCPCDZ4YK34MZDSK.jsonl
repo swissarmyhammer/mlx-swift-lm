@@ -1,0 +1,1 @@
+{"id":"01M5QWJ40MWVQYJ8NMPB2S4F14","timestamp":"2026-10-24T21:20:10.260522Z","op":"create","item_id":"01M5QWJ40MQCPCDZ4YK34MZDSK","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: d73a4a\n+tag_name: sampling\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: d73a4a\n-tag_name: sampling\n","transaction_id":null}

@@ -69,7 +69,7 @@ public struct ResolvedSamplingParameters: Sendable, Equatable {
 ///
 /// `GenerateParameters.temperature` defaults to `0.6` (a sampling value), so for
 /// top-k / nucleus a `nil` temperature output deliberately leaves that default in
-/// place — emitting `0` would route `sampler()` to argmax and silently ignore the
+/// place — emitting `0` would route `makeSampler()` to argmax and silently ignore the
 /// filter. The resolver does not clamp large top-k; MLX's `applyTopK` guards
 /// `k >= vocab` downstream.
 public func resolveSamplingParameters(

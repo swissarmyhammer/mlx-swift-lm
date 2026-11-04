@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import Testing
 
 @testable import MLXLLM
@@ -187,7 +188,7 @@ struct ChatSessionRecurrentCheckpointTests {
         var configuration = try JSONDecoder().decode(
             Qwen35TextConfiguration.self,
             from: Data(
-                qwen35TextConfigJSON(
+                Qwen35FixtureJSON.text(
                     mtpLayers: 0, hiddenLayers: Self.hybridLayerCount,
                     fullAttentionInterval: Self.hybridFullAttentionInterval
                 ).utf8))

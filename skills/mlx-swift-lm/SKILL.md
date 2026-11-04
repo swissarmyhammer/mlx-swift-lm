@@ -46,7 +46,7 @@ MLXEmbedders    - Embedding models and pooling utilities
 | Thread-safe model wrapper | `Libraries/MLXLMCommon/ModelContainer.swift` |
 | Simplified chat API | `Libraries/MLXLMCommon/ChatSession.swift` |
 | Generation & streaming APIs | `Libraries/MLXLMCommon/Evaluate.swift` |
-| KV cache types | `Libraries/MLXLMCommon/KVCache.swift` |
+| KV cache types | `Libraries/MLXLMCommon/KVCache.swift`, plus one file per cache class |
 | Wired-memory policies | `Libraries/MLXLMCommon/WiredMemoryPolicies.swift` |
 | Wired-memory measurement helpers | `Libraries/MLXLMCommon/WiredMemoryUtils.swift` |
 | Model configuration | `Libraries/MLXLMCommon/ModelConfiguration.swift` |

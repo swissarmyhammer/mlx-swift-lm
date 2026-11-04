@@ -69,7 +69,7 @@ private struct MockMTPIterator: TokenIteratorProtocol, MTPStatsCollecting {
 // MARK: - Minimal generateLoopTask reproduction
 //
 // The smallest faithful reproduction of the iterator-consuming pattern at
-// Evaluate.swift's `generateLoopTask` site. Mirrors the post-Phase-4 shape:
+// GenerationLoop.swift's `runTokenLoop` site. Mirrors the post-Phase-4 shape:
 // `var iterator = ...; while let token = iterator.next()`. Pre-Phase-4 this
 // helper used `for token in iterator`, and the counters on the outer
 // `iterator` binding stayed at zero because the for-in iterated a value-type

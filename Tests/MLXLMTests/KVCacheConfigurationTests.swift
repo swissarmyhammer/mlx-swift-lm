@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import Testing
 
@@ -312,9 +313,7 @@ struct KVCacheConfigurationTests {
             keys: MLXArray.ones([1, 1, 8, 16]),
             values: MLXArray.ones([1, 1, 8, 16]))
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("safetensors")
+        let url = TemporaryPromptCacheFile.makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
 
         try savePromptCache(url: url, cache: [cache])
@@ -394,21 +393,19 @@ struct KVCacheConfigurationTests {
     }
 
     @Test func modelCacheCopyAndTrimPreserveOneTimeline() throws {
-        let attention = KVCacheSimple()
-        _ = attention.update(
-            keys: MLXArray.zeros([1, 1, 8, 4]),
-            values: MLXArray.zeros([1, 1, 8, 4]))
+        let tokens = 8
+        let attention = ZeroFilledKVCache.make(tokens: tokens)
         let storage = KVCacheStorage([attention], plan: .disabled)
 
-        #expect(storage.processedTokenCount == 8)
+        #expect(storage.processedTokenCount == tokens)
         let snapshot = storage.copy()
         let trimmed = snapshot.trim(3)
 
         #expect(trimmed == 3)
         #expect(snapshot.processedTokenCount == 5)
         #expect(snapshot.cache[0].offset == 5)
-        #expect(storage.processedTokenCount == 8)
-        #expect(storage.cache[0].offset == 8)
+        #expect(storage.processedTokenCount == tokens)
+        #expect(storage.cache[0].offset == tokens)
         let snapshotAttention = try #require(snapshot.cache[0] as? KVCacheSimple)
         #expect(snapshotAttention !== attention)
     }
@@ -487,12 +484,7 @@ struct KVCacheConfigurationTests {
     }
 
     private func populatedSimpleCache(headDimension: Int) -> KVCacheSimple {
-        let cache = KVCacheSimple()
-        cache.state = [
-            MLXArray.zeros([1, 1, 1, headDimension]),
-            MLXArray.zeros([1, 1, 1, headDimension]),
-        ]
-        return cache
+        ZeroFilledKVCache.make(tokens: 1, headDimension: headDimension)
     }
 
     private final class HybridProgressModel: Module, LanguageModel {

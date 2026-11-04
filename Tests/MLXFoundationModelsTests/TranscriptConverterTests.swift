@@ -6,6 +6,7 @@ import FoundationModels
 import ImageIO
 import MLXLMCommon
 import Testing
+import UniformTypeIdentifiers
 
 @testable import MLXFoundationModels
 
@@ -154,7 +155,7 @@ struct TranscriptConverterTests {
 
         // Only supported types here. toolCalls/toolOutput are now mapped (see
         // the tool-calling tests below); genuinely unknown future entry types
-        // still hit the `default:` tripwire and are skipped.
+        // still hit the `@unknown default` warning and are skipped.
         let entries: [Transcript.Entry] = [
             .prompt(
                 Transcript.Prompt(
@@ -433,11 +434,13 @@ struct TranscriptConverterTests {
                 )),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
 
         #expect(messages.map(\.role) == [.user, .assistant])
         #expect(messages[1].content == "4")
         #expect(messages[1].reasoning == "Let me add: 2 plus 2 is 4.")
+        let raw = DefaultMessageGenerator().generate(message: messages[1])
+        #expect(raw["reasoning_content"] as? String == "Let me add: 2 plus 2 is 4.")
     }
 
     @Test
@@ -463,11 +466,28 @@ struct TranscriptConverterTests {
             .toolCalls(Transcript.ToolCalls(id: "tc_1", [toolCall])),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
 
         #expect(messages.map(\.role) == [.user, .assistant])
         #expect(messages[1].reasoning == "I need the tool.")
         #expect(messages[1].tool?.calls?.map(\.function.name) == ["get_weather"])
+        let raw = DefaultMessageGenerator().generate(message: messages[1])
+        #expect(raw["reasoning_content"] as? String == "I need the tool.")
+    }
+
+    @Test
+    func toolCallArgumentsThatAreNotAnObjectReplayEmpty() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        // `Transcript.ToolCall` is public, and its arguments hold any
+        // `GeneratedContent`, thus a host-built transcript can reach this.
+        let toolCall = Transcript.ToolCall(
+            id: "call_1", toolName: "echo", arguments: GeneratedContent("plain text"))
+
+        let messages = try TranscriptConverter.mlxMessages(
+            for: [.toolCalls(Transcript.ToolCalls(id: "tc_1", [toolCall]))])
+
+        #expect(messages[0].tool?.calls?.first?.function.arguments.isEmpty == true)
     }
 
     @Test
@@ -501,7 +521,7 @@ struct TranscriptConverterTests {
                 )),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
 
         #expect(messages.map(\.role) == [.user, .assistant])
         #expect(messages[0].reasoning == nil)
@@ -546,7 +566,7 @@ struct TranscriptConverterTests {
                 )),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
 
         #expect(messages.map(\.role) == [.user, .assistant, .user, .assistant])
         #expect(messages[1].reasoning == "Let me add: 2 plus 2 is 4.")
@@ -575,7 +595,7 @@ struct TranscriptConverterTests {
                 )),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: true)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .everyTurn)
 
         #expect(messages.count == 1)
         #expect(messages[0].reasoning == "before\nafter")
@@ -597,7 +617,7 @@ struct TranscriptConverterTests {
                 )),
         ]
 
-        let messages = try TranscriptConverter.mlxMessages(for: entries, replayReasoning: false)
+        let messages = try TranscriptConverter.mlxMessages(for: entries, reasoning: .dropped)
 
         #expect(messages.count == 1)
         #expect(messages[0].reasoning == nil)
@@ -922,6 +942,97 @@ struct TranscriptConverterTests {
             TranscriptConverter.labeledAttachments(in: entries).map(\.label)
                 == ["Photo_A1B2C3", "Photo_D4E5F6"])
     }
+
+    #if canImport(FoundationModels, _version: 2.1.14)
+
+    /// Reads the `.unsupportedTranscriptContent` payload out of a thrown error.
+    ///
+    /// - Parameter error: the error to read.
+    /// - Returns: the payload, or `nil` for any other error.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func unsupportedContent(
+        of error: any Error
+    ) -> LanguageModelError.UnsupportedTranscriptContent? {
+        if case LanguageModelError.unsupportedTranscriptContent(let content) = error {
+            return content
+        }
+        return nil
+    }
+
+    // Runs on every OS: the seam takes a `UTType`, so no `Transcript.DataAttachment` is built.
+    @Test
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func testUnsupportedDataAttachmentErrorNamesContentType() throws {
+        let entry = Transcript.Entry.prompt(
+            Transcript.Prompt(
+                segments: [.text(Transcript.TextSegment(content: "Read this"))],
+                responseFormat: nil))
+
+        let error = TranscriptConverter.unsupportedDataAttachment(
+            contentType: .json, in: entry)
+
+        let content = try #require(Self.unsupportedContent(of: error))
+        #expect(content.debugDescription.contains(UTType.json.identifier))
+    }
+
+    // `@available` makes Swift Testing report a skip on an older OS, because the
+    // `Transcript.DataAttachment` symbols do not exist there.
+    @Test
+    @available(iOS 27.2, macOS 27.2, visionOS 27.2, *)
+    func testPromptDataAttachmentThrowsUnsupportedTranscriptContent() throws {
+        let attachment = Transcript.AttachmentSegment(
+            content: .data(
+                Transcript.DataAttachment(contentType: .json, content: Data("{}".utf8))),
+            label: "payload")
+        let prompt = Transcript.Prompt(
+            segments: [
+                .text(Transcript.TextSegment(content: "Read this")),
+                .attachment(attachment),
+            ],
+            responseFormat: nil)
+
+        let error = #expect(throws: LanguageModelError.self) {
+            try TranscriptConverter.mlxMessages(for: [.prompt(prompt)])
+        }
+
+        let content = try #require(error.flatMap { Self.unsupportedContent(of: $0) })
+        #expect(content.debugDescription.contains(UTType.json.identifier))
+    }
+
+    // Runs on every OS: the seam takes a `UTType`, so no `Transcript.DataEntry` is built.
+    @Test
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func testUnsupportedDataEntryErrorNamesContentType() throws {
+        let entry = Transcript.Entry.prompt(
+            Transcript.Prompt(
+                segments: [.text(Transcript.TextSegment(content: "Read this"))],
+                responseFormat: nil))
+
+        let error = TranscriptConverter.unsupportedDataEntry(contentType: .json, in: entry)
+
+        let content = try #require(Self.unsupportedContent(of: error))
+        #expect(content.debugDescription.contains(UTType.json.identifier))
+    }
+
+    // `@available` makes Swift Testing report a skip on an older OS, because the
+    // `Transcript.DataEntry` symbols do not exist there. Both modes run, because
+    // `mlxMessages` takes a different path to `convert` when it replays reasoning.
+    @Test(arguments: [TranscriptConverter.HistoryReasoning.dropped, .everyTurn])
+    @available(iOS 27.2, macOS 27.2, visionOS 27.2, *)
+    func testDataEntryThrowsUnsupportedTranscriptContent(
+        reasoning: TranscriptConverter.HistoryReasoning
+    ) throws {
+        let dataEntry = Transcript.DataEntry(contentType: .json, content: Data("{}".utf8))
+
+        let error = #expect(throws: LanguageModelError.self) {
+            try TranscriptConverter.mlxMessages(for: [.data(dataEntry)], reasoning: reasoning)
+        }
+
+        let content = try #require(error.flatMap { Self.unsupportedContent(of: $0) })
+        #expect(content.debugDescription.contains(UTType.json.identifier))
+    }
+
+    #endif  // canImport(FoundationModels, _version: 2.1.14)
 
 }
 

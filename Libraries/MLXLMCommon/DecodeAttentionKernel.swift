@@ -334,9 +334,26 @@ package enum DecodeAttentionKernel {
     /// - Parameter keys: The number of cached keys, 1 or more.
     /// - Returns: The block count.
     static func blockCount(keys: Int) -> Int {
+        blockCount(
+            keys: keys, targetKeysPerBlock: targetKeysPerBlock, fewest: fewestBlocks,
+            most: mostBlocks)
+    }
+
+    /// The number of blocks some keys make, which ``VerifyAttentionKernel``
+    /// shares: the power of two at or below `keys / targetKeysPerBlock`,
+    /// from `fewest` to `most` blocks.
+    ///
+    /// - Parameters:
+    ///   - keys: The number of keys, 1 or more.
+    ///   - targetKeysPerBlock: The keys one block holds when the block count
+    ///     is not at a limit.
+    ///   - fewest: The fewest blocks, a power of two.
+    ///   - most: The most blocks, a power of two.
+    /// - Returns: The block count.
+    static func blockCount(keys: Int, targetKeysPerBlock: Int, fewest: Int, most: Int) -> Int {
         let wanted = max(keys / targetKeysPerBlock, 1)
         let powerOfTwo = 1 << (Int.bitWidth - 1 - wanted.leadingZeroBitCount)
-        return min(max(powerOfTwo, fewestBlocks), mostBlocks)
+        return min(max(powerOfTwo, fewest), most)
     }
 
     /// The number of keys of each block but the last, which holds the rest.
@@ -423,9 +440,26 @@ package enum DecodeAttentionKernel {
             threadGroup: (blockThreads, 1, 1),
             outputShapes: [[rows, blocks, headDim], [rows, blocks], [rows, blocks]],
             outputDTypes: [.float32, .float32, .float32])
+        return combine(results, like: queries)
+    }
+
+    /// The combine pass over the block results of each query row, which
+    /// ``VerifyAttentionKernel`` shares: the attention output of each row.
+    ///
+    /// - Parameters:
+    ///   - results: The block results, in float32: the weighted sums of the
+    ///     values, shape `(rows, blocks, headDim)`, the largest score of each
+    ///     block in natural-log units, shape `(rows, blocks)`, and the sum of
+    ///     the weights of each block, shape `(rows, blocks)`. Row `r` is row
+    ///     `r` of the `(batch, queryHeads, tokens)` rows of `queries`.
+    ///   - queries: The queries, whose shape and dtype the output takes.
+    /// - Returns: The attention output, of the shape and the dtype of
+    ///   `queries`.
+    static func combine(_ results: [MLXArray], like queries: MLXArray) -> MLXArray {
+        let rows = results[0].dim(0)
         return combineKernel(
             results,
-            template: [("T", queries.dtype), ("DIM", headDim)],
+            template: [("T", queries.dtype), ("DIM", queries.dim(HeadRowsAxis.width))],
             grid: (metalSimdWidth, rows * combineSimdGroups, 1),
             threadGroup: (metalSimdWidth, combineSimdGroups, 1),
             outputShapes: [queries.shape],

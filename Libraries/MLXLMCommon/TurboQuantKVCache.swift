@@ -1765,7 +1765,11 @@ public func maybeTurboQuantizeKVCache(
             // near-lossless protection for the quantization-sensitive first
             // and last layers at a quarter of the fp16 cost. An unsupported
             // realized shape remains in full precision.
-            guard let quantized = try? simple.toQuantized(groupSize: 64, bits: 8) else {
+            guard
+                let quantized = try? simple.toQuantized(
+                    groupSize: KVCacheTree.boundaryProtectionGroupSize,
+                    bits: KVCacheTree.boundaryProtectionBits)
+            else {
                 return simple
             }
             return quantized

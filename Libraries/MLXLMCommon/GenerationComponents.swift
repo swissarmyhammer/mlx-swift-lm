@@ -69,10 +69,7 @@ public struct GenerationComponents: Sendable {
         let existingFactory = logitProcessorFactory
         return Self(
             logitProcessorFactory: {
-                guard let existing = existingFactory?() else {
-                    return factory()
-                }
-                return ChainedLogitProcessor(processors: [existing, factory()])
+                Self.chaining(existingFactory?(), then: factory())
             },
             parameterValidator: parameterValidator)
     }
@@ -102,7 +99,7 @@ public struct GenerationComponents: Sendable {
     /// Build the ``LogitProcessor`` for a single generation.
     ///
     /// Composes the built-in penalty processor from
-    /// ``GenerateParameters/processor()`` with the custom processor produced by
+    /// ``GenerateParameters/makeProcessor()`` with the custom processor produced by
     /// ``logitProcessorFactory`` (if any). The custom processor runs *after* the
     /// penalty processor, matching Python mlx-lm where user `logits_processors`
     /// append after `make_logits_processors`.
@@ -110,16 +107,7 @@ public struct GenerationComponents: Sendable {
     /// The factory is invoked here, so a fresh custom processor is produced on
     /// every call and stateful processors do not leak state across generations.
     public func logitProcessor(parameters: GenerateParameters) -> LogitProcessor? {
-        switch (parameters.processor(), logitProcessorFactory?()) {
-        case (nil, nil):
-            return nil
-        case (let penalty?, nil):
-            return penalty
-        case (nil, let custom?):
-            return custom
-        case (let penalty?, let custom?):
-            return ChainedLogitProcessor(processors: [penalty, custom])
-        }
+        Self.chaining(parameters.makeProcessor(), logitProcessorFactory?())
     }
 
     /// As ``logitProcessor(parameters:)``, additionally masking the token ids
@@ -132,11 +120,24 @@ public struct GenerationComponents: Sendable {
     public func logitProcessor(
         parameters: GenerateParameters, model: any LanguageModel
     ) -> LogitProcessor? {
-        let base = logitProcessor(parameters: parameters)
-        guard let suppressor = makeSuppressTokensProcessor(model: model) else {
-            return base
-        }
-        guard let base else { return suppressor }
-        return ChainedLogitProcessor(processors: [base, suppressor])
+        Self.chaining(
+            logitProcessor(parameters: parameters), makeSuppressTokensProcessor(model: model))
+    }
+
+    /// `first` then `second`: `second` alone when `first` is `nil`, and else a
+    /// ``ChainedLogitProcessor`` of both, in that order.
+    private static func chaining(
+        _ first: LogitProcessor?, then second: LogitProcessor
+    ) -> LogitProcessor {
+        guard let first else { return second }
+        return ChainedLogitProcessor(processors: [first, second])
+    }
+
+    /// As ``chaining(_:then:)``, and `nil` when both are `nil`.
+    private static func chaining(
+        _ first: LogitProcessor?, _ second: LogitProcessor?
+    ) -> LogitProcessor? {
+        guard let second else { return first }
+        return chaining(first, then: second)
     }
 }

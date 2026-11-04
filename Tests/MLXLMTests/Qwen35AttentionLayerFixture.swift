@@ -39,6 +39,17 @@ struct Qwen35AttentionLayerFixture {
     /// values.
     private static let keysAndValues = 2
 
+    /// The index of each random tensor of a traced step, along the leading
+    /// axis of the one random draw that holds them all.
+    private enum StepTensor: Int, CaseIterable {
+        /// The queries of the new tokens.
+        case queries
+        /// The keys of the new tokens.
+        case keys
+        /// The values of the new tokens.
+        case values
+    }
+
     /// The width of one attention head.
     let headDim: Int
 
@@ -180,6 +191,48 @@ struct Qwen35AttentionLayerFixture {
                 with: kind, picksFrom: kernels, rotatedQueries: rotatedQueries,
                 attention: attention, cache: cache),
             gate: gate)
+
+        Self.expectTheStep(
+            output, gives: expected, cache: cache, keys: keys, sourceLocation: sourceLocation)
+    }
+
+    /// Checks that the traced attention step of the layer
+    /// (`attentionCacheStep`) gives the output of the route bit for bit, for
+    /// `tokens` random query, key and value rows after `cachedKeys` cached
+    /// keys: the kernel of the mask kind, or the SDPA of MLX when `kernels`
+    /// holds no kernel for the mask kind.
+    ///
+    /// - Parameters:
+    ///   - cachedKeys: The number of cached keys ahead of the step.
+    ///   - tokens: The number of new tokens of the step.
+    ///   - dtype: The dtype of the weights, the rows and the cache.
+    ///   - kind: The mask kind the step gives the layer.
+    ///   - kernels: The kernel that the step must pick for each mask kind.
+    ///   - seeds: The seed of each random operand.
+    ///   - sourceLocation: The location that a failure reports.
+    func expectTheTracedStepGivesTheRouteOutput(
+        cachedKeys: Int, tokens: Int, dtype: DType, mask kind: AttentionMaskKind,
+        picksFrom kernels: AttentionKernelTable, seeds: Seeds,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) throws {
+        let layer = try layer(dtype: dtype)
+        let attention = try #require(layer.selfAttn, sourceLocation: sourceLocation)
+        let cache = filledCache(keys: cachedKeys, dtype: dtype, seed: seeds.cache)
+        let step = MLXRandom.normal(
+            [StepTensor.allCases.count, 1, Self.queryHeads, tokens, headDim],
+            key: MLXRandom.key(seeds.tokens)
+        ).asType(dtype)
+        let queries = step[StepTensor.queries.rawValue]
+        let rotatedQueries = Self.rotated(queries, attention: attention, cache: cache)
+        let keys = cachedKeys + tokens
+
+        let output = layer.attentionCacheStep(
+            queries: queries, keys: step[StepTensor.keys.rawValue][0..., ..<Self.kvHeads],
+            values: step[StepTensor.values.rawValue][0..., ..<Self.kvHeads], cache: cache,
+            mask: Self.mask(kind, rotatedQueries: rotatedQueries, keys: keys))
+        let expected = Self.routeOutput(
+            with: kind, picksFrom: kernels, rotatedQueries: rotatedQueries,
+            attention: attention, cache: cache)
 
         Self.expectTheStep(
             output, gives: expected, cache: cache, keys: keys, sourceLocation: sourceLocation)

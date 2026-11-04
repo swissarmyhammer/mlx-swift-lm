@@ -8,6 +8,7 @@ import Foundation
 import FoundationModels
 import MLX
 import MLXLMCommon
+import UniformTypeIdentifiers
 
 /// Converts FoundationModels transcript entries to MLX chat message format.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -15,12 +16,66 @@ struct TranscriptConverter {
 
     private static let logger = MLXLogger(label: "TranscriptConverter")
 
+    /// How the history keeps the reasoning of a past turn, as the reasoning
+    /// protocol of the model states it.
+    enum HistoryReasoning: Equatable, Sendable {
+        /// Every reasoning entry is dropped: the answer carries forward, the
+        /// chain-of-thought does not.
+        case dropped
+
+        /// The reasoning of every turn rides on the assistant message of its
+        /// turn (``ReasoningConfig/replaysReasoningIntoHistory``, Qwen).
+        case everyTurn
+
+        /// Only the reasoning of a turn whose response is empty rides on the
+        /// assistant message of its turn
+        /// (``ReasoningConfig/replaysUnclosedReasoningIntoHistory``,
+        /// DeepSeek-V4). Such a turn stopped inside the block its prompt
+        /// opened, thus `ChatSession` records its whole text as the reasoning
+        /// and an empty content, and the render closes the block after the
+        /// text the model wrote. The reasoning of every other turn is dropped,
+        /// as `ChatSession` keeps the whole text of such a turn as the content.
+        case reasoningOnlyTurns
+
+        /// How the history keeps reasoning for a model whose reasoning
+        /// protocol is `config`. A protocol that replays every turn wins over
+        /// the unclosed-only flag, as it does in `ChatSession`.
+        ///
+        /// - Parameter config: the reasoning protocol of the model, or `nil`
+        ///   for a model with none.
+        init(for config: ReasoningConfig?) {
+            if config?.replaysReasoningIntoHistory == true {
+                self = .everyTurn
+            } else if config?.replaysUnclosedReasoningIntoHistory == true {
+                self = .reasoningOnlyTurns
+            } else {
+                self = .dropped
+            }
+        }
+
+        /// `message` with the reasoning this mode keeps: under
+        /// ``reasoningOnlyTurns`` an assistant message with a content or tool
+        /// calls loses its reasoning; every other message stays as it is.
+        ///
+        /// - Parameter message: a converted message.
+        /// - Returns: the message the history keeps.
+        func kept(_ message: Chat.Message) -> Chat.Message {
+            guard self == .reasoningOnlyTurns, !message.content.isEmpty || message.tool != nil
+            else {
+                return message
+            }
+            var answered = message
+            answered.reasoning = nil
+            return answered
+        }
+    }
+
     /// The MLX `Chat.Message` array for a collection of transcript entries.
     ///
     /// - Parameters:
     ///   - entries: Transcript entries from FoundationModels
-    ///   - replayReasoning: whether the text of a `.reasoning` entry rides on
-    ///     the assistant message of its turn, as ``Chat/Message/reasoning``.
+    ///   - reasoning: which turns keep the text of their `.reasoning` entry
+    ///     on the assistant message of the turn, as ``Chat/Message/reasoning``.
     ///     The framework appends a turn's reasoning entry AFTER the response
     ///     entry of that turn -- the response entry opens with the turn, the
     ///     reasoning entry opens when the first reasoning fragment arrives --
@@ -30,22 +85,35 @@ struct TranscriptConverter {
     ///     assistant message right before it. Consecutive reasoning entries
     ///     join with newlines, the way the segments of one entry do; a
     ///     reasoning entry with no assistant message on either side is
-    ///     dropped. `false` (the default) drops every reasoning entry: the
-    ///     answer carries forward, the chain-of-thought does not.
-    ///     `ReasoningConfig.replaysReasoningIntoHistory` decides which model
-    ///     family replays.
+    ///     dropped. ``HistoryReasoning/dropped`` (the default) drops every
+    ///     reasoning entry, and ``HistoryReasoning/reasoningOnlyTurns`` drops
+    ///     the reasoning of every turn but one whose response is empty.
+    ///     ``HistoryReasoning/init(for:)`` decides which model family replays.
+    ///
+    ///     A turn that stopped on its token budget inside its reasoning leaves
+    ///     a response entry with no text beside its reasoning entry. Under
+    ///     replay that turn comes back as an assistant message with an empty
+    ///     content and the reasoning, as `ChatSession` records it, thus the
+    ///     history render writes the reasoning the model wrote inside the think
+    ///     block of the turn, and the render of the next turn extends the
+    ///     tokens the prompt cache holds. A response entry with no text and no
+    ///     reasoning still gives no message.
     /// - Returns: Array of MLX Chat.Message objects
+    /// - Throws: `LanguageModelError.unsupportedTranscriptContent` if an
+    ///   attachment is not an image, or `entries` holds a data entry.
     static func mlxMessages(
-        for entries: some Collection<Transcript.Entry>, replayReasoning: Bool = false
+        for entries: some Collection<Transcript.Entry>, reasoning: HistoryReasoning = .dropped
     ) throws -> [Chat.Message] {
+        let replays = reasoning != .dropped
         var messages: [Chat.Message] = []
         var replay = ReasoningReplay()
         for entry in entries {
-            if replayReasoning, case .reasoning(let reasoning) = entry {
-                replay.hold(extractText(from: reasoning.segments))
+            if replays, case .reasoning(let entryReasoning) = entry {
+                replay.hold(extractText(from: entryReasoning.segments))
                 continue
             }
-            guard var message = try convert(entry: entry) else { continue }
+            let placeholder = replays ? reasoningOnlyTurn(of: entry) : nil
+            guard var message = try placeholder ?? convert(entry: entry) else { continue }
             replay.settle(before: &message, in: &messages)
             messages.append(message)
             if message.role == .assistant {
@@ -53,7 +121,32 @@ struct TranscriptConverter {
             }
         }
         replay.settle(in: &messages)
-        return messages
+        return messages.filter { !holdsNothing($0) }.map(reasoning.kept)
+    }
+
+    /// The assistant message that holds the place of `entry` when it is a
+    /// response entry with no text, for the reasoning of its turn to ride on.
+    ///
+    /// - Parameter entry: the entry to convert.
+    /// - Returns: an assistant message with an empty content, or `nil` when
+    ///   `entry` is not a response entry with no text.
+    private static func reasoningOnlyTurn(of entry: Transcript.Entry) -> Chat.Message? {
+        guard case .response(let response) = entry, extractText(from: response.segments) == nil
+        else {
+            return nil
+        }
+        return .assistant("")
+    }
+
+    /// Whether `message` is the place of a response entry with no text that no
+    /// reasoning took: an assistant message with no content, no reasoning and
+    /// no tool calls. No other entry converts to such a message.
+    ///
+    /// - Parameter message: a converted message.
+    /// - Returns: `true` when the history keeps nothing of `message`.
+    private static func holdsNothing(_ message: Chat.Message) -> Bool {
+        message.role == .assistant && message.content.isEmpty && message.reasoning == nil
+            && message.tool == nil
     }
 
     /// The reasoning text between two assistant messages, and the assistant
@@ -70,7 +163,17 @@ struct TranscriptConverter {
         /// Holds `text` for the next assistant message.
         mutating func hold(_ text: String?) {
             guard let text else { return }
-            pending = pending.map { $0 + "\n" + text } ?? text
+            pending = Self.joined(pending, text)
+        }
+
+        /// Joins consecutive reasoning text with a newline.
+        ///
+        /// - Parameters:
+        ///   - earlier: The text so far, or `nil` when there is none.
+        ///   - later: The text that follows it.
+        /// - Returns: The joined text.
+        private static func joined(_ earlier: String?, _ later: String) -> String {
+            earlier.map { $0 + "\n" + later } ?? later
         }
 
         /// Hands the pending text to `message` when it is an assistant
@@ -80,9 +183,7 @@ struct TranscriptConverter {
         {
             if message.role == .assistant {
                 message.reasoning =
-                    pending.map { pending in
-                        message.reasoning.map { $0 + "\n" + pending } ?? pending
-                    } ?? message.reasoning
+                    pending.map { Self.joined(message.reasoning, $0) } ?? message.reasoning
                 pending = nil
             } else {
                 settle(in: &messages)
@@ -94,21 +195,20 @@ struct TranscriptConverter {
         /// it when no assistant message stands right before it.
         mutating func settle(in messages: inout [Chat.Message]) {
             if let anchor, let pending {
-                messages[anchor].reasoning =
-                    messages[anchor].reasoning.map { $0 + "\n" + pending } ?? pending
+                messages[anchor].reasoning = Self.joined(messages[anchor].reasoning, pending)
             }
             pending = nil
         }
     }
 
     /// Converts a single transcript entry to its chat message — the per-entry
-    /// body of ``mlxMessages(for:replayReasoning:)``, which owns the
+    /// body of ``mlxMessages(for:reasoning:)``, which owns the
     /// cross-entry reasoning state around it.
     ///
     /// - Parameter entry: the entry to convert.
     /// - Returns: the message, or `nil` for an entry that produces none.
     /// - Throws: `LanguageModelError.unsupportedTranscriptContent` if an
-    ///   attachment is not an image.
+    ///   attachment is not an image, or `entry` is a data entry.
     private static func convert(entry: Transcript.Entry) throws -> Chat.Message? {
         switch entry {
         case .instructions(let instructions):
@@ -154,7 +254,7 @@ struct TranscriptConverter {
             // history (per SKILL.md) unless the caller asks for replay, in
             // which case `mlxMessages` consumes the entry BEFORE dispatching
             // here. Dropped explicitly so a future SDK change is reviewed here
-            // rather than silently absorbed by the catch-all below.
+            // rather than absorbed by the `@unknown default` below.
             logger.debug("Skipping reasoning entry (not replayed into chat history)")
             return nil
 
@@ -195,11 +295,16 @@ struct TranscriptConverter {
             let content = extractToolOutputContent(from: output.segments)
             return Chat.Message.tool(content, id: output.id)
 
-        default:
-            // Skip unsupported entry types. Explicit `return nil` is a
-            // tripwire: a newly added SDK entry type surfaces here for review
-            // rather than being silently coerced into the wrong role.
-            logger.debug("Skipping unsupported entry type")
+        #if canImport(FoundationModels, _version: 2.1.14)
+        case .data(let dataEntry):
+            throw unsupportedDataEntry(contentType: dataEntry.contentType, in: entry)
+        #endif
+
+        @unknown default:
+            // Each case this SDK declares is named above, so only an entry type
+            // newer than this adapter reaches here. Skipping it keeps it out of
+            // the wrong role, and the warning reports it for review.
+            logger.warning("Skipping a transcript entry of a kind this SDK adapter predates")
             return nil
         }
     }
@@ -214,40 +319,51 @@ struct TranscriptConverter {
     private static func extractToolOutputContent(
         from segments: [Transcript.Segment]
     ) -> String {
-        segments.compactMap { segment -> String? in
-            switch segment {
-            case .text(let textSegment):
-                return textSegment.content
-            case .structure(let structuredSegment):
-                return structuredSegment.content.jsonString
-            case .attachment(let attachment):
+        extractText(
+            from: segments,
+            structure: { $0.content.jsonString },
+            attachment: { attachment in
                 logger.warning(
                     "Dropping an attachment in tool output. Tool-output images are not yet forwarded to the model",
                     metadata: ["label": attachment.label ?? "none"])
-                return nil
-            default:
-                logger.debug("Skipping unsupported tool-output segment")
-                return nil
-            }
-        }.joined(separator: "\n")
+            }) ?? ""
     }
 
     /// Extracts text content from transcript segments.
     ///
-    /// Concatenates all text segments with newlines.
-    /// Skips images, structured content, and other non-text segments.
+    /// Concatenates all text segments with newlines. By default it skips images,
+    /// structured content, and other non-text segments.
     ///
-    /// - Parameter segments: Array of transcript segments
+    /// - Parameters:
+    ///   - segments: Array of transcript segments
+    ///   - structure: The text of a structured segment, or nil to skip it
+    ///   - attachment: Observes an attachment, which the text leaves out
     /// - Returns: Concatenated text, or nil if no text content found
-    private static func extractText(from segments: [Transcript.Segment]) -> String? {
+    private static func extractText(
+        from segments: [Transcript.Segment],
+        structure: (Transcript.StructuredSegment) -> String? = { _ in
+            logger.debug("Skipping non-text segment in extractText")
+            return nil
+        },
+        attachment: (Transcript.AttachmentSegment) -> Void = { _ in
+            logger.debug("Skipping non-text segment in extractText")
+        }
+    ) -> String? {
         let texts = segments.compactMap { segment -> String? in
             switch segment {
             case .text(let textSegment):
                 return textSegment.content
 
-            default:
-                // Skip images, structured content, and local attention segment types
-                logger.debug("Skipping non-text segment in extractText")
+            case .structure(let structuredSegment):
+                return structure(structuredSegment)
+
+            case .attachment(let attachmentSegment):
+                attachment(attachmentSegment)
+                return nil
+
+            @unknown default:
+                assertionFailure("segment of an unknown kind reached extractText")
+                logger.warning("Skipping a segment of a kind this SDK adapter predates")
                 return nil
             }
         }
@@ -276,16 +392,90 @@ struct TranscriptConverter {
                 return .ciImage(
                     imageAttachment.ciImage.oriented(imageAttachment.orientation),
                     label: attachment.label)
+            #if canImport(FoundationModels, _version: 2.1.14)
+            case .data(let dataAttachment):
+                throw unsupportedDataAttachment(
+                    contentType: dataAttachment.contentType, in: entry)
+            #endif
             @unknown default:
-                throw LanguageModelError.unsupportedTranscriptContent(
-                    LanguageModelError.UnsupportedTranscriptContent(
-                        unsupportedContent: [entry],
-                        debugDescription:
-                            "This attachment carries content the MLX adapter cannot render. Only image attachments are supported."
-                    ))
+                throw unsupportedContent(
+                    described:
+                        "This attachment carries content the MLX adapter cannot render. Only image attachments are supported.",
+                    in: entry)
             }
         }
     }
+
+    /// The error for transcript content that the adapter cannot render.
+    ///
+    /// - Parameters:
+    ///   - description: the debug description of the failure.
+    ///   - entry: the transcript entry that is or holds the content.
+    /// - Returns: a `LanguageModelError.unsupportedTranscriptContent` that names `entry`.
+    private static func unsupportedContent(
+        described description: String, in entry: Transcript.Entry
+    ) -> LanguageModelError {
+        LanguageModelError.unsupportedTranscriptContent(
+            LanguageModelError.UnsupportedTranscriptContent(
+                unsupportedContent: [entry],
+                debugDescription: description))
+    }
+
+    // 2.1.14 is the module version of the 27.2 SDK, the first SDK checked to declare the
+    // `.data` cases. Each `.data` case in this file carries this guard, and an SDK without
+    // the case compiles its switch through `@unknown default`.
+    #if canImport(FoundationModels, _version: 2.1.14)
+    /// The error for data the adapter has no renderer for. ``MLXLanguageModel`` opts into
+    /// no data type, whatever `contentType` says.
+    ///
+    /// This takes the content type rather than a transcript data type, so a test can call
+    /// it on an OS older than the 27.2 that those types require.
+    ///
+    /// - Parameters:
+    ///   - kind: what holds the bytes, as the description names it.
+    ///   - contentType: the type of the bytes.
+    ///   - supported: what the adapter supports instead, as the description states it.
+    ///   - entry: the transcript entry that is or holds the data.
+    /// - Returns: a `LanguageModelError.unsupportedTranscriptContent` that names `entry`
+    ///   and `contentType`.
+    private static func unsupportedData(
+        _ kind: String, contentType: UTType, supported: String, in entry: Transcript.Entry
+    ) -> LanguageModelError {
+        unsupportedContent(
+            described:
+                "This \(kind) of type \(contentType.identifier) carries content the MLX adapter cannot render. \(supported)",
+            in: entry)
+    }
+
+    /// The error for a data attachment.
+    ///
+    /// - Parameters:
+    ///   - contentType: the type of the attachment's bytes.
+    ///   - entry: the transcript entry that holds the attachment.
+    /// - Returns: the error of ``unsupportedData(_:contentType:supported:in:)``.
+    static func unsupportedDataAttachment(
+        contentType: UTType, in entry: Transcript.Entry
+    ) -> LanguageModelError {
+        unsupportedData(
+            "data attachment", contentType: contentType,
+            supported: "Only image attachments are supported.", in: entry)
+    }
+
+    /// The error for a data entry, the one Foundation Models documents for a data entry
+    /// that a model rejects.
+    ///
+    /// - Parameters:
+    ///   - contentType: the type of the entry's bytes.
+    ///   - entry: the transcript entry.
+    /// - Returns: the error of ``unsupportedData(_:contentType:supported:in:)``.
+    static func unsupportedDataEntry(
+        contentType: UTType, in entry: Transcript.Entry
+    ) -> LanguageModelError {
+        unsupportedData(
+            "data entry", contentType: contentType,
+            supported: "No data entry type is supported.", in: entry)
+    }
+    #endif
 
     struct LabeledAttachment: Sendable {
         let label: String
@@ -296,20 +486,16 @@ struct TranscriptConverter {
     static func labeledAttachments(in entries: some Collection<Transcript.Entry>)
         -> [LabeledAttachment]
     {
-        var seen = Set<String>()
-        var ordered: [LabeledAttachment] = []
-        for entry in entries {
-            guard case .prompt(let prompt) = entry else { continue }
-            for segment in prompt.segments {
-                guard case .attachment(let attachment) = segment,
-                    let label = attachment.label
-                else { continue }
-                if seen.insert(label).inserted {
-                    ordered.append(LabeledAttachment(label: label, entry: entry))
-                }
+        let labeled = entries.flatMap { entry -> [LabeledAttachment] in
+            guard case .prompt(let prompt) = entry else { return [] }
+            return prompt.segments.compactMap { segment in
+                guard case .attachment(let attachment) = segment, let label = attachment.label
+                else { return nil }
+                return LabeledAttachment(label: label, entry: entry)
             }
         }
-        return ordered
+        var seen: Set<String> = []
+        return labeled.filter { seen.insert($0.label).inserted }
     }
 
 }

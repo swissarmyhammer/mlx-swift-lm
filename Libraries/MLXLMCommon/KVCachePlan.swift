@@ -26,8 +26,7 @@ package struct KVCachePlan: Sendable, Equatable {
     }
 
     package func validated(_ storage: KVCacheStorage) throws -> KVCacheStorage {
-        precondition(storage.plan == self, "KVCacheStorage used with a different plan")
-        precondition(!storage.roundIsOpen, "validated(_:) ran inside a staged round")
+        checkStorage(storage, operation: "validated(_:)")
         storage.cache = try validated(storage.cache)
         return storage
     }
@@ -42,13 +41,8 @@ package struct KVCachePlan: Sendable, Equatable {
     /// Once every eligible layer has either converted or reached a terminal
     /// unsupported state, later decode steps only compare the completed plan.
     package func apply(to storage: KVCacheStorage) {
-        precondition(storage.plan == self, "KVCacheStorage used with a different plan")
-        precondition(!storage.roundIsOpen, "apply(to:) ran inside a staged round")
-        guard !storage.isApplicationTerminal else { return }
-        guard let configuration else {
-            storage.isApplicationTerminal = true
-            return
-        }
+        checkStorage(storage, operation: "apply(to:)")
+        guard let configuration = pendingConfiguration(for: storage) else { return }
 
         if applyKVCacheConfigurationFast(
             cache: &storage.cache, configuration: configuration)
@@ -69,13 +63,8 @@ package struct KVCachePlan: Sendable, Equatable {
     package func applyAndValidate(
         to storage: KVCacheStorage
     ) throws -> KVCacheApplicationResult? {
-        precondition(storage.plan == self, "KVCacheStorage used with a different plan")
-        precondition(!storage.roundIsOpen, "applyAndValidate(to:) ran inside a staged round")
-        guard !storage.isApplicationTerminal else { return nil }
-        guard let configuration else {
-            storage.isApplicationTerminal = true
-            return nil
-        }
+        checkStorage(storage, operation: "applyAndValidate(to:)")
+        guard let configuration = pendingConfiguration(for: storage) else { return nil }
 
         let application = try applyKVCacheConfigurationValidated(
             cache: &storage.cache, configuration: configuration)
@@ -83,10 +72,6 @@ package struct KVCachePlan: Sendable, Equatable {
             storage.isApplicationTerminal = true
         }
         return application.result
-    }
-
-    package func report(for cache: [KVCache]) -> KVCacheRuntimeReport? {
-        configuration.map { kvCacheRuntimeReport(cache: cache, configuration: $0) }
     }
 
     package func report(for storage: KVCacheStorage) -> KVCacheRuntimeReport? {
@@ -98,6 +83,29 @@ package struct KVCachePlan: Sendable, Equatable {
                 layers: report.layers,
                 processedTokenCount: storage.processedTokenCount)
         }
+    }
+
+    /// Requires that `storage` belongs to this plan and has no staged round open.
+    ///
+    /// - Parameters:
+    ///   - storage: The storage the operation runs on.
+    ///   - operation: The name of the operation in the precondition message.
+    private func checkStorage(_ storage: KVCacheStorage, operation: @autoclosure () -> String) {
+        precondition(storage.plan == self, "KVCacheStorage used with a different plan")
+        precondition(!storage.roundIsOpen, "\(operation()) ran inside a staged round")
+    }
+
+    /// The configuration that dynamic conversion of `storage` still has to apply, or `nil`
+    /// when the storage is terminal.
+    ///
+    /// A disabled plan has nothing to apply, so it marks the storage terminal here.
+    private func pendingConfiguration(for storage: KVCacheStorage) -> KVCacheConfiguration? {
+        guard !storage.isApplicationTerminal else { return nil }
+        guard let configuration else {
+            storage.isApplicationTerminal = true
+            return nil
+        }
+        return configuration
     }
 }
 
@@ -219,7 +227,7 @@ package final class KVCacheStorage {
     package func beginRound(maximumPositions: Int) -> KVCacheRound? {
         precondition(!roundIsOpen, "a staged round is already open on this storage")
 
-        var strategies = [any KVCacheRoundStrategy]()
+        var strategies: [any KVCacheRoundStrategy] = []
         strategies.reserveCapacity(cache.count)
         for (slot, entry) in cache.enumerated() {
             // Auxiliary entries are not leaves, but they append and trim like one.
@@ -259,7 +267,7 @@ package final class KVCacheStorage {
         // Built before the commit, because that is the last moment the pre-commit contents of a
         // wrapped ring still exist. Records name slots: the object a rotating strategy presents
         // is a round-scoped wrapper that outlives nothing, and its `trim(_:)` is a no-op.
-        var rewinds = [LeafRewind]()
+        var rewinds: [LeafRewind] = []
         rewinds.reserveCapacity(round.strategies.count)
         for strategy in round.strategies {
             rewinds.append(
@@ -268,7 +276,7 @@ package final class KVCacheStorage {
                     point: strategy.makeRestorePoint(retaining: retaining)))
             strategy.commit(retaining: retaining)
         }
-        processedTokenCount += retaining
+        commitProcessedTokens(retaining)
         openRound = nil
         // Nothing to keep when every leaf can be undone by a trim: that is the path `trim(_:)`
         // already takes, and recording a round would only widen what a rewind means.
@@ -277,8 +285,7 @@ package final class KVCacheStorage {
             ? CompletedRound(committedPositions: retaining, leaves: rewinds)
             : nil
 
-        assert(
-            nativeAttentionOffsetsAreAligned,
+        assertNativeAttentionOffsetsAligned(
             "committing a staged round left the leaves and the timeline out of step")
 
         return KVCacheRoundCommit(
@@ -342,8 +349,7 @@ package final class KVCacheStorage {
         processedTokenCount -= rewound
         lastRound = nil
 
-        assert(
-            nativeAttentionOffsetsAreAligned,
+        assertNativeAttentionOffsetsAligned(
             "rewinding a committed round left the leaves and the timeline out of step")
         return rewound
     }
@@ -375,6 +381,14 @@ package final class KVCacheStorage {
         KVCacheTree.leaves(in: cache)
             .filter(\.isAttentionCache)
             .allSatisfy { $0.cache.offset == processedTokenCount }
+    }
+
+    /// Debug-only check of ``nativeAttentionOffsetsAreAligned`` after an operation that moves
+    /// the leaves and the timeline together.
+    ///
+    /// - Parameter message: What the assertion reports when the two are out of step.
+    private func assertNativeAttentionOffsetsAligned(_ message: @autoclosure () -> String) {
+        assert(nativeAttentionOffsetsAreAligned, message())
     }
 
     /// One-time compatibility inference for caches created outside the shared
@@ -456,16 +470,26 @@ extension GenerateParameters {
             compatibility: .allowPartial)
     }
 
+    /// The `kvGroupSize` a request gets when it does not set one.
+    private static let defaultLegacyKVGroupSize = 64
+
+    /// The `quantizedKVStart` a request gets when it does not set one.
+    private static let defaultLegacyQuantizedKVStart = 0
+
+    /// The most prefix tokens a legacy `maxKVSize` cache preserves.
+    private static let legacyPreservedPrefixTokens = 4
+
     private var hasLegacyKVCacheOverrides: Bool {
-        maxKVSize != nil || kvBits != nil || kvScheme != nil || kvGroupSize != 64
-            || quantizedKVStart != 0
+        maxKVSize != nil || kvBits != nil || kvScheme != nil
+            || kvGroupSize != Self.defaultLegacyKVGroupSize
+            || quantizedKVStart != Self.defaultLegacyQuantizedKVStart
     }
 
     private func legacyKVCacheCapacity() throws -> KVCacheConfiguration.Capacity? {
         guard let maxKVSize else { return nil }
         return try .init(
             maxTokens: maxKVSize,
-            preservedPrefixTokens: min(4, max(0, maxKVSize - 1)))
+            preservedPrefixTokens: min(Self.legacyPreservedPrefixTokens, max(0, maxKVSize - 1)))
     }
 
     private func legacyKVCacheStrategy() throws -> KVCacheConfiguration.Strategy {
@@ -473,10 +497,17 @@ extension GenerateParameters {
             return try strategy(forLegacyScheme: kvScheme)
         }
         guard let kvBits else { return .fullPrecision }
-        return .affine(
+        return try affineStrategy(bits: kvBits, groupSize: kvGroupSize)
+    }
+
+    /// The affine strategy with `bits` and `groupSize` that starts at `quantizedKVStart`.
+    private func affineStrategy(
+        bits: Int, groupSize: Int
+    ) throws -> KVCacheConfiguration.Strategy {
+        .affine(
             try .init(
-                bits: kvBits,
-                groupSize: kvGroupSize,
+                bits: bits,
+                groupSize: groupSize,
                 compressionStart: quantizedKVStart))
     }
 
@@ -484,11 +515,7 @@ extension GenerateParameters {
         forLegacyScheme scheme: String
     ) throws -> KVCacheConfiguration.Strategy {
         if let affine = resolveAffineScheme(scheme) {
-            return .affine(
-                try .init(
-                    bits: affine.bits,
-                    groupSize: affine.groupSize,
-                    compressionStart: quantizedKVStart))
+            return try affineStrategy(bits: affine.bits, groupSize: affine.groupSize)
         }
         if let turbo = resolveTurboScheme(scheme),
             let keyPrecision = TurboQuantKVCacheConfiguration.KeyPrecision(
@@ -502,15 +529,37 @@ extension GenerateParameters {
                     valuePrecision: valuePrecision,
                     compressionStart: quantizedKVStart))
         }
-        if let varn = resolveVarianceNormalizedScheme(scheme) {
+        if let varianceNormalized = resolveVarianceNormalizedScheme(scheme) {
             return .varianceNormalized(
                 try .init(
-                    keyBits: varn.keyBits,
-                    valueBits: varn.valueBits,
-                    tileSize: varn.tileSize,
-                    sinkhornIterations: varn.sinkhornIterations,
+                    keyBits: varianceNormalized.keyBits,
+                    valueBits: varianceNormalized.valueBits,
+                    tileSize: varianceNormalized.tileSize,
+                    sinkhornIterations: varianceNormalized.sinkhornIterations,
                     compressionStart: quantizedKVStart))
         }
         throw KVCacheConfigurationError.unsupportedLegacyScheme(scheme)
+    }
+}
+
+extension KVCacheStorage {
+    /// Records the prompt tokens that a model's `prepare` processed.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt `prepare` received.
+    ///   - result: The result of `prepare`.
+    ///   - role: The name of the call in the precondition message.
+    func commitPrefill(of input: LMInput, result: PrepareResult, role: String) {
+        let inputLength = input.text.cacheSequenceLength
+        switch result {
+        case .tokens(let tokens):
+            let remainingLength = tokens.cacheSequenceLength
+            precondition(
+                remainingLength <= inputLength,
+                "\(role) returned more tokens than it received")
+            commitProcessedTokens(inputLength - remainingLength)
+        case .logits:
+            commitProcessedTokens(inputLength)
+        }
     }
 }

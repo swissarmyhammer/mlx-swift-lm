@@ -10,9 +10,8 @@ import Testing
 
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
-// Extends the serialized parent declared in ModelCacheEvictionTests.swift so these
-// cache-touching tests never run concurrently with the other cache suites (the
-// process-global `static let cache` + key-agnostic `evictAll()` would otherwise race).
+// Extends the serialized parent declared in ModelCacheEvictionTests.swift, which also states why
+// a test here that calls `evictAll()` runs in a process of its own.
 extension FoundationModelsCacheTests {
 
     @Suite("MLXLanguageModel tokenizer-bias cache")
@@ -51,23 +50,28 @@ extension FoundationModelsCacheTests {
                 "a new modelID must trigger a fresh vocab scan")
         }
 
+        #if os(macOS)
+        /// The body runs in a process of its own: `evictAll()` drops the state of every
+        /// test that runs beside it. See ``FoundationModelsCacheTests``.
+        @available(macOS 27.0, *)
         @Test("evictAll() forces a recompute on the next call")
         func evictAllClearsBias() async {
-            guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+            await #expect(processExitsWith: .success) {
+                let tok = CountingTokenizer(tokens: ["a", "b", "}", "\n"])
+                let id = "org/bias-evictall-\(UUID().uuidString)"
 
-            let tok = CountingTokenizer(tokens: ["a", "b", "}", "\n"])
-            let id = "org/bias-evictall-\(UUID().uuidString)"
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: id, tokenizer: tok)
+                let afterFirst = tok.idLookupCount
 
-            _ = await MLXLanguageModel.makeTokenizerBias(modelID: id, tokenizer: tok)
-            let afterFirst = tok.idLookupCount
+                await MLXLanguageModel.evictAll()
 
-            await MLXLanguageModel.evictAll()
-
-            _ = await MLXLanguageModel.makeTokenizerBias(modelID: id, tokenizer: tok)
-            #expect(
-                tok.idLookupCount > afterFirst,
-                "evictAll() must drop the cached bias so the next call rescans")
+                _ = await MLXLanguageModel.makeTokenizerBias(modelID: id, tokenizer: tok)
+                #expect(
+                    tok.idLookupCount > afterFirst,
+                    "evictAll() must drop the cached bias so the next call rescans")
+            }
         }
+        #endif
 
         @Test("evict() drops only this model's cached bias")
         func evictIsPerModel() async {

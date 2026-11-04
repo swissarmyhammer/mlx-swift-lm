@@ -16,12 +16,12 @@ import Testing
 /// The fixtures come from ``PromptCacheSpoolFixtures``. A test that must see a write in flight
 /// gives the store a ``HeldWriter``, which holds each write until the test releases it.
 @Suite("An evicted prompt cache goes to disk through one serial writer")
-struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
+struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFixtures {
 
     // MARK: - Fixture values
 
     /// The model that each key names. It holds a `/`, as a real model ID does.
-    private static let modelID = "test-org/prompt-cache-spool"
+    static let modelID = "test-org/prompt-cache-spool"
 
     /// How many entries the serial-writer test spills.
     private static let spillCount = 4
@@ -90,11 +90,6 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
     }
 
     // MARK: - Fixture builders
-
-    /// The key of `sessionID` under ``modelID``.
-    private static func key(_ sessionID: String) -> ExecutorPromptCacheKey {
-        ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID)
-    }
 
     /// Makes the folder `name` in `root`, and makes `root` when it is not there.
     ///
@@ -355,13 +350,14 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
         let directory = Self.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let modelID = "probe/spilled-prompt-cache-\(UUID().uuidString)"
-        let sessionKey = ExecutorPromptCacheKey(modelID: modelID, sessionID: "spilled-session")
+        let sessionKey = Self.key("spilled-session", modelID: modelID)
         let store = await Self.store(in: directory)
         await store.checkIn(sessionKey, Self.entry())
         await store.waitForSpills()
         #expect(try Self.fileNames(in: directory).count == 1)
 
-        try await respondOnce(inside: store, modelID: modelID, sessionID: sessionKey.sessionID)
+        try await ScriptedExecutorPass.respondOnce(
+            inside: store, modelID: modelID, sessionID: sessionKey.sessionID)
 
         #expect(try Self.fileNames(in: directory).isEmpty)
         #expect(await store.checkOut(sessionKey) == .none)
@@ -545,8 +541,8 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
         defer { try? FileManager.default.removeItem(at: directory) }
         let other = Self.entry()
         let store = await Self.store(in: directory, budget: other.byteCount)
-        let firstModel = ExecutorPromptCacheKey(modelID: Self.modelID, sessionID: "shared")
-        let secondModel = ExecutorPromptCacheKey(modelID: Self.otherModelID, sessionID: "shared")
+        let firstModel = Self.key("shared")
+        let secondModel = Self.key("shared", modelID: Self.otherModelID)
         // Each check-in sends the one before it to disk.
         await store.checkIn(firstModel, Self.entry())
         await store.checkIn(secondModel, Self.entry())
@@ -572,8 +568,8 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
         let writer = try HeldWriter(copies: Self.temporaryDirectory())
         defer { try? FileManager.default.removeItem(at: writer.copies) }
         let store = await Self.store(in: directory, writer: writer.write)
-        let evicted = { ExecutorPromptCacheKey(modelID: Self.modelID, sessionID: $0) }
-        let kept = { ExecutorPromptCacheKey(modelID: Self.otherModelID, sessionID: $0) }
+        let evicted = { Self.key($0) }
+        let kept = { Self.key($0, modelID: Self.otherModelID) }
         // The first two writes run at once. The third write waits.
         writer.release()
         writer.release()
@@ -606,7 +602,7 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures {
         let store = await Self.store(in: directory)
         await store.checkIn(Self.key("a"), Self.entry())
         await store.checkIn(
-            ExecutorPromptCacheKey(modelID: Self.otherModelID, sessionID: "a"), Self.entry())
+            Self.key("a", modelID: Self.otherModelID), Self.entry())
         await store.waitForSpills()
         #expect(try Self.fileNames(in: directory).count == 2)
 

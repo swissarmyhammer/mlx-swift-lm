@@ -155,16 +155,6 @@ struct QwenCommittedTurnRuleTests {
                 == nil)
     }
 
-    @Test func `declines an uncommitted lookahead the render cannot explain`() {
-        #expect(
-            rule.reuse(
-                turn: turn(
-                    prompt: [10, 11, Self.renderedOnly, Self.commit, 20],
-                    uncommittedTokens: [Self.renderedOnly]),
-                cache: alignedCache(
-                    [10, 11, Self.generatedOnly], previousRender: [10, 11])) == nil)
-    }
-
     @Test func `declines when no render is on record`() {
         #expect(
             rule.reuse(
@@ -184,7 +174,10 @@ struct QwenCommittedTurnRuleTests {
 
     // The decline after a turn that ends inside its reasoning (card
     // `^ef2zynk`) is in `CommittedTurnThinkBlockTests`, which runs the same
-    // table against this rule and against `DSMLCommittedTurnRule`.
+    // table against this rule and against `DSMLCommittedTurnRule`. The splice
+    // after a turn whose last generated tokens never reached the caches (card
+    // `^g2t7caa`) is in `CommittedTurnUncommittedTokenTests`, which runs the
+    // same way.
 
     // MARK: - Composition with the standard rules
 

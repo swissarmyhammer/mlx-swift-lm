@@ -47,13 +47,33 @@ actor ModelCache {
     /// Class wrapper around `Task` so actor-reentrancy supersession guards can
     /// use `===` identity comparison. `Task` is a value type; a wrapper lets us
     /// detect whether `evictAll()` replaced a loading entry mid-flight.
-    private final class LoadTask {
-        let task: Task<ModelContainer, Error>
-        init(_ task: Task<ModelContainer, Error>) { self.task = task }
+    private final class LoadTask<Value: Sendable> {
+        let task: Task<Value, Error>
+        init(_ task: Task<Value, Error>) { self.task = task }
+    }
+
+    /// The identity of an MTP drafter in the cache: the model it drafts for, and the drafter.
+    /// Two models that name the same drafter checkpoint load it each for itself, thus evicting
+    /// one model frees its own drafter only.
+    struct DrafterKey: Hashable {
+
+        /// The identity of the model the drafter drafts for.
+        let modelID: String
+
+        /// The identity of the drafter checkpoint.
+        ///
+        /// Read by the synthesized `Hashable` conformance, which keeps two drafters of one
+        /// model apart in ``drafters`` and ``drafterLoadingTasks``; periphery sees no caller.
+        // periphery:ignore
+        let drafterID: String
     }
 
     private var containers: [String: ModelContainer] = [:]
-    private var loadingTasks: [String: LoadTask] = [:]
+    private var loadingTasks: [String: LoadTask<ModelContainer>] = [:]
+    /// The loaded MTP drafters, one for each model and drafter checkpoint.
+    private var drafters: [DrafterKey: MTPDrafterContainer] = [:]
+    /// In-flight drafter loads, so that concurrent callers share one load.
+    private var drafterLoadingTasks: [DrafterKey: LoadTask<MTPDrafterContainer>] = [:]
     /// In-flight loads tagged as a warmup of an already-present model, which
     /// must NOT surface as `.downloading` (there is no user-facing download).
     /// A subset of `loadingTasks`' keys. See `load` and `isDownloading`.
@@ -136,6 +156,42 @@ actor ModelCache {
             }
             throw error
         }
+    }
+
+    /// Gets the cached MTP drafter for `key`, loading it if necessary.
+    ///
+    /// Concurrent callers for the same key share one load, as concurrent model loads do. A
+    /// load that `remove(modelID:)` or `evictAll()` superseded while it ran hands its awaiter
+    /// the drafter but does not cache it, and the loader must honor the cancellation that
+    /// eviction sends.
+    ///
+    /// - Parameters:
+    ///   - key: the model and the drafter checkpoint.
+    ///   - loader: loads the drafter.
+    /// - Returns: the drafter.
+    /// - Throws: the error of the load.
+    func loadDrafter(
+        _ key: DrafterKey,
+        loader: @Sendable @escaping () async throws -> MTPDrafterContainer
+    ) async throws -> MTPDrafterContainer {
+        if let cached = drafters[key] {
+            return cached
+        }
+        if let existingLoadTask = drafterLoadingTasks[key] {
+            return try await existingLoadTask.task.value
+        }
+        let loadTask = LoadTask(Task<MTPDrafterContainer, Error> { try await loader() })
+        drafterLoadingTasks[key] = loadTask
+        defer {
+            if drafterLoadingTasks[key] === loadTask {
+                drafterLoadingTasks[key] = nil
+            }
+        }
+        let loaded = try await loadTask.task.value
+        if drafterLoadingTasks[key] === loadTask {
+            drafters[key] = loaded
+        }
+        return loaded
     }
 
     /// Whether a *genuine download* is in flight for the given model: a load
@@ -253,17 +309,22 @@ actor ModelCache {
         }
     }
 
-    /// Evicts all cached state: model containers, tokenizers, constraint
-    /// templates, and per-model tokenizer biases. Cancels every registered load
-    /// task, as `remove(modelID:)` does for a single model. No GPU-stream
-    /// synchronization is required — in-flight callers retain their own
-    /// `ModelContainer` and free it via ARC on completion.
+    /// Evicts all cached state: model containers, MTP drafters, tokenizers,
+    /// constraint templates, and per-model tokenizer biases. Cancels every
+    /// registered load task, as `remove(modelID:)` does for a single model. No
+    /// GPU-stream synchronization is required — in-flight callers retain their
+    /// own `ModelContainer` and drafter and free them via ARC on completion.
     func evictAll() {
         containers.removeAll()
         for loadTask in loadingTasks.values {
             loadTask.task.cancel()
         }
         loadingTasks.removeAll()
+        drafters.removeAll()
+        for loadTask in drafterLoadingTasks.values {
+            loadTask.task.cancel()
+        }
+        drafterLoadingTasks.removeAll()
         suppressedLoadIDs.removeAll()
         grammarTokenizers.removeAll()
         constraintTemplates.removeAll()
@@ -272,19 +333,25 @@ actor ModelCache {
     }
 
     /// Evicts a single model's state across every per-model cache: its container,
-    /// xgrammar tokenizer, all compiled constraint templates, tokenizer bias,
-    /// last load error, the suppressed-download tag, and any in-flight load
-    /// registration.
+    /// its MTP drafters, xgrammar tokenizer, all compiled constraint templates,
+    /// tokenizer bias, last load error, the suppressed-download tag, and any
+    /// in-flight load registration.
     ///
     /// Cancels an in-flight load and drops its registration. A loader that honors
-    /// cancellation stops early. The load-completion guard in `load()` is
-    /// what prevents any superseded load from re-populating after removal.
+    /// cancellation stops early. The load-completion guards in `load()` and
+    /// `loadDrafter()` are what prevent any superseded load from re-populating
+    /// after removal.
     func remove(modelID: String) {
         // `loadingTasks` holds a `LoadTask` box; cancel the wrapped `Task`.
         loadingTasks[modelID]?.task.cancel()
         loadingTasks.removeValue(forKey: modelID)
         suppressedLoadIDs.remove(modelID)
         containers.removeValue(forKey: modelID)
+        drafters = drafters.filter { $0.key.modelID != modelID }
+        for (key, loadTask) in drafterLoadingTasks where key.modelID == modelID {
+            loadTask.task.cancel()
+            drafterLoadingTasks.removeValue(forKey: key)
+        }
         grammarTokenizers.removeValue(forKey: modelID)
         constraintTemplates = constraintTemplates.filter {
             !$0.key.hasPrefix("\(modelID):")

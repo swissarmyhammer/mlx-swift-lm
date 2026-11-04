@@ -31,12 +31,15 @@ struct ScriptedByteTokenizer: MLXLMCommon.Tokenizer {
     /// never stop.
     static let endOfTextByte = 3
 
+    /// One token for each byte value.
+    static let vocabularySize = 256
+
     /// Mask that keeps the low byte of a token ID when decoding.
     private static let tokenByteMask = 0xFF
 
     /// The token IDs that make the model emit `text` and then stop.
     static func tokenIDs(for text: String) -> [Int] {
-        Array(text.utf8).map { Int($0) } + [endOfTextByte]
+        ScriptedByteTokenizer().encode(text: text, addSpecialTokens: false) + [endOfTextByte]
     }
 
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
@@ -55,12 +58,12 @@ struct ScriptedByteTokenizer: MLXLMCommon.Tokenizer {
     }
 
     func convertIdToToken(_ id: Int) -> String? {
-        guard id >= 0, id < ScriptedLanguageModel.vocabularySize else { return nil }
+        guard id >= 0, id < Self.vocabularySize else { return nil }
         return String(UnicodeScalar(UInt8(id)))
     }
 
     var bosToken: String? { nil }
-    var eosToken: String? { String(UnicodeScalar(UInt8(Self.endOfTextByte))) }
+    var eosToken: String? { convertIdToToken(Self.endOfTextByte) }
     var unknownToken: String? { nil }
 
     func applyChatTemplate(
@@ -73,53 +76,112 @@ struct ScriptedByteTokenizer: MLXLMCommon.Tokenizer {
 /// A thread-safe record of the forward passes a scripted model ran.
 ///
 /// The model writes it on the generation thread, and a test reads it from
-/// its own task, thus a lock guards the counts. `begun` and `completed`
+/// its own task, thus a mutex guards the counts. `begun` and `completed`
 /// bracket each pass, so a test can tell a pass that is still running from
 /// a pass that finished.
-final class ForwardStepCounter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var begunCount = 0
-    private var completedCount = 0
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+final class ForwardStepCounter: Sendable {
+    private let counts = Mutex((begun: 0, completed: 0))
 
     /// Records the start of one forward pass.
     func begin() {
-        lock.lock()
-        begunCount += 1
-        lock.unlock()
+        counts.withLock { $0.begun += 1 }
     }
 
     /// Records the end of one forward pass.
     func end() {
-        lock.lock()
-        completedCount += 1
-        lock.unlock()
+        counts.withLock { $0.completed += 1 }
     }
 
     /// The number of forward passes the model started so far.
     var begun: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return begunCount
+        counts.withLock { $0.begun }
     }
 
     /// The number of forward passes that are running right now.
     var inFlight: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return begunCount - completedCount
+        counts.withLock { $0.begun - $0.completed }
     }
+}
+
+/// The shape of what the scripted models and the prompt-cache fixtures write
+/// into a cache.
+enum ScriptedCacheShape {
+
+    /// The key/value heads of each cache layer. One head is enough: the
+    /// caches only have to count the positions the model saw.
+    static let headCount = 1
+
+    /// The width of each key and value written into a cache.
+    static let headDimension = 1
+
+    /// The shape of the state written into each recurrent layer. One value is
+    /// enough: the caches only have to count the positions the model saw.
+    static let recurrentStateShape = [1, 1]
+
+    /// The axis of the tokens of the keys and values written into a cache.
+    static let tokenAxis = 2
+}
+
+/// Writes `keyValues` as the keys and the values of each attention cache of
+/// `caches`, and a new zero state into each recurrent cache, thus the offset of
+/// each cache moves past the tokens of `keyValues`.
+///
+/// - Parameters:
+///   - keyValues: the keys and values, of shape
+///     `(1, ScriptedCacheShape.headCount, tokenCount, ScriptedCacheShape.headDimension)`.
+///   - caches: the caches to write into.
+/// - Returns: all the keys that the first attention cache holds after the
+///   write, or nil when `caches` holds no attention cache.
+@discardableResult
+func writeScriptedCaches(keyValues: MLXArray, into caches: [KVCache]) -> MLXArray? {
+    let tokenCount = keyValues.dim(ScriptedCacheShape.tokenAxis)
+    var firstKeys: MLXArray?
+    for cache in caches {
+        if let recurrent = cache as? MambaCache {
+            // A linear layer puts new state arrays in its slots and does
+            // not write into the old ones, as Qwen 3.5 does.
+            recurrent[0] = MLXArray.zeros(ScriptedCacheShape.recurrentStateShape)
+            recurrent[1] = MLXArray.zeros(ScriptedCacheShape.recurrentStateShape)
+            recurrent.advance(tokenCount)
+        } else {
+            let keys = cache.update(keys: keyValues, values: keyValues).0
+            firstKeys = firstKeys ?? keys
+        }
+    }
+    return firstKeys
+}
+
+/// Moves each cache of `caches` past `tokenCount` more tokens, the way a
+/// forward pass does: one zero key and one zero value for each token into each
+/// attention cache, and a new zero state into each recurrent cache.
+///
+/// A ledger reads the POSITION of a cache and nothing else, thus a key of the
+/// right shape moves that position exactly as a prompt of the same length does.
+///
+/// - Parameters:
+///   - caches: the caches to feed.
+///   - tokenCount: the number of tokens to feed.
+func feed(_ caches: [KVCache], tokenCount: Int) {
+    guard tokenCount > 0 else { return }
+    writeScriptedCaches(
+        keyValues: MLXArray.zeros([
+            1, ScriptedCacheShape.headCount, tokenCount, ScriptedCacheShape.headDimension,
+        ]),
+        into: caches)
 }
 
 /// A model that replays one scripted token sequence for each generation round.
 ///
 /// Each round starts at ``prepare(_:cache:state:prefill:)``, which the token
 /// iterator calls exactly one time for each generation.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     KVCacheDimensionProvider
 {
 
     /// One token for each byte value.
-    static let vocabularySize = 256
+    static let vocabularySize = ScriptedByteTokenizer.vocabularySize
 
     /// Logit of the scripted token. The value only has to win `argmax`, so any
     /// pair with a clear gap works.
@@ -128,27 +190,18 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     /// Logit of every token the script does not select.
     private static let rejectedLogit: Float = -100
 
-    /// The key/value heads of each cache layer. One head is enough: the
-    /// caches only have to count the positions the model saw.
-    private static let cacheHeadCount = 1
-
-    /// The width of each key and value the model writes into its caches.
-    private static let cacheHeadDimension = 1
-
     /// One key/value head for each cache layer. A model with no cache layers
     /// allocates no KV cache.
-    var kvHeads: [Int] { Array(repeating: Self.cacheHeadCount, count: cacheLayerCount) }
-
-    /// The shape of the state that the model writes into each recurrent
-    /// layer. One value is enough: the caches only have to count the
-    /// positions the model saw.
-    private static let recurrentStateShape = [1, 1]
+    var kvHeads: [Int] {
+        Array(repeating: ScriptedCacheShape.headCount, count: cacheLayerCount)
+    }
 
     private let rounds: [[Int]]
     private let forwardSteps: ForwardStepCounter?
     private let forwardDelay: TimeInterval
     private let cacheLayerCount: Int
     private let recurrentLayerCount: Int
+    private let weights: MLXArray?
     private var roundIndex = -1
     private var step = 0
 
@@ -169,16 +222,21 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     /// model sit beside its attention layers. A recurrent layer cannot
     /// rewind, thus a model with one is a hybrid model. The default of zero
     /// gives the model no recurrent layer.
+    ///
+    /// `weights` is an array the model holds for as long as it lives, the way
+    /// a real model holds its parameters. No forward pass reads it. The
+    /// default of `nil` gives the model no weights.
     init(
         rounds: [[Int]], forwardSteps: ForwardStepCounter? = nil,
         forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0,
-        recurrentLayerCount: Int = 0
+        recurrentLayerCount: Int = 0, weights: MLXArray? = nil
     ) {
         self.rounds = rounds
         self.forwardSteps = forwardSteps
         self.forwardDelay = forwardDelay
         self.cacheLayerCount = cacheLayerCount
         self.recurrentLayerCount = recurrentLayerCount
+        self.weights = weights
         super.init()
     }
 
@@ -207,7 +265,7 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
             // Blocks the generation thread the way a real forward pass does.
             Thread.sleep(forTimeInterval: forwardDelay)
         }
-        write(tokenCount: inputs.size, into: cache ?? [])
+        feed(cache ?? [], tokenCount: inputs.size)
         let positions = Swift.max(inputs.size, 1)
         var logits = Array(
             repeating: Self.rejectedLogit,
@@ -215,32 +273,6 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
         // Only the last row is read as the next-token distribution.
         logits[(positions - 1) * Self.vocabularySize + nextToken()] = Self.selectedLogit
         return MLXArray(logits, [1, positions, Self.vocabularySize])
-    }
-
-    /// Writes one zero key and one zero value for each of `tokenCount` tokens
-    /// into each attention cache of `caches`, and a new zero state into each
-    /// recurrent cache, thus the offset of each cache counts the tokens the
-    /// model saw.
-    ///
-    /// - Parameters:
-    ///   - tokenCount: the number of tokens in the input of the forward pass.
-    ///   - caches: the caches of the forward pass.
-    private func write(tokenCount: Int, into caches: [KVCache]) {
-        guard tokenCount > 0 else { return }
-        let keyValues = MLXArray.zeros([
-            1, Self.cacheHeadCount, tokenCount, Self.cacheHeadDimension,
-        ])
-        for cache in caches {
-            if let recurrent = cache as? MambaCache {
-                // A linear layer puts new state arrays in its slots and does
-                // not write into the old ones, as Qwen 3.5 does.
-                recurrent[0] = MLXArray.zeros(Self.recurrentStateShape)
-                recurrent[1] = MLXArray.zeros(Self.recurrentStateShape)
-                recurrent.advance(tokenCount)
-            } else {
-                _ = cache.update(keys: keyValues, values: keyValues)
-            }
-        }
     }
 
     /// The token this round emits next, or end-of-text once the script is spent.
@@ -275,6 +307,12 @@ struct FixedPromptInputProcessor: UserInputProcessor {
     }
 }
 
+/// The model input that renders `text` as its UTF-8 bytes, one token for each byte.
+private func bytesInput(_ text: String) -> LMInput {
+    let tokens = ScriptedByteTokenizer().encode(text: text, addSpecialTokens: false)
+    return LMInput(tokens: MLXArray(tokens.map(Int32.init)))
+}
+
 /// A processor that renders the text of the prompt as its UTF-8 bytes, one
 /// token for each byte.
 ///
@@ -286,9 +324,7 @@ struct PromptBytesInputProcessor: UserInputProcessor {
 
     /// Renders the text of the prompt of `input` as one token for each byte.
     func prepare(input: UserInput) async throws -> LMInput {
-        let tokens = ScriptedByteTokenizer().encode(
-            text: input.prompt.description, addSpecialTokens: false)
-        return LMInput(tokens: MLXArray(tokens.map(Int32.init)))
+        bytesInput(input.prompt.description)
     }
 }
 
@@ -309,23 +345,24 @@ struct GenerationPromptBytesInputProcessor: UserInputProcessor {
     /// Renders the text of the prompt of `input`, a line break and
     /// ``generationPrompt``, as one token for each byte.
     func prepare(input: UserInput) async throws -> LMInput {
-        let tokens = ScriptedByteTokenizer().encode(
-            text: input.prompt.description + "\n" + generationPrompt, addSpecialTokens: false)
-        return LMInput(tokens: MLXArray(tokens.map(Int32.init)))
+        bytesInput(input.prompt.description + "\n" + generationPrompt)
     }
 }
 
-/// Builds a container over the scripted doubles. No download, no weights.
+/// Builds a container over the scripted doubles. No download, and no weights
+/// unless `weights` gives an array.
 ///
-/// `forwardSteps`, `forwardDelay`, `cacheLayerCount` and
-/// `recurrentLayerCount` pass through to
-/// ``ScriptedLanguageModel/init(rounds:forwardSteps:forwardDelay:cacheLayerCount:recurrentLayerCount:)``.
+/// `forwardSteps`, `forwardDelay`, `cacheLayerCount`, `recurrentLayerCount` and
+/// `weights` pass through to
+/// ``ScriptedLanguageModel/init(rounds:forwardSteps:forwardDelay:cacheLayerCount:recurrentLayerCount:weights:)``.
 /// `processor` renders the prompt of each pass. The default renders the same
 /// tokens for every prompt. `reasoningConfig` goes into the configuration of
 /// the context. The default of `nil` gives a model that does not reason.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 func makeScriptedContainer(
     modelID: String, rounds: [String], forwardSteps: ForwardStepCounter? = nil,
     forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0, recurrentLayerCount: Int = 0,
+    weights: MLXArray? = nil,
     processor: any UserInputProcessor = FixedPromptInputProcessor(),
     reasoningConfig: ReasoningConfig? = nil
 ) -> ModelContainer {
@@ -336,7 +373,8 @@ func makeScriptedContainer(
             forwardSteps: forwardSteps,
             forwardDelay: forwardDelay,
             cacheLayerCount: cacheLayerCount,
-            recurrentLayerCount: recurrentLayerCount),
+            recurrentLayerCount: recurrentLayerCount,
+            weights: weights),
         processor: processor,
         tokenizer: ScriptedByteTokenizer())
     return ModelContainer(context: context)
@@ -418,7 +456,29 @@ enum ScriptedSessionModel {
         processor: any UserInputProcessor = PromptBytesInputProcessor(),
         reasoningConfig: ReasoningConfig? = nil, recurrentLayerCount: Int = 0
     ) -> MLXLanguageModel {
-        let modelID = "probe/scripted-session-\(UUID().uuidString)"
+        make(
+            modelID: "probe/scripted-session-\(UUID().uuidString)", weights: weights,
+            scripts: scripts, cacheLayerCount: cacheLayerCount, processor: processor,
+            reasoningConfig: reasoningConfig, recurrentLayerCount: recurrentLayerCount)
+    }
+
+    /// Makes the model under `modelID`, with one script for each pass.
+    ///
+    /// - Parameters:
+    ///   - modelID: the identity of the model.
+    ///   - weights: the directory that makes the model available.
+    ///   - scripts: the text that each pass generates, in the order of the passes.
+    ///   - cacheLayerCount: the KV cache layers of the model.
+    ///   - processor: renders the prompt of each pass.
+    ///   - reasoningConfig: the reasoning protocol of the model. When it is set, the model
+    ///     declares `.reasoning`.
+    ///   - recurrentLayerCount: the recurrent layers of the model beside its KV cache layers.
+    /// - Returns: the model.
+    static func make(
+        modelID: String, weights: URL, scripts: [String], cacheLayerCount: Int,
+        processor: any UserInputProcessor, reasoningConfig: ReasoningConfig? = nil,
+        recurrentLayerCount: Int = 0
+    ) -> MLXLanguageModel {
         let capabilities: [LanguageModelCapabilities.Capability] =
             reasoningConfig == nil ? [] : [.reasoning]
         return MLXLanguageModel(
@@ -468,38 +528,36 @@ enum ScriptedSessionModel {
     }
 }
 
-/// Runs one executor pass of a scripted model inside `store`, for a
-/// transcript whose first entry is `sessionID`.
-///
-/// The scripted model holds no key/value cache, thus the pass checks nothing
-/// back in.
-///
-/// - Parameters:
-///   - store: the prompt cache store the pass binds.
-///   - modelID: the model of the pass. A fresh identity keeps the
-///     process-wide model cache and the shared store out of every other test.
-///   - sessionID: the first entry of the transcript, which names the session.
-@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-func respondOnce(
-    inside store: ExecutorPromptCacheStore, modelID: String, sessionID: String
-) async throws {
-    let weights = try makeScriptedWeightsDirectory()
-    defer { try? FileManager.default.removeItem(at: weights) }
-    let model = MLXLanguageModel(
-        configuration: ModelConfiguration(id: modelID),
-        capabilities: [],
-        weightsLocation: { _ in weights },
-        load: { _, _ in makeScriptedContainer(modelID: modelID, rounds: ["A"]) })
-    let prompt = Transcript.Prompt(
-        id: sessionID, segments: [.text(Transcript.TextSegment(content: "first turn"))])
-    try await ScriptedExecutorPass.run(
-        over: Transcript(entries: [.prompt(prompt)]), model: model, inside: store)
-}
-
 /// Runs one executor pass directly, on the task that calls it, the way a host
 /// that binds a task-local around its call to the executor runs it.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 enum ScriptedExecutorPass {
+    /// Reports the failures of a pass that survive a release build.
+    private static let logger = MLXLogger(label: "ScriptedExecutorPass")
+
+    /// Runs one executor pass of a scripted model inside `store`, for a
+    /// transcript whose first entry is `sessionID`.
+    ///
+    /// The scripted model holds no key/value cache, thus the pass checks nothing
+    /// back in.
+    ///
+    /// - Parameters:
+    ///   - store: the prompt cache store the pass binds.
+    ///   - modelID: the model of the pass. A fresh identity keeps the
+    ///     process-wide model cache and the shared store out of every other test.
+    ///   - sessionID: the first entry of the transcript, which names the session.
+    static func respondOnce(
+        inside store: ExecutorPromptCacheStore, modelID: String, sessionID: String
+    ) async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let model = ScriptedSessionModel.make(
+            modelID: modelID, weights: weights, scripts: ["A"], cacheLayerCount: 0,
+            processor: FixedPromptInputProcessor())
+        try await run(
+            over: ScriptedSessionModel.transcript(firstEntryID: sessionID), model: model,
+            inside: store)
+    }
 
     /// Runs one executor pass of `model` over `transcript` inside `store`.
     ///
@@ -565,7 +623,14 @@ enum ScriptedExecutorPass {
         // The channel is a rendezvous, thus a consumer must run beside the
         // executor or every send parks it.
         let consumer = Task<Void, Never> {
-            do { for try await _ in channel {} } catch {}
+            do {
+                for try await _ in channel {}
+            } catch is CancellationError {
+                // The pass ended and took its consumer down with it.
+            } catch {
+                assertionFailure("The channel of a scripted pass failed: \(error)")
+                logger.error("The channel of a scripted pass failed: \(error)")
+            }
         }
         defer { consumer.cancel() }
 

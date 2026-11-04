@@ -11,10 +11,8 @@ import Testing
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 // Nested under the serialized `FoundationModelsCacheTests` parent (declared in
-// ModelCacheEvictionTests.swift) so this suite never runs concurrently with the
-// eviction suite. They share the one process-global `MLXLanguageModel.cache`; a
-// key-agnostic `evictAll()` in the eviction suite would otherwise wipe the
-// parked-load windows these `.downloading` tests assert against.
+// ModelCacheEvictionTests.swift), which shares the one process-global
+// `MLXLanguageModel.cache` with this suite.
 //
 // `registerModelFactoryOnce` is the single shared registration declared at file
 // scope in ModelCacheEvictionTests.swift (both child suites' `init()` reference it).

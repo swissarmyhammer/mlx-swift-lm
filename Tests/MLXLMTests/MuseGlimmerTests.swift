@@ -1575,11 +1575,10 @@ struct MuseGlimmerOnyxCacheTests {
             cachedTokens: live,
             processedTokenCount: live.count,
             mainCacheIsAligned: true,
-            draftCacheIsAligned: true,
             maxTrimCount: live.count)
 
         let decision = try #require(rule.reuse(turn: turn, cache: cache))
-        guard case .appendSuffix(let suffixStart, let represented) = decision else {
+        guard case .appendSuffix(let suffixStart, let represented, _) = decision else {
             Issue.record("expected a live-cache suffix splice")
             return
         }
@@ -1608,11 +1607,10 @@ struct MuseGlimmerOnyxCacheTests {
             cachedTokens: live,
             processedTokenCount: live.count,
             mainCacheIsAligned: true,
-            draftCacheIsAligned: true,
             maxTrimCount: live.count)
 
         let decision = try #require(rule.reuse(turn: turn, cache: cache))
-        guard case .appendSuffix(let suffixStart, let represented) = decision else {
+        guard case .appendSuffix(let suffixStart, let represented, _) = decision else {
             Issue.record("expected a multi-call suffix splice")
             return
         }
@@ -1641,7 +1639,6 @@ struct MuseGlimmerOnyxCacheTests {
             cachedTokens: live,
             processedTokenCount: live.count,
             mainCacheIsAligned: true,
-            draftCacheIsAligned: true,
             maxTrimCount: live.count)
 
         #expect(rule.reuse(turn: turn, cache: cache) == nil)

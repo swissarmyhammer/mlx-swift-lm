@@ -3,17 +3,15 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXLMTestSupport
 import XCTest
+import os
 
 public class SampleTests: XCTestCase {
 
     private func sampleCounts(sampler: TopPSampler, logits: MLXArray, draws: Int) -> [Int: Int] {
-        var counts: [Int: Int] = [:]
-        for _ in 0 ..< draws {
-            let token = sampler.sample(logits: logits).item(Int.self)
-            counts[token, default: 0] += 1
-        }
-        return counts
+        Dictionary(grouping: sampledTokens(sampler, logits: logits, count: draws), by: { $0 })
+            .mapValues(\.count)
     }
 
     private func frequency(_ counts: [Int: Int], token: Int, draws: Int) -> Float {
@@ -111,23 +109,36 @@ public class SampleTests: XCTestCase {
     }
 
     func testGenerateParametersCreatesExpectedSampler() {
-        XCTAssertTrue(GenerateParameters(temperature: 0.7, topK: 40).sampler() is TopPSampler)
-        XCTAssertTrue(GenerateParameters(temperature: 0.7, minP: 0.1).sampler() is TopPSampler)
-        XCTAssertTrue(GenerateParameters(temperature: 0).sampler() is ArgMaxSampler)
+        XCTAssertTrue(GenerateParameters(temperature: 0.7, topK: 40).makeSampler() is TopPSampler)
+        XCTAssertTrue(GenerateParameters(temperature: 0.7, minP: 0.1).makeSampler() is TopPSampler)
+        XCTAssertTrue(GenerateParameters(temperature: 0).makeSampler() is ArgMaxSampler)
     }
 
-    func testPresencePenaltyContextPenalizesSeenTokens() {
+    /// Prompts a presence-penalty context with the tokens `[1, 1, 3]` in the shape `prompt`
+    /// gives them, and checks that the seen tokens 1 and 3 lose the penalty once each.
+    ///
+    /// - Parameter prompt: shapes the prompt tokens, for example to a `[1, 3]` batch.
+    /// - Returns: the context after the prompt, and the logits it penalized.
+    private func assertPresencePenaltyPenalizesSeenTokens(
+        prompt: (MLXArray) -> MLXArray = { $0 },
+        file: StaticString = #filePath, line: UInt = #line
+    ) -> (processor: PresencePenaltyContext, logits: MLXArray) {
         var processor = PresencePenaltyContext(presencePenalty: 0.5, presenceContextSize: 20)
-        processor.prompt(MLXArray([1, 1, 3]))
+        processor.prompt(prompt(MLXArray([1, 1, 3])))
 
         let logits =
             MLXArray([1.0 as Float, 2.0 as Float, 3.0 as Float, 4.0 as Float])[.newAxis, .ellipsis]
         let processed = processor.process(logits: logits)
         let values = processed[0].asArray(Float.self)
-        XCTAssertEqual(values[0], 1.0, accuracy: 1e-6)
-        XCTAssertEqual(values[1], 1.5, accuracy: 1e-6)
-        XCTAssertEqual(values[2], 3.0, accuracy: 1e-6)
-        XCTAssertEqual(values[3], 3.5, accuracy: 1e-6)
+        XCTAssertEqual(values[0], 1.0, accuracy: 1e-6, file: file, line: line)
+        XCTAssertEqual(values[1], 1.5, accuracy: 1e-6, file: file, line: line)
+        XCTAssertEqual(values[2], 3.0, accuracy: 1e-6, file: file, line: line)
+        XCTAssertEqual(values[3], 3.5, accuracy: 1e-6, file: file, line: line)
+        return (processor, logits)
+    }
+
+    func testPresencePenaltyContextPenalizesSeenTokens() {
+        _ = assertPresencePenaltyPenalizesSeenTokens()
     }
 
     func testFrequencyPenaltyContextPenalizesByCount() {
@@ -145,13 +156,13 @@ public class SampleTests: XCTestCase {
     }
 
     func testGenerateParametersCreatesExpectedPenaltyProcessor() {
-        XCTAssertNotNil(GenerateParameters(repetitionPenalty: 1.1).processor())
-        XCTAssertNotNil(GenerateParameters(presencePenalty: 0.5).processor())
-        XCTAssertNotNil(GenerateParameters(frequencyPenalty: 0.5).processor())
+        XCTAssertNotNil(GenerateParameters(repetitionPenalty: 1.1).makeProcessor())
+        XCTAssertNotNil(GenerateParameters(presencePenalty: 0.5).makeProcessor())
+        XCTAssertNotNil(GenerateParameters(frequencyPenalty: 0.5).makeProcessor())
         XCTAssertNotNil(
             GenerateParameters(
                 repetitionPenalty: 1.1, presencePenalty: 0.5, frequencyPenalty: 0.5
-            ).processor()
+            ).makeProcessor()
         )
     }
 
@@ -181,14 +192,16 @@ public class SampleTests: XCTestCase {
 
         let processed = processor.process(logits: logitsView)
 
-        zip(processed[0].asArray(Float.self), [10.0, 10.5, 12.0, 12.5]).forEach {
-            XCTAssertEqual($0, $1, accuracy: 1e-6)
+        for (value, expected) in zip(
+            processed[0].asArray(Float.self), [10.0, 10.5, 12.0, 12.5] as [Float]
+        ) {
+            XCTAssertEqual(value, expected, accuracy: 1e-6)
         }
-        zip(
+        for (value, expected) in zip(
             source.asArray(Float.self),
-            [0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0]
-        ).forEach {
-            XCTAssertEqual($0, $1, accuracy: 1e-6)
+            [0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0] as [Float]
+        ) {
+            XCTAssertEqual(value, expected, accuracy: 1e-6)
         }
     }
 
@@ -211,7 +224,7 @@ public class SampleTests: XCTestCase {
             repetitionPenalty: 1.5, repetitionContextSize: 5,
             presencePenalty: 0.5, presenceContextSize: 5,
             frequencyPenalty: 0.25, frequencyContextSize: 5
-        ).processor()
+        ).makeProcessor()
         XCTAssertNotNil(processor)
 
         processor?.prompt(MLXArray([0, 0, 0, 1, 1]))
@@ -268,17 +281,9 @@ public class SampleTests: XCTestCase {
     }
 
     func testPresencePenaltyContextWith2DPrompt() {
-        var processor = PresencePenaltyContext(presencePenalty: 0.5, presenceContextSize: 20)
-        processor.prompt(MLXArray([1, 1, 3]).reshaped(1, -1))
-
-        let logits =
-            MLXArray([1.0 as Float, 2.0 as Float, 3.0 as Float, 4.0 as Float])[.newAxis, .ellipsis]
-        let processed = processor.process(logits: logits)
-        let values = processed[0].asArray(Float.self)
-        XCTAssertEqual(values[0], 1.0, accuracy: 1e-6)
-        XCTAssertEqual(values[1], 1.5, accuracy: 1e-6)
-        XCTAssertEqual(values[2], 3.0, accuracy: 1e-6)
-        XCTAssertEqual(values[3], 3.5, accuracy: 1e-6)
+        let prompted = assertPresencePenaltyPenalizesSeenTokens(prompt: { $0.reshaped(1, -1) })
+        var processor = prompted.processor
+        let logits = prompted.logits
 
         // Exercise the append path where the original crash occurred
         processor.didSample(token: MLXArray(Int32(2)))
@@ -315,10 +320,8 @@ public class SampleTests: XCTestCase {
         log(MLXArray([0.25, 0.25, 0.25, 0.25] as [Float]))[.newAxis, .ellipsis]
     }
 
-    private func drawTopP(seed: UInt64?, draws: Int) -> [Int] {
-        let sampler = TopPSampler(temperature: 1.0, seed: seed)
-        let logits = flatLogits()
-        return (0 ..< draws).map { _ in sampler.sample(logits: logits).item(Int.self) }
+    private func drawTopP(seed: UInt64?, draws count: Int) -> [Int] {
+        sampledTokens(TopPSampler(temperature: 1.0, seed: seed), logits: flatLogits(), count: count)
     }
 
     func testTopPSamplerSameSeedIsReproducible() {
@@ -334,8 +337,8 @@ public class SampleTests: XCTestCase {
     func testCategoricalSamplerSameSeedIsReproducible() {
         let logits = flatLogits()
         func draw(seed: UInt64) -> [Int] {
-            let sampler = CategoricalSampler(temperature: 1.0, seed: seed)
-            return (0 ..< 24).map { _ in sampler.sample(logits: logits).item(Int.self) }
+            sampledTokens(
+                CategoricalSampler(temperature: 1.0, seed: seed), logits: logits, count: 24)
         }
         XCTAssertEqual(draw(seed: 7), draw(seed: 7))
     }
@@ -343,8 +346,9 @@ public class SampleTests: XCTestCase {
     func testGenerateParametersThreadsSeedToSampler() {
         let logits = flatLogits()
         func draw() -> [Int] {
-            let sampler = GenerateParameters(temperature: 1.0, topK: 4, seed: 99).sampler()
-            return (0 ..< 24).map { _ in sampler.sample(logits: logits).item(Int.self) }
+            sampledTokens(
+                GenerateParameters(temperature: 1.0, topK: 4, seed: 99).makeSampler(),
+                logits: logits, count: 24)
         }
         // Two independently-built samplers carrying the same seed agree.
         XCTAssertEqual(draw(), draw())
@@ -367,16 +371,15 @@ public class SampleTests: XCTestCase {
     }
 
     /// Thread-safe counter for asserting how many times a `@Sendable` factory runs.
-    private final class CallCounter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var count = 0
+    private final class CallCounter: Sendable {
+        private let count = OSAllocatedUnfairLock(initialState: 0)
 
         func increment() {
-            lock.withLock { count += 1 }
+            count.withLock { $0 += 1 }
         }
 
         var value: Int {
-            lock.withLock { count }
+            count.withLock { $0 }
         }
     }
 
@@ -395,19 +398,19 @@ public class SampleTests: XCTestCase {
         XCTAssertNotNil(components.logitProcessor(parameters: penalized) as? ChainedLogitProcessor)
     }
 
-    /// An empty ``GenerationComponents`` must reproduce ``GenerateParameters/processor()``
+    /// An empty ``GenerationComponents`` must reproduce ``GenerateParameters/makeProcessor()``
     /// exactly -- the guarantee that threading `components` everywhere is non-breaking.
     func testEmptyGenerationComponentsMatchesParametersProcessor() {
         let components = GenerationComponents()
 
         // no penalties -> nil, same as processor()
         let plain = GenerateParameters()
-        XCTAssertNil(plain.processor())
+        XCTAssertNil(plain.makeProcessor())
         XCTAssertNil(components.logitProcessor(parameters: plain))
 
         // penalties only -> the penalty processor, unwrapped (no chaining)
         let penalized = GenerateParameters(presencePenalty: 0.5, presenceContextSize: 5)
-        XCTAssertNotNil(penalized.processor() as? PenaltyProcessor)
+        XCTAssertNotNil(penalized.makeProcessor() as? PenaltyProcessor)
         XCTAssertNotNil(components.logitProcessor(parameters: penalized) as? PenaltyProcessor)
     }
 

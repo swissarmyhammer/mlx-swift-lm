@@ -45,6 +45,60 @@ final class GenerationExecutionTests: XCTestCase {
         }
     }
 
+    /// Runs the synchronous loop over `iterator`, whose tokens are all 42.
+    private static func runSynchronousLoop(
+        iterator: Iterator, stopTokenIds: Set<Int> = [],
+        didGenerate: (Int, [Int]) -> GenerateDisposition = { _, _ in .more }
+    ) -> SynchronousGenerationLoopResult {
+        SynchronousGenerationLoop.run(
+            promptTokenCount: 1,
+            modelConfiguration: .init(id: "test", eosTokenIds: stopTokenIds),
+            tokenizer: PseudoWordTokenizer(), iterator: iterator, didGenerate: didGenerate)
+    }
+
+    func testSynchronousLoopRecordsTheGeneratedTokens() {
+        let result = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3))
+        XCTAssertEqual(result.generatedTokenIds, [42, 42, 42])
+    }
+
+    func testSynchronousLoopReportsTheTokenLimit() {
+        let result = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3))
+        XCTAssertEqual(result.info.stopReason, .length)
+    }
+
+    func testSynchronousLoopHandsTheVisitorTheTokensSoFar() {
+        var visited: [[Int]] = []
+        _ = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 2)) { _, tokens in
+            visited.append(tokens)
+            return .more
+        }
+        XCTAssertEqual(visited, [[42], [42, 42]])
+    }
+
+    func testSynchronousLoopVisitorStopCancels() {
+        let result = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3)) { _, _ in .stop }
+        XCTAssertEqual(result.info.stopReason, .cancelled)
+    }
+
+    func testSynchronousLoopLeavesTheStopTokenOutOfTheTokens() {
+        let result = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3), stopTokenIds: [42])
+        XCTAssertEqual(result.generatedTokenIds, [])
+    }
+
+    func testSynchronousLoopReportsTheStopToken() {
+        let result = Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3), stopTokenIds: [42])
+        XCTAssertEqual(result.info.stopReason, .stop)
+    }
+
+    func testSynchronousLoopRunsInACancelledTask() async {
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return Self.runSynchronousLoop(iterator: Iterator(maxTokens: 3)).generatedTokenIds
+        }
+        let tokens = await task.value
+        XCTAssertEqual(tokens, [42, 42, 42])
+    }
+
     // Run with LIBDISPATCH_COOPERATIVE_POOL_STRICT=1 to expose pool starvation
     // deterministically. The timeout also lets a regressed implementation finish.
     func testBlockingIteratorLeavesCooperativeWorkerAvailable() async {
@@ -86,7 +140,7 @@ final class GenerationExecutionTests: XCTestCase {
             for await event in stream {
                 if case .info(let info) = event { completion = info }
             }
-            let tokens = await task.value
+            let tokens = (await task.value).consume().generatedTokens
             XCTAssertEqual(tokens, [42, 42, 42])
             XCTAssertEqual(completion?.generationTokenCount, 3)
             XCTAssertEqual(completion?.stopReason, .length)
@@ -123,11 +177,11 @@ final class GenerationExecutionTests: XCTestCase {
         await fulfillment(of: [firstEntered, secondEntered], timeout: 5)
         first.cancel()
         resumeFirst.signal()
-        let firstTokens = await first.value
+        let firstTokens = (await first.value).consume().generatedTokens
         XCTAssertEqual(firstTokens, [42])
         XCTAssertFalse(second.isCancelled)
         resumeSecond.signal()
-        let secondTokens = await second.value
+        let secondTokens = (await second.value).consume().generatedTokens
         XCTAssertEqual(secondTokens, [42])
 
         var firstCompletion: GenerateCompletionInfo?
@@ -189,7 +243,7 @@ final class GenerationExecutionTests: XCTestCase {
         for await event in stream {
             if case .info(let info) = event { completion = info }
         }
-        let tokens = await task.value
+        let tokens = (await task.value).consume().generatedTokens
         XCTAssertEqual(tokens, [42])
         XCTAssertEqual(completion?.stopReason, .cancelled)
         XCTAssertEqual(completion?.generationTokenCount, 1)
@@ -214,7 +268,7 @@ final class GenerationExecutionTests: XCTestCase {
         for await event in stream {
             if case .info(let info) = event { completion = info }
         }
-        let tokens = await task.value
+        let tokens = (await task.value).consume().generatedTokens
         XCTAssertEqual(tokens, [])
         XCTAssertEqual(completion?.stopReason, .cancelled)
         await fulfillment(of: [finalized], timeout: 0)
@@ -271,7 +325,7 @@ final class GenerationExecutionTests: XCTestCase {
         for await event in stream {
             if case .info(let info) = event { completion = info }
         }
-        let tokens = await task.value
+        let tokens = (await task.value).consume().generatedTokens
         XCTAssertEqual(tokens, [])
         XCTAssertEqual(completion?.stopReason, .length)
         XCTAssertEqual(completion?.generationTokenCount, 0)
@@ -323,7 +377,7 @@ final class GenerationExecutionTests: XCTestCase {
         for await event in stream {
             if case .info(let info) = event { completion = info }
         }
-        let tokens = await task.value
+        let tokens = (await task.value).consume().generatedTokens
         XCTAssertEqual(tokens, [42])
         XCTAssertEqual(completion?.stopReason, .length)
         await fulfillment(of: [finalized], timeout: 5)

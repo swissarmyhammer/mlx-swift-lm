@@ -36,6 +36,10 @@ struct ExecutorPromptCacheCheckpointTests {
     /// The line break between two messages of a render.
     private static let messageSeparator = "\n"
 
+    /// The end of the first message of every session here, the line break
+    /// after it included: as far as the next render agrees with the first.
+    private static let firstMessageEnd = (firstMessage + messageSeparator).utf8.count
+
     /// A store in a folder of its own, whose writer writes nothing. The
     /// budget comes from the device, thus each entry stays in memory.
     private func makeStore() -> ExecutorPromptCacheStore {
@@ -84,14 +88,12 @@ struct ExecutorPromptCacheCheckpointTests {
         // Turn 1 renders "first turn\nassistant:". Turn 2 renders
         // "first turn\nturn 1\nassistant:": it agrees with turn 1 through the
         // line break after the last message of turn 1, and no further.
-        let lastMessageEnd = (Self.firstMessage + Self.messageSeparator).utf8.count
-
         let passes = try await runDroppedTurn(
             processor: GenerationPromptBytesInputProcessor(
                 generationPrompt: Self.generationPrompt),
             recurrentLayerCount: 1)
 
-        #expect(passes.second.reusedTokenCount == lastMessageEnd)
+        #expect(passes.second.reusedTokenCount == Self.firstMessageEnd)
     }
 
     @Test("a split prefill still reports every prompt token of the pass")
@@ -126,14 +128,12 @@ struct ExecutorPromptCacheCheckpointTests {
     func aModelThatIsNotHybridStillRewindsToTheSharedPrefix() async throws {
         // An attention cache rewinds to any position, thus the render reuses
         // all it shares with the ledger, the line break included.
-        let sharedPrefix = (Self.firstMessage + Self.messageSeparator).utf8.count
-
         let passes = try await runDroppedTurn(
             processor: GenerationPromptBytesInputProcessor(
                 generationPrompt: Self.generationPrompt),
             recurrentLayerCount: 0)
 
-        #expect(passes.second.reusedTokenCount == sharedPrefix)
+        #expect(passes.second.reusedTokenCount == Self.firstMessageEnd)
     }
 
     // MARK: - Planning one pass with a checkpoint
@@ -145,36 +145,16 @@ struct ExecutorPromptCacheCheckpointTests {
     /// then the generation prompt and the generated turn of the pass.
     private static let ledger = checkpointTokens + [4, 5, 6]
 
-    /// The shape of the zero arrays the fixtures write into each cache.
-    private static let fixtureShape = [1, 1, 1, 1]
-
     /// The model the plan fixtures make fresh caches with: one attention
     /// layer and one recurrent layer.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func hybridModel() -> ScriptedLanguageModel {
         ScriptedLanguageModel(rounds: [], cacheLayerCount: 1, recurrentLayerCount: 1)
     }
 
-    /// Moves each cache of `caches` past `tokenCount` more tokens, the way a
-    /// forward pass of a hybrid model does.
-    ///
-    /// - Parameters:
-    ///   - caches: the caches to feed.
-    ///   - tokenCount: the number of tokens to feed.
-    private func feed(_ caches: [KVCache], tokenCount: Int) {
-        let keyValues = MLXArray.zeros([1, 1, tokenCount, 1])
-        for cache in caches {
-            if let recurrent = cache as? MambaCache {
-                recurrent[0] = MLXArray.zeros(Self.fixtureShape)
-                recurrent[1] = MLXArray.zeros(Self.fixtureShape)
-                recurrent.advance(tokenCount)
-            } else {
-                _ = cache.update(keys: keyValues, values: keyValues)
-            }
-        }
-    }
-
     /// An entry whose hybrid caches hold ``ledger`` and carry a checkpoint at
     /// the end of ``checkpointTokens``.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func entryWithCheckpoint() throws -> ExecutorPromptCacheEntry {
         let caches = try hybridModel().newCache(parameters: nil)
         feed(caches, tokenCount: Self.checkpointTokens.count)
@@ -186,21 +166,14 @@ struct ExecutorPromptCacheCheckpointTests {
             caches: caches, tokens: Self.ledger, checkpoint: checkpoint)
     }
 
-    /// Plans `render` against `entry`.
-    private func plan(
-        render: [Int], reusing entry: ExecutorPromptCacheEntry,
-        protocolRules: [any PromptCacheReuseRule] = []
-    ) throws -> ExecutorPromptCachePlan? {
-        try ExecutorPromptCachePlan.make(
-            reusing: entry, input: LMInput(tokens: MLXArray(render)), model: hybridModel(),
-            parameters: GenerateParameters(), protocolRules: protocolRules)
-    }
-
     @Test("a render that drops the generated turn goes back to the checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRenderThatDropsTheGeneratedTurnGoesBackToTheCheckpoint() throws {
         let render = Self.checkpointTokens + [9, 9]
 
-        let planned = try #require(try plan(render: render, reusing: entryWithCheckpoint()))
+        let planned = try #require(
+            try planPromptCache(
+                render: render, reusing: entryWithCheckpoint(), model: hybridModel()))
 
         #expect(planned.decision == .restore(.init(render: render, ledger: Self.ledger)))
         #expect(planned.reusedTokenCount == Self.checkpointTokens.count)
@@ -209,9 +182,11 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("the plan line of a restore names the rule and the seam")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func thePlanLineOfARestoreNamesTheRuleAndTheSeam() throws {
-        let planned = try plan(
-            render: Self.checkpointTokens + [9, 9], reusing: entryWithCheckpoint())
+        let planned = try planPromptCache(
+            render: Self.checkpointTokens + [9, 9], reusing: entryWithCheckpoint(),
+            model: hybridModel())
 
         let line = ExecutorPromptCacheReport.planLine(
             key: ExecutorPromptCacheKey(modelID: "test/checkpoint", sessionID: "s"),
@@ -226,46 +201,47 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("a render that parts before the checkpoint still rebuilds")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRenderThatPartsBeforeTheCheckpointStillRebuilds() throws {
         let render = [1, 9, 9]
 
-        let planned = try #require(try plan(render: render, reusing: entryWithCheckpoint()))
+        let planned = try #require(
+            try planPromptCache(
+                render: render, reusing: entryWithCheckpoint(), model: hybridModel()))
 
         #expect(planned.decision == .rebuild(.init(render: render, ledger: Self.ledger)))
         #expect(planned.reusedTokenCount == 0)
     }
 
     @Test("a render that extends the ledger still extends and does not restore")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRenderThatExtendsTheLedgerStillExtendsAndDoesNotRestore() throws {
         let planned = try #require(
-            try plan(render: Self.ledger + [7], reusing: entryWithCheckpoint()))
+            try planPromptCache(
+                render: Self.ledger + [7], reusing: entryWithCheckpoint(), model: hybridModel()))
 
         #expect(planned.decision == .extend)
         #expect(planned.reusedTokenCount == Self.ledger.count)
     }
 
-    /// A rule that keeps the whole ledger and feeds the last token of the
-    /// render, the way a committed-turn rule splices.
-    private struct SpliceLastTokenRule: PromptCacheReuseRule {
-        func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
-            guard let last = turn.promptTokens.last else { return nil }
-            return .appendSuffix(
-                suffixStart: turn.promptTokens.count - 1,
-                representedTokens: cache.cachedTokens + [last])
-        }
-    }
+    /// The token the splicing rule takes as the commit of the turn the model
+    /// wrote: the first token after the checkpoint in the render of the
+    /// splice test, thus the rule feeds the last token of that render.
+    private static let spliceCommit = 9
 
     @Test("a protocol rule still splices and does not restore")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aProtocolRuleStillSplicesAndDoesNotRestore() throws {
         let planned = try #require(
-            try plan(
+            try planPromptCache(
                 render: Self.checkpointTokens + [9, 9], reusing: entryWithCheckpoint(),
-                protocolRules: [SpliceLastTokenRule()]))
+                model: hybridModel(), protocolRules: [SplicingRule(commit: Self.spliceCommit)]))
 
         #expect(planned.decision == .splice)
     }
 
     @Test("caches that all rewind take no checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func cachesThatAllRewindTakeNoCheckpoint() {
         let caches: [KVCache] = [KVCacheSimple()]
         feed(caches, tokenCount: Self.checkpointTokens.count)
@@ -276,6 +252,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("only a model with a layer that cannot rewind is served by a checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func onlyAModelWithALayerThatCannotRewindIsServedByACheckpoint() {
         #expect(PromptCacheCheckpoint.applies(to: hybridModel()))
         #expect(
@@ -284,6 +261,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("an entry counts the bytes of its checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func anEntryCountsTheBytesOfItsCheckpoint() throws {
         let entry = try entryWithCheckpoint()
         let checkpoint = try #require(entry.checkpoint)
@@ -295,6 +273,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("a boundary before the end of the prompt is fed before generation")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aBoundaryBeforeTheEndOfThePromptIsFedBeforeGeneration() throws {
         let model = hybridModel()
         let render = Self.ledger
@@ -313,6 +292,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("a boundary at the end of the prompt is taken when the prefill ends")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aBoundaryAtTheEndOfThePromptIsTakenWhenThePrefillEnds() throws {
         let model = hybridModel()
         let slot = ExecutorPromptCacheSlot(nil, report: { _ in })
@@ -333,6 +313,7 @@ struct ExecutorPromptCacheCheckpointTests {
     }
 
     @Test("the commit line names the position of the checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func theCommitLineNamesThePositionOfTheCheckpoint() throws {
         let line = ExecutorPromptCacheReport.commitLine(
             key: ExecutorPromptCacheKey(modelID: "test/checkpoint", sessionID: "s"),

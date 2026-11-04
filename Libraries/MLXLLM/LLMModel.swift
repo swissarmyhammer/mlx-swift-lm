@@ -46,6 +46,10 @@ extension LLMModel {
     /// `TokenIterator`'s first forward. With `PrefillParameters.Chunking.balanced`
     /// (the default) the chunks are equal-sized, so no forward is a small
     /// remainder paying full attention cost against the whole prompt.
+    ///
+    /// When `state` asks for MTP drafter state and carries an
+    /// `MLXLMCommon/mtpPrefillChunkHandlerKey` handler, each chunk's hidden
+    /// rows go to the handler right after the chunk's forward.
     public func prepare(
         _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
     ) throws
@@ -66,13 +70,14 @@ extension LLMModel {
             // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
             // chunk N. Under .remainder the reserved tail is the legacy leftover
             // (up to a full step) rather than a single token.
-            var state: LMOutput.State? = state
+            var chunkState: LMOutput.State? = state
             processed = try prefill.forEachChunk(
                 total: total, reserving: prefill.chunking == .remainder ? stepSize : 1
             ) { range in
                 let input = y[.newAxis, range]
-                let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
-                state = output.state
+                let output = self(input, cache: cache.isEmpty ? nil : cache, state: chunkState)
+                chunkState = output.state
+                state?.feedMTPPrefillChunk(tokens: input.tokens, output: output)
                 asyncEval(cache)
             }
 
