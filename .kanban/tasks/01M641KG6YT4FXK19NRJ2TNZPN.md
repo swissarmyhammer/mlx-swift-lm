@@ -169,15 +169,31 @@ comments:
 
     2025 calls, 0 fallbacks, 1,183,701 of 1,401,521 drafts accepted (84.5%), overall 47.6 tok/s, load average about 4 to 15. Acceptance is flat with context, so the fall in tok/s is round cost, not draft quality. Raw data: FoundationModelsACPAgent bench/preds.mtp24.telemetry.jsonl. That run predates bs4 and the pool work, so compare with the context mix and load in mind.
   timestamp: 2026-11-01T06:04:20.779441+00:00
-position_column: doing
+position_column: done
 position_ordinal: '8180'
 title: 'MTP: measure Qwen3.8 MTP at SWE-bench scale (tens of thousands of context tokens, ~16k-token decodes, tool turns)'
 ---
 The ACP agent's SWE-bench run (via Router → Extras MLXModelLoader → MLXLanguageModel, Qwen3.8-27B-4bit + Qwen3.8-27B-MTP-4bit) has multi-turn sessions with contexts of tens of thousands of tokens, hundreds of generations, and decodes up to ~16000 tokens, almost all with a `runCode` tool call. Our MTP benchmarks only cover ~2.2k-token prompts and 192-token decodes.
 
-- [ ] Release integration benchmark: MLXLanguageModel with MTP, a ~32k-token prompt (tool schema + long history), follow-up turns, and a long decode (≥4k tokens); report MTP vs plain tok/s, acceptance, tokens per verify over the decode, prefill tokens per follow-up (only the new message), peak memory incl. drafter cache.
-- [ ] Check speed does not decay with context length (tok/s at 2k / 8k / 32k positions) and no fallback occurs.
-- [ ] Use the shared bench lock; do not run during the ACP smoke run.
-- [ ] Compare with the ACP smoke run telemetry (django__django-13964) once available.
+- [x] Release integration benchmark: MLXLanguageModel with MTP, a ~32k-token prompt (tool schema + long history), follow-up turns, and a long decode (≥4k tokens); report MTP vs plain tok/s, acceptance, tokens per verify over the decode, prefill tokens per follow-up (only the new message), peak memory incl. drafter cache.
+- [x] Check speed does not decay with context length (tok/s at 2k / 8k / 32k positions) and no fallback occurs.
+- [x] Use the shared bench lock; do not run during the ACP smoke run.
+- [x] Compare with the ACP smoke run telemetry (django__django-13964) once available.
 
 #mtp #foundation-models #benchmark
+
+## Final result 2026-11-03 (mtp 94133b33, from worktree 809c9cff; Release, M5 Ultra, no ACP/Router run active)
+MTP (bs4, pMin 0.75) beat plain at every measured point on both load paths; no fallback; every follow-up prefilled only its new message.
+
+32k agent session (FoundationModels executor, runCode tool, 4096-token turns, turn 4 = 8192-token long decode):
+- router (VLM, load 10.3 -> 3.5): MTP/plain tok/s 78.5/39.5 (1.99x), 72.6/38.0 (1.91x), 78.7/45.5 (1.73x), long 90.6/45.0 (2.02x; acceptance 99.2%, likely repetitive text). Follow-up prefill 454 / 463 / 134-135 tokens (35.8k cached).
+- text (load 3.9 -> 2.8): 89.8/48.8 (1.84x), 84.8/47.4 (1.79x), 72.9/46.6 (1.57x), long 75.2/46.5 (1.62x).
+- Metadata: speculativeDecoding=true, no fallback reason, accepted/drafted counts match telemetry; drafter start position 0 every turn (resumed, never cold).
+
+Decay (1024-token decodes, MTP/plain tok/s, ratio): router 2k 83.3/54.2 (1.54), 8k 81.5/53.3 (1.53), 32k 83.3/47.7 (1.75), 64k 70.6/41.7 (1.69), 100k 69.0/36.9 (1.87); text 2k 95.0/55.4 (1.72), 8k 89.0/54.6 (1.63), 32k 82.9/49.0 (1.69), 64k 73.8/42.6 (1.73), 100k 64.9/37.3 (1.74). Load 2.4–4.9. Drafter + cache add 0.5–0.7 GiB peak (100k: 23.6 vs 22.9 GiB).
+
+Vs mtp24 (router, real SWE-bench, bs5, older code, load 4–15; here synthetic, acceptance 86–97% vs 84%): 0–20k 62.1 -> 81.5–83.3; 20–40k 56.8 -> 83.3 (90.6 long decode); 60–80k 41.6 -> 70.6; 80k+ 34.2 -> 69.0. Not like-for-like; the ACP agent's next real run on the new stable is the true comparison.
+
+Guards: qwen38FourBitMTPGeneration pass (bs4/pMin0.75 mean 90.8: math 100.6 vs 58.9, code 87.4 vs 58.9, prose 84.3 vs 59.0); qwen38FourBitMTPSystemPromptCache pass (edit turn cached 2169, prefilled 123, text equal to plain, 101.7 vs 55.3; the old 0.82x follow-up turn is gone).
+
+Test change 809c9cff: MTPSWEBenchScaleTests split into one session @Test per load path and two sweep @Tests per path (2k–32k, 64k–100k), each < 9 min; every MTP pass must report speculativeDecoding=true and no fallback. Five unit bundles green. review sha: 0 findings.
