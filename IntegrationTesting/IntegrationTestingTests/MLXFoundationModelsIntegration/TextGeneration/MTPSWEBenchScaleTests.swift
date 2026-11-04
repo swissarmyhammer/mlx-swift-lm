@@ -5,8 +5,10 @@
 // prompt cache, and one decode of at least 4096 tokens; on the load path of the
 // FoundationModels router (`loadModelContainer`, thus the vision-language `Qwen35`, and the
 // drafter `.matchingTarget(.qwen35Text, .qwen35VLM)`) and on the text path (`LLMModelFactory`
-// and `.qwen35Text`). Run it in Release, or the throughput measures the debug build:
-// `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS,arch=arm64' -configuration Release ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES -only-testing:IntegrationTestingTests/MTPSWEBenchScaleTests`
+// and `.qwen35Text`). Run it in Release, or the throughput measures the debug build. Each test
+// covers one load path, and a sweep test one context band, so each runs in one hold of the bench
+// lock; select one test at a time:
+// `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS,arch=arm64' -configuration Release ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES '-only-testing:IntegrationTestingTests/MTPSWEBenchScaleTests/agentSessionSpeculatesAtSWEBenchScaleOnRouterPath()'`
 //
 // Every measurement line goes to the unified log under the `MTP SWE-BENCH SCALE:` prefix:
 // `log show --info --start <time> --predicate 'subsystem == "com.apple.FoundationModels-MLX" AND category == "MTPSWEBenchScale"'`
@@ -27,10 +29,10 @@ import os
 /// How the target loads.
 private typealias LoadPath = Qwen38FourBitMTPModel.LoadPath
 
-/// The time limit of each test, in minutes: the session test runs four sessions of about 13k
-/// decoded tokens over a 32k-token prompt, and the sweep of one load path prefills about 208k
-/// tokens and decodes 1024 tokens ten times: plain and MTP.
-private let sweBenchScaleTimeLimitMinutes = 150
+/// The time limit of each test, in minutes: one hold of the shared bench lock. A session test
+/// runs two sessions of about 12k decoded tokens over a 32k-token prompt on one load path, and a
+/// sweep test prefills and decodes the points of one context band on one load path.
+private let sweBenchScaleTimeLimitMinutes = 20
 
 /// The tool call one pass emitted.
 struct ExecutorToolCall {
@@ -98,6 +100,10 @@ struct PassEvents {
     var completion: GenerateCompletionInfo?
     var chunkTimes: [Date] = []
 
+    /// The metadata the pass sent to its response entry, each value as text: for a model that
+    /// speculates, the MTP outcome of the call.
+    var metadata: [String: String] = [:]
+
     /// Reads `event`, which arrived at `time`.
     mutating func consume(_ event: MLXLanguageModel.Executor.GenerationEvent, at time: Date) {
         switch event {
@@ -114,8 +120,8 @@ struct PassEvents {
             cachedTokenCount = input.cachedTokenCount
         case .completion(let info):
             completion = info
-        case .updateMetadata:
-            break
+        case .updateMetadata(let values, _):
+            metadata.merge(values.mapValues { "\($0)" }) { _, update in update }
         }
     }
 }
@@ -304,9 +310,12 @@ struct MTPSWEBenchScaleTests {
     /// The tokens of each chunk of the reference prefill that reads the logits at a divergence.
     private static let referenceChunkTokenCount = 2_048
 
-    /// The context lengths of the decode-rate sweep, in tokens of content: the ACP agent's
+    /// The short context lengths of the decode-rate sweep, in tokens of content.
+    private static let shortSweepContextTokenCounts = [2_048, 8_192, 32_768]
+
+    /// The long context lengths of the decode-rate sweep, in tokens of content: the ACP agent's
     /// SWE-bench sessions reach about 103k.
-    private static let sweepContextTokenCounts = [2_048, 8_192, 32_768, 65_536, 100_000]
+    private static let longSweepContextTokenCounts = [65_536, 100_000]
 
     /// The token budget of each pass of the sweep, which each pass must write.
     private static let sweepDecodeTokenCount = 1_024
@@ -365,33 +374,64 @@ struct MTPSWEBenchScaleTests {
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
-    func agentSessionSpeculatesAtSWEBenchScale() async throws {
-        let router = try await measureSessions(on: .router)
-        let text = try await measureSessions(on: .text)
-        let routerLong = try #require(router.mtp.last).completion.tokensPerSecond
-        let textLong = try #require(text.mtp.last).completion.tokensPerSecond
-        Self.log("long decode MTP: router path \(routerLong) tok/s, text path \(textLong) tok/s")
+    func agentSessionSpeculatesAtSWEBenchScaleOnRouterPath() async throws {
+        try await logLongDecode(of: try await measureSessions(on: .router))
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    @Test(
-        .enabled(if: Qwen38FourBitMTPModel.isLocal),
-        arguments: Qwen38FourBitMTPModel.LoadPath.allCases)
-    func decodeRateFromTwoToOneHundredThousandContextTokens(
-        path: Qwen38FourBitMTPModel.LoadPath
-    ) async throws {
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func agentSessionSpeculatesAtSWEBenchScaleOnTextPath() async throws {
+        try await logLongDecode(of: try await measureSessions(on: .text))
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func decodeRateUpToThirtyTwoThousandContextTokensOnRouterPath() async throws {
+        try await sweep(Self.shortSweepContextTokenCounts, on: .router)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func decodeRateFromSixtyFourToOneHundredThousandContextTokensOnRouterPath() async throws {
+        try await sweep(Self.longSweepContextTokenCounts, on: .router)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func decodeRateUpToThirtyTwoThousandContextTokensOnTextPath() async throws {
+        try await sweep(Self.shortSweepContextTokenCounts, on: .text)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(.enabled(if: Qwen38FourBitMTPModel.isLocal))
+    func decodeRateFromSixtyFourToOneHundredThousandContextTokensOnTextPath() async throws {
+        try await sweep(Self.longSweepContextTokenCounts, on: .text)
+    }
+
+    /// Writes the MTP and plain rates of the long decode of `sessions`.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func logLongDecode(of sessions: Sessions) async throws {
+        let mtp = try #require(sessions.mtp.last).completion.tokensPerSecond
+        let plain = try #require(sessions.plain.last).completion.tokensPerSecond
+        Self.log(
+            "\(sessions.path) long decode: MTP \(mtp) tok/s, plain \(plain) tok/s, \(mtp / plain)x")
+    }
+
+    /// Measures each point of `contextTokenCounts` on `path`, and logs each rate against the
+    /// rate of the first point.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func sweep(_ contextTokenCounts: [Int], on path: LoadPath) async throws {
         let (runners, countTokens) = try await makeSweepRunners(on: path)
+        let first = try #require(contextTokenCounts.first)
         let baseline = try await measureSweepPoint(
-            try #require(Self.sweepContextTokenCounts.first), runners: runners,
-            countTokens: countTokens)
-        for contextTokenCount in Self.sweepContextTokenCounts.dropFirst() {
+            first, runners: runners, countTokens: countTokens)
+        for contextTokenCount in contextTokenCounts.dropFirst() {
             let point = try await measureSweepPoint(
                 contextTokenCount, runners: runners, countTokens: countTokens)
             Self.log(
                 """
                 \(path) sweep \(contextTokenCount): MTP at \(point.mtp / baseline.mtp) and \
-                plain at \(point.plain / baseline.plain) of their rates at \
-                \(Self.sweepContextTokenCounts[0]) tokens
+                plain at \(point.plain / baseline.plain) of their rates at \(first) tokens
                 """)
         }
         await releaseAllGPUMemory()
@@ -475,8 +515,34 @@ struct MTPSWEBenchScaleTests {
             verify; drafter start \(pass.drafterStartPosition.map(String.init) ?? "none"); \
             fallback \(fallback); tool call \(pass.events.toolCall?.name ?? "none"); peak GPU \
             \(Double(pass.peakMemoryBytes) / bytesPerGibibyte) GiB; \
+            metadata \(describe(pass.events.metadata)); \
             \(DecodeRates(chunkTimes: pass.events.chunkTimes).summary)
             """
+    }
+
+    /// The MTP outcome keys of `metadata`, in a measurement line.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func describe(_ metadata: [String: String]) -> String {
+        let keys = [
+            SpeculativeDecodingOutcome.MetadataKey.speculativeDecoding,
+            SpeculativeDecodingOutcome.MetadataKey.fallbackReason,
+            SpeculativeDecodingOutcome.MetadataKey.acceptedDraftTokenCount,
+            SpeculativeDecodingOutcome.MetadataKey.draftedTokenCount,
+        ]
+        return keys.map { "\($0)=\(metadata[$0] ?? "absent")" }.joined(separator: " ")
+    }
+
+    /// Holds that the response metadata of an MTP pass reports that it drafted and did not fall
+    /// back.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func expectSpeculationMetadata(of pass: Pass, _ label: String) {
+        let metadata = pass.events.metadata
+        #expect(
+            metadata[SpeculativeDecodingOutcome.MetadataKey.speculativeDecoding] == "true",
+            "\(label): metadata \(describe(metadata))")
+        #expect(
+            metadata[SpeculativeDecodingOutcome.MetadataKey.fallbackReason] == nil,
+            "\(label): metadata \(describe(metadata))")
     }
 
     /// Holds the scale, the speculation, the prompt-cache reuse and the speed of the sessions.
@@ -507,6 +573,7 @@ struct MTPSWEBenchScaleTests {
             #expect((pass.completion.proposedDraftTokens ?? 0) > 0, "\(turn) drafted nothing")
             #expect(pass.completion.passthroughReason == nil, "\(turn)")
             #expect(pass.completion.speculativeDecodingFallbackReason == nil, "\(turn)")
+            Self.expectSpeculationMetadata(of: pass, turn)
             // The drafter state began with the first turn and was resumed, never started cold.
             #expect(pass.drafterStartPosition == 0, "\(turn)")
         }
@@ -673,6 +740,7 @@ struct MTPSWEBenchScaleTests {
         #expect((mtp.proposedDraftTokens ?? 0) > 0, "\(label)")
         #expect(mtp.passthroughReason == nil, "\(label)")
         #expect(mtp.speculativeDecodingFallbackReason == nil, "\(label)")
+        Self.expectSpeculationMetadata(of: passes.mtp, label)
         return SweepPoint(
             plain: passes.plain.completion.tokensPerSecond, mtp: mtp.tokensPerSecond)
     }
@@ -695,13 +763,17 @@ struct MTPSWEBenchScaleTests {
             \(telemetry?.meanEmittedTokensPerTargetCall ?? 0), effective block size \
             \(Double(telemetry?.targetVerifiedTokenCount ?? 0) / verifyCalls), \
             \(mtp.completion.generateTime / rounds * millisecondsPerSecond) ms per round over \
-            \(telemetry?.roundCount ?? 0) rounds; plain \(plainMilliseconds) ms per token
+            \(telemetry?.roundCount ?? 0) rounds; plain \(plainMilliseconds) ms per token; peak GPU \
+            MTP \(Double(mtp.peakMemoryBytes) / bytesPerGibibyte) GiB, plain \
+            \(Double(plain.peakMemoryBytes) / bytesPerGibibyte) GiB; MTP metadata \
+            \(describe(mtp.events.metadata))
             """
     }
 
     /// Writes `measurement` under the measurement prefix.
     static func log(_ measurement: String) {
-        measurementLog.info("\(measurementPrefix, privacy: .public) \(measurement, privacy: .public)")
+        measurementLog.info(
+            "\(measurementPrefix, privacy: .public) \(measurement, privacy: .public)")
     }
 }
 
