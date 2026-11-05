@@ -2042,49 +2042,41 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
     public init() {}
 
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
-        let message = Self.separatingImportedReasoning(message)
+        var message = message
+        var reasoning: String?
+        if message.role == .assistant {
+            let reasoningProtocol = QwenReasoningProtocol.tagged
+            let startDelimiter = reasoningProtocol.startDelimiter
+            let endDelimiter = reasoningProtocol.endDelimiter
+            let reasoningAndContent: Substring?
+            if let recorded = message.reasoning {
+                // The session already streamed reasoning apart from the content.
+                reasoning = recorded
+                reasoningAndContent = nil
+            } else if message.prefilledReasoningStartDelimiter == startDelimiter {
+                reasoningAndContent = message.content[...]
+            } else if message.content.hasPrefix(startDelimiter) {
+                reasoningAndContent = message.content.dropFirst(startDelimiter.count)
+            } else {
+                reasoningAndContent = nil
+            }
+            if let reasoningAndContent,
+                let end = reasoningAndContent.range(of: endDelimiter)
+            {
+                reasoning = String(reasoningAndContent[..<end.lowerBound])
+                message.content = String(reasoningAndContent[end.upperBound...])
+            }
+        }
+
         var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
             "content": contentParts(for: message, layout: .imagesThenVideosThenText),
         ]
+        if let reasoning {
+            dictionary["reasoning_content"] = reasoning
+        }
         addToolMetadata(to: &dictionary, for: message)
-        // The Qwen 3.5 chat template keeps the `<think>` block of a past
-        // turn and reads `reasoning_content` into it. Without this key the
-        // history render writes an empty block, thus the next round parts
-        // from the tokens the model wrote and the prompt cache starts cold.
-        addReasoningMetadata(to: &dictionary, for: message)
         return dictionary
-    }
-
-    /// The message with a completed think block at the start of its content
-    /// moved to ``Chat/Message/reasoning``.
-    ///
-    /// A history that a caller imports can keep the reasoning of an assistant
-    /// turn inside its content. The Qwen 3.8 chat template reads the reasoning
-    /// of a past turn only from `reasoning_content`, thus without this move it
-    /// renders the block as an answer. The move keeps all whitespace, because
-    /// the template trims the two parts itself.
-    ///
-    /// These messages stay as they are: a message that is not an assistant
-    /// turn, a message that already carries its reasoning (a turn that
-    /// ``ChatSession`` recorded), a content that does not start with the open
-    /// delimiter, and a block that does not close.
-    ///
-    /// - Parameter message: The structured chat message to convert.
-    /// - Returns: The message, with its completed think block apart from the
-    ///   content when it has one.
-    private static func separatingImportedReasoning(_ message: Chat.Message) -> Chat.Message {
-        let startDelimiter = QwenReasoningProtocol.tagged.startDelimiter
-        let endDelimiter = QwenReasoningProtocol.tagged.endDelimiter
-        guard message.role == .assistant, message.reasoning == nil,
-            message.content.hasPrefix(startDelimiter)
-        else { return message }
-        let block = message.content.dropFirst(startDelimiter.count)
-        guard let end = block.range(of: endDelimiter) else { return message }
-        var separated = message
-        separated.reasoning = String(block[..<end.lowerBound])
-        separated.content = String(block[end.upperBound...])
-        return separated
     }
 }
 

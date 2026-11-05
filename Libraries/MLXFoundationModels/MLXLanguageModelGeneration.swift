@@ -176,15 +176,27 @@ extension MLXLanguageModel.Executor {
         // models are tool-blind (template ignores `tools:`), so
         // they fall through to the single-phase path unchanged;
         // thinking-disabled requests stay single-phase too.
+        //
+        // An unspecified level resolves through the template's own
+        // `defaultOn`, exactly as the prompt does below. If the two
+        // disagree the phase asks for reasoning the prompt suppressed,
+        // burning `maxTokens` without producing a tool call.
         let thinkThenCallConfig: ReasoningConfig? = {
             guard declaresReasoning,
                 let reasoningConfig = resolved.reasoningConfig,
-                case .templateFlag = reasoningConfig.promptStrategy,
+                case .templateFlag(_, let defaultOn, _) = reasoningConfig.promptStrategy,
                 Self.thinkingEnabled(
-                    for: request.contextOptions.reasoningLevel) != false
+                    for: request.contextOptions.reasoningLevel, defaultOn: defaultOn)
             else { return nil }
             return reasoningConfig
         }()
+        // Routing keys on the declaration alone, never on the level: a
+        // model can open its channel even when the template was told
+        // not to think, as Gemma 4 does on the post-tool turns this
+        // path serves. Deriving this from `thinkThenCallConfig` would
+        // leave those markers in the answer.
+        let routedReasoningConfig: ReasoningConfig? =
+            declaresReasoning ? resolved.reasoningConfig : nil
         // Thread `enable_thinking` through the tool-aware template
         // so the prompt's thinking state matches how we drive
         // generation. For a toggleable model (`.templateFlag`, e.g.
@@ -226,7 +238,7 @@ extension MLXLanguageModel.Executor {
                 messages: messages,
                 enabledToolDefinitions: enabledToolDefinitions,
                 toolAwareRender: toolAwareRender,
-                thinkThenCallConfig: thinkThenCallConfig,
+                routedReasoningConfig: routedReasoningConfig,
                 schemaJSON: schemaJSON,
                 baselineInput: baselineInput,
                 modelID: modelID,
@@ -275,7 +287,8 @@ extension MLXLanguageModel.Executor {
     ///   - messages: The chat messages the tool-aware prompt renders from
     ///   - enabledToolDefinitions: The tool definitions this turn exposes
     ///   - toolAwareRender: The thinking state the tool-aware render carries
-    ///   - thinkThenCallConfig: The reasoning config of the think-then-call phase, when active
+    ///   - routedReasoningConfig: The reasoning config whose thinking the turn routes apart from
+    ///     the answer, when the caller declares reasoning
     ///   - schemaJSON: The encoded response schema, when the request carries one
     ///   - baselineInput: The prompt rendered without tool awareness
     ///   - modelID: The model identifier the schema fallback keys on
@@ -293,7 +306,7 @@ extension MLXLanguageModel.Executor {
         messages: [Chat.Message],
         enabledToolDefinitions: [Transcript.ToolDefinition],
         toolAwareRender: ThinkingRender,
-        thinkThenCallConfig: ReasoningConfig?,
+        routedReasoningConfig: ReasoningConfig?,
         schemaJSON: String?,
         baselineInput: LMInput,
         modelID: String,
@@ -313,7 +326,7 @@ extension MLXLanguageModel.Executor {
             messages: messages, tools: toolSpecs, context: context)
         let transcriptBoundary = await toolAwareRender.transcriptBoundary(
             of: toolAwareInput, messages: messages, tools: toolSpecs, context: context)
-        let reasoning = thinkThenCallConfig.map {
+        let reasoning = routedReasoningConfig.map {
             (
                 config: $0,
                 primedInside: Self.reasoningPrimedInside(
@@ -1078,6 +1091,8 @@ extension MLXLanguageModel.Executor {
                     closingBias: grammar.bias.closing,
                     whitespaceBias: grammar.bias.whitespace,
                     whitespaceTokenIDs: grammar.bias.whitespaceTokenIDs,
+                    prefill: .init(
+                        stepSize: Self.prefillStepSize ?? PrefillParameters.defaultStepSize),
                     speculation: speculation
                 ) { text in
                     onText(text)
@@ -1236,6 +1251,11 @@ extension MLXLanguageModel.Executor {
                             totalTokenCount: Self.generatedTokenCount(of: info),
                             reasoningTokenCount: 0),
                         entryID: entryID, into: channel)
+                case .reasoning:
+                    // Dropped on purpose. Anything with a resolved config goes to
+                    // `runReasoning`, so reaching here means the caller did not declare
+                    // `.reasoning` and forwarding it would defeat the capability gate.
+                    break
                 case .toolCall(_):
                     break
                 case .rejectedToolCall(let rejection):
@@ -1327,14 +1347,16 @@ extension MLXLanguageModel.Executor {
             transcriptBoundary: transcriptBoundary, speculation: speculation,
             context: context)
 
-        var emitter = ReasoningEventEmitter(
-            config: reasoningConfig, primedInside: primedInside)
+        // The collector matches the delimiters by token id when the tokenizer
+        // has them as single tokens, and scans the decoded text otherwise.
+        var collector = ReasoningTokenCollector(
+            config: reasoningConfig, primedInside: primedInside,
+            tokenizer: context.tokenizer)
         let format = context.configuration.toolCallFormat ?? .json
         var protocolDecoder = format.makeProtocolTokenStreamDecoder(
             tokenizer: context.tokenizer,
             tools: nil,
             stopStrings: context.configuration.effectiveStopStrings)
-        var detokenizer = context.tokenizer.makeStreamingDetokenizer()
         var reasoningTokenCount = 0
         var completionInfo: GenerateCompletionInfo?
         // Surfaced as a thrown error, as on the schema and allowed-tool
@@ -1390,16 +1412,13 @@ extension MLXLanguageModel.Executor {
                         // token count. Closing delimiters are deliberately
                         // attributed to reasoning until the emitter consumes
                         // them, then the final usage count is clamped.
-                        if emitter.isInsideReasoning {
+                        if collector.isInsideReasoning {
                             reasoningTokenCount += 1
                         }
-                        detokenizer.append(token: token)
-                        if let chunk = detokenizer.next() {
-                            for segment in emitter.process(chunk) {
-                                await Self.send(
-                                    segment, responseEntryID: responseEntryID,
-                                    reasoningEntryID: reasoningEntryID, channel: channel)
-                            }
+                        for segment in collector.ingest(token) {
+                            await Self.send(
+                                segment, responseEntryID: responseEntryID,
+                                reasoningEntryID: reasoningEntryID, channel: channel)
                         }
                     }
                 case .info(let info):
@@ -1426,13 +1445,12 @@ extension MLXLanguageModel.Executor {
                 throw RejectedToolCallError(rejection)
             }
         } else {
-            let pending = detokenizer.finish().map { emitter.process($0) } ?? []
-            for segment in pending + emitter.finalize() {
+            for segment in collector.finalize() {
                 await Self.send(
                     segment, responseEntryID: responseEntryID,
                     reasoningEntryID: reasoningEntryID, channel: channel)
             }
-            endedInsideReasoning = emitter.isInsideReasoning
+            endedInsideReasoning = collector.isInsideReasoning
         }
 
         // If generation ended while still inside a thinking block, the model
@@ -1583,6 +1601,18 @@ extension MLXLanguageModel.Executor {
             logger.error("Unrecognized reasoning level \(level); thinking stays on")
             return true
         }
+    }
+
+    /// The effective thinking state for a `.templateFlag` model: an
+    /// unspecified level defers to the template's own `defaultOn`.
+    ///
+    /// Resolve through this rather than collapsing the optional at the call site.
+    /// Reading `nil` as "on" holds only for a `defaultOn: true` family and
+    /// disagrees with the rendered prompt for Gemma 4, which defaults off.
+    static func thinkingEnabled(
+        for level: ContextOptions.ReasoningLevel?, defaultOn: Bool
+    ) -> Bool {
+        thinkingEnabled(for: level) ?? defaultOn
     }
 
     /// Decodes the rendered prompt's tail and asks whether it ends inside an

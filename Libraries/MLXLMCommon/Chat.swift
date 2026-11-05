@@ -27,6 +27,9 @@ public enum Chat {
     /// methods to construct role-specific messages, or the memberwise
     /// ``init(role:content:images:videos:audios:tool:reasoning:)`` directly.
     public struct Message {
+        // Records an opening reasoning delimiter supplied by the generation prompt.
+        package var prefilledReasoningStartDelimiter: String? = nil
+
         /// The role of the message sender.
         public var role: Role
 
@@ -544,7 +547,8 @@ extension DeepSeekV4ChatEncoder.Message {
 }
 
 /// Default implementation of ``MessageGenerator`` that produces `role` and
-/// `content`, plus `name`, `tool_call_id`, and `tool_calls` when present.
+/// `content`, plus `name`, `tool_call_id`, `tool_calls`, and `reasoning_content`
+/// when present.
 ///
 /// ```swift
 /// [

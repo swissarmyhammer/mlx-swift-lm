@@ -477,14 +477,14 @@ public final class ChatSession {
         /// - Parameters:
         ///   - assistant: what the generation wrote.
         ///   - reasoningHistory: how the history keeps the reasoning of the
-        ///     turn, or nil when the turn keeps its text whole.
+        ///     turn.
         ///   - generatedTokens: the tokens the generation returned.
         ///   - processedTokenCount: the tokens the main caches now hold.
         /// - Returns: whether the turn was recorded.
         @discardableResult
         mutating func record(
             _ assistant: AssistantGeneration,
-            reasoningHistory: ReasoningHistory?,
+            reasoningHistory: ReasoningHistory,
             generatedTokens: [Int],
             processedTokenCount: Int
         ) -> Bool {
@@ -520,73 +520,47 @@ public final class ChatSession {
 
     /// How the history keeps the reasoning of a generated turn.
     ///
+    /// The token loop routes the reasoning of a model with a
+    /// ``ModelConfiguration/reasoningConfig`` to ``Generation/reasoning(_:)``, thus
+    /// the content of the turn is the answer alone. The reasoning the model
+    /// finished goes beside the message, for the chat templates that replay it.
+    ///
     /// A model whose protocol replays reasoning into history
     /// (``ReasoningConfig/replaysReasoningIntoHistory``) has a chat template that
     /// writes the `reasoning_content` of a past turn inside its think block. The
-    /// session then records the reasoning of the turn there and the answer as
-    /// the content. The history render of the turn then holds the text the
-    /// model read while it wrote, thus the render of the next turn extends the
-    /// tokens the caches hold. A turn recorded whole as content renders inside
-    /// an empty think block instead: the model reads its own reasoning as an
-    /// answer, and the render parts from the cached tokens at the open block of
-    /// the generation prompt. Card `^z4aax33` measured that on Qwen 3.8.
+    /// history render of the turn then holds the text the model read while it
+    /// wrote, thus the render of the next turn extends the tokens the caches
+    /// hold. Card `^z4aax33` measured that on Qwen 3.8.
     ///
-    /// A model whose protocol replays only a turn that stopped inside its
-    /// reasoning (``ReasoningConfig/replaysUnclosedReasoningIntoHistory``)
-    /// keeps the whole text of every other turn as the content. A turn that
-    /// stopped inside the block its prompt opened has no close in its text,
-    /// thus the session records the whole text as the reasoning and an empty
-    /// content, and the render closes the block after the text the model
-    /// wrote. Card `^mf1mwaw` measured that on DeepSeek-V4.
+    /// Such a protocol, and one that replays only a turn that stopped inside its
+    /// reasoning (``ReasoningConfig/replaysUnclosedReasoningIntoHistory``), also
+    /// replays the reasoning of a turn that stopped before it closed the block.
+    /// The template closes the block after the text the model wrote, thus the
+    /// render still extends the cached tokens. Card `^mf1mwaw` measured that on
+    /// DeepSeek-V4. Every other protocol drops an unfinished thought, which a
+    /// replay would present as complete.
     private struct ReasoningHistory {
-        /// The reasoning protocol of the model.
-        let config: ReasoningConfig
+        /// Whether the history replays the reasoning of a turn that stopped
+        /// inside its reasoning block.
+        let replaysOpenReasoning: Bool
 
-        /// Whether the prompt ended inside an open reasoning block, thus the
-        /// generation starts inside reasoning.
-        let primedInside: Bool
+        /// The opening reasoning delimiter the generation prompt supplied, or
+        /// nil when the prompt did not end inside an open reasoning block.
+        let prefilledReasoningStartDelimiter: String?
 
-        /// The history of a turn generated from `prompt`, or nil when the
-        /// protocol of the model replays no reasoning into history.
+        /// The history of a turn of a model with `configuration`.
         ///
         /// - Parameters:
         ///   - configuration: the configuration of the model.
-        ///   - prompt: the rendered prompt of the turn.
-        ///   - tokenizer: the tokenizer of the model.
-        init?(configuration: ModelConfiguration, prompt: LMInput, tokenizer: any Tokenizer) {
-            guard let config = configuration.reasoningConfig,
-                config.replaysReasoningIntoHistory || config.replaysUnclosedReasoningIntoHistory
-            else {
-                return nil
-            }
-            self.config = config
-            self.primedInside = ReasoningEventEmitter.promptEndsInsideReasoning(
-                promptTokens: prompt.text.tokens.asArray(Int.self), config: config,
-                tokenizer: tokenizer)
-        }
-
-        /// The assistant message that records a generated turn.
-        ///
-        /// - Parameters:
-        ///   - content: the whole text the generation wrote.
-        ///   - toolCalls: the tool calls of the turn, or nil for none.
-        /// - Returns: the message, with the reasoning apart from the content
-        ///   when the protocol replays the reasoning of this turn.
-        func message(content: String, toolCalls: [ToolCall]?) -> Chat.Message {
-            if config.replaysReasoningIntoHistory {
-                let parts = ReasoningEventEmitter.separating(
-                    content, config: config, primedInside: primedInside)
-                return .assistant(
-                    parts.response, toolCalls: toolCalls,
-                    reasoning: parts.reasoning.isEmpty ? nil : parts.reasoning)
-            }
-            guard
-                ReasoningEventEmitter.staysInsidePrimedReasoning(
-                    content, config: config, primedInside: primedInside)
-            else {
-                return .assistant(content, toolCalls: toolCalls)
-            }
-            return .assistant("", toolCalls: toolCalls, reasoning: content)
+        ///   - primedInside: whether the prompt of the turn ended inside an open
+        ///     reasoning block.
+        init(configuration: ModelConfiguration, primedInside: Bool) {
+            let config = configuration.reasoningConfig
+            self.replaysOpenReasoning =
+                config?.replaysReasoningIntoHistory == true
+                || config?.replaysUnclosedReasoningIntoHistory == true
+            self.prefilledReasoningStartDelimiter =
+                primedInside ? config?.startDelimiter : nil
         }
     }
 
@@ -597,8 +571,23 @@ public final class ChatSession {
         var stopReason: GenerateStopReason?
         var wasTerminatedByConsumer = false
 
+        /// Whether any `.reasoning` arrived.
+        ///
+        /// Reasoning stays out of ``content``. It is tracked so a turn that produced
+        /// only thinking, such as one that hit `maxTokens` mid-thought, is not mistaken
+        /// for an empty generation and rolled back along with the user's message.
+        var producedReasoning = false
+
+        /// Reasoning the model finished: an answer or a tool call followed it.
+        /// Recorded beside the message for templates that replay it.
+        var finishedReasoning = ""
+
+        /// Reasoning with nothing after it yet. A turn that ends here was cut off
+        /// mid-thought, and replaying it would present the thought as complete.
+        var openReasoning = ""
+
         var shouldRecord: Bool {
-            (!content.isEmpty || !toolCalls.isEmpty)
+            (!content.isEmpty || !toolCalls.isEmpty || producedReasoning)
                 && rejectedToolCalls.isEmpty
                 && !wasTerminatedByConsumer
                 && stopReason != .cancelled
@@ -606,21 +595,37 @@ public final class ChatSession {
 
         /// The assistant message that records this generation in the history.
         ///
+        /// A turn that produced only reasoning records an empty assistant message.
+        /// That is deliberate: it keeps user/assistant alternation for strict
+        /// templates and keeps the user's turn in the transcript.
+        ///
         /// - Parameter reasoningHistory: how the history keeps the reasoning of
-        ///   the turn, or nil to record the whole text as the content.
-        /// - Returns: the message, with the reasoning apart from the content
-        ///   when `reasoningHistory` replays the reasoning of this turn.
-        func message(reasoningHistory: ReasoningHistory?) -> Chat.Message {
-            let calls = toolCalls.isEmpty ? nil : toolCalls
-            guard let reasoningHistory else {
-                return .assistant(content, toolCalls: calls)
-            }
-            return reasoningHistory.message(content: content, toolCalls: calls)
+        ///   the turn.
+        /// - Returns: the message, with the reasoning the history keeps beside
+        ///   the content.
+        func message(reasoningHistory: ReasoningHistory) -> Chat.Message {
+            let reasoning =
+                reasoningHistory.replaysOpenReasoning
+                ? finishedReasoning + openReasoning : finishedReasoning
+            var message = Chat.Message.assistant(
+                content, toolCalls: toolCalls.isEmpty ? nil : toolCalls,
+                reasoning: reasoning.isEmpty ? nil : reasoning)
+            message.prefilledReasoningStartDelimiter =
+                reasoningHistory.prefilledReasoningStartDelimiter
+            return message
         }
 
         mutating func consume(_ item: Generation) {
+            if item.chunk != nil || item.toolCall != nil {
+                finishedReasoning += openReasoning
+                openReasoning = ""
+            }
             if let chunk = item.chunk {
                 content += chunk
+            }
+            if let reasoning = item.reasoning {
+                producedReasoning = true
+                openReasoning += reasoning
             }
             if let toolCall = item.toolCall {
                 toolCalls.append(toolCall)
@@ -1669,10 +1674,15 @@ public final class ChatSession {
                             pendingOnDemandComponents(
                                 of: model, among: ModelComponent.needed(by: preparedInput)))
                         var input = preparedInput
+                        // The whole prompt, not `input`: the cache may leave less than the
+                        // prefill to prefill. Read before the prefill is queued.
+                        let reasoningPrimedInside = promptPrimesReasoning(
+                            input: preparedInput, modelConfiguration: modelConfiguration,
+                            tokenizer: tokenizer)
                         pendingMessages.removeAll()
                         let reasoningHistory = ReasoningHistory(
-                            configuration: modelConfiguration, prompt: preparedInput,
-                            tokenizer: tokenizer)
+                            configuration: modelConfiguration,
+                            primedInside: reasoningPrimedInside)
 
                         // The memory policy's verdict on a deferred draft model, from its byte
                         // estimate before it loads. The error of a fail action is kept until
@@ -2094,7 +2104,10 @@ public final class ChatSession {
                                 stopStrings: modelConfiguration.effectiveStopStrings,
                                 format: modelConfiguration.toolCallFormat ?? .json,
                                 tools: toolValidationSchemas,
-                                toolCallPolicy: generateParameters.toolCallPolicy)
+                                toolCallPolicy: generateParameters.toolCallPolicy,
+                                reasoning: modelConfiguration.reasoningConfig.map {
+                                    (config: $0, primedInside: reasoningPrimedInside)
+                                })
                             // The prefill counts the unfed generated tokens among the
                             // tokens it fed, thus the cached part leaves their place in the
                             // render out, and the two add up to the whole prompt.

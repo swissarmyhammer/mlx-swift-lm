@@ -104,7 +104,9 @@ private enum MTPChatCheck: String, CaseIterable {
     case drafterPrefillsOnlyTheSuffix
     /// The MTP session writes the tokens of the plain session, or parts from
     /// them only at a near-tie of plain's two best tokens
-    /// (``MTPChatTokenMatch/nearTieLogitTolerance``).
+    /// (``MTPChatTokenMatch/nearTieLogitTolerance``). A turn whose prompt
+    /// differs from the plain turn's, because an earlier turn parted at such a
+    /// near-tie, has no plain tokens to match and holds.
     case matchesPlainTokens
     /// A follow-up turn of the MTP session decodes faster than the plain session.
     case decodesFasterThanPlain
@@ -123,7 +125,10 @@ private enum MTPChatCheck: String, CaseIterable {
             return mtp.cachedPromptTokenCount > 0
                 && mtp.drafterPrefillTokenCount == mtp.promptTokenCount
         case .matchesPlainTokens:
-            return MTPChatTokenMatch(mtp: mtp.tokens, plain: plain.tokens).holds
+            let samePrompt =
+                mtp.cachedPromptTokenCount + mtp.promptTokenCount
+                == plain.cachedPromptTokenCount + plain.promptTokenCount
+            return !samePrompt || MTPChatTokenMatch(mtp: mtp.tokens, plain: plain.tokens).holds
         case .decodesFasterThanPlain:
             return mtp.decodeTokensPerSecond > plain.decodeTokensPerSecond
         }

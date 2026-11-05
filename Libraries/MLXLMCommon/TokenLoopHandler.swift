@@ -90,15 +90,21 @@ private func emitOrCancel<Output>(
 
 /// The text/tool-call handler of a generation: the stop strings and the tool-call format of
 /// `modelConfiguration` (JSON when the configuration names none), with `tools` and
-/// `toolCallPolicy`. Every text/tool-call entry point builds its handler here.
+/// `toolCallPolicy`. A model with a ``ModelConfiguration/reasoningConfig`` also has its
+/// thinking routed to ``Generation/reasoning(_:)``, starting inside a thought when
+/// `reasoningPrimedInside`. Every text/tool-call entry point builds its handler here.
 func textToolHandler(
     tokenizer: Tokenizer, modelConfiguration: ModelConfiguration,
-    tools: [[String: any Sendable]]?, toolCallPolicy: ToolCallPolicy
+    tools: [[String: any Sendable]]?, toolCallPolicy: ToolCallPolicy,
+    reasoningPrimedInside: Bool
 ) -> TextToolTokenLoopHandler {
     TextToolTokenLoopHandler(
         tokenizer: tokenizer, stopStrings: modelConfiguration.effectiveStopStrings,
         format: modelConfiguration.toolCallFormat ?? .json, tools: tools,
-        toolCallPolicy: toolCallPolicy)
+        toolCallPolicy: toolCallPolicy,
+        reasoning: modelConfiguration.reasoningConfig.map {
+            (config: $0, primedInside: reasoningPrimedInside)
+        })
 }
 
 /// Decodes response text and tool calls into ``Generation`` events.
@@ -113,11 +119,12 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
     public init(
         tokenizer: Tokenizer, stopStrings: Set<String> = [], format: ToolCallFormat,
         tools: [[String: any Sendable]]? = nil,
-        toolCallPolicy: ToolCallPolicy = .init()
+        toolCallPolicy: ToolCallPolicy = .init(),
+        reasoning: (config: ReasoningConfig, primedInside: Bool)? = nil
     ) {
         self.decoder = format.makeTokenStreamDecoder(
             tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
-            toolCallPolicy: toolCallPolicy)
+            toolCallPolicy: toolCallPolicy, reasoning: reasoning)
     }
 
     public var additionalStopTokenIDs: Set<Int> { decoder.additionalStopTokenIDs }
@@ -210,10 +217,10 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
         emit: (sending Generation) -> Bool
     ) -> TokenLoopDisposition {
         switch event {
-        case .reasoning:
-            // The public Generation stream intentionally exposes only response
-            // text and tool calls. Protocol-aware clients consume reasoning via
-            // the package-level TokenStreamDecoder contract.
+        case .reasoning(let reasoning):
+            if !emit(.reasoning(reasoning)) {
+                return .cancelled
+            }
             return .more
 
         case .response(let response):

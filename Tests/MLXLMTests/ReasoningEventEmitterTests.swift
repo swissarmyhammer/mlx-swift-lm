@@ -150,6 +150,11 @@ struct ReasoningEventEmitterTests {
         #expect(segments == [.reasoning("a<think>b"), .response("c")])
     }
 
+    @Test func nestedInnerThinkNeverClosedFlushesAsReasoning() {
+        let segments = run(["<think>a<think>b"])
+        #expect(segments == [.reasoning("a<think>b")])
+    }
+
     @Test func strayCloseWhenNeverOpenedIsLiteralResponse() {
         let segments = run(["answer </think> more"])
         #expect(segments == [.response("answer </think> more")])
@@ -174,6 +179,40 @@ struct ReasoningEventEmitterTests {
         let segments = run(["<think>t</think>", "\n\nAnswer"])
         #expect(reasoningText(segments) == "t")
         #expect(responseText(segments) == "Answer")
+    }
+
+    @Test func trimsThoughtTrailingWhitespaceAcrossChunks() {
+        let closed = run(primedInside: true, ["a", "  ", "b", " \n", "\n</think>answer"])
+        #expect(closed == [.reasoning("a"), .reasoning("  b"), .response("answer")])
+        let unclosed = run(primedInside: true, ["thought", " \n"])
+        #expect(unclosed == [.reasoning("thought")])
+    }
+
+    @Test func heldThoughtWhitespaceIsTrimmedAtAnImplicitEnd() {
+        let segments = run(
+            config: Self.thinkThenToolConfig, primedInside: true,
+            ["thought", " \n", "<tool_call>{}"])
+        #expect(segments == [.reasoning("thought"), .response("<tool_call>{}")])
+    }
+
+    /// Whitespace held before a partial delimiter is still the thought's text when
+    /// the stream ends: only the trailing run is dropped.
+    @Test func heldThoughtWhitespaceFlushesBeforeAPartialDelimiter() {
+        let segments = run(primedInside: true, ["thought", " <"])
+        #expect(segments == [.reasoning("thought"), .reasoning(" <")])
+    }
+
+    /// Held whitespace must not be rescanned on every chunk, or a model stuck emitting
+    /// newlines makes each chunk cost more than the last.
+    @Test func longWhitespaceRunInThoughtStaysLinear() {
+        var emitter = ReasoningEventEmitter(
+            config: Self.thinkThenToolConfig, primedInside: true)
+        let start = ContinuousClock.now
+        var segments = emitter.process("thought")
+        for _ in 0 ..< 20_000 { segments += emitter.process("\n") }
+        segments += emitter.process("</think>answer")
+        #expect(ContinuousClock.now - start < .seconds(10))
+        #expect(segments == [.reasoning("thought"), .response("answer")])
     }
 
     // MARK: - Custom delimiters (registry-extensible families)
@@ -251,6 +290,36 @@ struct ReasoningEventEmitterTests {
                 renderedPromptTail: "<think>\n\n  ", config: Self.thinkConfig))
     }
 
+    /// Qwen3-8B's real thinking-on prompt for a user who typed `<think>`. The typed
+    /// text tokenizes to the template's own `<think>` id, so token ids cannot tell them apart.
+    @Test func openerInUserTurnIsNotDetected() {
+        let tail =
+            "<|im_start|>user\nWhat does <think> mean in a chat template?<|im_end|>\n"
+            + "<|im_start|>assistant\n"
+        #expect(
+            !ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: tail, config: Self.thinkConfig))
+    }
+
+    @Test func prefillAfterOpenerInUserTurnIsDetected() {
+        let tail =
+            "<|im_start|>user\nWhat does <think> mean in a chat template?<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>\n"
+        #expect(
+            ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: tail, config: Self.thinkConfig))
+    }
+
+    /// Qwen3-8B's real thinking-off prompt for the same user turn.
+    @Test func closedPrefillAfterOpenerInUserTurnIsNotDetected() {
+        let tail =
+            "<|im_start|>user\nWhat does <think> mean in a chat template?<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        #expect(
+            !ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: tail, config: Self.thinkConfig))
+    }
+
     @Test func customDelimiterPrefillDetected() {
         let kimi = ReasoningConfig(
             startDelimiter: "◁think▷", endDelimiter: "◁/think▷", promptStrategy: .alwaysOn)
@@ -297,75 +366,6 @@ struct ReasoningEventEmitterTests {
         #expect(segments == [.reasoning("thinking"), .response("<tool_call>{}")])
     }
 
-    // MARK: - separating (the parts of a whole generated text)
-
-    /// One generated text and the parts it separates into.
-    struct SeparationCase: Sendable, CustomTestStringConvertible {
-        /// The name of the case in the test report.
-        let name: String
-        /// Whether the prompt ends inside an open reasoning block.
-        let primedInside: Bool
-        /// The whole generated text.
-        let text: String
-        /// The reasoning the text holds.
-        let reasoning: String
-        /// The response the text holds.
-        let response: String
-        /// Whether the whole text stays inside the block that the prompt
-        /// opened.
-        let staysInsidePrimedReasoning: Bool
-
-        var testDescription: String { name }
-    }
-
-    /// The generated texts, one row for each way a turn can end its reasoning.
-    static let separationCases: [SeparationCase] = [
-        SeparationCase(
-            name: "a primed turn that closes its block", primedInside: true,
-            text: "Paris first.\n</think>\n\nOK", reasoning: "Paris first.", response: "OK",
-            staysInsidePrimedReasoning: false),
-        SeparationCase(
-            name: "a primed turn that stops inside its block", primedInside: true,
-            text: "Paris first, then", reasoning: "Paris first, then", response: "",
-            staysInsidePrimedReasoning: true),
-        SeparationCase(
-            name: "a primed turn that stops on a part of the close", primedInside: true,
-            text: "Paris first</thi", reasoning: "Paris first</thi", response: "",
-            staysInsidePrimedReasoning: true),
-        SeparationCase(
-            name: "a primed turn that leaves its block for a tool call", primedInside: true,
-            text: "Look it up.<tool_call>{}", reasoning: "Look it up.", response: "<tool_call>{}",
-            staysInsidePrimedReasoning: false),
-        SeparationCase(
-            name: "a turn that opens its own block", primedInside: false,
-            text: "<think>abc</think>xyz", reasoning: "abc", response: "xyz",
-            staysInsidePrimedReasoning: false),
-        SeparationCase(
-            name: "a turn that opens its own block and stops inside it", primedInside: false,
-            text: "<think>abc", reasoning: "abc", response: "",
-            staysInsidePrimedReasoning: false),
-        SeparationCase(
-            name: "a turn with no block", primedInside: false,
-            text: "OK", reasoning: "", response: "OK", staysInsidePrimedReasoning: false),
-    ]
-
-    @Test(arguments: separationCases)
-    func separatingAWholeTextGivesItsReasoningAndItsResponse(_ row: SeparationCase) {
-        let parts = ReasoningEventEmitter.separating(
-            row.text, config: Self.thinkThenToolConfig, primedInside: row.primedInside)
-
-        #expect(parts.reasoning == row.reasoning)
-        #expect(parts.response == row.response)
-    }
-
-    @Test(arguments: separationCases)
-    func aWholeTextTellsWhetherItStaysInsideThePrimedBlock(_ row: SeparationCase) {
-        #expect(
-            ReasoningEventEmitter.staysInsidePrimedReasoning(
-                row.text, config: Self.thinkThenToolConfig, primedInside: row.primedInside)
-                == row.staysInsidePrimedReasoning)
-    }
-
     // MARK: - promptEndsInsideReasoning over prompt tokens
 
     /// One rendered prompt and whether it ends inside an open reasoning block.
@@ -383,7 +383,7 @@ struct ReasoningEventEmitterTests {
     /// Text that fills more than the tail the probe decodes, one token for each
     /// character of ``QwenHistoryTokenizer``.
     private static let longerThanTheProbe = String(
-        repeating: "a", count: ReasoningEventEmitter.promptProbeTailTokenCount)
+        repeating: "a", count: ReasoningEventEmitter.promptTailTokenCount)
 
     /// The prompts, one row for each way a prompt can end.
     static let promptTailCases: [PromptTailCase] = [

@@ -405,10 +405,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// `.allowed` tool routing, guided `.required` developer tool calls,
     /// and reasoning (chain-of-thought) routing.
     ///
-    /// Capabilities are declared explicitly by the caller at ``init(configuration:capabilities:configurationResolver:speculativeDecoding:weightsLocation:load:)``
+    /// Capabilities are declared explicitly by the caller at ``init(configuration:capabilities:configurationResolver:speculativeDecoding:prefillStepSize:weightsLocation:load:)``
     /// and stored verbatim. The caller includes
     /// `.guidedGeneration`/`.toolCalling`/`.reasoning` as appropriate; the
-    /// adapter does not consult ``ReasoningHeuristics`` (which remains a
+    /// adapter does not consult `ReasoningHeuristics` (which remains a
     /// standalone helper a caller may use to compute their own capability set).
     ///
     /// Declaring `.reasoning` matters for request routing: the framework only
@@ -418,7 +418,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// capability was declared.
     public let capabilities: LanguageModelCapabilities
 
-    /// The configuration resolver that patches a per-call ``ModelConfiguration``
+    /// The configuration resolver that patches a per-call `ModelConfiguration`
     /// for this instance. Defaults to ``DefaultConfigurationResolver`` when
     /// omitted.
     public let configurationResolver: any ModelConfigurationResolver
@@ -426,6 +426,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// The MTP drafter the text, reasoning and tool turns of this model speculate
     /// with, or `nil` for plain decode.
     public let speculativeDecoding: MLXSpeculativeDecoding?
+
+    /// Prompt prefill step size; `nil` uses the default step size.
+    public let prefillStepSize: Int?
 
     /// Configuration the framework uses to create and cache executors.
     public var executorConfiguration: Executor.Configuration {
@@ -443,10 +446,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///   - capabilities: The capabilities this model supports
     ///     (`.guidedGeneration`, `.toolCalling`, `.reasoning`, `.vision`).
     ///     Stored verbatim; the adapter never infers or expands the set.
-    ///   - configurationResolver: Patches a per-call ``ModelConfiguration``
+    ///   - configurationResolver: Patches a per-call `ModelConfiguration`
     ///     (reasoning config, extra stop tokens) for this instance.
     ///   - speculativeDecoding: The MTP drafter the text, reasoning and tool
     ///     turns speculate with, or `nil` for plain decode.
+    ///   - prefillStepSize: Prompt prefill step size. `nil` uses the default step size.
     ///   - weightsLocation: Resolves a model identifier to its on-disk weights
     ///     directory, for the availability checks.
     ///   - load: Loads the model container for a configuration.
@@ -464,6 +468,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         configurationResolver: any ModelConfigurationResolver =
             DefaultConfigurationResolver(),
         speculativeDecoding: MLXSpeculativeDecoding? = nil,
+        prefillStepSize: Int? = nil,
         weightsLocation: @Sendable @escaping (String) -> URL,
         load: @escaping ContainerLoader
     ) {
@@ -471,6 +476,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         self.capabilities = LanguageModelCapabilities(capabilities)
         self.configurationResolver = configurationResolver
         self.speculativeDecoding = speculativeDecoding
+        self.prefillStepSize = prefillStepSize
         self.weightsLocation = weightsLocation
         self.load = load
     }
@@ -562,7 +568,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             defer { Stream.gpu.synchronize() }
             let input = try await context.processor.prepare(
                 input: UserInput(chat: [.user("warmup")]))
-            let parameters = GenerateParameters(maxTokens: 1)
+            let parameters = GenerateParameters(
+                maxTokens: 1, prefill: .init(stepSize: prefillStepSize))
             for await _ in try MLXLMCommon.generate(
                 input: input, parameters: parameters, context: context
             ) {
@@ -960,13 +967,24 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
         }
 
+        /// The prompt prefill step size of the model that the current `respond`
+        /// serves, from ``MLXLanguageModel/prefillStepSize``; `nil` uses the
+        /// default step size.
+        ///
+        /// A task-local, as ``drainCoordinator``, so each generation pass inside
+        /// one `respond` reads it without a parameter through every call.
+        @TaskLocal static var prefillStepSize: Int?
+
         /// Build `GenerateParameters` for a sampler-backed generation pass. The shared
         /// resolver owns temperature and mode precedence; this helper preserves the
-        /// optional seed directly on the backend request.
+        /// optional seed directly on the backend request, and the prompt prefill
+        /// step size, which defaults to the one of the model that the current
+        /// `respond` serves (``prefillStepSize``).
         static func makeParameters(
             maxTokens: Int,
             requestedTemperature: Double?,
-            samplingConfiguration: MLXSamplingConfiguration?
+            samplingConfiguration: MLXSamplingConfiguration?,
+            prefillStepSize: Int? = Executor.prefillStepSize
         ) -> GenerateParameters {
             var parameters = GenerateParameters(maxTokens: maxTokens)
             resolveSamplingParameters(
@@ -974,6 +992,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 clampedTemperature: clampedTemperature(requestedTemperature)
             ).apply(to: &parameters)
             parameters.seed = samplingConfiguration?.seed
+            parameters.prefill.stepSize = prefillStepSize
             return parameters
         }
 
@@ -1110,8 +1129,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
             try await withTaskCancellationHandler {
                 try await Self.$drainCoordinator.withValue(coordinator) {
-                    try await SpeculativeDecodingOutcome.$current.withValue(speculationOutcome) {
-                        try await runRespond(to: request, model: model, streamingInto: channel)
+                    try await Self.$prefillStepSize.withValue(model.prefillStepSize) {
+                        try await SpeculativeDecodingOutcome.$current.withValue(speculationOutcome)
+                        {
+                            try await runRespond(to: request, model: model, streamingInto: channel)
+                        }
                     }
                 }
             } onCancel: {
@@ -1246,7 +1268,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         otherwise: renderedMessages)
 
                     // Render the prompt through the model's UserInputProcessor.
-                    let userInput = UserInput(chat: messages)
+                    // Guided generation adds the schema, including its @Guide
+                    // descriptions, to the system prompt, so the model sees more than
+                    // the grammar. `includeSchemaInPrompt` refers to the system prompt.
+                    // Tool-aware prompts are unchanged.
+                    let promptMessages = TranscriptConverter.promptMessages(
+                        messages, schemaJSON: schemaJSON,
+                        includeSchemaInPrompt: request.contextOptions.includeSchemaInPrompt)
+                    let userInput = UserInput(chat: promptMessages.withSchema)
                     let input = try await context.processor.prepare(input: userInput)
 
                     // Reasoning is only consumed by the unconstrained path

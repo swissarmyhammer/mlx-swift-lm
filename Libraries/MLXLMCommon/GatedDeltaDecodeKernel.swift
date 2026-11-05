@@ -308,7 +308,8 @@ package enum GatedDeltaDecodeKernel {
     /// this kernel.
     ///
     /// `sigmoid_of` and `softplus_of` copy the `Sigmoid` and `LogAddExp`
-    /// operators of MLX, so that in the input type they round as the
+    /// operators of MLX (`Sigmoid` reads `metal::precise::exp` since MLX
+    /// 0.32.4, mlx#4461), so that in the input type they round as the
     /// compiled MLX kernels round. `window_at` reads one row of the conv input
     /// window: a row of the conv state, then the conv input of a token.
     /// `conv_silu` computes the conv taps of one channel for one token in
@@ -318,7 +319,7 @@ package enum GatedDeltaDecodeKernel {
         gatedDeltaMetalHeader + """
             template <typename T>
             inline T sigmoid_of(T x) {
-              auto y = 1 / (1 + metal::exp(metal::abs(x)));
+              auto y = 1 / (1 + metal::precise::exp(metal::abs(x)));
               return (x < 0) ? y : 1 - y;
             }
 

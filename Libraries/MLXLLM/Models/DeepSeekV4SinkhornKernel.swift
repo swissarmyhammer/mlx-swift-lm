@@ -19,7 +19,7 @@
 //     `fast::exp` in its sigmoids, thus its numbers are not the numbers of
 //     the op path. This kernel takes each step of the MLX primitives in
 //     their own order and with their own exponential: the sigmoid of
-//     `Sigmoid` in kernels/unary_ops.h, which reads `metal::exp`, and the
+//     `Sigmoid` in kernels/unary_ops.h, which reads `metal::precise::exp`, and the
 //     row softmax of `softmax_single_row` in kernels/softmax.h, which reads
 //     `fast::exp` also when the op path asks for a precise softmax.
 //  2. The mlx-vlm kernel reads exactly four copies. This kernel takes the
@@ -269,17 +269,18 @@ enum DeepSeekV4SinkhornKernel {
     /// long generation can change.
     ///
     /// `mlx_sigmoid` is the `Sigmoid` operator of MLX, kernels/unary_ops.h,
-    /// for a float32 value, with the same `metal::exp`. The two are compiled
-    /// with the same options, thus they give the same bits. A sigmoid with
-    /// `metal::precise::exp` does not: the parity test measured one unit in
-    /// the last place on some `pre` and `post` values.
+    /// for a float32 value, with the same `metal::precise::exp` (MLX 0.32.4,
+    /// mlx#4461). The two are compiled with the same options, thus they give
+    /// the same bits. A sigmoid with another exponential does not: the parity
+    /// test measured one unit in the last place on some `pre` and `post`
+    /// values.
     ///
     /// MLX writes the kernel signature directly after the header, thus the
     /// header ends in a line break.
     private static let header = """
         #pragma METAL fp contract(off)
         inline float mlx_sigmoid(float x) {
-            float y = 1 / (1 + metal::exp(metal::abs(x)));
+            float y = 1 / (1 + metal::precise::exp(metal::abs(x)));
             return (x < 0) ? y : 1 - y;
         }
 

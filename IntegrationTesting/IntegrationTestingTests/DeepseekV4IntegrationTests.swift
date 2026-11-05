@@ -451,6 +451,8 @@ struct DeepseekV4IntegrationTests {
             switch generation {
             case .chunk(let chunk):
                 text += chunk
+            case .reasoning:
+                break
             case .toolCall(let call):
                 calls.append(call)
             case .rejectedToolCall(let rejection):

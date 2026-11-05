@@ -115,10 +115,10 @@ struct ChatSessionReasoningHistoryTests {
             generated: answer, recordedContent: answer, recordedReasoning: nil,
             keepsTheGeneratedTurn: true),
         HistoryCase(
-            name: "the control: a protocol that does not replay reasoning keeps the raw text",
+            name: "a protocol that does not replay reasoning still keeps it beside the answer",
             reasoningConfig: QwenReasoningProtocol.tagged, thinking: .flag(true),
-            generated: reasonedTurn, recordedContent: reasonedTurn, recordedReasoning: nil,
-            keepsTheGeneratedTurn: false),
+            generated: reasonedTurn, recordedContent: answer, recordedReasoning: reasoning,
+            keepsTheGeneratedTurn: true),
     ]
 
     /// The first user turn.

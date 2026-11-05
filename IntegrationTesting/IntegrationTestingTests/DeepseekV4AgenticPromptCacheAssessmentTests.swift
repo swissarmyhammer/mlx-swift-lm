@@ -189,6 +189,9 @@ func collect(
         switch generation {
         case .chunk(let chunk):
             text += chunk
+        case .reasoning:
+            // The thinking of the pass; the assessment reads the answer.
+            break
         case .toolCall(let call):
             toolCalls.append(call)
         case .rejectedToolCall(let rejection):

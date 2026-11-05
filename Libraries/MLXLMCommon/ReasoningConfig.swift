@@ -118,6 +118,60 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
     }
 }
 
+// MARK: - ReasoningChannel
+
+/// The labeled-channel shape of a reasoning protocol: the start delimiter opens a
+/// *channel* whose role is named by a short label that follows it, and one shared
+/// end delimiter closes every channel whatever its role.
+///
+/// Gemma 4 is the family that needs this. Its delimiters are real special tokens
+/// (`soc_token` id 100 `<|channel>`, `eoc_token` id 101 `<channel|>`) and the
+/// reasoning span is named by the label:
+///
+/// ```
+/// <|channel>thought\n ... <channel|>the answer
+/// ```
+///
+/// A plain ``ReasoningConfig`` (start/end delimiter pair) cannot express that.
+/// A pair anchored on `<|channel>` emits `thought` as the first word of the
+/// thinking; a pair anchored on `<|channel>thought\n` stops matching the moment
+/// the label is anything else, leaking the raw opener into the answer.
+public struct ReasoningChannel: Sendable, Equatable {
+
+    /// Ends the role label that follows the start delimiter (Gemma 4: a newline).
+    public var labelTerminator: String
+
+    /// Labels whose channel carries the answer rather than reasoning.
+    ///
+    /// Every other label routes to reasoning, which is the safe direction: the text
+    /// is still delivered, and no scratchpad or raw marker can reach the answer.
+    public var responseLabels: Set<String>
+
+    /// How far past the start delimiter a label may run before the opener counts as
+    /// malformed and its text is shown as reasoning instead of consumed as metadata.
+    ///
+    /// Without a bound, a label that never terminates either buffers the whole
+    /// generation or swallows everything up to a distant end delimiter.
+    public var maxLabelLength: Int
+
+    public init(
+        labelTerminator: String = "\n",
+        responseLabels: Set<String>,
+        maxLabelLength: Int = 32
+    ) {
+        self.labelTerminator = labelTerminator
+        self.responseLabels = responseLabels
+        self.maxLabelLength = maxLabelLength
+    }
+
+    /// Gemma 4: `<|channel>thought\n ... <channel|>` carries reasoning.
+    ///
+    /// No shipped template wraps the answer in a channel, so `content` is listed
+    /// defensively: it costs nothing and keeps such an answer out of the thought
+    /// stream if one ever appears.
+    public static let gemma4 = ReasoningChannel(responseLabels: ["content"])
+}
+
 // MARK: - ReasoningConfig
 
 /// Describes a model's reasoning (chain-of-thought) protocol: the delimiters
@@ -183,6 +237,12 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// `false` keeps the renders of every other template unchanged.
     public var replaysUnclosedReasoningIntoHistory: Bool
 
+    /// When non-nil, ``startDelimiter`` opens a *labeled channel* rather than a
+    /// reasoning span directly: a role label follows it and decides whether the
+    /// span is reasoning or the answer. `nil` (the default) is the plain
+    /// delimiter-pair protocol, e.g. `<think>` ... `</think>`.
+    public var channel: ReasoningChannel?
+
     /// Creates a reasoning protocol.
     ///
     /// - Parameters:
@@ -199,6 +259,8 @@ public struct ReasoningConfig: Sendable, Equatable {
     ///   - replaysUnclosedReasoningIntoHistory: whether a past turn that
     ///     stopped inside its reasoning goes back into its history render as
     ///     reasoning.
+    ///   - channel: the labeled-channel shape of the protocol, or `nil` for a
+    ///     plain delimiter pair.
     public init(
         startDelimiter: String,
         endDelimiter: String,
@@ -207,7 +269,8 @@ public struct ReasoningConfig: Sendable, Equatable {
         implicitEndDelimiters: [String] = [],
         budgetTransition: ReasoningBudgetTransition? = nil,
         replaysReasoningIntoHistory: Bool = false,
-        replaysUnclosedReasoningIntoHistory: Bool = false
+        replaysUnclosedReasoningIntoHistory: Bool = false,
+        channel: ReasoningChannel? = nil
     ) {
         self.startDelimiter = startDelimiter
         self.endDelimiter = endDelimiter
@@ -217,6 +280,7 @@ public struct ReasoningConfig: Sendable, Equatable {
         self.budgetTransition = budgetTransition
         self.replaysReasoningIntoHistory = replaysReasoningIntoHistory
         self.replaysUnclosedReasoningIntoHistory = replaysUnclosedReasoningIntoHistory
+        self.channel = channel
     }
 
     // MARK: - Presets
@@ -239,6 +303,26 @@ public struct ReasoningConfig: Sendable, Equatable {
     public static let alwaysOnThinking = ReasoningConfig(
         startDelimiter: "<think>", endDelimiter: "</think>",
         promptStrategy: .alwaysOn)
+
+    /// Gemma 4's protocol: labeled channels (see ``ReasoningChannel/gemma4``), toggled
+    /// via `enable_thinking`, whose template default is thinking off.
+    ///
+    /// Shared here rather than spelled per model because four types (text, unified,
+    /// and the LLM and VLM entry points) declare the same protocol.
+    ///
+    /// Gemma 4's templates differ in how much they prefill, and the 31B template
+    /// suppresses the generation prompt entirely after a tool call or tool response.
+    /// The model then opens the channel itself, so without this config its delimiters
+    /// reach the caller as literal text.
+    ///
+    /// A tool call opened inside a thought channel ends it, since the model does not
+    /// always close the channel first.
+    public static let gemma4 = ReasoningConfig(
+        startDelimiter: "<|channel>", endDelimiter: "<channel|>",
+        promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: false),
+        isSpecialToken: true,
+        implicitEndDelimiters: ["<|tool_call>"],
+        channel: .gemma4)
 }
 
 // MARK: - Closing the reasoning of a prompt

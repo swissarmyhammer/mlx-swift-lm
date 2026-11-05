@@ -153,8 +153,9 @@ public enum MultiRowQuantizedMatvec {
             inline float affine_load_vector(const device T* x, thread float (&x_thread)[VALUES]) {
                 float sum = 0;
                 if (BITS == 4) {
+                    // MLX 0.32.4 widens each input before the sum of a pack, not after.
                     UNROLL_FULL for (int i = 0; i < VALUES; i += 4) {
-                        sum += x[i] + x[i + 1] + x[i + 2] + x[i + 3];
+                        sum += float(x[i]) + float(x[i + 1]) + float(x[i + 2]) + float(x[i + 3]);
                     }
                 } else {
                     UNROLL_FULL for (int i = 0; i < VALUES; i++) {

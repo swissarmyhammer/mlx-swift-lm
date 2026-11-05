@@ -228,7 +228,9 @@ struct ChatTurnTranscript {
         for try await event in stream {
             observe(event)
             switch event.generation {
-            case .chunk(let chunk)?:
+            case .chunk(let chunk)?, .reasoning(let chunk)?:
+                // A thinking model streams its thought as `.reasoning`. The transcript
+                // keeps both, so that MTP and plain runs compare the whole output.
                 text += chunk
                 firstChunkMs = firstChunkMs ?? Benchmark.millisecondsSince(start)
             case .info(let completion)?:
