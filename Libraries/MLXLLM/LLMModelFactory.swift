@@ -102,6 +102,7 @@ public enum LLMTypeRegistry {
         "baichuan_m1": create(BaichuanM1Configuration.self, BaichuanM1Model.init),
         "exaone4": create(Exaone4Configuration.self, Exaone4Model.init),
         "gpt_oss": create(GPTOSSConfiguration.self, GPTOSSModel.init),
+        "flint": create(FlintConfiguration.self, FlintModel.init),
         "lille-130m": create(Lille130mConfiguration.self, Lille130mModel.init),
         "olmoe": create(OlmoEConfiguration.self, OlmoEModel.init),
         "olmo2": create(Olmo2Configuration.self, Olmo2Model.init),
@@ -587,6 +588,11 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: "Explain quaternions."
     )
 
+    static public let flint_oQ8e = ModelConfiguration(
+        id: "mlx-community/flint-oQ8e",
+        defaultPrompt: "Write a Python function that merges overlapping intervals."
+    )
+
     private static func all() -> [ModelConfiguration] {
         [
             codeLlama13b4bit,
@@ -664,6 +670,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             gpt_oss_20b_MXFP4_Q8,
             jamba_3b_4bit,
             nemotron_labs_diffusion_3b_4bit,
+            flint_oQ8e,
         ]
     }
 

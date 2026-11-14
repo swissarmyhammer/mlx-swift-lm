@@ -84,6 +84,14 @@ LLMRegistry.mellum2_1_12b_a2_5b_thinking_6bit  // mlx-community/Mellum2.1-12B-A2
 // Note: Mellum uses Qwen-style <think> reasoning and JSON tool calls
 ```
 
+### Flint
+
+```swift
+// model_type: "flint"
+LLMRegistry.flint_oQ8e  // mlx-community/flint-oQ8e
+// Note: Flint always thinks in <think> blocks and uses GLM-style tool calls
+```
+
 ### Other Supported LLM Types
 
 | model_type | Description |
