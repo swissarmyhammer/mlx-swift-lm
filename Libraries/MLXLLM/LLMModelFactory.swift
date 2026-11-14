@@ -876,6 +876,11 @@ public final class LLMModelFactory: GenericModelFactory {
 
         let tokenizer = try await tokenizerTask
 
+        // A protocol with one reasoning block per message masks a second end
+        // delimiter in a pass (Flint).
+        registerClosedReasoningEndGuard(
+            model: model, reasoning: mutableConfiguration.reasoningConfig, tokenizer: tokenizer)
+
         let llmModel = model as? LLMModel
 
         let messageGenerator: any MessageGenerator

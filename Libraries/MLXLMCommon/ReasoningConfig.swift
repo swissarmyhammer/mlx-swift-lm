@@ -243,6 +243,15 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// delimiter-pair protocol, e.g. `<think>` ... `</think>`.
     public var channel: ReasoningChannel?
 
+    /// Whether generation masks ``endDelimiter`` once a reasoning block has
+    /// closed in the pass (``ClosedReasoningEndProcessor``).
+    ///
+    /// Set it only for a model whose template writes one reasoning block for
+    /// each assistant message, and whose end delimiter is one plain token that
+    /// the model can sample by mistake after its answer. Flint is such a
+    /// model. The default `false` leaves every other protocol unchanged.
+    public var masksEndDelimiterAfterClose = false
+
     /// Creates a reasoning protocol.
     ///
     /// - Parameters:

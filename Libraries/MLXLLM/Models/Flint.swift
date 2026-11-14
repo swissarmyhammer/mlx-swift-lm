@@ -517,12 +517,18 @@ extension FlintModel {
     /// `reasoning_content` of every past assistant turn back into its
     /// `<think>` block, thus a replayed history extends the tokens the model
     /// wrote and the prompt cache carries across turns.
+    ///
+    /// Each assistant message holds one `<think>` block, and `</think>` is a
+    /// plain token. After a status line Flint can sample a second `</think>`
+    /// where it should end its turn with `<|user|>`, and then write the next
+    /// user turn as text. Generation masks `</think>` once the block closes.
     public var reasoningConfig: ReasoningConfig? { FlintModel.reasoning }
 
     static let reasoning: ReasoningConfig = {
         var config = ReasoningConfig.alwaysOnThinking
         config.implicitEndDelimiters = ["<tool_call>"]
         config.replaysReasoningIntoHistory = true
+        config.masksEndDelimiterAfterClose = true
         return config
     }()
 }

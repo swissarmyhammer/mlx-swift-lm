@@ -112,16 +112,21 @@ public struct GenerationComponents: Sendable {
 
     /// As ``logitProcessor(parameters:)``, additionally masking the token ids
     /// the model suppresses -- declared through ``SuppressedTokensProviding``
-    /// or read from its `generation_config.json`.
+    /// or read from its `generation_config.json` -- and, for a model whose
+    /// reasoning protocol asks for it, the end delimiter once its reasoning has
+    /// closed (``ClosedReasoningEndProcessor``).
     ///
-    /// Suppression runs last so that no processor composed before it can
+    /// The masks run last so that no processor composed before them can
     /// reintroduce a masked id -- for multimodal placeholder tokens, emitting
     /// one is never valid output.
     public func logitProcessor(
         parameters: GenerateParameters, model: any LanguageModel
     ) -> LogitProcessor? {
         Self.chaining(
-            logitProcessor(parameters: parameters), makeSuppressTokensProcessor(model: model))
+            Self.chaining(
+                logitProcessor(parameters: parameters),
+                makeClosedReasoningEndProcessor(model: model)),
+            makeSuppressTokensProcessor(model: model))
     }
 
     /// `first` then `second`: `second` alone when `first` is `nil`, and else a
