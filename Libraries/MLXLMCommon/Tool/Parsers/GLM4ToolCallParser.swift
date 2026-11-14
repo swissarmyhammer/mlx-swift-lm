@@ -70,16 +70,86 @@ public struct GLM4ToolCallParser: ToolCallParser, Sendable {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
 
             // GLM4: deserialize if NOT a string type in schema
-            if !isStringType(funcName: funcName, argName: key, tools: tools) {
-                arguments[key] = tryParseJSON(value) ?? value
+            func typed(_ name: String, _ value: String) -> any Sendable {
+                isStringType(funcName: funcName, argName: name, tools: tools)
+                    ? value : tryParseJSON(value) ?? value
+            }
+
+            if let nested = Self.nestedPairs(in: value) {
+                // The value wraps the real arguments of the call.
+                for (name, nestedValue) in nested {
+                    arguments[name] = typed(name, nestedValue)
+                }
             } else {
-                arguments[key] = value
+                arguments[key] = typed(key, value)
             }
 
             searchRange = valueEnd.upperBound ..< text.endIndex
         }
 
         return ToolCall(function: .init(name: funcName, arguments: arguments))
+    }
+
+    /// The argument pairs nested inside `value`, or `nil` when it nests none.
+    ///
+    /// Flint can open a JSON object inside one value and then write the
+    /// arguments with GLM tags, as in
+    /// `{"op</arg_key><arg_value>use skill","id</arg_key><arg_value>kanban"}`,
+    /// or nest whole tagged pairs. Those pairs are the arguments of the call.
+    /// The recovery applies only when every key it finds is an identifier, so
+    /// free text that mentions the tags stays as it is.
+    ///
+    /// - Parameter value: an argument value.
+    /// - Returns: the nested pairs in order, or `nil`.
+    static func nestedPairs(in value: String) -> [(String, String)]? {
+        guard value.contains("</arg_key>") else { return nil }
+        // The separator of a key and its value inside a value.
+        let nestedSeparator = /<\/arg_key>\s*<arg_value>/
+        // What ends a nested value and starts the next key: GLM tags, or the
+        // `","` of a JSON object.
+        let nestedBoundary = /<\/arg_value>\s*<arg_key>|"\s*,\s*"/
+        // A key that a nested pair may have.
+        let nestedKey = /[A-Za-z_][A-Za-z0-9_.\-]{0,63}/
+
+        let parts = value.split(separator: nestedSeparator, omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+
+        let jsonOpened = parts[0].trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{")
+        var keys = [String(parts[0])]
+        var values: [String] = []
+        for part in parts.dropFirst().dropLast() {
+            guard let boundary = part.matches(of: nestedBoundary).last else { return nil }
+            values.append(String(part[..<boundary.range.lowerBound]))
+            keys.append(String(part[boundary.range.upperBound...]))
+        }
+        values.append(String(parts[parts.count - 1]))
+
+        func cleanKey(_ raw: String) -> String? {
+            var key = Substring(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+            for prefix in ["{", "<arg_key>", "\""] where key.hasPrefix(prefix) {
+                key = key.dropFirst(prefix.count)
+                key = Substring(key.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            if key.hasSuffix("\"") { key = key.dropLast() }
+            return key.wholeMatch(of: nestedKey) == nil ? nil : String(key)
+        }
+
+        var lastValue = values[values.count - 1].trimmingCharacters(in: .whitespacesAndNewlines)
+        if lastValue.hasSuffix("</arg_value>") {
+            lastValue = String(lastValue.dropLast("</arg_value>".count))
+        }
+        if jsonOpened, lastValue.hasSuffix("}") {
+            lastValue = String(lastValue.dropLast()).trimmingCharacters(in: .whitespaces)
+            if lastValue.hasSuffix("\"") { lastValue = String(lastValue.dropLast()) }
+        }
+        values[values.count - 1] = lastValue
+
+        var pairs: [(String, String)] = []
+        for (rawKey, rawValue) in zip(keys, values) {
+            guard let key = cleanKey(rawKey) else { return nil }
+            pairs.append((key, rawValue.trimmingCharacters(in: .whitespacesAndNewlines)))
+        }
+        return pairs
     }
 
     /// Parses `name\n{json}`. The payload must be exactly one call and, when a

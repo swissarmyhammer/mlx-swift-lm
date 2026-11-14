@@ -1303,6 +1303,97 @@ struct ToolTests {
         #expect(toolCall.function.arguments["query"] == .string("machine learning"))
     }
 
+    // MARK: - GLM4 pairs nested inside a value
+    //
+    // Flint sometimes opens a JSON object inside one value and then writes the
+    // rest of its arguments with GLM tags (flint2 bench, django-13447). The
+    // inner pairs are the arguments of the call.
+
+    @Test("GLM4 recovers pairs that a JSON-opened wrapper value nests")
+    func glm4RecoversPairsNestedInAWrapperValue() throws {
+        let content =
+            #"<tool_call>skills<arg_key>arguments</arg_key><arg_value>{"op</arg_key><arg_value>use skill","id</arg_key><arg_value>kanban"}</arg_value></tool_call>"#
+
+        let call = try #require(GLM4ToolCallParser().parse(content: content, tools: nil))
+
+        #expect(call.function.name == "skills")
+        #expect(call.function.arguments == ["op": .string("use skill"), "id": .string("kanban")])
+    }
+
+    @Test("GLM4 recovers one nested pair")
+    func glm4RecoversOneNestedPair() throws {
+        let content =
+            #"<tool_call>skills<arg_key>arguments</arg_key><arg_value>{"op</arg_key><arg_value>list skill"}</arg_value></tool_call>"#
+
+        let call = try #require(GLM4ToolCallParser().parse(content: content, tools: nil))
+
+        #expect(call.function.arguments == ["op": .string("list skill")])
+    }
+
+    @Test("GLM4 recovers tag-delimited pairs nested in a value")
+    func glm4RecoversTagDelimitedNestedPairs() throws {
+        let content =
+            "<tool_call>skills<arg_key>arguments</arg_key><arg_value><arg_key>op</arg_key><arg_value>use skill</arg_value><arg_key>id</arg_key><arg_value>kanban</arg_value></arg_value></tool_call>"
+
+        let call = try #require(GLM4ToolCallParser().parse(content: content, tools: nil))
+
+        #expect(call.function.arguments == ["op": .string("use skill"), "id": .string("kanban")])
+    }
+
+    @Test("GLM4 types a recovered value as it types the well-formed call")
+    func glm4TypesRecoveredValuesFromTheSchema() throws {
+        let tools: [[String: any Sendable]] = [
+            [
+                "type": "function",
+                "function": [
+                    "name": "agents",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "prompt": ["type": "string"] as [String: any Sendable],
+                            "count": ["type": "integer"] as [String: any Sendable],
+                        ] as [String: any Sendable],
+                    ] as [String: any Sendable],
+                ] as [String: any Sendable],
+            ]
+        ]
+        let nested =
+            #"<tool_call>agents<arg_key>arguments</arg_key><arg_value>{"prompt</arg_key><arg_value>[1]","count</arg_key><arg_value>[3]"}</arg_value></tool_call>"#
+        let wellFormed =
+            "<tool_call>agents<arg_key>prompt</arg_key><arg_value>[1]</arg_value><arg_key>count</arg_key><arg_value>[3]</arg_value></tool_call>"
+
+        let call = try #require(GLM4ToolCallParser().parse(content: nested, tools: tools))
+        let expected = try #require(GLM4ToolCallParser().parse(content: wellFormed, tools: tools))
+
+        // The string parameter keeps its text; the other one is decoded.
+        #expect(call.function.arguments == expected.function.arguments)
+        #expect(call.function.arguments["prompt"] == .string("[1]"))
+        #expect(call.function.arguments["count"] == .array([.int(3)]))
+    }
+
+    @Test("GLM4 keeps free text with tag-like markup as it is")
+    func glm4KeepsFreeTextMarkup() throws {
+        // The text before the inner separator is not a key, so the value stays.
+        let value = #"see the parser: a value ends at </arg_key><arg_value> in GLM"#
+        let content =
+            "<tool_call>write<arg_key>text</arg_key><arg_value>\(value)</arg_value></tool_call>"
+
+        let call = try #require(GLM4ToolCallParser().parse(content: content, tools: nil))
+
+        #expect(call.function.arguments == ["text": .string(value)])
+    }
+
+    @Test("GLM4 recovery through ToolCallProcessor")
+    func glm4NestedPairsThroughProcessor() throws {
+        let processor = ToolCallProcessor(format: .glm4)
+        _ = processor.processChunk(
+            #"<tool_call>skills<arg_key>arguments</arg_key><arg_value>{"op</arg_key><arg_value>use skill","id</arg_key><arg_value>kanban"}</arg_value></tool_call>"#
+        )
+
+        let call = try #require(processor.toolCalls.first)
+        #expect(call.function.arguments == ["op": .string("use skill"), "id": .string("kanban")])
+    }
+
     // MARK: - GLM4 Bare Format Tests
     //
     // Covers the original (pre-4.7, non-MoE) GLM-4 checkpoints such as
