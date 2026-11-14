@@ -60,7 +60,8 @@ struct ExecutorPromptCacheDrafterWindowTests {
             generated.append(token)
         }
         mtp.finalizeGeneration()
-        let drafterState = try #require(mtp.mtpDrafterContinuation, "\(mtp.passthroughReason ?? "")")
+        let drafterState = try #require(
+            mtp.mtpDrafterContinuation, "\(mtp.passthroughReason ?? "")")
         let ledger = Array((Self.prompt + generated).prefix(drafterState.targetProcessedTokenCount))
         let entry = ExecutorPromptCacheEntry(
             caches: mtp.mainCache, tokens: ledger, renderTokens: Self.prompt,
@@ -86,12 +87,15 @@ struct ExecutorPromptCacheDrafterWindowTests {
         let parameters = try Self.parameters(window: window)
         var report: [String] = []
         let entry = try ExecutorPromptCacheFile.read(
-            from: url, key: Self.key, templates: try fixture.target.newCache(parameters: parameters),
+            from: url, key: Self.key,
+            templates: try fixture.target.newCache(parameters: parameters),
             drafter: fixture.drafter, parameters: parameters, report: { report.append($0) })
         return (entry, report)
     }
 
-    @Test("a spilled windowed drafter state reads back as rings of its window, aligned with the ledger")
+    @Test(
+        "a spilled windowed drafter state reads back as rings of its window, aligned with the ledger"
+    )
     func windowedDrafterStateReadsBack() throws {
         let fixture = try Qwen35MTPFixture()
         let url = try spillWindowedStream(fixture)

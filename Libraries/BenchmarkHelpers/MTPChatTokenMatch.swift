@@ -126,6 +126,10 @@ enum MTPChatTokenEvent: Sendable, GenerationProviding {
         if case .generation(let generation) = self { return generation }
         return nil
     }
+
+    init(generation: Generation) {
+        self = .generation(generation)
+    }
 }
 
 /// Records each token of a chat turn, and the most likely candidates of its

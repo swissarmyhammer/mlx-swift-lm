@@ -121,6 +121,14 @@ package func weightedExpertUnsort(
     )[0]
 }
 
+/// Quantized expert projections benefit from grouping repeated expert routes at smaller batch
+/// sizes because each unsorted route can require another quantized weight read. Dense projections
+/// retain the higher crossover point, where sorting overhead is more readily amortized.
+@inline(__always)
+func shouldSortExpertRoutes(routeCount: Int, quantized: Bool) -> Bool {
+    routeCount >= (quantized ? 16 : 64)
+}
+
 /// The projected expert outputs of ``projectSwitchExperts(_:_:transformInput:combine:transformHidden:downProj:)``.
 ///
 /// `output` holds the `downProj` result. When the tokens were sorted by expert
@@ -152,7 +160,10 @@ private func projectSwitchExperts(
     var x = MLX.expandedDimensions(x, axes: [-2, -3])
     x = transformInput(x)
 
-    let doSort = indices.size >= 64
+    // The down projection is quantized exactly when the gate/up projections are.
+    let doSort = shouldSortExpertRoutes(
+        routeCount: indices.size,
+        quantized: downProj is QuantizedSwitchLinear)
 
     var expertIndices = indices
     var inverseOrder = MLXArray()

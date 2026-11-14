@@ -283,6 +283,7 @@ func generateLoopTask<
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     includeStopToken: Bool = false,
     tokenCollector: consuming Collector,
+    steering: SteeringControl? = nil,
     handler: consuming Handler
 ) -> (AsyncStream<Handler.Output>, Task<Collector.Result, Never>) {
     let (stream, continuation) = AsyncStream<Handler.Output>.makeStream()
@@ -304,6 +305,7 @@ func generateLoopTask<
                 modelConfiguration: modelConfiguration,
                 tokenizer: tokenizer,
                 includeStopToken: includeStopToken,
+                steering: steering,
                 isCancelled: { Task.isCancelled },
                 emit: {
                     if case .terminated = continuation.yield($0) { return false }
@@ -362,6 +364,7 @@ private func runTokenLoop<Handler: TokenLoopHandler, Collector: GeneratedTokenCo
     modelConfiguration: ModelConfiguration,
     tokenizer: Tokenizer,
     includeStopToken: Bool,
+    steering: SteeringControl? = nil,
     isCancelled: () -> Bool,
     emit: (sending Handler.Output) -> Bool
 ) -> (result: Collector.Result, info: GenerateCompletionInfo) {
@@ -411,6 +414,10 @@ private func runTokenLoop<Handler: TokenLoopHandler, Collector: GeneratedTokenCo
     // post-loop block below assigns `.cancelled`; Stream.defaultStream.synchronize() still
     // settles any in-flight evaluation at the end of the task body.
     tokenLoop: while !isCancelled() {
+        if let steering, handler.canEndForSteering, steering.requestsEarlyBoundary {
+            stopReason = .steered
+            break
+        }
         guard let token = nextPooledToken(&iterator) else { break }
         tokenCollector.record(token)
 

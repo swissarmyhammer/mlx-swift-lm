@@ -48,12 +48,12 @@ import MLXGuidedGeneration
 ///         }
 ///         return cache.repoDirectory(repo: repo, kind: .model)
 ///     },
-///     load: { configuration, progressHandler in
+///     load: { configuration, progress in
 ///         try await loadModelContainer(
 ///             from: #hubDownloader(),
 ///             using: #huggingFaceTokenizerLoader(),
 ///             configuration: configuration,
-///             progressHandler: progressHandler)
+///             progress: progress)
 ///     })
 /// let session = LanguageModelSession(model: model, tools: [], instructions: nil)
 /// let response = try await session.respond(to: "Hello!")
@@ -93,13 +93,24 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// This closure must honor cancellation while it is suspended. ``evict()``
     /// and ``evictAll()`` cancel the load task tied to this closure. A closure
     /// that ignores cancellation keeps running and keeps its caller waiting.
+    @available(
+        *, deprecated, message: "Use ProgressContainerLoader with the progress-aware initializer"
+    )
     public typealias ContainerLoader =
         @Sendable (
             _ configuration: ModelConfiguration,
             _ progressHandler: @Sendable @escaping (Progress) -> Void
         ) async throws -> ModelContainer
 
-    private let load: ContainerLoader
+    /// A container loader that receives phase-specific download and weight progress.
+    public typealias ProgressContainerLoader =
+        @Sendable (
+            _ configuration: ModelConfiguration,
+            _ progress: LoadProgressHandlers
+        ) async throws -> ModelContainer
+
+    private let load: ProgressContainerLoader
+    private let progress: LoadProgressHandlers
 
     /// The revision `ModelConfiguration.Identifier.id(_:revision:)` takes when
     /// the caller gives none. A Hub model at this revision keeps the bare
@@ -208,6 +219,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     private func makeContainerLoader() -> @Sendable () async throws -> ModelContainer {
         let configuration = self.configuration
         let load = self.load
+        let configuredProgress = self.progress
         return {
             // One identifier per load attempt. Eviction cancels a load and
             // forgets it at once, so a replacement can start while this one is
@@ -216,10 +228,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let loadID = UUID()
             MLXDownloadProgress.reportStarted(modelID: configuration.name, loadID: loadID)
             defer { MLXDownloadProgress.reportEnded(modelID: configuration.name, loadID: loadID) }
-            return try await load(configuration) { progress in
-                MLXDownloadProgress.report(
-                    progress: progress, modelID: configuration.name, loadID: loadID)
-            }
+            let progress = LoadProgressHandlers(
+                download: { progress in
+                    MLXDownloadProgress.report(
+                        progress: progress, modelID: configuration.name, loadID: loadID)
+                    configuredProgress.download?(progress)
+                },
+                weights: configuredProgress.weights)
+            return try await load(configuration, progress)
         }
     }
 
@@ -405,7 +421,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// `.allowed` tool routing, guided `.required` developer tool calls,
     /// and reasoning (chain-of-thought) routing.
     ///
-    /// Capabilities are declared explicitly by the caller at ``init(configuration:capabilities:configurationResolver:speculativeDecoding:prefillStepSize:weightsLocation:load:)``
+    /// Capabilities are declared explicitly by the caller at
+    /// ``init(configuration:capabilities:configurationResolver:speculativeDecoding:prefillStepSize:weightsLocation:progress:load:)``
     /// and stored verbatim. The caller includes
     /// `.guidedGeneration`/`.toolCalling`/`.reasoning` as appropriate; the
     /// adapter does not consult `ReasoningHeuristics` (which remains a
@@ -462,6 +479,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///     URL(fileURLWithPath: "/Volumes/SharedCache/models/\(id)")
     /// }
     /// ```
+    @_disfavoredOverload
+    @available(*, deprecated, message: "Use init(..., progress:load:)")
     public init(
         configuration: ModelConfiguration,
         capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
@@ -478,7 +497,37 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         self.speculativeDecoding = speculativeDecoding
         self.prefillStepSize = prefillStepSize
         self.weightsLocation = weightsLocation
+        self.load = { configuration, progress in
+            try await load(configuration, progress.download ?? { _ in })
+        }
+        self.progress = .init()
+    }
+
+    /// Creates an `MLXLanguageModel` whose loader receives phase-specific model
+    /// loading progress.
+    ///
+    /// Use this initializer when the loader forwards `LoadProgressHandlers` to
+    /// `loadModelContainer`. The deprecated `load:` initializer remains available
+    /// for source compatibility with download-only loaders.
+    public init(
+        configuration: ModelConfiguration,
+        capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
+        configurationResolver: any ModelConfigurationResolver =
+            DefaultConfigurationResolver(),
+        speculativeDecoding: MLXSpeculativeDecoding? = nil,
+        prefillStepSize: Int? = nil,
+        weightsLocation: @Sendable @escaping (String) -> URL,
+        progress: LoadProgressHandlers = .init(),
+        load: @escaping ProgressContainerLoader
+    ) {
+        self.configuration = configuration
+        self.capabilities = LanguageModelCapabilities(capabilities)
+        self.configurationResolver = configurationResolver
+        self.speculativeDecoding = speculativeDecoding
+        self.prefillStepSize = prefillStepSize
+        self.weightsLocation = weightsLocation
         self.load = load
+        self.progress = progress
     }
 
     /// Downloads the model and loads its weights into memory.

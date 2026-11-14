@@ -195,7 +195,8 @@ struct MTPVerifyForwardProfileTests {
                 let operands = zip(queries, caches).map { ($0, $1[0], $1[1], Self.attentionScale) }
                 return (
                     route: Self.median { Self.attentionMilliseconds(operands, maskArray: false) },
-                    sdpa: Self.median { Self.sdpaMilliseconds(operands) })
+                    sdpa: Self.median { Self.sdpaMilliseconds(operands) }
+                )
             }
             let format = { (values: [Double]) in
                 values.map { String(format: "%.2f", $0) }.joined(separator: ", ")
@@ -315,7 +316,8 @@ struct MTPVerifyForwardProfileTests {
         state[mtpEmitFlagKey] = true
         state[mtpVerifyKeepsSnapshotsKey] = true
         return GPUWallTime.milliseconds {
-            let output = target(LMInput.Text(tokens: tokenArray(tokens)), cache: cache, state: state)
+            let output = target(
+                LMInput.Text(tokens: tokenArray(tokens)), cache: cache, state: state)
             eval([output.logits] + (output.state?[mtpLastHiddenStatesKey].map { [$0] } ?? []))
         }
     }
@@ -445,7 +447,8 @@ struct MTPVerifyForwardProfileTests {
 
     /// Writes `measurement` under the measurement prefix.
     private static func log(_ measurement: String) {
-        measurementLog.info("\(measurementPrefix, privacy: .public) \(measurement, privacy: .public)")
+        measurementLog.info(
+            "\(measurementPrefix, privacy: .public) \(measurement, privacy: .public)")
     }
 }
 

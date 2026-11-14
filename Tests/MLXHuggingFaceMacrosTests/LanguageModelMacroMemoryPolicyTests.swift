@@ -32,12 +32,12 @@ final class LanguageModelMacroMemoryPolicyTests: XCTestCase {
                         }
                         return cache.repoDirectory(repo: repo, kind: .model)
                     },
-                    load: { configuration, progressHandler in
+                    load: { configuration, progress in
                         try await loadModelContainer(
                             from: #hubDownloader(),
                             using: #huggingFaceTokenizerLoader(),
                             configuration: configuration,
-                            progressHandler: progressHandler)
+                            progress: progress)
                     })
                 """,
             macros: testMacros)

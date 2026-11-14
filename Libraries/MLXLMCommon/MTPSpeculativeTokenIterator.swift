@@ -140,7 +140,7 @@ extension MLXArray {
 /// method argument, with the target's last hidden state and per-`layer_type`
 /// shared K/V extracted from the ``LMOutput/State`` emitted by the target on
 /// the previous main-model call.
-/// If the drafter needs its own KV cache (Qwen MTP), that cache is owned by
+/// If the drafter needs its own KV cache (Qwen MTP or DSpark), that cache is owned by
 /// this iterator, prefilled over the shifted prompt, and reconciled against
 /// accepted target tokens after every verify pass; it is never stored on the
 /// shared drafter model.
@@ -689,6 +689,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         let persistentState = persistentTargetState(from: mainState)
         var prefillState = persistentState ?? LMOutput.State()
         prefillState[mtpEmitFlagKey] = true
+        prefillState[mtpTargetLayerIdsKey] = drafter.targetLayerIds
         // Stateful drafters and warm continuations need one hidden row per
         // prompt token, so their `prepare` call receives the emit flag. Other
         // drafters are primed by the explicit one-token follow-up below.
@@ -1100,6 +1101,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         // in one forward call, emitting state for next round.
         var verifyState = state
         verifyState[mtpEmitFlagKey] = true
+        verifyState[mtpTargetLayerIdsKey] = drafter.targetLayerIds
         let verifyTokens = concatenated([bonusToken, flatDraftTokens])
         let verifyInput = LMInput.Text(tokens: verifyTokens)
         let verifyStart = verifyInput.tokens.dim(0) - (draftCount + 1)
@@ -1488,6 +1490,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         discardSpeculativePromptCacheCheckpoints(mainCache)
         mainState?[mtpEmitFlagKey] = false
         mainState?[mtpVerifyKeepsSnapshotsKey] = nil
+        mainState?[mtpTargetLayerIdsKey] = nil
         mainState?[mtpLastHiddenStatesKey] = nil
         mainState?[mtpSharedKVStatesKey] = nil
         mainState?[mtpSharedKVSourceIndicesKey] = nil

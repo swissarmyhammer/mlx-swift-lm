@@ -148,6 +148,7 @@ public class CacheList: BaseKVCache {
 
     @discardableResult
     public override func trim(_ n: Int) -> Int {
+        guard caches.allSatisfy({ canRewindConvolutionCache($0, positions: n) }) else { return 0 }
         var result = 0
         for cache in caches {
             result = cache.trim(n)

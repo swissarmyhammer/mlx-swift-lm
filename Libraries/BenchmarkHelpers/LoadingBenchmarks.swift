@@ -28,7 +28,7 @@ extension Benchmark {
         return try await measureLoads("LLM", runs: runs) {
             _ = try await LLMModelFactory.shared.load(
                 from: downloader, using: tokenizerLoader, configuration: configuration
-            ) { _ in }
+            )
         }
     }
 
@@ -50,7 +50,7 @@ extension Benchmark {
         return try await measureLoads("VLM", runs: runs) {
             _ = try await VLMModelFactory.shared.load(
                 from: downloader, using: tokenizerLoader, configuration: configuration
-            ) { _ in }
+            )
         }
     }
 
@@ -72,7 +72,7 @@ extension Benchmark {
         try await measureLoads("Embedding", runs: runs) {
             _ = try await EmbedderModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader, configuration: configuration
-            ) { _ in }
+            )
         }
     }
 

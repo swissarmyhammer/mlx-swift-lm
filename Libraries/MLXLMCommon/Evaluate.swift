@@ -240,6 +240,8 @@ private func runSynchronousGeneration(
 ///         print("Tool call: \(call.function.name)")
 ///     case .rejectedToolCall(let rejection):
 ///         print("Rejected tool call: \(rejection.reason)")
+///     case .steering:
+///         break
 ///     }
 /// }
 /// ```
@@ -302,6 +304,8 @@ public func generate(
 ///         print("Tool call: \(call.function.name)")
 ///     case .rejectedToolCall(let rejection):
 ///         print("Rejected tool call: \(rejection.reason)")
+///     case .steering:
+///         break
 ///     }
 /// }
 /// ```
@@ -606,7 +610,8 @@ func generateTaskRecordingTokens<Iterator: TokenIteratorProtocol>(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil,
     toolCallPolicy: ToolCallPolicy = .init(),
-    reasoningPrimedInside: Bool = false
+    reasoningPrimedInside: Bool = false,
+    steering: SteeringControl? = nil
 ) -> (AsyncStream<Generation>, Task<SendableBox<RecordedGenerationResult>, Never>) {
     generateTaskRecordingTokens(
         promptTokenCount: promptTokenCount,
@@ -614,6 +619,7 @@ func generateTaskRecordingTokens<Iterator: TokenIteratorProtocol>(
         tokenizer: tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
+        steering: steering,
         handler: textToolHandler(
             tokenizer: tokenizer, modelConfiguration: modelConfiguration, tools: tools,
             toolCallPolicy: toolCallPolicy, reasoningPrimedInside: reasoningPrimedInside))
@@ -652,6 +658,7 @@ func generateTaskRecordingTokens<Handler: TokenLoopHandler>(
     tokenizer: Tokenizer,
     iterator: consuming any TokenIteratorProtocol,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
+    steering: SteeringControl? = nil,
     handler: consuming Handler
 ) -> (AsyncStream<Handler.Output>, Task<SendableBox<RecordedGenerationResult>, Never>) {
     generateLoopTask(
@@ -661,6 +668,7 @@ func generateTaskRecordingTokens<Handler: TokenLoopHandler>(
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
         tokenCollector: RecordingGeneratedTokens(),
+        steering: steering,
         handler: handler)
 }
 

@@ -112,7 +112,7 @@ extension Benchmark {
         let configuration = ModelConfiguration(id: modelId)
         let container = try await LLMModelFactory.shared.loadContainer(
             from: downloader, using: tokenizerLoader, configuration: configuration
-        ) { _ in }
+        )
         return try await llmGeneration(
             container: container, prompt: prompt, promptCharacterCount: promptCharacterCount,
             maxTokens: maxTokens, runs: runs)
@@ -235,7 +235,7 @@ struct ChatTurnTranscript {
                 firstChunkMs = firstChunkMs ?? Benchmark.millisecondsSince(start)
             case .info(let completion)?:
                 info = completion
-            case .toolCall?, .rejectedToolCall?, nil:
+            case .toolCall?, .rejectedToolCall?, .steering?, nil:
                 break
             }
         }

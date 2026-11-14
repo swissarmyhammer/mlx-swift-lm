@@ -289,10 +289,10 @@ extension FoundationModelsCacheTests {
                 configuration: ModelConfiguration(id: id),
                 capabilities: [],
                 weightsLocation: { _ in URL(fileURLWithPath: "/tmp") },
-                load: { _, progressHandler in
+                load: { _, progress in
                     let fakeProgress = Progress(totalUnitCount: 10)
                     fakeProgress.completedUnitCount = 5
-                    progressHandler(fakeProgress)
+                    progress.download?(fakeProgress)
                     await gate.signalReported()
                     await gate.waitForRelease()
                     throw LoadFailure()
@@ -326,10 +326,10 @@ extension FoundationModelsCacheTests {
                 configuration: ModelConfiguration(id: id),
                 capabilities: [],
                 weightsLocation: { _ in URL(fileURLWithPath: "/tmp") },
-                load: { _, progressHandler in
+                load: { _, progress in
                     let fakeProgress = Progress(totalUnitCount: 10)
                     fakeProgress.completedUnitCount = 5
-                    progressHandler(fakeProgress)
+                    progress.download?(fakeProgress)
                     await withTaskCancellationHandler {
                         await gate.waitForRelease()
                     } onCancel: {
@@ -368,10 +368,10 @@ extension FoundationModelsCacheTests {
                 configuration: ModelConfiguration(id: id),
                 capabilities: [],
                 weightsLocation: { _ in URL(fileURLWithPath: "/tmp") },
-                load: { configuration, progressHandler in
+                load: { configuration, progress in
                     let fakeProgress = Progress(totalUnitCount: 10)
                     fakeProgress.completedUnitCount = 5
-                    progressHandler(fakeProgress)
+                    progress.download?(fakeProgress)
                     await gate.signalReported()
                     await gate.waitForRelease()
                     return ModelContainer(

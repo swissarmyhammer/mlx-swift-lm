@@ -27,6 +27,7 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     case lfm2
     case lfm2MoE
     case lfm2VL
+    case lfm3
     case baichuanM1
     case baichuanM1ShortWindow
     case falconH1
@@ -87,6 +88,8 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
             return LFM2Model(try Self.decode(LFM2Configuration.self, Self.lfm2JSON))
         case .lfm2MoE:
             return LFM2MoEModel(try Self.decode(LFM2MoEConfiguration.self, Self.lfm2MoEJSON))
+        case .lfm3:
+            return LFM3Model(try Self.decode(LFM3Configuration.self, Self.lfm3JSON))
         case .lfm2VL:
             return LFM2VL(try Self.decode(LFM2VLConfiguration.self, Self.lfm2VLJSON))
         case .baichuanM1:
@@ -265,6 +268,22 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
             "max_position_embeddings": 128, "use_expert_bias": false,
             "num_dense_layers": 0, "norm_eps": 1e-5, "conv_bias": false,
             "conv_L_cache": 3, "full_attn_idxs": [1, 3], "rope_theta": 10000.0
+        }
+        """
+
+    /// Short-convolution layers 0 and 2, and attention layers 1 and 3.
+    private static let lfm3JSON = """
+        {
+            "model_type": "lfm3", "vocab_size": 32, "hidden_size": 16,
+            "intermediate_size": 32, "num_hidden_layers": 4,
+            "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 8,
+            "norm_eps": 1e-5, "conv_L_cache": 3, "conv_bias": false,
+            "sliding_window": 4, "use_sandwich_norm": true, "tie_word_embeddings": true,
+            "layer_types": ["conv", "full_attention", "conv", "sliding_attention"],
+            "rope_parameters": {
+                "full_attention": {"rope_type": "default", "rope_theta": 10000.0},
+                "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0}
+            }
         }
         """
 

@@ -53,7 +53,7 @@ struct FreshMatcherTests {
     func freshMatcherKeepsTheCompiledGrammarAlive() throws {
         var source: GrammarConstraint? = try GrammarConstraint(
             tokenizer: try makeByteFallbackTokenizer(), grammar: #"root ::= "ab""#)
-        weak var owner = source
+        weak let owner = source
         var first: GrammarConstraint? = try source!.freshMatcher()
         source = nil
         let second = try first!.freshMatcher()

@@ -358,3 +358,188 @@ public class MambaCache: ArraysCache {
         return new
     }
 }
+
+/// Compact convolution cache with a bounded token history for safe rewinds.
+///
+/// Hybrid models normally need only the final `stateLength` projected inputs,
+/// but retaining a small rolling history makes speculative rejection and short
+/// chat-template rewinds possible without keeping the full prompt activation
+/// history. Trims larger than the retained window fail atomically and callers
+/// can rebuild from the common prefix.
+public final class RewindableConvolutionCache: MambaCache {
+    public override class var serializedClassName: String? { "RewindableConvolutionCache" }
+
+    /// The configuration and contents of a saved `RewindableConvolutionCache`.
+    fileprivate struct SavedLayout {
+        let offset: Int
+        let stateLength: Int
+        let rollbackCapacity: Int
+        /// The slot of each saved array, in the order of the arrays.
+        let presentSlots: [Int]
+    }
+
+    /// Checks saved values and reads the layout they describe.
+    ///
+    /// - Parameters:
+    ///   - state: The saved arrays.
+    ///   - metaState: The saved meta state.
+    /// - Returns: The layout.
+    /// - Throws: ``KVCacheError`` when the values are not a saved `RewindableConvolutionCache`.
+    fileprivate static func savedLayout(
+        state: [MLXArray], metaState: [String]
+    ) throws -> SavedLayout {
+        guard metaState.count == 5,
+            let offset = Int(metaState[0]),
+            let stateLength = Int(metaState[1]),
+            let rollbackCapacity = Int(metaState[2]),
+            let slotCount = Int(metaState[3]),
+            slotCount == 2,
+            offset >= 0,
+            stateLength > 0,
+            rollbackCapacity > 0,
+            state.allSatisfy({ $0.ndim == 3 })
+        else {
+            throw KVCacheError(
+                message:
+                    "Corrupt prompt cache: invalid RewindableConvolutionCache state or metadata.")
+        }
+        let presentSlots =
+            metaState[4].isEmpty
+            ? [] : metaState[4].split(separator: ",").compactMap { Int($0) }
+        guard presentSlots.count == state.count,
+            presentSlots.allSatisfy({ (0 ..< slotCount).contains($0) })
+        else {
+            throw KVCacheError(
+                message: "Corrupt prompt cache: invalid RewindableConvolutionCache slots.")
+        }
+        return SavedLayout(
+            offset: offset, stateLength: stateLength, rollbackCapacity: rollbackCapacity,
+            presentSlots: presentSlots)
+    }
+
+    public override class func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
+        let layout = try savedLayout(state: state, metaState: metaState)
+        let cache = RewindableConvolutionCache(
+            stateLength: layout.stateLength, rollbackCapacity: layout.rollbackCapacity)
+        cache.write(state: state, layout: layout)
+        return cache
+    }
+
+    /// Writes saved arrays into their slots and moves to the saved offset.
+    fileprivate func write(state: [MLXArray], layout: SavedLayout) {
+        for (arrayIndex, slotIndex) in layout.presentSlots.enumerated() {
+            self[slotIndex] = state[arrayIndex]
+        }
+        offset = layout.offset
+    }
+
+    public let stateLength: Int
+    public let rollbackCapacity: Int
+
+    public init(stateLength: Int, rollbackCapacity: Int = 64) {
+        precondition(stateLength > 0)
+        precondition(rollbackCapacity > 0)
+        self.stateLength = stateLength
+        self.rollbackCapacity = rollbackCapacity
+        super.init()
+    }
+
+    /// Commits one convolution call and retains only the bounded rewind window.
+    public func record(
+        input: MLXArray,
+        initialState: MLXArray,
+        currentState: MLXArray
+    ) {
+        let timeline: MLXArray
+        if let history = self[1] {
+            timeline = concatenated([history, input], axis: 1)
+        } else {
+            timeline = concatenated([initialState, input], axis: 1)
+        }
+
+        let retainedLength = min(timeline.dim(1), stateLength + rollbackCapacity)
+        self[0] = currentState
+        self[1] = contiguous(timeline[0..., (timeline.dim(1) - retainedLength)..., 0...])
+        // `advance` moves `offset` too in this fork.
+        advance(input.dim(1))
+    }
+
+    public override var isTrimmable: Bool { true }
+
+    public override func isTrimmable(after positions: Int) -> Bool {
+        positions >= 0 && positions <= rollbackCapacity
+    }
+
+    public override var maxTrimCount: Int {
+        guard let history = self[1] else { return 0 }
+        return max(0, min(offset, history.dim(1) - stateLength))
+    }
+
+    func canRewind(_ positions: Int) -> Bool {
+        guard positions >= 0 else { return false }
+        if positions == 0 { return true }
+        guard let history = self[1] else { return false }
+        return positions <= min(offset, history.dim(1) - stateLength)
+    }
+
+    @discardableResult
+    public override func trim(_ n: Int) -> Int {
+        guard n > 0, canRewind(n), let history = self[1] else { return 0 }
+
+        let retained = history[0..., ..<(history.dim(1) - n), 0...]
+        self[0] = contiguous(retained[0..., (retained.dim(1) - stateLength)..., 0...])
+        self[1] = contiguous(retained)
+        offset -= n
+        return n
+    }
+
+    public override func copy() -> any KVCache {
+        let copy = RewindableConvolutionCache(
+            stateLength: stateLength, rollbackCapacity: rollbackCapacity)
+        copyContents(to: copy)
+        return copy
+    }
+
+    /// Stable prompt-cache metadata. Transient batch lengths are finalized
+    /// before serialization and intentionally excluded.
+    public override var metaState: [String] {
+        get {
+            [
+                "\(offset)", "\(stateLength)", "\(rollbackCapacity)",
+                "\(slotCount)", presentSlotIndices.map(String.init).joined(separator: ","),
+            ]
+        }
+        set {
+            assertionFailure(
+                """
+                RewindableConvolutionCache.metaState cannot be set directly; \
+                restore through prompt-cache loading.
+                """)
+        }
+    }
+}
+
+/// A model makes its convolution caches as templates for a restore, thus the saved values must
+/// have the configuration of the template.
+extension RewindableConvolutionCache: PromptCacheRestorable {
+    public func validatePromptCacheRestore(state: [MLXArray], metaState: [String]) throws {
+        let layout = try Self.savedLayout(state: state, metaState: metaState)
+        guard layout.stateLength == stateLength, layout.rollbackCapacity == rollbackCapacity
+        else {
+            throw KVCacheError(
+                message:
+                    "RewindableConvolutionCache restore: saved state length \(layout.stateLength) "
+                    + "and rollback capacity \(layout.rollbackCapacity) do not match the model's "
+                    + "\(stateLength) and \(rollbackCapacity).")
+        }
+    }
+
+    public func restorePromptCache(state: [MLXArray], metaState: [String]) {
+        guard let layout = try? Self.savedLayout(state: state, metaState: metaState) else {
+            preconditionFailure("restorePromptCache runs only after validatePromptCacheRestore")
+        }
+        write(state: state, layout: layout)
+    }
+}

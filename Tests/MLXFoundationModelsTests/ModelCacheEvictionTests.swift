@@ -62,7 +62,7 @@ extension FoundationModelsCacheTests {
                     load: { configuration, progress in
                         try await loadModelContainer(
                             from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
-                            configuration: configuration, progressHandler: progress)
+                            configuration: configuration, progress: progress)
                     })
 
                 // Drive a load that parks, then fails — populating lastErrors[id].
@@ -100,7 +100,7 @@ extension FoundationModelsCacheTests {
                         try await loadModelContainer(
                             from: BlockingDownloader(gate: gate),
                             using: EvictStubTokenizerLoader(),
-                            configuration: configuration, progressHandler: progress)
+                            configuration: configuration, progress: progress)
                     })
                 let task = Task { try await model.preload() }
                 await gate.waitUntilStarted()
@@ -150,7 +150,7 @@ extension FoundationModelsCacheTests {
                     load: { configuration, progress in
                         try await loadModelContainer(
                             from: BlockingDownloader(gate: gate), using: EvictStubTokenizerLoader(),
-                            configuration: configuration, progressHandler: progress)
+                            configuration: configuration, progress: progress)
                     })
 
                 // Park a genuine (non-warmup) load in flight.
@@ -248,7 +248,7 @@ extension FoundationModelsCacheTests {
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 private func makeCancellationProbingLoader(
     probe: CancellationProbe
-) -> MLXLanguageModel.ContainerLoader {
+) -> MLXLanguageModel.ProgressContainerLoader {
     { _, _ in
         await withTaskCancellationHandler {
             await probe.parkUntilCancelled()

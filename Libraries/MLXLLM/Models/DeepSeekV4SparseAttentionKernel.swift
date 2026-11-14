@@ -150,267 +150,267 @@ enum DeepSeekV4SparseAttentionKernel {
     /// header ends in a line break.
     private static let header =
         metalMatrixLaneDeclaration + """
-        constexpr constant uint bfloat16Bits = 16;
-        constexpr constant uint highHalfMask = 0xFFFF0000u;
+            constexpr constant uint bfloat16Bits = 16;
+            constexpr constant uint highHalfMask = 0xFFFF0000u;
 
-        inline float2 load_pair(const device float* source, size_t index) {
-            return *(const device float2*)(source + index);
-        }
-
-        inline float2 load_pair(const device half* source, size_t index) {
-            return float2(*(const device half2*)(source + index));
-        }
-
-        inline float2 load_pair(const device bfloat16_t* source, size_t index) {
-            uint word = *(const device uint*)(source + index);
-            return float2(as_type<float>(word << bfloat16Bits), as_type<float>(word & highHalfMask));
-        }
-
-        template <typename Source>
-        inline float2 load_pair(Source source, size_t index) {
-            return float2(float(source[index]), float(source[index + 1]));
-        }
-
-        struct NoPool {
-            inline uint count(int) const { return 0; }
-            inline int row(uint, int) const { return -1; }
-        };
-
-        struct EveryVisiblePool {
-            uint chunks;
-            int chunkWidth;
-            inline uint count(int position) const {
-                return min(chunks, uint((position + 1) / chunkWidth));
-            }
-            inline int row(uint pick, int) const { return int(pick); }
-        };
-
-        template <typename Picks>
-        struct PickedPool {
-            Picks picks;
-            size_t first;
-            uint pickCount;
-            uint chunks;
-            int chunkWidth;
-            inline uint count(int) const { return pickCount; }
-            inline int row(uint pick, int position) const {
-                int chunk = int(picks[first + pick]);
-                bool readable = chunk >= 0 && uint(chunk) < chunks
-                    && (chunk + 1) * chunkWidth <= position + 1;
-                return readable ? chunk : -1;
-            }
-        };
-
-        template <typename Picks>
-        inline PickedPool<Picks> picked_pool(
-            Picks picks, size_t first, uint pickCount, uint chunks, int chunkWidth
-        ) {
-            return {picks, first, pickCount, chunks, chunkWidth};
-        }
-
-        struct QueryPlace {
-            uint sequence;
-            uint token;
-            uint tokens;
-            uint headFirst;
-            int position;
-            uint windowFirst;
-            uint windowCount;
-            size_t windowBase;
-            size_t poolBase;
-        };
-
-        struct KeyRow {
-            int row;
-            int pooled;
-        };
-
-        template <typename Pool>
-        inline KeyRow key_row(uint key, thread const QueryPlace& place, thread const Pool& rows, uint total) {
-            if (key < place.windowCount) {
-                return {int(place.windowFirst + key), 0};
-            }
-            if (key >= total) {
-                return {-1, 0};
-            }
-            return {rows.row(key - place.windowCount, place.position), 1};
-        }
-
-        inline KeyRow key_of_lane(KeyRow mine, ushort lane) {
-            return {simd_shuffle(mine.row, lane), simd_shuffle(mine.pooled, lane)};
-        }
-
-        template <int DIM, typename WindowRows, typename PoolRows>
-        inline simdgroup_float8x8 key_matrix(
-            WindowRows window, PoolRows pool, thread const QueryPlace& place, KeyRow key, uint column
-        ) {
-            float2 pair = float2(0.0f);
-            if (key.row >= 0 && column < DIM) {
-                size_t index = (key.pooled ? place.poolBase : place.windowBase) + size_t(key.row) * DIM + column;
-                pair = key.pooled ? load_pair(pool, index) : load_pair(window, index);
-            }
-            simdgroup_float8x8 matrix;
-            matrix.thread_elements()[0] = pair.x;
-            matrix.thread_elements()[1] = pair.y;
-            return matrix;
-        }
-
-        template <
-            typename T, int HEADS, int DIM, int HEAD_BLOCK, int DIM_SLICE, int SIMD_GROUPS, int SIMD_WIDTH,
-            bool HAS_SINKS, typename Queries, typename WindowKeys, typename WindowValues, typename PoolKeys,
-            typename Pool, typename Sinks>
-        inline void attend_query(
-            Queries queries, WindowKeys windowKeys, WindowValues windowValues, PoolKeys pool,
-            thread const Pool& rows, Sinks sinks, float scale, thread const QueryPlace& place,
-            device T* output, threadgroup float* partial, threadgroup float* weights,
-            threadgroup float* rowMax, threadgroup float* rowSum, threadgroup float* correction,
-            ushort simdGroup, ushort lane
-        ) {
-            constexpr int headFrags = HEAD_BLOCK / matrixSide;
-            constexpr int dimFrags = DIM_SLICE / matrixSide;
-            constexpr int keyFrags = SIMD_WIDTH / matrixSide;
-            constexpr int tileScores = SIMD_WIDTH * HEAD_BLOCK;
-            static_assert(HEAD_BLOCK % matrixSide == 0, "whole matrices of heads");
-            static_assert(DIM_SLICE % matrixSide == 0, "whole matrices of the head width");
-            static_assert(SIMD_WIDTH % matrixSide == 0, "whole matrices of keys");
-
-            short2 at = lane_coordinate(lane);
-            uint dimFirst = uint(simdGroup) * DIM_SLICE;
-            uint threadIndex = uint(simdGroup) * SIMD_WIDTH + lane;
-            for (uint head = threadIndex; head < HEAD_BLOCK; head += SIMD_GROUPS * SIMD_WIDTH) {
-                bool hasSink = HAS_SINKS && place.headFirst + head < HEADS;
-                rowMax[head] = hasSink ? float(sinks[place.headFirst + head]) : -INFINITY;
-                rowSum[head] = hasSink ? 1.0f : 0.0f;
+            inline float2 load_pair(const device float* source, size_t index) {
+                return *(const device float2*)(source + index);
             }
 
-            simdgroup_float8x8 queryT[dimFrags][headFrags];
-            simdgroup_float8x8 out[headFrags][dimFrags];
-            #pragma clang loop unroll(full)
-            for (int d = 0; d < dimFrags; d++) {
-                uint column = dimFirst + d * matrixSide + at.y;
-                #pragma clang loop unroll(full)
-                for (int r = 0; r < headFrags; r++) {
-                    uint head = place.headFirst + r * matrixSide + at.x;
-                    #pragma clang loop unroll(full)
-                    for (int e = 0; e < elementsPerLane; e++) {
-                        float value = 0.0f;
-                        if (head + e < HEADS && column < DIM) {
-                            size_t index = ((size_t(place.sequence) * HEADS + head + e) * place.tokens + place.token) * DIM + column;
-                            value = float(queries[index]) * scale;
-                        }
-                        queryT[d][r].thread_elements()[e] = value;
-                    }
-                    out[r][d] = make_filled_simdgroup_matrix<float, matrixSide>(0.0f);
+            inline float2 load_pair(const device half* source, size_t index) {
+                return float2(*(const device half2*)(source + index));
+            }
+
+            inline float2 load_pair(const device bfloat16_t* source, size_t index) {
+                uint word = *(const device uint*)(source + index);
+                return float2(as_type<float>(word << bfloat16Bits), as_type<float>(word & highHalfMask));
+            }
+
+            template <typename Source>
+            inline float2 load_pair(Source source, size_t index) {
+                return float2(float(source[index]), float(source[index + 1]));
+            }
+
+            struct NoPool {
+                inline uint count(int) const { return 0; }
+                inline int row(uint, int) const { return -1; }
+            };
+
+            struct EveryVisiblePool {
+                uint chunks;
+                int chunkWidth;
+                inline uint count(int position) const {
+                    return min(chunks, uint((position + 1) / chunkWidth));
                 }
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+                inline int row(uint pick, int) const { return int(pick); }
+            };
 
-            uint total = place.windowCount + rows.count(place.position);
-            for (uint tileFirst = 0; tileFirst < total; tileFirst += SIMD_WIDTH) {
-                KeyRow mine = key_row(tileFirst + lane, place, rows, total);
+            template <typename Picks>
+            struct PickedPool {
+                Picks picks;
+                size_t first;
+                uint pickCount;
+                uint chunks;
+                int chunkWidth;
+                inline uint count(int) const { return pickCount; }
+                inline int row(uint pick, int position) const {
+                    int chunk = int(picks[first + pick]);
+                    bool readable = chunk >= 0 && uint(chunk) < chunks
+                        && (chunk + 1) * chunkWidth <= position + 1;
+                    return readable ? chunk : -1;
+                }
+            };
 
-                #pragma clang loop unroll(full)
-                for (int k = 0; k < keyFrags; k++) {
-                    KeyRow key = key_of_lane(mine, ushort(k * matrixSide + at.y));
-                    simdgroup_float8x8 scores[headFrags];
-                    #pragma clang loop unroll(full)
-                    for (int r = 0; r < headFrags; r++) {
-                        scores[r] = make_filled_simdgroup_matrix<float, matrixSide>(0.0f);
-                    }
-                    #pragma clang loop unroll(full)
-                    for (int d = 0; d < dimFrags; d++) {
-                        simdgroup_float8x8 keys = key_matrix<DIM>(
-                            windowKeys, pool, place, key, dimFirst + d * matrixSide + at.x);
-                        #pragma clang loop unroll(full)
-                        for (int r = 0; r < headFrags; r++) {
-                            simdgroup_multiply_accumulate(scores[r], keys, queryT[d][r], scores[r]);
-                        }
-                    }
-                    #pragma clang loop unroll(full)
-                    for (int r = 0; r < headFrags; r++) {
-                        simdgroup_store(
-                            scores[r],
-                            partial + simdGroup * tileScores + k * matrixSide * HEAD_BLOCK + r * matrixSide,
-                            HEAD_BLOCK);
-                    }
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-
-                for (int head = simdGroup; head < HEAD_BLOCK; head += SIMD_GROUPS) {
-                    float score = 0.0f;
-                    #pragma clang loop unroll(full)
-                    for (int group = 0; group < SIMD_GROUPS; group++) {
-                        score += partial[group * tileScores + lane * HEAD_BLOCK + head];
-                    }
-                    score = mine.row >= 0 ? score : -INFINITY;
-                    float previous = rowMax[head];
-                    float largest = max(previous, simd_max(score));
-                    bool seen = largest > -INFINITY;
-                    float weight = seen ? exp(score - largest) : 0.0f;
-                    float factor = seen ? exp(previous - largest) : 1.0f;
-                    float tileSum = simd_sum(weight);
-                    weights[lane * HEAD_BLOCK + head] = weight;
-                    if (lane == 0) {
-                        rowMax[head] = largest;
-                        rowSum[head] = rowSum[head] * factor + tileSum;
-                        correction[head] = factor;
-                    }
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-
-                #pragma clang loop unroll(full)
-                for (int r = 0; r < headFrags; r++) {
-                    float factor = correction[r * matrixSide + at.y];
-                    #pragma clang loop unroll(full)
-                    for (int d = 0; d < dimFrags; d++) {
-                        out[r][d].thread_elements() *= factor;
-                    }
-                }
-                #pragma clang loop unroll(full)
-                for (int k = 0; k < keyFrags; k++) {
-                    simdgroup_float8x8 weightMatrix[headFrags];
-                    #pragma clang loop unroll(full)
-                    for (int r = 0; r < headFrags; r++) {
-                        simdgroup_load(
-                            weightMatrix[r], weights + k * matrixSide * HEAD_BLOCK + r * matrixSide,
-                            HEAD_BLOCK, ulong2(0, 0), true);
-                    }
-                    KeyRow key = key_of_lane(mine, ushort(k * matrixSide + at.y));
-                    #pragma clang loop unroll(full)
-                    for (int d = 0; d < dimFrags; d++) {
-                        simdgroup_float8x8 values = key_matrix<DIM>(
-                            windowValues, pool, place, key, dimFirst + d * matrixSide + at.x);
-                        #pragma clang loop unroll(full)
-                        for (int r = 0; r < headFrags; r++) {
-                            simdgroup_multiply_accumulate(out[r][d], weightMatrix[r], values, out[r][d]);
-                        }
-                    }
-                }
+            template <typename Picks>
+            inline PickedPool<Picks> picked_pool(
+                Picks picks, size_t first, uint pickCount, uint chunks, int chunkWidth
+            ) {
+                return {picks, first, pickCount, chunks, chunkWidth};
             }
 
-            #pragma clang loop unroll(full)
-            for (int r = 0; r < headFrags; r++) {
-                uint head = place.headFirst + r * matrixSide + at.y;
-                if (head >= HEADS) {
-                    continue;
+            struct QueryPlace {
+                uint sequence;
+                uint token;
+                uint tokens;
+                uint headFirst;
+                int position;
+                uint windowFirst;
+                uint windowCount;
+                size_t windowBase;
+                size_t poolBase;
+            };
+
+            struct KeyRow {
+                int row;
+                int pooled;
+            };
+
+            template <typename Pool>
+            inline KeyRow key_row(uint key, thread const QueryPlace& place, thread const Pool& rows, uint total) {
+                if (key < place.windowCount) {
+                    return {int(place.windowFirst + key), 0};
                 }
-                float inverse = 1.0f / rowSum[r * matrixSide + at.y];
-                size_t rowBase = ((size_t(place.sequence) * HEADS + head) * place.tokens + place.token) * DIM;
+                if (key >= total) {
+                    return {-1, 0};
+                }
+                return {rows.row(key - place.windowCount, place.position), 1};
+            }
+
+            inline KeyRow key_of_lane(KeyRow mine, ushort lane) {
+                return {simd_shuffle(mine.row, lane), simd_shuffle(mine.pooled, lane)};
+            }
+
+            template <int DIM, typename WindowRows, typename PoolRows>
+            inline simdgroup_float8x8 key_matrix(
+                WindowRows window, PoolRows pool, thread const QueryPlace& place, KeyRow key, uint column
+            ) {
+                float2 pair = float2(0.0f);
+                if (key.row >= 0 && column < DIM) {
+                    size_t index = (key.pooled ? place.poolBase : place.windowBase) + size_t(key.row) * DIM + column;
+                    pair = key.pooled ? load_pair(pool, index) : load_pair(window, index);
+                }
+                simdgroup_float8x8 matrix;
+                matrix.thread_elements()[0] = pair.x;
+                matrix.thread_elements()[1] = pair.y;
+                return matrix;
+            }
+
+            template <
+                typename T, int HEADS, int DIM, int HEAD_BLOCK, int DIM_SLICE, int SIMD_GROUPS, int SIMD_WIDTH,
+                bool HAS_SINKS, typename Queries, typename WindowKeys, typename WindowValues, typename PoolKeys,
+                typename Pool, typename Sinks>
+            inline void attend_query(
+                Queries queries, WindowKeys windowKeys, WindowValues windowValues, PoolKeys pool,
+                thread const Pool& rows, Sinks sinks, float scale, thread const QueryPlace& place,
+                device T* output, threadgroup float* partial, threadgroup float* weights,
+                threadgroup float* rowMax, threadgroup float* rowSum, threadgroup float* correction,
+                ushort simdGroup, ushort lane
+            ) {
+                constexpr int headFrags = HEAD_BLOCK / matrixSide;
+                constexpr int dimFrags = DIM_SLICE / matrixSide;
+                constexpr int keyFrags = SIMD_WIDTH / matrixSide;
+                constexpr int tileScores = SIMD_WIDTH * HEAD_BLOCK;
+                static_assert(HEAD_BLOCK % matrixSide == 0, "whole matrices of heads");
+                static_assert(DIM_SLICE % matrixSide == 0, "whole matrices of the head width");
+                static_assert(SIMD_WIDTH % matrixSide == 0, "whole matrices of keys");
+
+                short2 at = lane_coordinate(lane);
+                uint dimFirst = uint(simdGroup) * DIM_SLICE;
+                uint threadIndex = uint(simdGroup) * SIMD_WIDTH + lane;
+                for (uint head = threadIndex; head < HEAD_BLOCK; head += SIMD_GROUPS * SIMD_WIDTH) {
+                    bool hasSink = HAS_SINKS && place.headFirst + head < HEADS;
+                    rowMax[head] = hasSink ? float(sinks[place.headFirst + head]) : -INFINITY;
+                    rowSum[head] = hasSink ? 1.0f : 0.0f;
+                }
+
+                simdgroup_float8x8 queryT[dimFrags][headFrags];
+                simdgroup_float8x8 out[headFrags][dimFrags];
                 #pragma clang loop unroll(full)
                 for (int d = 0; d < dimFrags; d++) {
-                    uint column = dimFirst + d * matrixSide + at.x;
-                    if (column >= DIM) {
-                        continue;
+                    uint column = dimFirst + d * matrixSide + at.y;
+                    #pragma clang loop unroll(full)
+                    for (int r = 0; r < headFrags; r++) {
+                        uint head = place.headFirst + r * matrixSide + at.x;
+                        #pragma clang loop unroll(full)
+                        for (int e = 0; e < elementsPerLane; e++) {
+                            float value = 0.0f;
+                            if (head + e < HEADS && column < DIM) {
+                                size_t index = ((size_t(place.sequence) * HEADS + head + e) * place.tokens + place.token) * DIM + column;
+                                value = float(queries[index]) * scale;
+                            }
+                            queryT[d][r].thread_elements()[e] = value;
+                        }
+                        out[r][d] = make_filled_simdgroup_matrix<float, matrixSide>(0.0f);
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                uint total = place.windowCount + rows.count(place.position);
+                for (uint tileFirst = 0; tileFirst < total; tileFirst += SIMD_WIDTH) {
+                    KeyRow mine = key_row(tileFirst + lane, place, rows, total);
+
+                    #pragma clang loop unroll(full)
+                    for (int k = 0; k < keyFrags; k++) {
+                        KeyRow key = key_of_lane(mine, ushort(k * matrixSide + at.y));
+                        simdgroup_float8x8 scores[headFrags];
+                        #pragma clang loop unroll(full)
+                        for (int r = 0; r < headFrags; r++) {
+                            scores[r] = make_filled_simdgroup_matrix<float, matrixSide>(0.0f);
+                        }
+                        #pragma clang loop unroll(full)
+                        for (int d = 0; d < dimFrags; d++) {
+                            simdgroup_float8x8 keys = key_matrix<DIM>(
+                                windowKeys, pool, place, key, dimFirst + d * matrixSide + at.x);
+                            #pragma clang loop unroll(full)
+                            for (int r = 0; r < headFrags; r++) {
+                                simdgroup_multiply_accumulate(scores[r], keys, queryT[d][r], scores[r]);
+                            }
+                        }
+                        #pragma clang loop unroll(full)
+                        for (int r = 0; r < headFrags; r++) {
+                            simdgroup_store(
+                                scores[r],
+                                partial + simdGroup * tileScores + k * matrixSide * HEAD_BLOCK + r * matrixSide,
+                                HEAD_BLOCK);
+                        }
+                    }
+                    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                    for (int head = simdGroup; head < HEAD_BLOCK; head += SIMD_GROUPS) {
+                        float score = 0.0f;
+                        #pragma clang loop unroll(full)
+                        for (int group = 0; group < SIMD_GROUPS; group++) {
+                            score += partial[group * tileScores + lane * HEAD_BLOCK + head];
+                        }
+                        score = mine.row >= 0 ? score : -INFINITY;
+                        float previous = rowMax[head];
+                        float largest = max(previous, simd_max(score));
+                        bool seen = largest > -INFINITY;
+                        float weight = seen ? exp(score - largest) : 0.0f;
+                        float factor = seen ? exp(previous - largest) : 1.0f;
+                        float tileSum = simd_sum(weight);
+                        weights[lane * HEAD_BLOCK + head] = weight;
+                        if (lane == 0) {
+                            rowMax[head] = largest;
+                            rowSum[head] = rowSum[head] * factor + tileSum;
+                            correction[head] = factor;
+                        }
+                    }
+                    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                    #pragma clang loop unroll(full)
+                    for (int r = 0; r < headFrags; r++) {
+                        float factor = correction[r * matrixSide + at.y];
+                        #pragma clang loop unroll(full)
+                        for (int d = 0; d < dimFrags; d++) {
+                            out[r][d].thread_elements() *= factor;
+                        }
                     }
                     #pragma clang loop unroll(full)
-                    for (int e = 0; e < elementsPerLane; e++) {
-                        output[rowBase + column + e] = T(out[r][d].thread_elements()[e] * inverse);
+                    for (int k = 0; k < keyFrags; k++) {
+                        simdgroup_float8x8 weightMatrix[headFrags];
+                        #pragma clang loop unroll(full)
+                        for (int r = 0; r < headFrags; r++) {
+                            simdgroup_load(
+                                weightMatrix[r], weights + k * matrixSide * HEAD_BLOCK + r * matrixSide,
+                                HEAD_BLOCK, ulong2(0, 0), true);
+                        }
+                        KeyRow key = key_of_lane(mine, ushort(k * matrixSide + at.y));
+                        #pragma clang loop unroll(full)
+                        for (int d = 0; d < dimFrags; d++) {
+                            simdgroup_float8x8 values = key_matrix<DIM>(
+                                windowValues, pool, place, key, dimFirst + d * matrixSide + at.x);
+                            #pragma clang loop unroll(full)
+                            for (int r = 0; r < headFrags; r++) {
+                                simdgroup_multiply_accumulate(out[r][d], weightMatrix[r], values, out[r][d]);
+                            }
+                        }
+                    }
+                }
+
+                #pragma clang loop unroll(full)
+                for (int r = 0; r < headFrags; r++) {
+                    uint head = place.headFirst + r * matrixSide + at.y;
+                    if (head >= HEADS) {
+                        continue;
+                    }
+                    float inverse = 1.0f / rowSum[r * matrixSide + at.y];
+                    size_t rowBase = ((size_t(place.sequence) * HEADS + head) * place.tokens + place.token) * DIM;
+                    #pragma clang loop unroll(full)
+                    for (int d = 0; d < dimFrags; d++) {
+                        uint column = dimFirst + d * matrixSide + at.x;
+                        if (column >= DIM) {
+                            continue;
+                        }
+                        #pragma clang loop unroll(full)
+                        for (int e = 0; e < elementsPerLane; e++) {
+                            output[rowBase + column + e] = T(out[r][d].thread_elements()[e] * inverse);
+                        }
                     }
                 }
             }
-        }
 
-        """
+            """
 
     /// The start of every kernel body: the threadgroup memory, and the place
     /// of the query token and of the head block this threadgroup reads.

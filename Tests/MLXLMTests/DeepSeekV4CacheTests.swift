@@ -683,7 +683,8 @@ struct DeepSeekV4CacheTests {
 
     @Test(arguments: feedCuts)
     func theIndexerBranchKeepsItsPoolInTheScoreDTypeWithTheBitsOfACast(cuts: [Int]) throws {
-        let cache = DeepSeekV4Cache(configuration: try Self.configuration(), layer: Self.overlapLayer)
+        let cache = DeepSeekV4Cache(
+            configuration: try Self.configuration(), layer: Self.overlapLayer)
         let indexerBranch = try #require(cache.indexerChunks, "the overlap layer holds an indexer")
         let kept = try Self.activationPooled(through: indexerBranch, cuts: cuts)
         let activation = try Self.activationPooled(through: cache.attentionChunks, cuts: cuts)
@@ -723,7 +724,8 @@ struct DeepSeekV4CacheTests {
     }
 
     @Test func aCopyOfTheCachePoolsItsIndexerBranchInTheScoreDType() throws {
-        let cache = DeepSeekV4Cache(configuration: try Self.configuration(), layer: Self.overlapLayer)
+        let cache = DeepSeekV4Cache(
+            configuration: try Self.configuration(), layer: Self.overlapLayer)
         let duplicate = try #require(cache.copy() as? DeepSeekV4Cache)
         let indexerBranch = try #require(
             duplicate.indexerChunks, "the copy of the overlap layer holds an indexer")

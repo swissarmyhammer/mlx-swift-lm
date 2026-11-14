@@ -213,7 +213,8 @@ struct MTPNearTieDivergenceTests {
 
     /// Writes `measurement` under the measurement prefix.
     private static func log(_ measurement: String) {
-        measurementLog.info("\(measurementPrefix, privacy: .public) \(measurement, privacy: .public)")
+        measurementLog.info(
+            "\(measurementPrefix, privacy: .public) \(measurement, privacy: .public)")
     }
 }
 

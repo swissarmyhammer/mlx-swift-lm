@@ -64,8 +64,9 @@ struct MTPBlockSweepNoiseAllowanceTests {
     }
 
     @Test func allowanceIsTheQuietLoadFloorWhenTheSweepMeasuredLessNoise() {
-        #expect(Self.sweep(chainedRate: Self.singleDraftRate).noiseAllowance
-            == MTPBlockSweep.quietLoadNoiseFloor)
+        #expect(
+            Self.sweep(chainedRate: Self.singleDraftRate).noiseAllowance
+                == MTPBlockSweep.quietLoadNoiseFloor)
     }
 
     @Test func allowanceIsTheMeasuredNoiseWhenItExceedsTheQuietLoadFloor() {

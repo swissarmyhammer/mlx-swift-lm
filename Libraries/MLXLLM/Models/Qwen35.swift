@@ -1281,6 +1281,10 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
         }
     }
 
+    public var excludedCheckpointNamespaces: [String] {
+        Qwen35CheckpointPolicy.excludedTargetNamespaces
+    }
+
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = try Qwen35CheckpointPolicy.prepareTarget(
             checkpoint, layout: .text, tiedWordEmbeddings: configuration.tieWordEmbeddings)
@@ -1360,6 +1364,12 @@ extension Qwen35TextModel: LoRAModel {
     }
 }
 
+extension Qwen35TextModel: ModelComponentsProviding {
+    public var modelComponents: [ModelComponent: [CheckpointComponent]] {
+        Qwen35CheckpointPolicy.components
+    }
+}
+
 extension Qwen35TextModel: SpeculativeCacheRewindModel {
     /// The drafts of the longest verify whose snapshot slots a GDN layer keeps.
     public var maximumNativeTargetCacheRewind: Int { GatedDeltaDecodeKernel.mostRewoundTokens }
@@ -1407,6 +1417,10 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
         try languageModel.prepare()
     }
 
+    public var excludedCheckpointNamespaces: [String] {
+        Qwen35CheckpointPolicy.excludedTargetNamespaces
+    }
+
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = try Qwen35CheckpointPolicy.prepareTarget(
             checkpoint, layout: .wrappedText,
@@ -1427,6 +1441,12 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
 extension Qwen35Model: LoRAModel {
     public var loraLayers: [Module] {
         languageModel.model.layers
+    }
+}
+
+extension Qwen35Model: ModelComponentsProviding {
+    public var modelComponents: [ModelComponent: [CheckpointComponent]] {
+        Qwen35CheckpointPolicy.components
     }
 }
 

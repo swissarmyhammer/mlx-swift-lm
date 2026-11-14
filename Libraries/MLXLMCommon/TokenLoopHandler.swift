@@ -42,6 +42,10 @@ public protocol TokenLoopHandler: SendableMetatype {
     /// are not included in the public output or generation token count.
     var receivesStopTokens: Bool { get }
 
+    /// Whether decoding can end here to apply pending steering input.
+    /// The default, `false`, lets the current model step finish.
+    var canEndForSteering: Bool { get }
+
     /// Return `.stop` for semantic generation stops, or `.cancelled` for consumer termination.
     ///
     /// `logProbabilities` stays on the GPU until you call
@@ -69,6 +73,7 @@ public protocol TokenLoopHandler: SendableMetatype {
 }
 
 extension TokenLoopHandler {
+    public var canEndForSteering: Bool { false }
     /// No semantic boundary: the generation stops only on the model's own stop tokens.
     public var additionalStopTokenIDs: Set<Int> { [] }
 
@@ -115,6 +120,12 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
     private var decoder: any TokenStreamDecoder
     var cachedPromptTokenCount = 0
     var speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
+    private var hasResponse = false
+    private var hasNonTextOutput = false
+
+    public var canEndForSteering: Bool {
+        hasResponse && !hasNonTextOutput && decoder.canEndForSteering
+    }
 
     public init(
         tokenizer: Tokenizer, stopStrings: Set<String> = [], format: ToolCallFormat,
@@ -224,16 +235,20 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
             return .more
 
         case .response(let response):
+            hasResponse = hasResponse || !response.isEmpty
             return emitOrCancel(.chunk(response), emit: emit)
 
         case .toolCall(let toolCall):
+            hasNonTextOutput = true
             return emitOrCancel(.toolCall(toolCall), emit: emit)
 
         case .protocolError(let message):
+            hasNonTextOutput = true
             Self.logger.error("\(message)")
             return .more
 
         case .rejectedToolCall(let rejection):
+            hasNonTextOutput = true
             return emitOrCancel(.rejectedToolCall(rejection), emit: emit)
 
         case .stop:

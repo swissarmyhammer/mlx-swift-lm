@@ -152,14 +152,18 @@ struct ExecutorPromptCacheMTPTests {
             .instructions(
                 Transcript.Instructions(
                     id: Self.sessionID,
-                    segments: [.text(Transcript.TextSegment(content: fixture.text(for: Self.instructions)))],
+                    segments: [
+                        .text(Transcript.TextSegment(content: fixture.text(for: Self.instructions)))
+                    ],
                     toolDefinitions: []))
         ]
         for (index, prompt) in prompts.enumerated() {
             entries.append(
                 .prompt(
                     Transcript.Prompt(
-                        segments: [.text(Transcript.TextSegment(content: fixture.text(for: prompt)))])))
+                        segments: [
+                            .text(Transcript.TextSegment(content: fixture.text(for: prompt)))
+                        ])))
             if responses.indices.contains(index) {
                 entries.append(
                     .response(
@@ -211,7 +215,8 @@ struct ExecutorPromptCacheMTPTests {
     private func converse(
         _ model: MLXLanguageModel, fixture: Qwen35MTPFixture, secondTurn: SecondTurn,
         tools: Bool = false,
-        between: (ExecutorPromptCacheStore, ExecutorPromptCacheKey) async throws -> Void = { _, _ in }
+        between: (ExecutorPromptCacheStore, ExecutorPromptCacheKey) async throws -> Void = { _, _ in
+        }
     ) async throws -> Conversation {
         let (store, folder) = makeStore()
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -232,10 +237,12 @@ struct ExecutorPromptCacheMTPTests {
             switch secondTurn {
             case .followUp:
                 transcript(
-                    prompts: [Self.firstPrompt, Self.followUpPrompt], responses: [first.responseText],
+                    prompts: [Self.firstPrompt, Self.followUpPrompt],
+                    responses: [first.responseText],
                     fixture: fixture)
             case .edit:
-                transcript(prompts: [Self.firstPrompt + Self.editTokens], responses: [], fixture: fixture)
+                transcript(
+                    prompts: [Self.firstPrompt + Self.editTokens], responses: [], fixture: fixture)
             }
         let second = try await respond(model, over: secondTranscript, tools: tools, inside: store)
         await store.waitForSpills()
@@ -255,7 +262,8 @@ struct ExecutorPromptCacheMTPTests {
         #expect(speculative.first.responseText == plain.first.responseText)
         #expect(speculative.second.responseText == plain.second.responseText)
         #expect(speculative.second.speculated)
-        #expect(speculative.second.usage.first?.cachedPromptTokenCount == speculative.firstLedgerCount)
+        #expect(
+            speculative.second.usage.first?.cachedPromptTokenCount == speculative.firstLedgerCount)
     }
 
     /// The drafter state of the entry the conversation left.
@@ -410,14 +418,15 @@ struct ExecutorPromptCacheMTPTests {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
         let models = try makeModels(weights: weights)
-        let spillMainCachesOnly: (ExecutorPromptCacheStore, ExecutorPromptCacheKey) async throws -> Void = {
-            store, key in
-            let entry = try #require(await store.checkOut(key).entry)
-            await store.configure(memoryBudgetBytes: 0)
-            await store.checkIn(key, Self.mainCaches(of: entry))
-            await store.waitForSpills()
-            await store.configure(memoryBudgetBytes: .max)
-        }
+        let spillMainCachesOnly:
+            (ExecutorPromptCacheStore, ExecutorPromptCacheKey) async throws -> Void = {
+                store, key in
+                let entry = try #require(await store.checkOut(key).entry)
+                await store.configure(memoryBudgetBytes: 0)
+                await store.checkIn(key, Self.mainCaches(of: entry))
+                await store.waitForSpills()
+                await store.configure(memoryBudgetBytes: .max)
+            }
 
         let plain = try await converse(models.plain, fixture: models.fixture, secondTurn: .followUp)
         let speculative = try await converse(

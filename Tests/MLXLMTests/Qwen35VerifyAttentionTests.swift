@@ -90,7 +90,8 @@ struct Qwen35VerifyAttentionTests {
     }
 
     /// A cache of `model` that holds `context`.
-    private static func prefilled(_ model: Qwen35TextModel, _ context: MLXArray) throws -> [KVCache] {
+    private static func prefilled(_ model: Qwen35TextModel, _ context: MLXArray) throws -> [KVCache]
+    {
         let cache = try model.newCache(parameters: nil)
         eval(model(context, cache: cache))
         return cache

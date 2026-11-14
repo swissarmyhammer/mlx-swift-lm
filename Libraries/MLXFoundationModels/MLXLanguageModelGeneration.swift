@@ -1260,6 +1260,8 @@ extension MLXLanguageModel.Executor {
                     break
                 case .rejectedToolCall(let rejection):
                     throw RejectedToolCallError(rejection)
+                case .steering:
+                    break
                 }
             }
         }

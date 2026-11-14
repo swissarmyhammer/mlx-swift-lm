@@ -284,7 +284,7 @@ private class Qwen3ModelInner: Module {
             // Causal ∧ key-not-padding, broadcast to [Batch, 1, L, L]. The
             // causal array spans the retained keys; cached keys are real
             // tokens, so padding applies to the current inputs only.
-            var keep = MLXArray.ones([inputs.dim(0), causal.dim(-1)], dtype: .bool)
+            let keep = MLXArray.ones([inputs.dim(0), causal.dim(-1)], dtype: .bool)
             keep[0..., (causal.dim(-1) - inputs.dim(1))...] = attentionMask.asType(.bool)
             mask = .array(causal & keep[0..., .newAxis, .newAxis, 0...])
         }

@@ -124,7 +124,8 @@ final class GuidedDraftChain {
     /// - Parameter index: The first draft to roll back. The drafts after it go too.
     /// - Throws: The error of the matcher.
     func rollBack(draftsFrom index: Int) throws {
-        precondition(index <= committedDraftCount, "Rolling back a draft the matcher no longer holds")
+        precondition(
+            index <= committedDraftCount, "Rolling back a draft the matcher no longer holds")
         let acceptances = drafts[index ..< committedDraftCount].reduce(0) {
             $0 + $1.acceptanceCount
         }

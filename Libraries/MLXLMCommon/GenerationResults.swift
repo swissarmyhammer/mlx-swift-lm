@@ -116,6 +116,10 @@ public enum GenerateStopReason: Sendable {
     /// Generation stopped because the configured max token limit was reached.
     case length
 
+    /// This model step ended at a supported boundary to apply pending steering.
+    /// The owning chat turn continues with the additional user input.
+    case steered
+
     /// Generation stopped due to explicit task cancellation or early stream termination.
     case cancelled
 }
@@ -333,6 +337,7 @@ public struct GenerateCompletionInfo: Sendable {
 /// - `.toolCall`: A tool call parsed from the generated output.
 /// - `.rejectedToolCall`: Tool-call-shaped output that was not executable.
 /// - `.info`: Metadata and performance statistics about the generation process.
+/// - `.steering`: The outcome of accepted steering instructions.
 public enum Generation: Sendable {
     /// A generated text chunk as a String.
     case chunk(String)
@@ -360,6 +365,9 @@ public enum Generation: Sendable {
     /// A tool-call-shaped model output rejected by parsing or authorization.
     case rejectedToolCall(RejectedToolCall)
 
+    /// The outcome of steering instructions submitted to a chat session.
+    case steering(SteeringEvent)
+
     /// Generated text or nil
     public var chunk: String? {
         switch self {
@@ -368,6 +376,7 @@ public enum Generation: Sendable {
         case .info: nil
         case .toolCall: nil
         case .rejectedToolCall: nil
+        case .steering: nil
         }
     }
 
@@ -379,6 +388,7 @@ public enum Generation: Sendable {
         case .info: nil
         case .toolCall: nil
         case .rejectedToolCall: nil
+        case .steering: nil
         }
     }
 
@@ -390,6 +400,7 @@ public enum Generation: Sendable {
         case .info(let info): info
         case .toolCall: nil
         case .rejectedToolCall: nil
+        case .steering: nil
         }
     }
 
@@ -401,6 +412,7 @@ public enum Generation: Sendable {
         case .info: nil
         case .toolCall(let toolCall): toolCall
         case .rejectedToolCall: nil
+        case .steering: nil
         }
     }
 
@@ -412,6 +424,19 @@ public enum Generation: Sendable {
         case .info: nil
         case .toolCall: nil
         case .rejectedToolCall(let rejection): rejection
+        case .steering: nil
+        }
+    }
+
+    /// Steering event or nil.
+    public var steering: SteeringEvent? {
+        switch self {
+        case .chunk: nil
+        case .reasoning: nil
+        case .info: nil
+        case .toolCall: nil
+        case .rejectedToolCall: nil
+        case .steering(let event): event
         }
     }
 

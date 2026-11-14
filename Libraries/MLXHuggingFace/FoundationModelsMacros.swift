@@ -11,9 +11,9 @@ import MLXLMCommon
 ///
 /// The macro synthesizes the `weightsLocation:` and `load:` arguments; the
 /// caller supplies only `configuration` (plus optional `capabilities`,
-/// `configurationResolver` and `speculativeDecoding`). A caller needing a
-/// custom weights location or loader should call the `MLXLanguageModel`
-/// initializer directly.
+/// `configurationResolver`, `speculativeDecoding` and model-load `progress`).
+/// A caller needing a custom weights location or loader should call the
+/// `MLXLanguageModel` initializer directly.
 ///
 /// The expansion references symbols the caller must have in scope:
 /// ```swift
@@ -49,16 +49,15 @@ import MLXLMCommon
 @freestanding(expression)
 public macro huggingFaceLanguageModel(
     configuration: ModelConfiguration,
-    // The `capabilities` / `configurationResolver` / `speculativeDecoding`
-    // defaults mirror
-    // `MLXLanguageModel.init(configuration:capabilities:configurationResolver:speculativeDecoding:weightsLocation:load:)`.
+    // The defaults mirror the corresponding `MLXLanguageModel` initializers.
     // The expansion forwards each argument only when the caller supplies it, so
     // an omitted argument falls through to the initializer's own default rather
     // than the value written here — keep the two in sync so this signature does
     // not advertise a default the expansion never applies.
     capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
     configurationResolver: any ModelConfigurationResolver = DefaultConfigurationResolver(),
-    speculativeDecoding: MLXSpeculativeDecoding? = nil
+    speculativeDecoding: MLXSpeculativeDecoding? = nil,
+    progress: LoadProgressHandlers = .init()
 ) -> MLXLanguageModel =
     #externalMacro(module: "MLXHuggingFaceMacros", type: "LanguageModelMacro")
 

@@ -654,6 +654,18 @@ public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
     return cache.first?.trim(count) ?? 0
 }
 
+/// Whether `cache`, or each ``RewindableConvolutionCache`` under it, still holds the history to
+/// rewind `positions` tokens. Every other cache answers `true`.
+func canRewindConvolutionCache(_ cache: KVCache, positions: Int) -> Bool {
+    if let cache = cache as? RewindableConvolutionCache {
+        return cache.canRewind(positions)
+    }
+    if let cache = cache as? CacheList {
+        return cache.children.allSatisfy { canRewindConvolutionCache($0, positions: positions) }
+    }
+    return true
+}
+
 /// Whether every attention entry of a hybrid attention/recurrent cache can rewind, in place,
 /// the rejected drafts of a speculative verify of `positions` tokens written into it: up to
 /// `positions - 1` tokens, since the bonus token at the head of the verify is always kept.
@@ -671,6 +683,8 @@ public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
 package func canRewindSpeculativeVerify(_ cache: [KVCache], positions: Int) -> Bool {
     cache.allSatisfy { entry in
         switch entry {
+        case let convolution as RewindableConvolutionCache:
+            convolution.isTrimmable(after: positions)
         case is MambaCache: true
         case is RotatingKVCache: positions > 1
         default: entry.isTrimmable
@@ -712,7 +726,9 @@ private func rewindSpeculativeEntries(
 ) -> Int {
     guard numTokens > 0,
         cache.allSatisfy({ entry in
-            if let recurrent = entry as? MambaCache {
+            // A bounded convolution history trims like attention; other recurrent entries
+            // select a snapshot slot.
+            if let recurrent = entry as? MambaCache, !(entry is RewindableConvolutionCache) {
                 return recurrent.speculativeSlotCount > numTokens
             }
             return entry.maxTrimCount >= numTokens
@@ -720,7 +736,7 @@ private func rewindSpeculativeEntries(
     else { return 0 }
 
     for entry in cache {
-        if let recurrent = entry as? MambaCache {
+        if let recurrent = entry as? MambaCache, !(entry is RewindableConvolutionCache) {
             guard recurrent.selectSpeculativeSlot(rollingBack: numTokens) else {
                 preconditionFailure("Missing recurrent speculative snapshot slot")
             }

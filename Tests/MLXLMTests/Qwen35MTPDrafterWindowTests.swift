@@ -177,7 +177,8 @@ struct Qwen35MTPDrafterWindowTests {
         for rows in Array(repeating: Self.drafterChunkRows, count: positionCount).joined()
         where start < positionCount {
             let end = min(start + rows, positionCount)
-            try Self.append(start ..< end, of: tokens, hidden: hidden, to: &windowed, fixture: fixture)
+            try Self.append(
+                start ..< end, of: tokens, hidden: hidden, to: &windowed, fixture: fixture)
             start = end
         }
         let windowStart = positionCount - Self.window

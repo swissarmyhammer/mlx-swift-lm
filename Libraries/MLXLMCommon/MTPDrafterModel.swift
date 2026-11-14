@@ -68,6 +68,14 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// ``MTPDrafterCompatibilityError`` for unsupported pairings.
     func validateCompatibility(with target: any LanguageModel) throws
 
+    /// Target decoder-layer outputs required by the drafter.
+    ///
+    /// Layer indices use the target model's zero-based decoder-layer numbering.
+    /// `nil` means the drafter consumes the target model's ordinary final hidden
+    /// representation. DFlash/DSpark-style drafters return the exact feature
+    /// taps recorded in their checkpoint configuration.
+    var targetLayerIds: [Int]? { get }
+
     /// K-step drafting from a constant position.
     ///
     /// Returns the proposed tokens as a `[B, blockSize - 1]` MLXArray. The
@@ -117,6 +125,7 @@ extension MTPDrafterModel {
     public var requiresSharedTargetKV: Bool { true }
     public var requiresPromptPrefill: Bool { false }
     public var requiresGreedySampling: Bool { false }
+    public var targetLayerIds: [Int]? { nil }
 }
 
 /// Target-side capability for rewinding an in-place speculative verify pass.
@@ -769,6 +778,13 @@ public let mtpPositionDeltasKey =
 /// reads as `false` (no emit), so non-MTP callers are unaffected.
 public let mtpEmitFlagKey = LMOutput.Key<Bool>("mtp.emitDrafterState")
 
+/// Decoder-layer outputs the target should concatenate into
+/// ``mtpLastHiddenStatesKey`` while emitting drafter state.
+///
+/// This is used by DFlash/DSpark-style drafters. An absent value preserves
+/// the target's ordinary MTP hidden-state behavior.
+public let mtpTargetLayerIdsKey = LMOutput.Key<[Int]>("mtp.targetLayerIds")
+
 /// Receives the target hidden rows of one prefill chunk, as a target's
 /// ``LanguageModel/prepare(_:cache:state:prefill:)`` evaluates it.
 ///
@@ -828,6 +844,7 @@ extension LMOutput.State {
         state[mtpEmitFlagKey] = nil
         state[mtpPrefillChunkHandlerKey] = nil
         state[mtpVerifyKeepsSnapshotsKey] = nil
+        state[mtpTargetLayerIdsKey] = nil
         state[mtpLastHiddenStatesKey] = nil
         state[mtpSharedKVStatesKey] = nil
         state[mtpSharedKVSourceIndicesKey] = nil

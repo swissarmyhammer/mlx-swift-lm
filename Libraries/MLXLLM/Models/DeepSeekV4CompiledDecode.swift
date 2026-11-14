@@ -122,9 +122,11 @@ enum DeepSeekV4CompiledDecode {
     ///   and `comb`.
     static func splitActivations(
         hcEps: Float
-    ) -> @Sendable (DeepSeekV4Math.HCSplitOperands) -> (
-        pre: MLXArray, post: MLXArray, comb: MLXArray
-    ) {
+    )
+        -> @Sendable (DeepSeekV4Math.HCSplitOperands) -> (
+            pre: MLXArray, post: MLXArray, comb: MLXArray
+        )
+    {
         let preWeights = shapelessField { DeepSeekV4Math.hcPreWeights($0, eps: hcEps) }
         let postGains = shapelessField { DeepSeekV4Math.hcPostGains($0) }
         let combRows = shapelessField { DeepSeekV4Math.hcCombRows($0, eps: hcEps) }
