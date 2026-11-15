@@ -44,8 +44,24 @@ comments:
     - evidence: local commit (not pushed) `chore(kanban): record that cheaper KV cache writes do not move Flint decode (^y5d37gd)`; files: .kanban/ only (tasks 01M7FHGHAH9SHF8EC04YXM9NET, 01M7GCNQTVHPRSGCP27Y5D37GD, new 01M7GKHRNX075K8G9T2WQT7W37); no code changed
     - next: follow-up card ^wqt7w37
   timestamp: 2026-11-15T22:00:09.243669+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7gkm1m4mm4ddkkp4jm8cyvq
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (383cf981) — 0 findings (0 confirmed, 0 refuted); 6 .kanban/ files changed, no validator matches them; no prior Review Findings sections
+    - next: none — task moved to done; follow-up ^wqt7w37 tracks the remaining work
+  timestamp: 2026-11-15T22:00:38.788584+00:00
+- actor: claude-code
+  id: 01m7gkmefbkmawqer2gyv7bsvy
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: no-change — cheaper write forms leave decode unchanged; cost is the serial heads→write→SDPA dependency; follow-up ^wqt7w37
+    - test: skipped — empty code diff
+    - commit: 383cf981 (kanban evidence only)
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T22:00:51.947518+00:00
+position_column: done
+position_ordinal: ffffaf80
 title: 'Flint: cut the L=1 KV cache write cost (MLX Swift subscript set, ~0.66 ms/token)'
 ---
 ## Why
