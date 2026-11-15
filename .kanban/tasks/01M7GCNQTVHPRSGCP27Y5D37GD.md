@@ -1,8 +1,51 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '8880'
+comments:
+- actor: claude-code
+  id: 01m7gkhgdjh56ezm2nxne9b05k
+  text: |-
+    Research + measurements (M5, oQ4e, same session). Scratch bench: scratchpad/kvwrite (Sources/kvwrite/main.swift CPU per call, Gpu.swift 40-layer step wall).
+
+    MLX Swift public API survey (checkout 7ede4fd6; upstream ml-explore/mlx-swift main checked via gh code search): no public sliceUpdate; `mlx_slice_update_dynamic` exists in Cmlx's C header only, no Swift wrapper. `MLXFast.metalKernel` has no in-place / aliased / donated output option (only initValue, atomicOutputs, ensureRowContiguous) — folding the write into the ^nanqj4p heads kernel would need undefined aliasing, so not attempted.
+
+    CPU per call (thread CPU time, [1,4,1,128] bf16 into [1,4,2048,128]):
+    - set [.ellipsis, r..<r+1, 0...] (current): 1.84 us
+    - set [0..., 0..., r..<r+1, 0...]: 1.45 us; set [0..., 0..., r..<r+1]: 1.38 us (skips expandEllipsisOperations; reshape pair stays — the single-op fast path only exists for axis 0)
+    - putAlong(axis 2) with fresh [1,1,1,1] Int32 index: 1.87 us; with a precomputed index: 0.67 us; creating the index MLXArray: 0.70 us
+    - set with an MLXArray index (scatter path): 4.54 us
+    - get [.ellipsis, ..<n, 0...]: 0.69 us; get [0..., 0..., ..<n]: 0.52 us
+    - KVCacheSimple.update L=1: 3.81 us; RotatingKVCache.update L=1 wrapped: 2.68 us
+    40-layer synthetic step (2 writes + presenting rows + eval), ms/step at 2k / 16k: gets only 0.365/0.388; ellipsis set 0.664/0.800; no-ellipsis set 0.669/0.778; putAlong shared fresh idx 0.621/0.766; putAlong precomputed idx 0.574/0.726; one combined [2,B,H,S,D] KV buffer with one set 0.488/0.629.
+
+    Real decode (flintbench, ms/tok at 2k/8k/16k; prefill tok/s):
+    - baseline: 6.23/6.59/7.01 and 6.25/6.61/7.03 (prefill 8927/8882/8190, 8922/9007/8189)
+    - A, no-ellipsis subscripts in KVCacheSimple.update + RotatingKVCache.updateInPlace (bit-identical graph): 6.25/6.58/7.00 — no change
+    - B, putAlong with one shared index per update for K and V (L=1): 6.25/6.62/7.04 — no change
+    - timing-only probe, V write skipped at L=1 (wrong output): 6.19/6.56/6.96 — halving the write dispatches is worth ~0.05 ms at most, so a combined K+V layout (which would also need the producer to emit stacked KV and touches every model's cache) cannot pay
+    - timing-only probe, K and V writes both skipped at L=1: 5.92/6.36/6.70 — -0.31 ms
+    - after reverting: 6.25/6.60/7.00
+
+    Conclusion: decode is not CPU-bound on the write; cutting Swift CPU (A, B) does not move ms/token. The 0.31 ms is the serial step the write puts on each layer's critical path (heads kernel -> slice update -> SDPA); with either write present the step stays (the nonlinearity between "skip V" and "skip both" shows it). No public MLX Swift API removes that step: what would is (1) a custom-kernel output that aliases / donates an input buffer (MLX fast::metal_kernel + MLXFast.metalKernel have none), so the heads kernel writes the cache row itself, or (2) an attention that takes the new K/V row beside the cache prefix so the cache write runs off the critical path. A public dynamic sliceUpdate in mlx-swift would only cut CPU, which these measurements show does not help.
+
+    All experimental edits reverted; Libraries/ is unchanged (git status shows only .kanban).
+  timestamp: 2026-11-15T21:59:15.634336+00:00
+- actor: claude-code
+  id: 01m7gkhy3x7c42zfrdtjcctd71
+  text: |-
+    ### implement — no-change
+    - evidence: per-call CPU set ellipsis 1.84 us / no-ellipsis 1.38 us / putAlong precomputed idx 0.67 us (+0.70 us index); flintbench decode 2k/8k/16k baseline 6.23/6.59/7.01 and 6.25/6.61/7.03, no-ellipsis 6.25/6.58/7.00, putAlong shared idx 6.25/6.62/7.04 (no win); probes: skip V 6.19/6.56/6.96, skip K+V 5.92/6.36/6.70; reverted 6.25/6.60/7.00. No production files changed, so no test, flintcheck or format run was needed. Follow-up filed as ^wqt7w37 (take the write off the critical path: attention that takes the new row separately, or upstream in-place custom-kernel outputs).
+    - next: human decides whether to close this card as measured / no-change, or to pursue ^wqt7w37.
+  timestamp: 2026-11-15T21:59:29.661704+00:00
+- actor: claude-code
+  id: 01m7gkk4rvq12w2vvxz2spx59a
+  text: |-
+    ### commit — changed
+    - evidence: local commit (not pushed) `chore(kanban): record that cheaper KV cache writes do not move Flint decode (^y5d37gd)`; files: .kanban/ only (tasks 01M7FHGHAH9SHF8EC04YXM9NET, 01M7GCNQTVHPRSGCP27Y5D37GD, new 01M7GKHRNX075K8G9T2WQT7W37); no code changed
+    - next: follow-up card ^wqt7w37
+  timestamp: 2026-11-15T22:00:09.243669+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'Flint: cut the L=1 KV cache write cost (MLX Swift subscript set, ~0.66 ms/token)'
 ---
 ## Why

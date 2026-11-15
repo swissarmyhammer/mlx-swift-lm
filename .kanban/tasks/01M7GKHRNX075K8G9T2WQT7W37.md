@@ -1,0 +1,18 @@
+---
+assignees:
+- claude-code
+position_column: todo
+position_ordinal: '8780'
+title: 'Flint: take the L=1 cache write off the attention critical path (~0.31 ms/token)'
+---
+## Why
+- Found in ^y5d37gd (oQ4e, M5, same-session flintbench). If both L=1 cache writes are skipped (a timing-only probe), decode drops by 0.31 ms/token (6.25 -> 5.92 at 2k, 7.00 -> 6.70 at 16k). If only the V write is skipped, it drops by just 0.05 ms. Cutting the Swift CPU cost of the write (index forms without an ellipsis, putAlong with a shared index) changed nothing. So the cost is the serial step that the write adds to each layer: heads kernel -> slice update -> SDPA.
+- MLX Swift has no public API that removes that step. `MLXFast.metalKernel` has no output that aliases or donates an input, so the heads kernel cannot write the cache row itself unless it relies on undefined aliasing.
+
+## What
+Evaluate an attention path that reads the cache prefix (rows < offset) plus the new K/V row as separate inputs. The cache write then runs at the same time instead of in front of the attention. Candidates are a decode attention kernel (decbench StreamAttention2 was bit-exact against MLX SDPA with sinks in earlier work) and an upstream request for in-place custom-kernel outputs in mlx / mlx-swift.
+
+## Acceptance
+- Bit-exact against MLX SDPA, so greedy ids stay unchanged on oQ4e and oQ8e.
+- Decode ms/token improves against a same-session baseline at 2k and 16k. Prefill does not regress.
+- RotatingKVCache and KVCacheSimple semantics stay unchanged. All five bundles are green. #flint-perf

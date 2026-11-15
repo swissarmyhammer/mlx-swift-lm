@@ -123,13 +123,29 @@ comments:
     - evidence: commit subject "chore(kanban): record the Flint DFlash2 and prompt-lookup go/no-go measurements (^yxm9net)"; files: .kanban/tasks/01M7FHGHAH9SHF8EC04YXM9NET.{jsonl,md}, .kanban/tasks/01M7GCNVYNJNS73KPQGTWC3ZH6.{jsonl,md}
     - next: none (local commit only, not pushed)
   timestamp: 2026-11-15T21:38:10.724567+00:00
+- actor: claude-code
+  id: 01m7gjbz47dshya606ta1w170e
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (fddc95ad) — 0 findings (confirmed 0, refuted 0); 0 files reviewed, 4 .kanban/ files not reviewed (no validator matched); no prior Review Findings sections
+    - next: none — task moved to done
+  timestamp: 2026-11-15T21:38:45.511992+00:00
+- actor: claude-code
+  id: 01m7gjcdsbe4mnjdvhc0wndd6a
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: no-change — measured no-go (verify 2.78/3.97 steps at L=8, SDPA cliff at L≥5; DFlash2 0.57–0.91x, n-gram 1.10–1.20x)
+    - test: skipped — empty code diff
+    - commit: fddc95ad (kanban evidence only)
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T21:39:00.523325+00:00
 depends_on:
 - 01M7FHFQT76AN9817CJJ4PQTWR
 - 01M7FHFWPMBDPGDSD9BG68BHJ1
 - 01M7FHG1KPDNCWYR3DCPG2HSB8
 - 01M7FHG7TA2MGDAS4Q5NANQJ4P
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffffae80
 title: 'Flint: measure whether DFlash2 speculative decoding can pay off (8-token verify cost)'
 ---
 ## Why
