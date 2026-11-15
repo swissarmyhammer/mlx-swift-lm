@@ -1,8 +1,32 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '8680'
+comments:
+- actor: claude-code
+  id: 01m7fnczcb9c52tcab8bv7xdz0
+  text: 'Research: loadModelCheckpoint returns evaluated tensors; prepareCheckpoint (Flint fuse + sanitize stacking) builds lazy concatenations that keep the parts referenced through the graph until materializeModelForInference evaluates the whole model in one eval, so every fused buffer coexists with every part. Fix plan: evaluate the prepared checkpoint weights in byte-bounded groups with Memory.clearCache() between groups, right after prepareCheckpoint returns (the loader''s own pre-prepare checkpoint value is replaced by then, so evaluated concats detach and the parts free). Baseline at HEAD 2a0fd237 (/usr/bin/time -l flintcli <dir> chat 200 hello): oQ8e peak 70.17 GB, load 4.1 s; oQ4e peak 38.65 GB, load 2.2 s. MLX''s isEvaluated is internal to mlx-swift, so the helper evaluates all prepared tensors (evaluating an already-evaluated array is a no-op).'
+  timestamp: 2026-11-15T13:12:29.835698+00:00
+- actor: claude-code
+  id: 01m7fp2sz8x45805yyfxa9wvah
+  text: |-
+    ### implement — changed
+    - evidence: Libraries/MLXLMCommon/ModelCheckpoint.swift (new `ModelCheckpoint.materializeWeights(groupByteLimit:)`, default `materializationGroupBytes` = 1 GiB: evaluates prepared tensors in byte-bounded groups, Memory.clearCache() after each), Libraries/MLXLMCommon/Load.swift (installWeights calls it right after prepareCheckpoint; loadWeights doc), Libraries/MLXLMCommon/ModelComponent.swift (the on-demand component load calls it too, so both loaders behave alike), Tests/MLXLMTests/LoadWeightsTests.swift (testMaterializingAPreparedCheckpointFreesEachGroupOfReplacedParts: RED with a single-eval stub, peak growth 268435456 not < 134217728; GREEN after grouping).
+    - Peak footprint (/usr/bin/time -l flintcli <dir> chat 200 hello): oQ8e 70.17 GB -> 44.27 GB (unfused reference 42.7); oQ4e 38.65 GB -> 24.92 GB. Load: oQ8e 4.1 s -> 3.8 s, oQ4e 2.2 s -> 2.3 s (one sample each, within noise).
+    - Tests: MLXLMTests 1090 XCTest (4 LFM2 env skips) + 2331 Swift Testing passed, 3 known issues (baseline); MLXGuidedGenerationTests 76 passed; MLXFoundationModelsTests 494 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 passed. Zero failures, zero warnings beyond the pre-existing build-system "missing creator" line.
+    - flintcheck.sh: MATCH x4 (all 256 greedy ids identical on parity/long/prompt_87/prompt_706), TOOL CALL get_weather Paris. golden_base.json untouched; output in scratchpad/golden_75rm5ds.json.
+    - flintbench.sh: decode 7.10/7.50/7.81 ms/tok at 2k/8k/16k (prefill 6251/6158/5746 tok/s), unchanged.
+    - Note: mlx-swift's isEvaluated is internal, so the helper evaluates every prepared tensor; already-evaluated ones are no-ops.
+    - next: /review
+  timestamp: 2026-11-15T13:24:25.192108+00:00
+- actor: claude-code
+  id: 01m7fpjg49hdejgrzmk5gq5shh
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests complete (no code warnings). xcrun xctest, one bundle at a time: MLXLMTests 1090 XCTest (4 skipped = LFM2 env baseline, 0 failures) + Swift Testing 2331 tests in 221 suites passed, 3 known issues (baseline); MLXGuidedGenerationTests 76 passed; MLXFoundationModelsTests 494 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest passed, 0 failures. swift-format lint -s clean on Load.swift, ModelCheckpoint.swift, ModelComponent.swift, LoadWeightsTests.swift. flintcheck.sh: MATCH x4 (256 greedy ids identical each) plus TOOL CALL get_weather line; golden_base.json untouched.
+    - next: review / commit
+  timestamp: 2026-11-15T13:32:59.401054+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'Loader: release checkpoint tensors that prepareCheckpoint replaces before materialization (Flint fusion load peak)'
 ---
 ## Why

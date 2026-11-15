@@ -523,7 +523,8 @@ package func weightFileBytes(of weightURLs: [URL]) -> Int {
 /// This is typically called via ``GenericModelFactory/load(from:using:configuration:useLatest:progress:)``.
 /// This function loads model weight `safetensor` files in the given `modelDirectory`,
 /// calls ``BaseLanguageModel/prepareCheckpoint(_:)`` to allow per-model preprocessing,
-/// applies optional quantization, and
+/// evaluates the prepared tensors in groups so that the tensors preparation replaces are freed
+/// group by group, applies optional quantization, and
 /// updates the model with the weights. Derived inference-only state is prepared after the
 /// checkpoint update and before the model is evaluated and returned to callers.
 ///
@@ -610,12 +611,14 @@ private func installWeights(
             loading: componentLoading, perLayerQuantization: perLayerQuantization)
         + model.excludedCheckpointNamespaces
     // The checkpoint goes out of scope before materialization, so tensors that preparation
-    // replaces are freed by then.
+    // replaces are freed by then. The prepared tensors evaluate in groups first, so the
+    // results of preparation never all stand beside the tensors they replace.
     do {
         var checkpoint = try loadModelCheckpoint(
             urls: weightURLs, excludedNamespaces: excludedNamespaces)
         checkpoint.perLayerQuantization = perLayerQuantization
         checkpoint = try model.prepareCheckpoint(checkpoint)
+        checkpoint.materializeWeights()
         try applyCheckpoint(checkpoint, to: model)
     }
 

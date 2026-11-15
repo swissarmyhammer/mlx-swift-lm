@@ -96,8 +96,31 @@ comments:
     - evidence: swift build --build-tests clean (bundles newer than Flint.swift). xcrun xctest, one bundle at a time: MLXLMTests 2331 Swift Testing tests / 221 suites passed with 3 known issues, plus 1089 XCTest, 0 failures, 4 skipped (the 4 LFM2 env-var skips); MLXGuidedGenerationTests 76 tests passed; MLXFoundationModelsTests 494 tests passed; CXGrammarTests 7 tests passed; MLXHuggingFaceMacrosTests 11 XCTest passed, 0 failures. swift-format lint -s on Libraries/MLXLLM/Models/Flint.swift: clean. flintcheck.sh: MATCH x4 (256 greedy ids identical each) plus TOOL CALL get_weather ["city": Paris]. golden_base.json untouched.
     - next: commit
   timestamp: 2026-11-15T13:08:27.043508+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7fn6c3efnapt3wj8hxa0a4w
+  text: |-
+    ### commit — changed
+    - evidence: 2a0fd237 refactor(flint): name the head axes and the q/k/v split indices, found in review of ^j4pqtwr; files: Libraries/MLXLLM/Models/Flint.swift, .kanban/tasks/01M7FHFQT76AN9817CJJ4PQTWR.jsonl, .kanban/tasks/01M7FHFQT76AN9817CJJ4PQTWR.md
+    - next: local commit only, not pushed
+  timestamp: 2026-11-15T13:08:53.486803+00:00
+- actor: claude-code
+  id: 01m7fn7cp78aefq6fzeng40f6q
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (2a0fd237) — 0 findings (attempted 7, failed 0, refuted 0); Libraries/MLXLLM/Models/Flint.swift reviewed; all 5 prior items from 2026-11-15 06:47 checked
+    - next: none — task moved to done
+  timestamp: 2026-11-15T13:09:26.855112+00:00
+- actor: claude-code
+  id: 01m7fn7mh08nyn9agjez4p88v5
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — Flint.swift named constants (5/5 findings)
+    - test: green — MLXLMTests 1089 XCTest + 2331 ST, Guided 76, FM 494, CXGrammar 7, Macros 11; flintcheck MATCH x4 + TOOL CALL
+    - commit: 2a0fd237
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T13:09:34.880464+00:00
+position_column: done
+position_ordinal: ffffa480
 title: 'Flint: fuse q/k/v, shared-expert gate/up and routed-expert gate/up projections at load'
 ---
 ## Why

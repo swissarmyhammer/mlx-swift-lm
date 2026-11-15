@@ -74,3 +74,41 @@ public struct ModelCheckpoint {
         }
     }
 }
+
+extension ModelCheckpoint {
+    /// The bytes of tensors that ``materializeWeights(groupByteLimit:)`` evaluates together
+    /// by default.
+    static let materializationGroupBytes = 1 << 30
+
+    /// Evaluates the tensors in groups of at most `groupByteLimit` bytes, and clears the MLX
+    /// buffer cache after each group.
+    ///
+    /// ``BaseLanguageModel/prepareCheckpoint(_:)`` can replace loaded tensors with lazy
+    /// results of them, as Flint joins its projections. A lazy result holds its inputs until
+    /// it evaluates, thus one evaluation of the whole model would hold every input beside
+    /// every result. A group frees the inputs that only it reads, before the next group
+    /// allocates its results. A tensor larger than the limit forms a group of its own, and
+    /// a tensor that is already evaluated costs nothing.
+    ///
+    /// - Parameter groupByteLimit: The most bytes of tensors that evaluate together.
+    func materializeWeights(groupByteLimit: Int = materializationGroupBytes) {
+        var group = [MLXArray]()
+        var groupBytes = 0
+        for tensor in weights.values {
+            if !group.isEmpty, groupBytes + tensor.nbytes > groupByteLimit {
+                Self.evaluate(group)
+                group.removeAll(keepingCapacity: true)
+                groupBytes = 0
+            }
+            group.append(tensor)
+            groupBytes += tensor.nbytes
+        }
+        Self.evaluate(group)
+    }
+
+    /// Evaluates `group`, then returns the buffers its freed inputs leave in the cache.
+    private static func evaluate(_ group: [MLXArray]) {
+        eval(group)
+        Memory.clearCache()
+    }
+}

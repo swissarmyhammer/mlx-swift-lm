@@ -647,6 +647,32 @@ final class LoadWeightsTests: XCTestCase {
         XCTAssertEqual(model.layer.weight.sum().item(Float.self), 0)
     }
 
+    // A prepared checkpoint whose tensors join evaluated parts, the way Flint fuses its
+    // projections, must free each group of parts before the next group evaluates, so the
+    // joined copies never all stand beside the parts.
+    func testMaterializingAPreparedCheckpointFreesEachGroupOfReplacedParts() {
+        let layerCount = 8
+        let partElements = 4 * 1024 * 1024
+        let fusedBytes = 2 * partElements * MemoryLayout<Float>.size
+        Memory.clearCache()
+        let checkpoint = ModelCheckpoint(
+            weights: Dictionary(
+                uniqueKeysWithValues: (0 ..< layerCount).map { layer in
+                    let parts = [
+                        MLXRandom.uniform(0 ..< 1, [partElements]),
+                        MLXRandom.uniform(0 ..< 1, [partElements]),
+                    ]
+                    eval(parts)
+                    return ("layers.\(layer).fused.weight", concatenated(parts))
+                }))
+        let partsMemory = Memory.activeMemory
+        Memory.peakMemory = 0
+
+        checkpoint.materializeWeights(groupByteLimit: fusedBytes)
+
+        XCTAssertLessThan(Memory.peakMemory - partsMemory, layerCount * fusedBytes / 2)
+    }
+
     /// Writes a checkpoint whose index names only `model.safetensors` while the head lives in
     /// `projector.safetensors`, the `jinaai/jina-reranker-v3-mlx` layout.
     private func writeSidecarCheckpoint(in directory: URL) throws {

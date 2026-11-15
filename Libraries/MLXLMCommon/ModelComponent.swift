@@ -166,7 +166,9 @@ public class AnyOnDemandComponent: @unchecked Sendable {
                 // Callers need not be in a withError scope, on any thread.
                 let module = try withLoaderThreadError {
                     let module = make()
-                    try applyCheckpoint(source.checkpoint(), to: module)
+                    let checkpoint = try source.checkpoint()
+                    checkpoint.materializeWeights()
+                    try applyCheckpoint(checkpoint, to: module)
                     eval(module)
                     return module
                 }
