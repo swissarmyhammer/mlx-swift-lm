@@ -1091,8 +1091,7 @@ extension MLXLanguageModel.Executor {
                     closingBias: grammar.bias.closing,
                     whitespaceBias: grammar.bias.whitespace,
                     whitespaceTokenIDs: grammar.bias.whitespaceTokenIDs,
-                    prefill: .init(
-                        stepSize: Self.prefillStepSize ?? PrefillParameters.defaultStepSize),
+                    prefill: .init(stepSize: Self.prefillStepSize),
                     speculation: speculation
                 ) { text in
                     onText(text)

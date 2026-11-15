@@ -64,8 +64,8 @@ public enum GuidedGenerationLoop {
     ///   - diagnosticLog: When true, flush the grammar constraint's diagnostic
     ///     logs after the run completes. Defaults to false.
     ///   - prefill: Prompt prefill parameters (step size, chunking strategy,
-    ///     progress callback). Defaults to a 512-token step with balanced
-    ///     chunking.
+    ///     progress callback). Defaults to no step size, which lets the model
+    ///     prefill with its own default step, and balanced chunking.
     ///   - emit: Callback for each text delta. Return `false` to stop.
     /// - Returns: Total number of tokens generated (including FF tokens).
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
@@ -89,7 +89,7 @@ public enum GuidedGenerationLoop {
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
-        prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
+        prefill: PrefillParameters = .init(),
         emit: (String) -> Bool
     ) throws -> Int {
         try run(
@@ -134,7 +134,7 @@ public enum GuidedGenerationLoop {
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
-        prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
+        prefill: PrefillParameters = .init(),
         speculation: MTPSpeculation?,
         bufferPoolClearing: GenerationBufferPoolClearing = GenerationBufferPoolClearing(),
         emit: (String) -> Bool

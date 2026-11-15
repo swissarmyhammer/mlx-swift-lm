@@ -216,7 +216,7 @@ struct GuidedFixtureRun {
         tokenBudget: Int = maxTokens,
         sink: GuidedGenerationDiagnosticSink = GuidedGenerationDiagnosticSink(),
         bufferPoolClearing: GenerationBufferPoolClearing = GenerationBufferPoolClearing(),
-        prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
+        prefill: PrefillParameters = .init(),
         image: LMInput.ProcessedImage? = nil
     ) throws -> GuidedFixtureRun {
         let tokenizer = ToolCallAlphabetTokenizer()

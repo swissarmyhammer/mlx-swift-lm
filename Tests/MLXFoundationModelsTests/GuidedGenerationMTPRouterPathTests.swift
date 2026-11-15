@@ -39,7 +39,7 @@ struct GuidedGenerationMTPRouterPathTests {
         init(
             schema: String, blockSize: Int, vision: Qwen35VLMMTPFixture,
             prompt: [Int] = GuidedGenerationMTPRouterPathTests.prompt,
-            prefill: PrefillParameters = .init(stepSize: PrefillParameters.defaultStepSize),
+            prefill: PrefillParameters = .init(),
             image: LMInput.ProcessedImage? = nil
         ) throws {
             let fixture = try Qwen35MTPFixture()

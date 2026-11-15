@@ -444,7 +444,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// with, or `nil` for plain decode.
     public let speculativeDecoding: MLXSpeculativeDecoding?
 
-    /// Prompt prefill step size; `nil` uses the default step size.
+    /// Prompt prefill step size; `nil` lets the model prefill with its own default step size.
     public let prefillStepSize: Int?
 
     /// Configuration the framework uses to create and cache executors.
@@ -467,7 +467,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///     (reasoning config, extra stop tokens) for this instance.
     ///   - speculativeDecoding: The MTP drafter the text, reasoning and tool
     ///     turns speculate with, or `nil` for plain decode.
-    ///   - prefillStepSize: Prompt prefill step size. `nil` uses the default step size.
+    ///   - prefillStepSize: Prompt prefill step size. `nil` lets the model prefill with its own
+    ///     default step size.
     ///   - weightsLocation: Resolves a model identifier to its on-disk weights
     ///     directory, for the availability checks.
     ///   - load: Loads the model container for a configuration.
@@ -1017,8 +1018,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         }
 
         /// The prompt prefill step size of the model that the current `respond`
-        /// serves, from ``MLXLanguageModel/prefillStepSize``; `nil` uses the
-        /// default step size.
+        /// serves, from ``MLXLanguageModel/prefillStepSize``; `nil` lets the
+        /// model prefill with its own default step size.
         ///
         /// A task-local, as ``drainCoordinator``, so each generation pass inside
         /// one `respond` reads it without a parameter through every call.

@@ -81,8 +81,24 @@ comments:
     - evidence: commit subject `refactor(sliding-window): name the band axes in the permutation, found in review of ^v6cgcp6`; files Libraries/MLXLMCommon/SlidingWindowBands.swift and .kanban/tasks/01M7FYTG4PAPKM8D19MV6CGCP6.{md,jsonl}. swift-format made no additional changes.
     - next: none (local commit, not pushed)
   timestamp: 2026-11-15T17:27:50.594982+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7g41tr46j5q2g0jywxrva37
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (eeedd53f) — 0 findings (7 validator runs attempted, 0 failed); 1 file reviewed (Libraries/MLXLMCommon/SlidingWindowBands.swift), 2 .kanban files had no matching validator; prior finding (2026-11-15 11:06) checked
+    - next: none — task moved to done
+  timestamp: 2026-11-15T17:28:33.284964+00:00
+- actor: claude-code
+  id: 01m7g428d229p242g1j6p3vptg
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — SlidingWindowBands.swift named BandAxis axes (1/1 finding)
+    - test: green — MLXLMTests 1098 XCTest + 2344 ST, Guided 76, FM 494, CXGrammar 7, Macros 11; flintcheck MATCH x4 + TOOL CALL
+    - commit: eeedd53f
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T17:28:47.266709+00:00
+position_column: done
+position_ordinal: ffffa980
 title: 'Flint: banded sliding-window prefill attention (the array mask costs ~8-9% of prefill)'
 ---
 ## Why
