@@ -25,6 +25,13 @@ comments:
     - evidence: swift build --build-tests complete (no code warnings). xcrun xctest, one bundle at a time: MLXLMTests 1090 XCTest (4 skipped = LFM2 env baseline, 0 failures) + Swift Testing 2331 tests in 221 suites passed, 3 known issues (baseline); MLXGuidedGenerationTests 76 passed; MLXFoundationModelsTests 494 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest passed, 0 failures. swift-format lint -s clean on Load.swift, ModelCheckpoint.swift, ModelComponent.swift, LoadWeightsTests.swift. flintcheck.sh: MATCH x4 (256 greedy ids identical each) plus TOOL CALL get_weather line; golden_base.json untouched.
     - next: review / commit
   timestamp: 2026-11-15T13:32:59.401054+00:00
+- actor: claude-code
+  id: 01m7fpkfsg34yxz4hqwyrpae6a
+  text: |-
+    ### commit — changed
+    - evidence: 8ab425ee perf(load): free the tensors a checkpoint preparation replaces before the next group evaluates (^75rm5ds); files: Libraries/MLXLMCommon/Load.swift, ModelCheckpoint.swift, ModelComponent.swift, Tests/MLXLMTests/LoadWeightsTests.swift, .kanban/tasks (01M7FHFQT76AN9817CJJ4PQTWR, 01M7FJYDTT4WFHFYHH475RM5DS)
+    - next: none (local commit only, not pushed)
+  timestamp: 2026-11-15T13:33:31.824562+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Loader: release checkpoint tensors that prepareCheckpoint replaces before materialization (Flint fusion load peak)'
