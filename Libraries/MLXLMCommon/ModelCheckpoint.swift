@@ -38,7 +38,7 @@ public struct ModelCheckpoint {
         var result = self
         result.weights = [:]
         result.weightMetadata = [:]
-        var sources = [String: String]()
+        var sources: [String: String] = [:]
         for name in weights.keys.sorted() {
             guard let mapped = transform(name) else { continue }
             if let previous = sources.updateValue(name, forKey: mapped) {
@@ -48,7 +48,7 @@ public struct ModelCheckpoint {
             result.weightMetadata[mapped] = metadata(forWeight: name)
         }
         if let perLayerQuantization {
-            var settings = [String: BaseConfiguration.QuantizationOption]()
+            var settings: [String: BaseConfiguration.QuantizationOption] = [:]
             sources = [:]
             for name in perLayerQuantization.perLayerQuantization.keys.sorted() {
                 guard let mapped = transform(name) else { continue }
@@ -92,7 +92,7 @@ extension ModelCheckpoint {
     ///
     /// - Parameter groupByteLimit: The most bytes of tensors that evaluate together.
     func materializeWeights(groupByteLimit: Int = materializationGroupBytes) {
-        var group = [MLXArray]()
+        var group: [MLXArray] = []
         var groupBytes = 0
         for tensor in weights.values {
             if !group.isEmpty, groupBytes + tensor.nbytes > groupByteLimit {

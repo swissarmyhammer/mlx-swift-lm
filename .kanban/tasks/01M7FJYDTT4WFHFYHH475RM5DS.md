@@ -32,6 +32,44 @@ comments:
     - evidence: 8ab425ee perf(load): free the tensors a checkpoint preparation replaces before the next group evaluates (^75rm5ds); files: Libraries/MLXLMCommon/Load.swift, ModelCheckpoint.swift, ModelComponent.swift, Tests/MLXLMTests/LoadWeightsTests.swift, .kanban/tasks (01M7FHFQT76AN9817CJJ4PQTWR, 01M7FJYDTT4WFHFYHH475RM5DS)
     - next: none (local commit only, not pushed)
   timestamp: 2026-11-15T13:33:31.824562+00:00
+- actor: claude-code
+  id: 01m7fpnr6m3xf8zz5m2ykcs767
+  text: |-
+    ### review — findings
+    - evidence: review sha 8ab425ee~1..HEAD — 1 finding (1 confirmed, 0 refuted): Libraries/MLXLMCommon/ModelCheckpoint.swift:95
+    - next: implement the Review Findings item (replace `[MLXArray]()` with `: [MLXArray] = []`, and every other such empty-collection init in the file), then re-review
+  timestamp: 2026-11-15T13:34:45.972629+00:00
+- actor: claude-code
+  id: 01m7fpp2g6tkvtm9navq37kybj
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — ModelCheckpoint.swift, Load.swift, ModelComponent.swift, LoadWeightsTests.swift (+1 test)
+    - test: green — MLXLMTests 1090 XCTest + 2331 ST, Guided 76, FM 494, CXGrammar 7, Macros 11; flintcheck MATCH x4 + TOOL CALL
+    - commit: 8ab425ee (+47b06e2c kanban)
+    - review: findings — Libraries/MLXLMCommon/ModelCheckpoint.swift:95 (AlwaysUseLiteralForEmptyCollectionInit)
+  timestamp: 2026-11-15T13:34:56.518786+00:00
+- actor: claude-code
+  id: 01m7fq6p9jkmxka7bttb8ja8x6
+  text: |-
+    ### implement — changed
+    - evidence: Libraries/MLXLMCommon/ModelCheckpoint.swift — every empty collection written as an initializer call in the file now uses a typed literal: `var group: [MLXArray] = []` (materializeWeights, the finding), `var sources: [String: String] = [:]` and `var settings: [String: BaseConfiguration.QuantizationOption] = [:]` (mapNames). Load.swift, ModelComponent.swift, LoadWeightsTests.swift: the lines this task added contain no empty-collection initializer call, so no edit. swift-format: only ModelCheckpoint.swift changed. swift build --build-tests complete (only the pre-existing "missing creator" build-system line). xctest one bundle at a time: MLXLMTests 1090 XCTest (4 skipped = LFM2 env baseline, 0 failures) + 2331 Swift Testing passed, 3 known issues (baseline); MLXGuidedGenerationTests 76; MLXFoundationModelsTests 494; CXGrammarTests 7; MLXHuggingFaceMacrosTests 11 — 0 failures. flintcheck.sh: MATCH x4 (256 ids each) + TOOL CALL get_weather Paris; golden_base.json md5 unchanged (3630e415…).
+    - Review finding item flipped to [x]. Not committed; task left in doing.
+    - next: /test, /commit, /review
+  timestamp: 2026-11-15T13:44:01.074870+00:00
+- actor: claude-code
+  id: 01m7fqn476dn91th8xwwgfeycr
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests complete (only a build-system "missing creator for mutated node" notice, no compiler warnings); xcrun xctest per bundle, all exit 0: MLXLMTests 2331 Swift Testing tests in 221 suites passed with 3 known issues, XCTest 1090 executed with 4 skipped (LFM2 env skips) and 0 failures; MLXGuidedGenerationTests 76 passed; MLXFoundationModelsTests 494 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest passed, 0 failures. swift-format lint -s on Libraries/MLXLMCommon/ModelCheckpoint.swift clean. flintcheck.sh: MATCH x4 (all 256 greedy ids identical) and TOOL CALL get_weather line present.
+    - next: review/commit
+  timestamp: 2026-11-15T13:51:54.086499+00:00
+- actor: claude-code
+  id: 01m7fqp7stvdyaj9s9j06xnfrv
+  text: |-
+    ### commit — changed
+    - evidence: commit "refactor(load): write the empty collections of ModelCheckpoint as literals, found in review of ^75rm5ds" (this comment ships in that same commit, so the sha is in git log by that subject); files: Libraries/MLXLMCommon/ModelCheckpoint.swift, .kanban/tasks/01M7FJYDTT4WFHFYHH475RM5DS.jsonl, .kanban/tasks/01M7FJYDTT4WFHFYHH475RM5DS.md
+    - next: none
+  timestamp: 2026-11-15T13:52:30.522548+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Loader: release checkpoint tensors that prepareCheckpoint replaces before materialization (Flint fusion load peak)'
@@ -50,3 +88,15 @@ Measured with `/usr/bin/time -l flintcli <dir> chat 200 hello` on the M5: oQ8e p
 - Flint greedy ids unchanged (flintcheck.sh MATCH on all four prompts).
 - All five test bundles green.
 #flint-perf
+
+## Review Findings (2026-11-15 07:33)
+
+> Scope: `review sha 8ab425ee~1..HEAD` — reviewed the diffs only — lines this change added or modified. 4 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7FHFQT76AN9817CJJ4PQTWR.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHFQT76AN9817CJJ4PQTWR.md` — no validator matches this file
+> - `.kanban/tasks/01M7FJYDTT4WFHFYHH475RM5DS.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FJYDTT4WFHFYHH475RM5DS.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/ModelCheckpoint.swift:95` `code-hygiene/idioms-swift` — AlwaysUseLiteralForEmptyCollectionInit: replace '[MLXArray]()' with ': [MLXArray] = []'.
