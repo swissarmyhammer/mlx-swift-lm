@@ -77,8 +77,24 @@ comments:
     - evidence: commit subject "chore(kanban): record the MLX command-buffer sizing measurements on M5 (^twc3zh6)"; files: .kanban/tasks/01M7GCNJFYATF646QNT5SMNPG3.{jsonl,md}, .kanban/tasks/01M7GCNVYNJNS73KPQGTWC3ZH6.{jsonl,md}; local commit only, not pushed; no code changed
     - next: none
   timestamp: 2026-11-15T21:23:44.461677+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7ghha1ynkyfdz572v43dy89
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (2c68203d) — 0 findings; 4 .kanban/ files in the delta, no validator matches them (0 files reviewed). No prior Review Findings sections.
+    - next: none — moved to done
+  timestamp: 2026-11-15T21:24:11.966298+00:00
+- actor: claude-code
+  id: 01m7ghhq422z3ycjt54venaad9
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: no-change — measured grid on Flint + Qwen3.8-27B; no safe library change (process-wide, read once, costs memory/prefill)
+    - test: skipped — empty code diff
+    - commit: 2c68203d (kanban evidence only)
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T21:24:25.346972+00:00
+position_column: done
+position_ordinal: ffffad80
 title: 'Decode: measure MLX command-buffer sizing (MLX_MAX_OPS/MB_PER_BUFFER) for decode on M5'
 ---
 ## Why
