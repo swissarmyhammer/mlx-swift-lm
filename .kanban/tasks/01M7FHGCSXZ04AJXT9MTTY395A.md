@@ -105,8 +105,24 @@ comments:
     - evidence: commit `test(flint): guard the prefill progress log with a lock instead of @unchecked Sendable, found in review of ^tty395a` (sha recorded in the returned step block); files: Tests/MLXLMTests/FlintTests.swift, .kanban/tasks/01M7FHGCSXZ04AJXT9MTTY395A.jsonl, .kanban/tasks/01M7FHGCSXZ04AJXT9MTTY395A.md
     - next: none
   timestamp: 2026-11-15T16:31:08.432820+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7g0tcmdzm09nyk3f464xmn4
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (875f4de9) — 0 findings (0 confirmed, 1 refuted, 7 attempted, 0 failed); 1 file reviewed (Tests/MLXLMTests/FlintTests.swift), 2 .kanban files not matched by any validator; prior finding (2026-11-15 10:13) checked
+    - next: none — task moved to done
+  timestamp: 2026-11-15T16:32:03.725240+00:00
+- actor: claude-code
+  id: 01m7g0txt84c4g90a6v2qrayx0
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — FlintTests.swift ProgressLog lock (1/1 finding)
+    - test: green — MLXLMTests 1095 XCTest + 2339 ST, Guided 76, FM 494, CXGrammar 7, Macros 11
+    - commit: 875f4de9
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T16:32:21.320569+00:00
+position_column: done
+position_ordinal: ffffa880
 title: 'Flint: profile prefill and close the gap to mlx-vlm (5.6–6k vs 7–7.7k tok/s)'
 ---
 ## Why

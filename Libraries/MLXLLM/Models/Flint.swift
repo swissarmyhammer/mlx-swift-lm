@@ -209,10 +209,27 @@ private enum FlintHeadAxis {
     static let headMajor = [batch, head, token, width]
 }
 
+/// The axes of an attention mask array, counted from its end: a mask of
+/// `[..., queries, keys]`.
+private enum FlintMaskAxis {
+    /// The axis that holds the queries.
+    static let query = -2
+    /// The axis that holds the keys.
+    static let key = -1
+}
+
+/// The attention mask of one Flint layer.
+enum FlintAttentionMask {
+    /// A mask the SDPA of MLX reads.
+    case sdpa(MLXFast.ScaledDotProductAttentionMaskMode)
+    /// The bands of a sliding layer whose queries fill several blocks. The
+    /// layer gives the keys its cache presents to the bands in place of the
+    /// array mask of its window.
+    case bands(SlidingWindowBands)
+}
+
 extension FlintAttentionLayer {
-    func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
-    ) -> MLXArray {
+    func callAsFunction(_ x: MLXArray, mask: FlintAttentionMask, cache: KVCache?) -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
         let heads = projectHeads(x)
 
@@ -229,14 +246,38 @@ extension FlintAttentionLayer {
         // The sinks load in the dtype of the queries (see `FlintModel.sanitize`),
         // so the cast returns them as they are and adds no kernel. It casts only
         // when the parameters change dtype after load.
-        let output = attentionWithCacheUpdate(
-            queries: queries, keys: keys, values: values, cache: cache,
-            scale: scale, mask: mask, sinks: sinks.asType(queries.dtype)
+        let output = attention(
+            queries: queries, keys: keys, values: values, mask: mask, cache: cache,
+            sinks: sinks.asType(queries.dtype)
         )
         .transposed(axes: FlintHeadAxis.headMajor)
         .reshaped(B, L, -1)
 
         return wo(output)
+    }
+
+    /// Writes the keys and the values into `cache`, then attends over every
+    /// key the cache presents under `mask`.
+    ///
+    /// The bands come only with no cache or a ``RotatingKVCache`` that keeps
+    /// no prefix rows (see ``FlintModelInner/attentionMasks(h:cache:)``),
+    /// whose update presents the keys the bands were made for.
+    private func attention(
+        queries: MLXArray, keys: MLXArray, values: MLXArray, mask: FlintAttentionMask,
+        cache: KVCache?, sinks: MLXArray
+    ) -> MLXArray {
+        switch mask {
+        case .sdpa(let mode):
+            return attentionWithCacheUpdate(
+                queries: queries, keys: keys, values: values, cache: cache,
+                scale: scale, mask: mode, sinks: sinks)
+        case .bands(let bands):
+            let (presentedKeys, presentedValues) =
+                cache?.update(keys: keys, values: values) ?? (keys, values)
+            return bands.attention(
+                queries: queries, keys: presentedKeys, values: presentedValues, scale: scale,
+                sinks: sinks)
+        }
     }
 }
 
@@ -812,9 +853,7 @@ class FlintDecoderLayer: Module {
         }
     }
 
-    func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
-    ) -> MLXArray {
+    func callAsFunction(_ x: MLXArray, mask: FlintAttentionMask, cache: KVCache?) -> MLXArray {
         let h = x + selfAttn(inputLayerNorm(x), mask: mask, cache: cache)
         return mlp(postAttentionLayerNorm(h), residual: h)
     }
@@ -842,19 +881,60 @@ public class FlintModelInner: Module {
 
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         var h = embedTokens(inputs)
-
-        let fullMask = firstFullLayer.map {
-            createAttentionMask(h: h, cache: cache?[$0])
-        }
-        let slidingMask = firstSlidingLayer.map {
-            createAttentionMask(h: h, cache: cache?[$0], windowSize: layers[$0].window)
-        }
-
+        let masks = attentionMasks(h: h, cache: cache)
         for (i, layer) in layers.enumerated() {
-            let mask = layer.window == nil ? fullMask! : slidingMask!
+            guard let mask = layer.window == nil ? masks.full : masks.sliding else {
+                preconditionFailure("Each layer kind has the mask of its first layer")
+            }
             h = layer(h, mask: mask, cache: cache?[i])
         }
         return norm(h)
+    }
+
+    /// The mask of every full-attention layer and of every sliding layer for
+    /// the hidden states `h`, each `nil` when the model has no layer of its
+    /// kind.
+    ///
+    /// The caches of one kind hold the same rows, so the cache of the first
+    /// layer of a kind shapes the mask of each layer of that kind.
+    func attentionMasks(
+        h: MLXArray, cache: [KVCache]?
+    ) -> (full: FlintAttentionMask?, sliding: FlintAttentionMask?) {
+        let full = firstFullLayer.map {
+            FlintAttentionMask.sdpa(createAttentionMask(h: h, cache: cache?[$0]))
+        }
+        let sliding = firstSlidingLayer.flatMap { index in
+            layers[index].window.map { slidingMask(h: h, cache: cache?[index], window: $0) }
+        }
+        return (full, sliding)
+    }
+
+    /// The mask of a sliding layer of `window` keys: the bands, when the
+    /// queries fill several blocks of the window and the cache presents the
+    /// keys of the array mask; otherwise the mask of the SDPA of MLX.
+    ///
+    /// A ``RotatingKVCache`` without kept prefix rows (each Flint sliding
+    /// cache; see ``makeSlidingWindowKVCache(parameters:window:)``) and no
+    /// cache both mask a multi-token write with
+    /// `createCausalMask(n: L, offset: T - L, windowSize: window)` over the
+    /// `T` keys it presents, `[L, T]`. The bands give that attention, so they
+    /// take the shape of the array mask.
+    private func slidingMask(h: MLXArray, cache: KVCache?, window: Int) -> FlintAttentionMask {
+        let mode = createAttentionMask(h: h, cache: cache, windowSize: window)
+        guard case .array(let mask) = mode, Self.presentsWindowedKeys(cache),
+            let bands = SlidingWindowBands(
+                queryCount: mask.dim(FlintMaskAxis.query), keyCount: mask.dim(FlintMaskAxis.key),
+                window: window)
+        else { return .sdpa(mode) }
+        return .bands(bands)
+    }
+
+    /// Whether a multi-token write into `cache` attends over the keys of the
+    /// windowed causal mask: with no cache, or with a ``RotatingKVCache``
+    /// that keeps no prefix rows, whose mask keeps no prefix keys either.
+    private static func presentsWindowedKeys(_ cache: KVCache?) -> Bool {
+        guard let cache else { return true }
+        return (cache as? RotatingKVCache)?.preservedPrefixTokens == 0
     }
 }
 

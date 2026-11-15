@@ -294,6 +294,65 @@ final class FlintTests: XCTestCase {
         XCTAssertLessThan(difference, preparedLogitTolerance)
     }
 
+    // MARK: - Sliding-window bands
+
+    /// A prefill step of a few windows of ``configJSON``, so that the second
+    /// step reads a wrapped rotating cache.
+    private let wrappingPrefillStep = 5
+
+    /// The number of tokens of the wrapping prompt: several prefill steps.
+    private let wrappingPromptTokens = 23
+
+    /// Whether `mask` attends by bands.
+    private func isBanded(_ mask: FlintAttentionMask?) -> Bool {
+        if case .bands = mask { true } else { false }
+    }
+
+    /// The sliding mask of the first forward of `count` tokens of a new cache.
+    private func slidingMask(forTokens count: Int) throws -> FlintAttentionMask? {
+        let model = try makeSeededModel()
+        let inner = model.languageModel.model
+        let tokens = prompt(count: count, for: model).text.tokens.reshaped(1, -1)
+        return inner.attentionMasks(
+            h: inner.embedTokens(tokens), cache: try model.newCache(parameters: nil)
+        ).sliding
+    }
+
+    /// A prompt of more than one block of query rows slides by bands.
+    func testAPromptOfSeveralBlocksSlidesByBands() throws {
+        XCTAssertTrue(isBanded(try slidingMask(forTokens: shortPromptTokens)))
+    }
+
+    /// One decode token keeps the mask of the SDPA of MLX.
+    func testOneDecodeTokenTakesNoBands() throws {
+        XCTAssertFalse(isBanded(try slidingMask(forTokens: 1)))
+    }
+
+    /// A prefill in steps past the wrap of the rotating cache gives the last
+    /// logits of token-by-token decode, which attends without bands.
+    func testWrappedChunkedPrefillMatchesTokenByTokenDecode() throws {
+        let model = try makeSeededModel()
+        let input = prompt(count: wrappingPromptTokens, for: model)
+        let all = input.text.tokens.reshaped(1, -1)
+
+        let stepCache = try model.newCache(parameters: nil)
+        var stepped = model(all[0..., ..<1], cache: stepCache)
+        for index in 1 ..< wrappingPromptTokens {
+            stepped = model(all[0..., index ..< (index + 1)], cache: stepCache)
+        }
+
+        let cache = try model.newCache(parameters: nil)
+        let rest = try XCTUnwrap(
+            remainder(
+                of: try model.prepare(
+                    input, cache: cache, state: nil,
+                    prefill: .init(stepSize: wrappingPrefillStep))))
+        let prepared = model(rest.tokens.reshaped(1, -1), cache: cache)
+
+        let difference = abs(prepared[0..., -1] - stepped[0..., -1]).max().item(Float.self)
+        XCTAssertLessThan(difference, preparedLogitTolerance)
+    }
+
     // MARK: - Projection fusion at load
 
     /// 4-bit for every layer, with the overrides of `overrides` on top.
