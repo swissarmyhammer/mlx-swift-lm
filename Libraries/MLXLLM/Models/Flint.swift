@@ -916,6 +916,49 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider {
         }
     }
 
+    /// The prefill step when the caller sets none: the prefill chunk of mlx-vlm
+    /// and mlx-lm. A forward of more tokens keeps the GPU busier than the
+    /// generic step of ``PrefillParameters/defaultStepSize``.
+    static let defaultPrefillStepSize = 2048
+
+    /// Prefills every prompt token but the last into `cache`, and hands the
+    /// last token to the iterator, whose forward computes the logits.
+    ///
+    /// The chunks run through the text model without the output projection, in
+    /// steps of at most ``defaultPrefillStepSize`` tokens unless `prefill` sets
+    /// its own. The generic prepare hands a prompt that fits in one step to the
+    /// iterator whole, and that forward computes the float32 logits of every
+    /// prompt row, of which the iterator reads only the last.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt.
+    ///   - cache: The cache of each layer, which the prefill fills.
+    ///   - state: Not read; Flint keeps no state beside its cache.
+    ///   - prefill: The step size, the chunking and the progress observer.
+    /// - Returns: The tokens the iterator still has to read: the last prompt
+    ///   token, or the whole prompt under ``PrefillParameters/Chunking/unchunked``.
+    public func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        let text = input.text
+        let layerCaches = cache.isEmpty ? nil : cache
+        let processed = try withPreparedCache(cache, lengths: text.sequenceLengths) {
+            // asyncEval lets the CPU build the graph of the next chunk while
+            // the GPU evaluates this one; one eval after the loop syncs.
+            let processed = try prefill.forEachChunk(
+                total: text.tokens.size, defaultStepSize: Self.defaultPrefillStepSize
+            ) { range in
+                _ = languageModel.model(text[.newAxis, range].tokens, cache: layerCaches)
+                asyncEval(cache)
+            }
+            if processed > 0 {
+                eval(cache)
+            }
+            return processed
+        }
+        return .tokens(text[processed...])
+    }
+
     /// The module path of the text model in an mlx-vlm checkpoint.
     static let checkpointPrefix = "language_model."
 

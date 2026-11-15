@@ -91,11 +91,27 @@ comments:
     - evidence: test(flint): check the compiled decode step through the block without a shared expert and without normalization, found in review of ^pg2hsb8 (Tests/MLXLMTests/FlintCompiledDecodeTests.swift, .kanban/)
     - next: review
   timestamp: 2026-11-15T15:36:16.149759+00:00
+- actor: claude-code
+  id: 01m7fxnmq6aqdr8s8rnkm9agzt
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (c168e9ed) — 0 findings (7 validator pairs attempted, 0 failed); 1 file reviewed, 2 .kanban files not matched; both prior findings checked
+    - next: none — task moved to done
+  timestamp: 2026-11-15T15:37:02.438784+00:00
+- actor: claude-code
+  id: 01m7fxnznes445h3pm8vek38r6
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — FlintCompiledDecodeTests.swift block parity matrix (2/2 findings)
+    - test: green — MLXLMTests 1092 XCTest + 2339 ST, Guided 76, FM 494, CXGrammar 7, Macros 11
+    - commit: c168e9ed
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T15:37:13.646281+00:00
 depends_on:
 - 01M7FHFQT76AN9817CJJ4PQTWR
 - 01M7FHFWPMBDPGDSD9BG68BHJ1
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffffa780
 title: 'Flint: compile the one-token decode step (router math, combine, residuals)'
 ---
 ## Why

@@ -1,8 +1,68 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '8480'
+comments:
+- actor: claude-code
+  id: 01m7fy96rhc8qspg85pb9wy4sf
+  text: |-
+    Research + same-session measurements (oQ4e, M5, medians of 3 process runs, prefill tok/s at 2k / 8k / 16k; scratchpad pfbench.sh; flintcli bench and pybench.py now take `@idsfile` and a chunk size).
+
+    Input note: prompt_706.txt holds 19728 comma-separated real token ids. Both flintbench and pybench tokenized it as TEXT (digit text). Real ids (`@prompt_706.txt`) are the fair input.
+
+    | run | 2k | 8k | 16k |
+    |---|---|---|---|
+    | Swift, text, default step 512 (= flintbench today) | 5456 | 6400 | 5930 |
+    | Swift, ids, step 512 (default) | 4766 | 5957 | 5553 |
+    | Swift, ids, step 1024 | 5852 | 7385 | 6862 |
+    | Swift, ids, step 2048 | 6082 | 7827 | 7357 |
+    | Swift, ids, step 4096 | 6113 | 7849 | 7381 |
+    | Swift, ids, step 8192 | 6128 | 5909 | 6168 |
+    | mlx-vlm, text, 2048 chunks | 6361 | 8014 | 7266 |
+    | mlx-vlm, ids, 2048 chunks | 7270 | 7802 | 7150 |
+    | mlx-vlm, ids, 512 chunks | 4279 | 5266 | 4862 |
+
+    Conclusions:
+    1. The gap is the chunk size. At equal chunks Swift is equal or faster than mlx-vlm at 8k/16k (7827 vs 7802, 7357 vs 7150) and also faster at 512 (5957 vs 5266). Flint uses the generic LLMModel.prepare default of 512; mlx-vlm/mlx-lm prefill in 2048.
+    2. Second cost: when the prompt is not longer than the step size, the generic prepare hands the WHOLE prompt to the iterator, whose forward runs the float32 lm_head (150144 vocab) over every prompt row. That is why Swift ids/2048 at ctx 2048 is 6082 vs mlx-vlm 7270 (mlx-vlm prefills 2047 tokens with no logits, then 1), and why step 8192 collapses at 8k. Same cost hits every short prompt / ChatSession follow-up message. Gemma3Text already avoids it by prefilling through the inner model and always reserving one token.
+
+    Ablations at step 2048 (temporary FLINT_ABL switch, reverted), baseline 6246 / 8021 / 7312:
+    - no sinks: 5739 / 7982 / 7489 -> noise, sinks cost nothing measurable.
+    - bf16 combine weights (no float32 routed sum): 7364 / 8318 / 7617 -> ~4% at 8k/16k; NOT taken: the reference and mlx-vlm do the f32 combine and float32 parity must hold.
+    - full causal mask on sliding layers: 6609 / 8762 / 7911 -> ~8-9%; the sliding-window array mask costs. mlx-vlm pays the same (create_attention_mask -> RotatingKVCache.make_mask array). Going beyond mlx-vlm here needs a banded sliding prefill attention -> filed as a separate task.
+    - no routed experts: 9492 / 13894 / 12414 -> routed experts are ~42% of prefill time; same gather_qmm path as mlx-vlm (sorted at >=16 routes; weightedExpertUnsort is top-8 bf16 only, Flint is top-6 f32 weights, so it does not apply).
+
+    Plan: Flint gets its own prepare: default step 2048 (the mlx-vlm/mlx-lm chunk), prefill through the inner model (no lm_head), always reserve exactly one token for the iterator.
+  timestamp: 2026-11-15T15:47:43.505070+00:00
+- actor: claude-code
+  id: 01m7fz86nde8vxra2d3eyfffx4
+  text: |-
+    ### implement — changed
+    - change: `FlintModel.prepare` (Libraries/MLXLLM/Models/Flint.swift): default prefill step `defaultPrefillStepSize = 2048` (the mlx-vlm/mlx-lm chunk; a caller's stepSize still wins), chunks run through the inner text model (no lm_head), and exactly one token is always reserved for the iterator (Gemma3Text pattern), so a prompt <= one step no longer computes float32 logits over every prompt row. Doc of `PrefillParameters.stepSize` names the Flint default. Tests: FlintTests `testPrepareLeavesOnlyTheLastTokenForTheIterator` (RED 11 != 1), `testPrepareReadsOneMLXVLMChunkInOneForward` (RED [512,1024,1536,2048] != [2048]), `testPreparedLogitsMatchOneForward` (characterization); model built under a seeded random state.
+    - prefill, real ids `@prompt_706.txt`, medians of 3, cold-process 2k/8k/16k: Swift before (step 512) 4766 / 5957 / 5553 -> after 6172 / 7929 / 7353; mlx-vlm 2048 chunks 7270 / 7802 / 7150. Warm 2k (second 2048 in-process): Swift before 6100 -> after 8100; mlx-vlm 8220. Cold 2k in the Swift process carries first-call warmup (min/max 6045-7259).
+    - flintbench.sh (text input): prefill 6614 / 6368 / 5943 -> 8200 / 8020 / 7438; decode 6.37 / 6.72 / 7.07 ms/tok (baseline 6.37 / 6.72 / 7.09, no regression).
+    - flintcheck: MATCH x4 + TOOL CALL get_weather(Paris). oQ8e loads; greedy ids MATCH golden8_fused.json x4. Forward numerics untouched, so float32 logit parity is unchanged (one-shot golden bit-identical).
+    - iterator path (TokenIterator greedy, new mode `flintcli greedy`): prompts 200-500 tokens: old (one-shot through iterator) vs new (n-1 prefill + 1) identical 128 ids. parity_ids 666: 512 vs 2048 identical. long_ids 3600 and prompt_706 19728: both old 512 and new 2048 already diverge from the one-shot golden, always at near-ties (gaps 0.377, 0.111, 0.004, 0.008) — bf16 chunking noise that existed before.
+    - ChatSession: follow-up "Now name two more." prefilled 6 tokens with 80 cached.
+    - tests: MLXLMTests 2339 Swift Testing passed with 3 known issues + XCTest 1095 with 4 LFM2 env skips, 0 failures; MLXGuidedGenerationTests 76; MLXFoundationModelsTests 494; CXGrammarTests 7; MLXHuggingFaceMacrosTests 11 XCTest. swift-format run; only this task's files changed.
+    - new tasks: ^v6cgcp6 (banded sliding-window prefill attention; the array mask costs ~8-9%), ^dnsqaqc (guided generation pins prefill step to 512 and overrides the model default, so Flint guided requests still prefill at 512).
+    - next: /review
+  timestamp: 2026-11-15T16:04:39.213026+00:00
+- actor: claude-code
+  id: 01m7fzqsd1pgvf8g371j0wkhfp
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean; xcrun xctest per bundle: MLXLMTests XCTest 1095 run, 4 skipped (LFM2 env skips, baseline), 0 failures; Swift Testing 2339 tests in 222 suites passed, 3 known issues (baseline); GDNDecodeKernelLayerTests passed. MLXGuidedGenerationTests 76 passed. MLXFoundationModelsTests 494 passed. CXGrammarTests 7 passed. MLXHuggingFaceMacrosTests 11 passed (XCTest). swift-format lint -s on Flint.swift, PrefillParameters.swift, FlintTests.swift clean. flintcheck.sh: MATCH x4 (256 ids identical each) and TOOL CALL get_weather Paris.
+    - next: review/commit
+  timestamp: 2026-11-15T16:13:09.921920+00:00
+- actor: claude-code
+  id: 01m7fzrjev61gzf52d2b6m1yht
+  text: |-
+    ### commit — changed
+    - evidence: commit subject `perf(flint): prefill in 2048-token steps without the output projection (^tty395a)`; files Libraries/MLXLLM/Models/Flint.swift, Libraries/MLXLMCommon/PrefillParameters.swift, Tests/MLXLMTests/FlintTests.swift, and all .kanban/ changes (including ^v6cgcp6, ^dnsqaqc). Local commit on stable, not pushed. The sha is in the commit itself.
+    - next: none
+  timestamp: 2026-11-15T16:13:35.579950+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'Flint: profile prefill and close the gap to mlx-vlm (5.6–6k vs 7–7.7k tok/s)'
 ---
 ## Why

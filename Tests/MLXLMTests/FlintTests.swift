@@ -202,6 +202,88 @@ final class FlintTests: XCTestCase {
         }
     }
 
+    // MARK: - Prefill
+
+    /// The seed of the random state that the prefill tests build their model
+    /// under.
+    private let prefillSeed: UInt64 = 7
+
+    /// The number of tokens of the short prompt of the prefill tests: more
+    /// than one, and fewer than any prefill step.
+    private let shortPromptTokens = 11
+
+    /// The prefill chunk of mlx-vlm and mlx-lm, which a Flint prefill reads in
+    /// one forward when the caller sets no step size.
+    private let mlxVLMPrefillChunk = 2048
+
+    /// The largest difference of a float32 logit between a prepared prompt and
+    /// one forward over it.
+    private let preparedLogitTolerance: Float = 1e-4
+
+    /// The test model, built under ``prefillSeed`` so that its weights do not
+    /// depend on the global random state of the bundle.
+    private func makeSeededModel() throws -> FlintModel {
+        try withRandomState(MLXRandom.RandomState(seed: prefillSeed)) { try makeModel() }
+    }
+
+    /// A prompt of `count` tokens in the vocabulary of `model`, without a
+    /// batch axis, as the token iterator hands it to a prepare.
+    private func prompt(count: Int, for model: FlintModel) -> LMInput {
+        LMInput(tokens: MLXArray((0 ..< count).map { Int32(($0 * 7 + 3) % model.vocabularySize) }))
+    }
+
+    /// The tokens that `result` leaves for the iterator, or `nil` when it
+    /// returns logits.
+    private func remainder(of result: PrepareResult) -> LMInput.Text? {
+        if case .tokens(let text) = result { text } else { nil }
+    }
+
+    /// Records each progress report of a prefill.
+    private final class ProgressLog: @unchecked Sendable {
+        /// The `processed` count of each report, in order.
+        var processed: [Int] = []
+    }
+
+    /// A prompt shorter than one step prefills into the cache, and only its
+    /// last token reaches the iterator, whose forward computes the logits.
+    func testPrepareLeavesOnlyTheLastTokenForTheIterator() throws {
+        let model = try makeSeededModel()
+        let result = try model.prepare(
+            prompt(count: shortPromptTokens, for: model),
+            cache: try model.newCache(parameters: nil), state: nil, prefill: .init())
+        XCTAssertEqual(try XCTUnwrap(remainder(of: result)).tokens.size, 1)
+    }
+
+    /// Without a step size from the caller, a prompt of one mlx-vlm chunk plus
+    /// the last token prefills in one forward.
+    func testPrepareReadsOneMLXVLMChunkInOneForward() throws {
+        let model = try makeSeededModel()
+        let log = ProgressLog()
+        var prefill = PrefillParameters()
+        prefill.progress = { processed, _ in log.processed.append(processed) }
+        _ = try model.prepare(
+            prompt(count: mlxVLMPrefillChunk + 1, for: model),
+            cache: try model.newCache(parameters: nil), state: nil, prefill: prefill)
+        XCTAssertEqual(log.processed, [mlxVLMPrefillChunk])
+    }
+
+    /// The logits after a prepare and the forward of the remainder match the
+    /// last logits of one forward over the whole prompt.
+    func testPreparedLogitsMatchOneForward() throws {
+        let model = try makeSeededModel()
+        let input = prompt(count: shortPromptTokens, for: model)
+        let full = model(
+            input.text.tokens.reshaped(1, -1), cache: try model.newCache(parameters: nil))
+
+        let cache = try model.newCache(parameters: nil)
+        let rest = try XCTUnwrap(
+            remainder(of: try model.prepare(input, cache: cache, state: nil, prefill: .init())))
+        let prepared = model(rest.tokens.reshaped(1, -1), cache: cache)
+
+        let difference = abs(prepared[0..., -1] - full[0..., -1]).max().item(Float.self)
+        XCTAssertLessThan(difference, preparedLogitTolerance)
+    }
+
     // MARK: - Projection fusion at load
 
     /// 4-bit for every layer, with the overrides of `overrides` on top.
