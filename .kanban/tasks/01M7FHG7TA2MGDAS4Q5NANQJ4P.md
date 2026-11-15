@@ -99,8 +99,24 @@ comments:
     - evidence: refactor(flint): drop the unused head rotation and name the attention input method apart from the head count, found in review of ^nanqj4p (files: Libraries/MLXLLM/Models/Flint.swift, Tests/MLXLMTests/FlintDecodeHeadsKernelTests.swift, .kanban/tasks/01M7FHG7TA2MGDAS4Q5NANQJ4P.jsonl, .kanban/tasks/01M7FHG7TA2MGDAS4Q5NANQJ4P.md)
     - next: none; local commit only, not pushed
   timestamp: 2026-11-15T20:38:52.554301+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7gezye6vmn2ymf2yc1jay2a
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (4838f8db) — 0 findings (7 attempted, 0 failed, 0 skipped); both items of Review Findings (2026-11-15 14:16) checked
+    - next: none — moved to done
+  timestamp: 2026-11-15T20:39:45.862140+00:00
+- actor: claude-code
+  id: 01m7gf0bqp8pgb2dkkcj7vwm9b
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — Flint.swift, FlintDecodeHeadsKernelTests.swift (2/2 findings)
+    - test: green — MLXLMTests 1098 XCTest + 2353 ST, Guided 78, FM 496, CXGrammar 7, Macros 11; flintcheck MATCH x4 + TOOL CALL
+    - commit: 4838f8db
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T20:39:59.478687+00:00
+position_column: done
+position_ordinal: ffffab80
 title: 'Flint: find and cut the cost of sliding-window attention in decode (~63 µs/layer)'
 ---
 ## Why
