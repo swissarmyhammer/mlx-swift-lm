@@ -1,10 +1,10 @@
 import Foundation
 import MLX
-import MLXLMCommon
 import MLXNN
 import XCTest
 
 @testable import MLXLLM
+@testable import MLXLMCommon
 
 /// Tiny-config tests of the Flint port: configuration, weight layout, and the
 /// sliding-window / full-attention cache path.
@@ -29,9 +29,29 @@ final class FlintTests: XCTestCase {
         }
         """
 
-    private func makeModel() throws -> FlintModel {
+    /// The layout of ``configJSON`` with every projection width a multiple of
+    /// ``quantizationGroupSize``, so that each layer quantizes.
+    private var quantizableConfigJSON: String {
+        configJSON
+            .replacingOccurrences(of: "\"hidden_size\": 16", with: "\"hidden_size\": 64")
+            .replacingOccurrences(
+                of: "\"intermediate_size\": 32", with: "\"intermediate_size\": 64"
+            )
+            .replacingOccurrences(of: "\"head_dim\": 8", with: "\"head_dim\": 16")
+            .replacingOccurrences(
+                of: "\"moe_intermediate_size\": 8", with: "\"moe_intermediate_size\": 32"
+            )
+            .replacingOccurrences(
+                of: "\"shared_expert_intermediate_size\": 16",
+                with: "\"shared_expert_intermediate_size\": 32")
+    }
+
+    /// The group size of the quantized test checkpoints.
+    private let quantizationGroupSize = 32
+
+    private func makeModel(json: String? = nil) throws -> FlintModel {
         let config = try JSONDecoder().decode(
-            FlintConfiguration.self, from: Data(configJSON.utf8))
+            FlintConfiguration.self, from: Data((json ?? configJSON).utf8))
         let model = FlintModel(config)
         // Nonzero sinks and expert biases, so the paths that read them matter.
         var updates = [String: MLXArray]()
@@ -145,5 +165,112 @@ final class FlintTests: XCTestCase {
         for cache in fullCache + stepCache {
             XCTAssertEqual(cache.offset, tokens.count)
         }
+    }
+
+    // MARK: - Projection fusion at load
+
+    /// 4-bit for every layer, with the overrides of `overrides` on top.
+    private func quantizationPlan(
+        overrides: [String: BaseConfiguration.QuantizationOption] = [:]
+    ) -> BaseConfiguration.PerLayerQuantization {
+        .init(
+            quantization: .init(groupSize: quantizationGroupSize, bits: 4),
+            perLayerQuantization: overrides)
+    }
+
+    /// A quantized model and its checkpoint, in the module layout of an mlx-vlm
+    /// checkpoint (separate projections, `language_model.` prefix).
+    private func makeQuantizedCheckpoint(
+        plan: BaseConfiguration.PerLayerQuantization
+    ) throws -> (reference: FlintModel, checkpoint: ModelCheckpoint) {
+        let reference = try makeModel(json: quantizableConfigJSON)
+        quantize(model: reference) { path, _ in
+            plan.quantization(layer: path).map {
+                (groupSize: $0.groupSize, bits: $0.bits, mode: $0.mode)
+            }
+        }
+        eval(reference)
+        let weights = Dictionary(
+            uniqueKeysWithValues: reference.parameters().flattened().map { ($0.0, $0.1) })
+        return (reference, ModelCheckpoint(weights: weights, perLayerQuantization: plan))
+    }
+
+    /// Loads `checkpoint` into a new model the way the model loader does.
+    private func load(_ checkpoint: ModelCheckpoint) throws -> FlintModel {
+        let model = try makeModel(json: quantizableConfigJSON)
+        try applyCheckpoint(try model.prepareCheckpoint(checkpoint), to: model)
+        eval(model)
+        return model
+    }
+
+    private func parameterKeys(_ model: FlintModel) -> Set<String> {
+        Set(model.parameters().flattened().map(\.0))
+    }
+
+    /// q/k/v, the dense and shared-expert gate/up and the routed gate/up each load
+    /// as one projection when their parts share a quantization.
+    func testLoadFusesProjectionsThatShareQuantization() throws {
+        let (_, checkpoint) = try makeQuantizedCheckpoint(plan: quantizationPlan())
+        let keys = parameterKeys(try load(checkpoint))
+        let expected: Set = [
+            "language_model.model.layers.0.self_attn.qkv_proj.scales",
+            "language_model.model.layers.0.mlp.gate_up_proj.scales",
+            "language_model.model.layers.2.self_attn.qkv_proj.scales",
+            "language_model.model.layers.2.mlp.shared_expert.gate_up_proj.scales",
+            "language_model.model.layers.2.mlp.switch_mlp.gate_up_proj.scales",
+        ]
+        XCTAssertEqual(expected.subtracting(keys), [])
+    }
+
+    /// The fused model computes the logits of the separate projections, for a
+    /// prefill and for a decode step.
+    func testFusedProjectionsMatchSeparateProjections() throws {
+        let (reference, checkpoint) = try makeQuantizedCheckpoint(plan: quantizationPlan())
+        let fused = try load(checkpoint)
+        XCTAssertTrue(
+            parameterKeys(fused).contains("language_model.model.layers.2.self_attn.qkv_proj.weight")
+        )
+
+        let prompt = MLXArray((0 ..< 10).map { Int32(($0 * 7 + 3) % 64) }).reshaped(1, -1)
+        let next = MLXArray([Int32(5)]).reshaped(1, 1)
+        let referenceCache = try reference.newCache(parameters: nil)
+        let fusedCache = try fused.newCache(parameters: nil)
+        let expected = concatenated(
+            [reference(prompt, cache: referenceCache), reference(next, cache: referenceCache)],
+            axis: 1)
+        let actual = concatenated(
+            [fused(prompt, cache: fusedCache), fused(next, cache: fusedCache)], axis: 1)
+
+        XCTAssertLessThan(abs(actual - expected).max().item(Float.self), 1e-5)
+    }
+
+    /// Parts with different quantizations keep their own layers.
+    func testLoadKeepsProjectionsWhoseQuantizationDiffers() throws {
+        let eightBit = BaseConfiguration.QuantizationOption.quantize(
+            .init(groupSize: quantizationGroupSize, bits: 8))
+        let plan = quantizationPlan(overrides: [
+            "language_model.model.layers.2.self_attn.k_proj": eightBit,
+            "language_model.model.layers.2.mlp.shared_expert.up_proj": eightBit,
+        ])
+        let (_, checkpoint) = try makeQuantizedCheckpoint(plan: plan)
+        let keys = parameterKeys(try load(checkpoint))
+        let separate: Set = [
+            "language_model.model.layers.2.self_attn.q_proj.scales",
+            "language_model.model.layers.2.self_attn.k_proj.scales",
+            "language_model.model.layers.2.self_attn.v_proj.scales",
+            "language_model.model.layers.2.mlp.shared_expert.gate_proj.scales",
+            "language_model.model.layers.2.mlp.shared_expert.up_proj.scales",
+        ]
+        XCTAssertEqual(separate.subtracting(keys), [])
+    }
+
+    /// A checkpoint without quantization keeps its layout, so a conversion
+    /// saves the projections under their checkpoint names.
+    func testLoadWithoutQuantizationKeepsSeparateProjections() throws {
+        let reference = try makeModel(json: quantizableConfigJSON)
+        let weights = Dictionary(
+            uniqueKeysWithValues: reference.parameters().flattened().map { ($0.0, $0.1) })
+        let keys = parameterKeys(try load(ModelCheckpoint(weights: weights)))
+        XCTAssertEqual(keys, Set(weights.keys))
     }
 }

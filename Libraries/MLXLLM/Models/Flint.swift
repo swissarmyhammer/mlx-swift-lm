@@ -173,7 +173,54 @@ extension FlintConfiguration: ModelConfigurationValidating {
 
 // MARK: - Attention
 
-class FlintAttention: Module {
+/// A Flint attention layer: query, key and value projections, then attention
+/// with per-head RMS norms, optional RoPE and learned sinks.
+///
+/// ``FlintAttention`` keeps the three projections of the checkpoint;
+/// ``FlintFusedAttention`` computes them with one matmul.
+protocol FlintAttentionLayer: Module {
+    var scale: Float { get }
+    var wo: Linear { get }
+    var qNorm: RMSNorm { get }
+    var kNorm: RMSNorm { get }
+    /// The learned attention sink of each query head.
+    var sinks: MLXArray { get }
+    /// `nil` for a layer of `no_rope_layer_indices`.
+    var rope: RoPELayer? { get }
+
+    /// The queries, keys and values of `x`, each `[B, L, heads, headDim]`.
+    func projectHeads(_ x: MLXArray) -> (queries: MLXArray, keys: MLXArray, values: MLXArray)
+}
+
+extension FlintAttentionLayer {
+    func callAsFunction(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) -> MLXArray {
+        let (B, L) = (x.dim(0), x.dim(1))
+        let heads = projectHeads(x)
+
+        var queries = qNorm(heads.queries).transposed(0, 2, 1, 3)
+        var keys = kNorm(heads.keys).transposed(0, 2, 1, 3)
+        let values = heads.values.transposed(0, 2, 1, 3)
+
+        if let rope {
+            let offset = cache?.ropeOffset
+            queries = applyRotaryPosition(rope, to: queries, offset: offset)
+            keys = applyRotaryPosition(rope, to: keys, offset: offset)
+        }
+
+        let output = attentionWithCacheUpdate(
+            queries: queries, keys: keys, values: values, cache: cache,
+            scale: scale, mask: mask, sinks: sinks.asType(queries.dtype)
+        )
+        .transposed(0, 2, 1, 3)
+        .reshaped(B, L, -1)
+
+        return wo(output)
+    }
+}
+
+class FlintAttention: Module, FlintAttentionLayer {
     let attentionHeads: Int
     let kvHeads: Int
     let headDim: Int
@@ -217,29 +264,72 @@ class FlintAttention: Module {
         }
     }
 
-    func callAsFunction(
-        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
-    ) -> MLXArray {
+    /// The ``FlintFusedAttention`` of this layer when its projections under
+    /// `path` join in `checkpoint`, or `nil` when they keep their own layers.
+    func fused(at path: String, in checkpoint: inout ModelCheckpoint) -> FlintFusedAttention? {
+        let joined = FlintProjectionFusion.fuse(
+            ["q_proj", "k_proj", "v_proj"], under: path, into: "qkv_proj",
+            outputAxis: FlintProjectionFusion.linearOutputAxis, in: &checkpoint)
+        return joined ? FlintFusedAttention(fusing: self) : nil
+    }
+
+    func projectHeads(_ x: MLXArray) -> (queries: MLXArray, keys: MLXArray, values: MLXArray) {
         let (B, L) = (x.dim(0), x.dim(1))
-
-        var queries = qNorm(wq(x).reshaped(B, L, attentionHeads, headDim)).transposed(0, 2, 1, 3)
-        var keys = kNorm(wk(x).reshaped(B, L, kvHeads, headDim)).transposed(0, 2, 1, 3)
-        let values = wv(x).reshaped(B, L, kvHeads, headDim).transposed(0, 2, 1, 3)
-
-        if let rope {
-            let offset = cache?.ropeOffset
-            queries = applyRotaryPosition(rope, to: queries, offset: offset)
-            keys = applyRotaryPosition(rope, to: keys, offset: offset)
-        }
-
-        let output = attentionWithCacheUpdate(
-            queries: queries, keys: keys, values: values, cache: cache,
-            scale: scale, mask: mask, sinks: sinks.asType(queries.dtype)
+        return (
+            wq(x).reshaped(B, L, attentionHeads, headDim),
+            wk(x).reshaped(B, L, kvHeads, headDim),
+            wv(x).reshaped(B, L, kvHeads, headDim)
         )
-        .transposed(0, 2, 1, 3)
-        .reshaped(B, L, -1)
+    }
+}
 
-        return wo(output)
+/// A ``FlintAttention`` whose query, key and value projections load as one
+/// `qkv_proj`, whose rows are the query rows, then the key rows, then the value
+/// rows.
+final class FlintFusedAttention: Module, FlintAttentionLayer {
+    /// The heads axis of the `[B, L, heads, headDim]` projection.
+    private static let headsAxis = 2
+
+    let attentionHeads: Int
+    let kvHeads: Int
+    let headDim: Int
+    let scale: Float
+
+    @ModuleInfo(key: "qkv_proj") var wqkv: Linear
+    @ModuleInfo(key: "o_proj") var wo: Linear
+    @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
+    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
+    @ParameterInfo(key: "softmax_offset") var sinks: MLXArray
+
+    let rope: RoPELayer?
+
+    /// Takes over the output projection, norms, sinks and RoPE of `attention`,
+    /// and makes a `qkv_proj` as wide as its three projections together.
+    init(fusing attention: FlintAttention) {
+        self.attentionHeads = attention.attentionHeads
+        self.kvHeads = attention.kvHeads
+        self.headDim = attention.headDim
+        self.scale = attention.scale
+        self.rope = attention.rope
+
+        let projections = [attention.wq, attention.wk, attention.wv]
+        _wqkv.wrappedValue = Linear(
+            attention.wq.shape.1, projections.map(\.shape.0).reduce(0, +),
+            bias: attention.wq.bias != nil)
+        _wo.wrappedValue = attention.wo
+        _qNorm.wrappedValue = attention.qNorm
+        _kNorm.wrappedValue = attention.kNorm
+        _sinks.wrappedValue = attention.sinks
+    }
+
+    /// Splits the heads of the one projection. At decode (`L` = 1) each part is
+    /// a contiguous run of heads, so the norms that follow read it in place.
+    func projectHeads(_ x: MLXArray) -> (queries: MLXArray, keys: MLXArray, values: MLXArray) {
+        let (B, L) = (x.dim(0), x.dim(1))
+        let heads = wqkv(x).reshaped(B, L, -1, headDim)
+        let parts = split(
+            heads, indices: [attentionHeads, attentionHeads + kvHeads], axis: Self.headsAxis)
+        return (parts[0], parts[1], parts[2])
     }
 }
 
@@ -256,10 +346,52 @@ class FlintMLP: Module, UnaryLayer {
         _down.wrappedValue = Linear(hiddenDimensions, dimensions, bias: false)
     }
 
+    /// The ``FlintFusedMLP`` of this MLP when its projections under `path` join
+    /// in `checkpoint`, or `nil` when they keep their own layers.
+    func fused(at path: String, in checkpoint: inout ModelCheckpoint) -> FlintFusedMLP? {
+        let joined = FlintProjectionFusion.fuse(
+            ["gate_proj", "up_proj"], under: path, into: "gate_up_proj",
+            outputAxis: FlintProjectionFusion.linearOutputAxis, in: &checkpoint)
+        return joined ? FlintFusedMLP(fusing: self) : nil
+    }
+
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         down(compiledSiluProduct(gate(x), up(x)))
     }
 }
+
+/// A ``FlintMLP`` whose gate and up projections load as one `gate_up_proj`,
+/// the gate rows first.
+final class FlintFusedMLP: Module, UnaryLayer {
+    /// The number of projections, gate and up, that `gate_up_proj` holds.
+    private static let parts = 2
+
+    @ModuleInfo(key: "gate_up_proj") var gateUp: Linear
+    @ModuleInfo(key: "down_proj") var down: Linear
+
+    /// Takes over the down projection of `mlp`, and makes a `gate_up_proj` as
+    /// wide as its gate and up projections together.
+    init(fusing mlp: FlintMLP) {
+        let (hiddenDimensions, dimensions) = mlp.gate.shape
+        _gateUp.wrappedValue = Linear(dimensions, Self.parts * hiddenDimensions, bias: false)
+        _down.wrappedValue = mlp.down
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        let parts = split(gateUp(x), parts: Self.parts, axis: -1)
+        return down(compiledSiluProduct(parts[0], parts[1]))
+    }
+}
+
+/// The routed experts of a Flint MoE block: ``SwitchGLU`` keeps the gate and up
+/// projections of the checkpoint, and ``FusedGateUpSwitchGLU`` computes them
+/// with one gathered matmul.
+protocol FlintRoutedExperts: Module {
+    func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray
+}
+
+extension SwitchGLU: FlintRoutedExperts {}
+extension FusedGateUpSwitchGLU: FlintRoutedExperts {}
 
 /// Sigmoid-routed experts plus one shared expert. The expert bias steers the
 /// choice of experts only; the weights of the chosen experts are their sigmoid
@@ -270,8 +402,9 @@ class FlintSparseMoeBlock: Module, UnaryLayer {
 
     @ModuleInfo(key: "gate") var gate: Linear
     @ParameterInfo(key: "expert_bias") var expertBias: MLXArray
-    @ModuleInfo(key: "switch_mlp") var switchMLP: SwitchGLU
-    @ModuleInfo(key: "shared_expert") var sharedExpert: FlintMLP?
+    @ModuleInfo(key: "switch_mlp") var switchMLP: any FlintRoutedExperts
+    /// A ``FlintMLP``, or a ``FlintFusedMLP`` once its projections fuse.
+    @ModuleInfo(key: "shared_expert") var sharedExpert: UnaryLayer?
 
     init(_ args: FlintConfiguration) {
         self.topK = args.numExpertsPerToken
@@ -318,6 +451,126 @@ class FlintSparseMoeBlock: Module, UnaryLayer {
         }
         return out
     }
+
+    /// Fuses the routed gate and up projections, and those of the shared
+    /// expert, wherever their parts under `path` join in `checkpoint`.
+    func fuseProjections(
+        at path: String, in checkpoint: inout ModelCheckpoint, configuration: FlintConfiguration
+    ) throws {
+        if switchMLP is SwitchGLU,
+            FlintProjectionFusion.fuse(
+                ["gate_proj", "up_proj"], under: "\(path).switch_mlp", into: "gate_up_proj",
+                outputAxis: FlintProjectionFusion.switchOutputAxis, in: &checkpoint)
+        {
+            try replaceChild(
+                "switch_mlp",
+                with: FusedGateUpSwitchGLU(
+                    inputDims: configuration.hiddenSize,
+                    hiddenDims: configuration.moeIntermediateSize,
+                    numExperts: configuration.numExperts))
+        }
+        if let shared = sharedExpert as? FlintMLP,
+            let fused = shared.fused(at: "\(path).shared_expert", in: &checkpoint)
+        {
+            try replaceChild("shared_expert", with: fused)
+        }
+    }
+}
+
+// MARK: - Projection fusion
+
+/// Joins projections that read the same input, at load, so that one matmul
+/// computes the rows of all of them.
+///
+/// Decode of a quantized Flint is bound by the number of kernels per token, not
+/// by bandwidth. A quantized matmul computes each output row from its own
+/// weights, scales and biases, thus the rows of the joined matmul are the rows
+/// of the separate ones, bit for bit.
+///
+/// The parts join only when each one is quantized with the same bits, group
+/// size and mode and carries the same tensors; other quantizations of Flint keep
+/// the separate layers. An unquantized checkpoint keeps its layout, because a
+/// conversion saves the module tree it loads.
+enum FlintProjectionFusion {
+    /// The output axis of a `Linear` weight, `[out, in]`, and of its scales,
+    /// biases and bias.
+    static let linearOutputAxis = 0
+    /// The output axis of a `SwitchLinear` weight, `[experts, out, in]`, and of
+    /// its scales, biases and bias.
+    static let switchOutputAxis = 1
+
+    /// The tensors a quantized layer can carry.
+    private static let tensorNames = ["weight", "scales", "biases", "bias"]
+
+    /// Joins the layers `parts` under `parent` into the one layer `fused`,
+    /// along `outputAxis`, in the order of `parts`, and moves their quantization
+    /// to it.
+    ///
+    /// - Parameters:
+    ///   - parts: the names of the layers to join, under `parent`.
+    ///   - parent: the module path of the module that holds the layers.
+    ///   - fused: the name of the joined layer, under `parent`.
+    ///   - outputAxis: the axis of the output rows of each tensor.
+    ///   - checkpoint: the prepared checkpoint, with its tensor names.
+    /// - Returns: whether the layers joined. When they do not, `checkpoint` is
+    ///   unchanged.
+    static func fuse(
+        _ parts: [String], under parent: String, into fused: String, outputAxis: Int,
+        in checkpoint: inout ModelCheckpoint
+    ) -> Bool {
+        let paths = parts.map { "\(parent).\($0)" }
+        guard var plan = checkpoint.perLayerQuantization,
+            let quantization = sharedQuantization(of: paths, in: plan),
+            let names = sharedTensorNames(of: paths, in: checkpoint.weights)
+        else { return false }
+
+        let fusedPath = "\(parent).\(fused)"
+        for name in names {
+            let tensors = paths.compactMap {
+                checkpoint.weights.removeValue(forKey: "\($0).\(name)")
+            }
+            checkpoint.weights["\(fusedPath).\(name)"] = concatenated(tensors, axis: outputAxis)
+        }
+        for path in paths {
+            plan.perLayerQuantization[path] = nil
+        }
+        plan.perLayerQuantization[fusedPath] = .quantize(quantization)
+        checkpoint.perLayerQuantization = plan
+        return true
+    }
+
+    /// The quantization of every layer of `paths`, or `nil` when one layer is
+    /// not quantized or two differ in bits, group size or mode.
+    private static func sharedQuantization(
+        of paths: [String], in plan: BaseConfiguration.PerLayerQuantization
+    ) -> BaseConfiguration.Quantization? {
+        let settings = paths.map { plan.quantization(layer: $0) }
+        guard let first = settings.first, let quantization = first,
+            settings.allSatisfy({ $0.map { $0.asTuple == quantization.asTuple } ?? false })
+        else { return nil }
+        return quantization
+    }
+
+    /// The tensor names that every layer of `paths` carries, or `nil` when the
+    /// layers carry different tensors or are not quantized.
+    private static func sharedTensorNames(
+        of paths: [String], in weights: [String: MLXArray]
+    ) -> [String]? {
+        let present = paths.map { path in
+            tensorNames.filter { weights["\(path).\($0)"] != nil }
+        }
+        guard let names = present.first, names.contains("scales"),
+            present.allSatisfy({ $0 == names })
+        else { return nil }
+        return names
+    }
+}
+
+extension Module {
+    /// Replaces the child module under `key` with `module`.
+    fileprivate func replaceChild(_ key: String, with module: Module) throws {
+        try update(modules: ModuleChildren(values: [key: .value(module)]), verify: .all)
+    }
 }
 
 // MARK: - Decoder
@@ -326,10 +579,11 @@ class FlintDecoderLayer: Module {
     /// The sliding window of this layer, or `nil` for full attention.
     let window: Int?
 
-    @ModuleInfo(key: "self_attn") var selfAttn: FlintAttention
+    @ModuleInfo(key: "self_attn") var selfAttn: any FlintAttentionLayer
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
-    let mlp: UnaryLayer
+    /// A dense ``FlintMLP`` or ``FlintFusedMLP``, or a ``FlintSparseMoeBlock``.
+    @ModuleInfo var mlp: UnaryLayer
 
     init(_ args: FlintConfiguration, layerIdx: Int) {
         self.window = args.window(layer: layerIdx)
@@ -338,10 +592,29 @@ class FlintDecoderLayer: Module {
         _postAttentionLayerNorm.wrappedValue = RMSNorm(
             dimensions: args.hiddenSize, eps: args.rmsNormEps)
         if args.mlpOnlyLayers.contains(layerIdx) {
-            self.mlp = FlintMLP(
+            _mlp.wrappedValue = FlintMLP(
                 dimensions: args.hiddenSize, hiddenDimensions: args.intermediateSize)
         } else {
-            self.mlp = FlintSparseMoeBlock(args)
+            _mlp.wrappedValue = FlintSparseMoeBlock(args)
+        }
+    }
+
+    /// Fuses the projections of this layer wherever their parts under `path`
+    /// join in `checkpoint`; see ``FlintProjectionFusion``.
+    func fuseProjections(
+        at path: String, in checkpoint: inout ModelCheckpoint, configuration: FlintConfiguration
+    ) throws {
+        if let attention = selfAttn as? FlintAttention,
+            let fused = attention.fused(at: "\(path).self_attn", in: &checkpoint)
+        {
+            try replaceChild("self_attn", with: fused)
+        }
+        if let dense = mlp as? FlintMLP, let fused = dense.fused(at: "\(path).mlp", in: &checkpoint)
+        {
+            try replaceChild("mlp", with: fused)
+        } else if let sparse = mlp as? FlintSparseMoeBlock {
+            try sparse.fuseProjections(
+                at: "\(path).mlp", in: &checkpoint, configuration: configuration)
         }
     }
 
@@ -449,8 +722,26 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider {
         }
     }
 
+    /// The module path of the text model in an mlx-vlm checkpoint.
+    static let checkpointPrefix = "language_model."
+
+    /// Sanitizes the checkpoint, then fuses the projections of a quantized one
+    /// (see ``FlintProjectionFusion``).
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var checkpoint = checkpoint
+        checkpoint.weights = try sanitize(
+            weights: checkpoint.weights, metadata: checkpoint.metadata)
+        guard checkpoint.perLayerQuantization != nil else { return checkpoint }
+        for (index, layer) in languageModel.model.layers.enumerated() {
+            try layer.fuseProjections(
+                at: "\(Self.checkpointPrefix)model.layers.\(index)", in: &checkpoint,
+                configuration: configuration)
+        }
+        return checkpoint
+    }
+
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        let prefix = "language_model."
+        let prefix = Self.checkpointPrefix
         var weights = Dictionary(
             uniqueKeysWithValues: weights.map { key, value in
                 (key.hasPrefix(prefix) ? String(key.dropFirst(prefix.count)) : key, value)
