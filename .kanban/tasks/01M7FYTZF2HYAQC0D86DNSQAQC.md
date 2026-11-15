@@ -120,8 +120,24 @@ comments:
     - evidence: docs(test-support): document the shared guided tokenizer and prefill-recording model, found in review of ^dnsqaqc — Tests/MLXLMTestSupport/GuidedByteTokenizer.swift, Tests/MLXLMTestSupport/PrefillStepRecordingModel.swift, .kanban/ (local commit, not pushed)
     - next: re-review
   timestamp: 2026-11-15T18:39:14.196580+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7g84eqj4r30vvajdexwmt4b
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (c8746a30) — 0 findings, 0 confirmed, 0 refuted; 7 validator runs attempted, 0 failed; 2 files reviewed; all 5 prior findings checked
+    - next: none — task moved to done
+  timestamp: 2026-11-15T18:39:53.586461+00:00
+- actor: claude-code
+  id: 01m7g84y1mrfvjxbbv6ttq7dcv
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — docs on GuidedByteTokenizer.swift, PrefillStepRecordingModel.swift (4/4 findings)
+    - test: green — MLXLMTests 1098 XCTest + 2344 ST, Guided 78, FM 496, CXGrammar 7, Macros 11
+    - commit: c8746a30
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T18:40:09.268139+00:00
+position_column: done
+position_ordinal: ffffaa80
 title: Guided generation pins the prefill step to 512 and overrides the model default
 ---
 ## Why

@@ -187,9 +187,23 @@ protocol FlintAttentionLayer: Module {
     var sinks: MLXArray { get }
     /// `nil` for a layer of `no_rope_layer_indices`.
     var rope: RoPELayer? { get }
+    /// The rotation ``FlintDecodeHeadsKernel`` gives the heads of this layer,
+    /// or `nil` when the kernel does not reproduce the RoPE of the layer.
+    var headRotation: FlintHeadRotation? { get }
 
     /// The queries, keys and values of `x`, each `[B, L, heads, headDim]`.
     func projectHeads(_ x: MLXArray) -> (queries: MLXArray, keys: MLXArray, values: MLXArray)
+
+    /// The normed and rotated queries and keys of `x` and its values, each
+    /// `[B, heads, L, headDim]`.
+    ///
+    /// - Parameters:
+    ///   - x: The layer input, shape `[B, L, hiddenSize]`.
+    ///   - offset: The position of the first token of `x`; `nil` reads 0.
+    /// - Returns: The heads the attention reads.
+    func attentionHeads(_ x: MLXArray, offset: RoPEOffset?) -> (
+        queries: MLXArray, keys: MLXArray, values: MLXArray
+    )
 }
 
 /// The axes of a `[B, L, heads, headDim]` attention tensor.
@@ -231,29 +245,48 @@ enum FlintAttentionMask {
 extension FlintAttentionLayer {
     func callAsFunction(_ x: MLXArray, mask: FlintAttentionMask, cache: KVCache?) -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
-        let heads = projectHeads(x)
-
-        var queries = qNorm(heads.queries).transposed(axes: FlintHeadAxis.headMajor)
-        var keys = kNorm(heads.keys).transposed(axes: FlintHeadAxis.headMajor)
-        let values = heads.values.transposed(axes: FlintHeadAxis.headMajor)
-
-        if let rope {
-            let offset = cache?.ropeOffset
-            queries = applyRotaryPosition(rope, to: queries, offset: offset)
-            keys = applyRotaryPosition(rope, to: keys, offset: offset)
-        }
+        let heads = attentionHeads(x, offset: cache?.ropeOffset)
 
         // The sinks load in the dtype of the queries (see `FlintModel.sanitize`),
         // so the cast returns them as they are and adds no kernel. It casts only
         // when the parameters change dtype after load.
         let output = attention(
-            queries: queries, keys: keys, values: values, mask: mask, cache: cache,
-            sinks: sinks.asType(queries.dtype)
+            queries: heads.queries, keys: heads.keys, values: heads.values, mask: mask,
+            cache: cache, sinks: sinks.asType(heads.queries.dtype)
         )
         .transposed(axes: FlintHeadAxis.headMajor)
         .reshaped(B, L, -1)
 
         return wo(output)
+    }
+
+    /// The op path of ``attentionHeads(_:offset:)``: the heads of
+    /// ``projectHeads(_:)``, normed and rotated.
+    func attentionHeads(_ x: MLXArray, offset: RoPEOffset?) -> (
+        queries: MLXArray, keys: MLXArray, values: MLXArray
+    ) {
+        rotatedHeads(projectHeads(x), offset: offset)
+    }
+
+    /// The query and key norms, the head-major layout and the RoPE of the
+    /// projected heads.
+    ///
+    /// - Parameters:
+    ///   - heads: The projected heads, each `[B, L, heads, headDim]`.
+    ///   - offset: The position of the first token; `nil` reads 0.
+    /// - Returns: The heads the attention reads, each `[B, heads, L, headDim]`.
+    func rotatedHeads(
+        _ heads: (queries: MLXArray, keys: MLXArray, values: MLXArray), offset: RoPEOffset?
+    ) -> (queries: MLXArray, keys: MLXArray, values: MLXArray) {
+        var queries = qNorm(heads.queries).transposed(axes: FlintHeadAxis.headMajor)
+        var keys = kNorm(heads.keys).transposed(axes: FlintHeadAxis.headMajor)
+        let values = heads.values.transposed(axes: FlintHeadAxis.headMajor)
+
+        if let rope {
+            queries = applyRotaryPosition(rope, to: queries, offset: offset)
+            keys = applyRotaryPosition(rope, to: keys, offset: offset)
+        }
+        return (queries, keys, values)
     }
 
     /// Writes the keys and the values into `cache`, then attends over every
@@ -300,6 +333,11 @@ class FlintAttention: Module, FlintAttentionLayer {
     /// `nil` for a layer of `no_rope_layer_indices`.
     let rope: RoPELayer?
 
+    let headRotation: FlintHeadRotation?
+
+    /// The position scale of a RoPE without `rope_scaling`.
+    private static let unscaledPositions: Float = 1
+
     init(_ args: FlintConfiguration, layerIdx: Int) {
         self.attentionHeads = args.attentionHeads
         self.kvHeads = args.kvHeads
@@ -317,11 +355,18 @@ class FlintAttention: Module, FlintAttentionLayer {
 
         if args.noRopeLayerIndices.contains(layerIdx) {
             self.rope = nil
+            self.headRotation = .unrotated
+        } else if args.ropeScaling == nil {
+            self.rope = RoPE(
+                dimensions: headDim, traditional: false, base: args.ropeTheta,
+                scale: Self.unscaledPositions)
+            self.headRotation = .rotary(base: args.ropeTheta, scale: Self.unscaledPositions)
         } else {
             self.rope = initializeRope(
                 dims: headDim, base: args.ropeTheta, traditional: false,
                 scalingConfig: args.ropeScaling,
                 maxPositionEmbeddings: args.maxPositionEmbeddings)
+            self.headRotation = nil
         }
     }
 
@@ -368,6 +413,12 @@ final class FlintFusedAttention: Module, FlintAttentionLayer {
 
     let rope: RoPELayer?
 
+    let headRotation: FlintHeadRotation?
+
+    /// The kernel of a decode token, or `nil` when it does not reproduce the
+    /// heads of this layer.
+    private let decodeHeads: FlintDecodeHeadsKernel?
+
     /// Takes over the output projection, norms, sinks and RoPE of `attention`,
     /// and makes a `qkv_proj` as wide as its three projections together.
     init(fusing attention: FlintAttention) {
@@ -376,6 +427,13 @@ final class FlintFusedAttention: Module, FlintAttentionLayer {
         self.headDim = attention.headDim
         self.scale = attention.scale
         self.rope = attention.rope
+        self.headRotation = attention.headRotation
+        self.decodeHeads = attention.headRotation.flatMap {
+            FlintDecodeHeadsKernel(
+                queryHeads: attention.attentionHeads, kvHeads: attention.kvHeads,
+                headDim: attention.headDim, queryEps: attention.qNorm.eps,
+                keyEps: attention.kNorm.eps, rotation: $0)
+        }
 
         let projections = [attention.wq, attention.wk, attention.wv]
         _wqkv.wrappedValue = Linear(
@@ -390,11 +448,45 @@ final class FlintFusedAttention: Module, FlintAttentionLayer {
     /// Splits the heads of the one projection. At decode (`L` = 1) each part is
     /// a contiguous run of heads, so the norms that follow read it in place.
     func projectHeads(_ x: MLXArray) -> (queries: MLXArray, keys: MLXArray, values: MLXArray) {
-        let (B, L) = (x.dim(0), x.dim(1))
-        let heads = wqkv(x).reshaped(B, L, -1, headDim)
+        splitHeads(wqkv(x))
+    }
+
+    /// The heads of one `qkv_proj` output, each `[B, L, heads, headDim]`.
+    private func splitHeads(_ projection: MLXArray) -> (
+        queries: MLXArray, keys: MLXArray, values: MLXArray
+    ) {
+        let (B, L) = (projection.dim(0), projection.dim(1))
+        let heads = projection.reshaped(B, L, -1, headDim)
         let parts = split(
             heads, indices: [attentionHeads, attentionHeads + kvHeads], axis: FlintHeadAxis.head)
         return (parts[Self.queriesPart], parts[Self.keysPart], parts[Self.valuesPart])
+    }
+
+    /// The heads the attention reads. A decode token whose layout and RoPE
+    /// ``FlintDecodeHeadsKernel`` reads takes the kernel, with the bits of
+    /// the op path in one dispatch; every other block takes the op path.
+    func attentionHeads(_ x: MLXArray, offset: RoPEOffset?) -> (
+        queries: MLXArray, keys: MLXArray, values: MLXArray
+    ) {
+        let projection = wqkv(x)
+        if let decodeHeads, let position = Self.position(of: offset),
+            let heads = decodeHeads.heads(
+                of: projection, queryWeight: qNorm.weight, keyWeight: kNorm.weight,
+                offset: position)
+        {
+            return heads
+        }
+        return rotatedHeads(splitHeads(projection), offset: offset)
+    }
+
+    /// The one position the kernel reads: 0 with no offset, the scalar
+    /// offset, and `nil` for an offset of each sequence.
+    private static func position(of offset: RoPEOffset?) -> Int? {
+        switch offset {
+        case nil: 0
+        case .scalar(let position): position
+        case .batch: nil
+        }
     }
 }
 
