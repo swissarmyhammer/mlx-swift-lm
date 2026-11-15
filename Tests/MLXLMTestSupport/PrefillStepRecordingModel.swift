@@ -29,6 +29,13 @@ public final class PrefillStepRecordingModel: Module, LanguageModel {
 
     /// Records the step `prefill` resolves to, and leaves every token of `input` to the
     /// generation.
+    ///
+    /// - Parameters:
+    ///   - input: The prepared input.
+    ///   - cache: Unused: the model keeps no cache.
+    ///   - state: Unused: the model keeps no state.
+    ///   - prefill: The prefill parameters of the caller, whose step the model resolves.
+    /// - Returns: The tokens of `input`, all of them left to the generation.
     public func prepare(
         _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
     ) throws -> PrepareResult {
@@ -39,9 +46,19 @@ public final class PrefillStepRecordingModel: Module, LanguageModel {
     }
 
     /// No cache: the model keeps no state between calls.
+    ///
+    /// - Parameter parameters: Unused: the model keeps no cache.
+    /// - Returns: No caches.
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] { [] }
 
     /// One EOS-preferring logit row for each position of `input`.
+    ///
+    /// - Parameters:
+    ///   - input: The tokens to score.
+    ///   - cache: Unused: the model keeps no cache.
+    ///   - state: Unused: the model keeps no state.
+    /// - Returns: Logits of shape `[1, positions, GuidedByteTokenizer.vocabularySize]`, the EOS
+    ///   token highest at each position.
     public func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {

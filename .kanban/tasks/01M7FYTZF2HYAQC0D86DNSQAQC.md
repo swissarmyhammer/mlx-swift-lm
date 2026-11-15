@@ -83,6 +83,43 @@ comments:
     - evidence: test(guided): share the prefill-recording model and the byte tokenizer through MLXLMTestSupport, found in review of ^dnsqaqc (files: Package.swift, Tests/MLXLMTestSupport/GuidedByteTokenizer.swift, Tests/MLXLMTestSupport/PrefillStepRecordingModel.swift, Tests/MLXFoundationModelsTests/PrefillStepSizeTests.swift, Tests/MLXGuidedGenerationTests/*, .kanban/)
     - next: review
   timestamp: 2026-11-15T18:21:25.093508+00:00
+- actor: claude-code
+  id: 01m7g751akadmbjfnw1w3371me
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (f81c2a74), 4 findings (4 confirmed, 1 refuted) — Tests/MLXLMTestSupport/GuidedByteTokenizer.swift:20, :24, :29, :34 (code-hygiene/missing-docs-swift)
+    - next: add documentation comments to every public declaration in Tests/MLXLMTestSupport/GuidedByteTokenizer.swift, then re-review
+  timestamp: 2026-11-15T18:22:44.051850+00:00
+- actor: claude-code
+  id: 01m7g75gahryy4vnyn4xzyw006
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — shared PrefillStepRecordingModel + GuidedByteTokenizer in MLXLMTestSupport (1/1 finding)
+    - test: green — MLXLMTests 1098 XCTest + 2344 ST, Guided 78, FM 496, CXGrammar 7, Macros 11
+    - commit: f81c2a74
+    - review: findings — Tests/MLXLMTestSupport/GuidedByteTokenizer.swift:20, :24, :29, :34 (missing-docs-swift)
+  timestamp: 2026-11-15T18:22:59.409772+00:00
+- actor: claude-code
+  id: 01m7g7mm7xx03hcjtepkcxf05p
+  text: |-
+    ### implement — changed
+    - evidence: Tests/MLXLMTestSupport/GuidedByteTokenizer.swift: added doc comments to encode(text:addSpecialTokens:), decode(tokenIds:skipSpecialTokens:), convertTokenToId(_:), convertIdToToken(_:), and Parameters/Returns to applyChatTemplate, in the ScalarTokenizer style. Tests/MLXLMTestSupport/PrefillStepRecordingModel.swift: every public declaration already had a summary; added Parameters/Returns to prepare, newCache, callAsFunction. Check: `swift format lint` with only AllPublicDeclarationsHaveDocumentation enabled gives 4 findings on the HEAD tokenizer and 0 on both edited files. Docs only, no code change. swift-format touched only these 2 files. swift build --build-tests clean (only the baseline swiftbuild "missing creator for mutated node" message). xctest: MLXLMTests 1098 XCTest (4 skipped, 0 failures) + 2344 ST passed, 3 known issues (baseline). MLXGuidedGenerationTests 78 passed. MLXFoundationModelsTests 496 passed. CXGrammarTests 7 passed. MLXHuggingFaceMacrosTests 11 XCTest, 0 failures. 4 findings of 2026-11-15 12:21 flipped to [x]. Not committed.
+    - next: /review
+  timestamp: 2026-11-15T18:31:14.941054+00:00
+- actor: claude-code
+  id: 01m7g82e7gmfe232y21gm4vrhq
+  text: |-
+    ### test — green
+    - evidence: `swift build --build-tests` rc=0, no compiler warnings. Libraries/ `git diff --stat` empty (only Tests/MLXLMTestSupport/GuidedByteTokenizer.swift +28 and PrefillStepRecordingModel.swift +17). `swift-format lint -s` on both files clean. `xcrun xctest` per bundle: MLXLMTests 2344 Swift Testing tests passed with 3 known issues, plus 1098 XCTest tests with 4 skipped (LFM2 env skips: MLX_LFM2_MOE_MODEL_PATH, MLX_LFM2_MOE_BENCHMARK, MLX_LFM2_MODEL_PATH, MLX_LFM2_BENCHMARK) and 0 failures; GDNDecodeKernelLayerTests passed. MLXGuidedGenerationTests 78 passed. MLXFoundationModelsTests 496 passed. CXGrammarTests 7 passed. MLXHuggingFaceMacrosTests 11 XCTest passed, 0 failures. No real model loaded, no flintcheck/flintbench.
+    - next: review/commit
+  timestamp: 2026-11-15T18:38:47.536707+00:00
+- actor: claude-code
+  id: 01m7g8388mcxmfqstvyxejgvpf
+  text: |-
+    ### commit — changed
+    - evidence: docs(test-support): document the shared guided tokenizer and prefill-recording model, found in review of ^dnsqaqc — Tests/MLXLMTestSupport/GuidedByteTokenizer.swift, Tests/MLXLMTestSupport/PrefillStepRecordingModel.swift, .kanban/ (local commit, not pushed)
+    - next: re-review
+  timestamp: 2026-11-15T18:39:14.196580+00:00
 position_column: doing
 position_ordinal: '80'
 title: Guided generation pins the prefill step to 512 and overrides the model default
@@ -109,3 +146,16 @@ Found in ^tty395a. `PrefillParameters.stepSize == nil` lets each model pick its 
 > - `.kanban/tasks/01M7FYTZF2HYAQC0D86DNSQAQC.md` — no validator matches this file
 
 - [x] `Tests/MLXFoundationModelsTests/PrefillStepSizeTests.swift:116` `reuse/reuse` — This change adds a second `PrefillStepRecordingModel` that duplicates the one already added at `Tests/MLXGuidedGenerationTests/GuidedPrefillStepTests.swift:14`. Both have the same `prepare` that records `prefill.resolvedStepSize(...)`, the same `newCache`, and the same `callAsFunction` that builds EOS-preferring logit rows. The copy here is a strict subset: it takes a non-optional `ownDefaultStepSize` and does not handle a model with no default. The near-match was not generalized, so the two copies can drift apart. Keep one `PrefillStepRecordingModel`. The two files are in different test targets, so put it in a shared test-support target that both link (for example `Tests/MLXLMTestSupport`, which already holds the shared MTP fakes), and use the optional `ownDefaultStepSize` form. Then delete the copy in `PrefillStepSizeTests.swift`, and reuse `GuidedByteTokenizer` from `GuidedLoopTestSupport.swift` in place of `ToolCallAlphabetTokenizer` if that fits.
+
+## Review Findings (2026-11-15 12:21)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 7 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7FYTZF2HYAQC0D86DNSQAQC.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FYTZF2HYAQC0D86DNSQAQC.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTestSupport/GuidedByteTokenizer.swift:20` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'encode(text:addSpecialTokens:)'.
+- [x] `Tests/MLXLMTestSupport/GuidedByteTokenizer.swift:24` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'decode(tokenIds:skipSpecialTokens:)'.
+- [x] `Tests/MLXLMTestSupport/GuidedByteTokenizer.swift:29` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'convertTokenToId(_:)'.
+- [x] `Tests/MLXLMTestSupport/GuidedByteTokenizer.swift:34` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'convertIdToToken(_:)'.
