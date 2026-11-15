@@ -58,6 +58,47 @@ comments:
     - evidence: perf(flint): fuse the decode q/k norm, RoPE and head layout into one Metal dispatch (^nanqj4p) — Libraries/MLXLLM/Models/FlintDecodeHeadsKernel.swift, Libraries/MLXLLM/Models/Flint.swift, Libraries/MLXLMCommon/MetalSimdWidth.swift, Tests/MLXLMTests/FlintDecodeHeadsKernelTests.swift, .kanban/ (incl. new cards ^y5d37gd, ^5smnpg3, ^twc3zh6). The sha is the HEAD commit carrying this subject line.
     - next: review
   timestamp: 2026-11-15T20:16:12.100499+00:00
+- actor: claude-code
+  id: 01m7gdv0qszqgz8t0enjhp9wj1
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (fc40251a) — 2 findings (2 confirmed, 2 refuted): Libraries/MLXLLM/Models/Flint.swift:192, Libraries/MLXLLM/Models/Flint.swift:265
+    - next: implement the 2 open items in the 2026-11-15 14:16 Review Findings section, then re-review
+  timestamp: 2026-11-15T20:19:35.801514+00:00
+- actor: claude-code
+  id: 01m7gdvgyetke6h48rjqa5a9pa
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — FlintDecodeHeadsKernel.swift (new), Flint.swift, MetalSimdWidth.swift, FlintDecodeHeadsKernelTests.swift (new)
+    - test: green — MLXLMTests 1098 XCTest + 2353 ST, Guided 78, FM 496, CXGrammar 7, Macros 11; flintcheck MATCH x4 + TOOL CALL
+    - commit: fc40251a
+    - review: findings — Libraries/MLXLLM/Models/Flint.swift:192 (dead headRotation), Libraries/MLXLLM/Models/Flint.swift:265 (attentionHeads name clash)
+  timestamp: 2026-11-15T20:19:52.398241+00:00
+- actor: claude-code
+  id: 01m7ge4225py1f3abkg584vz7m
+  text: 'Review fixes (iteration 2): removed the `headRotation` requirement from FlintAttentionLayer (no generic reader) and the stored `headRotation` on FlintFusedAttention (written, never read). FlintAttention keeps `headRotation` (read by FlintFusedAttention.init(fusing:) and by the three rotation tests), now with its doc comment. Renamed the method `attentionHeads(_:offset:)` to `attentionInputs(_:offset:)` in the protocol, both implementations (op-path extension and FlintFusedAttention), the callAsFunction call site, the doc link and the two test call sites; `attentionHeads` now names only the head count. Checked every other symbol fc40251a added in FlintDecodeHeadsKernel.swift — each has a reader.'
+  timestamp: 2026-11-15T20:24:32.069892+00:00
+- actor: claude-code
+  id: 01m7geegae4v8bv8e007cx7h3f
+  text: |-
+    ### implement — changed
+    - evidence: files Libraries/MLXLLM/Models/Flint.swift, Tests/MLXLMTests/FlintDecodeHeadsKernelTests.swift. Both 2026-11-15 14:16 findings flipped to [x]. swift build --build-tests clean (only the pre-existing SwiftPM "missing creator" note). xctest: MLXLMTests 1098 XCTest (4 skipped LFM2 baseline, 0 failures) + 2353 ST passed (3 known issues baseline); MLXGuidedGenerationTests 78; MLXFoundationModelsTests 496; CXGrammarTests 7; MLXHuggingFaceMacrosTests 11 — all pass. swift-format applied (no files outside this task changed). flintcheck: MATCH x4 (256 greedy ids each) + TOOL CALL get_weather Paris (out golden_nanqj4p_r2.json; golden_base untouched).
+    - next: /review
+  timestamp: 2026-11-15T20:30:14.350233+00:00
+- actor: claude-code
+  id: 01m7gexjhbh4rw762y7x7cd4xy
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean (0 errors, 0 source warnings). xctest one bundle at a time: MLXLMTests 2353 Swift Testing tests / 224 suites passed with 3 known issues + 1098 XCTest, 0 failures, 4 skipped (LFM2 env skips, baseline); GDNDecodeKernelLayerTests passed. MLXGuidedGenerationTests 78 tests passed. MLXFoundationModelsTests 496 tests passed. CXGrammarTests 7 tests passed. MLXHuggingFaceMacrosTests 11 XCTest passed. swift-format lint -s on Flint.swift and FlintDecodeHeadsKernelTests.swift clean. flintcheck.sh: MATCH x4 (256 greedy ids each) and TOOL CALL: get_weather Paris; output written to golden_test.json, golden_base.json untouched.
+    - next: review
+  timestamp: 2026-11-15T20:38:28.139874+00:00
+- actor: claude-code
+  id: 01m7geyacacyvek0wx2ehw2ahg
+  text: |-
+    ### commit — changed
+    - evidence: refactor(flint): drop the unused head rotation and name the attention input method apart from the head count, found in review of ^nanqj4p (files: Libraries/MLXLLM/Models/Flint.swift, Tests/MLXLMTests/FlintDecodeHeadsKernelTests.swift, .kanban/tasks/01M7FHG7TA2MGDAS4Q5NANQJ4P.jsonl, .kanban/tasks/01M7FHG7TA2MGDAS4Q5NANQJ4P.md)
+    - next: none; local commit only, not pushed
+  timestamp: 2026-11-15T20:38:52.554301+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Flint: find and cut the cost of sliding-window attention in decode (~63 µs/layer)'
@@ -81,3 +122,22 @@ title: 'Flint: find and cut the cost of sliding-window attention in decode (~63 
 - ms/token improves against a same-session baseline at 2k and 16k.
 - Prompt-cache and ChatSession checkpoint behaviour is unchanged: rotated caches still trim or restore as now.
 - All five bundles are green. #flint-perf
+
+## Review Findings (2026-11-15 14:16)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 4 file(s) reviewed, 10 not reviewed.
+
+> 10 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7FHG7TA2MGDAS4Q5NANQJ4P.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHG7TA2MGDAS4Q5NANQJ4P.md` — no validator matches this file
+> - `.kanban/tasks/01M7FYTZF2HYAQC0D86DNSQAQC.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FYTZF2HYAQC0D86DNSQAQC.md` — no validator matches this file
+> - `.kanban/tasks/01M7GCNJFYATF646QNT5SMNPG3.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7GCNJFYATF646QNT5SMNPG3.md` — no validator matches this file
+> - `.kanban/tasks/01M7GCNQTVHPRSGCP27Y5D37GD.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7GCNQTVHPRSGCP27Y5D37GD.md` — no validator matches this file
+> - `.kanban/tasks/01M7GCNVYNJNS73KPQGTWC3ZH6.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7GCNVYNJNS73KPQGTWC3ZH6.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/Models/Flint.swift:192` `code-hygiene/dead-code-swift` — var.instance `headRotation` is unused.
+- [x] `Libraries/MLXLLM/Models/Flint.swift:265` `swift/naming-clarity` — The new method `attentionHeads(_:offset:)` in the `FlintAttentionLayer` extension shares its base name with the stored property `let attentionHeads: Int` (the query head count) on `FlintAttention`. Inside that type, `attentionHeads` now names both the head count and a function that returns the normed, rotated heads, so a reader cannot tell from the name which one a bare reference means. Line 248 (`let heads = attentionHeads(x, offset: cache?.ropeOffset)`) is one example. Rename the method to a name that says what it returns, such as `rotatedAttentionHeads(_:offset:)` or `attentionInputs(_:offset:)`, in the protocol, both extensions and the call sites, and keep `attentionHeads` as the head count.

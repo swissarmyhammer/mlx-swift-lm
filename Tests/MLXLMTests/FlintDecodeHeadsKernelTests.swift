@@ -326,7 +326,7 @@ struct FlintDecodeHeadsKernelTests {
         let offset = RoPEOffset.scalar(Self.layerOffset)
 
         let reference = layer.rotatedHeads(layer.projectHeads(x), offset: offset)
-        let heads = layer.attentionHeads(x, offset: offset)
+        let heads = layer.attentionInputs(x, offset: offset)
 
         expectSameBits(heads.queries, reference.queries, "queries")
         expectSameBits(heads.keys, reference.keys, "keys")
@@ -339,7 +339,7 @@ struct FlintDecodeHeadsKernelTests {
         let x = Self.randomArray([1, Self.decodeTokens, Self.hiddenSize], seed: Seed.hidden)
             .asType(.bfloat16)
 
-        let heads = layer.attentionHeads(x, offset: .scalar(Self.layerOffset))
+        let heads = layer.attentionInputs(x, offset: .scalar(Self.layerOffset))
 
         #expect(
             DeepSeekV4TestArrays.nodeCount(

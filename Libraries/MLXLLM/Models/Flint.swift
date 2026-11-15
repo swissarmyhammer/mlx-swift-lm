@@ -187,9 +187,6 @@ protocol FlintAttentionLayer: Module {
     var sinks: MLXArray { get }
     /// `nil` for a layer of `no_rope_layer_indices`.
     var rope: RoPELayer? { get }
-    /// The rotation ``FlintDecodeHeadsKernel`` gives the heads of this layer,
-    /// or `nil` when the kernel does not reproduce the RoPE of the layer.
-    var headRotation: FlintHeadRotation? { get }
 
     /// The queries, keys and values of `x`, each `[B, L, heads, headDim]`.
     func projectHeads(_ x: MLXArray) -> (queries: MLXArray, keys: MLXArray, values: MLXArray)
@@ -201,7 +198,7 @@ protocol FlintAttentionLayer: Module {
     ///   - x: The layer input, shape `[B, L, hiddenSize]`.
     ///   - offset: The position of the first token of `x`; `nil` reads 0.
     /// - Returns: The heads the attention reads.
-    func attentionHeads(_ x: MLXArray, offset: RoPEOffset?) -> (
+    func attentionInputs(_ x: MLXArray, offset: RoPEOffset?) -> (
         queries: MLXArray, keys: MLXArray, values: MLXArray
     )
 }
@@ -245,7 +242,7 @@ enum FlintAttentionMask {
 extension FlintAttentionLayer {
     func callAsFunction(_ x: MLXArray, mask: FlintAttentionMask, cache: KVCache?) -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
-        let heads = attentionHeads(x, offset: cache?.ropeOffset)
+        let heads = attentionInputs(x, offset: cache?.ropeOffset)
 
         // The sinks load in the dtype of the queries (see `FlintModel.sanitize`),
         // so the cast returns them as they are and adds no kernel. It casts only
@@ -260,9 +257,9 @@ extension FlintAttentionLayer {
         return wo(output)
     }
 
-    /// The op path of ``attentionHeads(_:offset:)``: the heads of
+    /// The op path of ``attentionInputs(_:offset:)``: the heads of
     /// ``projectHeads(_:)``, normed and rotated.
-    func attentionHeads(_ x: MLXArray, offset: RoPEOffset?) -> (
+    func attentionInputs(_ x: MLXArray, offset: RoPEOffset?) -> (
         queries: MLXArray, keys: MLXArray, values: MLXArray
     ) {
         rotatedHeads(projectHeads(x), offset: offset)
@@ -333,6 +330,8 @@ class FlintAttention: Module, FlintAttentionLayer {
     /// `nil` for a layer of `no_rope_layer_indices`.
     let rope: RoPELayer?
 
+    /// The rotation ``FlintDecodeHeadsKernel`` gives the heads of this layer,
+    /// or `nil` when the kernel does not reproduce the RoPE of the layer.
     let headRotation: FlintHeadRotation?
 
     /// The position scale of a RoPE without `rope_scaling`.
@@ -413,8 +412,6 @@ final class FlintFusedAttention: Module, FlintAttentionLayer {
 
     let rope: RoPELayer?
 
-    let headRotation: FlintHeadRotation?
-
     /// The kernel of a decode token, or `nil` when it does not reproduce the
     /// heads of this layer.
     private let decodeHeads: FlintDecodeHeadsKernel?
@@ -427,7 +424,6 @@ final class FlintFusedAttention: Module, FlintAttentionLayer {
         self.headDim = attention.headDim
         self.scale = attention.scale
         self.rope = attention.rope
-        self.headRotation = attention.headRotation
         self.decodeHeads = attention.headRotation.flatMap {
             FlintDecodeHeadsKernel(
                 queryHeads: attention.attentionHeads, kvHeads: attention.kvHeads,
@@ -465,7 +461,7 @@ final class FlintFusedAttention: Module, FlintAttentionLayer {
     /// The heads the attention reads. A decode token whose layout and RoPE
     /// ``FlintDecodeHeadsKernel`` reads takes the kernel, with the bits of
     /// the op path in one dispatch; every other block takes the op path.
-    func attentionHeads(_ x: MLXArray, offset: RoPEOffset?) -> (
+    func attentionInputs(_ x: MLXArray, offset: RoPEOffset?) -> (
         queries: MLXArray, keys: MLXArray, values: MLXArray
     ) {
         let projection = wqkv(x)
