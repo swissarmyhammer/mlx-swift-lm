@@ -58,6 +58,44 @@ comments:
     - evidence: local commit on stable, subject "perf(flint): fuse q/k/v and gate/up projections at load (^j4pqtwr)"; files: Libraries/MLXLLM/Models/Flint.swift, Tests/MLXLMTests/FlintTests.swift, .kanban/ board changes. swift-format ran; no unrelated files changed. Not pushed. (The sha is reported by the commit step's reply, since a comment inside the commit cannot name its own sha.)
     - next: transient load peak (oQ8e 42.7→70.2 GB) tracked in ^75rm5ds.
   timestamp: 2026-11-15T12:47:26.122529+00:00
+- actor: claude-code
+  id: 01m7fm4jyf4ep4wfyc9h48g3x5
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (5b0b9e46) — 5 findings (code-hygiene/magic-numbers-swift): Libraries/MLXLLM/Models/Flint.swift:202, :203, :204, :216, :332
+    - next: implement — replace the magic numbers with named constants across Flint.swift, then re-run test and review
+  timestamp: 2026-11-15T12:50:26.384+00:00
+- actor: claude-code
+  id: 01m7fm4zc9ptq67zg311xgtkba
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — Flint.swift, FlintTests.swift (+4 tests)
+    - test: green — MLXLMTests 1089 XCTest + 2331 ST, Guided 76, FM 494, CXGrammar 7, Macros 11; flintcheck MATCH x4 + TOOL CALL
+    - commit: 5b0b9e46
+    - review: findings — Flint.swift:202, :203, :204, :216, :332 (magic-numbers-swift)
+  timestamp: 2026-11-15T12:50:39.113428+00:00
+- actor: claude-code
+  id: 01m7fmpybnqt45b2byq829kv38
+  text: |-
+    Magic-number findings fixed in Flint.swift:
+    - The four `transposed(0, 2, 1, 3)` calls in the FlintAttentionLayer extension (findings :202, :203, :204, :216) now use `transposed(axes: FlintHeadAxis.headMajor)`. FlintHeadAxis is a new file-private enum with batch/token/head/width axis constants, which follows DeepSeekV4Attention's `BatchMajorAxis` and `headMajor` pattern. A protocol extension can't hold a static stored property, so the enum is at file scope. Something that didn't work: a file-scope `let x = [0, 2, 1, 3]` array literal still trips swiftlint no_magic_numbers. Only `static let` scalars are exempt.
+    - FlintFusedAttention's `(parts[0], parts[1], parts[2])` (finding :332) now indexes with the named constants `queriesPart`, `keysPart` and `valuesPart`. Its private `headsAxis = 2` was a duplicate of the new enum, so it was removed and the split uses `FlintHeadAxis.head`.
+    - I ran swiftlint (only_rules no_magic_numbers, allowed_numbers [0, 1, -1, 100], the validator's config) on Flint.swift. No hits remain in code this task added. Six hits remain, and git blame puts all of them on lines from e7e3ed84, before this card: the config decode defaults at lines 88, 90, 91 and 112, `pow(Float(headDim), -0.5)` in FlintAttention.init, and the `weights.sum` line in the MoE block. They are out of scope for this card.
+  timestamp: 2026-11-15T13:00:27.893489+00:00
+- actor: claude-code
+  id: 01m7fmq1geqdyqwb63pmjqjdj5
+  text: |-
+    ### implement — changed
+    - evidence: Libraries/MLXLLM/Models/Flint.swift (5 magic-numbers-swift findings fixed, all flipped to [x]). `swift build --build-tests` is clean: its only warning is the SwiftPM `missing creator for mutated node` build-graph note, which isn't from this code. xctest results: MLXLMTests 1089 XCTest (4 skips that were already there, 0 failures) + 2331 Swift Testing passed (3 known issues, all from before this change). MLXGuidedGenerationTests 76, MLXFoundationModelsTests 494, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11, all pass. flintcheck: MATCH x4 (256 ids each), TOOL CALL get_weather Paris. golden_base.json is untouched (md5 3630e415… before and after). The repo-wide swift-format changed nothing else.
+    - next: review
+  timestamp: 2026-11-15T13:00:31.118130+00:00
+- actor: claude-code
+  id: 01m7fn5j93yc2q0pqy2asya7wh
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean (bundles newer than Flint.swift). xcrun xctest, one bundle at a time: MLXLMTests 2331 Swift Testing tests / 221 suites passed with 3 known issues, plus 1089 XCTest, 0 failures, 4 skipped (the 4 LFM2 env-var skips); MLXGuidedGenerationTests 76 tests passed; MLXFoundationModelsTests 494 tests passed; CXGrammarTests 7 tests passed; MLXHuggingFaceMacrosTests 11 XCTest passed, 0 failures. swift-format lint -s on Libraries/MLXLLM/Models/Flint.swift: clean. flintcheck.sh: MATCH x4 (256 greedy ids identical each) plus TOOL CALL get_weather ["city": Paris]. golden_base.json untouched.
+    - next: commit
+  timestamp: 2026-11-15T13:08:27.043508+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Flint: fuse q/k/v, shared-expert gate/up and routed-expert gate/up projections at load'
@@ -81,3 +119,31 @@ In `Libraries/MLXLLM/Models/Flint.swift`:
 - ChatSession multi-turn prompt-cache reuse is unchanged: follow-ups prefill only the new message.
 
 Note: coordinate model loads with the foundationmodelsacpagent session (SWE-bench run). #flint-perf
+
+## Review Findings (2026-11-15 06:47)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 2 file(s) reviewed, 16 not reviewed.
+
+> 16 file(s) not reviewed — no validator matched:
+> - `.kanban/tags/01M7FHFQT8GC48MH7HCDSE7BPM.jsonl` — no validator matches this file
+> - `.kanban/tags/01M7FHFQT8GC48MH7HCDSE7BPM.yaml` — no validator matches this file
+> - `.kanban/tasks/01M7FHFQT76AN9817CJJ4PQTWR.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHFQT76AN9817CJJ4PQTWR.md` — no validator matches this file
+> - `.kanban/tasks/01M7FHFWPMBDPGDSD9BG68BHJ1.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHFWPMBDPGDSD9BG68BHJ1.md` — no validator matches this file
+> - `.kanban/tasks/01M7FHG1KPDNCWYR3DCPG2HSB8.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHG1KPDNCWYR3DCPG2HSB8.md` — no validator matches this file
+> - `.kanban/tasks/01M7FHG7TA2MGDAS4Q5NANQJ4P.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHG7TA2MGDAS4Q5NANQJ4P.md` — no validator matches this file
+> - `.kanban/tasks/01M7FHGCSXZ04AJXT9MTTY395A.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHGCSXZ04AJXT9MTTY395A.md` — no validator matches this file
+> - `.kanban/tasks/01M7FHGHAH9SHF8EC04YXM9NET.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHGHAH9SHF8EC04YXM9NET.md` — no validator matches this file
+> - `.kanban/tasks/01M7FJYDTT4WFHFYHH475RM5DS.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FJYDTT4WFHFYHH475RM5DS.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/Models/Flint.swift:202` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLLM/Models/Flint.swift:203` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLLM/Models/Flint.swift:204` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLLM/Models/Flint.swift:216` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLLM/Models/Flint.swift:332` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.

@@ -192,6 +192,23 @@ protocol FlintAttentionLayer: Module {
     func projectHeads(_ x: MLXArray) -> (queries: MLXArray, keys: MLXArray, values: MLXArray)
 }
 
+/// The axes of a `[B, L, heads, headDim]` attention tensor.
+private enum FlintHeadAxis {
+    /// The axis that holds the batch.
+    static let batch = 0
+    /// The axis that holds the tokens.
+    static let token = 1
+    /// The axis that holds the heads.
+    static let head = 2
+    /// The axis that holds the numbers of one head.
+    static let width = 3
+
+    /// The axis order that swaps the token axis and the head axis. The swap is
+    /// its own inverse, thus the same order takes the attention output back
+    /// again.
+    static let headMajor = [batch, head, token, width]
+}
+
 extension FlintAttentionLayer {
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
@@ -199,9 +216,9 @@ extension FlintAttentionLayer {
         let (B, L) = (x.dim(0), x.dim(1))
         let heads = projectHeads(x)
 
-        var queries = qNorm(heads.queries).transposed(0, 2, 1, 3)
-        var keys = kNorm(heads.keys).transposed(0, 2, 1, 3)
-        let values = heads.values.transposed(0, 2, 1, 3)
+        var queries = qNorm(heads.queries).transposed(axes: FlintHeadAxis.headMajor)
+        var keys = kNorm(heads.keys).transposed(axes: FlintHeadAxis.headMajor)
+        let values = heads.values.transposed(axes: FlintHeadAxis.headMajor)
 
         if let rope {
             let offset = cache?.ropeOffset
@@ -213,7 +230,7 @@ extension FlintAttentionLayer {
             queries: queries, keys: keys, values: values, cache: cache,
             scale: scale, mask: mask, sinks: sinks.asType(queries.dtype)
         )
-        .transposed(0, 2, 1, 3)
+        .transposed(axes: FlintHeadAxis.headMajor)
         .reshaped(B, L, -1)
 
         return wo(output)
@@ -287,8 +304,12 @@ class FlintAttention: Module, FlintAttentionLayer {
 /// `qkv_proj`, whose rows are the query rows, then the key rows, then the value
 /// rows.
 final class FlintFusedAttention: Module, FlintAttentionLayer {
-    /// The heads axis of the `[B, L, heads, headDim]` projection.
-    private static let headsAxis = 2
+    /// The index of the query heads among the split parts of `qkv_proj`.
+    private static let queriesPart = 0
+    /// The index of the key heads among the split parts of `qkv_proj`.
+    private static let keysPart = 1
+    /// The index of the value heads among the split parts of `qkv_proj`.
+    private static let valuesPart = 2
 
     let attentionHeads: Int
     let kvHeads: Int
@@ -328,8 +349,8 @@ final class FlintFusedAttention: Module, FlintAttentionLayer {
         let (B, L) = (x.dim(0), x.dim(1))
         let heads = wqkv(x).reshaped(B, L, -1, headDim)
         let parts = split(
-            heads, indices: [attentionHeads, attentionHeads + kvHeads], axis: Self.headsAxis)
-        return (parts[0], parts[1], parts[2])
+            heads, indices: [attentionHeads, attentionHeads + kvHeads], axis: FlintHeadAxis.head)
+        return (parts[Self.queriesPart], parts[Self.keysPart], parts[Self.valuesPart])
     }
 }
 
