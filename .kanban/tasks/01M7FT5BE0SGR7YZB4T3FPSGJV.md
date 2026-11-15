@@ -1,8 +1,13 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '8680'
+comments:
+- actor: claude-code
+  id: 01m7gnmn15kk659kzg4mfctejy
+  text: Closed by the user on 2026-11-15 without a fix. The flake was avoided by building the new Flint test module under its own seeded random state (^pg2hsb8); the GDN fixture still draws from the global random state.
+  timestamp: 2026-11-15T22:35:55.813188+00:00
+position_column: done
+position_ordinal: ffffb180
 title: 'GDN decode kernel test: build the fixture layers from a seeded random state'
 ---
 ## Why
