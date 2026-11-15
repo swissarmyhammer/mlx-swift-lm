@@ -417,6 +417,9 @@ let package = Package(
                 "MLXLMCommon",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
+                // The byte tokenizer and the prefill-step model this bundle shares with
+                // MLXFoundationModelsTests.
+                "MLXLMTestSupport",
             ],
             path: "Tests/MLXGuidedGenerationTests"
         ),

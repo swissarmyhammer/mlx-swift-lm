@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXLMTestSupport
 import MLXNN
 import Testing
 

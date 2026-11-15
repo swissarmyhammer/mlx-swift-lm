@@ -3,56 +3,10 @@
 import Foundation
 import MLX
 import MLXLMCommon
-import MLXNN
+import MLXLMTestSupport
 import Testing
 
 @testable import MLXGuidedGeneration
-
-/// Records the prefill step its `prepare` resolves, the way a model resolves it: with its own
-/// default step when it has one, and with the generic default otherwise. Its logits prefer EOS,
-/// so the grammar decides the output.
-private final class PrefillStepRecordingModel: Module, LanguageModel {
-
-    /// The logit of the EOS token, high enough to win every decision the grammar leaves open.
-    private static let eosLogit: Float = 20
-
-    /// The step the model prefills with when the caller sets none, or `nil` for a model without
-    /// a default of its own.
-    private let ownDefaultStepSize: Int?
-
-    /// The step the last `prepare` resolved, or `nil` before the first `prepare`.
-    private(set) var resolvedStepSize: Int?
-
-    /// Makes a model whose own default step is `ownDefaultStepSize`.
-    ///
-    /// - Parameter ownDefaultStepSize: The model's own default step, or `nil` for none.
-    init(ownDefaultStepSize: Int?) {
-        self.ownDefaultStepSize = ownDefaultStepSize
-        super.init()
-    }
-
-    func prepare(
-        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
-    ) throws -> PrepareResult {
-        resolvedStepSize =
-            ownDefaultStepSize.map { prefill.resolvedStepSize(defaultStepSize: $0) }
-            ?? prefill.resolvedStepSize()
-        return .tokens(input.text)
-    }
-
-    func newCache(parameters: GenerateParameters?) throws -> [KVCache] { [] }
-
-    func callAsFunction(
-        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
-    ) -> LMOutput {
-        let positions = input.tokens.size
-        var row = [Float](repeating: 0, count: GuidedByteTokenizer.vocabularySize)
-        row[GuidedByteTokenizer.eosTokenID] = Self.eosLogit
-        let rows = Array(repeating: row, count: positions).flatMap { $0 }
-        return LMOutput(
-            logits: MLXArray(rows).reshaped(1, positions, GuidedByteTokenizer.vocabularySize))
-    }
-}
 
 /// A guided generation leaves the prefill step to the model unless its caller sets one.
 @Suite(.serialized)

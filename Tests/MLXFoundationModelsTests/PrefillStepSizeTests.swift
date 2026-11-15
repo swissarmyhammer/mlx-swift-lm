@@ -4,12 +4,11 @@
 
 import Foundation
 import FoundationModels
-import MLX
-import MLXNN
 import Testing
 
 @testable import MLXFoundationModels
 import MLXLMCommon
+import MLXLMTestSupport
 
 @Suite("Prefill step size")
 struct PrefillStepSizeTests {
@@ -82,7 +81,7 @@ struct GuidedPrefillStepSizeTests {
         let model = PrefillStepRecordingModel(ownDefaultStepSize: ownDefaultStepSize)
         let context = ModelContext(
             configuration: ModelConfiguration(id: modelID), model: model,
-            processor: FixedPromptInputProcessor(), tokenizer: ToolCallAlphabetTokenizer())
+            processor: FixedPromptInputProcessor(), tokenizer: GuidedByteTokenizer())
         let grammar = try await MLXLanguageModel.Executor.guidedGrammar(
             kind: .json, source: schema, reserveSchemaJSON: schema, maxTokens: maxTokens,
             modelID: modelID, context: context)
@@ -108,50 +107,6 @@ struct GuidedPrefillStepSizeTests {
         #expect(
             try await Self.resolvedStepSize(prefillStepSize: Self.callerStepSize)
                 == Self.callerStepSize)
-    }
-}
-
-/// Records the prefill step its `prepare` resolves with its own default step, as a model with a
-/// default of its own resolves it. Its logits prefer EOS, so the grammar decides the output.
-private final class PrefillStepRecordingModel: Module, MLXLMCommon.LanguageModel {
-
-    /// The logit of the EOS token, high enough to win every decision the grammar leaves open.
-    private static let eosLogit: Float = 20
-
-    /// The tokens of the vocabulary.
-    private static let vocabularySize = ToolCallAlphabetTokenizer.alphabet.count
-
-    /// The step the model prefills with when the caller sets none.
-    private let ownDefaultStepSize: Int
-
-    /// The step the last `prepare` resolved, or `nil` before the first `prepare`.
-    private(set) var resolvedStepSize: Int?
-
-    /// Makes a model whose own default step is `ownDefaultStepSize`.
-    ///
-    /// - Parameter ownDefaultStepSize: The model's own default step.
-    init(ownDefaultStepSize: Int) {
-        self.ownDefaultStepSize = ownDefaultStepSize
-        super.init()
-    }
-
-    func prepare(
-        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
-    ) throws -> PrepareResult {
-        resolvedStepSize = prefill.resolvedStepSize(defaultStepSize: ownDefaultStepSize)
-        return .tokens(input.text)
-    }
-
-    func newCache(parameters: GenerateParameters?) throws -> [KVCache] { [] }
-
-    func callAsFunction(
-        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
-    ) -> LMOutput {
-        let positions = input.tokens.size
-        var row = [Float](repeating: 0, count: Self.vocabularySize)
-        row[Self.vocabularySize - 1] = Self.eosLogit
-        let rows = Array(repeating: row, count: positions).flatMap { $0 }
-        return LMOutput(logits: MLXArray(rows).reshaped(1, positions, Self.vocabularySize))
     }
 }
 
