@@ -36,8 +36,24 @@ comments:
     - evidence: local commit (not pushed) of the .kanban/ measurement record, subject: `chore(kanban): record that moving the Flint decode cache write off the attention path gives no speedup (^wqt7w37)`; files: .kanban/tasks/01M7GCNQTVHPRSGCP27Y5D37GD.{jsonl,md}, .kanban/tasks/01M7GKHRNX075K8G9T2WQT7W37.{jsonl,md}. No code changed. The sha is in `git log` under that subject.
     - next: the 0.31 ms needs the cache write gone entirely, which needs an in-place custom-kernel output upstream in mlx/mlx-swift.
   timestamp: 2026-11-15T22:15:50.403144+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7gmgh7vmp8sgvvjr92r7q9z
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (00394f51) — 0 findings (confirmed 0, refuted 0); 4 .kanban/ files changed, no validator matches them, 0 files reviewed
+    - next: none — task moved to done
+  timestamp: 2026-11-15T22:16:12.283124+00:00
+- actor: claude-code
+  id: 01m7gmgw5wpdjbft104cw7kdc0
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: no-change — probes show moving the write gives no speedup; removing it needs an upstream in-place custom-kernel output
+    - test: skipped — empty code diff
+    - commit: 00394f51 (kanban evidence only)
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T22:16:23.484605+00:00
+position_column: done
+position_ordinal: ffffb080
 title: 'Flint: take the L=1 cache write off the attention critical path (~0.31 ms/token)'
 ---
 ## Why
