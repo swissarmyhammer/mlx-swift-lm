@@ -209,13 +209,22 @@ package struct SlidingWindowBands {
     }
 }
 
-/// The axes of a tensor whose rows stand in blocks: `[batch, heads, block,
-/// row, width]`, or `[batch, block, heads, row, width]` after the swap.
+/// The axes of a tensor whose rows stand in blocks, block-major: `[batch,
+/// block, heads, row, width]`, or `[batch, heads, block, row, width]` after
+/// the swap.
 private enum BandAxis {
+    /// The axis that holds the sequences.
+    static let batch = 0
     /// The axis that holds the blocks, beside the batch axis.
     static let block = 1
+    /// The axis that holds the heads.
+    static let head = 2
+    /// The axis that holds the rows of one block.
+    static let row = 3
+    /// The axis that holds the numbers of one row.
+    static let width = 4
 
     /// The axis order that swaps the head axis and the block axis. The swap is
     /// its own inverse, thus the same order takes the blocks back again.
-    static let swapHeadAndBlock = [0, 2, 1, 3, 4]
+    static let swapHeadAndBlock = [batch, head, block, row, width]
 }
