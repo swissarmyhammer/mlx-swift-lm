@@ -226,6 +226,9 @@ extension FlintAttentionLayer {
             keys = applyRotaryPosition(rope, to: keys, offset: offset)
         }
 
+        // The sinks load in the dtype of the queries (see `FlintModel.sanitize`),
+        // so the cast returns them as they are and adds no kernel. It casts only
+        // when the parameters change dtype after load.
         let output = attentionWithCacheUpdate(
             queries: queries, keys: keys, values: values, cache: cache,
             scale: scale, mask: mask, sinks: sinks.asType(queries.dtype)
@@ -445,9 +448,11 @@ class FlintSparseMoeBlock: Module, UnaryLayer {
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         // The projection runs in the activation dtype; sigmoid, selection and
-        // normalization run in float32, as the reference does.
+        // normalization run in float32, as the reference does. The bias loads
+        // in float32 (see `FlintModel.sanitize`); a bias of another dtype
+        // promotes to float32 in the add.
         let scores = sigmoid(gate(x).asType(.float32))
-        let choice = scores + expertBias.asType(.float32)
+        let choice = scores + expertBias
 
         let indices: MLXArray
         var weights: MLXArray
@@ -465,8 +470,11 @@ class FlintSparseMoeBlock: Module, UnaryLayer {
             weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-20)
         }
 
+        // The weights are float32, so the compiled sum promotes the routed
+        // outputs to float32 inside its fused multiply, with no cast kernel of
+        // its own.
         let routed = switchMLP(x, indices)
-        var out = weightedExpertSum(routed.asType(.float32), weights).asType(x.dtype)
+        var out = weightedExpertSum(routed, weights).asType(x.dtype)
         if let sharedExpert {
             out = out + sharedExpert(x)
         }
@@ -804,8 +812,33 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider {
                 weights["\(mlp).expert_bias"] = zeros([configuration.numExperts])
             }
         }
+        storeInForwardDtypes(&weights)
 
         return Dictionary(uniqueKeysWithValues: weights.map { (prefix + $0.key, $0.value) })
+    }
+
+    /// Stores the parameters that a forward pass casts in the dtype that it
+    /// reads them in, so that the casts run once, here: the expert bias in the
+    /// float32 of the router scores, and the sinks in the dtype of the queries,
+    /// which is the dtype of the query norm. These are the casts the forward
+    /// pass made, thus the logits do not change.
+    ///
+    /// - Parameter weights: the checkpoint tensors, without the
+    ///   ``checkpointPrefix``.
+    private func storeInForwardDtypes(_ weights: inout [String: MLXArray]) {
+        for index in languageModel.model.layers.indices {
+            let layer = "model.layers.\(index)"
+            let biasKey = "\(layer).mlp.expert_bias"
+            if let bias = weights[biasKey] {
+                weights[biasKey] = bias.asType(.float32)
+            }
+            let sinksKey = "\(layer).self_attn.softmax_offset"
+            if let sinks = weights[sinksKey],
+                let queryNorm = weights["\(layer).self_attn.q_norm.weight"]
+            {
+                weights[sinksKey] = sinks.asType(queryNorm.dtype)
+            }
+        }
     }
 }
 

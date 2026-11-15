@@ -70,8 +70,24 @@ comments:
     - evidence: commit "refactor(load): write the empty collections of ModelCheckpoint as literals, found in review of ^75rm5ds" (this comment ships in that same commit, so the sha is in git log by that subject); files: Libraries/MLXLMCommon/ModelCheckpoint.swift, .kanban/tasks/01M7FJYDTT4WFHFYHH475RM5DS.jsonl, .kanban/tasks/01M7FJYDTT4WFHFYHH475RM5DS.md
     - next: none
   timestamp: 2026-11-15T13:52:30.522548+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7fqqq2ptwdw8p3dn5pxn7jk
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (6b450a82): 0 findings (7 validator passes attempted, 0 failed); 1 file reviewed (Libraries/MLXLMCommon/ModelCheckpoint.swift), 2 .kanban files had no matching validator. The prior finding (2026-11-15 07:33) is checked.
+    - next: none — task moved to done
+  timestamp: 2026-11-15T13:53:18.934403+00:00
+- actor: claude-code
+  id: 01m7fqrc6jvtz0xye49xpmfana
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — ModelCheckpoint.swift empty-collection literals (1/1 finding)
+    - test: green — MLXLMTests 1090 XCTest + 2331 ST, Guided 76, FM 494, CXGrammar 7, Macros 11; flintcheck MATCH x4 + TOOL CALL
+    - commit: 6b450a82
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T13:53:40.562865+00:00
+position_column: done
+position_ordinal: ffffa580
 title: 'Loader: release checkpoint tensors that prepareCheckpoint replaces before materialization (Flint fusion load peak)'
 ---
 ## Why

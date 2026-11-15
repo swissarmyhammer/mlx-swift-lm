@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m7frf2dza28d9b2wrsj4jaqf
+  text: 'Handoff from ^g68bhj1: the expert-bias cast and the routed->f32 cast are gone from the decode graph (oQ4e decode step: 191 -> 97 AsType). The per-step casts that remain in the Flint MoE block, and that a compiled router/combine could fuse, are `gate(x).asType(.float32)` before `sigmoid` (47 per token) and `weightedExpertSum(...).asType(x.dtype)` before the shared-expert add (47 per token). `model(...).asType(.float32)` before lm_head runs once per token. Count them with flintcli `dot <promptfile> <ctx> <out.dot>` (scratchpad flintcli), then `grep -o ''label ="[^"]*"'' out.dot | sort | uniq -c`.'
+  timestamp: 2026-11-15T14:06:04.223396+00:00
 depends_on:
 - 01M7FHFQT76AN9817CJJ4PQTWR
 - 01M7FHFWPMBDPGDSD9BG68BHJ1

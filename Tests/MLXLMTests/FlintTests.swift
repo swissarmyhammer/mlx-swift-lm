@@ -140,6 +140,41 @@ final class FlintTests: XCTestCase {
         XCTAssertEqual(Set(model.sanitize(weights: expected).keys), Set(expected.keys))
     }
 
+    // MARK: - Parameter dtypes at load
+
+    /// The expert bias of the first MoE layer.
+    private let expertBiasKey = "language_model.model.layers.2.mlp.expert_bias"
+    /// The attention sinks of the first layer, and the query norm beside them.
+    private let sinksKey = "language_model.model.layers.0.self_attn.softmax_offset"
+    private let queryNormKey = "language_model.model.layers.0.self_attn.q_norm.weight"
+
+    /// The parameters of `model` as a checkpoint, with the tensor under `key`
+    /// stored in `dtype`.
+    private func checkpointWeights(
+        of model: FlintModel, storing key: String, in dtype: DType
+    ) throws -> [String: MLXArray] {
+        var weights = Dictionary(
+            uniqueKeysWithValues: model.parameters().flattened().map { ($0.0, $0.1) })
+        weights[key] = try XCTUnwrap(weights[key]).asType(dtype)
+        return weights
+    }
+
+    /// The router adds the expert bias to float32 scores, so a bfloat16 bias
+    /// loads in float32 and no forward pass casts it.
+    func testSanitizeStoresTheExpertBiasInFloat32() throws {
+        let model = try makeModel()
+        let weights = try checkpointWeights(of: model, storing: expertBiasKey, in: .bfloat16)
+        XCTAssertEqual(model.sanitize(weights: weights)[expertBiasKey]?.dtype, .float32)
+    }
+
+    /// The sinks load in the dtype of the queries that the query norm makes, so
+    /// no forward pass casts them.
+    func testSanitizeStoresTheSinksInTheDtypeOfTheQueryNorm() throws {
+        let model = try makeModel()
+        let weights = try checkpointWeights(of: model, storing: queryNormKey, in: .bfloat16)
+        XCTAssertEqual(model.sanitize(weights: weights)[sinksKey]?.dtype, .bfloat16)
+    }
+
     /// Prefill and token-by-token decode agree past the sliding window, which
     /// checks the rotating cache, its masks, the sinks and the no-RoPE layers.
     func testIncrementalDecodeMatchesFullPrefill() throws {
