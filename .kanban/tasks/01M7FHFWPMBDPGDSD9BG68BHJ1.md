@@ -61,8 +61,24 @@ comments:
     - evidence: commit with subject "perf(flint): cast the expert bias and the sinks once at load, not on every forward (^g68bhj1)" on branch stable; files: Libraries/MLXLLM/Models/Flint.swift, Tests/MLXLMTests/FlintTests.swift, .kanban/ (the board change ships in the same commit, so the sha is read from git log by that subject)
     - next: review
   timestamp: 2026-11-15T14:18:27.214828+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7fs7hkngwb6w2934xekc429
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (001e28ef) — 0 findings (attempted 7, failed 0); Libraries/MLXLLM/Models/Flint.swift and Tests/MLXLMTests/FlintTests.swift reviewed; 6 .kanban files had no matching validator
+    - next: none — task moved to done
+  timestamp: 2026-11-15T14:19:26.197646+00:00
+- actor: claude-code
+  id: 01m7fs7tg1jzw7nrwrq8wppv9v
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — Flint.swift, FlintTests.swift (+2 tests); 94 casts/token removed
+    - test: green — MLXLMTests 1092 XCTest + 2331 ST, Guided 76, FM 494, CXGrammar 7, Macros 11; flintcheck MATCH x4 + TOOL CALL
+    - commit: 001e28ef
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T14:19:35.297565+00:00
+position_column: done
+position_ordinal: ffffa680
 title: 'Flint: stop casting the attention sinks and the expert bias on every forward'
 ---
 ## Why

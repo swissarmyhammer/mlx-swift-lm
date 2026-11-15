@@ -359,7 +359,27 @@ final class FlintFusedAttention: Module, FlintAttentionLayer {
 
 // MARK: - MLP
 
-class FlintMLP: Module, UnaryLayer {
+/// The feed-forward block of a Flint decoder layer: a dense ``FlintMLP`` or
+/// ``FlintFusedMLP``, or a ``FlintSparseMoeBlock``.
+protocol FlintFeedForward: UnaryLayer {
+    /// Adds the output of the block to the residual stream.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, tokens, hiddenSize)`.
+    ///   - residual: The residual stream the output joins, of the shape of `x`.
+    /// - Returns: `residual` plus the block output.
+    func callAsFunction(_ x: MLXArray, residual: MLXArray) -> MLXArray
+}
+
+extension FlintFeedForward {
+    /// Adds the block output to `residual` with one add of its own; a block
+    /// that can fuse the add into its last kernel implements this itself.
+    func callAsFunction(_ x: MLXArray, residual: MLXArray) -> MLXArray {
+        residual + self(x)
+    }
+}
+
+class FlintMLP: Module, FlintFeedForward {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
@@ -386,7 +406,7 @@ class FlintMLP: Module, UnaryLayer {
 
 /// A ``FlintMLP`` whose gate and up projections load as one `gate_up_proj`,
 /// the gate rows first.
-final class FlintFusedMLP: Module, UnaryLayer {
+final class FlintFusedMLP: Module, FlintFeedForward {
     /// The number of projections, gate and up, that `gate_up_proj` holds.
     private static let parts = 2
 
@@ -420,9 +440,15 @@ extension FusedGateUpSwitchGLU: FlintRoutedExperts {}
 /// Sigmoid-routed experts plus one shared expert. The expert bias steers the
 /// choice of experts only; the weights of the chosen experts are their sigmoid
 /// scores, normalized, in float32.
-class FlintSparseMoeBlock: Module, UnaryLayer {
-    let topK: Int
-    let normTopkProb: Bool
+///
+/// A decode step of one token runs through one compiled trace of the block,
+/// which reads the compiled router scores and the compiled combine of
+/// ``FlintCompiledDecode`` and adds the residual stream inside the combine. A
+/// longer block reads the op path of ``FlintExpertRouting``. The two give the
+/// same bits.
+class FlintSparseMoeBlock: Module, FlintFeedForward {
+    /// The routing constants of the checkpoint, and the op path of the routing.
+    let routing: FlintExpertRouting
 
     @ModuleInfo(key: "gate") var gate: Linear
     @ParameterInfo(key: "expert_bias") var expertBias: MLXArray
@@ -430,9 +456,33 @@ class FlintSparseMoeBlock: Module, UnaryLayer {
     /// A ``FlintMLP``, or a ``FlintFusedMLP`` once its projections fuse.
     @ModuleInfo(key: "shared_expert") var sharedExpert: UnaryLayer?
 
+    /// The compiled combine of a block with a shared expert, which a decode
+    /// step reads.
+    private let compiledCombine:
+        @Sendable (MLXArray, MLXArray, MLXArray, MLXArray, MLXArray) -> MLXArray
+
+    /// The compiled combine of a block without a shared expert, which a decode
+    /// step reads.
+    private let compiledRoutedCombine:
+        @Sendable (MLXArray, MLXArray, MLXArray, MLXArray) -> MLXArray
+
+    /// The compiled trace of one decode step, which reads the weights of
+    /// this block as inputs. Its arguments are `[x, residual]`, and its one
+    /// result is `residual` plus the block output.
+    ///
+    /// One trace replays the whole decode step of the block: the gate, the
+    /// router kernel, the experts and the combine. The CPU then builds one
+    /// primitive for the block where the op path builds one for each step.
+    let compiledDecodeStep = CompiledTrace<FlintSparseMoeBlock> { block, arguments in
+        [block.decodeStep(arguments[0], residual: arguments[1])]
+    }
+
     init(_ args: FlintConfiguration) {
-        self.topK = args.numExpertsPerToken
-        self.normTopkProb = args.normTopkProb
+        let routing = FlintExpertRouting(
+            topK: args.numExpertsPerToken, normalizesWeights: args.normTopkProb)
+        self.routing = routing
+        self.compiledCombine = FlintCompiledDecode.combine(routing)
+        self.compiledRoutedCombine = FlintCompiledDecode.combineRoutedExperts(routing)
 
         _gate.wrappedValue = Linear(args.hiddenSize, args.numExperts, bias: false)
         _expertBias.wrappedValue = zeros([args.numExperts])
@@ -446,39 +496,50 @@ class FlintSparseMoeBlock: Module, UnaryLayer {
         }
     }
 
+    /// The op path of one block of tokens.
+    ///
+    /// - Parameter x: The block input, shape `(batch, tokens, hiddenSize)`.
+    /// - Returns: The block output, of the shape and dtype of `x`.
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        // The projection runs in the activation dtype; sigmoid, selection and
-        // normalization run in float32, as the reference does. The bias loads
-        // in float32 (see `FlintModel.sanitize`); a bias of another dtype
-        // promotes to float32 in the add.
-        let scores = sigmoid(gate(x).asType(.float32))
-        let choice = scores + expertBias
+        let router = FlintExpertRouting.scores(logits: gate(x), bias: expertBias)
+        let selected = routing.selected(scores: router.scores, choice: router.choice)
+        return routing.combined(
+            x, routed: switchMLP(x, selected.indices), weights: selected.weights,
+            shared: sharedExpert?(x))
+    }
 
-        let indices: MLXArray
-        var weights: MLXArray
-        if supportsFusedRouterTopK(choice, k: topK) {
-            (indices, weights) = fusedRouterTopK(
-                selection: choice, values: scores, k: topK, normalize: false,
-                order: .ascending)
-        } else {
-            let kth = choice.dim(-1) - topK
-            indices = MLX.stopGradient(
-                MLX.argPartition(choice, kth: kth, axis: -1)[.ellipsis, kth...])
-            weights = MLX.takeAlong(scores, indices, axis: -1)
+    /// Adds the output of one block of tokens to the residual stream.
+    ///
+    /// A block of one token runs through ``compiledDecodeStep``, and a longer
+    /// block reads the op path. The two give the same bits.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, tokens, hiddenSize)`.
+    ///   - residual: The residual stream the output joins, of the shape of `x`.
+    /// - Returns: `residual` plus the block output.
+    func callAsFunction(_ x: MLXArray, residual: MLXArray) -> MLXArray {
+        guard FlintCompiledDecode.isDecodeStep(x) else {
+            return residual + self(x)
         }
-        if normTopkProb {
-            weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-20)
-        }
+        return compiledDecodeStep(self, [x, residual])[0]
+    }
 
-        // The weights are float32, so the compiled sum promotes the routed
-        // outputs to float32 inside its fused multiply, with no cast kernel of
-        // its own.
-        let routed = switchMLP(x, indices)
-        var out = weightedExpertSum(routed, weights).asType(x.dtype)
-        if let sharedExpert {
-            out = out + sharedExpert(x)
+    /// The body of ``compiledDecodeStep``: the decode step of the block, with
+    /// the compiled router scores and the compiled combine, which adds the
+    /// residual stream.
+    ///
+    /// - Parameters:
+    ///   - x: The block input, shape `(batch, 1, hiddenSize)`.
+    ///   - residual: The residual stream the output joins, of the shape of `x`.
+    /// - Returns: `residual` plus the block output.
+    private func decodeStep(_ x: MLXArray, residual: MLXArray) -> MLXArray {
+        let (scores, choice) = FlintCompiledDecode.routerScores(gate(x), expertBias)
+        let selected = routing.selected(scores: scores, choice: choice)
+        let routed = switchMLP(x, selected.indices)
+        guard let sharedExpert else {
+            return compiledRoutedCombine(x, routed, selected.weights, residual)
         }
-        return out
+        return compiledCombine(x, routed, selected.weights, sharedExpert(x), residual)
     }
 
     /// Fuses the routed gate and up projections, and those of the shared
@@ -503,6 +564,110 @@ class FlintSparseMoeBlock: Module, UnaryLayer {
         {
             try replaceChild("shared_expert", with: fused)
         }
+    }
+}
+
+/// The routing constants of a Flint checkpoint, and the op path of the
+/// routing and of the combine of a ``FlintSparseMoeBlock``.
+///
+/// The routing lives in a value type rather than in the block, because
+/// ``FlintCompiledDecode`` compiles it: a compiled body can capture a
+/// `Sendable` value, and it cannot capture a module.
+struct FlintExpertRouting: Sendable {
+    /// The number of routed experts one token reads.
+    let topK: Int
+
+    /// True when the selected weights divide by their own sum
+    /// (`norm_topk_prob`).
+    let normalizesWeights: Bool
+
+    /// The epsilon the normalization adds, so that selected weights that add
+    /// up to zero cannot divide by zero.
+    private static let normalizeEpsilon: Float = 1e-20
+
+    /// The axis of a `(batch, tokens, experts)` score tensor that holds one
+    /// score for each routed expert. It is the last axis.
+    private static let expertAxis = -1
+
+    /// Scores every routed expert.
+    ///
+    /// The projection runs in the activation dtype; the sigmoid and the
+    /// selection run in float32, as the reference does. The bias loads in
+    /// float32 (see ``FlintModel/sanitize(weights:)``); a bias of another
+    /// dtype promotes to float32 in the add.
+    ///
+    /// - Parameters:
+    ///   - logits: The gate projection of the block, shape
+    ///     `(batch, tokens, experts)`.
+    ///   - bias: The expert bias, one value for each routed expert.
+    /// - Returns: The sigmoid scores, which weigh the selected experts, and
+    ///   the biased scores, which select them. Both are float32.
+    static func scores(logits: MLXArray, bias: MLXArray) -> (scores: MLXArray, choice: MLXArray) {
+        let scores = sigmoid(logits.asType(.float32))
+        return (scores, scores + bias)
+    }
+
+    /// Selects the ``topK`` experts of the highest biased scores, and gathers
+    /// their unbiased scores, in ascending order of the biased score.
+    ///
+    /// A single row reads the fused router kernel, and any other block reads
+    /// the generic MLX chain. The two give the same bits.
+    ///
+    /// - Parameters:
+    ///   - scores: The sigmoid scores, shape `(batch, tokens, experts)`.
+    ///   - choice: The biased scores, of the shape of `scores`.
+    /// - Returns: The selected experts and their scores, each of shape
+    ///   `(batch, tokens, topK)`. The scores are not normalized yet.
+    func selected(scores: MLXArray, choice: MLXArray) -> (indices: MLXArray, weights: MLXArray) {
+        guard supportsFusedRouterTopK(choice, k: topK) else {
+            let kth = choice.dim(Self.expertAxis) - topK
+            let indices = MLX.stopGradient(
+                MLX.argPartition(choice, kth: kth, axis: Self.expertAxis)[.ellipsis, kth...])
+            return (indices, MLX.takeAlong(scores, indices, axis: Self.expertAxis))
+        }
+        let fused = fusedRouterTopK(
+            selection: choice, values: scores, k: topK, normalize: false, order: .ascending)
+        return (fused.indices, fused.scores)
+    }
+
+    /// Divides the selected weights by their own sum when the checkpoint
+    /// normalizes them, and leaves them as they are otherwise.
+    ///
+    /// - Parameter weights: The selected weights, shape `(batch, tokens, topK)`.
+    /// - Returns: The weights the combine reads, of the shape of `weights`.
+    func normalized(_ weights: MLXArray) -> MLXArray {
+        guard normalizesWeights else {
+            return weights
+        }
+        return weights
+            / (weights.sum(axis: Self.expertAxis, keepDims: true) + Self.normalizeEpsilon)
+    }
+
+    /// Weighs the outputs of the selected experts, adds them up, and adds the
+    /// output of the shared expert.
+    ///
+    /// The weights are float32, so the compiled sum promotes the routed
+    /// outputs to float32 inside its fused multiply, with no cast kernel of
+    /// its own. The sum then casts back to the dtype of the block input.
+    ///
+    /// - Parameters:
+    ///   - x: The block input. Only its dtype reaches the result.
+    ///   - routed: The output of each selected expert, shape
+    ///     `(batch, tokens, topK, hiddenSize)`.
+    ///   - weights: The selected weights, shape `(batch, tokens, topK)`, not
+    ///     normalized yet.
+    ///   - shared: The output of the shared expert, or `nil` for a block that
+    ///     holds none.
+    /// - Returns: The block output, shape `(batch, tokens, hiddenSize)`, in the
+    ///   dtype of `x` (or the dtype of its sum with `shared`).
+    func combined(
+        _ x: MLXArray, routed: MLXArray, weights: MLXArray, shared: MLXArray?
+    ) -> MLXArray {
+        let summed = weightedExpertSum(routed, normalized(weights)).asType(x.dtype)
+        guard let shared else {
+            return summed
+        }
+        return summed + shared
     }
 }
 
@@ -612,7 +777,7 @@ class FlintDecoderLayer: Module {
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
     /// A dense ``FlintMLP`` or ``FlintFusedMLP``, or a ``FlintSparseMoeBlock``.
-    @ModuleInfo var mlp: UnaryLayer
+    @ModuleInfo var mlp: any FlintFeedForward
 
     init(_ args: FlintConfiguration, layerIdx: Int) {
         self.window = args.window(layer: layerIdx)
@@ -651,7 +816,7 @@ class FlintDecoderLayer: Module {
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
         let h = x + selfAttn(inputLayerNorm(x), mask: mask, cache: cache)
-        return h + mlp(postAttentionLayerNorm(h))
+        return mlp(postAttentionLayerNorm(h), residual: h)
     }
 }
 
