@@ -50,6 +50,47 @@ comments:
     - evidence: commit "perf(flint): compile the one-token MoE decode step (^pg2hsb8)" (the sha is the commit with this subject on branch stable; it cannot be written into the comment it ships in). Files: Libraries/MLXLLM/Models/Flint.swift, Libraries/MLXLLM/Models/FlintCompiledDecode.swift, Tests/MLXLMTests/FlintCompiledDecodeTests.swift, and all .kanban/ changes (including new card ^3fpsgjv).
     - next: review
   timestamp: 2026-11-15T15:11:10.521300+00:00
+- actor: claude-code
+  id: 01m7fwbzkdw2w1fj78w92ck8mg
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (864b34d9) — 2 findings (2 confirmed, 3 refuted): Libraries/MLXLLM/Models/Flint.swift:539, Tests/MLXLMTests/FlintCompiledDecodeTests.swift:171
+    - next: implement — add block-level decode parity tests for the no-shared-expert path and for normalizesWeights == false
+  timestamp: 2026-11-15T15:14:17.325595+00:00
+- actor: claude-code
+  id: 01m7fwcabc0svt7eq0np1ptxvm
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — Flint.swift, FlintCompiledDecode.swift (new), FlintCompiledDecodeTests.swift (new)
+    - test: green — MLXLMTests 1092 XCTest + 2337 ST, Guided 76, FM 494, CXGrammar 7, Macros 11; flintcheck MATCH x4 + TOOL CALL
+    - commit: 864b34d9
+    - review: findings — Libraries/MLXLLM/Models/Flint.swift:539, Tests/MLXLMTests/FlintCompiledDecodeTests.swift:171
+  timestamp: 2026-11-15T15:14:28.332888+00:00
+- actor: claude-code
+  id: 01m7fwm4vmnwxwrchjjyg11b9r
+  text: 'Picked up the 2 review findings (back to doing). Approach, tests only: FlintCompiledDecodeTests gets a `BlockVariant` (hasSharedExpert × normalizesWeights, 4 variants); `configurationJSON(_:)` sets shared_expert_intermediate_size 40 or 0 and norm_topk_prob from the variant; `moeBlock(_:dtype:)` still builds under withRandomState(seed). The block-level parity test now runs activationDTypes × blockVariants (8 cases). Two guard tests confirm each variant builds the block it names (sharedExpert nil iff width 0; routing.normalizesWeights). RED via a temporary Flint.swift mutation (no-shared branch adds residual twice; compiledCombine forced to normalize) to prove the new cases reach both branches; mutation reverted afterwards.'
+  timestamp: 2026-11-15T15:18:44.852319+00:00
+- actor: claude-code
+  id: 01m7fx5nk4my9dbcx2n5cw4gcq
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Tests/MLXLMTests/FlintCompiledDecodeTests.swift (tests only; Flint.swift and FlintCompiledDecode.swift are unchanged, so flintcheck was not needed). Added BlockVariant (shared expert on/off × norm_topk_prob on/off); configurationJSON(_:) and moeBlock(_:dtype:) are parameterized, and the block is still built under withRandomState. aDecodeStepOfTheMoEBlockGivesTheBitsOfTheOpPath now runs activationDTypes × blockVariants (8 cases, bit-exact). New guard tests: theBlockHasTheSharedExpertOfItsVariant and theBlockRoutesWithTheNormalizationOfItsVariant (4 cases each). RED: a temporary Flint.swift mutation (the no-shared branch added the residual twice, and compiledCombine was forced to normalize) failed exactly the 6 expected block cases, all 4 no-shared and the 2 shared+unnormalized. Reverted; git diff on Libraries is empty. GREEN: swift build --build-tests gave no new warnings. MLXLMTests: 2339 Swift Testing tests passed with 3 known issues, and 1092 XCTest tests ran with 4 skipped (LFM2 env) and 0 failures. MLXGuidedGenerationTests 76, MLXFoundationModelsTests 494, CXGrammarTests 7 and MLXHuggingFaceMacrosTests 11 all passed. swift-format applied. Both findings are marked [x]. Not committed.
+    - next: /test, /review
+  timestamp: 2026-11-15T15:28:19.044238+00:00
+- actor: claude-code
+  id: 01m7fxkggf8ysz7qtxhspst96e
+  text: |-
+    ### test — green
+    - evidence: git diff --stat shows only Tests/MLXLMTests/FlintCompiledDecodeTests.swift changed (Libraries/ unchanged, real-model guard not needed). swift build --build-tests exit 0, no code warnings. xctest per bundle: MLXLMTests 2339 Swift Testing tests / 222 suites passed with 3 known issues, plus 1092 XCTest tests with 4 skipped (the LFM2 env skips) and 0 failures; FlintCompiledDecodeTests and GDNDecodeKernelLayerTests passed. MLXGuidedGenerationTests 76 passed. MLXFoundationModelsTests 494 passed. CXGrammarTests 7 passed. MLXHuggingFaceMacrosTests 11 passed, 0 failures. swift-format lint -s on FlintCompiledDecodeTests.swift clean.
+    - next: review
+  timestamp: 2026-11-15T15:35:52.591459+00:00
+- actor: claude-code
+  id: 01m7fxm7gnatbr1nh4p13vktf1
+  text: |-
+    ### commit — changed
+    - evidence: test(flint): check the compiled decode step through the block without a shared expert and without normalization, found in review of ^pg2hsb8 (Tests/MLXLMTests/FlintCompiledDecodeTests.swift, .kanban/)
+    - next: review
+  timestamp: 2026-11-15T15:36:16.149759+00:00
 depends_on:
 - 01M7FHFQT76AN9817CJJ4PQTWR
 - 01M7FHFWPMBDPGDSD9BG68BHJ1
@@ -75,3 +116,20 @@ title: 'Flint: compile the one-token decode step (router math, combine, residual
 - The op path and the compiled path are bit-exact in a unit test on a tiny config.
 - ms/token and graph-build time improve (flintcli `graph` mode prints build, asyncEval and wait per token).
 - All five bundles are green. #flint-perf
+
+## Review Findings (2026-11-15 09:11)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 3 file(s) reviewed, 8 not reviewed.
+
+> 8 file(s) not reviewed — no validator matched:
+> - `.kanban/tags/01M7FT5BE124TZQK1AC8KQQEP5.jsonl` — no validator matches this file
+> - `.kanban/tags/01M7FT5BE124TZQK1AC8KQQEP5.yaml` — no validator matches this file
+> - `.kanban/tasks/01M7FHFWPMBDPGDSD9BG68BHJ1.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHFWPMBDPGDSD9BG68BHJ1.md` — no validator matches this file
+> - `.kanban/tasks/01M7FHG1KPDNCWYR3DCPG2HSB8.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHG1KPDNCWYR3DCPG2HSB8.md` — no validator matches this file
+> - `.kanban/tasks/01M7FT5BE0SGR7YZB4T3FPSGJV.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FT5BE0SGR7YZB4T3FPSGJV.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/Models/Flint.swift:539` `completeness/invariant-propagation` — The compiled decode step's no-shared-expert branch (`compiledRoutedCombine`) is never exercised through the block. Its only test calls the combine function directly, so the wiring that picks this branch in `decodeStep` has no parity coverage. Add a block-level decode parity test with `shared_expert_intermediate_size` set to 0, so the block has no shared expert and the guard takes the `compiledRoutedCombine` path. Compare `block(x, residual:)` with `residual + block(x)` bit for bit, in both dtypes.
+- [x] `Tests/MLXLMTests/FlintCompiledDecodeTests.swift:171` `completeness/invariant-propagation` — The block-level decode parity test fixes `norm_topk_prob` to true. The `normalizesWeights == false` branch of the compiled decode step is therefore never run through a whole MoE block, even though the change compiles that branch. Only the standalone combine tests cover the false setting. Parameterize `configurationJSON` or `moeBlock` over `normalizesWeights`, and run the block-level parity test for both settings and both activation dtypes.

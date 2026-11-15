@@ -157,30 +157,76 @@ struct FlintCompiledDecodeTests {
 
     // MARK: - The MoE block
 
-    /// A tiny Flint configuration whose MoE block reads ``expertCount``
-    /// experts, ``expertsPerToken`` of them for each token, and one shared
-    /// expert.
-    private static let configurationJSON = """
-        {
-            "model_type": "flint", "hidden_size": \(hiddenSize), "num_hidden_layers": 1,
-            "intermediate_size": 32, "num_attention_heads": 4, "num_key_value_heads": 2,
-            "head_dim": 8, "vocab_size": 64, "layer_types": ["full_attention"],
-            "softmax_type": "learnable", "num_experts": \(expertCount),
-            "num_experts_per_tok": \(expertsPerToken), "moe_intermediate_size": 24,
-            "shared_expert_intermediate_size": 40, "router_score_function": "sigmoid",
-            "norm_topk_prob": true, "hidden_act": "silu"
+    /// One variant of the tiny MoE block: with or without a shared expert,
+    /// and with or without `norm_topk_prob`.
+    struct BlockVariant: CustomTestStringConvertible, Sendable {
+        /// True when the block has a shared expert, so that a decode step
+        /// reads the compiled combine with the shared-expert add; false when
+        /// it reads the compiled combine of the routed experts alone.
+        let hasSharedExpert: Bool
+        /// The `norm_topk_prob` of the block.
+        let normalizesWeights: Bool
+
+        /// The text the test report shows for this variant.
+        var testDescription: String {
+            let shared = hasSharedExpert ? "shared expert" : "no shared expert"
+            let normalization = normalizesWeights ? "normalized" : "unnormalized"
+            return "\(shared), \(normalization)"
         }
-        """
+    }
+
+    /// The two settings of the shared expert: present and absent.
+    private static let sharedExpertSettings = [true, false]
+
+    /// Each shared-expert setting with each setting of `norm_topk_prob`.
+    static let blockVariants = sharedExpertSettings.flatMap { hasSharedExpert in
+        normalizations.map {
+            BlockVariant(hasSharedExpert: hasSharedExpert, normalizesWeights: $0)
+        }
+    }
+
+    /// The intermediate width of the shared expert of a block that has one.
+    private static let sharedExpertWidth = 40
+
+    /// The `shared_expert_intermediate_size` that leaves a block without a
+    /// shared expert.
+    private static let noSharedExpertWidth = 0
+
+    /// A tiny Flint configuration whose MoE block reads ``expertCount``
+    /// experts, ``expertsPerToken`` of them for each token, and the shared
+    /// expert and the normalization of `variant`.
+    private static func configurationJSON(_ variant: BlockVariant) -> String {
+        let sharedWidth = variant.hasSharedExpert ? sharedExpertWidth : noSharedExpertWidth
+        return """
+            {
+                "model_type": "flint", "hidden_size": \(hiddenSize), "num_hidden_layers": 1,
+                "intermediate_size": 32, "num_attention_heads": 4, "num_key_value_heads": 2,
+                "head_dim": 8, "vocab_size": 64, "layer_types": ["full_attention"],
+                "softmax_type": "learnable", "num_experts": \(expertCount),
+                "num_experts_per_tok": \(expertsPerToken), "moe_intermediate_size": 24,
+                "shared_expert_intermediate_size": \(sharedWidth),
+                "router_score_function": "sigmoid",
+                "norm_topk_prob": \(variant.normalizesWeights), "hidden_act": "silu"
+            }
+            """
+    }
+
+    /// The variant of the block the trace tests read: a shared expert and
+    /// normalized weights, as the Flint checkpoints have.
+    private static let checkpointVariant = BlockVariant(
+        hasSharedExpert: true, normalizesWeights: true)
 
     /// The key of the expert bias among the parameters of a MoE block.
     private static let expertBiasKey = "expert_bias"
 
-    /// A MoE block of ``configurationJSON`` with a nonzero expert bias, whose
-    /// floating-point parameters take `dtype`. The expert bias stays in
-    /// float32, as ``FlintModel/sanitize(weights:)`` stores it.
-    private static func moeBlock(dtype: DType) throws -> FlintSparseMoeBlock {
+    /// A MoE block of ``configurationJSON(_:)`` for `variant` with a nonzero
+    /// expert bias, whose floating-point parameters take `dtype`. The expert
+    /// bias stays in float32, as ``FlintModel/sanitize(weights:)`` stores it.
+    private static func moeBlock(
+        _ variant: BlockVariant = checkpointVariant, dtype: DType
+    ) throws -> FlintSparseMoeBlock {
         let configuration = try JSONDecoder().decode(
-            FlintConfiguration.self, from: Data(configurationJSON.utf8))
+            FlintConfiguration.self, from: Data(configurationJSON(variant).utf8))
         // The initial weights draw from a random state of their own, so that
         // building the block leaves the global random state of the bundle as
         // it was for every other suite.
@@ -198,9 +244,25 @@ struct FlintCompiledDecodeTests {
         return block
     }
 
-    @Test(arguments: activationDTypes)
-    func aDecodeStepOfTheMoEBlockGivesTheBitsOfTheOpPath(dtype: DType) throws {
-        let block = try Self.moeBlock(dtype: dtype)
+    @Test(arguments: blockVariants)
+    func theBlockHasTheSharedExpertOfItsVariant(variant: BlockVariant) throws {
+        let block = try Self.moeBlock(variant, dtype: .float32)
+
+        #expect((block.sharedExpert != nil) == variant.hasSharedExpert)
+    }
+
+    @Test(arguments: blockVariants)
+    func theBlockRoutesWithTheNormalizationOfItsVariant(variant: BlockVariant) throws {
+        let block = try Self.moeBlock(variant, dtype: .float32)
+
+        #expect(block.routing.normalizesWeights == variant.normalizesWeights)
+    }
+
+    @Test(arguments: activationDTypes, blockVariants)
+    func aDecodeStepOfTheMoEBlockGivesTheBitsOfTheOpPath(
+        dtype: DType, variant: BlockVariant
+    ) throws {
+        let block = try Self.moeBlock(variant, dtype: dtype)
         let x = Self.randomArray(Self.decodeShape + [Self.hiddenSize], seed: Seed.x, dtype: dtype)
         let residual = Self.randomArray(
             Self.decodeShape + [Self.hiddenSize], seed: Seed.residual, dtype: dtype)
@@ -208,7 +270,7 @@ struct FlintCompiledDecodeTests {
         let reference = residual + block(x)
         let compiled = block(x, residual: residual)
 
-        expectSameBits(compiled, reference, "MoE block")
+        expectSameBits(compiled, reference, "MoE block, \(variant.testDescription)")
     }
 
     /// The token count of a prefill block in the trace test.
