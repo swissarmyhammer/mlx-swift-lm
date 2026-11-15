@@ -61,6 +61,50 @@ comments:
     - evidence: commit subject `perf(flint): prefill in 2048-token steps without the output projection (^tty395a)`; files Libraries/MLXLLM/Models/Flint.swift, Libraries/MLXLMCommon/PrefillParameters.swift, Tests/MLXLMTests/FlintTests.swift, and all .kanban/ changes (including ^v6cgcp6, ^dnsqaqc). Local commit on stable, not pushed. The sha is in the commit itself.
     - next: none
   timestamp: 2026-11-15T16:13:35.579950+00:00
+- actor: claude-code
+  id: 01m7fzvwg4a6ts1bp7nh77g08t
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (6adfaa83) — 1 finding (1 confirmed, 2 refuted): Tests/MLXLMTests/FlintTests.swift:242 code-hygiene/disallowed-constructs-swift no_unchecked_sendable
+    - next: implement the open item in the 2026-11-15 10:13 Review Findings section, then re-review
+  timestamp: 2026-11-15T16:15:24.164054+00:00
+- actor: claude-code
+  id: 01m7fzw7bhjxvd2h94xne3zefp
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — Flint.swift (FlintModel.prepare), PrefillParameters.swift (doc), FlintTests.swift (+3 tests)
+    - test: green — MLXLMTests 1095 XCTest + 2339 ST, Guided 76, FM 494, CXGrammar 7, Macros 11; flintcheck MATCH x4 + TOOL CALL
+    - commit: 6adfaa83
+    - review: findings — Tests/MLXLMTests/FlintTests.swift:242 (no_unchecked_sendable)
+  timestamp: 2026-11-15T16:15:35.281667+00:00
+- actor: claude-code
+  id: 01m7g0aff15v1a66rdynpgdabv
+  text: |-
+    ### implement — changed
+    - finding: `Tests/MLXLMTests/FlintTests.swift:242` no_unchecked_sendable. `ProgressLog` was a `final class: @unchecked Sendable` with a mutable `var processed`. It is now a plain `Sendable` struct around `OSAllocatedUnfairLock<[Int]>` (the pattern of `ClearLog` in GenerationBufferPoolClearingTests and `CallCounter` in SampleTests): `record(_:)` appends under the lock, and `processed` reads under the lock. The test closure calls `log.record(processed)`. Added `import os`. The file has no other `@unchecked Sendable`. Finding flipped to [x].
+    - evidence: swift build --build-tests clean. xcrun xctest: MLXLMTests XCTest 1095 run, 4 skipped (LFM2 baseline), 0 failures; Swift Testing 2339 tests in 222 suites passed, 3 known issues (baseline). MLXGuidedGenerationTests 76, MLXFoundationModelsTests 494, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11, all passed. swift-format run; only FlintTests.swift and this card changed. Tests-only change, so flintcheck was not needed.
+    - next: /review (task left in doing, not committed)
+  timestamp: 2026-11-15T16:23:22.337003+00:00
+- actor: claude-code
+  id: 01m7g0r07e4qgbjjfhv04v7tz8
+  text: |-
+    ### test — green
+    - evidence: `swift build --build-tests` ok (the only build output warning is the SwiftPM bundle message "missing creator for mutated node ... mlx-swift_Cmlx.bundle/Contents/MacOS", which is tooling output, not a compiler warning). `git diff --stat` shows Libraries/ unchanged (only Tests/MLXLMTests/FlintTests.swift plus the task's .kanban files), so the real-model guard did not run.
+    - MLXLMTests: XCTest 1095 run, 0 failures, 4 skipped (the 4 LFM2 env skips); Swift Testing 2339 tests in 222 suites passed with 3 known issues (the baseline). GDNDecodeKernelLayerTests passed.
+    - MLXGuidedGenerationTests: 76 tests in 17 suites passed.
+    - MLXFoundationModelsTests: 494 tests in 66 suites passed.
+    - CXGrammarTests: 7 tests in 5 suites passed.
+    - MLXHuggingFaceMacrosTests: 11 XCTest tests, 0 failures.
+    - swift-format lint -s --configuration .swift-format Tests/MLXLMTests/FlintTests.swift: clean.
+    - next: review/commit
+  timestamp: 2026-11-15T16:30:45.486692+00:00
+- actor: claude-code
+  id: 01m7g0rpmgyfdcd81gyg9p69g7
+  text: |-
+    ### commit — changed
+    - evidence: commit `test(flint): guard the prefill progress log with a lock instead of @unchecked Sendable, found in review of ^tty395a` (sha recorded in the returned step block); files: Tests/MLXLMTests/FlintTests.swift, .kanban/tasks/01M7FHGCSXZ04AJXT9MTTY395A.jsonl, .kanban/tasks/01M7FHGCSXZ04AJXT9MTTY395A.md
+    - next: none
+  timestamp: 2026-11-15T16:31:08.432820+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Flint: profile prefill and close the gap to mlx-vlm (5.6–6k vs 7–7.7k tok/s)'
@@ -82,3 +126,19 @@ On oQ4e, Swift prefill runs at 5.6–6.0k tok/s from 2k to 16k context. mlx-vlm 
 - Float32 logit parity is unchanged.
 - Greedy ids are identical.
 - All five bundles are green. #flint-perf
+
+## Review Findings (2026-11-15 10:13)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 3 file(s) reviewed, 8 not reviewed.
+
+> 8 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7FHG1KPDNCWYR3DCPG2HSB8.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHG1KPDNCWYR3DCPG2HSB8.md` — no validator matches this file
+> - `.kanban/tasks/01M7FHGCSXZ04AJXT9MTTY395A.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FHGCSXZ04AJXT9MTTY395A.md` — no validator matches this file
+> - `.kanban/tasks/01M7FYTG4PAPKM8D19MV6CGCP6.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FYTG4PAPKM8D19MV6CGCP6.md` — no validator matches this file
+> - `.kanban/tasks/01M7FYTZF2HYAQC0D86DNSQAQC.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7FYTZF2HYAQC0D86DNSQAQC.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/FlintTests.swift:242` `code-hygiene/disallowed-constructs-swift` — no_unchecked_sendable: Instead of @unchecked Sendable, write a plain Sendable conformance or a @preconcurrency import. If the type really must be @unchecked Sendable, write // swiftlint:disable:next no_unchecked_sendable above it with the synchronization invariant that makes the type thread-safe.
