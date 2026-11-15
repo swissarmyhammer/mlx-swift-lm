@@ -42,8 +42,24 @@ comments:
     - evidence: local commit on stable (no push), subject: `chore(kanban): record that the Flint chunked-prefill logit gap is an MoE router near-tie, not a defect (^5smnpg3)`; files: .kanban/tasks/01M7FHG7TA2MGDAS4Q5NANQJ4P.{jsonl,md}, .kanban/tasks/01M7GCNJFYATF646QNT5SMNPG3.{jsonl,md}. The sha is the commit with this subject (see git log).
     - next: none, investigation record only; no code changed.
   timestamp: 2026-11-15T20:47:57.683986+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7gffshvxjdsx8tk3jnn4e8q
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (feecfcb6) — 0 findings; 4 .kanban/ files in the delta, no validator matched them (no code change; investigation outcome)
+    - next: none — task moved to done
+  timestamp: 2026-11-15T20:48:25.147907+00:00
+- actor: claude-code
+  id: 01m7gfg8t1xq6t9rw3d5rdda63
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: no-change — investigation: MoE router near-tie, reference shows the same gap; not a defect
+    - test: skipped — empty code diff
+    - commit: feecfcb6 (kanban evidence only)
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-15T20:48:40.769858+00:00
+position_column: done
+position_ordinal: ffffac80
 title: 'Flint: decode after a chunked prefill differs from a cold prefill by up to 1.3 float32 logits'
 ---
 ## Why
