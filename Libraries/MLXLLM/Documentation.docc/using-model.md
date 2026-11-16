@@ -116,6 +116,36 @@ DSpark currently requires greedy decoding (`temperature: 0`) so verification
 remains exact. Pair each draft with the target named in its model card; loading
 or running incompatible architecture dimensions fails closed.
 
+### DFlash2 speculative decoding
+
+A DFlash2 drafter proposes a block of tokens in one pass, from the outputs of some
+layers of a Qwen 3.5 or Qwen 3.8 target, and the target checks the block in one
+forward pass. It is an MTP drafter, so the MTP generation overloads and
+`ChatSession` speculate with it, and a chat keeps its prompt cache between turns.
+Load the drafter through its registration, which can also quantize it at load:
+
+```swift
+let target = try await LLMModelFactory.shared.loadContainer(
+    from: downloader, using: tokenizerLoader,
+    configuration: LLMRegistry.qwen3_8_27b_4bit)
+
+// `.dflash2` keeps the bf16 checkpoint; `.dflash2FourBit` quantizes its linear
+// layers to 4 bits (affine, groups of 64) as it loads.
+let drafter = try await MTPDrafterRegistration.dflash2FourBit.loadContainer(
+    from: downloader, using: tokenizerLoader,
+    configuration: MTPDrafterRegistry.qwen3_8_27b_dflash2)
+
+let session = ChatSession(
+    target,
+    speculativeDecoding: try SpeculativeDecodingConfig(mtpDrafter: drafter, blockSize: 5))
+```
+
+The `blockSize` counts the tokens of each verify, the bonus token included. The
+drafter caps it at its trained block (8 for Qwen3.8-27B) and at the eight tokens
+a Qwen 3.5 target verifies in place. Greedy streams accept the drafts the target
+agrees with; sampled streams verify the greedy drafts by sample-and-match, so the
+output follows the target's distribution.
+
 ## Evaluation Flow
 
 - Load the Model

@@ -50,6 +50,11 @@ public class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
     public static let lfm2_8B_A1B_dspark = ModelConfiguration(
         id: "LiquidAI/LFM2.5-8B-A1B-DSpark"
     )
+    /// The DFlash2 block drafter of Qwen3.8-27B, bf16; `DFlash2Registration` in MLXLLM
+    /// registers its model type, and can quantize it at load.
+    public static let qwen3_8_27b_dflash2 = ModelConfiguration(
+        id: "incoai/Qwen3.8-27B-DFlash2"
+    )
 
     private static func all() -> [ModelConfiguration] {
         [
@@ -59,6 +64,7 @@ public class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
             lfm2_1_2B_instruct_dspark,
             lfm2_2_6B_dspark,
             lfm2_8B_A1B_dspark,
+            qwen3_8_27b_dflash2,
         ]
     }
 }

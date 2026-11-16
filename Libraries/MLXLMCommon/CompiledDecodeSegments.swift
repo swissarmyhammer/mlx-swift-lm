@@ -47,6 +47,19 @@ package struct CompiledDecodeSegment: Sendable, Equatable {
             + (attentionPreLayer.map { [$0] } ?? [])
     }
 
+    /// The layers of `captureLayers` whose output this segment computes, in
+    /// layer order: the full-attention layer it closes, then its gated delta
+    /// net layers. The output of the full-attention layer this segment opens
+    /// with the head of is computed by the next segment.
+    ///
+    /// - Parameter captureLayers: The layers whose outputs a verify captures.
+    /// - Returns: The captured layers of this segment, in the order of its
+    ///   capture outputs.
+    package func capturedLayers(of captureLayers: [Int]) -> [Int] {
+        ((attentionPostLayer.map { [$0] } ?? []) + linearLayers).filter(
+            captureLayers.contains)
+    }
+
     /// Build the maximal segments separated by full-attention cache writes.
     package static func schedule(linearLayers: [Bool]) -> [Self] {
         var segments: [Self] = []
@@ -99,7 +112,9 @@ extension CompiledDecodeSegment {
     /// `[newConvState, newRecState]` per GDN layer (followed, for a verify,
     /// by the snapshot slots of
     /// ``GatedDeltaDecodeKernel/Snapshots/traceArrays``), then the
-    /// ``AttentionOutput`` arrays when closing with a head.
+    /// ``AttentionOutput`` arrays when closing with a head, then, for a verify
+    /// that captures layer outputs, the output of each layer of
+    /// ``capturedLayers(of:)``.
     ///
     /// The segment that closes the schedule, the one with no attention head,
     /// ends a decode step with the final norm. A verify leaves the norm to
@@ -118,11 +133,16 @@ extension CompiledDecodeSegment {
         _ input: MLXArray, arguments: [MLXArray], layers: [Layer], finalNorm: RMSNorm,
         verify: CompiledVerifyShape?
     ) -> [MLXArray] {
+        let captureLayers = verify?.captureLayers ?? []
+        var captured: [MLXArray] = []
         var hiddenStates = input
         if let post = attentionPostLayer {
             hiddenStates = layers[post].attentionPostBody(
                 x: hiddenStates, attention: arguments[AttentionInput.attention],
                 gate: arguments[AttentionInput.gate])
+            if captureLayers.contains(post) {
+                captured.append(hiddenStates)
+            }
         }
 
         var states: [MLXArray] = []
@@ -135,18 +155,22 @@ extension CompiledDecodeSegment {
             states +=
                 [step.convState, step.recurrentState]
                 + Self.snapshotOutputs(step.snapshots, verify: verify)
+            if captureLayers.contains(layerIndex) {
+                captured.append(hiddenStates)
+            }
         }
 
         if let pre = attentionPreLayer {
             let head = layers[pre].attentionPreBody(x: hiddenStates)
             // The next segment needs the attention layer's input for its residual.
             return [hiddenStates] + states + [head.queries, head.gate, head.keys, head.values]
+                + captured
         }
 
         if verify == nil {
             hiddenStates = finalNorm(hiddenStates)
         }
-        return [hiddenStates] + states
+        return [hiddenStates] + states + captured
     }
 
     /// The snapshot slots a GDN layer of a verify segment gives back, as
@@ -206,10 +230,12 @@ package final class CompiledDecodeSegmentCache<Owner: Module>: CompiledTraceInva
 }
 
 /// The static shape of a speculative verify step, whose gated delta net
-/// layers keep the snapshot slots of its tokens for a rollback: its tokens.
+/// layers keep the snapshot slots of its tokens for a rollback: its tokens,
+/// and the layers whose outputs it captures for a block drafter.
 ///
 /// Each shape traces a decode schedule of its own. The tokens fix the shapes
-/// of the trace, and of the snapshot slots each GDN layer gives back.
+/// of the trace, and of the snapshot slots each GDN layer gives back; the
+/// captured layers fix its extra outputs.
 package struct CompiledVerifyShape: Hashable, Sendable {
 
     /// The fewest tokens of a verify: the bonus token and one draft.
@@ -222,13 +248,21 @@ package struct CompiledVerifyShape: Hashable, Sendable {
     /// The tokens of the verify.
     package let tokens: Int
 
+    /// The decoder layers whose outputs the verify gives back, in the order
+    /// the drafter reads them, or empty for none.
+    package let captureLayers: [Int]
+
     /// The shape of a verify, or nil when its tokens are outside
     /// ``tokenRange``, which a compiled schedule does not run.
     ///
-    /// - Parameter tokens: The tokens of the verify.
-    package init?(tokens: Int) {
+    /// - Parameters:
+    ///   - tokens: The tokens of the verify.
+    ///   - captureLayers: The decoder layers whose outputs the verify gives
+    ///     back, or empty for none.
+    package init?(tokens: Int, captureLayers: [Int] = []) {
         guard Self.tokenRange.contains(tokens) else { return nil }
         self.tokens = tokens
+        self.captureLayers = captureLayers
     }
 }
 

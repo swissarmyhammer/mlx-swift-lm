@@ -206,9 +206,27 @@ extension CompiledDecodeSchedule {
         segment runSegment: (Int, [MLXArray]) -> [MLXArray],
         attention: (AttentionStep) -> MLXArray
     ) -> MLXArray {
+        runCapturing(
+            input, caches: caches, verify: verify, segment: runSegment, attention: attention
+        ).hidden
+    }
+
+    /// Runs the segments of a step as ``run(_:caches:verify:segment:attention:)`` does, and
+    /// also gives back the outputs of the layers ``CompiledVerifyShape/captureLayers`` names.
+    ///
+    /// - Parameters: As ``run(_:caches:verify:segment:attention:)`` takes them.
+    /// - Returns: The first output of the last segment, and the output of each layer of
+    ///   `verify?.captureLayers`, in that order.
+    package func runCapturing(
+        _ input: MLXArray, caches: Caches, verify: CompiledVerifyShape?,
+        segment runSegment: (Int, [MLXArray]) -> [MLXArray],
+        attention: (AttentionStep) -> MLXArray
+    ) -> (hidden: MLXArray, captured: [MLXArray]) {
         let outputsPerLinearLayer =
             CompiledDecodeSegment.statesPerLinearLayer
             + (verify == nil ? 0 : GatedDeltaDecodeKernel.Snapshots.traceArrayCount)
+        let captureLayers = verify?.captureLayers ?? []
+        var captured: [Int: MLXArray] = [:]
         var carry = input
         var pendingAttention: [MLXArray] = []
 
@@ -216,6 +234,10 @@ extension CompiledDecodeSchedule {
             let linear = caches.linear[index]
             let outputs = runSegment(index, [carry] + pendingAttention + linear.flatMap(\.states))
             carry = outputs[0]
+            let capturedHere = segment.capturedLayers(of: captureLayers)
+            for (layer, output) in zip(capturedHere, outputs.suffix(capturedHere.count)) {
+                captured[layer] = output
+            }
             for (position, entry) in linear.enumerated() {
                 let first = 1 + outputsPerLinearLayer * position
                 Self.commit(
@@ -238,7 +260,7 @@ extension CompiledDecodeSchedule {
             }
         }
 
-        return carry
+        return (carry, captureLayers.compactMap { captured[$0] })
     }
 
     /// Writes what a compiled gated delta net layer gave back into its cache: its conv and

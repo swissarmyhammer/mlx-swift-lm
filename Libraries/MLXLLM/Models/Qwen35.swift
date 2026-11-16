@@ -993,14 +993,41 @@ public class Qwen35TextModelInner: Module {
         keepsSnapshots: Bool = false,
         useCompiledDecode: Bool = true
     ) -> MLXArray {
+        forwardCapturing(
+            inputs, cache: cache, applyFinalNorm: applyFinalNorm, keepsSnapshots: keepsSnapshots,
+            captureLayers: [], useCompiledDecode: useCompiledDecode
+        ).hidden
+    }
+
+    /// ``forward(_:cache:applyFinalNorm:keepsSnapshots:useCompiledDecode:)``, which also gives
+    /// back the outputs of `captureLayers`, as a block drafter such as DFlash2 reads them.
+    ///
+    /// A speculative verify that captures layers runs through the compiled schedule of its
+    /// shape, its captures included; a decode step that captures takes the general path.
+    ///
+    /// - Parameters:
+    ///   - captureLayers: The decoder layers whose outputs to give back, in that order.
+    ///   - Other parameters: As ``forward(_:cache:applyFinalNorm:keepsSnapshots:useCompiledDecode:)``
+    ///     takes them.
+    /// - Returns: The hidden states and the output of each layer of `captureLayers`.
+    func forwardCapturing(
+        _ inputs: MLXArray,
+        cache: [KVCache?]?,
+        applyFinalNorm: Bool,
+        keepsSnapshots: Bool,
+        captureLayers: [Int],
+        useCompiledDecode: Bool
+    ) -> (hidden: MLXArray, captured: [MLXArray]) {
         if useCompiledDecode, let caches = cache,
-            let hiddenStates = compiledStep(
-                inputs, caches, applyFinalNorm: applyFinalNorm, keepsSnapshots: keepsSnapshots)
+            let step = compiledStep(
+                inputs, caches, applyFinalNorm: applyFinalNorm, keepsSnapshots: keepsSnapshots,
+                captureLayers: captureLayers)
         {
-            return hiddenStates
+            return step
         }
 
         var hiddenStates = embedTokens(inputs)
+        var captured: [Int: MLXArray] = [:]
 
         var cacheArray = cache
         if cacheArray == nil {
@@ -1023,9 +1050,15 @@ public class Qwen35TextModelInner: Module {
             hiddenStates = layer(
                 hiddenStates, attentionMask: attnMask, ssmMask: mask, cache: cacheArray?[i],
                 keepsSnapshots: keepsSnapshots)
+            if captureLayers.contains(i) {
+                captured[i] = hiddenStates
+            }
         }
 
-        return applyFinalNorm ? norm(hiddenStates) : hiddenStates
+        return (
+            applyFinalNorm ? norm(hiddenStates) : hiddenStates,
+            captureLayers.compactMap { captured[$0] }
+        )
     }
 
     // MARK: - Whole-step decode schedule
@@ -1074,20 +1107,22 @@ public class Qwen35TextModelInner: Module {
     }
 
     /// One step through a compiled schedule, or nil when the step takes the
-    /// general path: a decode step with the final norm, or a speculative
-    /// verify of ``CompiledVerifyShape/tokenRange`` tokens that keeps its
-    /// snapshots.
+    /// general path: a decode step with the final norm that captures no
+    /// layer, or a speculative verify of ``CompiledVerifyShape/tokenRange``
+    /// tokens that keeps its snapshots, with the outputs of `captureLayers`.
     private func compiledStep(
-        _ inputs: MLXArray, _ cache: [KVCache?], applyFinalNorm: Bool, keepsSnapshots: Bool
-    ) -> MLXArray? {
+        _ inputs: MLXArray, _ cache: [KVCache?], applyFinalNorm: Bool, keepsSnapshots: Bool,
+        captureLayers: [Int]
+    ) -> (hidden: MLXArray, captured: [MLXArray])? {
         if inputs.dim(1) == 1 {
-            return applyFinalNorm ? decodeStep(inputs, cache) : nil
+            guard applyFinalNorm, captureLayers.isEmpty else { return nil }
+            return decodeStep(inputs, cache).map { ($0, []) }
         }
         guard keepsSnapshots,
-            let shape = CompiledVerifyShape(tokens: inputs.dim(1)),
-            let hiddenStates = verifyStep(inputs, cache, shape: shape)
+            let shape = CompiledVerifyShape(tokens: inputs.dim(1), captureLayers: captureLayers),
+            let step = verifyStep(inputs, cache, shape: shape)
         else { return nil }
-        return applyFinalNorm ? norm(hiddenStates) : hiddenStates
+        return applyFinalNorm ? (norm(step.hidden), step.captured) : step
     }
 
     /// One decode step through the compiled segments, or nil when this is not
@@ -1112,10 +1147,10 @@ public class Qwen35TextModelInner: Module {
     /// ``DecodeAttentionKernel`` where they read the call, else the SDPA of MLX.
     private func verifyStep(
         _ inputs: MLXArray, _ cache: [KVCache?], shape: CompiledVerifyShape
-    ) -> MLXArray? {
+    ) -> (hidden: MLXArray, captured: [MLXArray])? {
         guard let caches = decodeSchedule.caches(cache, over: inputs) else { return nil }
         let mask = decodeSchedule.attentionMask(inputs, cache)
-        return decodeSchedule.run(
+        return decodeSchedule.runCapturing(
             inputs, caches: caches, verify: shape,
             segment: { index, arguments in
                 compiledVerifySegments(self, key: shape, at: index, arguments)
@@ -1201,11 +1236,18 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     ) -> LMOutput {
         let emitDrafterState = state?[mtpEmitFlagKey] ?? false
         let isVerify = emitDrafterState && (state?[mtpVerifyKeepsSnapshotsKey] ?? false)
-        let (logits, hiddenStates) = MultiRowQuantizedMatvec.run(asSpeculativeVerify: isVerify) {
+        let captureLayers = emitDrafterState ? (state?[mtpTargetLayerIdsKey] ?? []) : []
+        precondition(
+            Set(captureLayers).count == captureLayers.count
+                && captureLayers.allSatisfy(model.layers.indices.contains),
+            "drafter target layer ids must be unique and in range")
+        let (logits, hiddenStates, captured) = MultiRowQuantizedMatvec.run(
+            asSpeculativeVerify: isVerify
+        ) {
             logitsAndHiddenStates(
                 input, cache: cache, emitDrafterState: emitDrafterState,
-                keepsSnapshots: isVerify, lastTokenOnly: lastTokenOnly,
-                useCompiledDecode: useCompiledDecode)
+                keepsSnapshots: isVerify, captureLayers: captureLayers,
+                lastTokenOnly: lastTokenOnly, useCompiledDecode: useCompiledDecode)
         }
 
         guard emitDrafterState else {
@@ -1213,7 +1255,9 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
         }
 
         var outState = state ?? LMOutput.State()
-        outState[mtpLastHiddenStatesKey] = hiddenStates
+        // A block drafter reads the outputs of its target layers side by side.
+        outState[mtpLastHiddenStatesKey] =
+            captured.isEmpty ? hiddenStates : concatenated(captured, axis: -1)
         outState[mtpSharedKVStatesKey] = qwen35SharedKVState(
             cache: cache, fullAttentionIndex: model.faIdx)
         outState[mtpSharedKVOffsetsKey] = qwen35SharedKVOffsets(
@@ -1234,20 +1278,26 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     ///     the final norm runs after the backbone and every token projects.
     ///   - keepsSnapshots: True for a speculative verify, whose GDN layers
     ///     keep the states after each token for a rollback.
+    ///   - captureLayers: The layers whose outputs a block drafter reads,
+    ///     when the call emits the drafter state.
     ///   - lastTokenOnly: True to project the last token only, when the call
     ///     emits no drafter state.
     ///   - useCompiledDecode: False to take the general path.
-    /// - Returns: The logits and the normed hidden states.
+    /// - Returns: The logits, the normed hidden states, and the output of each
+    ///   layer of `captureLayers`.
     private func logitsAndHiddenStates(
         _ input: LMInput.Text, cache: [KVCache]?, emitDrafterState: Bool, keepsSnapshots: Bool,
-        lastTokenOnly: Bool, useCompiledDecode: Bool
-    ) -> (logits: MLXArray, hiddenStates: MLXArray) {
+        captureLayers: [Int], lastTokenOnly: Bool, useCompiledDecode: Bool
+    ) -> (logits: MLXArray, hiddenStates: MLXArray, captured: [MLXArray]) {
         let hiddenStates: MLXArray
+        var captured: [MLXArray] = []
         if emitDrafterState {
-            let hidden = model.forward(
+            let step = model.forwardCapturing(
                 input.tokens, cache: cache, applyFinalNorm: false,
-                keepsSnapshots: keepsSnapshots, useCompiledDecode: useCompiledDecode)
-            hiddenStates = model.norm(hidden)
+                keepsSnapshots: keepsSnapshots, captureLayers: captureLayers,
+                useCompiledDecode: useCompiledDecode)
+            hiddenStates = model.norm(step.hidden)
+            captured = step.captured
         } else {
             hiddenStates = model.forward(
                 input.tokens, cache: cache, applyFinalNorm: true,
@@ -1259,7 +1309,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
             lastTokenOnly && !emitDrafterState
             ? quantizedVocabularyProjectionInput(hiddenStates, projection: projection)
             : hiddenStates
-        return (projectVocabulary(projectionInput), hiddenStates)
+        return (projectVocabulary(projectionInput), hiddenStates, captured)
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
@@ -1375,6 +1425,21 @@ extension Qwen35TextModel: SpeculativeCacheRewindModel {
     public var maximumNativeTargetCacheRewind: Int { GatedDeltaDecodeKernel.mostRewoundTokens }
 }
 
+extension Qwen35TextModel: DFlash2TargetModel {
+    /// The decoder layers, the hidden width and the vocabulary.
+    public var dflash2Geometry: DFlash2Geometry {
+        DFlash2Geometry(
+            layerCount: model.layers.count, hiddenSize: configuration.hiddenSize,
+            vocabularySize: vocabularySize)
+    }
+
+    /// The token embedding.
+    public var dflash2Embedding: Embedding { model.embedTokens }
+
+    /// The LM head, or `nil` when it is tied to the embedding.
+    public var dflash2Head: Linear? { lmHead }
+}
+
 // MARK: - Top-level Model
 
 public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
@@ -1448,6 +1513,17 @@ extension Qwen35Model: ModelComponentsProviding {
     public var modelComponents: [ModelComponent: [CheckpointComponent]] {
         Qwen35CheckpointPolicy.components
     }
+}
+
+extension Qwen35Model: DFlash2TargetModel {
+    /// The geometry of the language model.
+    public var dflash2Geometry: DFlash2Geometry { languageModel.dflash2Geometry }
+
+    /// The token embedding of the language model.
+    public var dflash2Embedding: Embedding { languageModel.dflash2Embedding }
+
+    /// The LM head of the language model, or `nil` when it is tied to the embedding.
+    public var dflash2Head: Linear? { languageModel.dflash2Head }
 }
 
 extension Qwen35Model: SpeculativeCacheRewindModel {

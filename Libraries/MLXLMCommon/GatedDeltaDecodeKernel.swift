@@ -47,7 +47,12 @@ package enum GatedDeltaDecodeKernel {
 
     /// The most tokens of one run: the most tokens of a speculative verify
     /// the kernel holds.
-    package static let mostTokens = 6
+    ///
+    /// Eight, the most query rows of ``VerifyAttentionKernel`` and of
+    /// ``MultiRowQuantizedMatvec``, so a DFlash2 block of eight tokens
+    /// verifies in place. Only the snapshot slots grow with the tokens: the
+    /// threadgroup memory of a run holds one token at a time.
+    package static let mostTokens = 8
 
     /// The tokens of one decode step.
     package static let decodeTokens = 1

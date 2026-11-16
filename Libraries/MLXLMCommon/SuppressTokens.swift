@@ -166,3 +166,20 @@ struct SuppressTokensSampler: LogitSampler {
         base.sample(logits: suppressor.process(logits: logits))
     }
 }
+
+extension LogitSampler {
+    /// `logits` with the token ids this sampler suppresses masked out, or `logits` unchanged
+    /// for a sampler that suppresses none.
+    ///
+    /// A block drafter that selects its drafts itself, as DFlash2's candidate selector does,
+    /// masks its logits with the sampler the MTP iterator hands it.
+    ///
+    /// - Parameter logits: The draft logits, shape `[..., vocabulary]`.
+    /// - Returns: The masked logits, of the shape of `logits`.
+    package func suppressing(_ logits: MLXArray) -> MLXArray {
+        guard let suppressor = (self as? SuppressTokensSampler)?.suppressor else { return logits }
+        // The processor masks rows of `[rows, vocabulary]`.
+        return suppressor.process(logits: logits.reshaped(-1, logits.dim(-1)))
+            .reshaped(logits.shape)
+    }
+}
