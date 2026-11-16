@@ -1,0 +1,19 @@
+---
+assignees:
+- claude-code
+depends_on:
+- 01M7J84FZ3SJF8MB599CDEN2RC
+position_column: todo
+position_ordinal: '9080'
+title: 'Qwen3.8: fused 8-bit-KV decode and verify attention kernel for head dim 256 (candidate, needs sign-off)'
+---
+## Why
+^cden2rc measured the existing opt-in KV8 (`GenerateParameters(kvBits: 8)`) as NO-GO: with head dim 256 a `QuantizedKVCache` goes through `quantizedScaledDotProductAttention` (quantized matmul -> softmax -> quantized matmul, unfused) instead of the bf16 `DecodeAttentionKernel` / `VerifyAttentionKernel`. Plain decode lost 12-18% at 32k-64k and MTP lost 2.6x-3.5x, although the KV reads drop from ~4.3 GB to ~2.3 GB at 64k. The card's estimated saving (~1.6 ms per step at 64k) needs a kernel that reads 8-bit keys and values directly.
+
+## What
+- Decide with the user whether an output-changing opt-in is worth a custom kernel (top-1 agreement 99.5% vs bf16; near-ties only).
+- If yes: extend the decode and verify attention kernels to read affine 8-bit K/V (group 64) with inline dequantization, and route `QuantizedKVCache` there for head dim 256.
+
+## Acceptance
+- [ ] KV8 plain and MTP decode at 32k and 64k faster than bf16 KV (qwenbench.sh with QWEN_KV_BITS=8), or a recorded NO-GO.
+- [ ] Default path unchanged (`qwencheck.sh` identical). #qwen-perf

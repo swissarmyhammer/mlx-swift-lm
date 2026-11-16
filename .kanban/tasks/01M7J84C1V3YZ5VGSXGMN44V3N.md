@@ -42,10 +42,27 @@ comments:
     - evidence: 9 files — Libraries/MLXLMCommon/Qwen35PrefillPolicy.swift (new), Libraries/MLXLLM/LLMModel.swift, Libraries/MLXLLM/Models/Qwen35.swift, Libraries/MLXVLM/Models/Qwen35.swift, Libraries/MLXLMCommon/PrefillParameters.swift (doc), Tests/MLXLMTestSupport/PrefillProgressLog.swift (new), Tests/MLXLMTests/Qwen35PrefillStepTests.swift (new), Tests/MLXLMTests/FlintTests.swift (uses the shared log). `swift build --build-tests` clean. xctest: MLXLMTests 1120 XCTest (0 failures; 4 skipped are the pre-existing env-gated LFM2 real-checkpoint tests from the upstream merge 6dc1e4e7) + 2369 Swift Testing passed (3 pre-existing known issues); MLXGuidedGenerationTests 78, MLXFoundationModelsTests 496, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11 — all pass. qwencheck: 32k golden diverges (near-tie, gap <= 0.125); qwenbench prefill +10.2/+10.2/+10.4% vs stable; 64k peak +1.56 GB.
     - next: /review. User decision: re-baseline qwen_golden_base.json for the 32k prompt (not done). Follow-up ^237qeb2 filed: checkpoint feeds (most of a ChatSession prompt) still prefill at step 512.
   timestamp: 2026-11-16T20:26:13.585120+00:00
+- actor: claude-code
+  id: 01m7k0pybwp37tcjh6h6rmwjrh
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (276947b4) — 0 findings, 0 confirmed, 0 refuted; 7 validator passes attempted, 0 failed; 8 files reviewed, 6 .kanban files not matched by any validator. No prior Review Findings sections. qwencheck 32k divergence accepted per the card: documented bf16 near-ties (top-2 gap 0.0 at plain step 82, 0.125 at MTP step 212).
+    - next: none on this card. Open user decision: re-baseline qwen_golden_base.json for the 32k prompt. Follow-up ^237qeb2 (checkpoint feeds still at step 512).
+  timestamp: 2026-11-16T20:27:54.108664+00:00
+- actor: claude-code
+  id: 01m7k0qa6f6gev4njg6ayn1wnj
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — Qwen35PrefillPolicy 2048 in VLM/LLM prepare; prefill +10.2/+10.2/+10.4% vs stable; 32k golden near-tie divergence (gap ≤0.125) recorded
+    - test: green — 5 bundles 0 failures (run by implement)
+    - commit: 276947b4
+    - review: clean → done
+    - Orchestrator: later cards compare against qwen_golden_mn44v3n.json (step-2048 output); qwen_golden_base.json untouched pending the user's call.
+  timestamp: 2026-11-16T20:28:06.223089+00:00
 depends_on:
 - 01M7J847TB7CBFPZ2BQNSH02J2
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffffba80
 title: 'Qwen3.8 prefill: default step 2048'
 ---
 ## Why
