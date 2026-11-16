@@ -265,14 +265,10 @@ final class FlintTests: XCTestCase {
     /// chunk, which `ChatSession` runs up to a message boundary, reads it in
     /// one forward.
     func testCheckpointFeedReadsOneMLXVLMChunkInOneForward() throws {
-        let model = try makeSeededModel()
-        let log = PrefillProgressLog()
-        let prefill = log.recordingPrefill()
-        _ = try PromptCacheCheckpoint.prefill(
-            (0 ..< mlxVLMPrefillChunk).map { $0 % model.vocabularySize },
-            into: try model.newCache(parameters: nil), state: nil, model: model,
-            prefill: prefill)
-        XCTAssertEqual(log.processed, [mlxVLMPrefillChunk])
+        XCTAssertEqual(
+            try PrefillProgressLog.progressOfCheckpointFeed(
+                try makeSeededModel(), tokenCount: mlxVLMPrefillChunk),
+            [mlxVLMPrefillChunk])
     }
 
     /// The logits after a prepare and the forward of the remainder match the

@@ -112,47 +112,34 @@ final class Qwen35PrefillStepTests: XCTestCase {
     /// checkpoint feed at that step.
     private let callerStepSize = PrefillParameters.defaultStepSize
 
-    /// The `processed` count of each progress report of a checkpoint feed of
-    /// one mlx-vlm chunk of prompt tokens, which `ChatSession` and the
-    /// `MLXFoundationModels` executor run up to each message boundary.
-    private func progressOfOneChunkCheckpointFeed(
-        _ model: any LanguageModel, stepSize: Int? = nil
-    ) throws -> [Int] {
-        let log = PrefillProgressLog()
-        let prefill = log.recordingPrefill(stepSize: stepSize)
-        let vocabularySize = Qwen35FixtureJSON.defaultVocabularySize
-        _ = try PromptCacheCheckpoint.prefill(
-            (0 ..< mlxVLMPrefillChunk).map { $0 % vocabularySize },
-            into: try model.newCache(parameters: nil), state: nil, model: model,
-            prefill: prefill)
-        return log.processed
-    }
-
     /// A checkpoint feed of the vision-language model with no step from the
     /// caller reads one mlx-vlm chunk in one forward.
     func testVisionLanguageModelCheckpointFeedReadsOneMLXVLMChunkInOneForward() throws {
         XCTAssertEqual(
-            try progressOfOneChunkCheckpointFeed(try visionLanguageModel()), [mlxVLMPrefillChunk])
+            try PrefillProgressLog.progressOfCheckpointFeed(
+                try visionLanguageModel(), tokenCount: mlxVLMPrefillChunk), [mlxVLMPrefillChunk])
     }
 
     /// A checkpoint feed of the text model with no step from the caller reads
     /// one mlx-vlm chunk in one forward.
     func testTextModelCheckpointFeedReadsOneMLXVLMChunkInOneForward() throws {
         XCTAssertEqual(
-            try progressOfOneChunkCheckpointFeed(try textModel()), [mlxVLMPrefillChunk])
+            try PrefillProgressLog.progressOfCheckpointFeed(
+                try textModel(), tokenCount: mlxVLMPrefillChunk), [mlxVLMPrefillChunk])
     }
 
     /// A checkpoint feed of the text-only model that wraps the text model with
     /// no step from the caller reads one mlx-vlm chunk in one forward.
     func testWrappedTextModelCheckpointFeedReadsOneMLXVLMChunkInOneForward() throws {
         XCTAssertEqual(
-            try progressOfOneChunkCheckpointFeed(try wrappedTextModel()), [mlxVLMPrefillChunk])
+            try PrefillProgressLog.progressOfCheckpointFeed(
+                try wrappedTextModel(), tokenCount: mlxVLMPrefillChunk), [mlxVLMPrefillChunk])
     }
 
     /// A checkpoint feed keeps the step a caller sets.
     func testCheckpointFeedKeepsTheStepOfTheCaller() throws {
-        let progress = try progressOfOneChunkCheckpointFeed(
-            try textModel(), stepSize: callerStepSize)
+        let progress = try PrefillProgressLog.progressOfCheckpointFeed(
+            try textModel(), tokenCount: mlxVLMPrefillChunk, stepSize: callerStepSize)
         XCTAssertEqual(
             progress,
             Array(stride(from: callerStepSize, through: mlxVLMPrefillChunk, by: callerStepSize)))
