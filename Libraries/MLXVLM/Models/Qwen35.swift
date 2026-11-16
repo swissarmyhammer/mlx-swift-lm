@@ -467,6 +467,17 @@ public enum Qwen35Language {
 
         let rotaryEmbedding: RotaryEmbedding
 
+        /// The query, key and value projections as one matmul, once the
+        /// loader prepares them.
+        private let fusedQKV = FusedQuantizedProjectionGroup(keys: ["q_proj", "k_proj", "v_proj"])
+
+        /// The place of the query projection among the q/k/v outputs.
+        private static let queriesPart = 0
+        /// The place of the key projection among the q/k/v outputs.
+        private static let keysPart = 1
+        /// The place of the value projection among the q/k/v outputs.
+        private static let valuesPart = 2
+
         init(_ args: Qwen35Configuration.TextConfiguration) {
             self.numKeyValueHeads = args.kvHeads
             self.numAttentionHeads = args.attentionHeads
@@ -494,6 +505,42 @@ public enum Qwen35Language {
             super.init()
         }
 
+        @discardableResult
+        package override func update(
+            parameters: ModuleParameters, verify: VerifyUpdate,
+            path: [String] = [], modulePath: [String] = []
+        ) throws -> Self {
+            try fusedQKV.invalidating(afterUpdating: parameters) {
+                try super.update(
+                    parameters: parameters, verify: verify, path: path, modulePath: modulePath)
+            }
+        }
+
+        package override func updateModule(key: String, _ value: Any) throws {
+            try fusedQKV.invalidating(afterReplacing: key) {
+                try super.updateModule(key: key, value)
+            }
+        }
+
+        /// Whether one matmul computes the query, key and value projections.
+        var hasFusedProjection: Bool { fusedQKV.isPrepared }
+
+        /// Fuses the query, key and value projections; see
+        /// ``FusedQuantizedProjectionGroup``. The model loader calls this
+        /// before it publishes the model; a forward never does.
+        ///
+        /// - Returns: Whether one matmul computes the three projections.
+        @discardableResult
+        func prepareFusedProjection() throws -> Bool {
+            try fusedQKV.prepare([qProj, kProj, vProj], in: self)
+        }
+
+        /// The fused projection as compile state of `trace`; see
+        /// ``FusedQuantizedProjectionGroup/traceState(of:)``.
+        func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+            fusedQKV.traceState(of: trace)
+        }
+
         func callAsFunction(
             _ x: MLXArray,
             mask: MLXFast.ScaledDotProductAttentionMaskMode,
@@ -518,13 +565,14 @@ public enum Qwen35Language {
             let B = x.dim(0)
             let L = x.dim(1)
 
-            let qProjOutput = MultiRowQuantizedMatvec.projection(x, by: qProj)
+            let projected = fusedQKV(x, [qProj, kProj, vProj])
+            let qProjOutput = projected[Self.queriesPart]
             let qSplit = qProjOutput.reshaped(B, L, numAttentionHeads, -1).split(parts: 2, axis: -1)
             var queries = qSplit[0]
             let gate = qSplit[1].reshaped(B, L, -1)
 
-            var keys = MultiRowQuantizedMatvec.projection(x, by: kProj)
-            var values = MultiRowQuantizedMatvec.projection(x, by: vProj)
+            var keys = projected[Self.keysPart]
+            var values = projected[Self.valuesPart]
 
             queries = qNorm(queries).transposed(0, 2, 1, 3)
             keys = kNorm(keys.reshaped(B, L, numKeyValueHeads, -1)).transposed(0, 2, 1, 3)
@@ -609,6 +657,15 @@ public enum Qwen35Language {
         @ModuleInfo(key: "down_proj") var downProj: Linear
         @ModuleInfo(key: "up_proj") var upProj: Linear
 
+        /// The gate and up projections as one matmul, once the loader
+        /// prepares them.
+        private let fusedGateUp = FusedQuantizedProjectionGroup(keys: ["gate_proj", "up_proj"])
+
+        /// The place of the gate projection among the gate/up outputs.
+        private static let gatePart = 0
+        /// The place of the up projection among the gate/up outputs.
+        private static let upPart = 1
+
         init(dimensions: Int, hiddenDimensions: Int) {
             _gateProj.wrappedValue = Linear(dimensions, hiddenDimensions, bias: false)
             _downProj.wrappedValue = Linear(hiddenDimensions, dimensions, bias: false)
@@ -616,13 +673,49 @@ public enum Qwen35Language {
             super.init()
         }
 
+        @discardableResult
+        override func update(
+            parameters: ModuleParameters, verify: VerifyUpdate,
+            path: [String] = [], modulePath: [String] = []
+        ) throws -> Self {
+            try fusedGateUp.invalidating(afterUpdating: parameters) {
+                try super.update(
+                    parameters: parameters, verify: verify, path: path, modulePath: modulePath)
+            }
+        }
+
+        override func updateModule(key: String, _ value: Any) throws {
+            try fusedGateUp.invalidating(afterReplacing: key) {
+                try super.updateModule(key: key, value)
+            }
+        }
+
+        /// Whether one matmul computes the gate and up projections.
+        var hasFusedProjection: Bool { fusedGateUp.isPrepared }
+
+        /// Fuses the gate and up projections; see
+        /// ``FusedQuantizedProjectionGroup``. The model loader calls this
+        /// before it publishes the model; a forward never does.
+        ///
+        /// - Returns: Whether one matmul computes the two projections.
+        @discardableResult
+        func prepareFusedProjection() throws -> Bool {
+            try fusedGateUp.prepare([gateProj, upProj], in: self)
+        }
+
+        /// The fused projection as compile state of `trace`; see
+        /// ``FusedQuantizedProjectionGroup/traceState(of:)``.
+        func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+            fusedGateUp.traceState(of: trace)
+        }
+
         /// The MLP of `x`. Each projection runs through
         /// ``MultiRowQuantizedMatvec/projection(_:by:)``, so inside a
         /// speculative verify each token row keeps the bits of a decode step.
         func callAsFunction(_ x: MLXArray) -> MLXArray {
-            let gate = MultiRowQuantizedMatvec.projection(x, by: gateProj)
-            let up = MultiRowQuantizedMatvec.projection(x, by: upProj)
-            return MultiRowQuantizedMatvec.projection(silu(gate) * up, by: downProj)
+            let projected = fusedGateUp(x, [gateProj, upProj])
+            return MultiRowQuantizedMatvec.projection(
+                silu(projected[Self.gatePart]) * projected[Self.upPart], by: downProj)
         }
     }
 
@@ -1116,8 +1209,7 @@ public enum Qwen35Language {
 
         private let compiledLinearLayer: CompiledTrace<DecoderLayer> = CompiledTrace(
             state: { layer in
-                layer.linearAttn?.registerFusedProjectionTrace(layer.compiledLinearLayer)
-                return [layer] + (layer.linearAttn?.fusedProjectionTraceState ?? [])
+                [layer] + layer.fusedProjectionTraceState(of: layer.compiledLinearLayer)
             },
             body: { layer, arguments in
                 let result = layer.linearLayerBody(
@@ -1139,6 +1231,29 @@ public enum Qwen35Language {
         }
 
         var compiledGDNIsCompiled: Bool { compiledLinearLayer.isCompiled }
+
+        /// Fuses the projections of this layer that read one input: the four
+        /// input projections of the gated delta net, the query, key and value
+        /// projections of the attention, and the gate and up projections of a
+        /// dense MLP. The model loader calls this before it publishes the
+        /// model.
+        func prepareFusedProjections() throws {
+            _ = try linearAttn?.prepareFusedInputProjection()
+            _ = try selfAttn?.prepareFusedProjection()
+            _ = try (mlp as? MLP)?.prepareFusedProjection()
+        }
+
+        /// The fused projections of this layer as compile state of `trace`,
+        /// which each one drops when its fusion turns off.
+        ///
+        /// - Parameter trace: The trace that runs this layer.
+        /// - Returns: The fused projections the layer holds.
+        func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+            linearAttn?.registerFusedProjectionTrace(trace)
+            return (linearAttn?.fusedProjectionTraceState ?? [])
+                + (selfAttn?.fusedProjectionTraceState(of: trace) ?? [])
+                + ((mlp as? MLP)?.fusedProjectionTraceState(of: trace) ?? [])
+        }
 
         var supportsCompiledDecode: Bool {
             guard type(of: self) == DecoderLayer.self, !training else { return false }
@@ -1413,6 +1528,14 @@ public enum Qwen35Language {
         /// The compiled segment traces of every verify shape a step has run.
         var compiledVerifySegmentCount: Int { compiledVerifySegments.compiledCount }
 
+        /// Fuses the projections of each layer that read one input; see
+        /// ``DecoderLayer/prepareFusedProjections()``.
+        func prepareFusedProjections() throws {
+            for layer in layers {
+                try layer.prepareFusedProjections()
+            }
+        }
+
         var compiledGDNTraceCount: Int {
             layers.filter(\.compiledGDNIsCompiled).count
         }
@@ -1434,9 +1557,9 @@ public enum Qwen35Language {
         }
 
         /// The compile state of segment `index`: everything its body reads,
-        /// the layers it runs (with a GDN layer's fused projection) and the
-        /// final norm it ends with. Each GDN layer drops `trace` when its fused
-        /// projection goes stale.
+        /// the layers it runs (with the fused projections of each layer) and
+        /// the final norm it ends with. Each fused projection drops `trace`
+        /// when it goes stale.
         ///
         /// - Parameters:
         ///   - index: The segment.
@@ -1448,8 +1571,7 @@ public enum Qwen35Language {
             let segments = decodeSchedule.segments
             var modules = segments[index].layerIndices.flatMap { layerIndex -> [Module] in
                 let layer = layers[layerIndex]
-                layer.linearAttn?.registerFusedProjectionTrace(trace)
-                return [layer] + (layer.linearAttn?.fusedProjectionTraceState ?? [])
+                return [layer] + layer.fusedProjectionTraceState(of: trace)
             }
             if index == segments.indices.last {
                 modules.append(norm)
@@ -1738,11 +1860,7 @@ public enum Qwen35Language {
         }
 
         func prepare() throws {
-            for layer in model.layers {
-                if let linearAttn = layer.linearAttn {
-                    _ = try linearAttn.prepareFusedInputProjection()
-                }
-            }
+            try model.prepareFusedProjections()
         }
     }
 }

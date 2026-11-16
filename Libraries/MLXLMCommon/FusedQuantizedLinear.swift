@@ -223,3 +223,172 @@ package func fuseQuantizedLinearProjections(
 
     return FusedQuantizedLinearProjection(fused: fused, sourceViews: sourceViews)
 }
+
+/// Sibling quantized projections of one module that read the same input,
+/// computed by one fused matmul once the module prepares them at load.
+///
+/// The module keeps each projection under its checkpoint key, as a view into
+/// the fused storage, so checkpoints, adapters and parameter updates see the
+/// separate projections, and the fusion costs no second copy of the weights.
+/// An update that replaces one of the projections, or that writes one of their
+/// parameters, turns the fusion off and drops every compiled trace that read
+/// it, until the next preparation.
+///
+/// The fused matmul serves the calls of fewer than ``fewestMatrixRows`` input
+/// rows: a decode step and a short speculative verify. There MLX computes each
+/// output from its own weights, scales and biases in an order the output width
+/// does not change (`qmv`, `qmv_wide`, or ``MultiRowQuantizedMatvec``), thus
+/// each output of the fused matmul has the bits of the separate projection. A
+/// longer call, a prefill, keeps the separate matmuls: MLX gives it to its
+/// split-K matrix kernel, whose split of the inner dimension depends on the
+/// output width, so a wider fused matmul would sum in another order.
+package final class FusedQuantizedProjectionGroup {
+
+    /// The last axis of a projection input or output, which holds the
+    /// numbers of one row.
+    private static let rowAxis = -1
+
+    /// The fewest input rows MLX gives to its matrix-matrix kernels on any GPU
+    /// (`get_qmv_batch_limit` of the Metal backend). Calls of fewer rows run
+    /// the fused matmul.
+    package static let fewestMatrixRows = 6
+
+    /// A compiled trace that read the fused projection, held weakly: the
+    /// trace belongs to a module that the group must not keep alive.
+    private struct ReadingTrace {
+        weak var value: (any CompiledTraceInvalidating)?
+    }
+
+    /// The checkpoint keys of the projections under their module, in the
+    /// order of the fused rows.
+    package let keys: [String]
+
+    private let projection = FusedQuantizedLinearProjectionCache()
+
+    // Trace setup runs under the lock of each trace, which an invalidation
+    // must not take while it holds this one.
+    private let readingTracesLock = NSLock()
+    private var readingTraces: [ObjectIdentifier: ReadingTrace] = [:]
+
+    /// - Parameter keys: The checkpoint keys of the projections under their
+    ///   module, in the order the module gives the projections.
+    package init(keys: [String]) {
+        self.keys = keys
+    }
+
+    /// Whether the fused projection computes the outputs.
+    package var isPrepared: Bool { projection.isPrepared }
+
+    /// Fuses `projections` and installs, in `owner`, a view of each one under
+    /// its key. Projections that differ in quantization, carry a bias, or are
+    /// not plain ``QuantizedLinear`` layers (an adapter, for example) keep
+    /// their own matmuls.
+    ///
+    /// - Parameters:
+    ///   - projections: The projections of ``keys``, in that order.
+    ///   - owner: The module that holds the projections.
+    /// - Returns: Whether the fused projection computes the outputs.
+    @discardableResult
+    package func prepare(_ projections: [Linear], in owner: Module) throws -> Bool {
+        let keys = keys
+        return try projection.prepare(enabled: true, linears: projections) { views in
+            try owner.update(
+                modules: ModuleChildren(
+                    values: Dictionary(
+                        uniqueKeysWithValues: zip(keys, views.map { .value($0) }))),
+                verify: [])
+        }
+    }
+
+    /// The outputs of `projections` for `x`, in order: the parts of the fused
+    /// matmul once prepared, for fewer than ``fewestMatrixRows`` input rows,
+    /// else one matmul for each projection. Each matmul runs through
+    /// ``MultiRowQuantizedMatvec/projection(_:by:)``.
+    ///
+    /// - Parameters:
+    ///   - x: The input, shape `(batch, tokens, inputWidth)`.
+    ///   - projections: The projections of ``keys``, in that order.
+    /// - Returns: The output of each projection, shape `(batch, tokens, rows)`.
+    package func callAsFunction(_ x: MLXArray, _ projections: [Linear]) -> [MLXArray] {
+        let inputRows = x.size / x.dim(Self.rowAxis)
+        guard let fused = projection.fused, inputRows < Self.fewestMatrixRows else {
+            return projections.map { MultiRowQuantizedMatvec.projection(x, by: $0) }
+        }
+        let rows = projections.dropLast().map(\.shape.0)
+        let ends = rows.indices.map { rows[...$0].reduce(0, +) }
+        return split(
+            MultiRowQuantizedMatvec.projection(x, by: fused), indices: ends,
+            axis: Self.rowAxis)
+    }
+
+    /// The fused projection as compile state of `trace`, which the group
+    /// drops when the fusion turns off. It is not a registered child of its
+    /// module, so a trace would otherwise read its arrays as tape constants,
+    /// which MLX keeps alive after the trace is erased.
+    ///
+    /// - Parameter trace: The trace that reads the state.
+    /// - Returns: The fused projection, or nothing before the preparation.
+    package func traceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+        readingTracesLock.withLock {
+            readingTraces[ObjectIdentifier(trace)] = ReadingTrace(value: trace)
+        }
+        return projection.fused.map { [$0] } ?? []
+    }
+
+    /// Runs `update`, a parameter update of the module, then turns the fusion
+    /// off when the update reaches one of the projections, also when it
+    /// throws after it wrote an earlier tensor.
+    ///
+    /// - Parameters:
+    ///   - parameters: The parameters of the update, under the module.
+    ///   - update: The update.
+    /// - Returns: The result of `update`.
+    package func invalidating<Result>(
+        afterUpdating parameters: ModuleParameters, _ update: () throws -> Result
+    ) rethrows -> Result {
+        let keys = keys
+        let reachesProjection = parameters.flattened().contains { name, _ in
+            keys.contains { name.hasPrefix("\($0).") }
+        }
+        defer {
+            if reachesProjection {
+                invalidate()
+            }
+        }
+        return try update()
+    }
+
+    /// Runs `update`, the replacement of the child module under `key`, then
+    /// turns the fusion off when `key` is one of the projections, also when
+    /// the module refuses the replacement.
+    ///
+    /// - Parameters:
+    ///   - key: The key of the child module.
+    ///   - update: The replacement.
+    /// - Returns: The result of `update`.
+    package func invalidating<Result>(
+        afterReplacing key: String, _ update: () throws -> Result
+    ) rethrows -> Result {
+        defer {
+            if keys.contains(key) {
+                invalidate()
+            }
+        }
+        return try update()
+    }
+
+    /// Turns the fusion off and drops every trace that read it. The views the
+    /// preparation installs land here too, and drop the traces that ran before
+    /// it.
+    private func invalidate() {
+        projection.invalidate()
+        let traces = readingTracesLock.withLock {
+            let traces = readingTraces.values.compactMap(\.value)
+            readingTraces.removeAll()
+            return traces
+        }
+        for trace in traces {
+            trace.invalidate()
+        }
+    }
+}
