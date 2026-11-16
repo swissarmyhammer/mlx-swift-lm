@@ -82,6 +82,24 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
     /// The bound of the random weights, about the scale of a trained projection.
     private static let weightScale: Float = 0.02
 
+    /// An output width of whole tiles of 32 rows, the tile of 8 SIMD groups.
+    private static let wideTileOutputs = 4096
+
+    /// An output width of whole tiles of 16 rows and not of 32.
+    private static let mediumTileOutputs = 48
+
+    /// An output width of whole tiles of 8 rows and not of 16.
+    private static let narrowTileOutputs = 40
+
+    /// An input width of three blocks of the 4-bit kernel and six of the
+    /// 8-bit kernel: the prefetch of the next block runs, and the last block
+    /// has no next block.
+    private static let oddBlockInputSize = 1536
+
+    /// Output widths that take each threadgroup width of the kernel: 8, 4 and
+    /// 2 SIMD groups.
+    private static let everyTileOutputs = [64, mediumTileOutputs, narrowTileOutputs]
+
     private func makeLayer(
         _ format: Format, inputs: Int, outputs: Int, dtype: DType, seed: UInt64,
         bias: MLXArray? = nil
@@ -133,6 +151,35 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testEveryRowIsBitIdenticalToItsOwnMatvecForEveryThreadgroupWidth() {
+        var seed: UInt64 = 200
+        for format in Self.formats {
+            for dtype in Self.dtypes {
+                for outputs in Self.everyTileOutputs {
+                    seed += 1
+                    let layer = makeLayer(
+                        format, inputs: Self.oddBlockInputSize, outputs: outputs, dtype: dtype,
+                        seed: seed)
+                    assertEveryRowMatches(
+                        layer, width: Self.oddBlockInputSize, dtype: dtype,
+                        label: "\(format) \(dtype) N=\(outputs) K=\(Self.oddBlockInputSize)")
+                }
+            }
+        }
+    }
+
+    func testAnOutputWidthOfWholeWideTilesTakesEightSimdGroups() {
+        XCTAssertEqual(MultiRowQuantizedMatvec.simdGroups(outputs: Self.wideTileOutputs), 8)
+    }
+
+    func testAnOutputWidthOfWholeMediumTilesTakesFourSimdGroups() {
+        XCTAssertEqual(MultiRowQuantizedMatvec.simdGroups(outputs: Self.mediumTileOutputs), 4)
+    }
+
+    func testAnOutputWidthOfWholeNarrowTilesTakesTwoSimdGroups() {
+        XCTAssertEqual(MultiRowQuantizedMatvec.simdGroups(outputs: Self.narrowTileOutputs), 2)
     }
 
     func testVocabularyWidthRowsAreBitIdenticalToTheirOwnMatvec() {

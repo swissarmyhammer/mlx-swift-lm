@@ -42,10 +42,26 @@ comments:
     - qwencheck: CHECK PASS. qwenbench: GO, a small gain on every decode point (see the previous comment).
     - next: /review
   timestamp: 2026-11-16T17:35:05.341633+00:00
+- actor: claude-code
+  id: 01m7jpz0rr4ghnsefj4wvp9cvq
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (21cb6c91) — 0 findings, 0 confirmed, 1 refuted; 5 files reviewed, 6 .kanban files had no matching validator
+    - next: none; task moved to done
+  timestamp: 2026-11-16T17:37:32.952740+00:00
+- actor: claude-code
+  id: 01m7jpz71pg7thqt8060x9t1tg
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — ResidualRMSNormKernel + ResidualStream through shared decode bodies; qwencheck PASS; plain −1.7%/−1.5%/−1.1% vs ^6jf4g0c
+    - test: green — 5 bundles 0 failures (run by implement)
+    - commit: 21cb6c91
+    - review: clean → done
+  timestamp: 2026-11-16T17:37:39.382059+00:00
 depends_on:
 - 01M7J83R03FRVF0510R6JF4G0C
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffffb680
 title: 'Qwen3.8 decode: fuse residual add + RMSNorm'
 ---
 ## Why
