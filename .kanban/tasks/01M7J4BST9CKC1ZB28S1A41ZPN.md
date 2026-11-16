@@ -1,6 +1,11 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m7jb6ses06y3ry3yvaj6n2mz
+  text: '### skipped — depends on ^fgktqbt, which is skipped because ^sbwbavm is NO-GO'
+  timestamp: 2026-11-16T14:12:04.697359+00:00
 depends_on:
 - 01M7J4BPYK5W5F22NDZFGKTQBT
 position_column: todo

@@ -246,8 +246,31 @@ comments:
     - evidence: swift build --build-tests (changed files touched and rebuilt: 0 compiler warnings; only the build-system node message about the Cmlx bundle). xcrun xctest on all five bundles, all exit 0. MLXLMTests: Swift Testing 2381 tests passed, XCTest 1098 executed, 0 failures. MLXGuidedGenerationTests: 78 passed. MLXFoundationModelsTests: 496 passed. CXGrammarTests: 7 passed. MLXHuggingFaceMacrosTests: 11 XCTest passed. Only the pre-existing 4 LFM2 skips and 3 known issues (AttentionKernelToleranceTests, ToolTests MiniCPM5), in files this branch does not touch.
     - next: review
   timestamp: 2026-11-16T14:10:55.209028+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7jb54e6b9kpcwrx5egd7338
+  text: |-
+    ### commit — changed
+    - evidence: b4fd6c79 refactor(dflash2): name axes and arguments, add hiddenSize to test fixture
+    - next: none
+  timestamp: 2026-11-16T14:11:10.406678+00:00
+- actor: claude-code
+  id: 01m7jb6byg9f67f50kvskatejw
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (b4fd6c79): 0 findings, 0 confirmed, 0 refuted, 7 validator runs attempted, 0 failed; 2 source files reviewed; 2 .kanban files had no matching validator; all 8 findings from the 2026-11-16 07:50 review are checked
+    - next: none; task moved to done
+  timestamp: 2026-11-16T14:11:50.864962+00:00
+- actor: claude-code
+  id: 01m7jb6ph94gs3ps89fwz58ht6
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 2 files (named axes/arguments, fixture hiddenSize)
+    - test: green — 5 bundles, 0 failures (pre-existing 4 LFM2 skips, 3 known issues)
+    - commit: b4fd6c79
+    - review: clean — 0 findings, 8/8 prior checked → done
+  timestamp: 2026-11-16T14:12:01.705086+00:00
+position_column: done
+position_ordinal: ffffb280
 title: 'DFlash2 with a 4-bit drafter: port onto stable and measure go/no-go against MTP'
 ---
 ## Why

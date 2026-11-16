@@ -1,6 +1,13 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m7jb6rjde0m7yezbkq9r0gq3
+  text: |-
+    ### skipped — gated on GO, ^sbwbavm is NO-GO
+    DFlash2 4-bit reached 0.88/0.89/0.93x of MTP bs4 on agent turns at 18-21k/28-29k/67-71k (round 1.85-2.5 plain steps vs MTP ~1.7). Not wired into the router. Re-measure DFlash2 b5 after the qwen-perf verify cards (^ets0cjp, ^117ymn8) land; the port is on branch dflash2-4bit (b4fd6c79).
+  timestamp: 2026-11-16T14:12:03.789456+00:00
 depends_on:
 - 01M7J4BHB7KZS32WH5QSBWBAVM
 position_column: todo
