@@ -62,6 +62,46 @@ comments:
     - evidence: 2 files — Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift, Tests/MLXLMTests/MultiRowQuantizedMatvecTests.swift; qwencheck CHECK PASS; 5 bundles exit 0; verify L3/L4 2k 27.05/31.07 -> 24.24/28.22 ms; MTP decode vs ^ftj9mae -6.0/-3.0/-3.5%
     - next: /review (not committed, per instructions); follow-up ^q1yp3b1 filed
   timestamp: 2026-11-16T18:35:10.220308+00:00
+- actor: claude-code
+  id: 01m7jtc3qdtp8ptay76thegngt
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD — 3 findings (3 confirmed, 0 refuted) — Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift:418, Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift:520, Tests/MLXLMTests/MultiRowQuantizedMatvecTests.swift:156
+    - next: implement the three findings in the 2026-11-16 12:35 Review Findings section, then re-review
+  timestamp: 2026-11-16T18:37:07.693686+00:00
+- actor: claude-code
+  id: 01m7jtcg186bwcqgs5nn6thv5z
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — MultiRowQuantizedMatvec staged inputs/8-SIMD tiles/prefetch; qwencheck PASS; MTP −6.0%/−3.0%/−3.5% vs ^ftj9mae
+    - test: green — 5 bundles exit 0 (run by implement)
+    - commit: 60d6f578
+    - review: findings — MultiRowQuantizedMatvec.swift:418, :520; MultiRowQuantizedMatvecTests.swift:156
+  timestamp: 2026-11-16T18:37:20.296497+00:00
+- actor: claude-code
+  id: 01m7jtqsw79x8a00x70j3rwykv
+  text: |-
+    Review findings fix (iteration 2):
+    - :418 — new free helper `load_words_and_scale<S>(wl, scales, group, words, scale)`; both `fetch_row`s call it, the affine one then adds its bias load.
+    - :520 — new free helper `fetch_block(format, ws, row_bytes, row_groups, raw)` holds the one copy of the RESULTS-row fetch loop; the prologue and the in-loop prefetch both call it. It takes `raw[RESULTS]` (a 1-D array of the Raw struct) by reference plus scalars, and it costs nothing: step-matmul microbench interleaved, 15 runs ($S/mrbench_dedup_ets0cjp.txt; `cur` = header before this edit, `new` = after, extracted from the Swift source by $S/extract_header.sh): rows 3 16.33 -> 16.30 ms, rows 4 19.23 -> 19.21, rows 6 29.70 -> 29.06; lib (new) 16.72/19.59/29.75 vs the earlier final 17.05/19.65/29.94. 0 mismatches against MLX row by row for every variant. So the 0.3 ms cost recorded earlier is specific to moving the compute loop (weights/inputs/results arrays), not to a by-reference raw fetch.
+    - MultiRowQuantizedMatvecTests.swift:156 — both every-format tests now call `assertEveryFormatAndDtypeMatches(outputSizes:inputs:seed:)`; seeds named (`everyFormatSeed` = 1, `everyThreadgroupWidthSeed` = 200), so each test builds the same layers as before. MultiRowQuantizedMatvecTests 11/11 pass.
+  timestamp: 2026-11-16T18:43:30.823702+00:00
+- actor: claude-code
+  id: 01m7jv14wxsqcdxvg5y4cep20m
+  text: |-
+    Note on the finding texts. You told me to share the code for findings :418 and :520. Two parts of their text said to keep the code as it was, and you overrode them:
+    - :418 said "Leave the bodies as they are." The fix adds the shared free helper that the same finding describes.
+    - :520 said not to write a helper that takes `raw` by reference. `fetch_block` does take `raw[RESULTS]` by reference. The interleaved microbench shows that this costs nothing (see the earlier comment).
+
+    Verification: swift-format format and lint are clean on both files. `swift build --build-tests` printed no warnings except SwiftPM's "missing creator for mutated node" bundle notice. MultiRowQuantizedMatvecTests: 11/11 pass. Full MLXLMTests via xcrun xctest exits 0 ($S/testlogs_ets0cjp_dedup/MLXLMTests.log): XCTest 1117 tests, 4 skipped, 0 failures; Swift Testing 2369 passed with 3 known issues. These counts are the same as iteration 1. qwencheck ($S/qwencheck_ets0cjp_dedup.log): 8/8 MATCH, SESSION PASS (cached 139/203), TOOLCHAT plain+mtp PASS, CHECK PASS.
+  timestamp: 2026-11-16T18:48:37.021478+00:00
+- actor: claude-code
+  id: 01m7jv16vajydqwb4jw3m7hqst
+  text: |-
+    ### implement — changed
+    - evidence: 2 files — Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift, Tests/MLXLMTests/MultiRowQuantizedMatvecTests.swift; 3/3 findings checked; mrbench rows 3/4/6 cur 16.33/19.23/29.70 -> new 16.30/19.21/29.06 ms, 0 mismatches; MLXLMTests exit 0 (1117 XCTest, 2369 Swift Testing); qwencheck CHECK PASS
+    - next: /review (not committed, per instructions)
+  timestamp: 2026-11-16T18:48:39.018242+00:00
 depends_on:
 - 01M7J83VR4YW1XXC8EAFTJ9MAE
 position_column: doing
@@ -81,3 +121,19 @@ In `Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift`:
 - [x] Microbench: L=3 and L=4 verify forward in ms, before and after.
 - [x] `qwencheck.sh`: MTP greedy ids identical to the golden file, and cache reuse passes. The parity unit test (exact) passes. All five bundles are green.
 - [x] `qwenbench.sh` delta on this card. #qwen-perf
+
+## Review Findings (2026-11-16 12:35)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 2 file(s) reviewed, 6 not reviewed.
+
+> 6 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7J83VR4YW1XXC8EAFTJ9MAE.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7J83VR4YW1XXC8EAFTJ9MAE.md` — no validator matches this file
+> - `.kanban/tasks/01M7J840QAGWRNMGV5HETS0CJP.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7J840QAGWRNMGV5HETS0CJP.md` — no validator matches this file
+> - `.kanban/tasks/01M7JRKZNB0NZ2DECAJQ1YP3B1.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7JRKZNB0NZ2DECAJQ1YP3B1.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift:418` `duplication/duplication` — `Mxfp4Format::fetch_row` repeats the first two statements of `AffineFormat::fetch_row`: the packed-word load through `load_words` and the scale load from `scales[group]`. The two formats differ only in the scale type and in the bias load, which the mxfp4 format does not have. If the word or scale addressing changes in one format, the other can drift out of step. Leave the bodies as they are. The two-line load is small and the scale types differ. If the addressing is ever changed, move the shared load into a single free helper that both formats call, the way `load_words` already is. Do not extract anything that takes `raw` by reference, because the file records that such a helper costs about 0.3 ms.
+- [x] `Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift:520` `duplication/duplication` — The weight prefetch loop in `project_rows` repeats the 4-line `fetch_row` loop from the prologue (lines 501-505). Both loops call `format.fetch_row` over `RESULTS` rows with the same arguments and differ only in the `ws` and `advance` setup before them. A later change to the row addressing or the fetch arguments must be made in both places or the prologue and the in-loop prefetch will disagree. Fold the two loops into one by running the fetch at the top of each iteration after a single pre-advance, so only one copy of the fetch exists. If that changes the generated code, keep the two copies and add a comment that the in-loop fetch must match the prologue fetch. Do not extract a helper that takes `raw` by reference, because the file records that it costs about 0.3 ms.
+- [x] `Tests/MLXLMTests/MultiRowQuantizedMatvecTests.swift:156` `reuse/reuse` — `testEveryRowIsBitIdenticalToItsOwnMatvecForEveryThreadgroupWidth` repeats the loop of the existing `testEveryRowIsBitIdenticalToItsOwnMatvecForEveryFormat`: the same format, dtype and output loops, the same `makeLayer` and `assertEveryRowMatches` calls, and the same seed counter. The only differences are the output list and a fixed input width. Writing a parallel copy means two loops that must be kept in sync, when the existing test could take the output widths and input width as parameters. Extract a helper such as `assertEveryFormatAndDtypeMatches(outputs: [Int], inputs: Int)` and have both tests call it with their own output list and input width. Alternatively, generalize the existing test to take those two lists. Either way, keep one copy of the loop.

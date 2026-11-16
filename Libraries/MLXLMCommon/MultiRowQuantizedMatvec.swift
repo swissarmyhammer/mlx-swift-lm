@@ -259,6 +259,16 @@ public enum MultiRowQuantizedMatvec {
                 }
             }
 
+            /// The packed words and the scale of one lane in one weight row of a block,
+            /// the loads of every format.
+            template <typename S>
+            inline void load_words_and_scale(
+                const device uint32_t* wl, const device S* scales, int group,
+                thread uint32_t (&words)[PACKS], thread S& scale) {
+                load_words(wl, words);
+                scale = scales[group];
+            }
+
             inline float fp8_e8m0_value(uint8_t bits) {
                 uint32_t out = (bits == 0 ? 0x400000 : (static_cast<uint16_t>(bits) << 23));
                 return as_type<float>(out);
@@ -370,8 +380,7 @@ public enum MultiRowQuantizedMatvec {
                 }
 
                 void fetch_row(const device uint32_t* wl, int group, thread Raw& raw) const thread {
-                    load_words(wl, raw.words);
-                    raw.scale = scales[group];
+                    load_words_and_scale(wl, scales, group, raw.words, raw.scale);
                     raw.bias = biases[group];
                 }
 
@@ -415,8 +424,7 @@ public enum MultiRowQuantizedMatvec {
                 }
 
                 void fetch_row(const device uint32_t* wl, int group, thread Raw& raw) const thread {
-                    load_words(wl, raw.words);
-                    raw.scale = scales[group];
+                    load_words_and_scale(wl, scales, group, raw.words, raw.scale);
                 }
 
                 static void decode(
@@ -471,6 +479,18 @@ public enum MultiRowQuantizedMatvec {
                 }
             };
 
+            /// The packed words and the scales of the `RESULTS` weight rows of one lane in
+            /// the block whose first row starts at `ws`, read through `format`.
+            template <typename Format>
+            inline void fetch_block(
+                thread const Format& format, const device uint8_t* ws, int row_bytes,
+                int row_groups, thread typename Format::Raw (&raw)[RESULTS]) {
+                UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
+                    format.fetch_row(
+                        (const device uint32_t*)(ws + row * row_bytes), row * row_groups, raw[row]);
+                }
+            }
+
             /// Runs the rows of one threadgroup through the weights `format` reads.
             ///
             /// The loop keeps the weights, the inputs and the results of a block in
@@ -498,11 +518,7 @@ public enum MultiRowQuantizedMatvec {
                     }
                 }
                 typename Format::Raw raw[RESULTS];
-                UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
-                    format.fetch_row(
-                        (const device uint32_t*)(ws + row * layout.row_bytes),
-                        row * layout.row_groups, raw[row]);
-                }
+                fetch_block(format, ws, layout.row_bytes, layout.row_groups, raw);
 
                 float result[ROWS][RESULTS] = {};
                 int stage = 0;
@@ -516,11 +532,7 @@ public enum MultiRowQuantizedMatvec {
                     if (has_next) {
                         ws += Layout::block_bytes;
                         format.advance(Layout::groups_per_block);
-                        UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
-                            format.fetch_row(
-                                (const device uint32_t*)(ws + row * layout.row_bytes),
-                                row * layout.row_groups, raw[row]);
-                        }
+                        fetch_block(format, ws, layout.row_bytes, layout.row_groups, raw);
                     }
 
                     const InputStage<ROWS> input_stage(staged_x, staged_sums, stage);
