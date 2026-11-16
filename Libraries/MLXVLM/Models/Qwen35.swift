@@ -27,8 +27,10 @@ private func supportsExactCompiledDecode(_ dtype: DType) -> Bool {
 
 // MARK: - Configuration
 
+/// The `config.json` of a Qwen 3.5 vision-language checkpoint.
 public struct Qwen35Configuration: Codable, Sendable {
 
+    /// The `text_config` of the checkpoint: the shape of the language model.
     public struct TextConfiguration: Codable, Sendable {
         /// The values a `config.json` that leaves a field out gets.
         fileprivate enum Defaults {
@@ -75,38 +77,85 @@ public struct Qwen35Configuration: Codable, Sendable {
             static let mropeSection = [temporalFrequencies, heightFrequencies, widthFrequencies]
         }
 
+        /// The `model_type` of the text config.
         public var modelType: String = ""
+        /// The width of the hidden states.
         public var hiddenSize: Int = Defaults.hiddenSize
+        /// The decoder layers.
         public var hiddenLayers: Int = Defaults.hiddenLayers
+        /// The width of the dense MLP.
         public var intermediateSize: Int = Defaults.intermediateSize
+        /// The query heads of an attention layer.
         public var attentionHeads: Int = Defaults.attentionHeads
+        /// The key and value heads of an attention layer.
         public var kvHeads: Int = Defaults.kvHeads
+        /// The value heads of a GDN layer.
         public var linearNumValueHeads: Int = Defaults.linearNumValueHeads
+        /// The key heads of a GDN layer.
         public var linearNumKeyHeads: Int = Defaults.linearNumKeyHeads
+        /// The width of a GDN key head.
         public var linearKeyHeadDim: Int = Defaults.linearKeyHeadDim
+        /// The width of a GDN value head.
         public var linearValueHeadDim: Int = Defaults.linearValueHeadDim
+        /// The kernel size of the GDN conv.
         public var linearConvKernelDim: Int = Defaults.linearConvKernelDim
+        /// The epsilon of the RMS norms.
         public var rmsNormEps: Float = Defaults.rmsNormEps
+        /// The tokens of the vocabulary.
         public var vocabularySize: Int = Defaults.vocabularySize
+        /// The base of the M-RoPE frequencies; `rope_parameters` gives it
+        /// when the config carries them.
         public var ropeTheta: Float = Defaults.ropeTheta
+        /// The share of each head that M-RoPE rotates; `rope_parameters`
+        /// gives it when the config carries them.
         public var partialRotaryFactor: Float = Defaults.partialRotaryFactor
+        /// The longest sequence the positions were trained on.
         public var maxPositionEmbeddings: Int = Defaults.maxPositionEmbeddings
+        /// Whether the output projection shares the weights of the token
+        /// embedding.
         public var tieWordEmbeddings: Bool = false
+        /// Whether the q, k, v and o projections of an attention layer carry
+        /// a bias.
         public var attentionBias: Bool = false
+        /// The width of an attention head; `hiddenSize / attentionHeads` when
+        /// the config leaves it out.
         public var headDim: Int?
+        /// The M-RoPE parameters: `type`, `mrope_section`, `rope_theta` and
+        /// `partial_rotary_factor`. A config with no `rope_parameters` gets
+        /// the defaults, with its top-level `rope_theta` and
+        /// `partial_rotary_factor` when it has them.
         public var ropeParameters: [String: StringOrNumber]?
+        /// One full-attention layer for each of this many layers, when
+        /// `layerTypes` is `nil`.
         public var fullAttentionInterval: Int = Defaults.fullAttentionInterval
+        /// The kind of each decoder layer as the config lists it; `nil` when
+        /// the config leaves it out, and the kinds then follow
+        /// `fullAttentionInterval`.
         public var layerTypes: [String]?
         var resolvedLayerTypes: [String] = []
+        /// The decoder layers of the multi-token-prediction head the
+        /// checkpoint carries. The MTP drafter reads it; this model drops
+        /// the head.
         public var mtpNumHiddenLayers: Int = 0
+        /// Whether the multi-token-prediction head has a token embedding
+        /// of its own instead of sharing the target's.
         public var mtpUseDedicatedEmbeddings: Bool = false
 
         // MoE fields
+        /// The routed experts of a MoE block; 0 gives every layer a dense
+        /// MLP.
         public var numExperts: Int = 0
+        /// The routed experts each token runs.
         public var numExpertsPerTok: Int = 0
+        /// The `decoder_sparse_step` of the config. This model does not
+        /// read it: a config with experts gives every layer a MoE block.
         public var decoderSparseStep: Int = 1
+        /// The width of the shared expert of a MoE block.
         public var sharedExpertIntermediateSize: Int = 0
+        /// The width of each routed expert of a MoE block.
         public var moeIntermediateSize: Int = 0
+        /// Whether the gate weights of the chosen experts are normalized to
+        /// sum to one.
         public var normTopkProb: Bool = true
 
         enum CodingKeys: String, CodingKey {
@@ -142,6 +191,14 @@ public struct Qwen35Configuration: Codable, Sendable {
             case normTopkProb = "norm_topk_prob"
         }
 
+        /// Decodes a text config. A field the config leaves out takes its
+        /// default, and the layer kinds are resolved from `layerTypes` or
+        /// `fullAttentionInterval`.
+        ///
+        /// - Parameter decoder: The decoder of the `text_config` object.
+        /// - Throws: A decoding error, or an error of
+        ///   `HybridAttentionSchedule` when `layerTypes` does not fit
+        ///   `hiddenLayers`.
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
 
@@ -263,6 +320,8 @@ public struct Qwen35Configuration: Codable, Sendable {
         }
     }
 
+    /// The `vision_config` of the checkpoint; Qwen 3.5 shares the vision
+    /// tower of Qwen3-VL.
     public typealias VisionConfiguration = Qwen3VLConfiguration.VisionConfiguration
 
     /// The ids of the special tokens a `config.json` that leaves them out gets.
@@ -277,26 +336,42 @@ public struct Qwen35Configuration: Codable, Sendable {
         static let visionEnd = 248_046
     }
 
+    /// The configuration of the language model.
     public let textConfiguration: TextConfiguration
+    /// The configuration of the vision tower.
     public let visionConfiguration: VisionConfiguration
+    /// The `model_type` of the checkpoint.
     public let modelType: String
     private let _ignoreIndex: Int?
+    /// The label id a training loss skips; -100 when the config leaves it
+    /// out.
     public var ignoreIndex: Int { _ignoreIndex ?? -100 }
     private let _imageTokenId: Int?
+    /// The id of the placeholder token of an image patch.
     public var imageTokenId: Int { _imageTokenId ?? DefaultTokenId.image }
     private let _videoTokenId: Int?
+    /// The id of the placeholder token of a video patch.
     public var videoTokenId: Int { _videoTokenId ?? DefaultTokenId.video }
     private let _imageTokenIndex: Int?
+    /// The id the image features replace in the input ids; `imageTokenId`
+    /// when the config leaves `image_token_index` out.
     public var imageTokenIndex: Int { _imageTokenIndex ?? imageTokenId }
     private let _videoTokenIndex: Int?
+    /// The id the video features replace in the input ids; `videoTokenId`
+    /// when the config leaves `video_token_index` out.
     public var videoTokenIndex: Int { _videoTokenIndex ?? videoTokenId }
     private let _visionStartTokenId: Int?
+    /// The id of the token that opens an image or a video.
     public var visionStartTokenId: Int { _visionStartTokenId ?? DefaultTokenId.visionStart }
     private let _visionEndTokenId: Int?
+    /// The id of the token that closes an image or a video.
     public var visionEndTokenId: Int { _visionEndTokenId ?? DefaultTokenId.visionEnd }
     private let _vocabSize: Int?
+    /// The tokens of the vocabulary; the text config gives it when the
+    /// top level leaves it out.
     public var vocabSize: Int { _vocabSize ?? textConfiguration.vocabularySize }
     private let _eosTokenId: IntOrIntArray?
+    /// The end-of-sequence token ids, or `nil` when the config names none.
     public var eosTokenId: [Int]? { _eosTokenId?.values }
 
     enum CodingKeys: String, CodingKey {
@@ -941,6 +1016,8 @@ public enum Qwen35Language {
         }
     }
 
+    /// A linear-attention layer: the gated delta net, with its causal conv
+    /// and its recurrent state.
     open class GatedDeltaNet: Module, GatedDeltaDecodeLayer {
         let hiddenSize: Int
         let numVHeads: Int
@@ -1008,6 +1085,10 @@ public enum Qwen35Language {
         /// from before a checkpoint replaces it.
         private static let initialDecayHigh = 16
 
+        /// Makes the projections, the conv, the decay and the norm of a gated
+        /// delta net.
+        ///
+        /// - Parameter args: The text config.
         public init(_ args: Qwen35Configuration.TextConfiguration) {
             self.hiddenSize = args.hiddenSize
             self.numVHeads = args.linearNumValueHeads
@@ -1154,6 +1235,16 @@ public enum Qwen35Language {
             )
         }
 
+        /// Runs the gated delta net over the tokens and moves the cache past them.
+        ///
+        /// - Parameters:
+        ///   - inputs: The hidden states, shape `(batch, tokens, hiddenSize)`.
+        ///   - mask: The padding mask, shape `(batch, tokens)`, or `nil`.
+        ///   - cache: The conv and recurrent state, or `nil` to start from zero
+        ///     and keep nothing.
+        ///   - keepsSnapshots: Whether to keep the state after each token, so a
+        ///     speculative verify can roll the cache back.
+        /// - Returns: The layer output, shape `(batch, tokens, hiddenSize)`.
         open func callAsFunction(
             _ inputs: MLXArray,
             mask: MLXArray? = nil,
@@ -1284,6 +1375,8 @@ public enum Qwen35Language {
         }
     }
 
+    /// The mixture-of-experts feed-forward block: the top-k routed experts
+    /// plus a gated shared expert.
     open class SparseMoeBlock: Module, UnaryLayer {
         let normTopkProb: Bool
         let numExperts: Int
@@ -1295,6 +1388,9 @@ public enum Qwen35Language {
         @ModuleInfo(key: "shared_expert") var sharedExpert: MLP
         @ModuleInfo(key: "shared_expert_gate") var sharedExpertGate: Linear
 
+        /// Makes the router, the routed experts and the shared expert.
+        ///
+        /// - Parameter args: The text config.
         public init(_ args: Qwen35Configuration.TextConfiguration) {
             self.normTopkProb = args.normTopkProb
             self.numExperts = args.numExperts
@@ -1315,6 +1411,11 @@ public enum Qwen35Language {
             super.init()
         }
 
+        /// Runs the block; a step of one float16 or bfloat16 token outside
+        /// training runs a compiled trace where the platform supports it.
+        ///
+        /// - Parameter x: The hidden states, shape `(batch, tokens, hiddenSize)`.
+        /// - Returns: The block output, the same shape as `x`.
         open func callAsFunction(_ x: MLXArray) -> MLXArray {
             guard x.dim(Qwen35Language.tokenAxis) == GatedDeltaDecodeKernel.decodeTokens,
                 !training, supportsExactCompiledDecode(x.dtype),
@@ -1356,6 +1457,8 @@ public enum Qwen35Language {
         }
     }
 
+    /// One decoder layer: a gated delta net or a full attention, then the
+    /// MLP or MoE block, each after an RMSNorm and with a residual.
     open class DecoderLayer: Module, FusedProjectionDecodeLayer {
         let isLinear: Bool
         let allowsCompiledDecode: Bool
@@ -1372,6 +1475,14 @@ public enum Qwen35Language {
 
         @ModuleInfo(key: "mlp") var mlp: Module & UnaryLayer
 
+        /// Makes the layer of the kind the schedule gives `layerIdx`.
+        ///
+        /// - Parameters:
+        ///   - args: The text config.
+        ///   - layerIdx: The place of the layer in the decoder.
+        ///   - forceFullAttention: Whether to make a full-attention layer
+        ///     whatever the schedule says, as the MTP head does. Such a layer
+        ///     never runs the compiled decode trace.
         public init(
             _ args: Qwen35Configuration.TextConfiguration, layerIdx: Int,
             forceFullAttention: Bool = false
@@ -1403,6 +1514,18 @@ public enum Qwen35Language {
             super.init()
         }
 
+        /// Runs the layer over the tokens.
+        ///
+        /// - Parameters:
+        ///   - x: The hidden states, shape `(batch, tokens, hiddenSize)`.
+        ///   - attentionMask: The mask of a full-attention layer.
+        ///   - ssmMask: The padding mask of a GDN layer, or `nil`.
+        ///   - cache: The cache of the layer, or `nil`.
+        ///   - positionIds: The M-RoPE positions, or `nil` to place the tokens
+        ///     after the cache.
+        ///   - keepsSnapshots: Whether a GDN layer keeps the state after each
+        ///     token, so a speculative verify can roll the cache back.
+        /// - Returns: The layer output, the same shape as `x`.
         open func callAsFunction(
             _ x: MLXArray,
             attentionMask: MLXFast.ScaledDotProductAttentionMaskMode,
@@ -1593,6 +1716,8 @@ public enum Qwen35Language {
         }
     }
 
+    /// The decoder stack: the token embedding, the decoder layers and the
+    /// final norm.
     open class Model: Module {
         @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
         @ModuleInfo(key: "layers") fileprivate var layers: [DecoderLayer]
@@ -1615,6 +1740,10 @@ public enum Qwen35Language {
         /// The argument of a segment that carries the hidden states.
         private static let carryArgument = 0
 
+        /// Makes the embedding, the decoder layers the schedule gives, the final
+        /// norm and the compiled decode segments.
+        ///
+        /// - Parameter args: The text config.
         public init(_ args: Qwen35Configuration.TextConfiguration) {
             precondition(args.vocabularySize > 0)
             _embedTokens.wrappedValue = Embedding(
@@ -2179,13 +2308,19 @@ private final class Qwen35Vision: Module {
     }
 }
 
+/// The Qwen 3.5 vision-language model: the Qwen3-VL vision tower and a
+/// hybrid language model of gated delta nets and full attention.
 public class Qwen35: Module, VLMModel {
     @ModuleInfo(key: "vision_tower") private var visionModel: Qwen3VLVision.VisionModel?
     @ModuleInfo(key: "language_model") var languageModel: Qwen35Language.LanguageModel
 
+    /// The configuration the model was made from.
     public let config: Qwen35Configuration
     private let onDemandVision: OnDemandComponent<Qwen35Vision>
 
+    /// Makes the vision tower and the language model.
+    ///
+    /// - Parameter config: The configuration of the checkpoint.
     public init(_ config: Qwen35Configuration) {
         self.config = config
         _visionModel.wrappedValue = Qwen3VLVision.VisionModel(config.visionConfiguration)
@@ -2194,17 +2329,29 @@ public class Qwen35: Module, VLMModel {
         super.init()
     }
 
+    /// The tokens of the vocabulary of the output logits.
     public var vocabularySize: Int { config.vocabSize }
 
+    /// The decoder layers of the language model, where LoRA adapters go.
     public var loraLayers: [Module] {
         languageModel.model.layers
     }
 
+    /// Makes one cache for each decoder layer: a `MambaCache` for a GDN
+    /// layer and a key-value cache for a full-attention layer.
+    ///
+    /// - Parameter parameters: The generation parameters, whose cache plan
+    ///   the caches follow, or `nil` for the defaults.
+    /// - Returns: The caches, in the order of the layers.
+    /// - Throws: An error when the cache plan of `parameters` is invalid.
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         _ = try parameters?.kvCachePlan()
         return try languageModel.makeCache(parameters: parameters)
     }
 
+    /// Fuses the projections of the language model after the weights load.
+    ///
+    /// - Throws: An error when the projections cannot be fused.
     public func prepare() throws {
         try languageModel.prepare()
     }
@@ -2323,6 +2470,23 @@ public class Qwen35: Module, VLMModel {
         return (pixelValues, imageFrames, videoFrames, inputEmbeddings)
     }
 
+    /// Prefills the prompt, its images and its videos into the cache.
+    ///
+    /// A cold prompt that fits one window runs in one forward. A warm cache,
+    /// or a prompt longer than the prefill window, runs the windowed
+    /// continuation, which anchors the M-RoPE positions at the cache offset.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt tokens and media.
+    ///   - cache: The caches of the layers.
+    ///   - state: The state of the previous output, which carries the rope
+    ///     delta of a warm cache.
+    ///   - prefill: The prefill window and the progress callback.
+    /// - Returns: The logits of the last token, and the state the decode
+    ///   continues from.
+    /// - Throws: An error when a warm cache has no rope delta, when the
+    ///   vision tower cannot load, or when the media features do not match
+    ///   their placeholder tokens.
     public func prepare(
         _ input: LMInput,
         cache: [any KVCache],
@@ -2503,6 +2667,14 @@ public class Qwen35: Module, VLMModel {
         return .logits(LMOutput(logits: lastOutput.logits, state: resumeState))
     }
 
+    /// Runs the language model over text tokens; the decode step.
+    ///
+    /// - Parameters:
+    ///   - input: The text tokens.
+    ///   - cache: The caches of the layers, or `nil`.
+    ///   - state: The state of the previous output. A warm cache needs its
+    ///     rope delta.
+    /// - Returns: The logits and the state the next step continues from.
     public func callAsFunction(
         _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
@@ -2524,10 +2696,19 @@ public class Qwen35: Module, VLMModel {
         return result
     }
 
+    /// The checkpoint namespaces the loader skips: the MTP head, which the
+    /// drafter loads instead.
     public var excludedCheckpointNamespaces: [String] {
         Qwen35CheckpointPolicy.excludedTargetNamespaces
     }
 
+    /// Drops the parts of the checkpoint this model does not run and
+    /// sanitizes the rest.
+    ///
+    /// - Parameter checkpoint: The checkpoint as it loads.
+    /// - Returns: The checkpoint with the weights this model loads.
+    /// - Throws: An error when the checkpoint names cannot be selected or
+    ///   mapped.
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = try Qwen35CheckpointPolicy.prepareTarget(
             checkpoint, layout: .vision,
@@ -2537,6 +2718,17 @@ public class Qwen35: Module, VLMModel {
         return checkpoint
     }
 
+    /// Sanitizes the weights of a checkpoint. An MLX-converted checkpoint
+    /// only drops the MTP head; any other checkpoint takes the full
+    /// sanitize.
+    ///
+    /// - Parameters:
+    ///   - weights: The weights of the checkpoint.
+    ///   - metadata: The metadata of the checkpoint; `format` names an MLX
+    ///     conversion.
+    /// - Returns: The weights this model loads.
+    /// - Throws: An error when the checkpoint names cannot be selected or
+    ///   mapped.
     public func sanitize(weights: [String: MLXArray], metadata: [String: String]) throws -> [String:
         MLXArray]
     {
@@ -2554,6 +2746,14 @@ public class Qwen35: Module, VLMModel {
     /// The axis of the kernel of a conv1d weight in MLX, `(out, kernel, in)`.
     private static let convKernelAxis = 1
 
+    /// Sanitizes the weights of a raw checkpoint: moves the conv kernel axis
+    /// to the MLX layout, shifts the RMSNorm weights by one when the
+    /// checkpoint is not converted yet, and sanitizes the vision tower.
+    ///
+    /// - Parameter weights: The weights of the checkpoint.
+    /// - Returns: The weights this model loads.
+    /// - Throws: An error when the checkpoint names cannot be selected or
+    ///   mapped.
     public func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
         // Whether the checkpoint stores RMSNorm weights in the raw (un-shifted)
         // convention that needs the `+1` offset. Mirrors the MLXLLM Qwen35 gate
@@ -2609,10 +2809,13 @@ public class Qwen35: Module, VLMModel {
 }
 
 extension Qwen35: ModelComponentsProviding {
+    /// The components a Qwen 3.5 checkpoint can carry.
     public var modelComponents: [ModelComponent: [CheckpointComponent]] {
         Qwen35CheckpointPolicy.components
     }
 
+    /// The vision tower, which a load can leave out and which then loads
+    /// the first time a prompt uses it.
     public var onDemandComponents: [AnyOnDemandComponent] { [onDemandVision] }
 }
 
