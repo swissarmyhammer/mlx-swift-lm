@@ -17,4 +17,4 @@ These are real-checkpoint integration tests. Under the project rules they belong
 
 ## Acceptance
 - [ ] Move the four tests to IntegrationTesting, or remove them from MLXLMTests, so that MLXLMTests reports 0 skipped.
-- [ ] Add a note to the CLAUDE.md "After an upstream merge" steps to check for upstream tests that an environment variable gates. #qwen-perf
+- [ ] Add a note to the CLAUDE.md "After an upstream merge" steps to check for upstream tests that an environment variable gates. #test-hygiene

@@ -19,8 +19,25 @@ comments:
     - The 4 skips are LFM2 checkpoint tests that an environment variable gates. They came from 6dc1e4e7 and were filed as a new task. The real-model IntegrationTesting suites were not run, as instructed.
     - next: /review
   timestamp: 2026-11-16T23:32:48.103895+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7kbbehk1e8acbmtkrfvdz6q
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (cdf50d96) — 0 findings, 0 confirmed, 0 refuted; 7 attempted, 0 failed; 5 files reviewed, 6 .kanban files had no matching validator
+    - next: none — task moved to done
+  timestamp: 2026-11-16T23:33:51.795397+00:00
+- actor: claude-code
+  id: 01m7kbbvwkdp1y94khjaxeez0j
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 5 IntegrationTesting files; xcodebuild build-for-testing IntegrationTesting: TEST BUILD SUCCEEDED, 0 errors, 0 warnings (this is the evidence for the acceptance item, now checked)
+    - test: green — MLXLMTests 1134 XCTest 0 fail + 2372 Swift Testing (run by implement)
+    - commit: cdf50d96
+    - review: clean → done
+    - Cause: upstream merge 6dc1e4e7 on stable, not this branch.
+  timestamp: 2026-11-16T23:34:05.459160+00:00
+position_column: done
+position_ordinal: ffffc080
 title: IntegrationTesting target does not compile on qwen-perf (DeepseekV4 switch, Qwen38FourBitMTPModel ContainerLoader)
 ---
 Found while working ^q1yp3b1. `xcodebuild build-for-testing -skipPackagePluginValidation -skipMacroValidation -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS'` fails with TEST BUILD FAILED on files that change did not touch:
@@ -29,5 +46,5 @@ Found while working ^q1yp3b1. `xcodebuild build-for-testing -skipPackagePluginVa
 - `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/TextGeneration/Qwen38FourBitMTPModel.swift`: `error: cannot convert return expression of type 'MLXLanguageModel.ContainerLoader' ... to return type 'MLXLanguageModel.ContainerLoader'` (same printed type: likely a `@concurrent` / `@Sendable` attribute mismatch of the closure).
 
 ## Acceptance
-- [ ] The IntegrationTesting scheme builds for testing with zero errors (CI `integration_tests.yml` runs it).
+- [x] The IntegrationTesting scheme builds for testing with zero errors (CI `integration_tests.yml` runs it).
 #qwen-perf
