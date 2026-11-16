@@ -48,6 +48,33 @@ comments:
     - evidence: 4 files — Libraries/MLXLMCommon/FusedQuantizedLinear.swift, Libraries/MLXLLM/Models/Qwen35.swift, Libraries/MLXVLM/Models/Qwen35.swift, Tests/MLXLMTests/Qwen35GDNInputProjectionGroupTests.swift. All 8 findings of Review Findings (2026-11-16 15:35) are checked. swift-format ran. swift build --build-tests finished with no compiler warnings. xcrun xctest MLXLMTests: 1126 XCTest tests, 0 failures, 4 skipped (the env-gated LFM2 checkpoint/benchmark tests, which existed before); Swift Testing ran 2369 tests and they passed, with 3 known issues that predate this change. Qwen35FusedGDNProjectionTests and Qwen35FusedProjectionTests are unchanged and green. qwencheck.sh (compares against qwen_golden_mn44v3n.json) printed CHECK PASS: golden ids identical, SESSION PASS, TOOLCHAT plain/mtp PASS. The other four bundles were not run in this pass.
     - next: /review
   timestamp: 2026-11-16T21:49:30.741205+00:00
+- actor: claude-code
+  id: 01m7k5h92nqfg43pa677zbn09c
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (5cfae684): 1 finding (1 confirmed, 2 refuted) — Tests/MLXLMTests/Qwen35GDNInputProjectionGroupTests.swift:195 (completeness/inverse-operation-coverage). All 8 prior findings checked.
+    - next: implement the 2026-11-16 15:49 finding (add the off-to-on fusedInputProjectionEnabled flip case asserting compiledDecodeSegmentCount == 0), then re-review.
+  timestamp: 2026-11-16T21:52:11.349137+00:00
+- actor: claude-code
+  id: 01m7k5hkd83bjeb11f16dgykt1
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — shared Qwen35GatedDeltaInputProjection, isEnabled didSet invalidation + tests; qwencheck PASS
+    - test: green — MLXLMTests 1126 XCTest 0 fail + 2369 Swift Testing (run by implement)
+    - commit: 5cfae684
+    - review: findings — Tests/MLXLMTests/Qwen35GDNInputProjectionGroupTests.swift:195
+  timestamp: 2026-11-16T21:52:21.928826+00:00
+- actor: claude-code
+  id: 01m7k5nmd8g8hzq97syt79qw7t
+  text: 'Findings pass 2 (2026-11-16 15:49 section). Added testLLMGatedDeltaNetRollbackSwitchReenableDropsTheCompiledDecode and testVLMGatedDeltaNetRollbackSwitchReenableDropsTheCompiledDecode. Each one disables the fusion, runs a compiled decode, sets `fusedInputProjectionEnabled = true`, and asserts `compiledDecodeSegmentCount == 0`. decodedLLMModel and decodedVLMModel now take `fusionEnabled: Bool = true` and set the switch before the decode, so all four switch tests use one helper. A new `gatedDeltaNet(of: Qwen35Language.Model)` lookup replaces the inline lookup in the VLM on→off test, whose assertions are unchanged. Production already invalidates on both flips, so the new tests pass on HEAD. Mutation check: with the guard of `isEnabledDidChange` changed to `guard isEnabled != oldValue, !isEnabled` (on→off only), both new tests failed with `("2") is not equal to ("0")` and the on→off tests still passed. The mutation was then reverted. Note: `traceState(of:)` registers a trace even while the fusion is off, which is why the off→on flip can drop it.'
+  timestamp: 2026-11-16T21:54:34.024389+00:00
+- actor: claude-code
+  id: 01m7k5nphd6q3gxyzyz153k2hg
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Tests/MLXLMTests/Qwen35GDNInputProjectionGroupTests.swift. swift-format ran. swift build --build-tests: Build complete, no compiler warnings. xcrun xctest -XCTest MLXLMTests.Qwen35GDNInputProjectionGroupTests: 8 tests, 0 failures. Mutation RED: 2 new tests failed (2 != 0) on an on→off-only guard, then the guard was reverted. The finding of 2026-11-16 15:49 is checked.
+    - next: /review
+  timestamp: 2026-11-16T21:54:36.205680+00:00
 position_column: doing
 position_ordinal: '80'
 title: Move the Qwen35 GDN input-projection fusion onto FusedQuantizedProjectionGroup
@@ -86,3 +113,13 @@ title: Move the Qwen35 GDN input-projection fusion onto FusedQuantizedProjection
 - [x] `Libraries/MLXVLM/Models/Qwen35.swift:1040` `duplication/duplication` — The VLM `fusedInputProjection` declaration repeats the LLM twin's key list and fusion configuration, so the checkpoint key order is written twice. Use the shared key order proposed for the LLM declaration and delete the local literal.
 - [x] `Libraries/MLXVLM/Models/Qwen35.swift:1048` `completeness/invariant-propagation` — The VLM twin has the same gap: `fusedInputProjectionEnabled`'s setter changes the fusion mode without invalidating the compiled traces that captured the fused path, while the `update` and `updateModule` overrides invalidate. Apply the same fix as the LLM twin in one shared place (the group, not each model), so both models inherit the invalidation. Add a VLM test that toggles the setter after a compiled decode and checks the trace is dropped.
 - [x] `Libraries/MLXVLM/Models/Qwen35.swift:1179` `duplication/duplication` — `inputProjections` in the VLM GatedDeltaNet repeats the LLM twin's ordered list. The same ordering is coupled to `keys` and `InputProjectionPart` in two places. Use the shared projection order proposed for the LLM copy and delete the local list.
+
+## Review Findings (2026-11-16 15:49)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 4 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7JDDYWRKM8CEB5KYFNJF2CD.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7JDDYWRKM8CEB5KYFNJF2CD.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTests/Qwen35GDNInputProjectionGroupTests.swift:195` `completeness/inverse-operation-coverage` — The rollback-switch test only flips `fusedInputProjectionEnabled` from on to off. The change now drops reading traces on every flip (`isEnabledDidChange` guards only on `isEnabled != oldValue`), and the stated reason is that a trace captured under the old setting keeps computing the outputs the old way. A trace captured while the fusion is off and then re-enabled is never tested, so the off-to-on direction is unproven. Add a case that decodes with the fusion disabled (or flips it off and decodes), then sets `fusedInputProjectionEnabled = true` and asserts `compiledDecodeSegmentCount == 0`. Keep the existing off-direction assertion.

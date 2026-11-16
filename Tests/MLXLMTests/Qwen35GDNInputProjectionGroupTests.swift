@@ -158,12 +158,16 @@ final class Qwen35GDNInputProjectionGroupTests: XCTestCase {
 
     /// The text model on seeded weights, quantized and prepared, after a
     /// prompt and compiled decode steps.
-    private func decodedLLMModel() throws -> Qwen35TextModel {
+    ///
+    /// - Parameter fusionEnabled: The rollback switch of the gated delta net
+    ///   during the decode.
+    private func decodedLLMModel(fusionEnabled: Bool = true) throws -> Qwen35TextModel {
         let configuration = try JSONDecoder().decode(
             Qwen35TextConfiguration.self, from: Data(Fixture.textConfigurationJSON.utf8))
         let model = try Fixture.seededQuantized(
             seed: Self.weightSeed, prepare: { try $0.prepare() },
             { Qwen35TextModel(configuration) })
+        try gatedDeltaNet(of: model).fusedInputProjectionEnabled = fusionEnabled
         decode(vocabulary: configuration.vocabularySize) { inputs, cache in
             model.model.forward(inputs, cache: cache, applyFinalNorm: true)
         }
@@ -197,30 +201,57 @@ final class Qwen35GDNInputProjectionGroupTests: XCTestCase {
         XCTAssertEqual(model.model.compiledDecodeSegmentCount, 0)
     }
 
+    func testLLMGatedDeltaNetRollbackSwitchReenableDropsTheCompiledDecode() throws {
+        let model = try decodedLLMModel(fusionEnabled: false)
+        XCTAssertGreaterThan(model.model.compiledDecodeSegmentCount, 0)
+
+        try gatedDeltaNet(of: model).fusedInputProjectionEnabled = true
+
+        XCTAssertEqual(model.model.compiledDecodeSegmentCount, 0)
+    }
+
     // MARK: - Vision-language model
 
     /// The language model of the vision-language model on seeded weights,
     /// quantized and prepared, after a prompt and compiled decode steps.
-    private func decodedVLMModel() throws -> Qwen35Language.Model {
+    ///
+    /// - Parameter fusionEnabled: The rollback switch of the gated delta net
+    ///   during the decode.
+    private func decodedVLMModel(fusionEnabled: Bool = true) throws -> Qwen35Language.Model {
         let configuration = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.TextConfiguration.self,
             from: Data(Fixture.textConfigurationJSON.utf8))
         let model = try Fixture.seededQuantized(
             seed: Self.weightSeed, prepare: { try $0.prepareFusedProjections() },
             { Qwen35Language.Model(configuration) })
+        try gatedDeltaNet(of: model).fusedInputProjectionEnabled = fusionEnabled
         decode(vocabulary: configuration.vocabularySize) { inputs, cache in
             model(inputs, cache: cache)
         }
         return model
     }
 
+    /// The first gated delta net of `model`.
+    private func gatedDeltaNet(of model: Qwen35Language.Model) throws
+        -> Qwen35Language.GatedDeltaNet
+    {
+        try XCTUnwrap(model.modules().compactMap { $0 as? Qwen35Language.GatedDeltaNet }.first)
+    }
+
     func testVLMGatedDeltaNetRollbackSwitchDropsTheCompiledDecode() throws {
         let model = try decodedVLMModel()
         XCTAssertGreaterThan(model.compiledDecodeSegmentCount, 0)
-        let gdn = try XCTUnwrap(
-            model.modules().compactMap { $0 as? Qwen35Language.GatedDeltaNet }.first)
 
-        gdn.fusedInputProjectionEnabled = false
+        try gatedDeltaNet(of: model).fusedInputProjectionEnabled = false
+
+        XCTAssertEqual(model.compiledDecodeSegmentCount, 0)
+    }
+
+    func testVLMGatedDeltaNetRollbackSwitchReenableDropsTheCompiledDecode() throws {
+        let model = try decodedVLMModel(fusionEnabled: false)
+        XCTAssertGreaterThan(model.compiledDecodeSegmentCount, 0)
+
+        try gatedDeltaNet(of: model).fusedInputProjectionEnabled = true
 
         XCTAssertEqual(model.compiledDecodeSegmentCount, 0)
     }
