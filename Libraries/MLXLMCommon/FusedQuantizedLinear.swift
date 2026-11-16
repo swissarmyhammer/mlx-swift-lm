@@ -280,8 +280,11 @@ package final class FusedQuantizedProjectionGroup {
 
     /// Whether the group fuses its projections. A disabled group prepares
     /// nothing, and computes every call with the separate matmuls, even after
-    /// a preparation.
-    package var isEnabled: Bool
+    /// a preparation. A change drops every compiled trace that read the
+    /// fusion, and keeps the preparation.
+    package var isEnabled: Bool {
+        didSet { isEnabledDidChange(from: oldValue) }
+    }
 
     private let projection = FusedQuantizedLinearProjectionCache()
 
@@ -412,11 +415,26 @@ package final class FusedQuantizedProjectionGroup {
         return try update()
     }
 
+    /// Drops every trace that read the fusion when ``isEnabled`` changed: a
+    /// trace captured under the old setting would keep computing the outputs
+    /// the old way.
+    ///
+    /// - Parameter oldValue: The setting before the change.
+    private func isEnabledDidChange(from oldValue: Bool) {
+        guard isEnabled != oldValue else { return }
+        dropReadingTraces()
+    }
+
     /// Turns the fusion off and drops every trace that read it. The views the
     /// preparation installs land here too, and drop the traces that ran before
     /// it.
     private func invalidate() {
         projection.invalidate()
+        dropReadingTraces()
+    }
+
+    /// Drops every trace that read the fusion, and forgets it.
+    private func dropReadingTraces() {
         let traces = readingTracesLock.withLock {
             let traces = readingTraces.values.compactMap(\.value)
             readingTraces.removeAll()
@@ -425,5 +443,86 @@ package final class FusedQuantizedProjectionGroup {
         for trace in traces {
             trace.invalidate()
         }
+    }
+}
+
+/// The four input projections of a Qwen 3.5/3.6 gated delta net, which one
+/// ``FusedQuantizedProjectionGroup`` computes for every call: their checkpoint
+/// keys, their order among the fused rows, and the split of the outputs. The
+/// text model and the vision-language model both read them here.
+package enum Qwen35GatedDeltaInputProjection {
+
+    /// The four projections, in the order of the fused rows. The raw value is
+    /// the place of the output of each one among the outputs of the group.
+    private enum Part: Int, CaseIterable {
+        /// `in_proj_qkv`: the mixed query, key and value.
+        case qkv
+        /// `in_proj_z`: the gate of the output norm.
+        case z
+        /// `in_proj_b`: the write strength of each value head.
+        case b
+        /// `in_proj_a`: the decay of each value head.
+        case a
+
+        /// The checkpoint key of the projection.
+        var key: String {
+            switch self {
+            case .qkv: "in_proj_qkv"
+            case .z: "in_proj_z"
+            case .b: "in_proj_b"
+            case .a: "in_proj_a"
+            }
+        }
+    }
+
+    /// The checkpoint keys of the four projections under the gated delta
+    /// net, in the order of the fused rows.
+    package static let keys = Part.allCases.map(\.key)
+
+    /// The group that fuses the four projections for every call, a prefill
+    /// too, unless `MLX_QWEN_FOUR_GDN=0` turns the fusion off.
+    ///
+    /// - Returns: A new group, enabled by ``qwen35FourGDNEnabled``.
+    package static func makeGroup() -> FusedQuantizedProjectionGroup {
+        FusedQuantizedProjectionGroup(
+            keys: keys, fusedRows: .everyCall, isEnabled: qwen35FourGDNEnabled)
+    }
+
+    /// The four projections in the order of ``keys``, as the group takes them.
+    ///
+    /// - Parameters:
+    ///   - qkv: `in_proj_qkv`.
+    ///   - z: `in_proj_z`.
+    ///   - b: `in_proj_b`.
+    ///   - a: `in_proj_a`.
+    /// - Returns: The projections, in the order of the fused rows.
+    package static func ordered(qkv: Linear, z: Linear, b: Linear, a: Linear) -> [Linear] {
+        [qkv, z, b, a]
+    }
+
+    /// The four projections of `inputs` through `group`, with `z` split into
+    /// heads.
+    ///
+    /// - Parameters:
+    ///   - inputs: The layer input, shape `(batch, sequence, hiddenSize)`.
+    ///   - group: The group of ``makeGroup()`` that the gated delta net holds.
+    ///   - projections: The projections of ``ordered(qkv:z:b:a:)``.
+    ///   - batch: The batch size of `inputs`.
+    ///   - sequence: The tokens of `inputs`.
+    ///   - heads: The value heads that `z` splits into.
+    ///   - headWidth: The width of each value head.
+    /// - Returns: The mixed qkv, `z` of shape `(batch, sequence, heads,
+    ///   headWidth)`, `b` and `a`.
+    package static func project(
+        _ inputs: MLXArray, by group: FusedQuantizedProjectionGroup, _ projections: [Linear],
+        batch: Int, sequence: Int, heads: Int, headWidth: Int
+    ) -> (qkv: MLXArray, z: MLXArray, b: MLXArray, a: MLXArray) {
+        let projected = group(inputs, projections)
+        return (
+            projected[Part.qkv.rawValue],
+            projected[Part.z.rawValue].reshaped(batch, sequence, heads, headWidth),
+            projected[Part.b.rawValue],
+            projected[Part.a.rawValue]
+        )
     }
 }

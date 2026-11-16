@@ -1037,9 +1037,7 @@ public enum Qwen35Language {
 
         /// The four input projections as one matmul for every call, once the
         /// loader prepares them; `MLX_QWEN_FOUR_GDN=0` keeps them separate.
-        private let fusedInputProjection = FusedQuantizedProjectionGroup(
-            keys: ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"], fusedRows: .everyCall,
-            isEnabled: qwen35FourGDNEnabled)
+        private let fusedInputProjection = Qwen35GatedDeltaInputProjection.makeGroup()
 
         /// Whether the four input projections run as one matmul; see
         /// ``FusedQuantizedProjectionGroup/isEnabled``.
@@ -1067,19 +1065,6 @@ public enum Qwen35Language {
             static let key = 1
             /// The value.
             static let value = 2
-        }
-
-        /// The places of the four input projections among the outputs of the
-        /// fused input projection.
-        private enum InputProjectionPart {
-            /// `in_proj_qkv`.
-            static let qkv = 0
-            /// `in_proj_z`.
-            static let z = 1
-            /// `in_proj_b`.
-            static let b = 2
-            /// `in_proj_a`.
-            static let a = 3
         }
 
         /// The upper bound of the uniform draw of `A` that `A_log` starts
@@ -1176,7 +1161,10 @@ public enum Qwen35Language {
         }
 
         /// The four input projections, in the order of the fused rows.
-        private var inputProjections: [Linear] { [inProjQKV, inProjZ, inProjB, inProjA] }
+        private var inputProjections: [Linear] {
+            Qwen35GatedDeltaInputProjection.ordered(
+                qkv: inProjQKV, z: inProjZ, b: inProjB, a: inProjA)
+        }
 
         /// The four input projections of `inputs`, with `z` split into heads.
         ///
@@ -1189,13 +1177,9 @@ public enum Qwen35Language {
         func projectInputs(_ inputs: MLXArray, batch: Int, sequence: Int) -> (
             qkv: MLXArray, z: MLXArray, b: MLXArray, a: MLXArray
         ) {
-            let projected = fusedInputProjection(inputs, inputProjections)
-            return (
-                projected[InputProjectionPart.qkv],
-                projected[InputProjectionPart.z].reshaped(batch, sequence, numVHeads, headVDim),
-                projected[InputProjectionPart.b],
-                projected[InputProjectionPart.a]
-            )
+            Qwen35GatedDeltaInputProjection.project(
+                inputs, by: fusedInputProjection, inputProjections, batch: batch,
+                sequence: sequence, heads: numVHeads, headWidth: headVDim)
         }
 
         /// Runs the gated delta net over the tokens and moves the cache past them.

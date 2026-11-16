@@ -21,6 +21,33 @@ comments:
     - evidence: 4 files — Libraries/MLXLMCommon/FusedQuantizedLinear.swift, Libraries/MLXLLM/Models/Qwen35.swift, Libraries/MLXVLM/Models/Qwen35.swift, Tests/MLXLMTests/Qwen35GDNInputProjectionGroupTests.swift (new). Ran swift build --build-tests (no warnings), then xctest on all five bundles: MLXLMTests 1123 XCTest + 2369 Swift Testing, MLXGuidedGenerationTests 78, MLXFoundationModelsTests 496, CXGrammarTests 7 and MLXHuggingFaceMacrosTests 11, with 0 failures. MLXLMTests skipped 4 LFM2 checkpoint/benchmark tests, which an environment variable gates and which existed before this change. It also recorded 3 withKnownIssue expectations. Golden output is identical to qwen_golden_mn44v3n.json. Decode did not regress.
     - next: /review
   timestamp: 2026-11-16T21:34:25.928745+00:00
+- actor: claude-code
+  id: 01m7k4p3aqgr9r0ca1q0dqagbn
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD — 8 findings (8 confirmed, 2 refuted): Libraries/MLXLLM/Models/Qwen35.swift:201, :209, :214, :310, :323; Libraries/MLXVLM/Models/Qwen35.swift:1040, :1048, :1179
+    - next: implement the 8 items of Review Findings (2026-11-16 15:35); task stays in review
+  timestamp: 2026-11-16T21:37:20.727750+00:00
+- actor: claude-code
+  id: 01m7k4phnbbgnb7ff0abs559hn
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 4 files; golden identical to qwen_golden_mn44v3n.json; bench unchanged
+    - test: green — 5 bundles 0 failures (run by implement)
+    - commit: 22915621
+    - review: findings — MLXLLM/Models/Qwen35.swift:201, :209, :214, :310, :323; MLXVLM/Models/Qwen35.swift:1040, :1048, :1179
+  timestamp: 2026-11-16T21:37:35.403203+00:00
+- actor: claude-code
+  id: 01m7k53jq3vaqb0m3q399j6xdk
+  text: 'Findings pass 1 (2026-11-16 15:35 section). Invalidation: `FusedQuantizedProjectionGroup.isEnabled` now has a `didSet` that calls `isEnabledDidChange(from:)`, which drops every reading trace when the value changes. It keeps the preparation, so a re-enable needs no new prepare (Qwen35FusedGDNProjectionTests flips the switch off then on around prepare). `invalidate()` now does projection.invalidate() + the shared `dropReadingTraces()`. TDD: testLLMGatedDeltaNetRollbackSwitchDropsTheCompiledDecode and testVLMGatedDeltaNetRollbackSwitchDropsTheCompiledDecode both failed first with segment count 2 != 0, then passed. Duplication: new `package enum Qwen35GatedDeltaInputProjection` in FusedQuantizedLinear.swift (next to the group) holds the one order (private `Part: Int, CaseIterable` with `key`), `keys`, `makeGroup()`, `ordered(qkv:z:b:a:)` and `project(_:by:_:batch:sequence:heads:headWidth:)` (split + z reshape). Both twins use it; their InputProjectionPart enums and key literals are gone. New unit test testGatedDeltaProjectionSplitsZIntoHeads failed first (missing symbol), then passed.'
+  timestamp: 2026-11-16T21:44:42.467079+00:00
+- actor: claude-code
+  id: 01m7k5cc7nbxsdbzjv672em0bw
+  text: |-
+    ### implement — changed
+    - evidence: 4 files — Libraries/MLXLMCommon/FusedQuantizedLinear.swift, Libraries/MLXLLM/Models/Qwen35.swift, Libraries/MLXVLM/Models/Qwen35.swift, Tests/MLXLMTests/Qwen35GDNInputProjectionGroupTests.swift. All 8 findings of Review Findings (2026-11-16 15:35) are checked. swift-format ran. swift build --build-tests finished with no compiler warnings. xcrun xctest MLXLMTests: 1126 XCTest tests, 0 failures, 4 skipped (the env-gated LFM2 checkpoint/benchmark tests, which existed before); Swift Testing ran 2369 tests and they passed, with 3 known issues that predate this change. Qwen35FusedGDNProjectionTests and Qwen35FusedProjectionTests are unchanged and green. qwencheck.sh (compares against qwen_golden_mn44v3n.json) printed CHECK PASS: golden ids identical, SESSION PASS, TOOLCHAT plain/mtp PASS. The other four bundles were not run in this pass.
+    - next: /review
+  timestamp: 2026-11-16T21:49:30.741205+00:00
 position_column: doing
 position_ordinal: '80'
 title: Move the Qwen35 GDN input-projection fusion onto FusedQuantizedProjectionGroup
@@ -36,3 +63,26 @@ title: Move the Qwen35 GDN input-projection fusion onto FusedQuantizedProjection
 ## Acceptance
 - [x] No duplicated fusion lifecycle code remains in either twin.
 - [x] `Qwen35FusedGDNProjectionTests` and `Qwen35FusedProjectionTests` pass (xctest). #qwen-perf
+
+## Review Findings (2026-11-16 15:35)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 4 file(s) reviewed, 8 not reviewed.
+
+> 8 file(s) not reviewed — no validator matched:
+> - `.kanban/tags/01M7K2PZ36BK105354QCTZG6AB.jsonl` — no validator matches this file
+> - `.kanban/tags/01M7K2PZ36BK105354QCTZG6AB.yaml` — no validator matches this file
+> - `.kanban/tasks/01M7J84FZ3SJF8MB599CDEN2RC.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7J84FZ3SJF8MB599CDEN2RC.md` — no validator matches this file
+> - `.kanban/tasks/01M7JDDYWRKM8CEB5KYFNJF2CD.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7JDDYWRKM8CEB5KYFNJF2CD.md` — no validator matches this file
+> - `.kanban/tasks/01M7K2NYGV3ANPCQGHS6XCB05K.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7K2NYGV3ANPCQGHS6XCB05K.md` — no validator matches this file
+
+- [x] `Libraries/MLXLLM/Models/Qwen35.swift:201` `duplication/duplication` — The same four checkpoint keys in the same order appear in the LLM and VLM `fusedInputProjection` declarations. The fused row order is coupled to `InputProjectionPart` and to `inputProjections`, so three copies of the order must agree. Give the four-key order one definition, for example a static on the shared group type or a shared constant, and reference it from both twins.
+- [x] `Libraries/MLXLLM/Models/Qwen35.swift:209` `completeness/invariant-propagation` — The `fusedInputProjectionEnabled` setter turns the input-projection fusion off or on without dropping the compiled traces that read it. A trace captured while the fusion was on keeps running the fused matmul after the switch. Every other path that changes the fused projection (`update` and `updateModule`) goes through `fusedInputProjection.invalidating(...)`, so the setter is the one site that skips the invalidation. Route the setter through the same lifecycle as the parameter updates, e.g. a group method that sets `isEnabled` and drops the reading traces when the value changes. Alternatively, make `isEnabled` read-only after init and document that toggling needs a new model. Add a test that toggles the setter after a compiled decode and checks `compiledDecodeSegmentCount` drops to 0, as the update test does.
+- [x] `Libraries/MLXLLM/Models/Qwen35.swift:214` `duplication/duplication` — The new `InputProjectionPart` enum copies the VLM file's existing `InputProjectionPart` (same name, same four cases, same doc comments, same indices). The change adds a second copy of the index map instead of sharing one. Declare the part indices once in MLXLMCommon next to `FusedQuantizedProjectionGroup`, and have both GDN twins use that declaration. Then delete the two local enums.
+- [x] `Libraries/MLXLLM/Models/Qwen35.swift:310` `duplication/duplication` — `inputProjections` repeats the VLM twin's list of the four projections in the same order. That order must match the `keys` list and `InputProjectionPart`, so it is a third copy of an ordering that has to agree. Derive the projection order from the shared group, or from one shared list of the four `Linear` keys and modules, and have both twins use it instead of writing the list twice.
+- [x] `Libraries/MLXLLM/Models/Qwen35.swift:323` `duplication/duplication` — `projectInputs` repeats the same logic as the VLM twin: one fused projection call, then the split into qkv, z reshaped to heads, b and a by the same index constants. The four-part split and the z reshape are real logic that can drift between the two copies, so a fix to one twin can miss the other. Move the split into one shared helper, for example a method on `FusedQuantizedProjectionGroup` or a free function in MLXLMCommon that takes the fused output and the batch, sequence, head count and head width, and returns the four parts. Both GDN twins then call it and keep only their own `inputProjections` list.
+- [x] `Libraries/MLXVLM/Models/Qwen35.swift:1040` `duplication/duplication` — The VLM `fusedInputProjection` declaration repeats the LLM twin's key list and fusion configuration, so the checkpoint key order is written twice. Use the shared key order proposed for the LLM declaration and delete the local literal.
+- [x] `Libraries/MLXVLM/Models/Qwen35.swift:1048` `completeness/invariant-propagation` — The VLM twin has the same gap: `fusedInputProjectionEnabled`'s setter changes the fusion mode without invalidating the compiled traces that captured the fused path, while the `update` and `updateModule` overrides invalidate. Apply the same fix as the LLM twin in one shared place (the group, not each model), so both models inherit the invalidation. Add a VLM test that toggles the setter after a compiled decode and checks the trace is dropped.
+- [x] `Libraries/MLXVLM/Models/Qwen35.swift:1179` `duplication/duplication` — `inputProjections` in the VLM GatedDeltaNet repeats the LLM twin's ordered list. The same ordering is coupled to `keys` and `InputProjectionPart` in two places. Use the shared projection order proposed for the LLM copy and delete the local list.
