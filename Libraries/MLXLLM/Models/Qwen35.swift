@@ -1283,6 +1283,27 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
         forward(input, cache: cache, state: state, lastTokenOnly: true)
     }
 
+    /// Prefills the prompt in steps of at most
+    /// ``MLXLMCommon/Qwen35PrefillPolicy/defaultStepSize`` tokens unless
+    /// `prefill` sets its own, and leaves the rest for the iterator.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt.
+    ///   - cache: The cache of each layer, which the prefill fills.
+    ///   - state: The model state of the first chunk; its MTP keys ask for the
+    ///     drafter state of each chunk.
+    ///   - prefill: The step size, the chunking and the progress observer.
+    /// - Returns: The tokens the iterator still has to read.
+    /// - Throws: `CancellationError` when the task is cancelled between two
+    ///   chunks.
+    public func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        try prepareInChunks(
+            input, cache: cache, state: state, prefill: prefill,
+            defaultStepSize: Qwen35PrefillPolicy.defaultStepSize)
+    }
+
     /// The logits of the tokens and, when `state` asks for it, the drafter
     /// state of an MTP round.
     ///
@@ -1506,6 +1527,23 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
         languageModel.nextTokenLogits(input, cache: cache, state: state)
+    }
+
+    /// Prefills the prompt through the prepare of the text model, thus in its
+    /// prefill step unless `prefill` sets its own.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt.
+    ///   - cache: The cache of each layer, which the prefill fills.
+    ///   - state: The model state of the first chunk.
+    ///   - prefill: The step size, the chunking and the progress observer.
+    /// - Returns: The tokens the iterator still has to read.
+    /// - Throws: `CancellationError` when the task is cancelled between two
+    ///   chunks.
+    public func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        try languageModel.prepare(input, cache: cache, state: state, prefill: prefill)
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {

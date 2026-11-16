@@ -55,10 +55,26 @@ comments:
     - evidence: measured NO-GO. qwenbench c1 (compiled drafter) vs HEAD c0: MTP 9.35/12.50/13.58 vs 9.35/12.55/13.57 ms/tok (noise). Deferred floor-read scheduling: no ms/tok gain, and acceptance changed (3.25 vs 3.29), so it is not allowed. All library edits were reverted; git status shows .kanban/ only.
     - next: the orchestrator closes the card as a measured NO-GO, or the user re-scopes it to the target verify graph build cost.
   timestamp: 2026-11-16T19:53:19.712838+00:00
+- actor: claude-code
+  id: 01m7jyryte3wk55t60633dr5zv
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (44f5ef94): 0 findings, 0 confirmed, 0 refuted; 4 .kanban/ files with no matching validator. `git diff 6e90d12e..HEAD` outside .kanban/ is empty, and the working tree is clean. Acceptance: qwencheck and the five bundles are marked not applicable (NO-GO, no code change). The qwenbench delta is on the card.
+    - next: closed as a measured NO-GO, as ^117ymn8 was.
+  timestamp: 2026-11-16T19:54:02.958735+00:00
+- actor: claude-code
+  id: 01m7jys9mcxj6nfyhnxfkpdyvh
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: no-change — measured NO-GO, library edits reverted
+    - test: n/a — no code change
+    - commit: 44f5ef94 (kanban evidence)
+    - review: clean → done
+  timestamp: 2026-11-16T19:54:14.028216+00:00
 depends_on:
 - 01M7J8449YT9F98KXC0117YMN8
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffffb980
 title: 'Qwen3.8 MTP round: compile the drafter step and remove CPU stalls'
 ---
 ## Why
@@ -71,5 +87,5 @@ The seed-gate `.item()` reads and the verify readback leave the GPU idle while t
 Files: `QwenMTP.swift`, `Qwen35MTP.swift`, `MTPSpeculativeTokenIterator.swift`.
 
 ## Acceptance
-- [ ] `qwencheck.sh`: MTP greedy ids identical to the golden file, and the multi-turn cache-reuse check passes. ChatSession and FoundationModels drafter-state restore are unaffected.
-- [ ] All five bundles are green. `qwenbench.sh` delta on this card. #qwen-perf
+- [x] `qwencheck.sh`: MTP greedy ids identical to the golden file, and the multi-turn cache-reuse check passes. ChatSession and FoundationModels drafter-state restore are unaffected. — not applicable: NO-GO, no code change (`git diff 6e90d12e..HEAD` outside `.kanban/` is empty)
+- [x] All five bundles are green. `qwenbench.sh` delta on this card. #qwen-perf — five bundles: not applicable: NO-GO, no code change. qwenbench delta: on this card (comment "Measured NO-GO": compiled drafter c1 vs HEAD c0 MTP 9.35/12.50/13.58 vs 9.35/12.55/13.57 ms/tok at 2k/32k/64k, inside noise; tok/verify unchanged)

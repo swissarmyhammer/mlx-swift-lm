@@ -55,7 +55,34 @@ extension LLMModel {
     ) throws
         -> PrepareResult
     {
-        let stepSize = prefill.resolvedStepSize()
+        try prepareInChunks(
+            input, cache: cache, state: state, prefill: prefill,
+            defaultStepSize: PrefillParameters.defaultStepSize)
+    }
+
+    /// The prepare step of ``prepare(_:cache:state:prefill:)``, in chunks of at
+    /// most `defaultStepSize` tokens when `prefill` sets no step size.
+    ///
+    /// A model with a prefill step of its own calls this from its own
+    /// `prepare`, because a conforming type cannot call the default of the
+    /// protocol extension.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt.
+    ///   - cache: The cache of each layer, which the prefill fills.
+    ///   - state: The model state of the first chunk; its MTP keys ask for the
+    ///     drafter state of each chunk.
+    ///   - prefill: The step size, the chunking and the progress observer.
+    ///   - defaultStepSize: The step size when `prefill` sets none.
+    /// - Returns: The tokens the iterator still has to read: the whole prompt
+    ///   when it fits in one step, else the tokens after the last chunk.
+    /// - Throws: `CancellationError` when the task is cancelled between two
+    ///   chunks.
+    func prepareInChunks(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters,
+        defaultStepSize: Int
+    ) throws -> PrepareResult {
+        let stepSize = prefill.resolvedStepSize(defaultStepSize: defaultStepSize)
         let y = input.text
         let total = y.tokens.size
 
@@ -72,7 +99,8 @@ extension LLMModel {
             // (up to a full step) rather than a single token.
             var chunkState: LMOutput.State? = state
             processed = try prefill.forEachChunk(
-                total: total, reserving: prefill.chunking == .remainder ? stepSize : 1
+                total: total, reserving: prefill.chunking == .remainder ? stepSize : 1,
+                defaultStepSize: defaultStepSize
             ) { range in
                 let input = y[.newAxis, range]
                 let output = self(input, cache: cache.isEmpty ? nil : cache, state: chunkState)

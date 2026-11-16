@@ -17,7 +17,8 @@ public struct PrefillParameters: Sendable {
 
     /// Ceiling on tokens evaluated per prefill forward. `nil` lets each model pick
     /// its own default (512 for the generic path; the Gemma 3 text path uses a
-    /// smaller, tuned chunk, and Flint the 2048-token chunk of mlx-vlm).
+    /// smaller, tuned chunk, and Flint and Qwen 3.5 the 2048-token chunk of
+    /// mlx-vlm).
     public var stepSize: Int?
 
     /// How the prompt is divided into forwards. See ``Chunking``.

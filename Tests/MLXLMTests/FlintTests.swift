@@ -1,8 +1,8 @@
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import XCTest
-import os
 
 @testable import MLXLLM
 @testable import MLXLMCommon
@@ -239,21 +239,6 @@ final class FlintTests: XCTestCase {
         if case .tokens(let text) = result { text } else { nil }
     }
 
-    /// Records each progress report of a prefill. The lock serializes every
-    /// read and write of the counts, so the `@Sendable` progress closure can
-    /// record from any thread.
-    private struct ProgressLog: Sendable {
-        private let reports = OSAllocatedUnfairLock<[Int]>(initialState: [])
-
-        /// The `processed` count of each report, in order.
-        var processed: [Int] { reports.withLock { $0 } }
-
-        /// Records the `processed` count of one report.
-        func record(_ processed: Int) {
-            reports.withLock { $0.append(processed) }
-        }
-    }
-
     /// A prompt shorter than one step prefills into the cache, and only its
     /// last token reaches the iterator, whose forward computes the logits.
     func testPrepareLeavesOnlyTheLastTokenForTheIterator() throws {
@@ -268,7 +253,7 @@ final class FlintTests: XCTestCase {
     /// the last token prefills in one forward.
     func testPrepareReadsOneMLXVLMChunkInOneForward() throws {
         let model = try makeSeededModel()
-        let log = ProgressLog()
+        let log = PrefillProgressLog()
         var prefill = PrefillParameters()
         prefill.progress = { processed, _ in log.record(processed) }
         _ = try model.prepare(
