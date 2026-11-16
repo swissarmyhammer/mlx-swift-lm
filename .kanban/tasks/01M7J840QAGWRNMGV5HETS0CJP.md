@@ -102,10 +102,26 @@ comments:
     - evidence: 2 files — Libraries/MLXLMCommon/MultiRowQuantizedMatvec.swift, Tests/MLXLMTests/MultiRowQuantizedMatvecTests.swift; 3/3 findings checked; mrbench rows 3/4/6 cur 16.33/19.23/29.70 -> new 16.30/19.21/29.06 ms, 0 mismatches; MLXLMTests exit 0 (1117 XCTest, 2369 Swift Testing); qwencheck CHECK PASS
     - next: /review (not committed, per instructions)
   timestamp: 2026-11-16T18:48:39.018242+00:00
+- actor: claude-code
+  id: 01m7jv2v721aea1byn3t1pk8fr
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (46a43005): 0 findings, 0 confirmed, 0 refuted; 7 validator runs attempted, 0 failed; all 3 prior findings checked
+    - next: none; task moved to done
+  timestamp: 2026-11-16T18:49:32.642074+00:00
+- actor: claude-code
+  id: 01m7jv33h7djhq1ph19pnn5zgk
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — shared fetch helpers + parity test helper; mrbench unchanged, 0 mismatches; qwencheck PASS
+    - test: green — MLXLMTests exit 0 (run by implement)
+    - commit: 46a43005
+    - review: clean → done
+  timestamp: 2026-11-16T18:49:41.159146+00:00
 depends_on:
 - 01M7J83VR4YW1XXC8EAFTJ9MAE
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffffb780
 title: 'Qwen3.8 MTP verify: make rows 3+ of the multi-row quantized matvec cheap, bit-exact'
 ---
 ## Why
