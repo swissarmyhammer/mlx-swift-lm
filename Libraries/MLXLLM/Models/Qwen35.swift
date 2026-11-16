@@ -853,28 +853,80 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
     // Every body stays inside this layer, so each trace's default state (the
     // layer's own weights) is complete.
     private let compiledLinearLayer: CompiledTrace<Qwen35DecoderLayer> = CompiledTrace(
-        state: { [$0] + $0.fusedProjectionTraceState(of: $0.compiledLinearLayer) },
+        state: { $0.layerTraceState(of: $0.compiledLinearLayer) },
         body: { layer, arguments in
             let step = layer.linearLayerBody(
-                x: arguments[0], convState: arguments[1], recState: arguments[2])
+                x: arguments[LinearTraceSlot.hidden],
+                convState: arguments[LinearTraceSlot.convState],
+                recState: arguments[LinearTraceSlot.recurrentState])
             return [step.output, step.convState, step.recurrentState]
         })
 
     private let compiledAttentionPre: CompiledTrace<Qwen35DecoderLayer> = CompiledTrace(
-        state: { [$0] + $0.fusedProjectionTraceState(of: $0.compiledAttentionPre) },
+        state: { $0.layerTraceState(of: $0.compiledAttentionPre) },
         body: { layer, arguments in
-            let (queries, gate, keys, values) = layer.attentionPreBody(x: arguments[0])
+            let (queries, gate, keys, values) = layer.attentionPreBody(
+                x: arguments[AttentionPreTraceSlot.hidden])
             return [queries, gate, keys, values]
         })
 
     private let compiledAttentionPost: CompiledTrace<Qwen35DecoderLayer> = CompiledTrace(
-        state: { [$0] + $0.fusedProjectionTraceState(of: $0.compiledAttentionPost) },
+        state: { $0.layerTraceState(of: $0.compiledAttentionPost) },
         body: { layer, arguments in
             [
                 layer.attentionPostBody(
-                    x: arguments[0], attention: arguments[1], gate: arguments[2])
+                    x: arguments[AttentionPostTraceSlot.hidden],
+                    attention: arguments[AttentionPostTraceSlot.attention],
+                    gate: arguments[AttentionPostTraceSlot.gate])
             ]
         })
+
+    /// The places of the hidden states and the two states of a GDN layer
+    /// among the arguments and among the results of its compiled trace.
+    private enum LinearTraceSlot {
+        /// The layer input, then the layer output.
+        static let hidden = 0
+        /// The conv state.
+        static let convState = 1
+        /// The recurrent state.
+        static let recurrentState = 2
+    }
+
+    /// The places of the argument and of the results of the trace that runs a
+    /// full-attention layer up to the KV write.
+    private enum AttentionPreTraceSlot {
+        /// The layer input among the arguments.
+        static let hidden = 0
+        /// The queries among the results.
+        static let queries = 0
+        /// The output gate among the results.
+        static let gate = 1
+        /// The keys among the results.
+        static let keys = 2
+        /// The values among the results.
+        static let values = 3
+    }
+
+    /// The places of the arguments and of the result of the trace that runs a
+    /// full-attention layer after the KV write.
+    private enum AttentionPostTraceSlot {
+        /// The layer input among the arguments, then the layer output among
+        /// the results.
+        static let hidden = 0
+        /// The attention over the cache.
+        static let attention = 1
+        /// The output gate from the trace before the KV write.
+        static let gate = 2
+    }
+
+    /// The compile state of `trace`, which runs this layer: the layer and its
+    /// fused projections, which drop `trace` when their fusion turns off.
+    ///
+    /// - Parameter trace: The trace that runs this layer.
+    /// - Returns: The modules whose weights the trace reads for this layer.
+    func layerTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+        [self] + fusedProjectionTraceState(of: trace)
+    }
 
     /// Fuses the projections of this layer that read one input: the four
     /// input projections of the gated delta net, the query, key and value
@@ -905,10 +957,10 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
         let recState = cache[1] ?? zero.rec
 
         let out = compiledLinearLayer(self, [x, convState, recState])
-        cache[0] = out[1]
-        cache[1] = out[2]
+        cache[0] = out[LinearTraceSlot.convState]
+        cache[1] = out[LinearTraceSlot.recurrentState]
         cache.advance(1)
-        return out[0]
+        return out[LinearTraceSlot.hidden]
     }
 
     /// Full-attention decode layer: two traced functions around the KV write,
@@ -918,9 +970,12 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
     ) -> MLXArray {
         let projected = compiledAttentionPre(self, [x])
         let attention = attentionCacheStep(
-            queries: projected[0], keys: projected[2], values: projected[3],
+            queries: projected[AttentionPreTraceSlot.queries],
+            keys: projected[AttentionPreTraceSlot.keys],
+            values: projected[AttentionPreTraceSlot.values],
             cache: cache, mask: mask)
-        return compiledAttentionPost(self, [x, attention, projected[1]])[0]
+        let gate = projected[AttentionPreTraceSlot.gate]
+        return compiledAttentionPost(self, [x, attention, gate])[AttentionPostTraceSlot.hidden]
     }
 
     /// The part of a full-attention decode step that cannot be traced: rope
@@ -1149,10 +1204,10 @@ public class Qwen35TextModelInner: Module {
     ) -> [Module] {
         let segments = decodeSchedule.segments
         var modules = traceState(forLayers: segments[index].layerIndices, of: trace)
-        if index == 0 {
+        if index == segments.indices.first {
             modules.append(embedTokens)
         }
-        if index == segments.count - 1 {
+        if index == segments.indices.last {
             modules.append(norm)
         }
         return modules
@@ -1163,10 +1218,7 @@ public class Qwen35TextModelInner: Module {
     func traceState(
         forLayers indices: [Int], of trace: any CompiledTraceInvalidating
     ) -> [Module] {
-        indices.flatMap { index -> [Module] in
-            let layer = layers[index]
-            return [layer] + layer.fusedProjectionTraceState(of: trace)
-        }
+        indices.flatMap { layers[$0].layerTraceState(of: trace) }
     }
 
     /// One step through a compiled schedule, or nil when the step takes the

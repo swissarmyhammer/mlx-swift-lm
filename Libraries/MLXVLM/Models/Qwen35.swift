@@ -1208,9 +1208,7 @@ public enum Qwen35Language {
         }
 
         private let compiledLinearLayer: CompiledTrace<DecoderLayer> = CompiledTrace(
-            state: { layer in
-                [layer] + layer.fusedProjectionTraceState(of: layer.compiledLinearLayer)
-            },
+            state: { $0.layerTraceState(of: $0.compiledLinearLayer) },
             body: { layer, arguments in
                 let result = layer.linearLayerBody(
                     x: arguments[LinearTraceSlot.hidden],
@@ -1253,6 +1251,17 @@ public enum Qwen35Language {
             return (linearAttn?.fusedProjectionTraceState ?? [])
                 + (selfAttn?.fusedProjectionTraceState(of: trace) ?? [])
                 + ((mlp as? MLP)?.fusedProjectionTraceState(of: trace) ?? [])
+        }
+
+        /// The compile state of `trace`, which runs this layer: the layer and
+        /// its fused projections, which drop `trace` when their fusion turns
+        /// off.
+        ///
+        /// - Parameter trace: The trace that runs this layer.
+        /// - Returns: The modules whose weights the trace reads for this
+        ///   layer.
+        func layerTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+            [self] + fusedProjectionTraceState(of: trace)
         }
 
         var supportsCompiledDecode: Bool {
@@ -1569,9 +1578,8 @@ public enum Qwen35Language {
             at index: Int, of trace: any CompiledTraceInvalidating
         ) -> [Module] {
             let segments = decodeSchedule.segments
-            var modules = segments[index].layerIndices.flatMap { layerIndex -> [Module] in
-                let layer = layers[layerIndex]
-                return [layer] + layer.fusedProjectionTraceState(of: trace)
+            var modules = segments[index].layerIndices.flatMap {
+                layers[$0].layerTraceState(of: trace)
             }
             if index == segments.indices.last {
                 modules.append(norm)
