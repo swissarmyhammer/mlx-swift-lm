@@ -462,6 +462,10 @@ struct DeepseekV4IntegrationTests {
                 Issue.record("the model wrote a tool call the parser rejected: \(rejection)")
             case .info:
                 break
+            case .steering(let event):
+                // The test submits no steering instruction, so a steering event
+                // means the session applied input the prompt never carried.
+                Issue.record("the session reported steering the test never sent: \(event)")
             }
         }
 

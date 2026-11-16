@@ -66,8 +66,24 @@ comments:
     - evidence: 3 files — Tests/MLXLMTestSupport/PrefillProgressLog.swift, Tests/MLXLMTests/FlintTests.swift, Tests/MLXLMTests/Qwen35PrefillStepTests.swift. swift-format run (no other files changed). `swift build --build-tests` Build complete, no compiler warnings (only the swiftbuild `missing creator for mutated node ... mlx-swift_Cmlx.bundle/Contents/MacOS` build-system note). `xcrun xctest -XCTest MLXLMTests.FlintTests,MLXLMTests.Qwen35PrefillStepTests` 26 tests, 0 failures.
     - next: /review
   timestamp: 2026-11-16T23:24:28.900773+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7kavnvk70ysxnfeaezbqhfe
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD — 0 findings (0 confirmed, 0 refuted; 7 validator runs attempted, 0 failed); 3 files reviewed, 6 .kanban files had no matching validator; the prior finding (FlintTests.swift:271 reuse/reuse) is checked
+    - next: none — task moved to done
+  timestamp: 2026-11-16T23:25:14.995475+00:00
+- actor: claude-code
+  id: 01m7kavyy1x0g4hp4kz6vbb1nh
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — shared PrefillProgressLog.progressOfCheckpointFeed
+    - test: green — FlintTests + Qwen35PrefillStepTests 26/0 (run by implement)
+    - commit: 6eb49ac9
+    - review: clean → done
+  timestamp: 2026-11-16T23:25:24.289812+00:00
+position_column: done
+position_ordinal: ffffbf80
 title: 'Qwen3.8 prefill: checkpoint feeds use the model''s prefill step'
 ---
 ## Why

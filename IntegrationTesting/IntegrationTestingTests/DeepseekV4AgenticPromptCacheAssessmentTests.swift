@@ -202,6 +202,11 @@ func collect(
                 "a generation pass rejected a tool call: \(rejection)")
         case .info(let info):
             completionInfo = info
+        case .steering(let event):
+            // The assessment submits no steering instruction, so a steering
+            // event means the session applied input the cache ledger never saw.
+            throw IntegrationTestFailure(
+                "a generation pass reported steering the assessment never sent: \(event)")
         }
     }
     guard let completionInfo else {

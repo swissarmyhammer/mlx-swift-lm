@@ -148,13 +148,13 @@ enum Qwen38FourBitMTPModel {
 
         /// The loader of the target of this path.
         @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-        var containerLoader: MLXLanguageModel.ContainerLoader {
+        var containerLoader: MLXLanguageModel.ProgressContainerLoader {
             switch self {
             case .text:
                 { configuration, progress in
                     try await LLMModelFactory.shared.loadContainer(
                         from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-                        configuration: configuration, progressHandler: progress)
+                        configuration: configuration, progress: progress)
                 }
             case .router: testLoad()
             }
