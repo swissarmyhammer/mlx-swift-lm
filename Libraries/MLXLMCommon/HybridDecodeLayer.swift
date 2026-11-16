@@ -159,3 +159,71 @@ extension HybridDecodeLayer {
         h + feedForward(postAttentionLayerNorm(h))
     }
 }
+
+/// The places of the hidden states and the two states of a gated delta net
+/// layer among the arguments and among the results of the compiled trace that
+/// runs ``HybridDecodeLayer/linearLayerBody(x:convState:recState:keepsSnapshots:)``.
+package enum LinearTraceSlot {
+    /// The layer input, then the layer output.
+    package static let hidden = 0
+    /// The conv state.
+    package static let convState = 1
+    /// The recurrent state.
+    package static let recurrentState = 2
+}
+
+/// The places of the argument and of the results of the compiled trace that
+/// runs ``HybridDecodeLayer/attentionPreBody(x:)``, a full-attention layer up
+/// to the KV write.
+package enum AttentionPreTraceSlot {
+    /// The layer input among the arguments.
+    package static let hidden = 0
+    /// The queries among the results.
+    package static let queries = 0
+    /// The output gate among the results.
+    package static let gate = 1
+    /// The keys among the results.
+    package static let keys = 2
+    /// The values among the results.
+    package static let values = 3
+}
+
+/// The places of the arguments and of the result of the compiled trace that
+/// runs ``HybridDecodeLayer/attentionPostBody(x:attention:gate:)``, a
+/// full-attention layer after the KV write.
+package enum AttentionPostTraceSlot {
+    /// The layer input among the arguments, then the layer output among the
+    /// results.
+    package static let hidden = 0
+    /// The attention over the cache.
+    package static let attention = 1
+    /// The output gate from the trace before the KV write.
+    package static let gate = 2
+}
+
+/// A ``HybridDecodeLayer`` whose projections a load fuses, so the compiled
+/// traces that run the layer read the fused projections too.
+///
+/// A fused projection lives beside the layer's checkpoint modules, and it
+/// drops each trace that reads it when its fusion turns off. So the compile
+/// state of a trace that runs this layer is the layer and its fused
+/// projections, which ``layerTraceState(of:)`` gives.
+package protocol FusedProjectionDecodeLayer: HybridDecodeLayer {
+    /// The fused projections of this layer as compile state of `trace`. Each
+    /// one registers `trace` so that it drops it when its fusion turns off.
+    ///
+    /// - Parameter trace: The trace that runs this layer.
+    /// - Returns: The fused projections the layer holds.
+    func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module]
+}
+
+extension FusedProjectionDecodeLayer {
+    /// The compile state of `trace`, which runs this layer: the layer and its
+    /// fused projections, which drop `trace` when their fusion turns off.
+    ///
+    /// - Parameter trace: The trace that runs this layer.
+    /// - Returns: The modules whose weights the trace reads for this layer.
+    package func layerTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+        [self] + fusedProjectionTraceState(of: trace)
+    }
+}

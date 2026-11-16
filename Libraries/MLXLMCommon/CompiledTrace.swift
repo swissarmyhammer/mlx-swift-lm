@@ -112,6 +112,23 @@ public final class CompiledTrace<Owner: Module>: CompiledTraceInvalidating {
     }
 }
 
+extension CompiledTrace where Owner: FusedProjectionDecodeLayer {
+    /// A trace stored at `trace` on a decoder layer, whose compile state is
+    /// ``FusedProjectionDecodeLayer/layerTraceState(of:)`` of that same trace:
+    /// the layer and its fused projections, which drop the trace when their
+    /// fusion turns off.
+    ///
+    /// - Parameters:
+    ///   - trace: The property of the layer that stores this trace.
+    ///   - body: The function to trace.
+    package convenience init(
+        layerTrace trace: KeyPath<Owner, CompiledTrace<Owner>> & Sendable,
+        body: @escaping Body
+    ) {
+        self.init(state: { $0.layerTraceState(of: $0[keyPath: trace]) }, body: body)
+    }
+}
+
 /// Something `Module.invalidateCompiledTraces()` can reset: a ``CompiledTrace``
 /// or a container of them.
 public protocol CompiledTraceInvalidating: AnyObject {

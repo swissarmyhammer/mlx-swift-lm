@@ -1101,7 +1101,7 @@ public enum Qwen35Language {
         }
     }
 
-    open class DecoderLayer: Module, HybridDecodeLayer {
+    open class DecoderLayer: Module, FusedProjectionDecodeLayer {
         let isLinear: Bool
         let allowsCompiledDecode: Bool
 
@@ -1208,7 +1208,7 @@ public enum Qwen35Language {
         }
 
         private let compiledLinearLayer: CompiledTrace<DecoderLayer> = CompiledTrace(
-            state: { $0.layerTraceState(of: $0.compiledLinearLayer) },
+            layerTrace: \.compiledLinearLayer,
             body: { layer, arguments in
                 let result = layer.linearLayerBody(
                     x: arguments[LinearTraceSlot.hidden],
@@ -1216,17 +1216,6 @@ public enum Qwen35Language {
                     recState: arguments[LinearTraceSlot.recurrentState])
                 return [result.output, result.convState, result.recurrentState]
             })
-
-        /// The places of the hidden states and the two states of a GDN layer
-        /// among the arguments and among the results of its compiled trace.
-        private enum LinearTraceSlot {
-            /// The layer input, then the layer output.
-            static let hidden = 0
-            /// The conv state.
-            static let convState = 1
-            /// The recurrent state.
-            static let recurrentState = 2
-        }
 
         var compiledGDNIsCompiled: Bool { compiledLinearLayer.isCompiled }
 
@@ -1246,22 +1235,12 @@ public enum Qwen35Language {
         ///
         /// - Parameter trace: The trace that runs this layer.
         /// - Returns: The fused projections the layer holds.
-        func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+        package func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module]
+        {
             linearAttn?.registerFusedProjectionTrace(trace)
             return (linearAttn?.fusedProjectionTraceState ?? [])
                 + (selfAttn?.fusedProjectionTraceState(of: trace) ?? [])
                 + ((mlp as? MLP)?.fusedProjectionTraceState(of: trace) ?? [])
-        }
-
-        /// The compile state of `trace`, which runs this layer: the layer and
-        /// its fused projections, which drop `trace` when their fusion turns
-        /// off.
-        ///
-        /// - Parameter trace: The trace that runs this layer.
-        /// - Returns: The modules whose weights the trace reads for this
-        ///   layer.
-        func layerTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
-            [self] + fusedProjectionTraceState(of: trace)
         }
 
         var supportsCompiledDecode: Bool {

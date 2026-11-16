@@ -770,7 +770,7 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
 
 // MARK: - Decoder Layer
 
-final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
+final class Qwen35DecoderLayer: Module, FusedProjectionDecodeLayer {
     let isLinear: Bool
 
     @ModuleInfo(key: "self_attn") var selfAttn: Qwen35Attention?
@@ -850,10 +850,10 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
 
     // MARK: - Compiled decode blocks
 
-    // Every body stays inside this layer, so each trace's default state (the
-    // layer's own weights) is complete.
+    // Every body stays inside this layer, so each trace's state is the layer
+    // and its fused projections (`layerTrace:`).
     private let compiledLinearLayer: CompiledTrace<Qwen35DecoderLayer> = CompiledTrace(
-        state: { $0.layerTraceState(of: $0.compiledLinearLayer) },
+        layerTrace: \.compiledLinearLayer,
         body: { layer, arguments in
             let step = layer.linearLayerBody(
                 x: arguments[LinearTraceSlot.hidden],
@@ -863,7 +863,7 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
         })
 
     private let compiledAttentionPre: CompiledTrace<Qwen35DecoderLayer> = CompiledTrace(
-        state: { $0.layerTraceState(of: $0.compiledAttentionPre) },
+        layerTrace: \.compiledAttentionPre,
         body: { layer, arguments in
             let (queries, gate, keys, values) = layer.attentionPreBody(
                 x: arguments[AttentionPreTraceSlot.hidden])
@@ -871,7 +871,7 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
         })
 
     private let compiledAttentionPost: CompiledTrace<Qwen35DecoderLayer> = CompiledTrace(
-        state: { $0.layerTraceState(of: $0.compiledAttentionPost) },
+        layerTrace: \.compiledAttentionPost,
         body: { layer, arguments in
             [
                 layer.attentionPostBody(
@@ -880,53 +880,6 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
                     gate: arguments[AttentionPostTraceSlot.gate])
             ]
         })
-
-    /// The places of the hidden states and the two states of a GDN layer
-    /// among the arguments and among the results of its compiled trace.
-    private enum LinearTraceSlot {
-        /// The layer input, then the layer output.
-        static let hidden = 0
-        /// The conv state.
-        static let convState = 1
-        /// The recurrent state.
-        static let recurrentState = 2
-    }
-
-    /// The places of the argument and of the results of the trace that runs a
-    /// full-attention layer up to the KV write.
-    private enum AttentionPreTraceSlot {
-        /// The layer input among the arguments.
-        static let hidden = 0
-        /// The queries among the results.
-        static let queries = 0
-        /// The output gate among the results.
-        static let gate = 1
-        /// The keys among the results.
-        static let keys = 2
-        /// The values among the results.
-        static let values = 3
-    }
-
-    /// The places of the arguments and of the result of the trace that runs a
-    /// full-attention layer after the KV write.
-    private enum AttentionPostTraceSlot {
-        /// The layer input among the arguments, then the layer output among
-        /// the results.
-        static let hidden = 0
-        /// The attention over the cache.
-        static let attention = 1
-        /// The output gate from the trace before the KV write.
-        static let gate = 2
-    }
-
-    /// The compile state of `trace`, which runs this layer: the layer and its
-    /// fused projections, which drop `trace` when their fusion turns off.
-    ///
-    /// - Parameter trace: The trace that runs this layer.
-    /// - Returns: The modules whose weights the trace reads for this layer.
-    func layerTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
-        [self] + fusedProjectionTraceState(of: trace)
-    }
 
     /// Fuses the projections of this layer that read one input: the four
     /// input projections of the gated delta net, the query, key and value
