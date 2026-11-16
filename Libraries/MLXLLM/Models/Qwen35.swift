@@ -1250,9 +1250,13 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
         forward(input, cache: cache, state: state, lastTokenOnly: true)
     }
 
-    /// Prefills the prompt in steps of at most
-    /// ``MLXLMCommon/Qwen35PrefillPolicy/defaultStepSize`` tokens unless
-    /// `prefill` sets its own, and leaves the rest for the iterator.
+    /// The prefill step when the caller sets none:
+    /// ``MLXLMCommon/Qwen35PrefillPolicy/defaultStepSize``.
+    public var defaultPrefillStepSize: Int { Qwen35PrefillPolicy.defaultStepSize }
+
+    /// Prefills the prompt in steps of at most ``defaultPrefillStepSize``
+    /// tokens unless `prefill` sets its own, and leaves the rest for the
+    /// iterator.
     ///
     /// - Parameters:
     ///   - input: The prompt.
@@ -1268,7 +1272,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     ) throws -> PrepareResult {
         try prepareInChunks(
             input, cache: cache, state: state, prefill: prefill,
-            defaultStepSize: Qwen35PrefillPolicy.defaultStepSize)
+            defaultStepSize: defaultPrefillStepSize)
     }
 
     /// The logits of the tokens and, when `state` asks for it, the drafter
@@ -1495,6 +1499,9 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
     ) -> LMOutput {
         languageModel.nextTokenLogits(input, cache: cache, state: state)
     }
+
+    /// The prefill step of the text model when the caller sets none.
+    public var defaultPrefillStepSize: Int { languageModel.defaultPrefillStepSize }
 
     /// Prefills the prompt through the prepare of the text model, thus in its
     /// prefill step unless `prefill` sets its own.

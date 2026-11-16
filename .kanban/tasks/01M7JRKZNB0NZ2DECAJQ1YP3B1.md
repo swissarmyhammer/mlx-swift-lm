@@ -53,10 +53,26 @@ comments:
     - evidence: change reverted on orchestrator NO-GO; `git status` shows only .kanban. Measured before revert: L=2 verify +3.2/+1.3/+1.8%, MTP ms/tok vs HEAD +1.9/+6.7/−0.4%; 32k MTP golden moved off plain at step 1 (tie, gap 0.0). qwencheck BASE restored to qwen_golden_mn44v3n.json; qwen_golden_q1yp3b1.json kept as a record.
     - next: orchestrator/user decides the card's fate (close as no-go). Follow-up ^6gkhfah: IntegrationTesting build errors at HEAD.
   timestamp: 2026-11-16T22:56:36.038180+00:00
+- actor: claude-code
+  id: 01m7k98nfnt73r2gybwsd7z01s
+  text: |-
+    ### review — clean
+    - evidence: `review sha HEAD~1..HEAD` (67488a15): 0 findings, 0 confirmed, 0 refuted; 6 .kanban files, no validator matched. Acceptance items checked off: L=2 verify before/after and qwenbench delta met by the card evidence; golden policy recorded (golden stays qwen_golden_mn44v3n.json); qwencheck pass, parity tests, five bundles not applicable: NO-GO, reverted.
+    - next: none; card closed as a measured NO-GO. Follow-up ^6gkhfah stays open.
+  timestamp: 2026-11-16T22:57:23.445759+00:00
+- actor: claude-code
+  id: 01m7k98yf05fj5qxgjs9ntzv58
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: no-change — measured NO-GO (L=2 verify +1.3–3.2%, MTP +1.9/+6.7/−0.4% vs HEAD, 32k golden moved off plain), reverted
+    - test: n/a — no code change
+    - commit: 67488a15 (kanban evidence)
+    - review: clean → done
+  timestamp: 2026-11-16T22:57:32.640502+00:00
 depends_on:
 - 01M7J840QAGWRNMGV5HETS0CJP
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffffbe80
 title: 'Qwen3.8 MTP verify: run 2-row verifies through the bit-exact multi-row kernel'
 ---
 ## Why
@@ -67,6 +83,6 @@ title: 'Qwen3.8 MTP verify: run 2-row verifies through the bit-exact multi-row k
 - The MTP greedy ids of L=2 verifies will change (they become those of a plain decode). Regenerate the MTP golden on purpose and record why, or confirm the ids stay identical.
 
 ## Acceptance
-- [ ] `qwencli verify` L=2 mtp-verify-state before/after at 2k/32k/64k.
-- [ ] `qwencheck.sh` passes (golden policy decided and recorded); parity tests exact; all five bundles green.
-- [ ] `qwenbench.sh` delta on the card. #qwen-perf
+- [x] `qwencli verify` L=2 mtp-verify-state before/after at 2k/32k/64k. — Recorded on this card (comment "Landed (uncommitted)", 15 reps median, files verify_before_q1yp3b1.txt / verify_after_q1yp3b1.txt): 21.10→21.77 / 23.87→24.18 / 27.28→27.77 ms (+3.2% / +1.3% / +1.8%). Measured NO-GO.
+- [x] `qwencheck.sh` passes (golden policy decided and recorded); parity tests exact; all five bundles green. — golden policy: decided and recorded on this card (comment "NO-GO (orchestrator decision), reverted"): the change moved 32k MTP away from plain at step 1, so the golden stays `qwen_golden_mn44v3n.json` and `qwencheck.sh` BASE points back at it; `qwen_golden_q1yp3b1.json` is a record only. qwencheck pass, parity tests, five bundles: not applicable: NO-GO, reverted (commit 67488a15 is .kanban/ only; `fewestRows` stays 3).
+- [x] `qwenbench.sh` delta on the card. #qwen-perf — on this card (comment "Landed (uncommitted)", medians of 3): MTP ms/tok vs HEAD 9.48→9.66 / 12.47→13.31 / 13.55→13.49 at 2k/32k/64k (+1.9% / +6.7% / −0.4%); tokens/verify 3.29→3.21 / 2.40→2.22 / 2.65→2.73; plain decode and prefill unchanged.

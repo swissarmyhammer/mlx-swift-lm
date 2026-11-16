@@ -2278,6 +2278,11 @@ public class Qwen35: Module, VLMModel {
     /// The tokens of the vocabulary of the output logits.
     public var vocabularySize: Int { config.vocabSize }
 
+    /// The prefill step when the caller sets none:
+    /// ``MLXLMCommon/Qwen35PrefillPolicy/defaultStepSize``, the step of the
+    /// text models too.
+    public var defaultPrefillStepSize: Int { Qwen35PrefillPolicy.defaultStepSize }
+
     /// The decoder layers of the language model, where LoRA adapters go.
     public var loraLayers: [Module] {
         languageModel.model.layers
@@ -2448,15 +2453,15 @@ public class Qwen35: Module, VLMModel {
             batchSize: inputIds2D.dim(0), state: state)
 
         // Windowed (chunked) prefill — the remaining #344 deferred item for
-        // Qwen3.5 — in the Qwen 3.5 step (`Qwen35PrefillPolicy.defaultStepSize`,
-        // the text models' step too) unless the caller sets one. The windowed forward also
+        // Qwen3.5 — in the Qwen 3.5 step (`defaultPrefillStepSize`, the text
+        // models' step too) unless the caller sets one. The windowed forward also
         // owns every warm continuation (multi-turn chat, tool restart,
         // restored prompt cache): a cold cache is just a continuation
         // anchored at offset 0, and a warm one anchors M-RoPE positions at
         // the cache offset plus the rope delta carried in `state` — never
         // back at zero. The windowed forward is single-sequence; batched
         // inputs keep the single-shot path below.
-        let window = prefill.resolvedStepSize(defaultStepSize: Qwen35PrefillPolicy.defaultStepSize)
+        let window = prefill.resolvedStepSize(defaultStepSize: defaultPrefillStepSize)
         if inputIds2D.dim(0) == 1, inputIds2D.dim(-1) > 0,
             cacheOffset > 0 || inputIds2D.dim(-1) > window
         {
@@ -2589,7 +2594,7 @@ public class Qwen35: Module, VLMModel {
         }
 
         let processed = try prefill.forEachChunk(
-            total: remainderLength, defaultStepSize: Qwen35PrefillPolicy.defaultStepSize
+            total: remainderLength, defaultStepSize: defaultPrefillStepSize
         ) { range in
             let output = forward(range)
             state?.feedMTPPrefillChunk(

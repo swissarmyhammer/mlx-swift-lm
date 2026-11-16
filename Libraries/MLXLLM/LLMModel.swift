@@ -42,7 +42,8 @@ extension LLMModel {
     /// Default prepare step for ``LLMModel``.
     ///
     /// Evaluates the prompt into the cache in chunks of at most
-    /// `PrefillParameters.stepSize` (default 512), leaving one token for the
+    /// `PrefillParameters.stepSize`, or of the model's
+    /// `defaultPrefillStepSize` when the caller sets none, leaving one token for the
     /// `TokenIterator`'s first forward. With `PrefillParameters.Chunking.balanced`
     /// (the default) the chunks are equal-sized, so no forward is a small
     /// remainder paying full attention cost against the whole prompt.
@@ -57,7 +58,7 @@ extension LLMModel {
     {
         try prepareInChunks(
             input, cache: cache, state: state, prefill: prefill,
-            defaultStepSize: PrefillParameters.defaultStepSize)
+            defaultStepSize: defaultPrefillStepSize)
     }
 
     /// The prepare step of ``prepare(_:cache:state:prefill:)``, in chunks of at

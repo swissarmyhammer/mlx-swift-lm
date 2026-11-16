@@ -11,8 +11,10 @@ package enum Qwen35PrefillPolicy {
     /// generic step of ``PrefillParameters/defaultStepSize``, for more peak
     /// memory. A step the caller sets still wins.
     ///
-    /// The step does not move a checkpoint of the hybrid caches: a prompt cache
-    /// takes each checkpoint after a feed that ends at a message boundary (see
-    /// `PromptCacheCheckpoint`), never at a prefill chunk boundary.
+    /// The Qwen 3.5 models give this step as their
+    /// ``LanguageModel/defaultPrefillStepSize``, thus the feeds of a prompt
+    /// cache up to a checkpoint (see `PromptCacheCheckpoint`) take it too. The
+    /// step does not move a checkpoint of the hybrid caches: each feed ends at
+    /// a message boundary, never at a prefill chunk boundary.
     package static let defaultStepSize = 2048
 }
